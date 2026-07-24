@@ -2115,13 +2115,15 @@ export class Orchestrator {
     // no run-global model.
     const model =
       overrideModel ?? contract.routing_models[routed.adapter.id] ?? s?.defaultModel ?? null;
-    // Effort disclosure (INV-105) against the ROUTED MODEL's advertised set. The
+    // Effort disclosure (INV-105) against the harness's advertised ladder. This
+    // gate only DISCLOSES an unplaceable level; the clamp belongs to the adapter,
+    // which resolves against the catalog for the profile env the child runs in
+    // (the manifest here is the DEFAULT account's — see effortGovernance.ts). The
     // contract's FROZEN per-lane effort (QA-035) wins so Exact Retry replays it
     // without re-reading settings; `effortHint`/settings apply only to an unfrozen lane.
     const governed = governRouteEffort(
       contract.routing_efforts[routed.adapter.id] ?? effortHint ?? s?.effort ?? null,
       { id: routed.adapter.id, ...routed },
-      model,
     );
     const effort = governed.effort;
     if (governed.ignored) ignored.push(governed.ignored);

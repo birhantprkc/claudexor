@@ -265,7 +265,17 @@ shared normalizer then passes an ADVERTISED level through verbatim — including
 one this repo has never heard of, which is what lets a new vendor level work
 with no code change — clamps a rankable-but-unadvertised level onto the nearest
 advertised one, and refuses a level that is neither, disclosed via
-`ignored_settings` rather than silently downgraded. The CLI help, the MCP tool
+`ignored_settings` rather than silently downgraded. WHICH LAYER clamps is part
+of the contract: `discover()` probes the DEFAULT native harness home, so the
+manifest carries the default account's ladders, while codex advertises per
+ACCOUNT and every credential profile and API-key route runs under its own
+`CODEX_HOME`. Run preflight (`governRouteEffort`) therefore only DISCLOSES a
+level that no advertised ladder could place and forwards everything else
+verbatim; the adapter, which has resolved the profile env the child will
+actually run in, is the single layer that clamps. Reviewer efforts have no
+adapter-side disclosure channel, so the panel resolvers refuse a level the
+SELECTED reviewer does not advertise instead of forwarding it to be dropped.
+The CLI help, the MCP tool
 schema and the macOS picker's ordering all derive from that single source. `doctor` validates each
 harness's CONFIGURED default model against the truth source, so a broken
 default (e.g. a model the CLI cannot run) is reported honestly instead of
