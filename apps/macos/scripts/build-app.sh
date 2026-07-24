@@ -209,6 +209,12 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
     # construction.
     find "$BROWSER_MCP_DIR" -name "fsevents*" -type d -prune -exec rm -rf {} + 2>/dev/null || true
     find "$BROWSER_MCP_DIR" -name "*.node" -type f -delete 2>/dev/null || true
+    # Pruning the fsevents dir leaves pnpm's SYMLINKS to it dangling — a
+    # signed-bundle codesign --verify walks the bundle and dies on a broken
+    # link ("No such file"), which killed the CI candidate while the local
+    # unsigned build never entered the signing branch. Remove every dangling
+    # symlink the prune orphaned.
+    find "$BROWSER_MCP_DIR" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
     LEFTOVER_NODE_ADDON="$(find "$BROWSER_MCP_DIR" -name '*.node' -type f | head -1)"
     if [ -n "$LEFTOVER_NODE_ADDON" ]; then
       echo "ERROR: Browser MCP runtime still carries a native addon: $LEFTOVER_NODE_ADDON" >&2
