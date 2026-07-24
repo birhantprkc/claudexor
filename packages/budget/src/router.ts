@@ -67,6 +67,13 @@ export interface RouteContext {
   intent: Intent;
   qualityTiers: QualityTierSet;
   ledger: BudgetLedger;
+  /**
+   * The instant EVERY clock-dependent axis is evaluated at (cooldown expiry and
+   * quota pace slack). Optional: each entry point pins one `Date.now()` for the
+   * whole call when it is absent. A caller that ranks a pool and then explains
+   * the SAME pool must pass a pinned instant so both passes read one clock.
+   */
+  now?: number;
 }
 
 export class RoutingPreflightError extends Error {
@@ -97,6 +104,18 @@ function isIncrementalPaid(candidate: RouterCandidate): boolean {
   return !["proven_zero", "subscription_entitlement"].includes(effectiveBilling(candidate));
 }
 
+/**
+ * Pin ONE evaluation instant for a whole ranking pass. Reading the clock again
+ * per candidate makes the comparator time-varying: two candidates carrying
+ * IDENTICAL quota observations get slacks that differ by whatever milliseconds
+ * elapsed between the two reads, so a pool nothing actually separates is
+ * ordered by scheduler jitter and reports `expiring_quota_slack` instead of the
+ * honest `declared_order`. The pin is what makes equal inputs compare equal.
+ */
+function pinInstant(ctx: RouteContext): RouteContext {
+  return ctx.now === undefined ? { ...ctx, now: Date.now() } : ctx;
+}
+
 function eligible(candidates: RouterCandidate[], ctx: RouteContext): RouterCandidate[] {
   const ready = candidates.filter(
     (candidate) =>
@@ -105,6 +124,7 @@ function eligible(candidates: RouterCandidate[], ctx: RouteContext): RouterCandi
         candidate.harnessId,
         candidate.credentialRoute,
         candidate.credentialSubjectId,
+        ctx.now,
       ),
   );
   const free = ready.filter((candidate) => !isIncrementalPaid(candidate));
@@ -119,12 +139,15 @@ function tierValueOf(candidate: RouterCandidate, ctx: RouteContext): number {
   return tierIndex(candidate, ctx) ?? Number.MAX_SAFE_INTEGER;
 }
 
-/** Binding pace slack the `auto` comparator orders by; null = none observed. */
+/** Binding pace slack the `auto` comparator orders by; null = none observed.
+ * Evaluated at the pass-wide pinned instant (`ctx.now`) — never at a freshly
+ * read clock, which would make two identical quota states differ. */
 function autoSlack(candidate: RouterCandidate, ctx: RouteContext): number | null {
   return ctx.ledger.bindingPaceSlack(
     candidate.harnessId,
     candidate.credentialRoute,
     candidate.credentialSubjectId,
+    ctx.now,
   );
 }
 
@@ -148,6 +171,11 @@ type AutoRankAxis = "expiring_quota_slack" | "quality_tier";
  * two EQUAL non-null slacks yield order 0 and a null axis (declared order, and
  * the sort does NOT fall through to tiers). Only when BOTH slacks are absent
  * does the comparator compare tier indices.
+ *
+ * Both slacks are read at the pass-wide pinned instant (`ctx.now`), so the
+ * subtraction compares two quota states and nothing else. Re-reading the clock
+ * per candidate made the comparator time-varying and broke exactly the
+ * guarantee above: equal quota states produced a non-zero order.
  */
 function compareAutoTraced(
   a: RouterCandidate,
@@ -165,7 +193,11 @@ function compareAutoTraced(
 }
 
 /** Order candidates transparently; lower tuple values win. Unknown quota remains eligible. */
-export function rankHarnesses(candidates: RouterCandidate[], ctx: RouteContext): RouterCandidate[] {
+export function rankHarnesses(
+  candidates: RouterCandidate[],
+  context: RouteContext,
+): RouterCandidate[] {
+  const ctx = pinInstant(context);
   const routes = eligible(candidates, ctx);
   if (ctx.goal === "quality" && routes.every((candidate) => tierIndex(candidate, ctx) === null)) {
     throw new RoutingPreflightError(
@@ -207,8 +239,11 @@ export function selectHarness(
  */
 export function explainRanking(
   candidates: RouterCandidate[],
-  ctx: RouteContext,
+  context: RouteContext,
 ): RouteRankingRationale {
+  // ONE instant for both passes: the sort and the reason walk must read the same
+  // clock, or the recorded rationale can disagree with the order it explains.
+  const ctx = pinInstant(context);
   const rankedCandidates = rankHarnesses(candidates, ctx);
   const order = rankedCandidates.map((c) => c.harnessId);
   const eligibleIds = new Set(order);

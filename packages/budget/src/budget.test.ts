@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BudgetLedger, promptFingerprint, routeCostEvidence } from "./ledger.js";
 import { observationsFromEvent } from "./observe.js";
 import {
@@ -1040,6 +1040,43 @@ describe("routing telemetry", () => {
       expect(r.reason).toBe("declared_order");
       // Equal slacks: the stable sort preserves the declared input order.
       expect(r.order).toEqual(["claude", "codex"]);
+    });
+
+    // The above used to be a coin flip on a busy machine: the ranking pass read
+    // Date.now() once per candidate, so a millisecond crossing between the two
+    // reads made two IDENTICAL quota states differ by ~5.6e-11 of pace slack,
+    // the comparator returned a non-zero order, and the rationale claimed
+    // expiring_quota_slack. This pins the clock to advance on EVERY read, which
+    // turns that race into a certainty; the pass must still see equal slacks
+    // because it evaluates them at one instant.
+    it("holds declared_order when the clock ticks between reads (one pinned instant per pass)", () => {
+      const led = new BudgetLedger();
+      const base = Date.now();
+      const reset = new Date(base + 9_000_000).toISOString();
+      for (const harness_id of ["codex", "claude"] as const) {
+        led.observe({
+          harness_id,
+          ts: new Date(base).toISOString(),
+          quality: "native",
+          kind: "quota_constraint",
+          constraint_id: "five-hour",
+          used_ratio: 0.3,
+          window_seconds: 18_000,
+          resets_at: reset,
+        });
+      }
+      let tick = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => base + tick++);
+      try {
+        const r = explainRanking([cand("claude"), cand("codex")], routeContext(led, "auto"));
+        expect(r.reason).toBe("declared_order");
+        expect(r.order).toEqual(["claude", "codex"]);
+        // One pinned instant for the whole pass: the sort and the reason walk
+        // may not each pin their own, or they could explain different orders.
+        expect(tick).toBe(1);
+      } finally {
+        clock.mockRestore();
+      }
     });
   });
 

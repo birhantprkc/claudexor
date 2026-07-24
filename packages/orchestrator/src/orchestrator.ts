@@ -1657,13 +1657,13 @@ export class Orchestrator {
         intent,
         qualityTiers: config.routing.quality_tiers,
         ledger: routeLedger,
+        now: Date.now(), // ONE instant for the sort AND the rationale below
       };
       const ranked = rankHarnesses(remaining, routeCtx)
         .map((candidate) => byId.get(candidate.harnessId))
         .filter((candidate): candidate is RoutedAdapter => Boolean(candidate));
-      // QA-034: record the typed rationale ONCE at pool ordering (run evidence,
-      // not an event). Axis-aligned with rankHarnesses above so the persisted
-      // reason can never disagree with the order actually taken.
+      // QA-034: the rationale is run evidence recorded ONCE at pool ordering,
+      // pinned to routeCtx.now so it cannot disagree with the order just taken.
       if (runId) this.routingRationaleByRun.set(runId, explainRanking(remaining, routeCtx));
       ordered = ranked;
     }
