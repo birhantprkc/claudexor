@@ -427,12 +427,13 @@ function boundedTail(text: string): string {
     .replace(/\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
-  // The ring keeps only the final bytes, so a secret split by the truncation
-  // boundary could leave a prefix-less fragment redactSecrets cannot pattern
-  // (its anchors need the token head). Drop the leading partial token (up to
-  // the first whitespace) BEFORE redacting so a boundary-split fragment can
-  // never survive; then redact the remainder.
-  const bounded = plain.slice(-OUTPUT_TAIL_BYTES).replace(/^\S+/, "");
+  // Only when the text ACTUALLY overflows the tail budget does the slice cut
+  // the front — a secret split by that boundary could leave a prefix-less
+  // fragment redactSecrets cannot anchor. In that case (and only then) drop
+  // the leading partial token before redacting; short output is kept whole.
+  const truncated = plain.length > OUTPUT_TAIL_BYTES;
+  let bounded = plain.slice(-OUTPUT_TAIL_BYTES);
+  if (truncated) bounded = bounded.replace(/^\S+/, "");
   return redactSecrets(bounded.trim().slice(0, 4000));
 }
 

@@ -13,7 +13,7 @@
   "packages/cli/src/control-services.ts": 605,
   "packages/cli/src/plugins.ts": 1931,
   "packages/cli/src/setup-jobs.ts": 1496,
-  "packages/cli/src/setup-login-runner.ts": 616,
+  "packages/cli/src/setup-login-runner.ts": 617,
   "packages/control-api/src/daemon-server.ts": 3137,
   "packages/control-api/src/operation-catalog.ts": 627,
   "packages/daemon/src/journal-manager.ts": 650,
