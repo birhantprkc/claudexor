@@ -20,8 +20,8 @@
   "packages/daemon/src/project-partitions.ts": 636,
   "packages/daemon/src/server.ts": 653,
   "packages/daemon/src/threads.ts": 601,
-  "packages/harness-claude/src/index.ts": 974,
-  "packages/harness-codex/src/index.ts": 874,
+  "packages/harness-claude/src/index.ts": 996,
+  "packages/harness-codex/src/index.ts": 900,
   "packages/harness-cursor/src/index.ts": 803,
   "packages/journal/src/index.ts": 544,
   "packages/mcp-server/src/index.ts": 703,
@@ -30,7 +30,7 @@
   "packages/orchestrator/src/planRun.ts": 613,
   "packages/review/src/reviewEngine.ts": 1396,
   "packages/schema/src/control.ts": 1738,
-  "packages/schema/src/harness.ts": 1077,
+  "packages/schema/src/harness.ts": 1094,
   "packages/schema/src/setup.ts": 692,
   "packages/schema/src/telemetry.ts": 600
 }
