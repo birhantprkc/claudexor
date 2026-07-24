@@ -103,13 +103,26 @@ export function isRankedEffort(value: string): boolean {
 }
 
 /**
+ * Rank positions kept for ORDERING only: they sit below `low` so they sort
+ * correctly the day a vendor ships them, but no adapter advertises them today.
+ * Named separately from `EFFORT_RANK_ORDER` so user-facing text can say so
+ * instead of listing them beside levels a harness will actually accept.
+ */
+export const EFFORT_RANK_RESERVED: readonly string[] = ["none", "minimal"];
+
+/**
  * How every surface describes the effort vocabulary in help and refusal text.
  * ONE owner (INV-122) so no CLI string hand-copies a level list — and it
  * deliberately does NOT read as an allow-list, because the real answer is per
- * (harness, model) and lives in the manifest. `none`/`minimal` appear here as
- * RANK positions only; no adapter advertises them today.
+ * (harness, model) and lives in the manifest. The reserved positions are named
+ * as reserved rather than listed inline: this string is surfaced verbatim by the
+ * `--effort` and `--reviewer-effort` refusals, where a bare `none < minimal <
+ * low` reads as an offer of two levels no harness would take.
  */
-export const EFFORT_HINT_HELP = `harness-advertised level, weakest to strongest: ${EFFORT_RANK_ORDER.join(" < ")}`;
+export const EFFORT_HINT_HELP =
+  `harness-advertised level, weakest to strongest: ` +
+  `${EFFORT_RANK_ORDER.filter((level) => !EFFORT_RANK_RESERVED.includes(level)).join(" < ")}; ` +
+  `${EFFORT_RANK_RESERVED.join(" and ")} rank below them but no harness advertises them yet`;
 
 /**
  * JSON-Schema fragment for an effort value on UNTYPED surfaces (the MCP tool

@@ -46,5 +46,11 @@ export function governRouteEffort(
   if (check.status === "rejected") {
     return { effort: null, ignored: `effort=${requested} (${check.message} for ${route.id})` };
   }
-  return { effort: requested, ignored: null };
+  // The RESOLVED level, clamp included — what this function's name and contract
+  // promise. Returning the raw request instead was only safe because every
+  // adapter re-resolves against the same advertised set, i.e. the contract
+  // silently depended on a downstream re-clamp; nothing reads the raw value
+  // (`effort_hint` on the run spec is its one consumer, and the frozen per-lane
+  // `routing_efforts` map is captured from the request, not from here).
+  return { effort: check.effort, ignored: null };
 }
