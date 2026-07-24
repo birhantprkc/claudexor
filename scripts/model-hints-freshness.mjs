@@ -72,7 +72,10 @@ for (const adapter of buildRegistry({ includeFakes: false }).values()) {
  * recorded snapshot when it cannot answer. Both failure modes are freshness
  * smells worth surfacing and neither is a build breaker:
  *   - the probe answered but disagrees with the committed snapshot → the vendor
- *     moved and the snapshot should be re-recorded;
+ *     moved and the snapshot should be re-recorded. Only meaningful where the
+ *     snapshot is version-pinned AND that version is installed (`snapshotVersion`
+ *     below), since a per-version ladder disagrees with any other version by
+ *     design and "re-record it" would be advice no snapshot can satisfy;
  *   - the probe could not answer → the manifest is running on the snapshot.
  * The recorded snapshots are imported here (like the registry above) because
  * only the adapter that owns a vendor knows what its snapshot is.
@@ -93,6 +96,13 @@ const EFFORT_SNAPSHOTS = {
     module: "packages/harness-claude/dist/effort-probe.js",
     read: (m) => ({ "*": m.CLAUDE_EFFORT_SNAPSHOT.join(",") }),
     live: (caps) => ({ "*": (caps.effort_levels ?? []).join(",") }),
+    // The claude ladder is a property of the INSTALLED binary (2.1.89 stops at
+    // `max`, 2.1.165 adds `xhigh`) while the snapshot is pinned to ONE version, so
+    // a live ladder from any OTHER version legitimately disagrees with it. Drift
+    // is therefore only a real signal on the pinned version; comparing elsewhere
+    // demanded a re-record that cannot exist, since no single snapshot can be
+    // fresh for both versions and both are legitimate installs.
+    snapshotVersion: (m) => m.CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   },
 };
 
@@ -105,18 +115,29 @@ for (const [id, spec] of Object.entries(EFFORT_SNAPSHOTS)) {
   } catch {
     continue; // vendor CLI absent here — nothing to compare
   }
-  let snapshot;
+  let mod;
   try {
-    snapshot = spec.read(await import(pathToFileURL(join(root, spec.module)).href));
+    mod = await import(pathToFileURL(join(root, spec.module)).href);
   } catch {
     continue;
   }
+  const snapshot = spec.read(mod);
   const caps = manifest.capabilities ?? {};
   const stamped = caps.effort_levels_verified_against ?? null;
   const installed = semver(manifest.version);
   if (installed !== null && semver(stamped) !== installed) {
     warnings.push(
       `${id}: effort ladders came from the recorded snapshot (verified against ${stamped}), not a live probe on CLI ${installed} — the vendor probe did not answer`,
+    );
+    continue;
+  }
+  // A snapshot pinned to one vendor version can only be drift-compared ON that
+  // version (see `snapshotVersion`); elsewhere the live ladder is the truth and
+  // there is nothing actionable to say.
+  const pinned = spec.snapshotVersion ? semver(spec.snapshotVersion(mod)) : null;
+  if (pinned !== null && installed !== null && installed !== pinned) {
+    console.log(
+      `model-hints: ${id} — effort ladders read live from CLI ${installed}; the recorded snapshot is pinned to ${pinned} (a fallback for that version, not a target for every version), so no drift compare`,
     );
     continue;
   }
