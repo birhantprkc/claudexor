@@ -25,9 +25,11 @@ describe("safeErrorMessage (a thrown value never reports as no error)", () => {
   });
 
   it("still redacts secrets in a non-blank message", () => {
-    expect(safeErrorMessage(new Error("token sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA"))).not.toContain(
-      "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA",
-    );
+    // Assembled at run time: a token-shaped LITERAL in a tracked file trips the
+    // repo's own secret scan (CI step 1), which is the same convention the
+    // redaction tests below and in attemptFinalize.test.ts already follow.
+    const fakeToken = ["sk-ant", "1234567890abcdefghij"].join("-");
+    expect(safeErrorMessage(new Error(`token ${fakeToken}`))).not.toContain(fakeToken);
   });
 });
 
