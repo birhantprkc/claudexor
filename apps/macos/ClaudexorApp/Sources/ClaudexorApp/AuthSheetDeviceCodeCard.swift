@@ -136,7 +136,14 @@ final class EphemeralSignInSession: NSObject, ObservableObject, ASWebAuthenticat
         cancel()
         // A callback scheme that the device-code flow never redirects to; the
         // session simply hosts the private browser until the app-server confirms.
-        let created = ASWebAuthenticationSession(url: url, callbackURLScheme: "claudexor-auth") { _, _ in }
+        // The completion MUST be @Sendable-nonisolated: AuthenticationServices
+        // invokes it on a background queue when the session ends, and a closure
+        // formed in this @MainActor class otherwise inherits main isolation —
+        // the runtime isolation assert then SIGTRAPs the app right after a
+        // successful sign-in (owner live test, 2026-07-24).
+        let completion: @Sendable (URL?, Error?) -> Void = { _, _ in }
+        let created = ASWebAuthenticationSession(
+            url: url, callbackURLScheme: "claudexor-auth", completionHandler: completion)
         created.prefersEphemeralWebBrowserSession = true
         created.presentationContextProvider = self
         self.session = created
