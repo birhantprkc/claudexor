@@ -885,7 +885,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     const disclosurePath = store.paths(jobId).runnerDeviceCode;
     const deadline = job.deadlineAt ? Date.parse(job.deadlineAt) : now().getTime() + 60_000;
     const watch = () => {
-      const current = store.status(jobId);
+      let current: ControlSetupJob;
+      try {
+        current = store.status(jobId);
+      } catch {
+        return; // journal closed (shutdown/restart) — the successor re-arms
+      }
       if (!ACTIVE_SETUP_STATES.has(current.state) || current.phase === "cancelling") return;
       if (existsSync(disclosurePath)) {
         if (current.phase === "awaiting_user") {
