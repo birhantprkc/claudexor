@@ -200,6 +200,20 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
       echo "ERROR: Browser MCP deploy retained an external @claudexor/core self-link" >&2
       exit 1
     fi
+    # D-2: the runtime-update closure re-tars this directory and its
+    # assertNoNativeAddons guard forbids ANY .node file (the bundled Node's
+    # disable-library-validation would load them unsigned on user machines).
+    # fsevents is playwright's OPTIONAL fs-watch accelerator — chokidar falls
+    # back to polling without it — so prune every native addon here and fail
+    # loudly if one survives; the app layout stays closure-compatible by
+    # construction.
+    find "$BROWSER_MCP_DIR" -name "fsevents*" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    find "$BROWSER_MCP_DIR" -name "*.node" -type f -delete 2>/dev/null || true
+    LEFTOVER_NODE_ADDON="$(find "$BROWSER_MCP_DIR" -name '*.node' -type f | head -1)"
+    if [ -n "$LEFTOVER_NODE_ADDON" ]; then
+      echo "ERROR: Browser MCP runtime still carries a native addon: $LEFTOVER_NODE_ADDON" >&2
+      exit 1
+    fi
     echo "    browser-mcp-runtime $(du -sh "$BROWSER_MCP_DIR" | cut -f1 | tr -d ' ')"
   else
     echo "ERROR: Browser MCP deploy failed; packaged browser requests would be unavailable" >&2
@@ -293,6 +307,18 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   fi
   rm -rf "$SMOKE_HOME"
   echo "    bundled daemon boots (control-api discovery written)"
+  # D-2 integration proof (release-wave critical): the runtime-update closure
+  # must be producible from THIS exact packaged app layout — the CI candidate
+  # previously discovered a forbidden native addon only at release time.
+  echo "==> Closure-buildability smoke (build-runtime-closure against the packaged app)"
+  CLOSURE_SMOKE_DIR="$(mktemp -d)"
+  if node "$REPO_ROOT/scripts/build-runtime-closure.mjs"       --app-bundle "$APP"       --version "$VERSION"       --out "$CLOSURE_SMOKE_DIR" >/dev/null; then
+    echo "    runtime closure builds from the packaged app"
+    rm -rf "$CLOSURE_SMOKE_DIR"
+  else
+    echo "ERROR: runtime closure cannot be built from the packaged app layout (D-2)" >&2
+    exit 1
+  fi
 fi
 
 if [ -n "${SIGN_IDENTITY:-}" ]; then
@@ -300,9 +326,10 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
   # Inside-out signing (NOT --deep: --deep re-signs nested code with the
   # APP's entitlements, which strips the JIT entitlements the bundled Node
   # needs under hardened runtime — V8 would be killed at startup).
+  # fsevents is PRUNED from the deployed runtime (D-2 closure forbids native
+  # addons); the process-identity helper is the only nested Browser MCP code.
   DEPLOYED_PROCESS_HELPER="$APP/Contents/Resources/browser-mcp-runtime/dist/native/claudexor-process-identity"
-  DEPLOYED_FSEVENTS="$APP/Contents/Resources/browser-mcp-runtime/node_modules/.pnpm/fsevents@2.3.2/node_modules/fsevents/fsevents.node"
-  for NESTED_CODE in "$DEPLOYED_PROCESS_HELPER" "$DEPLOYED_FSEVENTS"; do
+  for NESTED_CODE in "$DEPLOYED_PROCESS_HELPER"; do
     [ -f "$NESTED_CODE" ] || { echo "ERROR: expected nested Browser MCP code is missing: $NESTED_CODE" >&2; exit 1; }
     codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$NESTED_CODE"
     codesign --verify --strict --verbose=2 "$NESTED_CODE"
