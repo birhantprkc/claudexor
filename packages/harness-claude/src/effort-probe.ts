@@ -65,7 +65,13 @@ export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
   let end = start + 1;
   for (; end < lines.length && end - start < EFFORT_HELP_BLOCK_MAX_LINES; end += 1) {
     const next = lines[end] ?? "";
-    if (next.trim() === "" || /^\s*--[a-z]/.test(next)) break;
+    // ANY new option line ends the block, SHORT alias included. Matching only a
+    // leading `--` let a layout that renders aliases (`  -m, --model <model>`)
+    // run straight past the next flag; the block then reached far enough that the
+    // LAST parenthesized group came from THAT flag instead — and a group like
+    // `(opus, sonnet, haiku)` is comma-separated lowercase slugs, so it passes as
+    // a value list and publishes model names as the effort ladder.
+    if (next.trim() === "" || /^\s*--?[A-Za-z0-9]/.test(next)) break;
   }
   const window = lines.slice(start, end).join(" ");
   // The FIRST paren in the block is not necessarily the value list: a vendor

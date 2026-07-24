@@ -57,6 +57,34 @@ describe("the claude ladder is a property of the INSTALLED binary", () => {
     expect(parseClaudeEffortHelp(help)).toBeNull();
   });
 
+  it("ends the block on a SHORT-alias flag too, not just a long one", () => {
+    // The regression: the terminator only matched a leading `--`, so a help
+    // layout that renders aliases ran past the next flag. Within the eight-line
+    // window the LAST parenthesized group then came from `--model`, and
+    // `(opus, sonnet, haiku)` is comma-separated lowercase slugs, so it passed as
+    // a value list — publishing MODEL NAMES as the effort ladder, live and
+    // stamped with the installed version, instead of falling back to the snapshot.
+    const help = [
+      "  --effort <level>",
+      "      Effort level for the current session",
+      "  -m, --model <model>",
+      "      Model for the session (opus, sonnet, haiku)",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toBeNull();
+  });
+
+  it("still reads a wrapped value list when the NEXT flag renders a short alias", () => {
+    // The terminator must not be so eager that it truncates a legitimate wrap.
+    const help = [
+      "  --effort <level>",
+      "      Effort level for the current session (low, medium,",
+      "      high, xhigh, max)",
+      "  -m, --model <model>",
+      "      Model for the session (opus, sonnet, haiku)",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
   it("reads xhigh from a CLI whose --help advertises it (2.1.165)", () => {
     expect(parseClaudeEffortHelp(HELP_2_1_165)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
