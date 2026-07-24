@@ -275,13 +275,9 @@
               },
               "effort": {
                 "type": "string",
-                "enum": [
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ],
+                "minLength": 1,
+                "maxLength": 32,
+                "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
                 "description": "Per-reviewer effort hint, passed to that harness only."
               }
             },

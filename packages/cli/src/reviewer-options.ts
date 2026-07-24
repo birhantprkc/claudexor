@@ -1,5 +1,7 @@
 import {
+  EFFORT_HINT_HELP,
   EffortHint,
+  isRankedEffort,
   ProviderFamily,
   type ControlReviewerPanelEntry,
   type EffortHint as EffortHintValue,
@@ -27,7 +29,7 @@ export function parseReviewerEffortMap(
       );
     const parsed = EffortHint.safeParse(effort);
     if (!parsed.success)
-      throw new Error(`invalid reviewer effort '${effort}' (expected low|medium|high|xhigh|max)`);
+      throw new Error(`invalid reviewer effort '${effort}' (expected a ${EFFORT_HINT_HELP})`);
     map[parsedFamily.data] = parsed.data;
   }
   return Object.keys(map).length > 0 ? map : undefined;
@@ -89,12 +91,15 @@ export function parseReviewerPanel(
       const colon = harness.lastIndexOf(":");
       if (colon > -1) {
         const suffix = harness.slice(colon + 1).trim();
-        const parsedEffort = EffortHint.safeParse(suffix);
-        if (!parsedEffort.success)
+        // Disambiguation keys off the RANK TABLE, not the open vocabulary: every
+        // slug is a well-formed effort, so accepting any of them here would make
+        // `cursor=org:model:v2` swallow `v2`. An unranked vendor level rides the
+        // unambiguous `--reviewer-effort family=level` spelling instead.
+        if (!isRankedEffort(suffix))
           throw new Error(
             `invalid --reviewer-panel entry '${pair}' (expected harness[:effort] or harness[=model[:effort]])`,
           );
-        effort = parsedEffort.data;
+        effort = suffix;
         harness = harness.slice(0, colon).trim();
       }
     }
@@ -107,9 +112,10 @@ export function parseReviewerPanel(
       const colon = model.lastIndexOf(":");
       if (colon > -1) {
         const suffix = model.slice(colon + 1).trim();
-        const parsedEffort = EffortHint.safeParse(suffix);
-        if (parsedEffort.success) {
-          effort = parsedEffort.data;
+        // Same rank-table disambiguation: a colon suffix the table does not know
+        // stays part of the model id (`org:model:v2`).
+        if (isRankedEffort(suffix)) {
+          effort = suffix;
           model = model.slice(0, colon).trim();
           if (!model)
             throw new Error(`invalid --reviewer-panel entry '${pair}' (missing model after '=')`);

@@ -30,6 +30,10 @@ export function buildWireFixtures() {
   const add = (name, schemaName, value) =>
     fixtures.push({ name, schema: schemaName, value: parse(schemaName, value) });
 
+  // The effort RANK table itself: the macOS picker orders levels by it, so the
+  // Swift copy is held to the TS SSOT here instead of drifting silently.
+  add("effort-rank-order", "EffortRankOrder", [...schema.EFFORT_RANK_ORDER]);
+
   add("handshake-response", "ControlHandshakeResponse", {
     protocolMajor: schema.CONTROL_PROTOCOL_MAJOR,
     compatible: true,

@@ -59,6 +59,7 @@ import {
   ControlHarnessSettingsPatch,
   ControlSettingsUpdateRequest,
   ConformanceReport,
+  EffortRankOrder,
   ContextPack,
   DecisionRecord,
   GateResult,
@@ -141,6 +142,7 @@ for (const name of readdirSync(outDir)) {
 }
 
 const schemas = {
+  EffortRankOrder,
   TaskContract,
   TestCommandInvocation,
   ContextPack,

@@ -22,16 +22,16 @@ extension ThreadsScreen {
         return modelsRouteParam(forAuthPreference: preference)
     }
 
-    /// Union of the RESOLVED pool's declared effort ladders in schema order
+    /// Union of the RESOLVED pool's advertised effort ladders in rank order
     /// (weakest → strongest); a sticky primary narrows to its own ladder. One
-    /// scalar effort rides the run — adapters clamp it individually.
+    /// scalar effort rides the run — adapters resolve it individually against
+    /// the routed model. Ordering comes from `EffortRanking`, which is held to
+    /// the schema SSOT by a derived fixture, so a level added upstream sorts
+    /// correctly here instead of landing after `max`.
     var composerEffortLevels: [String] {
         let families = primaryFamily.map { [$0] }
             ?? (resolvedPoolFamilies.isEmpty ? poolFamilies : resolvedPoolFamilies)
-        let declared = Set(families.flatMap { model.harnessInfo(for: $0)?.effortLevels ?? [] })
-        let canonical = ["low", "medium", "high", "xhigh", "max"].filter { declared.contains($0) }
-        // Unknown future levels degrade honestly to the tail, never dropped.
-        return canonical + declared.subtracting(canonical).sorted()
+        return EffortRanking.sorted(families.flatMap { model.harnessInfo(for: $0)?.effortLevels ?? [] })
     }
 
     /// The advanced options popover ("⋯"): clean SOLID sections on the popover's

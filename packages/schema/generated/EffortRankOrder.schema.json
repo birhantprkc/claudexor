@@ -1,0 +1,23 @@
+{
+  "$ref": "#/definitions/EffortRankOrder",
+  "definitions": {
+    "EffortRankOrder": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ]
+      },
+      "description": "Canonical cross-harness reasoning-effort rank order, weakest to strongest. A ranking table, not an allow-list: harnesses advertise their own per-model vocabularies and a level outside this table is passed through untouched when the model advertises it."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

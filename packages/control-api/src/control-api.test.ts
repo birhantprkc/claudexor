@@ -3930,7 +3930,11 @@ describe("DaemonControlApiServer", () => {
           prompt: "2+2?",
           mode: "ask",
           harnesses: ["codex"],
-          reviewerEfforts: { anthropic: "banana" },
+          // Malformed SHAPE is still refused at the boundary (spaces/uppercase are
+          // not an effort slug). An unknown-but-well-formed level is deliberately
+          // NOT refused here: what a level means is per (harness, model), and the
+          // wire contract stays as open as the vendor's own.
+          reviewerEfforts: { anthropic: "Banana Split" },
         }),
       });
       expect(invalidValue.status).toBe(400);
@@ -4041,7 +4045,9 @@ describe("DaemonControlApiServer", () => {
           prompt: "review it",
           mode: "agent",
           scope: { kind: "project", root: panelRoot },
-          reviewerPanel: [{ harness: "cursor", effort: "turbo" }],
+          // Shape refusal only — an unranked but well-formed level is resolved
+          // against the routed model, not rejected at the wire.
+          reviewerPanel: [{ harness: "cursor", effort: "TURBO BOOST" }],
         }),
       });
       expect(invalid.status).toBe(400);

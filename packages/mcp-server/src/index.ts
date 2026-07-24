@@ -12,7 +12,7 @@ import {
   type ServeStdioOptions,
 } from "@modelcontextprotocol/server/stdio";
 import {
-  EffortHint,
+  effortJsonSchema,
   ExternalContextPolicy,
   ProviderFamily,
   validateOptionalNonEmptyString,
@@ -318,7 +318,10 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
     PROVIDER_FAMILIES.map((family) => [family, { type: "string", minLength: 1 }]),
   );
   const reviewerEffortProperties = Object.fromEntries(
-    PROVIDER_FAMILIES.map((family) => [family, { type: "string", enum: EffortHint.options }]),
+    PROVIDER_FAMILIES.map((family) => [
+      family,
+      effortJsonSchema(`Reviewer effort for the ${family} family.`),
+    ]),
   );
   const promptSchema = (minN = 1) => ({
     type: "object",
@@ -345,11 +348,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         minLength: 1,
         description: "Optional model override for the primary harness.",
       },
-      effort: {
-        type: "string",
-        enum: EffortHint.options,
-        description: "Optional effort override for the primary harness.",
-      },
+      effort: effortJsonSchema("Optional effort override for the primary harness."),
       web: {
         type: "string",
         enum: ExternalContextPolicy.options,
@@ -400,7 +399,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
           properties: {
             harness: { type: "string", minLength: 1 },
             model: { type: "string", minLength: 1 },
-            effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] },
+            effort: effortJsonSchema("Effort for this reviewer entry."),
           },
           required: ["harness"],
         },

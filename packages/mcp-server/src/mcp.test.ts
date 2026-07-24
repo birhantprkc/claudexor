@@ -251,7 +251,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
         name: "claudexor_run",
         arguments: { prompt: "go", reviewerEfforts: { opneai: "xhigh" } },
       },
-      { id: 15, name: "claudexor_run", arguments: { prompt: "go", effort: "turbo" } },
+      { id: 15, name: "claudexor_run", arguments: { prompt: "go", effort: "TURBO BOOST" } },
       { id: 16, name: "claudexor_run", arguments: { prompt: "go", web: "internet" } },
       { id: 17, name: "claudexor_run", arguments: { prompt: "go", harness: "" } },
       { id: 18, name: "claudexor_run", arguments: { prompt: "go", primaryHarness: " " } },
@@ -523,7 +523,13 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(schema?.properties?.model?.minLength).toBe(1);
     expect(schema?.properties?.harness?.minLength).toBe(1);
     expect(schema?.properties?.primaryHarness?.minLength).toBe(1);
-    expect(schema?.properties?.effort?.enum).toContain("xhigh");
+    // The MCP effort surface is OPEN by design: pinning an enum here would
+    // reject a level a model genuinely advertises. It carries the slug SHAPE,
+    // and names the ranked levels as guidance in its description.
+    expect(schema?.properties?.effort?.enum).toBeUndefined();
+    expect(schema?.properties?.effort?.type).toBe("string");
+    expect(schema?.properties?.effort?.pattern).toBeTruthy();
+    expect(schema?.properties?.effort?.description).toContain("xhigh");
     expect(schema?.properties?.web?.enum).toContain("live");
     expect(schema?.properties?.externalContextPolicy?.enum).toContain("cached");
     expect(schema?.properties?.reviewerModels?.type).toBe("object");
@@ -531,7 +537,8 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(schema?.properties?.reviewerModels?.properties?.openai?.type).toBe("string");
     expect(schema?.properties?.reviewerEfforts?.type).toBe("object");
     expect(schema?.properties?.reviewerEfforts?.additionalProperties).toBe(false);
-    expect(schema?.properties?.reviewerEfforts?.properties?.openai?.enum).toContain("xhigh");
+    expect(schema?.properties?.reviewerEfforts?.properties?.openai?.type).toBe("string");
+    expect(schema?.properties?.reviewerEfforts?.properties?.openai?.description).toContain("xhigh");
     expect(schema?.properties?.tests?.type).toBe("array");
     expect(schema?.properties?.paidBudget?.anyOf).toHaveLength(2);
     expect(schema?.properties?.access?.enum).toContain("workspace_write");

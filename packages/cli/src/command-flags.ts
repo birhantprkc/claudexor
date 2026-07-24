@@ -4,6 +4,8 @@
  * line — the single source the arg parser, help, and MCP/CLI parity gate
  * read.
  */
+import { EFFORT_HINT_HELP } from "@claudexor/schema";
+
 export type CliFlagKind = "boolean" | "value";
 
 export interface CliFlagSpec {
@@ -162,7 +164,7 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   ),
   valueFlag("web", "<mode>", "External web/search policy: off|auto|cached|live"),
   valueFlag("model", "<id>", "Model hint forwarded to the selected harness route"),
-  valueFlag("effort", "<level>", "Reasoning effort hint: low|medium|high|xhigh|max"),
+  valueFlag("effort", "<level>", `Reasoning effort hint: ${EFFORT_HINT_HELP}`),
   valueFlag(
     "primary-harness",
     "<id>",

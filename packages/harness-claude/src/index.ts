@@ -43,6 +43,13 @@ import { probeClaudeCredentialProfile, resolveClaudeProfileRoute } from "./profi
 export { canonicalProfileConfigDir } from "./profile.js";
 import { smokeIsolatedApiKey, smokeIsolatedOAuthToken } from "./smoke.js";
 import {
+  CLAUDE_EFFORT_SNAPSHOT,
+  CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
+  probeClaudeEffortLevels,
+  probeClaudeHelp,
+} from "./effort-probe.js";
+export { probeClaudeEffortLevels } from "./effort-probe.js";
+import {
   claudeAttachmentBlocks,
   handleControlRequestFrame,
   initialSessionFrames,
@@ -55,13 +62,9 @@ export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
   (k) => k !== "ANTHROPIC_API_KEY",
 );
 
-/**
- * Ordered (weakest→strongest) reasoning-effort levels `claude --effort` accepts.
- * Verified against the installed CLI (`claude --help`, v2.1.165): the full
- * ladder is low|medium|high|max. SINGLE source for the manifest's
- * `effort_levels` and the run-time normalizer (which now clamps nothing away).
- */
-const CLAUDE_EFFORT_LEVELS: readonly EffortHint[] = ["low", "medium", "high", "xhigh", "max"];  // xhigh exists since CLI >2.1.165 (official default rec)
+// `claude --effort` accepts whatever the INSTALLED binary documents, and that
+// changes between CLI versions (2.1.89 stops at `max`; 2.1.165 adds `xhigh`), so
+// the ladder is read from `claude --help` — see `probeClaudeEffortLevels`.
 
 /** Exported for focused route-policy tests; runtime uses this exact selector. */
 export const selectClaudeRunAuthRoute = selectStrictAuthRoute;
@@ -113,14 +116,17 @@ export function probeClaudeReadonlyProfile(
 ): Promise<ClaudeReadonlyProfileProbe> {
   if (readonlyProbePromise) return readonlyProbePromise;
   readonlyProbePromise = (async () => {
-    try {
-      const result = await runCapture(BIN, ["--help"], {
-        timeoutMs: 10_000,
-        abortSignal,
-        cancelSignal: "SIGTERM",
-        cancelKillDelayMs: 0,
-      });
-      const help = `${result.stdout}\n${result.stderr}`;
+    const probe = await probeClaudeHelp(abortSignal);
+    if (!probe.ok) {
+      return {
+        supported: false,
+        missingFlags: [...CLAUDE_READONLY_REQUIRED_FLAGS],
+        detail: `readonly enforcement probe failed: ${probe.error}`,
+      };
+    }
+    {
+      const result = { code: probe.code };
+      const help = probe.help;
       const missingFlags: string[] = CLAUDE_READONLY_REQUIRED_FLAGS.filter(
         (flag) => !help.includes(flag),
       );
@@ -134,12 +140,6 @@ export function probeClaudeReadonlyProfile(
           result.code === 0 && missingFlags.length === 0
             ? "installed Claude CLI exposes the complete restrictive readonly flag set"
             : `readonly enforcement unavailable; missing ${missingFlags.join(", ") || `help exited ${result.code}`}`,
-      };
-    } catch (error) {
-      return {
-        supported: false,
-        missingFlags: [...CLAUDE_READONLY_REQUIRED_FLAGS],
-        detail: `readonly enforcement probe failed: ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
       };
     }
   })();
@@ -330,6 +330,8 @@ type ClaudeRuntimeDeps = {
   smokeIsolatedApiKey: typeof smokeIsolatedApiKey;
   smokeIsolatedOAuthToken: typeof smokeIsolatedOAuthToken;
   probeReadonlyProfile: typeof probeClaudeReadonlyProfile;
+  /** Effort ladder of the installed binary; falls back to the recorded snapshot. */
+  probeEffortLevels: typeof probeClaudeEffortLevels;
   runCliHarness: typeof runCliHarness;
 };
 
@@ -343,6 +345,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
     smokeIsolatedApiKey,
     smokeIsolatedOAuthToken,
     probeReadonlyProfile: probeClaudeReadonlyProfile,
+    probeEffortLevels: probeClaudeEffortLevels,
     runCliHarness,
     ...deps,
   };
@@ -358,6 +361,9 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
       }
       const apiKey = runtime.anthropicApiKey() !== null;
       const readonlyProfile = await runtime.probeReadonlyProfile();
+      // The ladder belongs to the INSTALLED CLI, so read it from that binary
+      // rather than declaring one version's list for every version.
+      const efforts = await runtime.probeEffortLevels();
       const native = await runtime.probeAuthStatus(BIN, { env: claudeNativeEnv() });
       const authed = native.authed;
       const oauthTokenAvailable = runtime.claudeOAuthToken() !== null;
@@ -394,9 +400,13 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           max_turns: true,
           tool_lists: true,
           interactive: true,
-          // claude --effort accepts low|medium|high|xhigh|max (verified against
-          // the installed CLI's --help). Single source for the run-time normalizer.
-          effort_levels: [...CLAUDE_EFFORT_LEVELS],
+          // Whatever THIS binary's --help documents; the snapshot fills in when
+          // the parse fails. Claude's ladder is CLI-wide, not per model, so
+          // `model_effort_levels` stays empty and every model falls back here.
+          effort_levels: [...efforts.levels],
+          effort_levels_verified_against: efforts.live
+            ? version
+            : CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
           // Manifest model truth source (strict model-truth validation: an explicit model outside
           // this list is refused, never forwarded to die as a native error).
           // Stable aliases plus current full ids; verified against the vendor
@@ -671,6 +681,9 @@ export function claudeArgsForSpec(
   spec: HarnessRunSpec,
   interactive = false,
   suppressBare = false,
+  /** What the installed CLI advertises; the recorded snapshot by default so
+   * arg-shape callers stay synchronous and the probe stays optional. */
+  advertisedEfforts: readonly EffortHint[] = CLAUDE_EFFORT_SNAPSHOT,
 ): string[] {
   // Interactive sessions deliver the prompt as a stream-json user message on
   // stdin (the control protocol's transport); one-shot runs keep the prompt arg.
@@ -700,9 +713,11 @@ export function claudeArgsForSpec(
   if (spec.model_hint) args.push("--model", spec.model_hint);
   // W-C4 live deltas (engine-gated to single-candidate lanes; parser tags payload.delta).
   if (spec.stream_deltas) args.push("--include-partial-messages");
-  // Clamp onto claude's declared effort ladder; null = not
-  // requested OR not tunable -> pass no flag. Never sends an invalid level.
-  const eff = normalizeEffort(spec.effort_hint, CLAUDE_EFFORT_LEVELS);
+  // Resolve against what the INSTALLED CLI advertises: an advertised level goes
+  // through verbatim (so a newer binary's level needs no code change here), a
+  // rankable one clamps, and anything else sends no flag rather than a level the
+  // vendor would reject. Null = not requested OR not tunable -> pass no flag.
+  const eff = normalizeEffort(spec.effort_hint, advertisedEfforts);
   if (eff) args.push("--effort", eff);
   if (spec.max_turns !== null && spec.max_turns > 0)
     args.push("--max-turns", String(spec.max_turns));
@@ -921,7 +936,14 @@ async function* runClaude(
   }
 
   const useSubscription = route === "subscription";
-  const args = claudeArgsForSpec(spec, interactive, useSubscription);
+  const args = claudeArgsForSpec(
+    spec,
+    interactive,
+    useSubscription,
+    // Shared with discovery through the memoized --help probe, so a run never
+    // re-spawns the CLI just to learn its ladder.
+    (await probeClaudeEffortLevels(abortSignalFromSpec(spec))).levels,
+  );
   // Scrub EVERY provider secret (incl. OpenAI/others — the cross-provider leak
   // fix) via the single core table, then re-add only the var this route needs.
   const env: Record<string, string | null | undefined> =

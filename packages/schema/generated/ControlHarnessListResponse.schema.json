@@ -372,17 +372,53 @@
                             "type": "array",
                             "items": {
                               "type": "string",
-                              "enum": [
-                                "low",
-                                "medium",
-                                "high",
-                                "xhigh",
-                                "max"
-                              ],
-                              "description": "Cross-harness reasoning-effort level, weakest to strongest; adapters declare the subset they support and a shared normalizer clamps requests onto the nearest supported level."
+                              "minLength": 1,
+                              "maxLength": 32,
+                              "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
+                              "description": "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model and a shared normalizer passes advertised levels through, clamps rankable ones, and refuses unrankable ones."
                             },
                             "default": [],
-                            "description": "Ordered (weakest to strongest) reasoning-effort levels this harness actually accepts; empty means effort is not a tunable surface."
+                            "description": "Ordered (weakest to strongest) reasoning-effort levels this harness accepts across all its models; empty means effort is not a tunable surface."
+                          },
+                          "model_effort_levels": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "object",
+                              "properties": {
+                                "levels": {
+                                  "type": "array",
+                                  "items": {
+                                    "$ref": "#/definitions/ControlHarnessListResponse/properties/harnesses/items/properties/manifest/anyOf/0/properties/capabilities/properties/effort_levels/items"
+                                  },
+                                  "default": [],
+                                  "description": "Ordered (weakest to strongest) reasoning-effort levels this model advertises, in the vendor's own order."
+                                },
+                                "default": {
+                                  "anyOf": [
+                                    {
+                                      "$ref": "#/definitions/ControlHarnessListResponse/properties/harnesses/items/properties/manifest/anyOf/0/properties/capabilities/properties/effort_levels/items"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "The effort level the vendor uses for this model when none is requested.",
+                                  "default": null
+                                }
+                              },
+                              "additionalProperties": false,
+                              "description": "Reasoning-effort vocabulary a single model advertises."
+                            },
+                            "default": {},
+                            "description": "Per-model advertised reasoning-effort vocabulary keyed by model id; a model absent here falls back to the harness-wide effort_levels union."
+                          },
+                          "effort_levels_verified_against": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "default": null,
+                            "description": "Vendor CLI version the effort ladders were last verified against; null = never verified / not applicable."
                           },
                           "known_models": {
                             "type": "array",

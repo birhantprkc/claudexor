@@ -11,6 +11,7 @@ import { serveAcpBridge, serveBeltBridge, serveMcpBridge } from "./bridge-serve.
 import { initProjectConfig } from "@claudexor/config";
 import {
   DecisionRecord,
+  EFFORT_HINT_HELP,
   EffortHint,
   ExternalContextPolicy,
   type ProtectedPathApproval,
@@ -201,8 +202,7 @@ function effortHint(args: ParsedArgs): EffortHint | undefined {
   const v = flagStr(args, "effort");
   if (v === undefined) return undefined;
   const parsed = EffortHint.safeParse(v);
-  if (!parsed.success)
-    throw new Error(`invalid --effort '${v}' (expected low|medium|high|xhigh|max)`);
+  if (!parsed.success) throw new Error(`invalid --effort '${v}' (expected a ${EFFORT_HINT_HELP})`);
   return parsed.data;
 }
 

@@ -242,12 +242,31 @@ credential transports, isolation containment, the honest readonly mechanism,
 and finite `attachment_inputs` declarations (the never-consumed execution-surface/session/output
 subtrees were deleted in the stabilization triage — a declared capability with no
 consumer is a staged field). Capabilities are data-driven and declared by the
-adapter: `effort_levels` (a shared normalizer clamps a requested hint onto the
-nearest supported level; a requested effort on an EMPTY ladder is disclosed
-via `ignored_settings`, never silently dropped) and `known_models` (+ the
+adapter: `effort_levels` + `model_effort_levels` (+ the
+`effort_levels_verified_against` freshness note) and `known_models` (+ the
 `known_models_verified_against` freshness note) as the manifest model truth
 source under the STRICT semantics described in the model-governance section
-above — there is no warn-and-pass-through tier. `doctor` validates each
+above — there is no warn-and-pass-through tier.
+
+Reasoning effort is an OPEN vocabulary, mirroring the vendors: codex types its
+own `ReasoningEffort` as any non-empty value the model advertises, and Claude
+Code's ladder belongs to the INSTALLED binary (2.1.89 stops at `max`; 2.1.165
+adds `xhigh`). So `EffortHint` is a bounded lowercase slug rather than an enum,
+and `EFFORT_RANK_ORDER` is a separate RANK table — an ordering aid, never an
+allow-list. Adapters discover what is really advertised at discovery time
+(codex `app-server` `model/list` → `supportedReasoningEfforts` per model; the
+`--effort` line of `claude --help`) and fall back to a recorded snapshot when a
+probe cannot answer, so a probe failure costs freshness, never the run; both
+probes are cached, and `scripts/model-hints-freshness.mjs` WARNS when the live
+ladders disagree with the snapshot. Effort ceilings are per MODEL, not per
+harness (gpt-5.6-sol takes `ultra`, gpt-5.4 stops at `xhigh`), so
+`effortLevelsForModel` narrows the harness-wide union for the routed model. The
+shared normalizer then passes an ADVERTISED level through verbatim — including
+one this repo has never heard of, which is what lets a new vendor level work
+with no code change — clamps a rankable-but-unadvertised level onto the nearest
+advertised one, and refuses a level that is neither, disclosed via
+`ignored_settings` rather than silently downgraded. The CLI help, the MCP tool
+schema and the macOS picker's ordering all derive from that single source. `doctor` validates each
 harness's CONFIGURED default model against the truth source, so a broken
 default (e.g. a model the CLI cannot run) is reported honestly instead of
 masked by a smoke that used a different model, and the same verdict rides

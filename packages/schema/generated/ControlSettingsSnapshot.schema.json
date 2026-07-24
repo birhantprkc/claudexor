@@ -96,14 +96,10 @@
                       },
                       "effort": {
                         "type": "string",
-                        "enum": [
-                          "low",
-                          "medium",
-                          "high",
-                          "xhigh",
-                          "max"
-                        ],
-                        "description": "Cross-harness reasoning-effort level, weakest to strongest; adapters declare the subset they support and a shared normalizer clamps requests onto the nearest supported level."
+                        "minLength": 1,
+                        "maxLength": 32,
+                        "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
+                        "description": "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model and a shared normalizer passes advertised levels through, clamps rankable ones, and refuses unrankable ones."
                       }
                     },
                     "required": [

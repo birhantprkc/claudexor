@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EffortHint } from "@claudexor/schema";
-import { normalizeEffort } from "./effort.js";
+import { EFFORT_RANK_ORDER } from "@claudexor/schema";
+import { normalizeEffort, resolveEffort } from "./effort.js";
 
 describe("normalizeEffort", () => {
   it("passes an exactly-supported level through unchanged", () => {
@@ -37,16 +37,24 @@ describe("normalizeEffort", () => {
   });
 });
 
-describe("expanded vocabulary: minimal and ultra (official vendor ladders)", () => {
-  it("orders the full vocabulary weakest -> strongest", () => {
-    // Declaration order IS rank (EFFORT_LADDER = EffortHintSchema.options);
-    // this pins the wire-contract ordering after adding the two new levels.
-    expect(EffortHint.options).toEqual([
-      "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+describe("expanded vocabulary: the open ladder (official vendor ladders)", () => {
+  it("ranks the full vocabulary weakest -> strongest", () => {
+    // The rank table is the SSOT for ordering; this pins it. It is deliberately
+    // WIDER than what anyone advertises: none/minimal are rank positions kept so
+    // they sort correctly the day a vendor ships them.
+    expect([...EFFORT_RANK_ORDER]).toEqual([
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
     ]);
   });
 
-  it("xhigh passes through a claude-shaped ladder unchanged (regression: the old 4-level ladder silently downgraded xhigh to high)", () => {
+  it("xhigh passes through a claude-shaped ladder unchanged (regression: the old 4-level ladder silently downgraded xhigh)", () => {
     const CLAUDE = ["low", "medium", "high", "xhigh", "max"] as const;
     expect(normalizeEffort("xhigh", CLAUDE)).toBe("xhigh");
   });
@@ -62,8 +70,51 @@ describe("expanded vocabulary: minimal and ultra (official vendor ladders)", () 
     expect(normalizeEffort("ultra", CODEX)).toBe("ultra");
   });
 
-  it("minimal clamps UP to low on ladders that exclude it (gpt-5.6-sol rejects minimal with unsupported_value)", () => {
+  it("minimal clamps UP to low on ladders that exclude it (no current model advertises minimal)", () => {
     const CODEX = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
     expect(normalizeEffort("minimal", CODEX)).toBe("low");
+  });
+});
+
+describe("open vocabulary: levels the rank table has never heard of", () => {
+  it("passes an ADVERTISED but unrankable vendor level through untouched", () => {
+    // The whole point of the design: codex types ReasoningEffort as any non-empty
+    // advertised string, so a level newer than this repo must work with NO code
+    // change here. It must not be clamped to a neighbour we merely guessed at.
+    const FUTURE = ["low", "medium", "high", "hyper"] as const;
+    expect(normalizeEffort("hyper", FUTURE)).toBe("hyper");
+    expect(resolveEffort("hyper", FUTURE)).toEqual({
+      status: "ok",
+      effort: "hyper",
+      clamped: false,
+    });
+  });
+
+  it("still ranks and clamps the KNOWN levels on a ladder that also advertises an unknown one", () => {
+    const FUTURE = ["low", "medium", "high", "hyper"] as const;
+    // `max` is rankable and unadvertised -> clamps onto the nearest RANKABLE
+    // advertised level; the unrankable `hyper` can never be a clamp target.
+    expect(normalizeEffort("max", FUTURE)).toBe("high");
+  });
+
+  it("REFUSES an unrankable level the model does not advertise, naming what IS advertised", () => {
+    const CODEX_54 = ["low", "medium", "high", "xhigh"] as const;
+    const check = resolveEffort("turbo", CODEX_54);
+    expect(check.status).toBe("rejected");
+    if (check.status !== "rejected") throw new Error("expected a rejection");
+    expect(check.message).toContain("turbo");
+    expect(check.message).toContain("low, medium, high, xhigh");
+  });
+
+  it("never silently downgrades an unrankable level: the arg builder gets null, not a guess", () => {
+    // A typo must not quietly become `high`. normalizeEffort answers "send no
+    // flag" so the vendor default stands, and the refusal text reaches the user
+    // through the surfaces that can talk back.
+    expect(normalizeEffort("turbo", ["low", "medium", "high"])).toBeNull();
+  });
+
+  it("refuses when NOTHING advertised can be ranked and the request is not one of them", () => {
+    const check = resolveEffort("high", ["hyper", "turbo"]);
+    expect(check.status).toBe("rejected");
   });
 });

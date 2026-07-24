@@ -145,6 +145,10 @@ function buildManifest(id: string, provider: ProviderFamily): HarnessManifest {
       // Partial ladder: a deliberate clamp fixture for the effort normalizer
       // (requests for xhigh/max clamp down to high).
       effort_levels: ["low", "medium", "high"],
+      // A fixture has no vendor to probe, so it declares no per-model narrowing
+      // and no freshness stamp — every fake model falls back to the ladder above.
+      model_effort_levels: {},
+      effort_levels_verified_against: null,
       // Small manifest truth source so strict model-truth tests can exercise BOTH the
       // accept path (fake-model) and the typed-refusal path (anything else).
       known_models: ["fake-model", "fake-model-alt"],

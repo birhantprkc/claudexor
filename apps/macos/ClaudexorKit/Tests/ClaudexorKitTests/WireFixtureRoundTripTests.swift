@@ -31,6 +31,7 @@ import Testing
         case "ControlQuotaResponse": return try recode(ControlQuotaResponse.self, data)
         case "ControlHarnessSettingsPatch": return try recode(HarnessSettingsPatch.self, data)
         case "ControlSettingsSnapshot": return try recode(SettingsSnapshot.self, data)
+        case "EffortRankOrder": return try recode([String].self, data)
         default: return nil
         }
     }
@@ -40,7 +41,7 @@ import Testing
         "ControlHandshakeResponse", "ControlProblem", "ControlThread", "ControlThreadTurn",
         "RunOutcomeFacts", "ControlBudgetSnapshot", "PlanReadiness", "PlanQuestionsArtifact",
         "ApplyEligibility", "ControlQuotaResponse", "ControlHarnessSettingsPatch",
-        "ControlSettingsSnapshot",
+        "ControlSettingsSnapshot", "EffortRankOrder",
     ]
 
     private static func recode<T: Codable>(_ type: T.Type, _ data: Data) throws -> Data {
@@ -59,6 +60,30 @@ import Testing
         ))
         return try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: String]
+        )
+    }
+
+    /// The Swift rank table IS the TS one. The generator emits EFFORT_RANK_ORDER
+    /// straight from the schema SSOT, so adding a level upstream fails here until
+    /// `EffortRanking.order` follows — the ordering can never rot into "unknown
+    /// levels land after max".
+    @Test func effortRankingMatchesTheGeneratedSchemaOrder() throws {
+        let url = try #require(Bundle.module.url(
+            forResource: "effort-rank-order", withExtension: "json", subdirectory: "Fixtures/wire"
+        ))
+        let wrapper = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        let generated = try #require(wrapper["value"] as? [String])
+        #expect(EffortRanking.order == generated)
+    }
+
+    /// A level no ranking table knows is still OFFERED, just sorted to the tail —
+    /// the whole point of the open vocabulary reaching the picker.
+    @Test func effortRankingSortsUnrankedVendorLevelsToTheTail() {
+        #expect(
+            EffortRanking.sorted(["max", "turbo", "low", "xhigh"])
+                == ["low", "xhigh", "max", "turbo"]
         )
     }
 

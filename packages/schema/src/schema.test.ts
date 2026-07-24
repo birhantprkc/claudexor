@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EFFORT_RANK_ORDER, EffortHint, isRankedEffort } from "./effort.js";
 import {
   CredentialProfile,
   ControlRunDecisionRequest,
@@ -193,6 +194,48 @@ describe("RouteProof + HarnessManifest", () => {
   });
 });
 
+describe("EffortHint is an OPEN vocabulary, bounded by shape only", () => {
+  it("accepts a level no ranking table knows, because vendors advertise their own", () => {
+    // Mirrors codex's own generated schema, which types ReasoningEffort as "a
+    // non-empty reasoning effort value advertised by the model" — a bounded
+    // string, not an enum. Refusal happens where the advertised set is known.
+    expect(EffortHint.parse("hyperdrive")).toBe("hyperdrive");
+    expect(EffortHint.parse("xhigh")).toBe("xhigh");
+    expect(EffortHint.parse("gpt-5")).toBe("gpt-5");
+  });
+
+  it("still refuses values that are not a slug at all", () => {
+    for (const bad of [
+      "",
+      " ",
+      "TURBO",
+      "turbo boost",
+      "turbo!",
+      "-turbo",
+      "turbo-",
+      "a".repeat(33),
+    ]) {
+      expect(EffortHint.safeParse(bad).success, bad).toBe(false);
+    }
+  });
+
+  it("keeps the rank table narrower than the vocabulary, and in rank order", () => {
+    expect([...EFFORT_RANK_ORDER]).toEqual([
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
+    // Ranked is not advertised: these two are rank placeholders only.
+    expect(isRankedEffort("none")).toBe(true);
+    expect(isRankedEffort("hyperdrive")).toBe(false);
+  });
+});
+
 describe("Control API schemas", () => {
   it("hard-errors every removed portfolio boundary", () => {
     expect(RoutingGoal.safeParse("subscription-first").success).toBe(false);
@@ -256,7 +299,7 @@ describe("Control API schemas", () => {
       ControlRunStartRequest.parse({
         prompt: "bad",
         mode: "ask",
-        reviewerEfforts: { anthropic: "banana" },
+        reviewerEfforts: { anthropic: "banana split" },
       }),
     ).toThrow();
     expect(() =>
@@ -350,7 +393,7 @@ describe("Control API schemas", () => {
       ControlRunStartRequest.parse({
         prompt: "bad",
         mode: "ask",
-        reviewerPanel: [{ harness: "cursor", effort: "turbo" }],
+        reviewerPanel: [{ harness: "cursor", effort: "TURBO BOOST" }],
       }),
     ).toThrow();
     expect(() =>

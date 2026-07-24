@@ -9,7 +9,6 @@ import type {
   ConformanceReport,
   CredentialProfile,
   CredentialProfileStatus,
-  EffortHint,
   HarnessEvent,
   HarnessManifest,
   HarnessRunSpec,
@@ -18,12 +17,21 @@ import {
   ConformanceReport as ConformanceReportSchema,
   HarnessManifest as HarnessManifestSchema,
 } from "@claudexor/schema";
+import {
+  CODEX_EFFORT_SNAPSHOT,
+  CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
+  codexEffortCapability,
+  codexEffortFor,
+  probeCodexEfforts,
+  unionEffortLevels,
+  type CodexEffortCapability,
+} from "./effort-probe.js";
+export { clearCodexEffortCache } from "./effort-probe.js";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
   brokenInstallAdvisory,
   browserMcpCommand,
-  normalizeEffort,
   providerScrubEnv,
   resolveHarnessBinary,
   runCliHarness,
@@ -42,14 +50,6 @@ import { codexImageArgs } from "./attachments.js";
 
 import { BIN, detectVersion, missingCliError, missingCliReport, probeEnv } from "./missing-cli.js";
 export { BIN } from "./missing-cli.js";
-
-/**
- * Ordered (weakest→strongest) reasoning-effort levels codex's
- * `model_reasoning_effort` config accepts. SINGLE source: the manifest's
- * `effort_levels` and the run-time normalizer both read this. The cross-harness
- * `max` hint clamps to `xhigh` (the ceiling) via the shared normalizer.
- */
-const CODEX_EFFORT_LEVELS: readonly EffortHint[] = ["low", "medium", "high", "xhigh", "max", "ultra"];  // max & ultra LIVE-VERIFIED on gpt-5.6-sol 2026-07-23; "minimal" REJECTED by gpt-5.6-sol (unsupported_value) — stays in the vocabulary, clamps to low here
 
 /** Exported for focused route-policy tests; runtime uses this exact selector. */
 export const selectCodexRunAuthRoute = selectStrictAuthRoute;
@@ -253,7 +253,12 @@ export function codexExecArgs(
     resume_session_id?: string | null;
     extra_mcp_servers?: HarnessRunSpec["extra_mcp_servers"];
   },
-  opts: { suppressNodeRepl?: boolean; outputSchemaPath?: string | null } = {},
+  opts: {
+    suppressNodeRepl?: boolean;
+    outputSchemaPath?: string | null;
+    /** Advertised-per-model vocabulary; the snapshot by default. */
+    effortCapability?: CodexEffortCapability;
+  } = {},
 ): string[] {
   // Codex.app's inherited `node_repl` MCP (its in-app-browser controller) can't
   // run in headless `codex exec` and fails every call → it used to flip an
@@ -265,10 +270,13 @@ export function codexExecArgs(
   // so a thread's later moves continue the same conversation instead of restarting.
   // LIVE-VERIFIED (codex 0.137): the resume subcommand does NOT accept --sandbox;
   // sandboxing must ride as `-c sandbox_mode="..."` config overrides there.
-  // Clamp the requested effort onto codex's supported ladder via the shared
-  // normalizer (single source: CODEX_EFFORT_LEVELS). Null = not requested OR
-  // effort not tunable -> pass no flag.
-  const effort = normalizeEffort(spec.effort_hint, CODEX_EFFORT_LEVELS);
+  // Effort is resolved against what THIS MODEL advertises, not a harness-wide
+  // ladder: gpt-5.6-sol takes `ultra`, gpt-5.4 stops at `xhigh`.
+  const effort = codexEffortFor(
+    opts.effortCapability ?? CODEX_EFFORT_SNAPSHOT,
+    spec.model_hint,
+    spec.effort_hint,
+  );
   if (spec.resume_session_id) {
     const args = [
       "exec",
@@ -364,6 +372,9 @@ type CodexRuntimeDeps = {
   resolveProfileSecret: (ref: string) => string | null;
   smokeIsolatedApiKey: typeof smokeIsolatedApiKey;
   runCliHarness: typeof runCliHarness;
+  /** Live per-model effort discovery; null on any failure (caller falls back). */
+  probeEfforts: (bin: string, env?: NodeJS.ProcessEnv) => Promise<CodexEffortCapability | null>;
+  nowMs: () => number;
 };
 
 export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): HarnessAdapter {
@@ -376,6 +387,8 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
     resolveProfileSecret: (ref) => resolveSecret(ref),
     smokeIsolatedApiKey,
     runCliHarness,
+    probeEfforts: (bin, env) => probeCodexEfforts(bin, env ? { env } : {}),
+    nowMs: () => Date.now(),
     ...deps,
   };
   return {
@@ -390,6 +403,10 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
       const apiKey = runtime.hasApiKey();
       const login = await runtime.probeLogin(BIN, { env: codexNativeEnv() });
       const nativeSessionAvailable = login.method === "chatgpt";
+      // Per-model effort vocabulary straight from the vendor. A failed probe
+      // falls back to the recorded snapshot and stamps the version it came from,
+      // so the freshness gate can tell a live ladder from a snapshot one.
+      const efforts = await codexEffortCapability(runtime.probeEfforts, runtime.nowMs, BIN);
       const authModes = [
         ...(nativeSessionAvailable ? ["local_session"] : []),
         ...(apiKey ? ["api_key"] : []),
@@ -419,9 +436,14 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           work_report_transport: "constrained",
           structured_output_channel: "final_message",
           web_policy: "native",
-          // codex model_reasoning_effort accepts low|medium|high|xhigh (max clamps
-          // to xhigh). Single source for the manifest AND the run-time normalizer.
-          effort_levels: [...CODEX_EFFORT_LEVELS],
+          // Effort is per MODEL here (`model/list` → supportedReasoningEfforts),
+          // so the harness-wide list is the UNION and `model_effort_levels`
+          // carries the truth a specific model is held to.
+          effort_levels: unionEffortLevels(efforts.capability),
+          model_effort_levels: efforts.capability,
+          effort_levels_verified_against: efforts.live
+            ? version
+            : CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
           // Manifest model truth source (strict model-truth validation: an explicit model outside
           // this list is refused, never forwarded to die as a native error).
           // Current + still-API-available ids per the vendor Codex models page,
@@ -755,6 +777,10 @@ async function* runCodex(
   const args = codexExecArgs(spec, {
     suppressNodeRepl: codexConfigHasNodeRepl(env["CODEX_HOME"]),
     outputSchemaPath,
+    // Shared with discovery through the TTL cache, so a run does not re-spawn an
+    // app-server; the snapshot backs it when the probe cannot answer.
+    effortCapability: (await codexEffortCapability(runtime.probeEfforts, runtime.nowMs, BIN))
+      .capability,
   });
   // Route evidence: the auth mode this child ACTUALLY runs under, read from
   // the same auth.json codex loads (typed `auth_mode` field — chatgpt vs

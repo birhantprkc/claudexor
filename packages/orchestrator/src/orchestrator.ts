@@ -97,6 +97,7 @@ import {
   withInactivityWatchdog,
 } from "@claudexor/core";
 import { assertRouteModelsAllowed } from "./modelGovernance.js";
+import { governRouteEffort } from "./effortGovernance.js";
 import { RequestRequirementsResolver } from "./requestRequirements.js";
 import { buildRevisePrompt } from "./revisePrompt.js";
 import {
@@ -548,9 +549,11 @@ export interface RoutedAdapter {
   /** Per-lane deny-path enforcement disclosure (postdiff_only until an adapter
    * supports native pre-write deny). */
   denyRequirement: RequestRequirementResolution;
-  /** Declared effort ladder (empty = effort is not a tunable surface; a
-   * requested effort is then DISCLOSED as ignored, never silently dropped). */
+  /** Harness-wide advertised effort ladder (empty = not a tunable surface; a
+   * requested effort is then DISCLOSED as ignored). Narrowed per model below. */
   effortLevels: readonly EffortHint[];
+  /** Per-model advertised vocabularies; absent model = the ladder above. */
+  modelEffortLevels: HarnessCapabilities["model_effort_levels"];
   /** Manifest model truth source (used when the adapter has no live models()). */
   knownModels: readonly KnownModelEntry[];
   /** Pre-spawn credential-route estimate (INV-061 projection of preference x
@@ -1419,6 +1422,7 @@ export class Orchestrator {
             (input.denyPaths?.length ?? 0) > 0,
           ),
           effortLevels: manifest.capabilities.effort_levels,
+          modelEffortLevels: manifest.capabilities.model_effort_levels,
           knownModels: manifest.capabilities.known_models,
           // A selected profile's credential_kind IS the route (round-18 #2);
           // the default store's sources apply only to profile-less runs.
@@ -2111,20 +2115,16 @@ export class Orchestrator {
     // no run-global model.
     const model =
       overrideModel ?? contract.routing_models[routed.adapter.id] ?? s?.defaultModel ?? null;
-    // Effort disclosure (INV-105): a requested effort on a harness with no
-    // declared ladder is DISCLOSED as ignored, never silently dropped.
-    // Harness-scoped resolution mirrors the model line above: the contract's
-    // FROZEN per-lane effort (QA-035) is authoritative so Exact Retry replays it
-    // without re-reading settings; a per-attempt `effortHint` (or settings
-    // default) applies only to a lane the contract did not freeze.
-    let effort: EffortHint | null =
-      contract.routing_efforts[routed.adapter.id] ?? effortHint ?? s?.effort ?? null;
-    if (effort && routed.effortLevels.length === 0) {
-      ignored.push(
-        `effort=${effort} (manifest capabilities.effort_levels is empty for ${routed.adapter.id})`,
-      );
-      effort = null;
-    }
+    // Effort disclosure (INV-105) against the ROUTED MODEL's advertised set. The
+    // contract's FROZEN per-lane effort (QA-035) wins so Exact Retry replays it
+    // without re-reading settings; `effortHint`/settings apply only to an unfrozen lane.
+    const governed = governRouteEffort(
+      contract.routing_efforts[routed.adapter.id] ?? effortHint ?? s?.effort ?? null,
+      { id: routed.adapter.id, ...routed },
+      model,
+    );
+    const effort = governed.effort;
+    if (governed.ignored) ignored.push(governed.ignored);
     return {
       model,
       effort,

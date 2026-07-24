@@ -16,6 +16,7 @@ import type {
 } from "@claudexor/schema";
 import { GlobalConfig } from "@claudexor/schema";
 import { validateModel } from "@claudexor/core";
+import { effortLevelsForModel } from "@claudexor/schema";
 import { loadConfig, updateGlobalConfig } from "@claudexor/config";
 import { buildRegistry, harnessModels } from "./registry.js";
 
@@ -149,9 +150,13 @@ export async function assertSettingsPatchValid(
         if (model.status !== "ok")
           badRequest(model.message ?? `model '${route.model}' was refused`);
         const manifest = await buildRegistry().get(route.harness)?.discover();
-        if (!manifest?.capabilities.effort_levels.includes(route.effort)) {
+        // A tier names harness AND model, so hold it to what that MODEL
+        // advertises rather than the harness-wide union.
+        const advertised = manifest ? effortLevelsForModel(manifest.capabilities, route.model) : [];
+        if (!advertised.includes(route.effort)) {
           badRequest(
-            `quality tier route '${route.harness}/${route.model}' does not accept effort '${route.effort}'`,
+            `quality tier route '${route.harness}/${route.model}' does not accept effort '${route.effort}'` +
+              (advertised.length > 0 ? ` (advertised: ${advertised.join(", ")})` : ""),
           );
         }
       }
@@ -188,7 +193,12 @@ export async function assertSettingsPatchValid(
       const adapter = buildRegistry().get(id);
       let ladder: readonly string[] = [];
       try {
-        ladder = adapter ? (await adapter.discover()).capabilities.effort_levels : [];
+        // Narrow to the model this harness will actually run (INV-104 pairing):
+        // an effort ceiling belongs to the MODEL, so validating a stored default
+        // against the harness-wide union would persist a setting the routed
+        // model rejects. `effortLevelsForModel` is the one owner of that lookup.
+        const capabilities = adapter ? (await adapter.discover()).capabilities : null;
+        ladder = capabilities ? effortLevelsForModel(capabilities, patch.defaultModel ?? null) : [];
       } catch (err) {
         // A harness whose manifest cannot be discovered (binary missing) still
         // 400s honestly rather than bubbling a raw error out of the endpoint.
@@ -200,7 +210,7 @@ export async function assertSettingsPatchValid(
         badRequest(
           ladder.length === 0
             ? `harness '${id}' declares no effort ladder; leave effort unset`
-            : `harness '${id}' does not accept effort '${patch.effort}' (declared ladder: ${ladder.join(", ")})`,
+            : `harness '${id}'${patch.defaultModel ? ` model '${patch.defaultModel}'` : ""} does not accept effort '${patch.effort}' (advertised: ${ladder.join(", ")})`,
         );
       }
     }
