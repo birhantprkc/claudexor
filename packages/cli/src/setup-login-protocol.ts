@@ -27,7 +27,6 @@ import {
   type SetupLoginRunnerResult,
   type SetupLoginRunnerState,
   type SetupExecutableEvidence,
-  type SetupProcessGroupHandle,
 } from "@claudexor/schema";
 
 export type {
@@ -36,7 +35,6 @@ export type {
   SetupLoginPermit,
   SetupLoginRunnerResult,
   SetupLoginRunnerState,
-  SetupProcessGroupHandle,
   SetupExecutableEvidence,
 };
 

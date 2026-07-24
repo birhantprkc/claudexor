@@ -57,9 +57,6 @@ export const selectCodexRunAuthRoute = selectStrictAuthRoute;
 export {
   CODEX_FILE_AUTH_ARGS,
   CODEX_FILE_AUTH_OVERRIDE,
-  CODEX_PROJECT_DOC_FALLBACK_ARGS,
-  CODEX_PROJECT_DOC_FALLBACK_OVERRIDE,
-  codexApiKey,
   codexAuthModeAt,
   defaultNativeCodexHome,
   ensureCodexApiAuth,

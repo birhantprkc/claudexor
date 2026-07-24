@@ -17,8 +17,6 @@ import { join } from "node:path";
 
 import { userConfigDir } from "@claudexor/util";
 
-export { redactSecrets } from "@claudexor/util";
-
 function configDir(): string {
   return userConfigDir();
 }
