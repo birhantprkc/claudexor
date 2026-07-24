@@ -131,6 +131,12 @@ export const EFFORT_HINT_HELP =
  * the surface stays as OPEN as the vendor contract. Pinning an enum here would
  * reject a level a model genuinely advertises, which is the bug this design
  * exists to prevent; the ranked levels ride in the description as guidance.
+ *
+ * The guidance is `EFFORT_HINT_HELP`, the SAME string the CLI renders, so an MCP
+ * client and a `--effort` refusal describe the vocabulary identically. Rendering
+ * the raw rank order here instead put `none` and `minimal` in front of every MCP
+ * client beside levels a harness will actually accept — precisely the allow-list
+ * misreading the CLI text was rewritten to avoid.
  */
 export function effortJsonSchema(description: string): Record<string, unknown> {
   return {
@@ -138,7 +144,7 @@ export function effortJsonSchema(description: string): Record<string, unknown> {
     minLength: 1,
     maxLength: EFFORT_HINT_MAX_LENGTH,
     pattern: EFFORT_HINT_PATTERN.source,
-    description: `${description} Ranked levels: ${EFFORT_RANK_ORDER.join(", ")}; a harness may advertise others per model, and an advertised level is passed through as-is.`,
+    description: `${description} Expects a ${EFFORT_HINT_HELP}; a harness may advertise others per model, and an advertised level is passed through as-is.`,
   };
 }
 
