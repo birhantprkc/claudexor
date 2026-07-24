@@ -416,6 +416,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
             "best",
             "claude-fable-5",
             "claude-sonnet-5",
+            "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -423,7 +424,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
           ],
-          known_models_verified_against: "2.1.165",
+          known_models_verified_against: "2.1.168",
         },
         capability_profile: {
           ...CLAUDE_CAPABILITY_PROFILE,
