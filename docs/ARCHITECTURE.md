@@ -442,8 +442,9 @@ opencode, raw-api: secret-ref keys only). Adapters stamp
 and retry evidence stays profile-attributable, and the run's `auth_route`
 receipt carries `profile_id`. Vendor sessions record the profile they were
 created under; resume never crosses profiles. `claudexor profiles login
-<harness> <id>` runs the same vendor login command the setup jobs use,
-interactively, scoped to the profile dir.
+<harness> <id>` scopes the vendor login to the profile dir: codex rides the
+SAME durable device-code setup job as the default login (D-17); the other
+harnesses run the vendor command interactively in this terminal.
 
 Removal is daemon-owned and mirrors registration: `DELETE
 /v2/credential-profiles/:harness/:id` (CLI `claudexor profiles remove`) takes
@@ -2001,11 +2002,14 @@ code touching one of these areas must honor it or change it explicitly here.
   first-wins auth-route receipt would misvalue metered usage as subscription
   entitlement against a finite cash cap. `nextEligibleProfile` skips
   cross-kind candidates; rotate between accounts of the SAME transport only.
-- `claudexor profiles login` deliberately spawns the vendor's own login
-  command IN the operator's terminal (no daemon setup job): vendor OAuth
-  needs the user's TTY/browser interactively, the mutated state is the
-  VENDOR's own scoped config dir (never Claudexor-owned state, so there is
-  no Claudexor receipt to journal), and the post-exit doctor probe against
-  the profile dir is the verification truth (exit code non-zero unless the
-  probe passes). The daemon-owned setup jobs remain the path for
+- `claudexor profiles login` for non-codex harnesses deliberately spawns the
+  vendor's own login command IN the operator's terminal (no daemon setup
+  job): vendor OAuth needs the user's TTY/browser interactively, the mutated
+  state is the VENDOR's own scoped config dir (never Claudexor-owned state,
+  so there is no Claudexor receipt to journal), and the post-exit doctor
+  probe against the profile dir is the verification truth (exit code
+  non-zero unless the probe passes). Codex profile login is the D-17
+  exception: it rides the SAME durable app-server device-code setup job as
+  the default codex login (restart-surviving runner, transient sidecar,
+  in-app/inline code disclosure), because the app-server flow needs no TTY. The daemon-owned setup jobs remain the path for
   non-interactive/GUI-driven logins.
