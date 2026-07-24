@@ -155,6 +155,32 @@ jobs:
           node packages/cli/dist/cli.js doctor --json > /tmp/doctor.json
           node -e 'const j=JSON.parse(require("node:fs").readFileSync("/tmp/doctor.json","utf8")); if(!Array.isArray(j.harnesses)) { console.error("doctor --json did not produce a harnesses array"); process.exit(1); }'
 
+  # Branch protection on main requires a check context literally named
+  # `build-test`. The job above never publishes one: a matrix job's check runs
+  # are named from its `name:` template, so it reports as "Node 20.19.0" and
+  # "Node 24.16.0" and the required context stays pending forever (every PR
+  # sits at BLOCKED). This aggregate exists only to publish that name.
+  # `if: always()` is load-bearing — without it the job is skipped when the
+  # matrix fails or is cancelled, and a skipped required check never reports.
+  build-test-gate:
+    name: build-test
+    needs: build-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Node matrix leg to succeed
+        # `needs.<job>.result` collapses the whole matrix: it is `success` only
+        # when every leg succeeded (fail-fast: false means all of them ran).
+        env:
+          MATRIX_RESULT: ${{ needs.build-test.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            echo "::error::Node matrix result is '$MATRIX_RESULT' (expected 'success')."
+            exit 1
+          fi
+
   swift:
     runs-on: macos-26
     steps:
