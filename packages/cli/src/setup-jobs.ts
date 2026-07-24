@@ -680,6 +680,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         phase: "awaiting_user",
         message: awaitingUserMessage(job),
       });
+      armDeviceCodeDisclosureWatcher(jobId);
     }
   }
 
@@ -865,6 +866,32 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     }
   }
 
+  /** D-17 disclosure race: awaiting_user flips before the one-time code
+   * sidecar exists, and a sidecar write is journal-less — SSE subscribers
+   * attached at the flip would never learn the code arrived. Armed at EVERY
+   * awaiting_user flip (create AND reconcile-adopt paths, one owner): watch
+   * for the sidecar (bounded by the job deadline) and bump ONE message event;
+   * the read-time projection then overlays the code as designed. */
+  function armDeviceCodeDisclosureWatcher(jobId: string): void {
+    const job = store.status(jobId);
+    if (!isDeviceCodeJob(job)) return;
+    const disclosurePath = store.paths(jobId).runnerDeviceCode;
+    const deadline = job.deadlineAt ? Date.parse(job.deadlineAt) : now().getTime() + 60_000;
+    const watch = () => {
+      const current = store.status(jobId);
+      if (!ACTIVE_SETUP_STATES.has(current.state) || current.phase === "cancelling") return;
+      if (existsSync(disclosurePath)) {
+        if (current.phase === "awaiting_user") {
+          update(jobId, {
+            message: `One-time code ready — enter it at the ${current.harness} verification page (shown in Claudexor).`,
+          });
+        }
+        return;
+      }
+      if (now().getTime() < deadline) setTimeout(watch, 300).unref();
+    };
+    setTimeout(watch, 300).unref();
+  }
   function markAwaitingUser(jobId: string): void {
     const current = store.status(jobId);
     if (current.phase === "launching") {
@@ -872,6 +899,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         phase: "awaiting_user",
         message: awaitingUserMessage(current),
       });
+      armDeviceCodeDisclosureWatcher(jobId);
     }
   }
 
@@ -1143,28 +1171,6 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
             failLaunch(signal ? `signal ${signal}` : `exit code ${code}`);
         });
         runner.unref();
-        // D-17 disclosure race: awaiting_user flips at PERMIT time, but the
-        // one-time code lands in the sidecar seconds later — and a sidecar
-        // write is deliberately journal-less, so SSE subscribers who attached
-        // on the flip would never learn the code exists. Watch for the
-        // sidecar (bounded) and bump ONE message event when it appears; the
-        // projection then overlays the code at read time as designed.
-        const disclosurePath = paths.runnerDeviceCode;
-        const disclosureDeadline = now().getTime() + loginTimeoutMs;
-        const watchDisclosure = () => {
-          const current = store.status(job.jobId);
-          if (!ACTIVE_SETUP_STATES.has(current.state) || current.phase === "cancelling") return;
-          if (existsSync(disclosurePath)) {
-            if (current.phase === "awaiting_user") {
-              update(job.jobId, {
-                message: `One-time code ready — enter it at the ${job.harness} verification page (shown in Claudexor).`,
-              });
-            }
-            return;
-          }
-          if (now().getTime() < disclosureDeadline) setTimeout(watchDisclosure, 300).unref();
-        };
-        setTimeout(watchDisclosure, 300).unref();
         return waiting;
       }
       // External-risk disclosure (v3.0.3, Bible): a browser-based OpenAI
