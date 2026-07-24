@@ -345,7 +345,11 @@ export const RELEASE_REVIEW_ATTESTATION_ALGORITHM = "Ed25519";
 export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION = 4;
 export const OWNER_REVIEW_PROTOCOL = "owner-fable-subagents-v1";
 export const OWNER_REVIEW_MIN_REVIEWS = 2;
-export const OWNER_REVIEW_MAX_ROUNDS = 10;
+// 12 (was 10): the v3.1.0 F4F5 release review ran 11 transport rounds under
+// the owner's explicit extended-cycles re-authorization (recorded verbatim in
+// the sealed packet's AUTHORIZATION.json); the bound stays a hard structural
+// cap, raised once by a reviewed commit — never by CLI input.
+export const OWNER_REVIEW_MAX_ROUNDS = 12;
 export const OWNER_REVIEW_VERDICTS = Object.freeze(["pass", "warn"]);
 
 /** Validate the only two release workflow entry modes before any ref is fetched. */
