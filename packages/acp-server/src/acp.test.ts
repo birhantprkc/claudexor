@@ -93,10 +93,15 @@ describe("AcpServer official SDK projection", () => {
       }
     };
     await withClient(runner, async (agent, updates) => {
+      // The stable ACP protocol version this server negotiates is pinned to the
+      // literal 1 (docs/INTEGRATIONS.md). An SDK bump that moves the stable wire
+      // version must fail here rather than silently renegotiate.
+      expect(ACP_PROTOCOL_VERSION).toBe(1);
       const initialized = await agent.request(acp.methods.agent.initialize, {
         protocolVersion: ACP_PROTOCOL_VERSION,
         clientCapabilities: {},
       });
+      expect(initialized.protocolVersion).toBe(1);
       expect(initialized.agentCapabilities).toMatchObject({
         loadSession: true,
         sessionCapabilities: { list: {}, resume: {}, close: {} },
