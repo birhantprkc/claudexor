@@ -585,6 +585,19 @@ function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     "LOGNAME",
     "CLAUDEXOR_CODEX_NATIVE_HOME",
     "CLAUDEXOR_CLAUDE_NATIVE_DIR",
+    // Network reachability for the DETACHED worker: without the proxy/CA
+    // family a corporate-proxy machine cannot reach the vendor at all and
+    // the device-code login dies opaquely. Pass-through only — never set.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
   ] as const) {
     if (source[key] !== undefined) env[key] = source[key];
   }

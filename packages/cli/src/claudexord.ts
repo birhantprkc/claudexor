@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   DaemonClient,
   awaitDaemonTermination,
@@ -628,7 +629,21 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  process.stderr.write(`claudexord: ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exitCode = 1;
-});
+// Entry guard: importing this module (the probe test imports
+// runProbeIfRequested) must NEVER boot the daemon in-process — an imported
+// main() would race the LIVE daemon for the journal writer lease and socket.
+const invokedAsEntry = (() => {
+  try {
+    return (
+      typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href
+    );
+  } catch {
+    return false;
+  }
+})();
+if (invokedAsEntry) {
+  main().catch((err: unknown) => {
+    process.stderr.write(`claudexord: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}

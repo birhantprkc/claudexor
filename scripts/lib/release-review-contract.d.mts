@@ -8,7 +8,7 @@ export function livenessFloorMs(promptChars: number): number;
 export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION: 4;
 export const OWNER_REVIEW_PROTOCOL: "owner-fable-subagents-v1";
 export const OWNER_REVIEW_MIN_REVIEWS: 2;
-export const OWNER_REVIEW_MAX_ROUNDS: 12;
+export const OWNER_REVIEW_MAX_ROUNDS: 24;
 export const OWNER_REVIEW_VERDICTS: readonly string[];
 
 export interface ChecklistFinding {
