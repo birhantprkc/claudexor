@@ -179,10 +179,26 @@ export async function probeCodexEfforts(
     // A clean exit before `model/list` answered means the method is unsupported.
     child.on("exit", () => finish(null));
 
+    // A pipe to a child that already died reports the break ASYNCHRONOUSLY, on
+    // the stream's `error` event — `write()` returns normally and the EPIPE
+    // arrives a tick later, so the try/catch in `send` can never see it. Left
+    // unhandled that event is an UNCAUGHT EXCEPTION: it took down whole test
+    // runs on machines with no codex installed while every dev box (codex
+    // present, handshake answered) stayed green. Both failure shapes have the
+    // same meaning here — no live catalog — so both land on `finish(null)` and
+    // the caller degrades to the recorded snapshot.
+    child.stdin?.on("error", () => finish(null));
+    child.stdout?.on("error", () => finish(null));
+
     const send = (payload: unknown): void => {
+      // The probe is over: the child has been killed, so a queued frame would
+      // only write into a destroyed stream to no purpose.
+      if (settled) return;
       try {
         child.stdin?.write(`${JSON.stringify(payload)}\n`);
       } catch {
+        // Kept for the SYNCHRONOUS shapes (a destroyed stream, a serialization
+        // fault); the asynchronous shape arrives on the listener above.
         finish(null);
       }
     };

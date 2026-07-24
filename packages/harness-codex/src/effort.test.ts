@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { HarnessRunSpec } from "@claudexor/schema";
 import { effortLevelsForModel } from "@claudexor/schema";
 import { resolveEffort } from "@claudexor/core";
@@ -12,6 +15,19 @@ import {
   unionEffortLevels,
   type CodexEffortCapability,
 } from "./effort-probe.js";
+import { rmSync as __rmSyncReap } from "node:fs";
+import { afterAll as __afterAllReap } from "vitest";
+
+// W-h: reap every temp dir this suite creates so the gate stops leaking tmpdirs.
+const __reapDirs: string[] = [];
+function reapMk(...args: Parameters<typeof mkdtempSync>): string {
+  const dir = mkdtempSync(...args);
+  __reapDirs.push(dir);
+  return dir;
+}
+__afterAllReap(() => {
+  for (const dir of __reapDirs.splice(0)) __rmSyncReap(dir, { recursive: true, force: true });
+});
 
 const base = {
   access: "workspace_write" as const,
@@ -121,6 +137,37 @@ describe("codex effort probe degrades gracefully", () => {
     // `sleep` speaks no JSON-RPC: the probe must time out, not hang the run.
     expect(await probeCodexEfforts("sleep", { timeoutMs: 250 })).toBeNull();
   });
+
+  it("returns null — and raises NO unhandled error — when the child dies mid-handshake", async () => {
+    // The regression: a broken pipe is delivered on the stream's `error` event,
+    // NOT thrown out of `write()`, so the probe's try/catch could not see it and
+    // the EPIPE escaped as an UNCAUGHT EXCEPTION that failed the whole test run.
+    // This stub accepts the `initialize` frame and exits immediately, so the two
+    // follow-up frames are written into a pipe with no reader left — the exact
+    // shape that appears wherever codex is absent or refuses to serve.
+    const dir = reapMk(join(tmpdir(), "claudexor-codex-dies-"));
+    const bin = join(dir, "codex");
+    writeFileSync(bin, '#!/bin/sh\nprintf \'{"jsonrpc":"2.0","id":1,"result":{}}\\n\'\nexit 0\n');
+    chmodSync(bin, 0o755);
+
+    const escaped: unknown[] = [];
+    const collect = (error: unknown): void => void escaped.push(error);
+    process.on("uncaughtException", collect);
+    try {
+      // Three rounds: the break lands in a short window between the child's exit
+      // and node tearing the stream down, so repeating removes the last doubt
+      // that a pass is just a lucky miss.
+      for (let round = 0; round < 3; round += 1) {
+        expect(await probeCodexEfforts(bin, { timeoutMs: 5_000 })).toBeNull();
+      }
+      // The EPIPE surfaces a tick after the write, so let the loop turn over
+      // before judging: settling first and crashing second is the whole bug.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } finally {
+      process.off("uncaughtException", collect);
+    }
+    expect(escaped).toEqual([]);
+  }, 30_000);
 
   it("arg building keeps working on the snapshot when the probe cannot answer", () => {
     // No capability passed = exactly the state after a failed probe.
