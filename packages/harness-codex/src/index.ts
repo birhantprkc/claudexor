@@ -20,11 +20,12 @@ import {
 import {
   CODEX_EFFORT_SNAPSHOT,
   CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-  codexEffortCapability,
   codexEffortFor,
+  codexEffortsForEnv,
   probeCodexEfforts,
   unionEffortLevels,
   type CodexEffortCapability,
+  type CodexEffortProbe,
 } from "./effort-probe.js";
 export { clearCodexEffortCache } from "./effort-probe.js";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
@@ -373,7 +374,7 @@ type CodexRuntimeDeps = {
   smokeIsolatedApiKey: typeof smokeIsolatedApiKey;
   runCliHarness: typeof runCliHarness;
   /** Live per-model effort discovery; null on any failure (caller falls back). */
-  probeEfforts: (bin: string, env?: NodeJS.ProcessEnv) => Promise<CodexEffortCapability | null>;
+  probeEfforts: CodexEffortProbe;
   nowMs: () => number;
 };
 
@@ -403,10 +404,10 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
       const apiKey = runtime.hasApiKey();
       const login = await runtime.probeLogin(BIN, { env: codexNativeEnv() });
       const nativeSessionAvailable = login.method === "chatgpt";
-      // Per-model effort vocabulary straight from the vendor. A failed probe
-      // falls back to the recorded snapshot and stamps the version it came from,
-      // so the freshness gate can tell a live ladder from a snapshot one.
-      const efforts = await codexEffortCapability(runtime.probeEfforts, runtime.nowMs, BIN);
+      // Per-model effort vocabulary from the vendor, probed in the SAME native env
+      // the login probe used (the catalog belongs to that CODEX_HOME's account). A
+      // failed probe falls back to the snapshot and stamps the version it came from.
+      const efforts = await codexEffortsForEnv(runtime, codexNativeEnv());
       const authModes = [
         ...(nativeSessionAvailable ? ["local_session"] : []),
         ...(apiKey ? ["api_key"] : []),
@@ -777,10 +778,9 @@ async function* runCodex(
   const args = codexExecArgs(spec, {
     suppressNodeRepl: codexConfigHasNodeRepl(env["CODEX_HOME"]),
     outputSchemaPath,
-    // Shared with discovery through the TTL cache, so a run does not re-spawn an
-    // app-server; the snapshot backs it when the probe cannot answer.
-    effortCapability: (await codexEffortCapability(runtime.probeEfforts, runtime.nowMs, BIN))
-      .capability,
+    // Probed in THIS run's resolved env, so a credential profile or API-key route
+    // gets its OWN account's catalog, not whichever one landed in the cache first.
+    effortCapability: (await codexEffortsForEnv(runtime, env)).capability,
   });
   // Route evidence: the auth mode this child ACTUALLY runs under, read from
   // the same auth.json codex loads (typed `auth_mode` field — chatgpt vs

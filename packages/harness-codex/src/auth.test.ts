@@ -25,6 +25,14 @@ import {
 } from "./index.js";
 import { missingCliError, missingCliReport } from "./missing-cli.js";
 
+/**
+ * Effort discovery is probed in the RUN's resolved env, so an unstubbed adapter
+ * would spawn a real `codex app-server` into the isolated CODEX_HOME these tests
+ * create. Auth routing does not need a live catalog; a null probe leaves the
+ * recorded snapshot answering.
+ */
+const NO_EFFORT_PROBE = { probeEfforts: async () => null } as const;
+
 describe("Codex strict runtime auth routing", () => {
   it("defaults native subscription state under Claudexor, never ordinary ~/.codex", () => {
     const root = mkdtempSync(join(tmpdir(), "claudexor-config-"));
@@ -129,6 +137,7 @@ describe("Codex strict runtime auth routing", () => {
       let probeEnv: Record<string, string | null | undefined> | undefined;
       const adapter = createCodexAdapter({
         detectVersion: async () => "codex 0.144.1",
+        ...NO_EFFORT_PROBE,
         probeLogin: async (_bin, options) => {
           probeEnv = options?.env;
           return { authed: true, method: "chatgpt", probeError: null };
@@ -473,6 +482,7 @@ describe("Codex transport-aware native doctor", () => {
     let probeEnv: Record<string, string | null | undefined> | undefined;
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.144.1",
+      ...NO_EFFORT_PROBE,
       probeLogin: async (_bin, options) => {
         probeEnv = options?.env;
         return { authed: true, method: "chatgpt", probeError: null };
@@ -527,6 +537,7 @@ describe("Codex transport-aware native doctor", () => {
     let cliOptions: CliRunLoopOptions | undefined;
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.144.1",
+      ...NO_EFFORT_PROBE,
       probeLogin: async (_bin, options) => {
         probeEnv = options?.env;
         return { authed: true, method: "chatgpt", probeError: null };

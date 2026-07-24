@@ -51,6 +51,14 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/**
+ * Effort discovery is probed in the RUN's resolved env, so an unstubbed adapter
+ * would spawn a real `codex app-server` into this test's temp CODEX_HOME and
+ * litter it while `afterEach` is removing it. These tests are about routing; a
+ * null probe means the recorded snapshot answers, which is all they need.
+ */
+const NO_EFFORT_PROBE = { probeEfforts: async () => null } as const;
+
 describe("canonicalCodexProfileHome (INV-135)", () => {
   it("refuses relative paths, out-of-tree paths, and the default native home", () => {
     expect(() => canonicalCodexProfileHome("relative/home")).toThrow(/absolute/);
@@ -84,6 +92,7 @@ describe("the REAL login probe inspects the profile's own store (round-17 BLOCK)
     childEnvs.length = 0;
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: realProbe,
       resolveProfileSecret: () => null,
     });
@@ -110,6 +119,7 @@ describe("Codex strict profile routing (INV-135)", () => {
     let stamped: HarnessEvent | undefined;
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async (_bin, options) => {
         probedEnv = options?.env;
         return { authed: true, method: "chatgpt", probeError: null };
@@ -164,6 +174,7 @@ describe("Codex strict profile routing (INV-135)", () => {
     );
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
       resolveProfileSecret: () => null,
       runCliHarness: async function* (options: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
@@ -192,6 +203,7 @@ describe("Codex strict profile routing (INV-135)", () => {
     let launches = 0;
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async () => ({ authed: false, method: "logged_out", probeError: null }),
       codexApiKey: () => {
         throw new Error("default key ladder must not run under a profile");
@@ -214,6 +226,7 @@ describe("Codex strict profile routing (INV-135)", () => {
   it("oauth_token profiles are a typed refusal — codex has no such transport", async () => {
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async () => {
         throw new Error("no login probe for an unsupported transport");
       },
@@ -239,6 +252,7 @@ describe("Codex strict profile routing (INV-135)", () => {
     const reads: string[] = [];
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async () => {
         throw new Error("no native probe for a key profile");
       },
@@ -263,6 +277,7 @@ describe("Codex strict profile routing (INV-135)", () => {
     const reads: string[] = [];
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async () => {
         throw new Error("no native probe for a key profile");
       },
@@ -312,6 +327,7 @@ describe("Codex config-dir readiness edges (round-20 contract)", () => {
   }) =>
     createCodexAdapter({
       detectVersion: async () => "codex 0.1-test",
+      ...NO_EFFORT_PROBE,
       probeLogin: async () => login,
       resolveProfileSecret: () => null,
     });

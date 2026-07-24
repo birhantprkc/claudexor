@@ -18,9 +18,10 @@
  * snapshot below and the run proceeds.
  */
 import { spawn } from "node:child_process";
-import type { EffortHint, ModelEffortCapability } from "@claudexor/schema";
-import { effortLevelsForModel } from "@claudexor/schema";
+import type { ModelEffortCapability } from "@claudexor/schema";
+import { EFFORT_RANK_ORDER, EffortHint, effortLevelsForModel } from "@claudexor/schema";
 import { normalizeEffort } from "@claudexor/core";
+import { BIN, probeEnv } from "./missing-cli.js";
 
 export type CodexEffortCapability = Record<string, ModelEffortCapability>;
 
@@ -49,17 +50,24 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCapability = {
 export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "0.144.1";
 
 /**
- * Harness-wide UNION of an advertised set, in rank order as the vendor lists it.
- * Kept as the coarse `effort_levels` fallback so every existing reader (settings
- * validation, the composer's picker, INV-105 disclosure) keeps working while
- * per-model narrowing happens through `effortLevelsForModel`.
+ * Harness-wide UNION of an advertised set, RANKED weakest→strongest. Kept as the
+ * coarse `effort_levels` fallback so every existing reader (settings validation,
+ * the composer's picker, INV-105 disclosure) keeps working while per-model
+ * narrowing happens through `effortLevelsForModel`.
+ *
+ * The union is sorted through `EFFORT_RANK_ORDER` rather than emitted in
+ * first-seen probe order, because `capabilities.effort_levels` PROMISES weakest
+ * to strongest and probe order is really "whatever order the vendor listed its
+ * models in". Unranked vendor levels cannot be placed, so they follow the ranked
+ * ones sorted lexicographically — the same tail rule the Swift `EffortRanking`
+ * contract applies, so both sides of the wire order a union identically.
  */
 export function unionEffortLevels(capability: CodexEffortCapability): EffortHint[] {
-  const seen: EffortHint[] = [];
-  for (const entry of Object.values(capability)) {
-    for (const level of entry.levels) if (!seen.includes(level)) seen.push(level);
-  }
-  return seen;
+  const seen = new Set<EffortHint>();
+  for (const entry of Object.values(capability)) for (const level of entry.levels) seen.add(level);
+  const ranked = (EFFORT_RANK_ORDER as readonly EffortHint[]).filter((level) => seen.has(level));
+  const unranked = [...seen].filter((level) => !ranked.includes(level)).sort();
+  return [...ranked, ...unranked];
 }
 
 interface ModelListEntry {
@@ -68,23 +76,68 @@ interface ModelListEntry {
   supportedReasoningEfforts?: unknown;
 }
 
-/** Shape-check one `model/list` entry; anything malformed is skipped, not thrown. */
-function readEntry(raw: ModelListEntry): [string, ModelEffortCapability] | null {
+/**
+ * A vendor VALUE that is not an effort level at all. Distinct from `null` (an
+ * entry that simply advertises no effort surface, which is normal and skipped):
+ * this poisons the whole probe. See `readModelListEfforts`.
+ */
+const MALFORMED = Symbol("malformed-effort-entry");
+
+/**
+ * Shape-check one `model/list` entry; never throws.
+ *
+ * ABSENCE is skipped (`null`): no id, no `supportedReasoningEfforts` array, an
+ * array member without the field, an empty list — a model with no effort surface
+ * is ordinary vendor output. A PRESENT value that is not an `EffortHint` is
+ * MALFORMED, because `EffortHint` is the wire contract every consumer downstream
+ * enforces, right up to `HarnessManifest.parse`.
+ */
+function readEntry(raw: ModelListEntry): [string, ModelEffortCapability] | null | typeof MALFORMED {
   if (typeof raw.id !== "string" || raw.id.trim() === "") return null;
   if (!Array.isArray(raw.supportedReasoningEfforts)) return null;
   const levels: EffortHint[] = [];
   for (const item of raw.supportedReasoningEfforts) {
     const level = (item as { reasoningEffort?: unknown })?.reasoningEffort;
-    if (typeof level === "string" && level.trim() !== "" && !levels.includes(level)) {
-      levels.push(level);
-    }
+    if (level === undefined) continue;
+    const parsed = EffortHint.safeParse(level);
+    if (!parsed.success) return MALFORMED;
+    if (!levels.includes(parsed.data)) levels.push(parsed.data);
   }
   if (levels.length === 0) return null;
+  // An absent default is normal (the vendor omits it, or sends an empty string);
+  // a present one must be a real level, since it is published as the manifest's
+  // per-model `default` and read back through the same schema.
   const fallback = raw.defaultReasoningEffort;
-  return [
-    raw.id,
-    { levels, default: typeof fallback === "string" && fallback !== "" ? fallback : null },
-  ];
+  if (fallback === undefined || fallback === null || fallback === "") {
+    return [raw.id, { levels, default: null }];
+  }
+  const parsedDefault = EffortHint.safeParse(fallback);
+  if (!parsedDefault.success) return MALFORMED;
+  return [raw.id, { levels, default: parsedDefault.data }];
+}
+
+/**
+ * The whole `model/list` payload as a capability map, or null for a FAILED probe.
+ *
+ * STRICT on purpose (the reviewed decision): ONE malformed value discards the
+ * ENTIRE live catalog and the caller degrades to the recorded snapshot, which is
+ * exactly what this module promises. Skipping the bad entry instead would publish
+ * a silently NARROWED ladder — a model advertising `["low", "HIGH!"]` would go out
+ * as `["low"]`, stamped with the installed CLI version, so a `high` request would
+ * clamp down to `low` and the freshness gate would call the ladder fresh. And a
+ * malformed value that reached the manifest would fail `HarnessManifest.parse`,
+ * breaking discovery rather than degrading it. The snapshot is a real, usable
+ * ladder, so strictness costs freshness and never capability.
+ */
+export function readModelListEfforts(data: unknown): CodexEffortCapability | null {
+  if (!Array.isArray(data)) return null;
+  const capability: CodexEffortCapability = {};
+  for (const raw of data) {
+    const entry = readEntry(raw as ModelListEntry);
+    if (entry === MALFORMED) return null;
+    if (entry) capability[entry[0]] = entry[1];
+  }
+  return Object.keys(capability).length > 0 ? capability : null;
 }
 
 /**
@@ -155,17 +208,7 @@ export async function probeCodexEfforts(
           continue;
         }
         if (message.id !== 2) continue;
-        const data = message.result?.data;
-        if (!Array.isArray(data)) {
-          finish(null);
-          return;
-        }
-        const capability: CodexEffortCapability = {};
-        for (const raw of data) {
-          const entry = readEntry(raw as ModelListEntry);
-          if (entry) capability[entry[0]] = entry[1];
-        }
-        finish(Object.keys(capability).length > 0 ? capability : null);
+        finish(readModelListEfforts(message.result?.data));
         return;
       }
     });
@@ -200,31 +243,72 @@ export function clearCodexEffortCache(): void {
   codexEffortCache.clear();
 }
 
+/** Live per-model discovery for one binary in one resolved environment. */
+export type CodexEffortProbe = (
+  bin: string,
+  env?: NodeJS.ProcessEnv,
+) => Promise<CodexEffortCapability | null>;
+
 /**
- * The per-model effort vocabulary codex currently advertises. Live when the
- * app-server answers, the recorded snapshot otherwise — a probe failure degrades
- * the ladder's freshness, never the run.
+ * Cache identity of ONE codex effort catalog: the resolved `CODEX_HOME` plus the
+ * binary path.
+ *
+ * `model/list` answers for the ACCOUNT the resolved home is logged into, and
+ * every credential profile and API-key route gets its own `CODEX_HOME`. Keying by
+ * the binary alone therefore served one profile another account's models and
+ * ladders for the whole TTL — omitting levels the account really has, or sending
+ * levels it does not. The binary stays in the key because two codex versions
+ * advertise different catalogs from the same home.
+ */
+function codexEffortCacheKey(bin: string, env?: NodeJS.ProcessEnv): string {
+  // A JSON-encoded pair, not a joined string: both halves are paths, so any
+  // printable separator would let two different (home, bin) pairs share a key.
+  return JSON.stringify([env?.["CODEX_HOME"] ?? "", bin]);
+}
+
+/**
+ * The per-model effort vocabulary codex currently advertises FOR THIS ENV. Live
+ * when the app-server answers, the recorded snapshot otherwise — a probe failure
+ * degrades the ladder's freshness, never the run.
  */
 export async function codexEffortCapability(
-  probe: (bin: string, env?: NodeJS.ProcessEnv) => Promise<CodexEffortCapability | null>,
+  probe: CodexEffortProbe,
   nowMs: () => number,
   bin: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<{ capability: CodexEffortCapability; live: boolean }> {
   const now = nowMs();
-  const cached = codexEffortCache.get(bin);
+  const key = codexEffortCacheKey(bin, env);
+  const cached = codexEffortCache.get(key);
   if (cached && cached.expiresAtMs > now) {
     return { capability: cached.capability, live: cached.live };
   }
   const probed = await probe(bin, env);
   const live = probed !== null;
   const capability = probed ?? CODEX_EFFORT_SNAPSHOT;
-  codexEffortCache.set(bin, {
+  codexEffortCache.set(key, {
     capability,
     live,
     expiresAtMs: now + (live ? CODEX_EFFORT_CACHE_TTL_MS : CODEX_EFFORT_FAILURE_CACHE_TTL_MS),
   });
   return { capability, live };
+}
+
+/**
+ * The catalog for the environment a codex child will ACTUALLY run in. ONE owner
+ * of that resolution: callers hand over their env PATCH (spec env + provider
+ * scrub + the resolved `CODEX_HOME`) and this resolves it exactly the way the
+ * spawn will, so the probe env and the cache identity can never disagree.
+ *
+ * An API-key route uses a fresh temporary `CODEX_HOME` per run, so it re-probes
+ * each time by construction. That is the correct trade: one bounded app-server
+ * spawn instead of a cross-account catalog served out of the cache.
+ */
+export async function codexEffortsForEnv(
+  deps: { probeEfforts: CodexEffortProbe; nowMs: () => number },
+  envPatch?: Record<string, string | null | undefined>,
+): Promise<{ capability: CodexEffortCapability; live: boolean }> {
+  return await codexEffortCapability(deps.probeEfforts, deps.nowMs, BIN, probeEnv(envPatch));
 }
 
 /**
