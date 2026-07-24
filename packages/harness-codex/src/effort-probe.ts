@@ -176,8 +176,15 @@ export async function probeCodexEfforts(
     const timer = setTimeout(() => finish(null), timeoutMs);
 
     child.on("error", () => finish(null));
-    // A clean exit before `model/list` answered means the method is unsupported.
-    child.on("exit", () => finish(null));
+    // `close`, NOT `exit`: `exit` fires when the process is reaped, which can
+    // beat the buffered stdout reaching the `data` handler above. An app-server
+    // that answers `model/list` and exits promptly would then be recorded as a
+    // FAILED probe and silently degrade a perfectly good live catalog to the
+    // snapshot. `close` fires only once every stdio stream is done, so by the
+    // time it runs the answer has already been parsed and `settled` is true.
+    // This does not reintroduce the EPIPE hazard: the asynchronous stream break
+    // still lands on the stdin/stdout `error` listeners below.
+    child.on("close", () => finish(null));
 
     // A pipe to a child that already died reports the break ASYNCHRONOUSLY, on
     // the stream's `error` event — `write()` returns normally and the EPIPE
@@ -246,6 +253,21 @@ export async function probeCodexEfforts(
 const CODEX_EFFORT_CACHE_TTL_MS = 10 * 60_000;
 const CODEX_EFFORT_FAILURE_CACHE_TTL_MS = 60_000;
 
+/**
+ * Hard ceiling on cached catalogs.
+ *
+ * The cache key is (resolved `CODEX_HOME`, binary), and an API-key route mints a
+ * FRESH `mkdtemp` home per run — so in a long-lived daemon every such run inserts
+ * a key that can never be read again. Expiry alone does not bound it: expiry is
+ * only consulted on a later read of the SAME key, which for an ephemeral home
+ * never comes, and `clearCodexEffortCache` is only reached from tests and the
+ * doctor's `fresh` path. The cap is what makes the map's size provably bounded
+ * regardless of run volume or uptime. Generous next to the real population
+ * (native home + one per credential profile, times installed binaries), so
+ * eviction only ever bites the ephemeral keys it exists for.
+ */
+const CODEX_EFFORT_CACHE_MAX_ENTRIES = 64;
+
 interface CodexEffortCacheEntry {
   capability: CodexEffortCapability;
   /** True when a live `model/list` answered; false when the snapshot filled in. */
@@ -257,6 +279,31 @@ const codexEffortCache = new Map<string, CodexEffortCacheEntry>();
 /** Drop the cached effort probe (tests; and the doctor's `fresh` path). */
 export function clearCodexEffortCache(): void {
   codexEffortCache.clear();
+}
+
+/** Live entry count. Exported so the bound above can be asserted, not assumed. */
+export function codexEffortCacheSize(): number {
+  return codexEffortCache.size;
+}
+
+/**
+ * Insert under the bound: drop everything already expired, then evict
+ * oldest-first until there is room. `Map` iterates in insertion order, so the
+ * first surviving key is the least recently INSERTED one — good enough here,
+ * because entries are rewritten on every refresh and the keys this protects
+ * against are write-once by construction.
+ */
+function storeCodexEfforts(key: string, entry: CodexEffortCacheEntry, nowMs: number): void {
+  for (const [k, v] of codexEffortCache) {
+    if (v.expiresAtMs <= nowMs) codexEffortCache.delete(k);
+  }
+  codexEffortCache.delete(key);
+  while (codexEffortCache.size >= CODEX_EFFORT_CACHE_MAX_ENTRIES) {
+    const oldest = codexEffortCache.keys().next();
+    if (oldest.done) break;
+    codexEffortCache.delete(oldest.value);
+  }
+  codexEffortCache.set(key, entry);
 }
 
 /** Live per-model discovery for one binary in one resolved environment. */
@@ -302,11 +349,15 @@ export async function codexEffortCapability(
   const probed = await probe(bin, env);
   const live = probed !== null;
   const capability = probed ?? CODEX_EFFORT_SNAPSHOT;
-  codexEffortCache.set(key, {
-    capability,
-    live,
-    expiresAtMs: now + (live ? CODEX_EFFORT_CACHE_TTL_MS : CODEX_EFFORT_FAILURE_CACHE_TTL_MS),
-  });
+  storeCodexEfforts(
+    key,
+    {
+      capability,
+      live,
+      expiresAtMs: now + (live ? CODEX_EFFORT_CACHE_TTL_MS : CODEX_EFFORT_FAILURE_CACHE_TTL_MS),
+    },
+    now,
+  );
   return { capability, live };
 }
 

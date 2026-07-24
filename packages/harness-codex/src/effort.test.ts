@@ -9,6 +9,8 @@ import { clearCodexEffortCache, createCodexAdapter } from "./index.js";
 import { codexExecArgs } from "./index.js";
 import {
   CODEX_EFFORT_SNAPSHOT,
+  codexEffortCacheSize,
+  codexEffortCapability,
   codexEffortsForEnv,
   probeCodexEfforts,
   readModelListEfforts,
@@ -169,6 +171,43 @@ describe("codex effort probe degrades gracefully", () => {
     expect(escaped).toEqual([]);
   }, 30_000);
 
+  it("keeps the live catalog when the app-server answers and exits IMMEDIATELY", async () => {
+    // The regression: the probe settled on the child's `exit`, which fires when
+    // the process is reaped and can beat the buffered stdout reaching the `data`
+    // handler. A well-behaved app-server that answers `model/list` and exits at
+    // once was then recorded as a FAILED probe, silently degrading a good live
+    // catalog to the recorded snapshot. `close` waits for the stdio streams.
+    const dir = reapMk(join(tmpdir(), "claudexor-codex-fast-"));
+    const bin = join(dir, "codex");
+    const answer =
+      '{"jsonrpc":"2.0","id":2,"result":{"data":[' +
+      '{"id":"gpt-9","defaultReasoningEffort":"high",' +
+      '"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]}' +
+      "]}}";
+    // The stub accepts the handshake, hands the `model/list` answer to a writer
+    // that INHERITS its stdout, and exits at once. `exit` therefore fires with the
+    // answer still in flight — the hazard in its deterministic form.
+    //
+    // `exec 3<&0` first: POSIX sh points a background job's stdin at /dev/null,
+    // which would drop the pipe's READ end the moment the parent exits and EPIPE
+    // our follow-up frames, settling the probe through the stdin error path
+    // instead. Holding a dup on fd 3 keeps this a pure exit-vs-output test; the
+    // EPIPE shape has its own case above.
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nexec 3<&0\nprintf '{"jsonrpc":"2.0","id":1,"result":{}}\\n'\n` +
+        `( sleep 0.3; printf '${answer}\\n' ) &\nexit 0\n`,
+    );
+    chmodSync(bin, 0o755);
+
+    for (let round = 0; round < 3; round += 1) {
+      const probed = await probeCodexEfforts(bin, { timeoutMs: 5_000 });
+      expect(probed).not.toBeNull();
+      expect(probed?.["gpt-9"]?.levels).toEqual(["low", "high"]);
+      expect(probed?.["gpt-9"]?.default).toBe("high");
+    }
+  }, 30_000);
+
   it("arg building keeps working on the snapshot when the probe cannot answer", () => {
     // No capability passed = exactly the state after a failed probe.
     const args = codexExecArgs({ ...base, model_hint: "gpt-5.6-sol", effort_hint: "max" });
@@ -310,6 +349,48 @@ describe("the effort cache is keyed by the codex IDENTITY, not just the binary",
     const a = await codexEffortsForEnv(deps, { CODEX_HOME: "/tmp/claudexor-profile-a" });
     expect(a.live).toBe(true);
     expect(a.capability["gpt-9"]?.levels).toEqual(["low", "high"]);
+    clearCodexEffortCache();
+  });
+
+  it("stays bounded across repeated EPHEMERAL homes instead of leaking one entry per run", async () => {
+    // The leak: an API-key route mints a fresh `mkdtemp` CODEX_HOME per run, so
+    // every run inserts a key nothing will ever read again. Expiry cannot collect
+    // them (it is only consulted on a later read of the SAME key), so in a
+    // long-lived daemon the map grew for the life of the process.
+    clearCodexEffortCache();
+    const probe = async (): Promise<CodexEffortCapability> => ({
+      "gpt-9": { levels: ["low", "high"], default: "high" },
+    });
+    // A FROZEN clock: nothing can expire, so only the entry cap can bound this.
+    // Without it the map would hold all 500 keys.
+    for (let run = 0; run < 500; run += 1) {
+      await codexEffortCapability(probe, () => 0, "codex", {
+        CODEX_HOME: `/tmp/claudexor-ephemeral-${run}`,
+      });
+    }
+    expect(codexEffortCacheSize()).toBeLessThanOrEqual(64);
+    clearCodexEffortCache();
+    expect(codexEffortCacheSize()).toBe(0);
+  });
+
+  it("still serves a stable home from cache while ephemeral homes churn past it", async () => {
+    clearCodexEffortCache();
+    let calls = 0;
+    const probe = async (): Promise<CodexEffortCapability> => {
+      calls += 1;
+      return { "gpt-9": { levels: ["low", "high"], default: "high" } };
+    };
+    const stable = { CODEX_HOME: "/tmp/claudexor-native-home" };
+    await codexEffortCapability(probe, () => 0, "codex", stable);
+    expect(calls).toBe(1);
+    // Well inside the cap: the stable entry must survive ordinary churn.
+    for (let run = 0; run < 10; run += 1) {
+      await codexEffortCapability(probe, () => 0, "codex", {
+        CODEX_HOME: `/tmp/claudexor-ephemeral-churn-${run}`,
+      });
+    }
+    await codexEffortCapability(probe, () => 0, "codex", stable);
+    expect(calls).toBe(11); // 1 stable + 10 ephemeral; the stable read was cached.
     clearCodexEffortCache();
   });
 });
