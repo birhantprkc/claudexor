@@ -19,7 +19,12 @@ import {
   unwrapWorkReportEnvelope,
   type WorkReportEnvelopeMode,
 } from "./attemptFinalize.js";
-import { redactHarnessEvent, harnessEventPayload, observeBudgetSignals } from "./runSupport.js";
+import {
+  redactHarnessEvent,
+  harnessEventPayload,
+  observeBudgetSignals,
+  safeErrorMessage,
+} from "./runSupport.js";
 import {
   type AttemptTelemetry,
   createAttemptTelemetry,
@@ -28,11 +33,6 @@ import {
   telemetrySummary,
   toolWarnings,
 } from "./attemptTelemetry.js";
-
-/** Redacted error message (mirrors the orchestrator's module-local helper). */
-function safeErrorMessage(err: unknown): string {
-  return redactSecrets(err instanceof Error ? err.message : String(err));
-}
 
 /** The reducer runs under the fixed `synth` attempt id (roster/cost visible). */
 export const DEEP_SCAN_REDUCER_ATTEMPT_ID = "synth";

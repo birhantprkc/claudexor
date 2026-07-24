@@ -6296,6 +6296,32 @@ describe("Orchestrator", () => {
     expect(outcome).toMatchObject({ harness_errored: true, status: "failed" });
   });
 
+  it("a planner that throws an EMPTY error still FAILS with a reportable message", async () => {
+    // `new Error("").message` is "", and a bare thrown "" stringifies to "". The
+    // error axes below the throw are decided by nullishness (`harnessError ??=`)
+    // and truthiness (`if (attemptError)`), which both read "" as "no error", so
+    // a harness that genuinely THREW could terminalize as a clean plan with
+    // nothing to show the operator. safeErrorMessage keeps the blank out of
+    // those tests at the source instead of patching one guard.
+    const { res, outcome } = await runToolErrorPlan({
+      ...toolErrorPlannerAdapter("planner", { finalText: null, toolError: false }),
+      async *run(): AsyncIterable<never> {
+        throw new Error("");
+      },
+    });
+    expect(legacyOutcome(res)).toBe("failed");
+    expect(outcome).toMatchObject({ harness_errored: true, status: "failed" });
+    // The attempt terminal must carry real text, not an empty string.
+    const completed = readRunEvents(res.runDir).find(
+      (e) => e.type === "harness.completed" && e.payload["attempt_id"] === "p01",
+    );
+    expect(completed?.payload["status"]).toBe("failed");
+    expect(String(completed?.payload["error"] ?? "").trim().length).toBeGreaterThan(0);
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "thrown error carried no message",
+    );
+  });
+
   // Council (INV-031): a planner that emits DRAFT questions on intent=plan and
   // a DIFFERENT merged set on intent=synthesize, so the "parser runs on the
   // merge output only" promise is verifiable — draft questions must not leak.

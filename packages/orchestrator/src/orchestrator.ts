@@ -113,6 +113,7 @@ import {
   sleep,
   redactHarnessEvent,
   harnessEventPayload,
+  safeErrorMessage,
   formatFindings,
   renderSummary,
   observeBudgetSignals,
@@ -7664,8 +7665,4 @@ function assertNoSecretLikeTokens(label: string, text: string): void {
   if (containsSecretLikeToken(text)) {
     throw new Error(`${label} contains secret-like token; refusing to persist artifact`);
   }
-}
-
-function safeErrorMessage(err: unknown): string {
-  return redactSecrets(err instanceof Error ? err.message : String(err));
 }

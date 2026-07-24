@@ -5,7 +5,31 @@ import {
   promptWithEngineConstraints,
   promptWithGateArgvDisclosure,
   redactHarnessEvent,
+  safeErrorMessage,
 } from "./runSupport.js";
+
+describe("safeErrorMessage (a thrown value never reports as no error)", () => {
+  it("keeps a real message verbatim", () => {
+    expect(safeErrorMessage(new Error("adapter exploded"))).toBe("adapter exploded");
+    expect(safeErrorMessage("plain string throw")).toBe("plain string throw");
+  });
+
+  it("substitutes a generic message for a blank one, so the throw stays visible", () => {
+    // Every error axis downstream folds with `??=` or tests `if (error)`, so an
+    // empty message would read as "nothing went wrong".
+    for (const thrown of [new Error(""), new Error("   \n\t "), "", "  "]) {
+      const message = safeErrorMessage(thrown);
+      expect(message.trim().length).toBeGreaterThan(0);
+      expect(message).toBe("thrown error carried no message");
+    }
+  });
+
+  it("still redacts secrets in a non-blank message", () => {
+    expect(safeErrorMessage(new Error("token sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA"))).not.toContain(
+      "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA",
+    );
+  });
+});
 
 describe("promptWithEngineConstraints (QA-022: protected paths + gate argv in one seam)", () => {
   it("appends the gate argv even when there are no protected paths", () => {
