@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ControlSettingsUpdateRequest } from "@claudexor/schema";
+import type { GlobalConfig as GlobalConfigT } from "@claudexor/schema";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -46,7 +47,17 @@ describe("assertSettingsPatchValid", () => {
   // `current` is REQUIRED now (a caller can no longer opt out of the D-9 fence);
   // an `auto` goal with no tiers never trips the invariant, so these patch-local
   // truth checks (harness ids / models / effort) reach their throw as before.
-  const AUTO_NO_TIERS = { goal: "auto" as const, qualityTiers: {} };
+  // Empty stored harnesses = every per-harness default (null model, null effort).
+  const AUTO_NO_TIERS = { goal: "auto" as const, qualityTiers: {}, harnesses: {} };
+
+  /** Stored per-harness settings for codex, built through the real merge path. */
+  const storedCodex = (settings: { defaultModel?: string | null; effort?: string | null }) =>
+    applyHarnessSettingsPatches(
+      {},
+      ControlSettingsUpdateRequest.parse({ harnesses: { codex: settings } }).harnesses!,
+    );
+  const patchCodex = (settings: Record<string, unknown>) =>
+    ControlSettingsUpdateRequest.parse({ harnesses: { codex: settings } });
 
   it("rejects fake harness ids everywhere they could persist", async () => {
     await expect(
@@ -86,7 +97,7 @@ describe("assertSettingsPatchValid", () => {
         ControlSettingsUpdateRequest.parse({ harnesses: { codex: { defaultModel: "gpt-5.5" } } }),
         AUTO_NO_TIERS,
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
   }, 30_000); // codex discover() spawns the vendor CLI; its startup latency is environmental
 
   it("refuses an effort outside the declared ladder", async () => {
@@ -107,6 +118,110 @@ describe("assertSettingsPatchValid", () => {
     }
   });
 
+  // INV-104 pairing: the effort ladder belongs to the MODEL, and a settings write
+  // may carry either half of the pair alone — so only the MERGED pair can be
+  // judged. The codex manifest (snapshot fallback under the stub) gives the
+  // asymmetry these need: gpt-5.5 stops at `xhigh` while the harness-wide union
+  // reaches `ultra` because gpt-5.6-sol advertises it.
+  // One `it` per patch shape, so a regression names the shape it broke instead of
+  // stopping at whichever assertion happened to come first.
+  // codex discover() spawns the (stubbed) vendor CLI, so each gets the same
+  // environmental-latency budget as the other manifest-backed cases.
+  it("shape 1: effort-only patch refused when the STORED model's ladder is narrower", async () => {
+    // `ultra` IS on the harness-wide union, so judging the patch against the union
+    // (or against a null model, which is what an absent patch.defaultModel means)
+    // accepted a value gpt-5.5 rejects.
+    await expect(
+      assertSettingsPatchValid(patchCodex({ effort: "ultra" }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.5" }),
+      }),
+    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+  }, 30_000);
+
+  it("shape 2: effort-only patch accepted when it is inside the STORED model's ladder", async () => {
+    await expect(
+      assertSettingsPatchValid(patchCodex({ effort: "xhigh" }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.5" }),
+      }),
+    ).resolves.toBeDefined();
+  }, 30_000);
+
+  it("shape 3: defaultModel-only patch refused when the STORED effort is unsupported", async () => {
+    // The patch carries no effort at all, so effort validation used to be skipped
+    // entirely and the stored `ultra` silently became unsupported for the new model.
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
+      }),
+    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+    // …and the same patch is fine once the stored effort fits the new model.
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5" }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "high" }),
+      }),
+    ).resolves.toBeDefined();
+  }, 30_000);
+
+  it("shape 4: both-fields patch behaves as before — the patch pair wins over stored", async () => {
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.5", effort: "xhigh" }),
+      }),
+    ).resolves.toBeDefined();
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5", effort: "ultra" }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
+      }),
+    ).rejects.toThrow(/harness 'codex' model 'gpt-5\.5' does not accept effort 'ultra'/);
+  }, 30_000);
+
+  it("an effective model the manifest records no ladder for keeps the harness-wide union", async () => {
+    // Deliberately NOT a hard refusal: `effortLevelsForModel` falls back to the
+    // union for a model with no recorded per-model vocabulary, and the pair check
+    // must stay consistent with that owner rather than inventing a stricter rule.
+    // `gpt-5.6` is a known model with no snapshot entry; a stale stored id that
+    // left `known_models` entirely takes the same path, so a vendor retiring a
+    // model can never turn an unrelated effort write into a 400.
+    for (const defaultModel of ["gpt-5.6", "retired-model-from-a-past-release"]) {
+      await expect(
+        assertSettingsPatchValid(patchCodex({ effort: "ultra" }), {
+          ...AUTO_NO_TIERS,
+          harnesses: storedCodex({ defaultModel }),
+        }),
+      ).resolves.toBeDefined();
+    }
+    // A null effective model (nothing stored, nothing patched) keeps the union too.
+    await expect(
+      assertSettingsPatchValid(patchCodex({ effort: "ultra" }), AUTO_NO_TIERS),
+    ).resolves.toBeDefined();
+  }, 30_000);
+
+  it("leaves a harness alone when the write touches neither half of the pair", async () => {
+    // A stored pair can go stale on its own (a vendor narrows a ladder under a
+    // value saved long ago). An unrelated write must not become a hard refusal
+    // for it — this validates settings honesty, it does not audit stored drift.
+    await expect(
+      assertSettingsPatchValid(patchCodex({ enabled: false }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.5", effort: "ultra" }),
+      }),
+    ).resolves.toBeDefined();
+    // Clearing the effort while narrowing the model is also fine: the effective
+    // effort is null, so there is no pair left to violate.
+    await expect(
+      assertSettingsPatchValid(patchCodex({ defaultModel: "gpt-5.5", effort: null }), {
+        ...AUTO_NO_TIERS,
+        harnesses: storedCodex({ defaultModel: "gpt-5.6-sol", effort: "ultra" }),
+      }),
+    ).resolves.toBeDefined();
+  }, 30_000);
+
   it("D-9/#22: merged-effective quality routing with zero tiers is a 4xx config_error at write", async () => {
     const emptyTiers = ControlSettingsUpdateRequest.parse({}).qualityTiers ?? {};
     // (a) Patch flips the goal to quality over empty stored tiers → refused.
@@ -114,6 +229,7 @@ describe("assertSettingsPatchValid", () => {
       assertSettingsPatchValid(ControlSettingsUpdateRequest.parse({ routingGoal: "quality" }), {
         goal: "auto",
         qualityTiers: emptyTiers,
+        harnesses: {},
       }),
     ).rejects.toMatchObject({ status: 400, code: "config_error" });
     // (b) Clearing the tiers while quality is already active → refused.
@@ -124,6 +240,7 @@ describe("assertSettingsPatchValid", () => {
       assertSettingsPatchValid(ControlSettingsUpdateRequest.parse({ qualityTiers: {} }), {
         goal: "quality",
         qualityTiers: oneTier,
+        harnesses: {},
       }),
     ).rejects.toMatchObject({ status: 400, code: "config_error" });
     // (c) A valid tier set with a quality goal is accepted.
@@ -133,16 +250,17 @@ describe("assertSettingsPatchValid", () => {
           routingGoal: "quality",
           qualityTiers: { implement: [[{ harness: "codex", model: "gpt-5.5", effort: "high" }]] },
         }),
-        { goal: "auto", qualityTiers: emptyTiers },
+        { goal: "auto", qualityTiers: emptyTiers, harnesses: {} },
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
     // (d) The stored tiers carry the goal even when the patch omits them.
     await expect(
       assertSettingsPatchValid(ControlSettingsUpdateRequest.parse({ routingGoal: "quality" }), {
         goal: "auto",
         qualityTiers: oneTier,
+        harnesses: {},
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
   }, 30_000); // codex discover() spawns the vendor CLI to validate the tier route
 
   it("assertRoutingGoalTiersConsistent discriminates the unroutable quality/zero-tier combo", () => {
@@ -222,9 +340,14 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
       qualityTiers: { implement: [[{ harness: "codex", model: "gpt-5.5", effort: "high" }]] },
     });
 
-  /** Run `fn` against a FRESH isolated config dir seeded with `seedRouting`. */
+  /** Run `fn` against a FRESH isolated config dir seeded with `seedRouting`
+   * (and, optionally, a stored per-harness model/effort pair). */
   async function withSeededConfig(
-    seedRouting: { goal: "auto" | "economy" | "quality"; qualityTiers: unknown },
+    seedRouting: {
+      goal: "auto" | "economy" | "quality";
+      qualityTiers: unknown;
+      harnesses?: GlobalConfigT["harnesses"];
+    },
     fn: (root: string) => Promise<void>,
   ): Promise<void> {
     const prev = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -233,6 +356,7 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
     try {
       updateGlobalConfig((cfg) => ({
         ...cfg,
+        harnesses: seedRouting.harnesses ?? cfg.harnesses,
         routing: {
           ...cfg.routing,
           goal: seedRouting.goal,
@@ -296,4 +420,75 @@ describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {
       },
     );
   });
+
+  it("an effort-only write is judged against the PERSISTED default model", async () => {
+    // End-to-end proof that the stored per-harness settings actually reach the
+    // validator: a unit test on `assertSettingsPatchValid` alone would still pass
+    // if `commitSettingsUpdate` handed it an empty harnesses map.
+    await withSeededConfig(
+      { goal: "auto", qualityTiers: oneTierPatch().qualityTiers },
+      async (root) => {
+        await commitSettingsUpdate(
+          root,
+          ControlSettingsUpdateRequest.parse({ harnesses: { codex: { defaultModel: "gpt-5.5" } } }),
+        );
+        expect(loadConfig(root).global.harnesses["codex"]?.default_model).toBe("gpt-5.5");
+        // gpt-5.5 stops at xhigh; `ultra` only exists on the harness-wide union.
+        await expect(
+          commitSettingsUpdate(
+            root,
+            ControlSettingsUpdateRequest.parse({ harnesses: { codex: { effort: "ultra" } } }),
+          ),
+        ).rejects.toThrow(/model 'gpt-5\.5' does not accept effort 'ultra'/);
+        expect(loadConfig(root).global.harnesses["codex"]?.effort).toBeNull();
+        // The same write against a model that advertises `ultra` persists.
+        await commitSettingsUpdate(
+          root,
+          ControlSettingsUpdateRequest.parse({
+            harnesses: { codex: { defaultModel: "gpt-5.6-sol", effort: "ultra" } },
+          }),
+        );
+        expect(loadConfig(root).global.harnesses["codex"]?.effort).toBe("ultra");
+      },
+    );
+  }, 30_000); // codex discover() spawns the vendor CLI; its startup latency is environmental
+
+  it("two concurrent writes can never persist a stranded model/effort pair", async () => {
+    // The pair is merged-effective too, so it needs the SAME under-lock re-check the
+    // goal/tiers invariant gets. A narrows the model (valid against the seed: the
+    // stored `high` is fine for gpt-5.5); B raises the effort (valid against the
+    // seed: gpt-5.6-sol accepts `ultra`). Committed in either order the final pair
+    // would be (gpt-5.5, ultra), which gpt-5.5 rejects.
+    await withSeededConfig(
+      {
+        goal: "auto",
+        qualityTiers: oneTierPatch().qualityTiers,
+        harnesses: applyHarnessSettingsPatches(
+          {},
+          ControlSettingsUpdateRequest.parse({
+            harnesses: { codex: { defaultModel: "gpt-5.6-sol", effort: "high" } },
+          }).harnesses!,
+        ),
+      },
+      async (root) => {
+        const results = await Promise.allSettled([
+          commitSettingsUpdate(
+            root,
+            ControlSettingsUpdateRequest.parse({
+              harnesses: { codex: { defaultModel: "gpt-5.5" } },
+            }),
+          ),
+          commitSettingsUpdate(
+            root,
+            ControlSettingsUpdateRequest.parse({ harnesses: { codex: { effort: "ultra" } } }),
+          ),
+        ]);
+        expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+        // Whichever writer landed second is refused, so the persisted pair is
+        // always one the model actually accepts.
+        const stored = loadConfig(root).global.harnesses["codex"];
+        expect(stored?.default_model === "gpt-5.5" && stored?.effort === "ultra").toBe(false);
+      },
+    );
+  }, 30_000);
 });

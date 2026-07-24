@@ -3,14 +3,16 @@
  *
  * STRICT (INV-104): persisted routing ids must be REAL registered
  * harnesses (fakes are test fixtures, never persistable routing targets),
- * model values must pass the harness's model truth source, and effort must be
- * on the declared ladder. All violations are 400s naming the harness, the
- * value, and the truth source — a bad value must never be persisted to die
- * later as an opaque native error.
+ * model values must pass the harness's model truth source, and the effort a
+ * harness ends up holding must be on the ladder of the model it ends up
+ * pointing at. All violations are 400s naming the harness, the value, and the
+ * truth source — a bad value must never be persisted to die later as an opaque
+ * native error.
  */
 import type {
   ControlSettingsUpdateRequest,
   GlobalConfig as GlobalConfigT,
+  HarnessCapabilities,
   QualityTierSet,
   RoutingGoal,
 } from "@claudexor/schema";
@@ -106,21 +108,82 @@ export function assertRoutingGoalTiersConsistent(goal: RoutingGoal, tiers: Quali
 }
 
 /**
- * `current` is the currently-stored routing this write merges over, and is
- * REQUIRED: the merged-effective goal/tiers invariant (D-9/#22) can only be
- * enforced against the stored state, so making it optional would let a future
- * writer call this + `updateGlobalConfig` directly and silently bypass the
- * fence. The effective value is the patch's field when present, otherwise the
- * stored one; `qualityTiers` REPLACES wholesale exactly as the persist path
- * merges it (control-services updateSettings), so a patch clearing tiers ({})
- * is honored here too.
+ * Manifest effort facts for the harnesses ONE patch touches, resolved once from
+ * live manifests (`discover()`, which spawns vendor CLIs) so the merged-effective
+ * effort invariant can be re-checked SYNCHRONOUSLY inside the config lock without
+ * probing again. `null` means the harness has no adapter to ask.
+ */
+export type PatchEffortCapabilities = ReadonlyMap<string, HarnessCapabilities | null>;
+
+/**
+ * The merged-effective (model, effort) invariant (INV-104 pairing): an effort
+ * ceiling belongs to the MODEL, so the effort a harness ends up holding must sit
+ * on the ladder of the model it ends up pointing at.
+ *
+ * Only the MERGE tells the truth here, because either half of the pair can arrive
+ * alone. An effort-only patch inherits the STORED default model, whose ladder may
+ * be narrower than the harness-wide union (`gpt-5.5` stops at `xhigh` while the
+ * union carries `ultra`), so judging it against the union accepted a setting the
+ * routed model rejects. A defaultModel-only patch inherits the STORED effort, so
+ * skipping the effort check entirely let a narrowing model silently strand an
+ * already-saved effort.
+ *
+ * `harnesses` is the ALREADY-MERGED settings map (patch folded over stored, via
+ * `applyHarnessSettingsPatches` — the same merge the persist path uses, so
+ * validation can never disagree with what gets written). `capabilities` is keyed
+ * by the ids whose pair this write actually touches, so an unrelated write to a
+ * harness whose stored pair drifted (a vendor narrowing a ladder under a value
+ * saved long ago) is not turned into a refusal. A model the manifest records no
+ * ladder for keeps the harness-wide union rather than becoming a hard refusal —
+ * that fallback is `effortLevelsForModel`'s, the ONE owner of the lookup.
+ *
+ * Pure + synchronous so it runs BOTH as the pre-lock fast-fail and inside the
+ * locked read-mutate-write cycle, exactly like `assertRoutingGoalTiersConsistent`.
+ */
+export function assertHarnessEffortPairsValid(
+  harnesses: GlobalConfigT["harnesses"],
+  capabilities: PatchEffortCapabilities,
+): void {
+  for (const [id, caps] of capabilities) {
+    const settings = harnesses[id];
+    const effort = settings?.effort ?? null;
+    if (!effort) continue;
+    const model = settings?.default_model ?? null;
+    const ladder = caps ? effortLevelsForModel(caps, model) : [];
+    if (ladder.includes(effort)) continue;
+    badRequest(
+      ladder.length === 0
+        ? `harness '${id}' declares no effort ladder; leave effort unset`
+        : `harness '${id}'${model ? ` model '${model}'` : ""} does not accept effort '${effort}' (advertised: ${ladder.join(", ")})`,
+    );
+  }
+}
+
+/**
+ * `current` is the currently-stored state this write merges over, and is
+ * REQUIRED: the merged-effective invariants (goal/tiers per D-9/#22, and the
+ * per-harness model/effort pair per INV-104) can only be enforced against the
+ * stored state, so making it optional would let a future writer call this +
+ * `updateGlobalConfig` directly and silently bypass the fences. The effective
+ * value is the patch's field when present, otherwise the stored one;
+ * `qualityTiers` REPLACES wholesale exactly as the persist path merges it
+ * (control-services updateSettings), so a patch clearing tiers ({}) is honored
+ * here too.
+ *
+ * Returns the manifest effort facts it probed, so `commitSettingsUpdate` can
+ * re-run the pair invariant under the lock without spawning the vendor CLIs twice.
  */
 export async function assertSettingsPatchValid(
   p: ControlSettingsUpdateRequest,
-  current: { goal: RoutingGoal; qualityTiers: QualityTierSet },
-): Promise<void> {
+  current: {
+    goal: RoutingGoal;
+    qualityTiers: QualityTierSet;
+    harnesses: GlobalConfigT["harnesses"];
+  },
+): Promise<PatchEffortCapabilities> {
   const realIds = new Set(buildRegistry({ includeFakes: false }).keys());
   const realList = [...realIds].sort().join(", ");
+  const effortCapabilities = new Map<string, HarnessCapabilities | null>();
   if (p.primaryHarness) {
     if (!realIds.has(p.primaryHarness)) {
       badRequest(
@@ -151,7 +214,10 @@ export async function assertSettingsPatchValid(
           badRequest(model.message ?? `model '${route.model}' was refused`);
         const manifest = await buildRegistry().get(route.harness)?.discover();
         // A tier names harness AND model, so hold it to what that MODEL
-        // advertises rather than the harness-wide union.
+        // advertises rather than the harness-wide union. No merge is involved
+        // here, unlike the per-harness pair below: a tier route is a COMPLETE
+        // (harness, model, effort) triple and `qualityTiers` replaces wholesale,
+        // so `route.model`/`route.effort` already ARE the effective pair.
         const advertised = manifest ? effortLevelsForModel(manifest.capabilities, route.model) : [];
         if (!advertised.includes(route.effort)) {
           badRequest(
@@ -189,16 +255,14 @@ export async function assertSettingsPatchValid(
         }
       }
     }
-    if (patch.effort) {
+    // Touching EITHER half of the (model, effort) pair puts the merged pair up for
+    // validation, so this only resolves the manifest facts; the pair itself is
+    // judged from the merged settings below. A patch that touches neither half is
+    // left alone — see `assertHarnessEffortPairsValid`.
+    if (patch.effort !== undefined || patch.defaultModel !== undefined) {
       const adapter = buildRegistry().get(id);
-      let ladder: readonly string[] = [];
       try {
-        // Narrow to the model this harness will actually run (INV-104 pairing):
-        // an effort ceiling belongs to the MODEL, so validating a stored default
-        // against the harness-wide union would persist a setting the routed
-        // model rejects. `effortLevelsForModel` is the one owner of that lookup.
-        const capabilities = adapter ? (await adapter.discover()).capabilities : null;
-        ladder = capabilities ? effortLevelsForModel(capabilities, patch.defaultModel ?? null) : [];
+        effortCapabilities.set(id, adapter ? (await adapter.discover()).capabilities : null);
       } catch (err) {
         // A harness whose manifest cannot be discovered (binary missing) still
         // 400s honestly rather than bubbling a raw error out of the endpoint.
@@ -206,14 +270,16 @@ export async function assertSettingsPatchValid(
           `cannot verify effort for '${id}': ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      if (!ladder.includes(patch.effort)) {
-        badRequest(
-          ladder.length === 0
-            ? `harness '${id}' declares no effort ladder; leave effort unset`
-            : `harness '${id}'${patch.defaultModel ? ` model '${patch.defaultModel}'` : ""} does not accept effort '${patch.effort}' (advertised: ${ladder.join(", ")})`,
-        );
-      }
     }
+  }
+  // INV-104 pairing, against the MERGED settings rather than the patch fields:
+  // the effort a harness will hold must be on the ladder of the model it will
+  // point at, whichever half of the pair this write supplied.
+  if (effortCapabilities.size > 0) {
+    assertHarnessEffortPairsValid(
+      applyHarnessSettingsPatches(current.harnesses, p.harnesses),
+      effortCapabilities,
+    );
   }
   // D-9/#22 server half: validate the MERGED EFFECTIVE routing, not just the
   // patch. If the write would leave `goal: quality` with zero configured tiers
@@ -227,6 +293,7 @@ export async function assertSettingsPatchValid(
   const effectiveGoal = p.routingGoal ?? current.goal;
   const effectiveTiers = p.qualityTiers ?? current.qualityTiers;
   assertRoutingGoalTiersConsistent(effectiveGoal, effectiveTiers);
+  return effortCapabilities;
 }
 
 const nullableSettingName = (
@@ -283,30 +350,37 @@ export function mergeSettingsPatch(
  * The fix serializes the whole transaction on the ONE config lock
  * (`updateGlobalConfig` holds it across the read-mutate-write): the pre-lock
  * `assertSettingsPatchValid` still runs the async patch-local truth checks
- * (harness ids, model, effort — these never race) and a fast-fail, but the
- * cross-field goal/tiers invariant is RE-CHECKED against the EXACT merged
- * config under the lock, so the invalid final combination can never be
- * persisted regardless of interleaving.
+ * (harness ids, models — these never race) and a fast-fail, but EVERY
+ * merged-effective invariant is RE-CHECKED against the EXACT merged config under
+ * the lock, so an invalid final combination can never be persisted regardless of
+ * interleaving. The per-harness (model, effort) pair is merged-effective too — a
+ * racing writer can narrow `default_model` under an effort this one validated —
+ * so it is re-checked here as well, from the manifest facts the pre-lock pass
+ * already probed (no second vendor-CLI spawn under the lock).
  */
 export async function commitSettingsUpdate(
   repoRoot: string,
   p: ControlSettingsUpdateRequest,
 ): Promise<void> {
-  const currentRouting = loadConfig(repoRoot).global.routing;
-  // Pre-lock: the patch-local truth (harness ids, models, effort ladders) and a
-  // fast-fail on the goal/tiers invariant against the current snapshot.
-  await assertSettingsPatchValid(p, {
-    goal: currentRouting.goal,
-    qualityTiers: currentRouting.quality_tiers,
+  const currentGlobal = loadConfig(repoRoot).global;
+  // Pre-lock: the patch-local truth (harness ids, models), the manifest effort
+  // facts, and a fast-fail on the merged-effective invariants against the
+  // current snapshot.
+  const effortCapabilities = await assertSettingsPatchValid(p, {
+    goal: currentGlobal.routing.goal,
+    qualityTiers: currentGlobal.routing.quality_tiers,
+    harnesses: currentGlobal.harnesses,
   });
   // Atomic write: the merge + the cross-field re-validation both run INSIDE the
   // config lock against the state actually being mutated. A racing writer that
   // committed between the pre-lock snapshot and here is seen by `cfg`, so a
-  // final quality-with-zero-tiers combination throws here (before any bytes are
-  // written) instead of silently persisting.
+  // final quality-with-zero-tiers combination (or a stranded harness
+  // model/effort pair) throws here (before any bytes are written) instead of
+  // silently persisting.
   updateGlobalConfig((cfg) => {
     const next = mergeSettingsPatch(cfg, p);
     assertRoutingGoalTiersConsistent(next.routing.goal, next.routing.quality_tiers);
+    assertHarnessEffortPairsValid(next.harnesses, effortCapabilities);
     return next;
   });
 }
