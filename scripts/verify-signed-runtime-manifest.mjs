@@ -68,10 +68,17 @@ try {
   // A-5 leg the promotion audit missed: the promoted artifact pair must be
   // built from THE tag's commit — candidate_run_id alone could select an
   // EARLIER candidate whose signed fields self-agree.
-  if (options["expected-build-sha"]) {
-    if (signed.buildSha !== options["expected-build-sha"]) {
+  if (options["expected-build-sha"] !== undefined) {
+    const expected = options["expected-build-sha"];
+    // An EMPTY/malformed value (e.g. prepare.outputs.sha resolved empty) must
+    // FAIL, never silently skip the binding — the flag's presence means the
+    // caller intends the tag-commit check to run.
+    if (!/^[0-9a-f]{40}$/.test(expected)) {
+      fail(`--expected-build-sha must be a full 40-char commit SHA; got "${expected}"`);
+    }
+    if (signed.buildSha !== expected) {
       fail(
-        `signed manifest buildSha (${signed.buildSha}) is not the published tag's commit (${options["expected-build-sha"]})`,
+        `signed manifest buildSha (${signed.buildSha}) is not the published tag's commit (${expected})`,
       );
     }
   }

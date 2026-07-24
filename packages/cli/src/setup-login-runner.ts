@@ -427,7 +427,13 @@ function boundedTail(text: string): string {
     .replace(/\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
-  return redactSecrets(plain.slice(-OUTPUT_TAIL_BYTES).trim().slice(0, 4000));
+  // The ring keeps only the final bytes, so a secret split by the truncation
+  // boundary could leave a prefix-less fragment redactSecrets cannot pattern
+  // (its anchors need the token head). Drop the leading partial token (up to
+  // the first whitespace) BEFORE redacting so a boundary-split fragment can
+  // never survive; then redact the remainder.
+  const bounded = plain.slice(-OUTPUT_TAIL_BYTES).replace(/^\S+/, "");
+  return redactSecrets(bounded.trim().slice(0, 4000));
 }
 
 /** Run `<binary> login --help` captured, bounded to 10s. Fails OPEN: only a
