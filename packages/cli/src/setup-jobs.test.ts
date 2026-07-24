@@ -26,7 +26,7 @@ import type {
   CredentialRoute,
   HarnessRunSpec,
 } from "@claudexor/schema";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   atomicPrivateJson,
   readLoginManifest,
@@ -1738,6 +1738,55 @@ describe("setup jobs", () => {
     expect(done.message).toContain("--browser-redirect");
     // A nonzero exit never runs the same-harness smoke.
     expect(capability.runs).toEqual([]);
+    await manager.shutdown();
+  });
+
+  it("D-17 disclosure race: the sidecar landing AFTER awaiting_user emits a follow-up event so SSE clients learn the code exists", async () => {
+    const group = processGroupFixture();
+    const capability = capabilityVerifier();
+    const manager = createSetupJobManager({
+      rootDir: join(root, "device-code-disclosure-race"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      spawn: (() => fakeOpener()) as unknown as typeof import("node:child_process").spawn,
+      monitorPollMs: 1,
+      processGroups: group.service,
+      authCapabilityVerifier: capability.verifier,
+      probeAuthSource: async () => nativeReadiness(true),
+    });
+    await manager.start();
+    const job = manager.create(DEVICE_CODE_REQUEST);
+    const observedAt = new Date().toISOString();
+    writeRunnerStateV2(manager, job.jobId, group.leader, "awaiting_permit", observedAt);
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    // At the flip the sidecar does not exist yet — the projection is empty.
+    expect(
+      (manager.snapshot({ jobId: job.jobId }) as { deviceCode?: unknown }).deviceCode,
+    ).toBeUndefined();
+    // The runner writes the disclosure a beat later.
+    const store = (
+      manager as unknown as { _store: { paths(id: string): { runnerDeviceCode: string } } }
+    )._store;
+    const auth = manager.status({ jobId: job.jobId }).authorization!;
+    atomicPrivateJson(store.paths(job.jobId).runnerDeviceCode, {
+      version: 2,
+      jobId: job.jobId,
+      executionId: auth.executionId,
+      flow: "chatgptDeviceCode",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGH",
+      disclosedAt: new Date().toISOString(),
+    });
+    // The watcher notices and bumps a message EVENT; the projection now carries the code.
+    await vi.waitFor(() => {
+      const snap = manager.snapshot({ jobId: job.jobId }) as {
+        deviceCode?: { userCode?: string };
+        job: { message: string };
+      };
+      expect(snap.deviceCode?.userCode).toBe("ABCD-EFGH");
+      expect(snap.job.message).toContain("One-time code ready");
+    });
     await manager.shutdown();
   });
 

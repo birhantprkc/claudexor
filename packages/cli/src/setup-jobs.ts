@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
@@ -1143,6 +1143,28 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
             failLaunch(signal ? `signal ${signal}` : `exit code ${code}`);
         });
         runner.unref();
+        // D-17 disclosure race: awaiting_user flips at PERMIT time, but the
+        // one-time code lands in the sidecar seconds later — and a sidecar
+        // write is deliberately journal-less, so SSE subscribers who attached
+        // on the flip would never learn the code exists. Watch for the
+        // sidecar (bounded) and bump ONE message event when it appears; the
+        // projection then overlays the code at read time as designed.
+        const disclosurePath = paths.runnerDeviceCode;
+        const disclosureDeadline = now().getTime() + loginTimeoutMs;
+        const watchDisclosure = () => {
+          const current = store.status(job.jobId);
+          if (!ACTIVE_SETUP_STATES.has(current.state) || current.phase === "cancelling") return;
+          if (existsSync(disclosurePath)) {
+            if (current.phase === "awaiting_user") {
+              update(job.jobId, {
+                message: `One-time code ready — enter it at the ${job.harness} verification page (shown in Claudexor).`,
+              });
+            }
+            return;
+          }
+          if (now().getTime() < disclosureDeadline) setTimeout(watchDisclosure, 300).unref();
+        };
+        setTimeout(watchDisclosure, 300).unref();
         return waiting;
       }
       // External-risk disclosure (v3.0.3, Bible): a browser-based OpenAI
