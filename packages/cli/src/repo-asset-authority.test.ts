@@ -4,7 +4,6 @@ import {
   isAppInstallerAsset,
   computeReleaseAssetTotals,
   sumAppInstallerDownloads,
-  extractStargazers,
   hasMoreReleasePages,
   utcDate,
   addDaysUtc,
@@ -12,7 +11,7 @@ import {
   parseCsv,
   serializeCsv,
   upsertRow,
-  priorRowBefore,
+  latestRowAtOrBefore,
   formatThousands,
   type MetricsRow,
 } from "./repo-asset-authority.js";
@@ -21,7 +20,8 @@ import {
 // reuse-lock, audit A-6). This module is the one definition consumed by BOTH
 // the CLI `release stats` and scripts/update-repo-metrics.mjs, so the behaviors
 // the audit named are pinned here once: allowlisting, source-failure handling,
-// pagination, lifetime seed, daily deltas, and same-day idempotency.
+// pagination, closed-day npm deltas, persisted-state validation, and same-day
+// idempotency.
 
 describe("asset allowlisting (the one authority)", () => {
   it("accepts only the signed DMG/ZIP app installers", () => {
@@ -97,13 +97,6 @@ describe("source-failure handling (never poison the count)", () => {
     expect(Number.isNaN(totals.rawTotalDownloads)).toBe(false);
     expect(totals.rawTotalDownloads).toBe(15);
   });
-
-  it("returns null stars for a malformed repo payload rather than a fake zero", () => {
-    expect(extractStargazers({ stargazers_count: 226 })).toBe(226);
-    expect(extractStargazers({})).toBeNull();
-    expect(extractStargazers(null)).toBeNull();
-    expect(extractStargazers("nope")).toBeNull();
-  });
 });
 
 describe("pagination", () => {
@@ -117,7 +110,7 @@ describe("pagination", () => {
 });
 
 describe("npm lifetime seed + daily deltas + gap repair", () => {
-  it("sums only days strictly after the prior date through today (delta)", () => {
+  it("sums only days after the npm watermark through the closed target day", () => {
     const daily = [
       { day: "2026-07-21", downloads: 200 },
       { day: "2026-07-22", downloads: 100 },
@@ -154,15 +147,26 @@ describe("npm lifetime seed + daily deltas + gap repair", () => {
     expect(utcDate(new Date("2026-07-23T23:59:00Z"))).toBe("2026-07-23");
   });
 
-  it("priorRowBefore is the seed signal: null when no earlier day exists", () => {
+  it("reuses the latest row on a same-day refresh", () => {
     const rows: MetricsRow[] = [
-      { date: "2026-07-22", star_total: 1, npm_total: 100, gh_app_downloads: 3, combined: 103 },
-      { date: "2026-07-23", star_total: 2, npm_total: 150, gh_app_downloads: 4, combined: 154 },
+      {
+        date: "2026-07-22",
+        npm_through: "2026-07-21",
+        npm_total: 100,
+        github_release_downloads: 3,
+        total_downloads: 103,
+      },
+      {
+        date: "2026-07-23",
+        npm_through: "2026-07-22",
+        npm_total: 150,
+        github_release_downloads: 4,
+        total_downloads: 154,
+      },
     ];
-    expect(priorRowBefore(rows, "2026-07-23")?.date).toBe("2026-07-22");
-    // Only today's row present => null => the collector SEEDS from the lifetime point.
-    expect(priorRowBefore([rows[1]], "2026-07-23")).toBeNull();
-    expect(priorRowBefore([], "2026-07-23")).toBeNull();
+    expect(latestRowAtOrBefore(rows, "2026-07-23")?.date).toBe("2026-07-23");
+    expect(latestRowAtOrBefore(rows, "2026-07-22")?.date).toBe("2026-07-22");
+    expect(latestRowAtOrBefore([], "2026-07-23")).toBeNull();
   });
 });
 
@@ -171,26 +175,26 @@ describe("CSV ledger same-day idempotency", () => {
     let rows: MetricsRow[] = [];
     rows = upsertRow(rows, {
       date: "2026-07-23",
-      star_total: 1,
+      npm_through: "2026-07-22",
       npm_total: 2,
-      gh_app_downloads: 3,
-      combined: 5,
+      github_release_downloads: 3,
+      total_downloads: 5,
     });
     rows = upsertRow(rows, {
       date: "2026-07-23",
-      star_total: 9,
+      npm_through: "2026-07-22",
       npm_total: 2,
-      gh_app_downloads: 3,
-      combined: 5,
+      github_release_downloads: 9,
+      total_downloads: 11,
     });
     expect(rows).toHaveLength(1);
-    expect(rows[0].star_total).toBe(9);
+    expect(rows[0].github_release_downloads).toBe(9);
     rows = upsertRow(rows, {
       date: "2026-07-22",
-      star_total: 0,
+      npm_through: "2026-07-21",
       npm_total: 0,
-      gh_app_downloads: 0,
-      combined: 0,
+      github_release_downloads: 0,
+      total_downloads: 0,
     });
     expect(rows[0].date).toBe("2026-07-22");
   });
@@ -199,23 +203,35 @@ describe("CSV ledger same-day idempotency", () => {
     const rows: MetricsRow[] = [
       {
         date: "2026-07-22",
-        star_total: 200,
+        npm_through: "2026-07-21",
         npm_total: 800,
-        gh_app_downloads: 300,
-        combined: 1100,
+        github_release_downloads: 300,
+        total_downloads: 1100,
       },
       {
         date: "2026-07-23",
-        star_total: 226,
+        npm_through: "2026-07-22",
         npm_total: 1250,
-        gh_app_downloads: 410,
-        combined: 1660,
+        github_release_downloads: 700,
+        total_downloads: 1950,
       },
     ];
     const once = serializeCsv(rows);
     const twice = serializeCsv(parseCsv(once).rows);
     expect(once).toBe(twice);
-    expect(once.startsWith("date,star_total,npm_total,gh_app_downloads,combined\n")).toBe(true);
+    expect(
+      once.startsWith("date,npm_through,npm_total,github_release_downloads,total_downloads\n"),
+    ).toBe(true);
+  });
+
+  it("rejects stale, malformed, or arithmetically inconsistent state", () => {
+    expect(() => parseCsv("date,npm_total\n2026-07-23,1250\n")).toThrow("header mismatch");
+    expect(() =>
+      parseCsv(
+        "date,npm_through,npm_total,github_release_downloads,total_downloads\n" +
+          "2026-07-23,2026-07-22,1250,700,9999\n",
+      ),
+    ).toThrow("invalid download totals");
   });
 });
 

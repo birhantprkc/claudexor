@@ -1,23 +1,13 @@
 name: Repo metrics
 
-# Daily refresh of the committed star-history / total-downloads charts, the
-# CSV ledger, and the shields endpoint badge (D-15). The generated assets under
-# docs/assets are what the README embeds, so this job's only mutation is to
-# commit those regenerated files back to the default branch.
+# Daily refresh of the total-downloads ledger and Shields endpoint badge (D-15).
+# Generated state is published to the dedicated `repo-metrics` branch because
+# protected `main` requires CI checks and must never receive bot bypass pushes.
 #
-# GITHUB_TOKEN push semantics: commits pushed with the built-in GITHUB_TOKEN do
-# NOT trigger further workflow runs (GitHub suppresses recursive event
-# triggers), so this daily commit cannot start another CI or release run. That
-# is the intended behavior here; do not swap in a PAT, which would re-enable
-# those triggers and could loop.
+# GITHUB_TOKEN push semantics: output-branch commits do NOT trigger further
+# workflow runs. Do not swap in a PAT, which could re-enable recursive triggers.
 
 on:
-  # PAUSED for the v3.1.0 release freeze: the daily 06:17 UTC commit pushes to
-  # the default branch, and a mid-signing push would advance origin/main while
-  # a release tag is being cut. PAUSE this schedule during a release freeze
-  # (comment it out), then re-enable it right after publish — that pause/
-  # resume is a step in the release runbook. workflow_dispatch stays
-  # available for a manual seed/refresh at any time.
   schedule:
     # 06:17 UTC daily. Off the top of the hour to dodge cron congestion; the
     # npm point range and GitHub cumulative counts do not care about the minute.
@@ -32,6 +22,9 @@ concurrency:
 
 permissions:
   contents: write
+
+env:
+  METRICS_BRANCH: repo-metrics
 
 jobs:
   update:
@@ -50,22 +43,52 @@ jobs:
       - name: Self-test the metrics collector
         run: node scripts/update-repo-metrics.mjs --check
 
-      - name: Refresh metrics, charts, and badge
+      - name: Restore the durable npm watermark
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code origin "refs/heads/$METRICS_BRANCH" >/dev/null 2>&1; then
+            git fetch --no-tags origin \
+              "$METRICS_BRANCH:refs/remotes/origin/$METRICS_BRANCH"
+            if git cat-file -e \
+              "origin/$METRICS_BRANCH:docs/assets/repo-metrics.csv" 2>/dev/null; then
+              git show "origin/$METRICS_BRANCH:docs/assets/repo-metrics.csv" \
+                > docs/assets/repo-metrics.csv
+            fi
+          fi
+
+      - name: Refresh metrics and badge
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/update-repo-metrics.mjs
 
-      - name: Commit regenerated assets when they changed
+      - name: Publish generated state without touching protected main
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/assets/repo-metrics.csv docs/assets/star-history-light.svg \
-            docs/assets/star-history-dark.svg docs/assets/downloads-light.svg \
-            docs/assets/downloads-dark.svg docs/assets/downloads-badge.json
+
+          publish="$RUNNER_TEMP/repo-metrics-branch"
+          new_branch=false
+          if git show-ref --verify --quiet "refs/remotes/origin/$METRICS_BRANCH"; then
+            git worktree add --detach "$publish" "origin/$METRICS_BRANCH"
+          else
+            new_branch=true
+            git worktree add -b "$METRICS_BRANCH" "$publish" HEAD
+          fi
+
+          mkdir -p "$publish/docs/assets"
+          cp docs/assets/repo-metrics.csv docs/assets/downloads-badge.json \
+            "$publish/docs/assets/"
+          cd "$publish"
+          git add docs/assets/repo-metrics.csv docs/assets/downloads-badge.json
           if git diff --cached --quiet; then
+            if [ "$new_branch" = true ]; then
+              git push origin "HEAD:refs/heads/$METRICS_BRANCH"
+              echo "Initialized the metrics output branch from the current seed."
+              exit 0
+            fi
             echo "No metrics change today; nothing to commit."
             exit 0
           fi
           git commit -m "chore(metrics): daily repo metrics refresh"
-          git push
+          git push origin "HEAD:refs/heads/$METRICS_BRANCH"

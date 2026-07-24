@@ -1,6 +1,6 @@
-// Single shared collector / asset-authority for the repo download+star metrics
+// Single shared collector / asset-authority for repository download metrics
 // (D-15 reuse-lock; audit A-6). BOTH consumers import the pure logic here so
-// there is exactly ONE definition of "what a download is":
+// there is exactly ONE definition of the GitHub release-asset totals:
 //
 //   - the CLI `claudexor release stats` (packages/cli/src/release.ts), and
 //   - the daily metrics workflow script (scripts/update-repo-metrics.mjs),
@@ -12,15 +12,10 @@
 // erasable syntax (types/interfaces only — no enums, no namespaces, no
 // parameter properties) and depend on nothing outside the Node stdlib.
 //
-// ASSET POLICY (the "one authority" the audit demanded): the honest
-// installs/downloads count is the app-installer allowlist — the signed DMG/ZIP
-// a human downloads to install the app. Everything else a GitHub release
-// carries (the `.spdx.json` SBOM, `runtime-manifest.json`, the lowercase
-// `claudexor-runtime-*.tar.gz` engine closure, `SHA256SUMS`, `*.sha256`
-// checksums, `REVIEW_ATTESTATION.json`) is tooling, not an install, and would
-// overcount humans. `release stats` additionally surfaces the raw all-asset
-// total as an explicitly-labelled diagnostic, but the app-installer figure is
-// the number both surfaces agree on and the README badge reports.
+// ASSET POLICY (the "one authority" the audit demanded): `release stats`
+// exposes both the DMG/ZIP app-installer subtotal and the raw sum across every
+// uploaded release asset. The README total-downloads badge deliberately uses
+// that raw sum; it is a download-event counter, not an installation counter.
 
 /** A single GitHub release asset as returned by the releases API (subset). */
 export interface ReleaseAsset {
@@ -104,20 +99,6 @@ export function sumAppInstallerDownloads(
 }
 
 // ---------------------------------------------------------------------------
-// GitHub stargazers authority
-// ---------------------------------------------------------------------------
-
-/**
- * Extract `stargazers_count` from the repo API payload, or null when the field
- * is absent/malformed (never a fabricated zero — callers surface the failure).
- */
-export function extractStargazers(repo: unknown): number | null {
-  if (typeof repo !== "object" || repo === null) return null;
-  const stars = (repo as { stargazers_count?: unknown }).stargazers_count;
-  return typeof stars === "number" ? stars : null;
-}
-
-// ---------------------------------------------------------------------------
 // Pagination authority (releases API is paged 100/response)
 // ---------------------------------------------------------------------------
 
@@ -174,17 +155,19 @@ export function sumNpmDeltaAfter(
 }
 
 // ---------------------------------------------------------------------------
-// CSV ledger authority (the metrics ledger; idempotent upsert + prior baseline)
+// CSV ledger authority (idempotent upsert + closed-day npm watermark)
 // ---------------------------------------------------------------------------
 
-export const CSV_HEADER = "date,star_total,npm_total,gh_app_downloads,combined";
+export const CSV_HEADER = "date,npm_through,npm_total,github_release_downloads,total_downloads";
 
 export interface MetricsRow {
   date: string;
-  star_total: number;
+  /** Last fully closed UTC npm day included in `npm_total`. */
+  npm_through: string;
   npm_total: number;
-  gh_app_downloads: number;
-  combined: number;
+  /** Raw cumulative count across every uploaded GitHub release asset. */
+  github_release_downloads: number;
+  total_downloads: number;
 }
 
 export function parseCsv(text: string): { header: string; rows: MetricsRow[] } {
@@ -194,22 +177,42 @@ export function parseCsv(text: string): { header: string; rows: MetricsRow[] } {
     .filter((l) => l.length > 0);
   if (lines.length === 0) return { header: CSV_HEADER, rows: [] };
   const header = lines[0];
-  const rows = lines.slice(1).map((line) => {
-    const [date, star_total, npm_total, gh_app_downloads, combined] = line.split(",");
-    return {
-      date,
-      star_total: Number(star_total),
-      npm_total: Number(npm_total),
-      gh_app_downloads: Number(gh_app_downloads),
-      combined: Number(combined),
-    };
+  if (header !== CSV_HEADER) {
+    throw new Error(`repo metrics CSV header mismatch: expected ${CSV_HEADER}`);
+  }
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  const rows = lines.slice(1).map((line, index) => {
+    const fields = line.split(",");
+    if (fields.length !== 5) {
+      throw new Error(`repo metrics CSV row ${index + 2} must have 5 columns`);
+    }
+    const [date, npm_through, npmRaw, githubRaw, totalRaw] = fields;
+    const npm_total = Number(npmRaw);
+    const github_release_downloads = Number(githubRaw);
+    const total_downloads = Number(totalRaw);
+    if (!datePattern.test(date) || !datePattern.test(npm_through)) {
+      throw new Error(`repo metrics CSV row ${index + 2} has an invalid UTC date`);
+    }
+    if (
+      !Number.isSafeInteger(npm_total) ||
+      npm_total < 0 ||
+      !Number.isSafeInteger(github_release_downloads) ||
+      github_release_downloads < 0 ||
+      !Number.isSafeInteger(total_downloads) ||
+      total_downloads !== npm_total + github_release_downloads
+    ) {
+      throw new Error(`repo metrics CSV row ${index + 2} has invalid download totals`);
+    }
+    return { date, npm_through, npm_total, github_release_downloads, total_downloads };
   });
   return { header, rows };
 }
 
 export function serializeCsv(rows: readonly MetricsRow[]): string {
   const body = rows
-    .map((r) => [r.date, r.star_total, r.npm_total, r.gh_app_downloads, r.combined].join(","))
+    .map((r) =>
+      [r.date, r.npm_through, r.npm_total, r.github_release_downloads, r.total_downloads].join(","),
+    )
     .join("\n");
   return body.length > 0 ? `${CSV_HEADER}\n${body}\n` : `${CSV_HEADER}\n`;
 }
@@ -226,16 +229,15 @@ export function upsertRow(rows: readonly MetricsRow[], row: MetricsRow): Metrics
 }
 
 /**
- * The last row whose date is strictly before `date` (the cumulative baseline a
- * same-day rerun rewinds to before re-summing the tail delta). Null when the
- * ledger has no earlier day — the signal to SEED from the npm lifetime point.
+ * The latest persisted row at or before `date`. Same-day reruns reuse its npm
+ * closed-day watermark while refreshing the live GitHub cumulative count.
  */
-export function priorRowBefore(rows: readonly MetricsRow[], date: string): MetricsRow | null {
-  let prior: MetricsRow | null = null;
+export function latestRowAtOrBefore(rows: readonly MetricsRow[], date: string): MetricsRow | null {
+  let latest: MetricsRow | null = null;
   for (const r of rows) {
-    if (r.date < date) prior = r;
+    if (r.date <= date && (latest === null || r.date > latest.date)) latest = r;
   }
-  return prior;
+  return latest;
 }
 
 export function formatThousands(n: number): string {
