@@ -1469,6 +1469,54 @@ describe("setup jobs", () => {
     await restarted.shutdown();
   });
 
+  it("D-17 restart adoption: a successor daemon re-arms the disclosure watcher for an already-awaiting_user device-code job", async () => {
+    const group = processGroupFixture({ leader: knownLeader(151) });
+    const capability = capabilityVerifier();
+    const opts = {
+      rootDir: join(root, "device-code-restart-watcher"),
+      platform: "darwin" as const,
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      spawn: (() => fakeOpener()) as unknown as typeof import("node:child_process").spawn,
+      monitorPollMs: 1,
+      processGroups: group.service,
+      authCapabilityVerifier: capability.verifier,
+      probeAuthSource: async () => nativeReadiness(true),
+    };
+    const first = createSetupJobManager(opts);
+    await first.start();
+    const job = first.create(DEVICE_CODE_REQUEST);
+    const observedAt = new Date().toISOString();
+    writeRunnerStateV2(first, job.jobId, group.leader, "awaiting_permit", observedAt);
+    await waitForPhase(first, job.jobId, "awaiting_user");
+    // Crash BEFORE the sidecar exists; the durable journal already says awaiting_user.
+    first.beginDrain();
+    first._store.journal.close();
+    const restarted = createSetupJobManager(opts);
+    await restarted.start();
+    expect(restarted.status({ jobId: job.jobId }).phase).toBe("awaiting_user");
+    // The sidecar lands under the SUCCESSOR daemon.
+    const auth = restarted.status({ jobId: job.jobId }).authorization!;
+    atomicPrivateJson(restarted._store.paths(job.jobId).runnerDeviceCode, {
+      version: 2,
+      jobId: job.jobId,
+      executionId: auth.executionId,
+      flow: "chatgptDeviceCode",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "WXYZ-1234",
+      disclosedAt: new Date().toISOString(),
+    });
+    await vi.waitFor(() => {
+      const snap = restarted.snapshot({ jobId: job.jobId }) as {
+        deviceCode?: { userCode?: string };
+        job: { message: string };
+      };
+      expect(snap.deviceCode?.userCode).toBe("WXYZ-1234");
+      expect(snap.job.message).toContain("One-time code ready");
+    });
+    await restarted.shutdown();
+  });
+
   it("marks a disappeared runner interrupted on restart and ignores a mismatched result", async () => {
     const first = createSetupJobManager({
       rootDir: join(root, "interrupted"),

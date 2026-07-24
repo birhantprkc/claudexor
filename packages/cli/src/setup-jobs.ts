@@ -680,8 +680,11 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         phase: "awaiting_user",
         message: awaitingUserMessage(job),
       });
-      armDeviceCodeDisclosureWatcher(jobId);
     }
+    // Armed for launching AND already-awaiting_user adoption (a successor
+    // daemon adopting a runner whose code sidecar has not landed yet —
+    // round-7 sol critical); the registry makes repeats no-ops.
+    armDeviceCodeDisclosureWatcher(jobId);
   }
 
   async function consumeLoginResult(jobId: string, result: SetupLoginRunnerResult): Promise<void> {
@@ -872,9 +875,13 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
    * awaiting_user flip (create AND reconcile-adopt paths, one owner): watch
    * for the sidecar (bounded by the job deadline) and bump ONE message event;
    * the read-time projection then overlays the code as designed. */
+  const armedDisclosureWatchers = new Set<string>();
   function armDeviceCodeDisclosureWatcher(jobId: string): void {
     const job = store.status(jobId);
     if (!isDeviceCodeJob(job)) return;
+    // Idempotent: create, permit-flip, and reconcile-adopt may each arm.
+    if (armedDisclosureWatchers.has(jobId)) return;
+    armedDisclosureWatchers.add(jobId);
     const disclosurePath = store.paths(jobId).runnerDeviceCode;
     const deadline = job.deadlineAt ? Date.parse(job.deadlineAt) : now().getTime() + 60_000;
     const watch = () => {
