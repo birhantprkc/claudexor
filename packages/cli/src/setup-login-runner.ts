@@ -399,21 +399,27 @@ function appServerConnection(child: ChildProcess): CodexAppServerConnection {
 const OUTPUT_TAIL_BYTES = 4096;
 
 /** Ring buffer of the last OUTPUT_TAIL_BYTES of tee'd vendor output. */
-function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
+export function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
   // Byte-accurate ring: keep the final OUTPUT_TAIL_BYTES RAW bytes and decode
   // ONCE in text() — a per-chunk String() decode splits multibyte UTF-8 into
   // replacement chars and a UTF-16 .slice miscounts the byte bound.
   let tail = Buffer.alloc(0);
+  // Whether the stream ever exceeded the ring — the truncation signal cannot
+  // be recovered from the decoded string's length (already <= the byte cap),
+  // so track it HERE and hand it to boundedTail (X224 ring-path fix).
+  let overflowed = false;
   return {
     push(chunk) {
-      tail = Buffer.concat([tail, chunk]).subarray(-OUTPUT_TAIL_BYTES);
+      const combined = Buffer.concat([tail, chunk]);
+      if (combined.length > OUTPUT_TAIL_BYTES) overflowed = true;
+      tail = combined.subarray(-OUTPUT_TAIL_BYTES);
     },
     text() {
       // The ring can start mid-codepoint: drop leading continuation bytes
       // (0b10xxxxxx) so the decode never opens with a replacement char.
       let start = 0;
       while (start < tail.length && (tail[start]! & 0b1100_0000) === 0b1000_0000) start += 1;
-      return boundedTail(tail.subarray(start).toString("utf8"));
+      return boundedTail(tail.subarray(start).toString("utf8"), overflowed || start > 0);
     },
   };
 }
@@ -421,19 +427,22 @@ function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
 /** Strip terminal escapes (CSI, OSC, bare ESC, C0 controls except newline),
  * redact secret-like tokens, and clamp - diagnostic evidence entering a
  * durable journal/API surface, never a raw vendor log copy (INV-062). */
-function boundedTail(text: string): string {
+export function boundedTail(text: string, truncated = false): string {
   const plain = text
     // eslint-disable-next-line no-control-regex
     .replace(/\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
-  // Only when the text ACTUALLY overflows the tail budget does the slice cut
-  // the front — a secret split by that boundary could leave a prefix-less
-  // fragment redactSecrets cannot anchor. In that case (and only then) drop
-  // the leading partial token before redacting; short output is kept whole.
-  const truncated = plain.length > OUTPUT_TAIL_BYTES;
+  // When the source was truncated at the front (ring overflow, or a
+  // direct-string caller over the byte budget), a secret split by that
+  // boundary could leave a prefix-less fragment redactSecrets cannot anchor.
+  // Drop the leading partial token in that case; untruncated output is whole.
+  // The caller's flag is authoritative (a ring string is already <= the cap,
+  // so a length check here cannot see the cut); direct callers OR in their
+  // own over-budget check.
+  const cut = truncated || Buffer.byteLength(plain, "utf8") > OUTPUT_TAIL_BYTES;
   let bounded = plain.slice(-OUTPUT_TAIL_BYTES);
-  if (truncated) bounded = bounded.replace(/^\S+/, "");
+  if (cut) bounded = bounded.replace(/^\S+/, "");
   return redactSecrets(bounded.trim().slice(0, 4000));
 }
 
