@@ -4,9 +4,11 @@ import {
   finalizeAttempt,
   readOnlyNoSuccessTerminal,
   resolveWorkReportEnvelope,
+  unrecoveredToolErrorFailure,
   unwrapWorkReportEnvelope,
   type WorkReportEnvelopeMode,
 } from "./attemptFinalize.js";
+import type { ToolErrorRecord } from "./attemptTelemetry.js";
 
 const completed: WorkReport = { state: "completed", required_inputs: [] };
 const needsInput: WorkReport = {
@@ -469,5 +471,34 @@ describe("readOnlyNoSuccessTerminal (QA-036)", () => {
         attemptsCount: 0,
       }),
     ).toEqual({ lifecycle: "failed", reason: "budget_exhausted" });
+  });
+});
+
+describe("unrecoveredToolErrorFailure (INV-043/INV-044 deliverable exception)", () => {
+  const toolError = (tool: string, summary: string): ToolErrorRecord => ({
+    tool,
+    kind: "command",
+    target: null,
+    summary,
+    toolUseId: null,
+    recovered: false,
+  });
+
+  it("a delivered deliverable keeps unrecovered tool errors as warning evidence", () => {
+    expect(unrecoveredToolErrorFailure([toolError("command", "exit 1")], true)).toBeNull();
+  });
+
+  it("a deliverable-less attempt escalates the FIRST unrecovered error", () => {
+    expect(
+      unrecoveredToolErrorFailure(
+        [toolError("command", "exit 1"), toolError("read", "no such file")],
+        false,
+      ),
+    ).toBe("command failed without recovery: exit 1");
+  });
+
+  it("no unrecovered errors is never a failure, delivered or not", () => {
+    expect(unrecoveredToolErrorFailure([], false)).toBeNull();
+    expect(unrecoveredToolErrorFailure([], true)).toBeNull();
   });
 });

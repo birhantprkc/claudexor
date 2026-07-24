@@ -6056,119 +6056,156 @@ describe("Orchestrator", () => {
 
   // Planner attempts share the explorer path's deliverable exception
   // (INV-043/INV-044): a delivered plan downgrades a benign unrecovered tool
-  // error to warning evidence instead of discarding the deliverable.
-  function toolErrorPlannerAdapter(id: string, planLines: string[]): HarnessAdapter {
+  // error to warning evidence instead of discarding the plan. The deliverable
+  // is read from the UNWRAPPED D-16 envelope, so the finalizer's own classes
+  // (veto / contract failure / interrupted) still outrank the exception.
+  const TOOL_ERROR_PLAN = [
+    "# Plan despite the failed check",
+    "1. Do the thing in src/a.ts",
+    "",
+    "## Open Questions",
+    "- (none)",
+  ].join("\n");
+
+  function toolErrorPlannerAdapter(
+    id: string,
+    opts: {
+      /** Final message text; null emits no message at all (no deliverable). */
+      finalText: string | null;
+      /** Arm the constrained_json WorkReport envelope for this lane. */
+      constrained?: boolean;
+      /** Emit the unrecovered tool error (default true). */
+      toolError?: boolean;
+      /** Emit a terminal capacity_exhausted context signal. */
+      contextExhausted?: boolean;
+    },
+  ): HarnessAdapter {
     return {
-      ...markdownPlannerAdapter(id, planLines),
+      ...markdownPlannerAdapter(id, []),
+      async discover() {
+        return HarnessManifest.parse({
+          id,
+          display_name: id,
+          kind: "local_cli",
+          provider_family: "openai",
+          capabilities: {
+            plan: true,
+            ...(opts.constrained === true
+              ? {
+                  work_report_transport: "constrained",
+                  json_schema_output: true,
+                  structured_output_channel: "final_message",
+                }
+              : {}),
+          },
+          access_profiles_supported: ["readonly"],
+        });
+      },
       async *run(spec) {
         const ts = new Date().toISOString();
         yield { type: "started", session_id: spec.session_id, ts };
-        yield {
-          type: "tool_call",
-          session_id: spec.session_id,
-          ts,
-          text: "rg TODO src",
-          tool: { name: "command", kind: "command", use_id: "t1", target: "rg TODO src" },
-        };
-        yield {
-          type: "tool_result",
-          session_id: spec.session_id,
-          ts,
-          tool: {
-            name: "command",
-            kind: "command",
-            use_id: "t1",
-            status: "error",
-            error_summary: "command exited with code 1",
-          },
-        };
-        if (planLines.length > 0) {
-          yield { type: "message", session_id: spec.session_id, ts, text: planLines.join("\n") };
+        if (opts.toolError !== false) {
+          yield {
+            type: "tool_call",
+            session_id: spec.session_id,
+            ts,
+            text: "pnpm test",
+            tool: { name: "command", kind: "command", use_id: "t1", target: "pnpm test" },
+          };
+          yield {
+            type: "tool_result",
+            session_id: spec.session_id,
+            ts,
+            tool: {
+              name: "command",
+              kind: "command",
+              use_id: "t1",
+              status: "error",
+              error_summary: "command exited with code 1",
+            },
+          };
+        }
+        if (opts.contextExhausted === true) {
+          yield {
+            type: "context",
+            session_id: spec.session_id,
+            ts,
+            context: {
+              kind: "capacity_exhausted",
+              cause: "window_exceeded",
+              native_code: null,
+              trigger: "auto",
+              pre_tokens: null,
+            },
+          };
+        }
+        if (opts.finalText !== null) {
+          yield { type: "message", session_id: spec.session_id, ts, text: opts.finalText };
         }
         yield { type: "completed", session_id: spec.session_id, ts };
       },
     };
   }
 
-  it("a delivered plan survives a benign unrecovered tool error as success_with_warnings", async () => {
+  async function runToolErrorPlan(
+    planner: HarnessAdapter,
+    extra: { web?: "live" } = {},
+  ): Promise<{ res: OrchestratorResult; outcome: Record<string, unknown> }> {
     const repo = await initRepo();
-    const planner = toolErrorPlannerAdapter("planner", [
-      "# Plan despite the no-match search",
-      "1. Do the thing in src/a.ts",
-      "",
-      "## Open Questions",
-      "- (none)",
-    ]);
     const orch = new Orchestrator({ registry: new Map([["planner", planner]]), reviewers: [] });
     const res = await orch.run({
       repoRoot: repo,
       prompt: "plan it",
       mode: "plan",
       harnesses: ["planner"],
+      ...extra,
     });
-    // The contracted deliverable landed — the unrecovered non-web tool error
-    // is disclosed as a warning, never a discarded plan (explorer parity).
+    const telemetry = new ArtifactStore(repo).readYaml<{
+      attempts: Array<{ attempt_id: string; outcome: Record<string, unknown> }>;
+    }>(join(res.runDir, "final", "telemetry.yaml"));
+    const attempt = telemetry?.attempts?.[0];
+    expect(attempt?.attempt_id).toBe("p01");
+    return { res, outcome: attempt?.outcome ?? {} };
+  }
+
+  it("a delivered plan survives an unrecovered tool error as success_with_warnings", async () => {
+    const { res, outcome } = await runToolErrorPlan(
+      toolErrorPlannerAdapter("planner", { finalText: TOOL_ERROR_PLAN }),
+    );
+    // The contracted deliverable landed — the unrecovered non-web tool error is
+    // disclosed as a warning, never a discarded plan (explorer parity).
     expect(legacyOutcome(res)).toBe("success");
     expect(readFileSync(join(res.runDir, "final", "plan.md"), "utf8")).toContain(
-      "# Plan despite the no-match search",
+      "# Plan despite the failed check",
     );
-    const telemetry = new ArtifactStore(repo).readYaml<{
-      attempts: Array<{
-        attempt_id: string;
-        outcome: {
-          deliverable_present: boolean;
-          harness_errored: boolean;
-          tool_warnings_count: number;
-          status: string;
-        };
-      }>;
-    }>(join(res.runDir, "final", "telemetry.yaml"));
-    expect(telemetry).toMatchObject({
-      attempts: [
-        {
-          attempt_id: "p01",
-          outcome: {
-            deliverable_present: true,
-            harness_errored: false,
-            tool_warnings_count: 1,
-            status: "success_with_warnings",
-          },
-        },
-      ],
+    expect(outcome).toMatchObject({
+      deliverable_present: true,
+      harness_errored: false,
+      tool_warnings_count: 1,
+      status: "success_with_warnings",
     });
   });
 
   it("a deliverable-less planner still hard-fails on an unrecovered tool error", async () => {
-    const repo = await initRepo();
-    const planner = toolErrorPlannerAdapter("planner", []);
-    const orch = new Orchestrator({ registry: new Map([["planner", planner]]), reviewers: [] });
-    const res = await orch.run({
-      repoRoot: repo,
-      prompt: "plan it",
-      mode: "plan",
-      harnesses: ["planner"],
-    });
+    const { res, outcome } = await runToolErrorPlan(
+      toolErrorPlannerAdapter("planner", { finalText: null }),
+    );
     expect(legacyOutcome(res)).toBe("failed");
-    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
-    expect(failure).toContain("failed without recovery");
-    const telemetry = new ArtifactStore(repo).readYaml<{
-      attempts: Array<{
-        attempt_id: string;
-        outcome: { deliverable_present: boolean; status: string };
-      }>;
-    }>(join(res.runDir, "final", "telemetry.yaml"));
-    expect(telemetry).toMatchObject({
-      attempts: [{ attempt_id: "p01", outcome: { deliverable_present: false, status: "failed" } }],
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "failed without recovery",
+    );
+    expect(outcome).toMatchObject({
+      deliverable_present: false,
+      status: "failed",
     });
   });
 
-  it("required web evidence keeps blocking a planner even when the plan text was delivered", async () => {
-    const repo = await initRepo();
+  it("required web evidence still blocks a planner that delivered plan text", async () => {
     // Delivers a plan but never attempts the REQUIRED web evidence — the web
-    // gate is a separate axis and must not be softened by the deliverable
-    // exception. (web_policy: "tools" so the harness is eligible for --web live.)
+    // gate is a separate axis and is NOT softened by the deliverable exception.
+    // (web_policy "tools" makes the harness eligible for --web live.)
     const planner: HarnessAdapter = {
-      ...markdownPlannerAdapter("planner", []),
+      ...toolErrorPlannerAdapter("planner", { finalText: TOOL_ERROR_PLAN, toolError: false }),
       async discover() {
         return HarnessManifest.parse({
           id: "planner",
@@ -6179,43 +6216,84 @@ describe("Orchestrator", () => {
           access_profiles_supported: ["readonly"],
         });
       },
-      async *run(spec) {
-        const ts = new Date().toISOString();
-        yield { type: "started", session_id: spec.session_id, ts };
-        yield {
-          type: "message",
-          session_id: spec.session_id,
-          ts,
-          text: ["# Plan from memory, no web call made", "", "## Open Questions", "- (none)"].join(
-            "\n",
-          ),
-        };
-        yield { type: "completed", session_id: spec.session_id, ts };
-      },
     };
-    const orch = new Orchestrator({ registry: new Map([["planner", planner]]), reviewers: [] });
-    const res = await orch.run({
-      repoRoot: repo,
-      prompt: "plan against the latest release notes",
-      mode: "plan",
-      harnesses: ["planner"],
-      web: "live",
-    });
+    const { res, outcome } = await runToolErrorPlan(planner, { web: "live" });
     expect(legacyOutcome(res)).toBe("blocked");
     expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
       "never attempted",
     );
-    const telemetry = new ArtifactStore(repo).readYaml<{
-      attempts: Array<{
-        attempt_id: string;
-        outcome: { web_required_unsatisfied: boolean; status: string };
-      }>;
-    }>(join(res.runDir, "final", "telemetry.yaml"));
-    expect(telemetry).toMatchObject({
-      attempts: [
-        { attempt_id: "p01", outcome: { web_required_unsatisfied: true, status: "blocked" } },
-      ],
+    expect(outcome).toMatchObject({
+      web_required_unsatisfied: true,
+      status: "blocked",
     });
+  });
+
+  it("a needs_input work_report veto still rides a delivered plan with a tool error", async () => {
+    // D-16 (INV-116): the plan DELIVERS and the tool error stays a warning, but
+    // the model-attested veto must survive on the work_state axis — the softened
+    // tool-error path must not launder a veto into a clean success.
+    const { res, outcome } = await runToolErrorPlan(
+      toolErrorPlannerAdapter("planner", {
+        constrained: true,
+        finalText: JSON.stringify({
+          work_report: {
+            state: "needs_input",
+            required_inputs: [
+              { kind: "decision", locator: "db-backend", description: "which db?" },
+            ],
+          },
+          output: TOOL_ERROR_PLAN,
+        }),
+      }),
+    );
+    expect(readFileSync(join(res.runDir, "final", "plan.md"), "utf8")).toContain(
+      "# Plan despite the failed check",
+    );
+    expect(outcome).toMatchObject({
+      deliverable_present: true,
+      harness_errored: false,
+      tool_warnings_count: 1,
+      status: "success_with_warnings",
+    });
+    expect(outcome["work_state"]).toMatchObject({ state: "needs_input" });
+    expect(res.facts.reason).toBe("input_required");
+  });
+
+  it("a malformed work_report is still a contract failure on a plan with a tool error", async () => {
+    // The tool error must NOT pre-empt the finalizer's contract failure: an
+    // active envelope that carried no valid report fails the attempt, and the
+    // failure names the contract, not the shell command.
+    const { res, outcome } = await runToolErrorPlan(
+      toolErrorPlannerAdapter("planner", {
+        constrained: true,
+        finalText: JSON.stringify({ work_report: { state: "bogus" }, output: TOOL_ERROR_PLAN }),
+      }),
+    );
+    expect(legacyOutcome(res)).toBe("failed");
+    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
+    expect(failure).toContain("work_report");
+    expect(failure).not.toContain("failed without recovery");
+    expect(outcome).toMatchObject({
+      deliverable_present: false,
+      harness_errored: true,
+      status: "failed",
+    });
+  });
+
+  it("context exhaustion still outranks a delivered plan with a tool error", async () => {
+    // An interrupted planner is never a clean plan: terminal capacity
+    // exhaustion outranks both the deliverable exception and the tool warning.
+    const { res, outcome } = await runToolErrorPlan(
+      toolErrorPlannerAdapter("planner", {
+        finalText: TOOL_ERROR_PLAN,
+        contextExhausted: true,
+      }),
+    );
+    expect(res.lifecycle).not.toBe("succeeded");
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "context capacity exhausted",
+    );
+    expect(outcome).toMatchObject({ harness_errored: true, status: "failed" });
   });
 
   // Council (INV-031): a planner that emits DRAFT questions on intent=plan and

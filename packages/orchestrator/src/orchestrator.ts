@@ -153,7 +153,6 @@ import {
 } from "./deepScanReducer.js";
 import {
   type AttemptTelemetry,
-  type ToolErrorRecord,
   classifyAdapterThrow,
   createAttemptTelemetry,
   observeAttemptTelemetry,
@@ -168,6 +167,7 @@ import {
   finalizeAttempt,
   readOnlyNoSuccessTerminal,
   resolveWorkReportEnvelope,
+  unrecoveredToolErrorFailure,
   unwrapWorkReportEnvelope,
   type AttemptOutcomeClass,
   type ResolvedWorkReportEnvelope,
@@ -5832,31 +5832,22 @@ export class Orchestrator {
         ),
       );
     }
-    const unrecovered = unrecoveredToolErrors(telemetry);
-    const webBlocked = webUnsatisfied(telemetry);
-    // Same deliverable-presence signal as the explorer path (which computes
-    // it from the redacted report): the planner's contracted deliverable is
-    // the text it produced. redactSecrets never empties a non-empty string,
-    // so this stays byte-faithful to the explorer's boolean.
-    const deliverablePresent = redactSecrets(answer.text()).length > 0;
-    if (!harnessError && webBlocked) {
-      harnessError = `web evidence unsatisfied: ${telemetry.web.errorSummary ?? (telemetry.web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`;
-    }
-    // Aligned with the explorer path's existing semantics (INV-043/INV-044):
-    // an unrecovered non-web tool error on an attempt that DELIVERED its plan
-    // is disclosed warning evidence — setAttemptOutcome lands it as
-    // success_with_warnings — never a terminal failure. Only a deliverable-less
-    // attempt escalates the first unrecovered error to a hard failure.
-    // Required-but-unsatisfied web evidence keeps its own hard gate above.
-    if (!harnessError && unrecovered.length > 0 && !deliverablePresent) {
-      const first = unrecovered[0] as ToolErrorRecord;
-      harnessError = `${first.tool} failed without recovery: ${first.summary}`;
-    }
     // D-16: unwrap and require PLAN TEXT — a plan with no text is not delivered.
+    // The unwrap runs BEFORE the error axes: the deliverable it yields is what
+    // decides whether an unrecovered tool error is fatal (explorer parity).
     const planUnwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", planWorkMode, {
       sideToolReport: telemetry.sideToolWorkReport ?? undefined,
     });
     const planText = redactSecrets(planUnwrapped.deliverable).trim();
+    const unrecovered = unrecoveredToolErrors(telemetry);
+    const webBlocked = webUnsatisfied(telemetry);
+    if (!harnessError && webBlocked) {
+      harnessError = `web evidence unsatisfied: ${telemetry.web.errorSummary ?? (telemetry.web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`;
+    }
+    // INV-043/INV-044, explorer parity: a DELIVERED plan keeps an unrecovered
+    // non-web tool error as warning evidence instead of discarding the plan (see
+    // the helper). Web keeps its hard gate above; the finalizer outranks both.
+    harnessError ??= unrecoveredToolErrorFailure(unrecovered, planText.length > 0);
     const planFinalized = finalizeAttempt({
       deliverableEvidence: planText.length > 0,
       harnessErrored: harnessError !== null && !webBlocked,
@@ -6995,10 +6986,7 @@ export class Orchestrator {
       if (!harnessError && webBlocked) {
         harnessError = `web evidence unsatisfied: ${telemetry.web.errorSummary ?? (telemetry.web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`;
       }
-      if (!harnessError && unrecovered.length > 0 && !reportPresent) {
-        const first = unrecovered[0] as ToolErrorRecord;
-        harnessError = `${first.tool} failed without recovery: ${first.summary}`;
-      }
+      harnessError ??= unrecoveredToolErrorFailure(unrecovered, reportPresent);
       const roFinalized = finalizeAttempt({
         deliverableEvidence: reportPresent,
         harnessErrored: harnessError !== null && !webBlocked,

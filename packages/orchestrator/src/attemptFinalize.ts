@@ -24,6 +24,7 @@ import {
   type WorkState,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
+import type { ToolErrorRecord } from "./attemptTelemetry.js";
 
 /**
  * How the WorkReport rides the wire for an active envelope (D-16c):
@@ -485,4 +486,33 @@ export function finalizeAttempt(input: FinalizeAttemptInput): FinalizeAttemptRes
     reason: null,
     outcomeClass: "clean",
   };
+}
+
+/**
+ * The deliverable exception for tool hygiene (INV-043/INV-044), shared by every
+ * read-only intent so planner and explorer cannot drift apart again.
+ *
+ * An unrecovered tool error is tool hygiene, not a terminal state: on an attempt
+ * that DELIVERED its contracted deliverable it stays disclosed warning evidence
+ * (`toolWarnings` counts it and `setAttemptOutcome` lands `success_with_warnings`)
+ * instead of discarding a produced answer or plan. Only a deliverable-LESS
+ * attempt escalates the FIRST unrecovered error into a hard harness error.
+ *
+ * `deliverableEvidence` MUST be the same raw evidence boolean `finalizeAttempt`
+ * folds — the unwrapped D-16 deliverable, never the pre-envelope answer text —
+ * so the WorkReport contract stays the one owner of what "delivered" means.
+ * This decides ONLY the tool-error axis: required-but-unsatisfied web evidence
+ * keeps its own hard gate, and the finalizer's contract-failure and interrupted
+ * classes still outrank whatever this returns.
+ *
+ * Returns the harness-error message to escalate, or null to leave the errors as
+ * warning evidence.
+ */
+export function unrecoveredToolErrorFailure(
+  unrecovered: readonly ToolErrorRecord[],
+  deliverableEvidence: boolean,
+): string | null {
+  if (deliverableEvidence) return null;
+  const first = unrecovered[0];
+  return first ? `${first.tool} failed without recovery: ${first.summary}` : null;
 }
