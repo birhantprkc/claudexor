@@ -1034,9 +1034,11 @@ views in the shared design-system files; screens compose them.
   reason and a path to Harness Doctor/Auth setup.
 - **Onboarding.** First run is native-first: explain Codex/Claude/Cursor native auth
   and expose daemon-owned native-login jobs, then offer API-key fallback
-  that writes only to the local secret store. Claudexor does not broker SaaS OAuth itself; it
-  launches each official CLI in Terminal and verifies its native session when available without
-  receiving/copying/storing vendor session tokens or credential files. Native
+  that writes only to the local secret store. Claudexor does not broker SaaS OAuth itself: Codex native login runs the
+  official app-server device-code flow fully in-app (D-17); Claude/Cursor
+  launch their official CLI in an auto-opened Terminal. Either way Claudexor
+  verifies the native session without receiving/copying/storing vendor
+  session tokens or credential files. Native
   readiness is distinct from overall/API-key readiness: absent means unavailable/not-run,
   an indeterminate probe remains unknown/not-run, and present-but-unusable is available/failed.
   Login/Manage Login is driven by that native source, never aggregate harness health. The

@@ -26,7 +26,7 @@ opt-in policy that rotates a spent account out of the way on typed vendor
 limits only. Everything runs on your machine, files are the source of truth,
 and there is no telemetry.
 
-Current status: **v3.0**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.1**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -422,9 +422,11 @@ transport. Native login stays vendor-owned (official CLI, structured argv,
 scrubbed env; Claudexor never sees or copies vendor tokens). The deep
 semantics live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5.
 
-Codex login defaults to device-auth (a URL + one-time code in the Terminal);
-complete it in a private browser window signed into no other OpenAI account —
-an in-browser account switch can revoke sibling OpenAI sessions server-side.
+Codex login defaults to device-auth, driven in-app: the macOS AuthSheet shows
+the one-time code and opens a private sign-in window (no Terminal); the CLI
+prints the same code inline. Complete it in a window signed into no other
+OpenAI account — an in-browser account switch can revoke sibling OpenAI
+sessions server-side.
 `claudexor auth login codex --browser-redirect` opts back into the older
 localhost-callback flow. See
 [Install And Login](docs/AGENT_ONBOARDING.md#install-and-login).
