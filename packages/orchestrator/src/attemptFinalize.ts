@@ -24,7 +24,7 @@ import {
   type WorkState,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
-import type { ToolErrorRecord } from "./attemptTelemetry.js";
+import type { ToolErrorRecord, WebEvidenceState } from "./attemptTelemetry.js";
 
 /**
  * How the WorkReport rides the wire for an active envelope (D-16c):
@@ -515,4 +515,25 @@ export function unrecoveredToolErrorFailure(
   if (deliverableEvidence) return null;
   const first = unrecovered[0];
   return first ? `${first.tool} failed without recovery: ${first.summary}` : null;
+}
+
+/**
+ * The harness-error message for required-but-unsatisfied web evidence, shared by
+ * every lane that reports it so the web axis has the SAME single owner as the
+ * tool-error axis above and the two cannot drift apart.
+ *
+ * This is a message builder only — it neither decides that the evidence is
+ * unsatisfied (`webUnsatisfied` owns that) nor changes the axis precedence: web
+ * stays a HARD gate that an attempt cannot buy off with a deliverable, unlike
+ * the tool-error exception, and the finalizer's contract-failure and interrupted
+ * classes still outrank it at the call site.
+ *
+ * The reason falls back through the telemetry the same way in every lane: the
+ * recorded `errorSummary` when there is one, else an unrecovered-web-tool reason
+ * when web was attempted at all, else a never-attempted reason.
+ */
+export function webEvidenceFailure(
+  web: Pick<WebEvidenceState, "attempted" | "errorSummary">,
+): string {
+  return `web evidence unsatisfied: ${web.errorSummary ?? (web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`;
 }

@@ -169,6 +169,7 @@ import {
   resolveWorkReportEnvelope,
   unrecoveredToolErrorFailure,
   unwrapWorkReportEnvelope,
+  webEvidenceFailure,
   type AttemptOutcomeClass,
   type ResolvedWorkReportEnvelope,
   type WorkReportEnvelopeMode,
@@ -2627,9 +2628,7 @@ export class Orchestrator {
     }
     const attemptStreamEndedMs = Date.now();
     if (webUnsatisfied(telemetry)) {
-      errors.push(
-        `web evidence unsatisfied: ${telemetry.web.errorSummary ?? (telemetry.web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`,
-      );
+      errors.push(webEvidenceFailure(telemetry.web));
     }
 
     const diff = await wsm.diff(envelope);
@@ -5842,7 +5841,7 @@ export class Orchestrator {
     const unrecovered = unrecoveredToolErrors(telemetry);
     const webBlocked = webUnsatisfied(telemetry);
     if (!harnessError && webBlocked) {
-      harnessError = `web evidence unsatisfied: ${telemetry.web.errorSummary ?? (telemetry.web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`;
+      harnessError = webEvidenceFailure(telemetry.web);
     }
     // INV-043/INV-044, explorer parity: a DELIVERED plan keeps an unrecovered
     // non-web tool error as warning evidence instead of discarding the plan (see
@@ -6984,7 +6983,7 @@ export class Orchestrator {
       const webBlocked = webUnsatisfied(telemetry);
       const reportPresent = report.length > 0;
       if (!harnessError && webBlocked) {
-        harnessError = `web evidence unsatisfied: ${telemetry.web.errorSummary ?? (telemetry.web.attempted ? "web tool failed without verified recovery" : "web evidence required but never attempted")}`;
+        harnessError = webEvidenceFailure(telemetry.web);
       }
       harnessError ??= unrecoveredToolErrorFailure(unrecovered, reportPresent);
       const roFinalized = finalizeAttempt({

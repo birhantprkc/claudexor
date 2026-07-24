@@ -6,6 +6,7 @@ import {
   resolveWorkReportEnvelope,
   unrecoveredToolErrorFailure,
   unwrapWorkReportEnvelope,
+  webEvidenceFailure,
   type WorkReportEnvelopeMode,
 } from "./attemptFinalize.js";
 import type { ToolErrorRecord } from "./attemptTelemetry.js";
@@ -500,5 +501,29 @@ describe("unrecoveredToolErrorFailure (INV-043/INV-044 deliverable exception)", 
   it("no unrecovered errors is never a failure, delivered or not", () => {
     expect(unrecoveredToolErrorFailure([], false)).toBeNull();
     expect(unrecoveredToolErrorFailure([], true)).toBeNull();
+  });
+});
+
+describe("webEvidenceFailure (one owner for the web axis message)", () => {
+  it("a recorded error summary is the reason verbatim", () => {
+    expect(webEvidenceFailure({ attempted: true, errorSummary: "429 from search" })).toBe(
+      "web evidence unsatisfied: 429 from search",
+    );
+    // The summary wins even when web was never attempted (nullish fallback only).
+    expect(webEvidenceFailure({ attempted: false, errorSummary: "blocked by policy" })).toBe(
+      "web evidence unsatisfied: blocked by policy",
+    );
+  });
+
+  it("an attempted-but-unsummarized failure reads as an unrecovered web tool", () => {
+    expect(webEvidenceFailure({ attempted: true, errorSummary: null })).toBe(
+      "web evidence unsatisfied: web tool failed without verified recovery",
+    );
+  });
+
+  it("never-attempted required web reads as never attempted", () => {
+    expect(webEvidenceFailure({ attempted: false, errorSummary: null })).toBe(
+      "web evidence unsatisfied: web evidence required but never attempted",
+    );
   });
 });
