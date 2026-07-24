@@ -65,6 +65,16 @@ try {
       );
     }
   }
+  // A-5 leg the promotion audit missed: the promoted artifact pair must be
+  // built from THE tag's commit — candidate_run_id alone could select an
+  // EARLIER candidate whose signed fields self-agree.
+  if (options["expected-build-sha"]) {
+    if (signed.buildSha !== options["expected-build-sha"]) {
+      fail(
+        `signed manifest buildSha (${signed.buildSha}) is not the published tag's commit (${options["expected-build-sha"]})`,
+      );
+    }
+  }
   console.log(
     `signed runtime manifest verified: v${signed.version} sha256=${signed.sha256} keyId=${signed.keyId}`,
   );
