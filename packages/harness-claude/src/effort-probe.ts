@@ -16,8 +16,7 @@
  * On a missing binary, an unparseable help text, or a `--help` that stops
  * documenting the values, the recorded snapshot fills in and the run proceeds.
  */
-import type { EffortHint } from "@claudexor/schema";
-import { EFFORT_HINT_PATTERN } from "@claudexor/schema";
+import { EffortHint, isRankedEffort } from "@claudexor/schema";
 import { runCapture } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
 
@@ -69,19 +68,38 @@ export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
     if (next.trim() === "" || /^\s*--[a-z]/.test(next)) break;
   }
   const window = lines.slice(start, end).join(" ");
-  const open = window.indexOf("(");
-  if (open < 0) return null;
-  const close = window.indexOf(")", open);
-  if (close < 0) return null;
-  const levels: EffortHint[] = [];
-  for (const raw of window.slice(open + 1, close).split(/[,|]/)) {
-    const level = raw.trim();
-    // Ignore anything that is not an effort slug: prose such as "(default: high)"
-    // must not become an advertised level.
-    if (!EFFORT_HINT_PATTERN.test(level)) continue;
-    if (!levels.includes(level)) levels.push(level);
+  // The FIRST paren in the block is not necessarily the value list: a vendor
+  // annotation can precede it ("Effort level (beta) (low, medium, high, max)"),
+  // and `beta` is itself a well-formed slug, so anchoring on the first group
+  // published a bogus one-level ladder instead of falling back to the snapshot.
+  // Take the LAST group that actually looks like a value list — which also
+  // survives an annotation placed AFTER the list.
+  let levels: EffortHint[] | null = null;
+  for (const group of window.matchAll(/\(([^()]*)\)/g)) {
+    levels = readEffortGroup(group[1] ?? "") ?? levels;
   }
-  return levels.length > 0 ? levels : null;
+  return levels;
+}
+
+/**
+ * The levels one parenthesized group advertises, or null when the group is not a
+ * value list at all.
+ *
+ * A group qualifies only if it ENUMERATES (a comma or pipe) or names a level the
+ * rank table knows — otherwise a lone annotation like `(beta)` would pass as a
+ * ladder. Levels are validated through `EffortHint` rather than a hand-rolled
+ * shape test, so prose such as "default: high" is ignored and an over-long token
+ * can never reach `capabilities.effort_levels` and fail the manifest schema.
+ */
+function readEffortGroup(body: string): EffortHint[] | null {
+  const levels: EffortHint[] = [];
+  for (const raw of body.split(/[,|]/)) {
+    const parsed = EffortHint.safeParse(raw.trim());
+    if (parsed.success && !levels.includes(parsed.data)) levels.push(parsed.data);
+  }
+  if (levels.length === 0) return null;
+  if (!/[,|]/.test(body) && !levels.some((level) => isRankedEffort(level))) return null;
+  return levels;
 }
 
 type ClaudeHelpProbe =

@@ -111,6 +111,51 @@ describe("the claude effort probe degrades gracefully", () => {
     expect(parseClaudeEffortHelp("  --effort <level>   Effort level for the session")).toBeNull();
   });
 
+  it("skips a leading annotation and reads the real value list, not the first paren", () => {
+    // A vendor annotation BEFORE the list is the trap: `beta` is a well-formed
+    // slug, so anchoring on the first `(` published ["beta"] as this binary's
+    // whole ladder — a bogus one-level ladder that looks live, instead of the
+    // snapshot fallback a failed parse is supposed to produce.
+    const help = [
+      "  --effort <level>                      Effort level (beta) (low, medium, high, xhigh, max)",
+      "  --fallback-model <model>              Fallback model",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("skips a TRAILING annotation too, rather than taking the last paren blindly", () => {
+    const help = [
+      "  --effort <level>                      Effort level (low, medium, high, max) (experimental)",
+      "  --fallback-model <model>              Fallback model",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high", "max"]);
+  });
+
+  it("returns null when the block's only parenthetical is an annotation", () => {
+    // No value list at all: fall back to the snapshot instead of advertising a
+    // one-item ladder made of prose.
+    const help = [
+      "  --effort <level>                      Effort level for the session (beta)",
+      "  --fallback-model <model>              Fallback model",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toBeNull();
+  });
+
+  it("accepts a single-level group when the level is one the rank table knows", () => {
+    const help = ["  --effort <level>                      Effort level (high)", ""].join("\n");
+    expect(parseClaudeEffortHelp(help)).toEqual(["high"]);
+  });
+
+  it("refuses an over-long token instead of letting it reach the manifest schema", () => {
+    const help = [
+      `  --effort <level>                      Effort level (low, ${"x".repeat(33)})`,
+      "",
+    ].join("\n");
+    // The bad token is dropped, not published: EffortHint bounds it, so
+    // capabilities.effort_levels can never carry a value the schema would reject.
+    expect(parseClaudeEffortHelp(help)).toEqual(["low"]);
+  });
+
   it("ignores prose inside the parentheses rather than advertising it as a level", () => {
     const help = [
       "  --effort <level>                      Effort level for the current session",
