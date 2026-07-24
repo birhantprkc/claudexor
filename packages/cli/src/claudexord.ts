@@ -124,7 +124,7 @@ export async function runStopIfRequested(argv: readonly string[]): Promise<boole
   return true;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   // The probe MUST run before any durable startup so it never binds a socket or
   // opens the journal (probing a candidate closure must be side-effect-free).
   if (runProbeIfRequested(process.argv.slice(2))) return;
@@ -629,9 +629,20 @@ async function main(): Promise<void> {
   }
 }
 
-// Entry guard: importing this module (the probe test imports
-// runProbeIfRequested) must NEVER boot the daemon in-process — an imported
-// main() would race the LIVE daemon for the journal writer lease and socket.
+/** Boot the daemon and translate a fatal error into a nonzero exit. The npm
+ * bin wrapper (packages/claudexor/bin/claudexord.js) calls this EXPLICITLY —
+ * a bare import must never boot the daemon (X228: the probe test's import
+ * would race the LIVE daemon for the journal writer lease). */
+export function runClaudexordEntry(): void {
+  main().catch((err: unknown) => {
+    process.stderr.write(`claudexord: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}
+
+// Direct execution (node dist/claudexord.js) boots via the entry guard;
+// imports (tests, the bin wrapper) get NO side effect and call
+// runClaudexordEntry() themselves.
 const invokedAsEntry = (() => {
   try {
     return (
@@ -641,9 +652,4 @@ const invokedAsEntry = (() => {
     return false;
   }
 })();
-if (invokedAsEntry) {
-  main().catch((err: unknown) => {
-    process.stderr.write(`claudexord: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exitCode = 1;
-  });
-}
+if (invokedAsEntry) runClaudexordEntry();
