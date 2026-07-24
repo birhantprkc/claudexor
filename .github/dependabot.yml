@@ -1,19 +1,40 @@
 version: 2
 updates:
-  # npm (pnpm workspace) — grouped so the flood of transitive bumps arrives as
-  # a small number of reviewable PRs, not one per package.
+  # npm (pnpm workspace) — minor/patch bumps arrive grouped so the flood of
+  # transitive updates is a small number of reviewable PRs, but MAJORS are
+  # deliberately excluded from the groups so each one arrives alone. A grouped
+  # major is unreviewable in practice: the July 2026 dev group shipped
+  # TypeScript 7 (which drops the root programmatic compiler API the ownership
+  # gate calls) in the same PR as a Prettier patch, and the production group
+  # shipped Zod 4 (changed `.default({})` / `z.record` semantics) alongside an
+  # unrelated SDK bump. Both were red and neither could be salvaged by dropping
+  # a file.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    # Raised from 5 with the group change: the two group PRs (dev + prod) used
+    # to leave four free slots, but now every pending major wants a slot of its
+    # own. At 5 a week with four concurrent majors would silently defer the
+    # overflow until an earlier PR closes, which is the opposite of the intent.
+    open-pull-requests-limit: 10
     groups:
       dev-dependencies:
         dependency-type: "development"
+        update-types: ["minor", "patch"]
       production-dependencies:
         dependency-type: "production"
+        update-types: ["minor", "patch"]
+    ignore:
+      # The runtime matrix is Node 20.19 / 24.16. A newer @types/node lets code
+      # typecheck against APIs that do not exist on the oldest supported
+      # runtime, so the major tracks the runtime floor by hand, not by bot.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
-  # GitHub Actions used by CI and the release workflow.
+  # GitHub Actions used by CI and the release workflow. Left ungrouped on
+  # purpose: each action pins a full commit SHA that has to be verified against
+  # the upstream tag one at a time.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
