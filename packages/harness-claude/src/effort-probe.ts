@@ -111,20 +111,49 @@ function readEffortGroup(body: string): EffortHint[] | null {
 type ClaudeHelpProbe =
   { ok: true; help: string; code: number | null } | { ok: false; error: string };
 
+/**
+ * Wall clock the shared capture is bounded by. It replaces the caller abort
+ * signal that used to bound it, so the spawn still cannot hang forever without
+ * belonging to any one caller.
+ */
+const HELP_PROBE_TIMEOUT_MS = 10_000;
+
 let helpProbePromise: Promise<ClaudeHelpProbe> | null = null;
 
+/** What an abandoned caller reads, without the shared capture ever seeing it. */
+function abandonedProbe(): ClaudeHelpProbe {
+  return { ok: false, error: "claude --help probe abandoned: the caller was cancelled" };
+}
+
 /**
- * ONE memoized `claude --help` capture for the whole process. The readonly-flag
- * probe and the effort ladder both ask the same installed binary the same
- * question, so they share a single spawn and a single cache rather than growing
- * a second discovery mechanism.
+ * The ONE `claude --help` capture, owned by the module rather than by whichever
+ * caller happened to ask for it first. The readonly-flag probe and the effort
+ * ladder both ask the same installed binary the same question, so they share a
+ * single spawn rather than growing a second discovery mechanism.
+ *
+ * Two properties keep the sharing honest, and the first cache had neither:
+ *
+ * 1. NO CALLER'S ABORT SIGNAL REACHES THE SPAWN. Threading the first caller's
+ *    signal in here made a process-wide resource the private property of one
+ *    run: cancelling that run killed the capture, and the memo then handed the
+ *    corpse to every later run. Its own wall clock bounds it instead.
+ * 2. ONLY AN ANSWER IS KEPT. A `--help` that never ran (spawn error) or that the
+ *    timeout killed (`code === null`, no exit status of its own) says nothing
+ *    about the installed binary, so keeping it turns one bad moment into a
+ *    permanent one; those outcomes drop the memo and the next caller re-probes.
+ *    A real exit is a fact about this binary — non-zero included — and stays.
+ *
+ * The stakes are higher than staleness. The ladder falls back to a snapshot
+ * recorded from CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST, so a poisoned memo on a
+ * machine running an older CLI does not merely lose freshness: it advertises and
+ * forwards `xhigh` to a binary that rejects it, for the life of the daemon.
  */
-export function probeClaudeHelp(abortSignal?: AbortSignal): Promise<ClaudeHelpProbe> {
-  helpProbePromise ??= (async (): Promise<ClaudeHelpProbe> => {
+function sharedHelpCapture(): Promise<ClaudeHelpProbe> {
+  if (helpProbePromise) return helpProbePromise;
+  const pending = (async (): Promise<ClaudeHelpProbe> => {
     try {
       const result = await runCapture(BIN, ["--help"], {
-        timeoutMs: 10_000,
-        abortSignal,
+        timeoutMs: HELP_PROBE_TIMEOUT_MS,
         cancelSignal: "SIGTERM",
         cancelKillDelayMs: 0,
       });
@@ -136,7 +165,36 @@ export function probeClaudeHelp(abortSignal?: AbortSignal): Promise<ClaudeHelpPr
       };
     }
   })();
-  return helpProbePromise;
+  helpProbePromise = pending;
+  // Identity-guarded so a late settle can only ever clear its OWN memo, never a
+  // re-probe another caller has already started.
+  const forget = (): void => {
+    if (helpProbePromise === pending) helpProbePromise = null;
+  };
+  void pending.then((probe) => {
+    if (!probe.ok || probe.code === null) forget();
+  }, forget);
+  return pending;
+}
+
+/**
+ * The shared capture, with the caller's cancellation bounding only the CALLER'S
+ * OWN wait. An abandoned caller reads a probe failure — its run is going away
+ * anyway, and the ladder falls back to the snapshot for that one run — while the
+ * capture keeps running for everybody else.
+ */
+export function probeClaudeHelp(abortSignal?: AbortSignal): Promise<ClaudeHelpProbe> {
+  const shared = sharedHelpCapture();
+  if (!abortSignal) return shared;
+  if (abortSignal.aborted) return Promise.resolve(abandonedProbe());
+  return new Promise<ClaudeHelpProbe>((resolve) => {
+    const abandon = (): void => resolve(abandonedProbe());
+    abortSignal.addEventListener("abort", abandon, { once: true });
+    void shared.then((probe) => {
+      abortSignal.removeEventListener("abort", abandon);
+      resolve(probe);
+    });
+  });
 }
 
 /**

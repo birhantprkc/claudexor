@@ -108,41 +108,39 @@ const CLAUDE_READONLY_REQUIRED_FLAGS = [
   "--no-chrome",
 ] as const;
 
-let readonlyProbePromise: Promise<ClaudeReadonlyProfileProbe> | null = null;
-
-export function probeClaudeReadonlyProfile(
+/**
+ * Derived from the SHARED `--help` capture on every call instead of behind a
+ * second cache of its own. That cache had the same defect as the one under it —
+ * a probe that failed once (or that a cancelled run read) stayed failed for the
+ * process lifetime, so a long-lived daemon reported readonly enforcement
+ * unavailable forever. It bought nothing either: the spawn is already memoized,
+ * and what is left is a handful of `includes` over text we already hold.
+ */
+export async function probeClaudeReadonlyProfile(
   abortSignal?: AbortSignal,
 ): Promise<ClaudeReadonlyProfileProbe> {
-  if (readonlyProbePromise) return readonlyProbePromise;
-  readonlyProbePromise = (async () => {
-    const probe = await probeClaudeHelp(abortSignal);
-    if (!probe.ok) {
-      return {
-        supported: false,
-        missingFlags: [...CLAUDE_READONLY_REQUIRED_FLAGS],
-        detail: `readonly enforcement probe failed: ${probe.error}`,
-      };
-    }
-    {
-      const result = { code: probe.code };
-      const help = probe.help;
-      const missingFlags: string[] = CLAUDE_READONLY_REQUIRED_FLAGS.filter(
-        (flag) => !help.includes(flag),
-      );
-      const hasPlanMode =
-        help.includes('"plan"') || help.includes("plan,") || help.includes(", plan");
-      if (!hasPlanMode) missingFlags.push("--permission-mode=plan");
-      return {
-        supported: result.code === 0 && missingFlags.length === 0,
-        missingFlags,
-        detail:
-          result.code === 0 && missingFlags.length === 0
-            ? "installed Claude CLI exposes the complete restrictive readonly flag set"
-            : `readonly enforcement unavailable; missing ${missingFlags.join(", ") || `help exited ${result.code}`}`,
-      };
-    }
-  })();
-  return readonlyProbePromise;
+  const probe = await probeClaudeHelp(abortSignal);
+  if (!probe.ok) {
+    return {
+      supported: false,
+      missingFlags: [...CLAUDE_READONLY_REQUIRED_FLAGS],
+      detail: `readonly enforcement probe failed: ${probe.error}`,
+    };
+  }
+  const help = probe.help;
+  const missingFlags: string[] = CLAUDE_READONLY_REQUIRED_FLAGS.filter(
+    (flag) => !help.includes(flag),
+  );
+  const hasPlanMode = help.includes('"plan"') || help.includes("plan,") || help.includes(", plan");
+  if (!hasPlanMode) missingFlags.push("--permission-mode=plan");
+  const supported = probe.code === 0 && missingFlags.length === 0;
+  return {
+    supported,
+    missingFlags,
+    detail: supported
+      ? "installed Claude CLI exposes the complete restrictive readonly flag set"
+      : `readonly enforcement unavailable; missing ${missingFlags.join(", ") || `help exited ${probe.code}`}`,
+  };
 }
 
 async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
