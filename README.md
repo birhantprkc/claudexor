@@ -435,7 +435,7 @@ localhost-callback flow. See
 claudexor auth status
 claudexor auth login codex    # codex login (device-auth by default)
 claudexor auth login claude   # claude auth login (claude.ai subscription route)
-claudexor auth login cursor   # cursor-agent login
+claudexor auth login cursor   # cursor-agent login 
 claudexor secrets set openai --from-env OPENAI_API_KEY
 claudexor secrets list
 claudexor settings show
