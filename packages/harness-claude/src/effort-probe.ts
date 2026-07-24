@@ -9,7 +9,9 @@
  *
  * The help line looks like:
  *   --effort <level>   Effort level for the current session (low, medium, high, xhigh, max)
- * with the parenthesized list possibly wrapped onto the following line.
+ * with the parenthesized list possibly wrapped onto following lines — and HOW FAR
+ * it wraps depends on the terminal width, so the parse reads the flag's whole
+ * block rather than a fixed number of lines.
  *
  * On a missing binary, an unparseable help text, or a `--help` that stops
  * documenting the values, the recorded snapshot fills in and the run proceeds.
@@ -37,6 +39,14 @@ export const CLAUDE_EFFORT_SNAPSHOT: readonly EffortHint[] = [
 export const CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "2.1.165";
 
 /**
+ * How many lines of a wrapped `--effort` block the parse will read. Generous
+ * next to the widest observed wrap (four lines at 40 columns) and still a hard
+ * stop, so an `--effort` line that documents nothing cannot reach into a later
+ * option's parentheses.
+ */
+const EFFORT_HELP_BLOCK_MAX_LINES = 8;
+
+/**
  * Pull the advertised levels out of `claude --help` text, or null when the
  * `--effort` line is absent or documents no values.
  *
@@ -47,9 +57,18 @@ export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
   const lines = help.split(/\r?\n/);
   const start = lines.findIndex((line) => line.includes("--effort"));
   if (start < 0) return null;
-  // The value list can wrap; join this line and the next two, which is as far as
-  // the vendor's help formatter ever pushes it.
-  const window = lines.slice(start, start + 3).join(" ");
+  // The value list wraps at the rendering width, and a narrower terminal pushes
+  // the closing paren further down (2.1.165 at 40 columns needs four lines), so
+  // a fixed line count silently loses the list. Read this flag's OWN block
+  // instead: everything up to the next documented flag or the blank line that
+  // ends the section, bounded so a paren from unrelated prose can never be
+  // mistaken for the effort list.
+  let end = start + 1;
+  for (; end < lines.length && end - start < EFFORT_HELP_BLOCK_MAX_LINES; end += 1) {
+    const next = lines[end] ?? "";
+    if (next.trim() === "" || /^\s*--[a-z]/.test(next)) break;
+  }
+  const window = lines.slice(start, end).join(" ");
   const open = window.indexOf("(");
   if (open < 0) return null;
   const close = window.indexOf(")", open);

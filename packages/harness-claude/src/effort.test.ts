@@ -18,7 +18,45 @@ const HELP_2_1_89 = [
   "  --fallback-model <model>              Fallback model",
 ].join("\n");
 
+/**
+ * The SAME 2.1.165 flag rendered at 40 columns: the vendor's help wraps to the
+ * width it is rendered at, which pushes the closing paren three lines below the
+ * flag. Captured verbatim from `claude --help` under a 40-column terminal.
+ */
+const HELP_2_1_165_NARROW = [
+  "  --debug [filter]",
+  "      Enable debug mode",
+  "  --effort <level>",
+  "      Effort level for the current",
+  "      session (low, medium, high, xhigh,",
+  "      max)",
+  "  --exclude-dynamic-system-prompt-sections",
+].join("\n");
+
 describe("the claude ladder is a property of the INSTALLED binary", () => {
+  it("finds the list however far the help wraps it, so a narrow terminal does not silently cost the ladder", () => {
+    // A truncated window returns null, which falls back to the recorded
+    // snapshot — i.e. it would advertise ANOTHER version's ladder, the exact
+    // defect this probe exists to remove.
+    expect(parseClaudeEffortHelp(HELP_2_1_165_NARROW)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
+  it("does not reach past the flag's own block for a paren when --effort documents no values", () => {
+    const help = [
+      "  --effort <level>",
+      "      Effort level for the current session",
+      "  --model <model>",
+      "      Model for the session (opus, sonnet, haiku)",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toBeNull();
+  });
+
   it("reads xhigh from a CLI whose --help advertises it (2.1.165)", () => {
     expect(parseClaudeEffortHelp(HELP_2_1_165)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
