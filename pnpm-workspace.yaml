@@ -17,3 +17,10 @@ allowBuilds:
 # pnpm can run an implicit deps-status check before every `pnpm run` that
 # auto-installs; disable it and rely on explicit installs.
 verifyDepsBeforeRun: false
+
+# Security floor for a transitive dependency. fast-uri < 3.1.4 carries
+# GHSA-v2hh-gcrm-f6hx; it reaches us only through ajv, whose range (^3.0.1)
+# already permits the patched release, so this pins the floor without a
+# version bump anywhere else. Remove once ajv itself requires >=3.1.4.
+overrides:
+  fast-uri: ^3.1.4
