@@ -3930,10 +3930,13 @@ describe("DaemonControlApiServer", () => {
           prompt: "2+2?",
           mode: "ask",
           harnesses: ["codex"],
-          // Malformed SHAPE is still refused at the boundary (spaces/uppercase are
-          // not an effort slug). An unknown-but-well-formed level is deliberately
-          // NOT refused here: what a level means is per (harness, model), and the
-          // wire contract stays as open as the vendor's own.
+          // Malformed SHAPE is refused at the boundary (spaces/uppercase are not
+          // an effort slug). A well-formed but unsupported LEVEL is refused too,
+          // one layer in: the wire vocabulary is open because a level only means
+          // something per (harness, model), so the reviewer's own advertised
+          // ladder is the judge — see the reviewer effort gate in
+          // orchestrator/reviewerPanel.ts, pinned in reviewerPanel.test.ts.
+          // Nothing well-formed is waved through unchecked.
           reviewerEfforts: { anthropic: "Banana Split" },
         }),
       });
@@ -4045,8 +4048,10 @@ describe("DaemonControlApiServer", () => {
           prompt: "review it",
           mode: "agent",
           scope: { kind: "project", root: panelRoot },
-          // Shape refusal only — an unranked but well-formed level is resolved
-          // against the routed model, not rejected at the wire.
+          // Shape refusal at the wire; a well-formed level such as `turbo` is
+          // refused by the reviewer effort gate against what the selected
+          // reviewer actually advertises (reviewerPanel.test.ts), never
+          // forwarded to be silently dropped by the adapter's normalizer.
           reviewerPanel: [{ harness: "cursor", effort: "TURBO BOOST" }],
         }),
       });

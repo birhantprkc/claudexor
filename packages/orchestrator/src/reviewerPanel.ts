@@ -37,6 +37,35 @@ export interface ReviewerPanelDeps {
   authPreferenceFor: (harnessId: string) => AuthPreference;
 }
 
+/**
+ * The reviewer effort gate: a requested level must be one the SELECTED reviewer
+ * actually advertises.
+ *
+ * ONE owner for both panel paths (INV-104's effort sibling). The wire type is an
+ * open slug rather than an enum — a level is only meaningful per (harness,
+ * model), so the boundary cannot know it — which means this manifest check IS
+ * the guarantee that a typo or an unsupported level is refused instead of
+ * travelling inward. Without it a reviewer effort dies silently: the adapter's
+ * normalizer drops an unresolvable level to "send no flag", while the review
+ * artifact still records `requested_effort`, so the run reads as though the
+ * level had been honored.
+ */
+function assertReviewerEffortAdvertised(
+  harnessId: string,
+  requestedEffort: EffortHint | null,
+  capabilities: { effort_levels: readonly EffortHint[] },
+): void {
+  if (!requestedEffort) return;
+  if (capabilities.effort_levels.includes(requestedEffort)) return;
+  const supported = capabilities.effort_levels.join(", ");
+  const suffix = supported
+    ? ` (supported: ${supported})`
+    : " (harness declares no effort controls)";
+  throw new HarnessUnavailableError(
+    `reviewer harness '${harnessId}' does not support requested effort '${requestedEffort}'${suffix}`,
+  );
+}
+
 export async function resolveExplicitReviewerPanel(
   deps: ReviewerPanelDeps,
   panel: ControlReviewerPanelEntry[],
@@ -172,15 +201,7 @@ export async function resolveExplicitReviewerPanel(
         }
       }
       const requestedEffort = entry.effort ?? null;
-      if (requestedEffort && !manifest.capabilities.effort_levels.includes(requestedEffort)) {
-        const supported = manifest.capabilities.effort_levels.join(", ");
-        const suffix = supported
-          ? ` (supported: ${supported})`
-          : " (harness declares no effort controls)";
-        throw new HarnessUnavailableError(
-          `reviewer harness '${entry.harness}' does not support requested effort '${requestedEffort}'${suffix}`,
-        );
-      }
+      assertReviewerEffortAdvertised(entry.harness, requestedEffort, manifest.capabilities);
       specs.push({
         adapter,
         providerFamily: manifest.provider_family,
@@ -267,12 +288,19 @@ export async function resolveAutoReviewerPanel(
           );
         }
       }
+      // STRICT, exactly like the model gate above and the explicit panel: a
+      // per-family effort override the selected reviewer does not advertise is
+      // refused here. The legacy `reviewerEfforts` map used to be an enum on the
+      // wire, so the boundary caught a typo; the vocabulary is open now, and this
+      // is the layer that knows what the chosen reviewer really accepts.
+      const requestedEffort = overrides.reviewerEfforts?.[m.provider_family] ?? null;
+      assertReviewerEffortAdvertised(adapter.id, requestedEffort, m.capabilities);
       seen.add(m.provider_family);
       specs.push({
         adapter,
         providerFamily: m.provider_family,
         requestedModel,
-        requestedEffort: overrides.reviewerEfforts?.[m.provider_family] ?? null,
+        requestedEffort,
         authPreference,
       });
       if (specs.length >= 2) break;
