@@ -165,10 +165,25 @@ Two power knobs shape review:
   `--reviewers "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`. Omitted, the
   engine chooses a cross-family panel automatically.
 - **Approvals** — mark paths that must clear a human before a change touching
-  them can be applied. Set **approval globs** in project/spec config
-  (`TaskContract.constraints.protected_paths`) as path globs, e.g.
-  `migrations/**` or `**/*.env`. A run that changes a matching path escalates to
-  a human-approval gate and is never auto-applied.
+  them can be applied. Set canonical repo-relative globs in the versioned
+  `.claudexor/config.yaml` (empty by default):
+
+  ```yaml
+  version: 1
+  constraints:
+    protected_paths:
+      - migrations/**
+      - "**/*.env"
+  ```
+
+  Creating, modifying, deleting, or renaming a matching path completes the run
+  but pauses apply for a human decision. `--allow-protected-path` applies only
+  to engine-derived gate/test paths and cannot suppress these project rules.
+  Before a mutating turn starts, a live project thread with configured project
+  protected paths is promoted one-way to its persistent isolated worktree. The
+  run and patch therefore complete without touching the project tree; only the
+  existing typed thread Apply decision can deliver the accumulated change.
+  Direct one-shot `--in-place` agent runs refuse and name the isolation remedy.
 
 ## Modes
 
@@ -543,6 +558,21 @@ Then follow the Install And Login sequence in docs/AGENT_ONBOARDING.md
 (verify version/doctor, check plugin status before touching anything, and log
 in only via `claudexor auth login <harness>` — never a bare vendor login).
 ```
+
+GitHub Copilot uses the portable plugin in this repository rather than the
+managed host installer:
+
+```bash
+npm install -g claudexor
+copilot plugin install razzant/claudexor:plugins/copilot
+```
+
+The portable plugin supports macOS and Linux and requires the `claudexor`
+command on `PATH`; Windows is not currently supported. It bundles one Agent
+Skill plus MCP wiring and never collects credentials or bypasses Claudexor's
+typed apply and human-decision gates. See
+[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md#portable-agent-skill-and-copilot-plugin)
+for lifecycle and precedence details.
 
 The explicit Claude install also enables the official subscription-quota
 status-line source. If `~/.claude/settings.json` already has a `statusLine`

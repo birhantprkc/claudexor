@@ -7,7 +7,8 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { CLAUDEXOR_VERSION, noProjectRepoRoot, readTextSafe, userConfigDir } from "@claudexor/util";
 import { releaseCommand } from "./release-command.js";
-import { serveAcpBridge, serveBeltBridge, serveMcpBridge } from "./bridge-serve.js";
+import { serveBeltBridge, serveMcpBridge } from "./bridge-serve.js";
+import { dispatchAcpCommand } from "./acp-auth-command.js";
 import { initProjectConfig } from "@claudexor/config";
 import {
   DecisionRecord,
@@ -1076,8 +1077,7 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
     }
 
     case "acp": {
-      if (args._[1] === "serve") return serveAcpBridge();
-      return printUsageError(json, "usage: claudexor acp serve");
+      return dispatchAcpCommand(args, json);
     }
 
     case "follow": {

@@ -1335,10 +1335,25 @@ construction (`final_verify: null`), a hash-bound `accept_risk` /
 projection reports `verify_pending` and stays eligible, and the fresh final
 check runs just-in-time on the apply path (the same gate, now handed the fresh
 verifier result) — a mechanical conflict there still fails closed.
-`TaskContract.constraints.protected_paths` holds config-owned **approval globs**
-— path globs (e.g. `migrations/**`, `**/*.env`) whose changes escalate a run to
-a human-approval gate before it can be applied — while
-`TaskContract.constraints.auto_protected_paths` is derived from configured
+The versioned project config owns restriction-only approval globs under
+`constraints.protected_paths` (empty by default). The schema accepts only
+canonical repo-relative forward-slash globs, rejecting absolute paths, dot
+segments, traversal, and backslashes. The orchestrator freezes the parsed list
+into `TaskContract.constraints.protected_paths`; any matching create, modify,
+delete, or either side of a rename escalates the completed run to a human
+decision before apply. Per-run approvals never narrow this list.
+
+Before a mutating turn starts, the daemon promotes an `in_place` project thread
+with configured project protected paths one-way into the existing persistent
+isolated-thread workspace. The promotion, worktree path/base, and invalidation
+of native sessions from the former live cwd are one durable journal mutation;
+the next lane receives the bounded continuation packet. The run can finish and
+produce a patch without changing the project tree, while the existing typed
+thread Apply decision remains the only delivery authority. A direct agent
+embedder that requests `inPlace` against the live project root fails before
+adapter spawn and must provide a distinct isolated execution root.
+
+`TaskContract.constraints.auto_protected_paths` is instead derived from configured
 deterministic gates. Existing auto-protected gate/test path edits block unless
 the run carries a typed `protected_path_approvals` entry for the matching glob
 (CLI: `--allow-protected-path`). Those approvals are scoped only to

@@ -255,6 +255,7 @@ import {
   userConfigDir,
   writeText,
 } from "@claudexor/util";
+import { assertWriteIsolation } from "./write-isolation.js";
 
 export interface OrchestratorDeps {
   registry: AdapterRegistry;
@@ -434,10 +435,10 @@ export interface RunInput {
    */
   inPlace?: boolean;
   /**
-   * Per-run globs no candidate may touch at all (create/modify/delete) —
-   * stricter than protected paths, which gate only tampering with existing
-   * files. Envelope/isolated runs only: the engine's post-diff policy gate is
-   * the authoritative enforcement (violation → blocking finding → blocked,
+   * Per-run globs no candidate may touch (create/modify/delete/rename). Unlike
+   * project protected paths, these produce a deny-path violation; both require
+   * a human decision before delivery. The engine's post-diff policy gate is the
+   * authoritative enforcement (violation → blocking finding → blocked,
    * patch undelivered). An in-place run with denyPaths is refused at preflight:
    * a live tree offers no pre-delivery containment, and silent non-enforcement
    * is never acceptable. accept_risk MAY still deliver (INV-111).
@@ -705,15 +706,16 @@ export class Orchestrator {
       throw new Error(`unknown mode: ${String(resolved.mode)}`);
     }
     const mode: ModeKind = parsedMode.data;
-    // denyPaths is enforced by the post-diff policy gate BEFORE delivery, which
-    // only exists on envelope/isolated runs — an in-place run mutates the live
-    // tree directly, so the gate could not contain a violation. Refuse loudly
-    // rather than accept a knob the engine cannot honor (INV-023).
-    if ((resolved.denyPaths?.length ?? 0) > 0 && resolved.inPlace === true) {
-      throw new Error(
-        "denyPaths requires an isolated/envelope run: the post-diff policy gate blocks a violating patch before delivery, which an in-place run cannot guarantee; drop --deny-path or run isolated",
-      );
-    }
+    const projectProtectedPaths =
+      mode === "agent" ? this.projectConfig(resolved.repoRoot).constraints.protected_paths : [];
+    assertWriteIsolation({
+      mode,
+      protectedPaths: projectProtectedPaths,
+      denyPaths: resolved.denyPaths,
+      inPlace: resolved.inPlace,
+      repoRoot: resolved.repoRoot,
+      executionRoot: this.execRootOf(resolved),
+    });
     // outputSchema constrains the run's final ANSWER. It is honored exactly
     // where a final answer is delivered (agent race incl. synthesis, and ask);
     // every other strategy refuses loudly rather than carrying a contract the
@@ -1847,7 +1849,7 @@ export class Orchestrator {
       projectCommands: cfg.tests?.commands ?? [],
     });
     const commands = resolvedGates.commands;
-    const protectedPaths: string[] = [];
+    const protectedPaths = [...new Set(cfg.constraints.protected_paths)];
     const autoProtectedPaths = resolvedGates.autoProtectedPaths;
     const protectedPathApprovals = [
       ...new Map(
