@@ -46,7 +46,7 @@ import {
   BIN,
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-  claudeEffortDisclosureEvent,
+  claudeRunEffortResolution,
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
@@ -935,13 +935,12 @@ async function* runClaude(
   const useSubscription = route === "subscription";
   // Shared with discovery through the memoized --help probe, so a run never
   // re-spawns the CLI just to learn its ladder.
-  const efforts = await runtime.probeEffortLevels(abortSignalFromSpec(spec));
-  const args = claudeArgsForSpec(spec, interactive, useSubscription, efforts.levels);
-  // INV-105 rides the RUN too: the INSTALLED binary can be narrower than the
-  // manifest ladder preflight saw — a DROP or a CLAMP is disclosed here, on the
-  // same inputs the arg builder resolves with, never a silent divergence.
-  const effortDisclosure = claudeEffortDisclosureEvent(spec, efforts.levels);
-  if (effortDisclosure) yield effortDisclosure;
+  // INV-105 on the RUN: probe the installed ladder, version-gate snapshot
+  // fallback trust (an installed 2.1.89 is never sent the 2.1.165 snapshot's
+  // xhigh), and disclose a DROP/CLAMP on the same inputs the args resolve with.
+  const effort = await claudeRunEffortResolution(spec, runtime, abortSignalFromSpec(spec));
+  const args = claudeArgsForSpec(spec, interactive, useSubscription, effort.advertised);
+  if (effort.disclosure) yield effort.disclosure;
   // Scrub EVERY provider secret (incl. OpenAI/others — the cross-provider leak
   // fix) via the single core table, then re-add only the var this route needs.
   const env: Record<string, string | null | undefined> =

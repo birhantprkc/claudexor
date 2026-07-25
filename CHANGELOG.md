@@ -30,7 +30,33 @@ Release history for Claudexor. The current version is declared in the root
   instead of an `error` field the daemon never serves. Review: both loop
   prompts pin the finding contract explicitly, and a reviewer effort the
   selected reviewer does not advertise is refused rather than silently
-  remapped. Maintenance: CI publishes the required `build-test` check context
+  remapped. Portable discovery and distribution (#75): project protected
+  paths are back as canonical repo-relative globs in the versioned
+  `.claudexor/config.yaml` — a mutating turn on a live project thread with
+  configured protected paths first promotes the thread ONE-WAY to its
+  persistent isolated worktree, so the run and patch complete without
+  touching the project tree and only the typed thread Apply decision can
+  deliver the change (`--allow-protected-path` cannot suppress project
+  rules; direct one-shot `--in-place` agent runs refuse and name the
+  isolation remedy); a portable GitHub Copilot plugin ships in-repo
+  (`plugins/copilot`: one Agent Skill plus `.mcp.json` wiring over the
+  preinstalled `claudexor` CLI) — Copilot owns its install/update lifecycle
+  (it is NOT a fifth managed host), macOS/Linux with Node 20.19+ only (no
+  Windows), the Skill starts doctor-backed and read-only, and MCP still
+  never exposes patch application; official MCP Registry publication
+  metadata lands (`server.json` bound to the executable npm package and its
+  exact version, release-parity checked) with publication only via the
+  separate manual tag-bound `publish-mcp.yml` OIDC workflow after the npm
+  package and public stable GitHub Release exist; and ACP Terminal Auth is
+  added as an EXPERIMENTAL surface — only when a client explicitly
+  advertises the experimental terminal-auth capability does Claudexor offer
+  Codex subscription login through the client's own terminal (the exact
+  allowlisted `claudexor acp serve auth login codex` suffix routed to the
+  existing durable device-code login, macOS/Linux); Claude and Cursor are
+  not advertised yet, the surface is proactive-only (no `auth_required`
+  emission or legacy authenticate request), and cancellation or an
+  unsupported device flow exits non-zero without spawning a second
+  Terminal. Maintenance: CI publishes the required `build-test` check context
   from the matrix job (PRs no longer sit BLOCKED waiting for a context that
   never arrives), the fast-uri floor is pinned at 3.1.4
   (GHSA-v2hh-gcrm-f6hx), major bumps stay out of the dependabot groups, and

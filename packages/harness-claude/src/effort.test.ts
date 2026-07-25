@@ -4,8 +4,11 @@ import { HarnessRunSpec } from "@claudexor/schema";
 import { normalizeEffort, resolveEffort } from "@claudexor/core";
 import {
   CLAUDE_EFFORT_SNAPSHOT,
+  CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
+  claudeAdvertisedEffortsForRun,
   claudeEffortClampedEvent,
   claudeEffortIgnoredEvent,
+  claudeSnapshotTrustedForVersion,
   parseClaudeEffortHelp,
 } from "./effort-probe.js";
 import { createClaudeAdapter } from "./index.js";
@@ -232,12 +235,47 @@ describe("the claude effort probe degrades gracefully", () => {
     expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high"]);
   });
 
-  it("falls back to a snapshot that still drives a usable run when the parse fails", () => {
-    // A failed probe costs freshness, never the run: the snapshot is a real
-    // ladder, so normalization keeps working end to end.
+  it("the snapshot fallback drives arg emission ONLY on the version it was captured from", () => {
+    // A failed parse falls back to the snapshot, but the snapshot is another
+    // CLI version's recorded --help: it is that binary's truth only on the
+    // exact version stamped on it. Same-version fallback keeps the full
+    // ladder usable end to end...
     expect(parseClaudeEffortHelp("garbage")).toBeNull();
     expect([...CLAUDE_EFFORT_SNAPSHOT]).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    expect(normalizeEffort("xhigh", CLAUDE_EFFORT_SNAPSHOT)).toBe("xhigh");
+    const fallback = { levels: CLAUDE_EFFORT_SNAPSHOT, live: false };
+    const sameVersion = claudeAdvertisedEffortsForRun(
+      fallback,
+      `${CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST} (Claude Code)`,
+    );
+    expect([...sameVersion]).toEqual([...CLAUDE_EFFORT_SNAPSHOT]);
+    expect(normalizeEffort("xhigh", sameVersion)).toBe("xhigh");
+    // ...while a MISMATCHED installed version distrusts the snapshot: the run
+    // ladder is honestly empty, so the normalizer sends NO flag rather than a
+    // level another version advertised (INV-105 — an installed 2.1.89 must
+    // never be handed the 2.1.165 snapshot's xhigh).
+    expect(claudeAdvertisedEffortsForRun(fallback, "2.1.89 (Claude Code)")).toEqual([]);
+    expect(normalizeEffort("xhigh", claudeAdvertisedEffortsForRun(fallback, "2.1.89"))).toBeNull();
+  });
+
+  it("snapshot trust is exact-version, and an unknown/unparseable version never vouches", () => {
+    expect(claudeSnapshotTrustedForVersion("2.1.165")).toBe(true);
+    expect(claudeSnapshotTrustedForVersion("2.1.165 (Claude Code)")).toBe(true);
+    expect(claudeSnapshotTrustedForVersion("2.1.89")).toBe(false);
+    // A LONGER dotted token is a different version, not a prefix match.
+    expect(claudeSnapshotTrustedForVersion("2.1.165.1")).toBe(false);
+    expect(claudeSnapshotTrustedForVersion("2.1.1650")).toBe(false);
+    expect(claudeSnapshotTrustedForVersion(null)).toBe(false);
+    expect(claudeSnapshotTrustedForVersion("claude (version unknown)")).toBe(false);
+  });
+
+  it("a LIVE parse is the binary's own answer — trusted on any version, no gate", () => {
+    const live = { levels: parseClaudeEffortHelp(HELP_2_1_89) ?? [], live: true };
+    expect([...claudeAdvertisedEffortsForRun(live, "9.9.9")]).toEqual([
+      "low",
+      "medium",
+      "high",
+      "max",
+    ]);
   });
 });
 
@@ -302,6 +340,81 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
     ]);
     expect(cliArgs).toBeDefined();
     expect(cliArgs).not.toContain("--effort");
+  });
+
+  const snapshotFallbackAdapter = (installedVersion: string, capture: (args: string[]) => void) =>
+    createClaudeAdapter({
+      detectVersion: async () => installedVersion,
+      probeReadonlyProfile: async () => ({ supported: true, missingFlags: [], detail: "ok" }),
+      probeAuthStatus: async () => ({
+        loggedIn: true,
+        authed: true,
+        authMethod: "claude.ai",
+        probeError: null,
+      }),
+      anthropicApiKey: () => null,
+      claudeOAuthToken: () => null,
+      // The C1 shape: the live parse FAILED, so the probe answered with the
+      // recorded snapshot (live: false) — which advertises xhigh.
+      probeEffortLevels: async () => ({ levels: [...CLAUDE_EFFORT_SNAPSHOT], live: false }),
+      runCliHarness: async function* (options): AsyncGenerator<HarnessEvent> {
+        capture(options.args);
+        yield {
+          type: "completed",
+          session_id: options.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+
+  const xhighSpec = (sessionId: string) =>
+    HarnessRunSpec.parse({
+      session_id: sessionId,
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/repo",
+      effort_hint: "xhigh",
+      auth_preference: "auto",
+    });
+
+  it("a MISMATCHED-version snapshot fallback sends NO --effort flag and discloses the drop (INV-105)", async () => {
+    // The confirmed C1 defect: installed 2.1.89, --help parse failed, the
+    // 2.1.165 snapshot filled in, and `--effort xhigh` went to a binary that
+    // rejects the level. The version gate must drop the flag and say so.
+    let cliArgs: string[] | undefined;
+    const adapter = snapshotFallbackAdapter("2.1.89 (Claude Code)", (args) => {
+      cliArgs = args;
+    });
+    const events: HarnessEvent[] = [];
+    for await (const ev of adapter.run(xhighSpec("claude-effort-snapshot-mismatch")))
+      events.push(ev);
+    expect(cliArgs).toBeDefined();
+    expect(cliArgs).not.toContain("--effort");
+    expect(cliArgs).not.toContain("xhigh");
+    const disclosure = events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]));
+    expect(disclosure?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=xhigh"),
+    ]);
+    expect(disclosure?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining(CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST),
+    ]);
+  });
+
+  it("a SAME-version snapshot fallback keeps trusting the snapshot: the flag rides, nothing is disclosed", async () => {
+    let cliArgs: string[] | undefined;
+    const adapter = snapshotFallbackAdapter(
+      `${CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST} (Claude Code)`,
+      (args) => {
+        cliArgs = args;
+      },
+    );
+    const events: HarnessEvent[] = [];
+    for await (const ev of adapter.run(xhighSpec("claude-effort-snapshot-same-version")))
+      events.push(ev);
+    expect(cliArgs).toBeDefined();
+    expect(cliArgs).toContain("--effort");
+    expect(cliArgs).toContain("xhigh");
+    expect(events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]))).toBeUndefined();
   });
 });
 

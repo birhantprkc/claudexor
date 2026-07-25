@@ -39,6 +39,71 @@ export const CLAUDE_EFFORT_SNAPSHOT: readonly EffortHint[] = [
 export const CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "2.1.165";
 
 /**
+ * Whether the recorded snapshot may be TRUSTED for arg emission against the
+ * installed binary (INV-105). The snapshot is another `--help`'s recorded
+ * answer, so it is only that binary's truth on the exact CLI version it was
+ * captured from: 2.1.165 advertises `xhigh`, 2.1.89 rejects it, and a 2.1.89
+ * install whose live parse failed used to be handed the 2.1.165 ladder anyway
+ * — `--effort xhigh` then went to a CLI that refuses the flag.
+ *
+ * The installed version string is whatever `claude --version` printed
+ * (e.g. `2.1.165 (Claude Code)`), so the comparison extracts the full dotted
+ * numeric token and requires it to EQUAL the snapshot stamp exactly. An
+ * unknown or unparseable version can never vouch for the snapshot.
+ */
+export function claudeSnapshotTrustedForVersion(installedVersion: string | null): boolean {
+  if (installedVersion === null) return false;
+  const token = installedVersion.match(/\d+(?:\.\d+)+/);
+  return token !== null && token[0] === CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST;
+}
+
+/**
+ * The effort ladder the RUN may resolve `--effort` against, version-gating
+ * snapshot trust (INV-105):
+ *
+ * - a LIVE parse is the installed binary's own answer — trusted on any version;
+ * - the snapshot FALLBACK is trusted only when the installed version equals
+ *   `CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST` (same binary, same ladder);
+ * - a fallback on ANY OTHER version (mismatch, unknown, unparseable) yields an
+ *   EMPTY ladder: the normalizer then sends no `--effort` flag at all, and the
+ *   existing drop seam (`claudeEffortIgnoredEvent`) discloses it — the run
+ *   proceeds at the vendor default rather than forwarding a level another
+ *   version's snapshot advertises to a binary that may reject it.
+ */
+export function claudeAdvertisedEffortsForRun(
+  efforts: { levels: readonly EffortHint[]; live: boolean },
+  installedVersion: string | null,
+): readonly EffortHint[] {
+  if (efforts.live) return efforts.levels;
+  return claudeSnapshotTrustedForVersion(installedVersion) ? efforts.levels : [];
+}
+
+/**
+ * The RUN's whole INV-105 effort seam in one place: probe the installed
+ * binary's ladder, version-gate snapshot-fallback trust
+ * (`claudeAdvertisedEffortsForRun`), and derive the DROP/CLAMP disclosure on
+ * the SAME advertised list the arg builder will resolve against — so the flag
+ * sent and the disclosure emitted can never disagree. The `--version` spawn
+ * happens only when it can matter (fallback ladder AND an effort actually
+ * requested); a live parse or a hint-less run never pays for it.
+ */
+export async function claudeRunEffortResolution(
+  spec: Pick<HarnessRunSpec, "session_id" | "effort_hint">,
+  deps: {
+    probeEffortLevels: typeof probeClaudeEffortLevels;
+    detectVersion: (abortSignal?: AbortSignal) => Promise<string | null>;
+  },
+  abortSignal?: AbortSignal,
+): Promise<{ advertised: readonly EffortHint[]; disclosure: HarnessEvent | null }> {
+  const efforts = await deps.probeEffortLevels(abortSignal);
+  const advertised =
+    efforts.live || !spec.effort_hint
+      ? efforts.levels
+      : claudeAdvertisedEffortsForRun(efforts, await deps.detectVersion(abortSignal));
+  return { advertised, disclosure: claudeEffortDisclosureEvent(spec, advertised) };
+}
+
+/**
  * How many lines of a wrapped `--effort` block the parse will read. Generous
  * next to the widest observed wrap (four lines at 40 columns) and still a hard
  * stop, so an `--effort` line that documents nothing cannot reach into a later
@@ -250,10 +315,18 @@ export function claudeEffortIgnoredEvent(
 ): HarnessEvent | null {
   if (!spec.effort_hint) return null;
   if (normalizeEffort(spec.effort_hint, advertised) !== null) return null;
+  // An EMPTY advertised list is the version-gated snapshot distrust case
+  // (`claudeAdvertisedEffortsForRun`): the installed binary's ladder could not
+  // be read and the recorded snapshot belongs to a different CLI version, so
+  // the honest statement is "unverifiable", not "not accepted".
   const detail =
-    `effort=${spec.effort_hint} (not accepted by the installed claude CLI` +
-    `${advertised.length > 0 ? `; it advertises: ${advertised.join(", ")}` : ""}; ` +
-    "the run used the vendor default)";
+    advertised.length > 0
+      ? `effort=${spec.effort_hint} (not accepted by the installed claude CLI; ` +
+        `it advertises: ${advertised.join(", ")}; the run used the vendor default)`
+      : `effort=${spec.effort_hint} (could not be verified against the installed claude CLI: ` +
+        "its effort ladder could not be read from --help, and the recorded snapshot was " +
+        `captured from CLI ${CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST}, a different version, ` +
+        "so no effort flag was sent; the run used the vendor default)";
   return {
     type: "message",
     session_id: spec.session_id,
