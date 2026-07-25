@@ -159,11 +159,20 @@ export function readModelListEfforts(data: unknown): CodexEffortCatalog | null {
   const capability: CodexEffortCapability = {};
   let defaultModel: string | null = null;
   for (const raw of data) {
-    const entry = readEntry(raw as ModelListEntry);
+    const listed = raw as ModelListEntry;
+    const entry = readEntry(listed);
     if (entry === MALFORMED) return null;
+    // TWO separate facts per entry. `isDefault` is model IDENTITY and is read
+    // even when the entry contributes no ladder: a default model that
+    // advertises no effort surface is still the model a hint-less run executes
+    // on, and dropping its identity with its (nonexistent) ladder silently
+    // re-validated hint-less runs against the harness-wide union — the exact
+    // bug the default-model narrowing exists to prevent.
+    if (listed.isDefault === true && typeof listed.id === "string" && listed.id.trim() !== "") {
+      defaultModel ??= listed.id;
+    }
     if (!entry) continue;
     capability[entry[0]] = entry[1];
-    if ((raw as ModelListEntry).isDefault === true) defaultModel ??= entry[0];
   }
   return Object.keys(capability).length > 0 ? { models: capability, defaultModel } : null;
 }
@@ -430,14 +439,27 @@ export function codexEffortFor(
   // let a sibling-only level (`ultra`) ride into a default model that rejects
   // it. A catalog with no recorded default keeps the union fallback — the
   // broadest honest set when the effective model is genuinely unknown.
+  //
+  // A default model the catalog recorded WITHOUT a ladder is different from an
+  // unknown model: the vendor listed it and advertised no effort surface, so
+  // its ladder is KNOWN-EMPTY, not unknown. `effortLevelsForModel`'s union
+  // fallback would clamp against sibling ladders the run never executes on;
+  // an empty advertised set instead sends no flag, and the caller's INV-105
+  // seam (`codexEffortIgnoredEvent`) discloses the dropped setting.
   const effectiveModel = model ?? catalog.defaultModel;
-  const advertised = effortLevelsForModel(
-    {
-      effort_levels: [...merged.order, ...merged.unconstrained],
-      model_effort_levels: catalog.models,
-    },
-    effectiveModel,
-  );
+  const defaultKnownEffortless =
+    effectiveModel != null &&
+    effectiveModel === catalog.defaultModel &&
+    !(effectiveModel in catalog.models);
+  const advertised = defaultKnownEffortless
+    ? []
+    : effortLevelsForModel(
+        {
+          effort_levels: [...merged.order, ...merged.unconstrained],
+          model_effort_levels: catalog.models,
+        },
+        effectiveModel,
+      );
   return normalizeEffort(requested, advertised, merged.consistent ? merged.order : advertised);
 }
 

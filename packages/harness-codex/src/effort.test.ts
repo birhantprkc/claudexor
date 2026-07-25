@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HarnessEvent } from "@claudexor/schema";
+import type { HarnessEvent, ModelEffortCapability } from "@claudexor/schema";
 import { HarnessRunSpec, effortLevelsForModel } from "@claudexor/schema";
 import { resolveEffort } from "@claudexor/core";
 import { clearCodexEffortCache, createCodexAdapter } from "./index.js";
@@ -491,6 +491,27 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
     ).toBeNull();
   });
 
+  it("keeps the default model's IDENTITY even when it advertises no effort surface", () => {
+    // Two separate facts: a model with no effort surface contributes no ladder,
+    // but `isDefault` is model identity — losing it with the (nonexistent)
+    // ladder sent hint-less runs back to the harness-wide union.
+    const flaggedNoSurface = readModelListEfforts([
+      { id: "gpt-plain", isDefault: true },
+      { id: "gpt-9", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+    ]);
+    expect(flaggedNoSurface).toEqual({
+      models: { "gpt-9": { levels: ["high"], default: null } },
+      defaultModel: "gpt-plain",
+    });
+    // Same with an explicitly EMPTY advertised list.
+    expect(
+      readModelListEfforts([
+        { id: "gpt-plain", isDefault: true, supportedReasoningEfforts: [] },
+        { id: "gpt-9", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+      ])?.defaultModel,
+    ).toBe("gpt-plain");
+  });
+
   it("returns null for a non-array payload and for an all-empty one", () => {
     expect(readModelListEfforts(undefined)).toBeNull();
     expect(readModelListEfforts({ data: [] })).toBeNull();
@@ -613,6 +634,31 @@ describe("a hint-less run is held to the DEFAULT model's ladder, not the union",
       },
     );
     expect(emittedEffort(args)).toBeNull();
+  });
+
+  it("sends NO flag and discloses when the default model advertises no effort surface", () => {
+    // The default's ladder is KNOWN-EMPTY (the vendor listed the model with no
+    // effort surface), not unknown — so a hint-less request must not clamp
+    // against the sibling union; it drops the flag and the INV-105 seam
+    // discloses the ignored setting.
+    const effortlessDefault: CodexEffortCatalog = {
+      models: { "gpt-sib": catalog.models["gpt-sib"] as ModelEffortCapability },
+      defaultModel: "gpt-plain",
+    };
+    const args = codexExecArgs(
+      { ...base, model_hint: null, effort_hint: "ultra" },
+      { effortCatalog: effortlessDefault },
+    );
+    expect(emittedEffort(args)).toBeNull();
+    const disclosed = codexEffortIgnoredEvent(effortlessDefault, {
+      session_id: "s1",
+      model_hint: null,
+      effort_hint: "ultra",
+    });
+    expect(disclosed?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=ultra"),
+    ]);
+    expect(disclosed?.text).toContain("gpt-plain");
   });
 
   it("keeps the union fallback only when the catalog recorded NO default model", () => {
