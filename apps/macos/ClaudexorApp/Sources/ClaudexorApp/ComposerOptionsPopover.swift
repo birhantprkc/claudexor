@@ -34,6 +34,12 @@ extension ThreadsScreen {
     /// model's own recorded ladder when the manifest has one, else the
     /// harness-wide merged ladder — so picking a model that stops at `xhigh`
     /// no longer offers a sibling-only `ultra` for this turn.
+    ///
+    /// With NO per-turn selection the turn still runs on a concrete model: the
+    /// persisted per-harness `defaultModel` (settings snapshot) when one is
+    /// pinned. Its ladder narrows the menu the same way — otherwise the picker
+    /// offered (and the run requested) sibling-only levels out of the
+    /// harness-wide union that the pinned default model rejects.
     var composerEffortLevels: [String] {
         let families = primaryFamily.map { [$0] }
             ?? (resolvedPoolFamilies.isEmpty ? poolFamilies : resolvedPoolFamilies)
@@ -41,7 +47,10 @@ extension ThreadsScreen {
             guard let info = model.harnessInfo(for: family) else { return [] }
             let chosen = (composerModels[family.rawValue] ?? "")
                 .trimmingCharacters(in: .whitespaces)
-            if !chosen.isEmpty, let perModel = info.modelEffortLevels[chosen], !perModel.isEmpty {
+            let persisted = (model.settingsSnapshot?.harnesses?[family.rawValue]?.defaultModel ?? "")
+                .trimmingCharacters(in: .whitespaces)
+            let effective = chosen.isEmpty ? persisted : chosen
+            if !effective.isEmpty, let perModel = info.modelEffortLevels[effective], !perModel.isEmpty {
                 return perModel
             }
             return info.effortLevels
