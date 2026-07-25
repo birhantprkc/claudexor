@@ -549,11 +549,9 @@ export interface RoutedAdapter {
   /** Per-lane deny-path enforcement disclosure (postdiff_only until an adapter
    * supports native pre-write deny). */
   denyRequirement: RequestRequirementResolution;
-  /** Harness-wide advertised effort ladder (empty = not a tunable surface; a
-   * requested effort is then DISCLOSED as ignored). Narrowed per model below. */
+  /** Harness-wide advertised effort ladder (empty = not tunable → the requested
+   * effort is DISCLOSED as ignored); the adapter re-resolves per model in its own env. */
   effortLevels: readonly EffortHint[];
-  /** Per-model advertised vocabularies; absent model = the ladder above. */
-  modelEffortLevels: HarnessCapabilities["model_effort_levels"];
   /** Manifest model truth source (used when the adapter has no live models()). */
   knownModels: readonly KnownModelEntry[];
   /** Pre-spawn credential-route estimate (INV-061 projection of preference x
@@ -792,6 +790,7 @@ export class Orchestrator {
   private async resolveReviewers(
     cwd: string,
     runAuthPreference?: AuthPreference,
+    onIgnoredSetting?: (detail: string) => void,
   ): Promise<ReviewerSpec[]> {
     if (this.deps.reviewers) return this.deps.reviewers;
     if (this.deps.reviewerPanel && this.deps.reviewerPanel.length > 0) {
@@ -803,11 +802,9 @@ export class Orchestrator {
         registry: this.deps.registry,
         harnessSettings: this.config(cwd)?.global.harnesses ?? {},
         authPreferenceFor: (id) => this.authPreferenceForHarness(cwd, id, runAuthPreference),
+        onIgnoredSetting,
       },
-      {
-        reviewerModels: this.deps.reviewerModels,
-        reviewerEfforts: this.deps.reviewerEfforts,
-      },
+      { reviewerModels: this.deps.reviewerModels, reviewerEfforts: this.deps.reviewerEfforts },
     );
   }
 
@@ -828,7 +825,9 @@ export class Orchestrator {
     mode: ModeKind,
   ): Promise<{ reviewers: ReviewerSpec[] } | { failed: OrchestratorResult }> {
     try {
-      return { reviewers: await this.resolveReviewers(input.repoRoot, input.authPreference) };
+      // Auto-panel dropped knobs (reviewerEfforts) → ignored-settings channel (QA-070):
+      const warn = (d: string) => void log.emit("review.preflight", { ignored_settings: [d] });
+      return { reviewers: await this.resolveReviewers(input.repoRoot, input.authPreference, warn) };
     } catch (err) {
       const message = safeErrorMessage(err);
       store.writeText(
@@ -1422,7 +1421,6 @@ export class Orchestrator {
             (input.denyPaths?.length ?? 0) > 0,
           ),
           effortLevels: manifest.capabilities.effort_levels,
-          modelEffortLevels: manifest.capabilities.model_effort_levels,
           knownModels: manifest.capabilities.known_models,
           // A selected profile's credential_kind IS the route (round-18 #2);
           // the default store's sources apply only to profile-less runs.

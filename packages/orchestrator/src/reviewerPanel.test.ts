@@ -61,28 +61,37 @@ describe("reviewer effort gate", () => {
   const claude = () => reviewerAdapter("claude", "anthropic", ["low", "medium", "high", "max"]);
   const cursor = () => reviewerAdapter("cursor", "cursor", ["low", "medium", "high"]);
 
-  it("refuses a legacy reviewerEfforts level the auto-selected reviewer does not advertise", async () => {
-    // The hole this closes: `reviewerEfforts` was an enum on the wire, so a typo
-    // was a 400. With an open vocabulary the boundary cannot judge the level, and
-    // the auto panel forwarded it unchecked.
-    await expect(
-      resolveAutoReviewerPanel(deps([claude()]), { reviewerEfforts: { anthropic: "banana" } }),
-    ).rejects.toThrow(HarnessUnavailableError);
-
-    await expect(
-      resolveAutoReviewerPanel(deps([claude()]), { reviewerEfforts: { anthropic: "banana" } }),
-    ).rejects.toThrow(
-      /does not support requested effort 'banana'.*harness-wide advertised ladder.*low, medium, high, max/,
+  it("DROPS-AND-DISCLOSES a legacy reviewerEfforts level the auto reviewer does not advertise", async () => {
+    // The per-family `reviewerEfforts` map also rides stored replay surfaces
+    // (Exact Retry params, ControlRunAgainDraft.request), and a replay is not
+    // distinguishable from a fresh request at this layer — so an unadvertised
+    // level is dropped WITH disclosure instead of a typed refusal killing a
+    // replay that used to run. The panel still reviews, at the reviewer's
+    // default effort; the review artifact no longer records the level as
+    // requested (requestedEffort is nulled), so nothing reads as honored.
+    const ignored: string[] = [];
+    const specs = await resolveAutoReviewerPanel(
+      { ...deps([claude()]), onIgnoredSetting: (d) => ignored.push(d) },
+      { reviewerEfforts: { anthropic: "banana" } },
     );
+    expect(specs).toHaveLength(1);
+    expect(specs[0]?.requestedEffort).toBeNull();
+    expect(ignored).toEqual([
+      expect.stringMatching(
+        /reviewer effort dropped:.*does not support requested effort 'banana'.*low, medium, high, max/,
+      ),
+    ]);
   });
 
-  it("refuses a well-known vendor level this reviewer's ladder does not advertise", async () => {
+  it("drops (not forwards) a well-known vendor level this reviewer's ladder does not advertise", async () => {
     // `ultra` is real elsewhere (codex sol models), just not on this reviewer's
-    // advertised ladder. Silently dropping it is the exact failure the gate
-    // exists to prevent.
-    await expect(
-      resolveAutoReviewerPanel(deps([claude()]), { reviewerEfforts: { anthropic: "ultra" } }),
-    ).rejects.toThrow(/does not support requested effort 'ultra'/);
+    // advertised ladder. It must not travel inward to die natively — and the
+    // drop must still resolve a working panel even with NO disclosure sink wired.
+    const specs = await resolveAutoReviewerPanel(deps([claude()]), {
+      reviewerEfforts: { anthropic: "ultra" },
+    });
+    expect(specs).toHaveLength(1);
+    expect(specs[0]?.requestedEffort).toBeNull();
   });
 
   it("accepts a legacy reviewer effort the reviewer advertises", async () => {
@@ -99,6 +108,11 @@ describe("reviewer effort gate", () => {
   });
 
   it("refuses an explicit reviewerPanel effort the reviewer does not advertise", async () => {
+    // Explicit panel entries are precise owner statements — they keep the
+    // HARD typed refusal (only the auto map above dropped to disclosure).
+    await expect(
+      resolveExplicitReviewerPanel(deps([cursor()]), [{ harness: "cursor", effort: "turbo" }]),
+    ).rejects.toThrow(HarnessUnavailableError);
     await expect(
       resolveExplicitReviewerPanel(deps([cursor()]), [{ harness: "cursor", effort: "turbo" }]),
     ).rejects.toThrow(

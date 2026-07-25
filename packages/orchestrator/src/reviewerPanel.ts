@@ -40,6 +40,10 @@ export interface ReviewerPanelDeps {
   registry: Map<string, HarnessAdapter>;
   harnessSettings: Record<string, PanelHarnessSettings | undefined>;
   authPreferenceFor: (harnessId: string) => AuthPreference;
+  /** Disclosure sink for a knob the panel dropped instead of refusing (the
+   * auto panel's `reviewerEfforts` map). Optional: the drop itself never
+   * depends on a listener being wired. */
+  onIgnoredSetting?: (detail: string) => void;
 }
 
 /**
@@ -55,7 +59,7 @@ export interface ReviewerPanelDeps {
  * artifact still records `requested_effort`, so the run reads as though the
  * level had been honored.
  */
-function assertReviewerEffortAdvertised(
+function reviewerEffortRefusal(
   harnessId: string,
   requestedEffort: EffortHint | null,
   capabilities: {
@@ -63,14 +67,14 @@ function assertReviewerEffortAdvertised(
     model_effort_levels: Record<string, ModelEffortCapability>;
   },
   model: string | null,
-): void {
-  if (!requestedEffort) return;
+): string | null {
+  if (!requestedEffort) return null;
   // Validate against the ladder of the model that will actually review: the
   // model's own advertised list when the entry resolves one and the manifest
   // recorded it, else the harness-wide merged ladder — which is then the only
   // honest set, and the refusal says so.
   const advertised = effortLevelsForModel(capabilities, model);
-  if (advertised.includes(requestedEffort)) return;
+  if (advertised.includes(requestedEffort)) return null;
   const perModel =
     model !== null && (capabilities.model_effort_levels[model]?.levels.length ?? 0) > 0;
   const supported = advertised.join(", ");
@@ -79,9 +83,7 @@ function assertReviewerEffortAdvertised(
     : perModel
       ? ` (model '${model}' advertises: ${supported})`
       : ` (harness-wide advertised ladder — no per-model ladder recorded${model ? ` for '${model}'` : ""}: ${supported})`;
-  throw new HarnessUnavailableError(
-    `reviewer harness '${harnessId}' does not support requested effort '${requestedEffort}'${suffix}`,
-  );
+  return `reviewer harness '${harnessId}' does not support requested effort '${requestedEffort}'${suffix}`;
 }
 
 export async function resolveExplicitReviewerPanel(
@@ -219,12 +221,15 @@ export async function resolveExplicitReviewerPanel(
         }
       }
       const requestedEffort = entry.effort ?? null;
-      assertReviewerEffortAdvertised(
+      // An EXPLICIT panel entry is a precise owner statement — an unadvertised
+      // level stays a hard, typed refusal (never forwarded to die natively).
+      const refusal = reviewerEffortRefusal(
         entry.harness,
         requestedEffort,
         manifest.capabilities,
         requestedModel,
       );
+      if (refusal) throw new HarnessUnavailableError(refusal);
       specs.push({
         adapter,
         providerFamily: manifest.provider_family,
@@ -311,13 +316,26 @@ export async function resolveAutoReviewerPanel(
           );
         }
       }
-      // STRICT, exactly like the model gate above and the explicit panel: a
-      // per-family effort override the selected reviewer does not advertise is
-      // refused here. The legacy `reviewerEfforts` map used to be an enum on the
-      // wire, so the boundary caught a typo; the vocabulary is open now, and this
-      // is the layer that knows what the chosen reviewer really accepts.
-      const requestedEffort = overrides.reviewerEfforts?.[m.provider_family] ?? null;
-      assertReviewerEffortAdvertised(adapter.id, requestedEffort, m.capabilities, requestedModel);
+      // DISCLOSE-AND-DROP, deliberately weaker than the model gate above: the
+      // per-family `reviewerEfforts` map also rides stored replay surfaces
+      // (Exact Retry params, `ControlRunAgainDraft.request`), so a map recorded
+      // before a reviewer/catalog change must not hard-fail a replay that used
+      // to run. A fresh request and a replayed draft are indistinguishable at
+      // this layer, so the disclosed drop applies everywhere — the honest
+      // middle: the panel still reviews, at the reviewer's default effort, and
+      // the drop is disclosed instead of a typed refusal killing the run.
+      // (Explicit `reviewerPanel[].effort` entries above stay hard refusals.)
+      let requestedEffort = overrides.reviewerEfforts?.[m.provider_family] ?? null;
+      const dropped = reviewerEffortRefusal(
+        adapter.id,
+        requestedEffort,
+        m.capabilities,
+        requestedModel,
+      );
+      if (dropped) {
+        deps.onIgnoredSetting?.(`reviewer effort dropped: ${dropped}`);
+        requestedEffort = null;
+      }
       seen.add(m.provider_family);
       specs.push({
         adapter,
