@@ -20,7 +20,7 @@
 import { spawn } from "node:child_process";
 import type { HarnessEvent, HarnessRunSpec, ModelEffortCapability } from "@claudexor/schema";
 import { EffortHint, effortLevelsForModel, mergeEffortLadders } from "@claudexor/schema";
-import { normalizeEffort } from "@claudexor/core";
+import { resolveEffort } from "@claudexor/core";
 import { nowIso } from "@claudexor/util";
 import { BIN, probeEnv } from "./missing-cli.js";
 
@@ -416,6 +416,23 @@ export async function codexEffortsForEnv(
 }
 
 /**
+ * The full outcome of resolving one (model, requested) pair against a catalog:
+ * what to send, whether the merged vendor order MOVED it there, and which
+ * model's ladder decided. `codexEffortFor` keeps only the level for the arg
+ * builder; the disclosure seams need the other two facts, because a CLAMP is a
+ * changed setting the user asked for differently (INV-105) even though a flag
+ * is still sent.
+ */
+export interface CodexEffortResolution {
+  /** The level to send, or null when no flag should be sent at all. */
+  effort: EffortHint | null;
+  /** True when `effort` differs from the request — the merged vendor order clamped it. */
+  clamped: boolean;
+  /** The model whose advertised ladder decided this (the hint, or the catalog default). */
+  effectiveModel: string | null;
+}
+
+/**
  * The effort value to send for one (model, requested) pair: advertised passes
  * through verbatim, a level a SIBLING model advertises clamps inside the merged
  * vendor order (`ultra` on gpt-5.4 → `xhigh` because the merged codex ladder
@@ -427,11 +444,11 @@ export async function codexEffortsForEnv(
  * model's own list) and an unadvertised level is refused rather than clamped
  * along an order this repo would have had to invent.
  */
-export function codexEffortFor(
+export function codexEffortResolution(
   catalog: CodexEffortCatalog,
   model: string | null | undefined,
   requested: EffortHint | null | undefined,
-): EffortHint | null {
+): CodexEffortResolution {
   const merged = mergeEffortLadders(Object.values(catalog.models).map((entry) => entry.levels));
   // No model hint does NOT mean "any model": codex runs the catalog's DEFAULT
   // model (`model/list` isDefault), so the requested level is held to THAT
@@ -460,7 +477,23 @@ export function codexEffortFor(
         },
         effectiveModel,
       );
-  return normalizeEffort(requested, advertised, merged.consistent ? merged.order : advertised);
+  const check = resolveEffort(requested, advertised, merged.consistent ? merged.order : advertised);
+  if (check.status !== "ok") return { effort: null, clamped: false, effectiveModel };
+  return { effort: check.effort, clamped: check.clamped, effectiveModel };
+}
+
+/**
+ * The level the arg builder should emit for one (model, requested) pair, or
+ * null when no flag should be sent. Thin projection of
+ * `codexEffortResolution`; the run-side disclosure seams read the full
+ * resolution so a clamp or a drop is never silent.
+ */
+export function codexEffortFor(
+  catalog: CodexEffortCatalog,
+  model: string | null | undefined,
+  requested: EffortHint | null | undefined,
+): EffortHint | null {
+  return codexEffortResolution(catalog, model, requested).effort;
 }
 
 /**
@@ -488,6 +521,49 @@ export function codexEffortIgnoredEvent(
     session_id: spec.session_id,
     ts: nowIso(),
     text: `[effort] ignored: ${detail}`,
+    payload: { ignored_settings: [detail] },
+  };
+}
+
+/**
+ * The INV-105 disclosure for an effort the run CLAMPED, or null when the
+ * requested level rode through verbatim (or was dropped — that is
+ * `codexEffortIgnoredEvent`'s shape, and the two are mutually exclusive: a
+ * drop sends no level, a clamp sends a different one). A clamp is quieter than
+ * a drop but just as much a changed setting: `--effort ultra` on gpt-5.4 runs
+ * at `xhigh`, and without this event nothing in the timeline said so. The
+ * payload rides the same `ignored_settings` channel governance and the drop
+ * seam use, so every existing reader renders the same warning.
+ */
+/**
+ * The one INV-105 seam the run yields: the DROP disclosure or the CLAMP
+ * disclosure, whichever applies (they are mutually exclusive by construction —
+ * a drop sends no flag, a clamp sends a different one), or null when the
+ * requested level rode through verbatim or nothing was requested.
+ */
+export function codexEffortDisclosureEvent(
+  catalog: CodexEffortCatalog,
+  spec: Pick<HarnessRunSpec, "session_id" | "model_hint" | "effort_hint">,
+): HarnessEvent | null {
+  return codexEffortIgnoredEvent(catalog, spec) ?? codexEffortClampedEvent(catalog, spec);
+}
+
+export function codexEffortClampedEvent(
+  catalog: CodexEffortCatalog,
+  spec: Pick<HarnessRunSpec, "session_id" | "model_hint" | "effort_hint">,
+): HarnessEvent | null {
+  if (!spec.effort_hint) return null;
+  const resolved = codexEffortResolution(catalog, spec.model_hint, spec.effort_hint);
+  if (!resolved.clamped || resolved.effort === null) return null;
+  const detail =
+    `effort=${spec.effort_hint} (clamped to ${resolved.effort}: the requested level is not ` +
+    `advertised by${resolved.effectiveModel ? ` model ${resolved.effectiveModel}` : " the resolved model"}, ` +
+    `so the run sent ${resolved.effort}, the nearest level that model advertises)`;
+  return {
+    type: "message",
+    session_id: spec.session_id,
+    ts: nowIso(),
+    text: `[effort] clamped: ${detail}`,
     payload: { ignored_settings: [detail] },
   };
 }

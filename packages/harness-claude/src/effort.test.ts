@@ -4,6 +4,7 @@ import { HarnessRunSpec } from "@claudexor/schema";
 import { normalizeEffort, resolveEffort } from "@claudexor/core";
 import {
   CLAUDE_EFFORT_SNAPSHOT,
+  claudeEffortClampedEvent,
   claudeEffortIgnoredEvent,
   parseClaudeEffortHelp,
 } from "./effort-probe.js";
@@ -301,5 +302,56 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
     ]);
     expect(cliArgs).toBeDefined();
     expect(cliArgs).not.toContain("--effort");
+  });
+});
+
+describe("an effort the resolution CLAMPED is disclosed too (INV-105) — the codex-symmetric seam", () => {
+  const maxCapped = ["low", "medium", "high", "xhigh", "max"] as const; // 2.1.165-shaped binary
+  const ladderWithUltra = [...maxCapped, "ultra"] as const; // a rank order that places ultra above max
+
+  it("discloses `ultra` clamped onto `max` when a rank ladder places it above a max-capped binary", () => {
+    // The claude-shaped clamp: the binary advertises up to `max`, the rank
+    // ladder knows `ultra` sits above it, so resolution clamps ultra -> max —
+    // and the seam says so, naming both levels.
+    const clamped = claudeEffortClampedEvent(
+      { session_id: "s1", effort_hint: "ultra" },
+      maxCapped,
+      ladderWithUltra,
+    );
+    expect(clamped?.type).toBe("message");
+    expect(clamped?.text).toContain("clamped");
+    expect(clamped?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=ultra"),
+    ]);
+    expect(clamped?.payload?.["ignored_settings"]).toEqual([expect.stringContaining("max")]);
+    // ...and the SAME inputs make the normalizer send exactly that level, so
+    // the disclosure and the flag cannot disagree.
+    expect(normalizeEffort("ultra", maxCapped, ladderWithUltra)).toBe("max");
+  });
+
+  it("a PASS-THROUGH emits nothing; against the binary's OWN ladder a miss is a DROP, not a clamp", () => {
+    // Advertised verbatim: neither seam fires.
+    expect(
+      claudeEffortClampedEvent({ session_id: "s1", effort_hint: "max" }, maxCapped),
+    ).toBeNull();
+    expect(
+      claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: "max" }, maxCapped),
+    ).toBeNull();
+    // TODAY'S production shape (two-arg resolution, ladder = the advertised
+    // list itself): an unadvertised level cannot clamp — it drops, and the
+    // existing DROP seam owns the disclosure. Pinned so the two seams stay
+    // mutually exclusive.
+    expect(
+      claudeEffortClampedEvent({ session_id: "s1", effort_hint: "ultra" }, maxCapped),
+    ).toBeNull();
+    expect(
+      claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: "ultra" }, maxCapped)?.payload?.[
+        "ignored_settings"
+      ],
+    ).toEqual([expect.stringContaining("effort=ultra")]);
+    // Nothing requested: nothing to disclose.
+    expect(
+      claudeEffortClampedEvent({ session_id: "s1", effort_hint: null }, maxCapped, ladderWithUltra),
+    ).toBeNull();
   });
 });

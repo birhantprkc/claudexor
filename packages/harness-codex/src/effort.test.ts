@@ -10,6 +10,7 @@ import { codexExecArgs } from "./index.js";
 import {
   CODEX_EFFORT_SNAPSHOT,
   codexEffortCacheSize,
+  codexEffortClampedEvent,
   codexEffortCapability,
   codexEffortIgnoredEvent,
   codexEffortsForEnv,
@@ -746,6 +747,126 @@ describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", 
     ]);
     // ...and the child was really spawned WITHOUT any effort flag.
     expect(cliArgs?.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
+    clearCodexEffortCache();
+  });
+});
+
+describe("an effort the run CLAMPED is disclosed too (INV-105) — a moved level is a changed setting", () => {
+  /** The B2 shape: the routed model stops at xhigh while a sibling advertises
+   * ultra, so `ultra` clamps to `xhigh` inside the merged vendor order — which
+   * used to happen with zero disclosure. */
+  const catalog: CodexEffortCatalog = {
+    models: {
+      "gpt-cap": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
+      "gpt-top": { levels: ["low", "medium", "high", "xhigh", "max", "ultra"], default: "low" },
+    },
+    defaultModel: "gpt-cap",
+  };
+
+  it("codexEffortClampedEvent discloses the requested level, the level sent, and the deciding model", () => {
+    const clamped = codexEffortClampedEvent(catalog, {
+      session_id: "s1",
+      model_hint: "gpt-cap",
+      effort_hint: "ultra",
+    });
+    expect(clamped?.type).toBe("message");
+    expect(clamped?.text).toContain("clamped");
+    expect(clamped?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=ultra"),
+    ]);
+    expect(clamped?.payload?.["ignored_settings"]).toEqual([expect.stringContaining("xhigh")]);
+    expect(clamped?.text).toContain("gpt-cap");
+    // ...and the flag really goes out at the clamped level, unchanged by the seam.
+    expect(
+      emittedEffort(
+        codexExecArgs(
+          { ...base, model_hint: "gpt-cap", effort_hint: "ultra" },
+          { effortCatalog: catalog },
+        ),
+      ),
+    ).toBe("xhigh");
+  });
+
+  it("a hint-less run clamping onto the DEFAULT model's ceiling names that model", () => {
+    const clamped = codexEffortClampedEvent(catalog, {
+      session_id: "s1",
+      model_hint: null,
+      effort_hint: "ultra",
+    });
+    expect(clamped?.text).toContain("gpt-cap");
+    expect(clamped?.payload?.["ignored_settings"]).toEqual([expect.stringContaining("xhigh")]);
+  });
+
+  it("a PASS-THROUGH (advertised level) emits nothing, and a DROP keeps the drop shape only", () => {
+    // Advertised verbatim: neither seam fires.
+    expect(
+      codexEffortClampedEvent(catalog, {
+        session_id: "s1",
+        model_hint: "gpt-cap",
+        effort_hint: "xhigh",
+      }),
+    ).toBeNull();
+    expect(
+      codexEffortIgnoredEvent(catalog, {
+        session_id: "s1",
+        model_hint: "gpt-cap",
+        effort_hint: "xhigh",
+      }),
+    ).toBeNull();
+    // Unplaceable level: the DROP seam owns it, the clamp seam stays silent.
+    const spec = { session_id: "s1", model_hint: "gpt-cap", effort_hint: "hyperdrive" };
+    expect(codexEffortClampedEvent(catalog, spec)).toBeNull();
+    expect(codexEffortIgnoredEvent(catalog, spec)?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=hyperdrive"),
+    ]);
+    // Nothing requested: nothing to disclose.
+    expect(
+      codexEffortClampedEvent(catalog, {
+        session_id: "s1",
+        model_hint: "gpt-cap",
+        effort_hint: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("the RUN discloses the clamp and still sends the clamped flag", async () => {
+    clearCodexEffortCache();
+    let cliArgs: string[] | undefined;
+    const adapter = createCodexAdapter({
+      detectVersion: async () => "codex-cli 0.144.1",
+      probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
+      hasApiKey: () => false,
+      probeEfforts: async () => catalog,
+      runCliHarness: async function* (options): AsyncGenerator<HarnessEvent> {
+        cliArgs = options.args;
+        yield {
+          type: "completed",
+          session_id: options.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    const spec = HarnessRunSpec.parse({
+      session_id: "codex-effort-clamp",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/repo",
+      // Governance forwards this verbatim (it sits in the harness-wide union);
+      // the routed model's ceiling is xhigh, so the run clamps — and says so.
+      effort_hint: "ultra",
+      model_hint: "gpt-cap",
+      auth_preference: "auto",
+    });
+    const events: HarnessEvent[] = [];
+    for await (const ev of adapter.run(spec)) events.push(ev);
+    const disclosure = events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]));
+    expect(disclosure?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=ultra"),
+    ]);
+    expect(disclosure?.text).toContain("clamped");
+    expect(disclosure?.text).toContain("xhigh");
+    // ...and the child was really spawned WITH the clamped flag.
+    expect(cliArgs?.some((a) => a === 'model_reasoning_effort="xhigh"')).toBe(true);
     clearCodexEffortCache();
   });
 });

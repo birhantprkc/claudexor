@@ -46,7 +46,7 @@ import {
   BIN,
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-  claudeEffortIgnoredEvent,
+  claudeEffortDisclosureEvent,
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
@@ -937,11 +937,11 @@ async function* runClaude(
   // re-spawns the CLI just to learn its ladder.
   const efforts = await runtime.probeEffortLevels(abortSignalFromSpec(spec));
   const args = claudeArgsForSpec(spec, interactive, useSubscription, efforts.levels);
-  // INV-105 rides the RUN too: preflight passed this level against the manifest
-  // ladder, but the INSTALLED binary's can be narrower — disclosed, never a
-  // silent vendor-default run (claudeEffortIgnoredEvent).
-  const droppedEffort = claudeEffortIgnoredEvent(spec, efforts.levels);
-  if (droppedEffort) yield droppedEffort;
+  // INV-105 rides the RUN too: the INSTALLED binary can be narrower than the
+  // manifest ladder preflight saw — a DROP or a CLAMP is disclosed here, on the
+  // same inputs the arg builder resolves with, never a silent divergence.
+  const effortDisclosure = claudeEffortDisclosureEvent(spec, efforts.levels);
+  if (effortDisclosure) yield effortDisclosure;
   // Scrub EVERY provider secret (incl. OpenAI/others — the cross-provider leak
   // fix) via the single core table, then re-add only the var this route needs.
   const env: Record<string, string | null | undefined> =

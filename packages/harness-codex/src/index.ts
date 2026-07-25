@@ -20,8 +20,8 @@ import {
 import {
   CODEX_EFFORT_SNAPSHOT,
   CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
+  codexEffortDisclosureEvent,
   codexEffortFor,
-  codexEffortIgnoredEvent,
   codexEffortsForEnv,
   probeCodexEfforts,
   unionEffortLevels,
@@ -755,10 +755,10 @@ async function* runCodex(
   // gets its OWN account's catalog, not whichever one landed in the cache first.
   const efforts = await codexEffortsForEnv(runtime, env);
   // INV-105 rides the RUN too: preflight passed this level against the DEFAULT
-  // account's manifest, but THIS env's catalog may still refuse it — disclosed,
-  // never a silent vendor-default run (codexEffortIgnoredEvent).
-  const droppedEffort = codexEffortIgnoredEvent(efforts.catalog, spec);
-  if (droppedEffort) yield droppedEffort;
+  // account's manifest, but THIS env's catalog may DROP it or CLAMP it onto the
+  // routed model's ceiling — disclosed either way, never a silent divergence.
+  const effortDisclosure = codexEffortDisclosureEvent(efforts.catalog, spec);
+  if (effortDisclosure) yield effortDisclosure;
   const args = codexExecArgs(spec, {
     suppressNodeRepl: codexConfigHasNodeRepl(env["CODEX_HOME"]),
     outputSchemaPath,

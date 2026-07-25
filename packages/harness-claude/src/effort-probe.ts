@@ -18,7 +18,7 @@
  */
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { EffortHint } from "@claudexor/schema";
-import { normalizeEffort, runCapture } from "@claudexor/core";
+import { normalizeEffort, resolveEffort, runCapture } from "@claudexor/core";
 import { nowIso, redactSecrets } from "@claudexor/util";
 
 export const BIN = process.env.CLAUDEXOR_CLAUDE_BIN || "claude";
@@ -259,6 +259,57 @@ export function claudeEffortIgnoredEvent(
     session_id: spec.session_id,
     ts: nowIso(),
     text: `[effort] ignored: ${detail}`,
+    payload: { ignored_settings: [detail] },
+  };
+}
+
+/**
+ * The INV-105 disclosure for an effort the resolution CLAMPED, or null when the
+ * level rode through verbatim (or was dropped — `claudeEffortIgnoredEvent`'s
+ * shape; the two are mutually exclusive: a drop sends no flag, a clamp sends a
+ * different one). Mirrors the codex clamp seam so a moved level is disclosed
+ * the same way on both adapters, and takes the SAME (advertised, ladder)
+ * inputs the arg builder's normalizer takes so the disclosure can never
+ * disagree with the flag actually sent.
+ *
+ * Reachability today: the arg builder resolves with the installed binary's own
+ * list as both advertised set and rank ladder (`normalizeEffort`'s two-arg
+ * form), and against one's own ladder every miss is a DROP, never a clamp —
+ * so with current call sites this event only fires if a rank ladder broader
+ * than the binary's list is ever threaded through (the codex-shaped future,
+ * e.g. `ultra` ranking above a max-capped binary and clamping onto `max`).
+ * The seam exists precisely so that future cannot be silent.
+ */
+/**
+ * The one INV-105 seam the run yields: the DROP disclosure or the CLAMP
+ * disclosure, whichever applies (they are mutually exclusive by construction —
+ * a drop sends no flag, a clamp sends a different one), or null when the
+ * requested level rode through verbatim or nothing was requested.
+ */
+export function claudeEffortDisclosureEvent(
+  spec: Pick<HarnessRunSpec, "session_id" | "effort_hint">,
+  advertised: readonly EffortHint[],
+): HarnessEvent | null {
+  return claudeEffortIgnoredEvent(spec, advertised) ?? claudeEffortClampedEvent(spec, advertised);
+}
+
+export function claudeEffortClampedEvent(
+  spec: Pick<HarnessRunSpec, "session_id" | "effort_hint">,
+  advertised: readonly EffortHint[],
+  ladder: readonly EffortHint[] = advertised,
+): HarnessEvent | null {
+  if (!spec.effort_hint) return null;
+  const check = resolveEffort(spec.effort_hint, advertised, ladder);
+  if (check.status !== "ok" || !check.clamped || check.effort === null) return null;
+  const detail =
+    `effort=${spec.effort_hint} (clamped to ${check.effort}: the requested level is not ` +
+    `advertised by the installed claude CLI (it advertises: ${advertised.join(", ")}), ` +
+    `so the run sent ${check.effort}, the nearest level it advertises)`;
+  return {
+    type: "message",
+    session_id: spec.session_id,
+    ts: nowIso(),
+    text: `[effort] clamped: ${detail}`,
     payload: { ignored_settings: [detail] },
   };
 }
