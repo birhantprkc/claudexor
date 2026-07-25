@@ -16,9 +16,10 @@
  * On a missing binary, an unparseable help text, or a `--help` that stops
  * documenting the values, the recorded snapshot fills in and the run proceeds.
  */
+import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { EffortHint } from "@claudexor/schema";
-import { runCapture } from "@claudexor/core";
-import { redactSecrets } from "@claudexor/util";
+import { normalizeEffort, runCapture } from "@claudexor/core";
+import { nowIso, redactSecrets } from "@claudexor/util";
 
 export const BIN = process.env.CLAUDEXOR_CLAUDE_BIN || "claude";
 
@@ -86,10 +87,23 @@ export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
   // survives an annotation placed AFTER the list.
   let levels: EffortHint[] | null = null;
   for (const group of window.matchAll(/\(([^()]*)\)/g)) {
-    levels = readEffortGroup(group[1] ?? "") ?? levels;
+    const parsed = readEffortGroup(group[1] ?? "");
+    // Same policy as the codex probe: ONE malformed token inside a value list
+    // fails the WHOLE parse (snapshot fallback). Skipping the token instead
+    // would publish a silently NARROWED ladder stamped as live — a real level
+    // would clamp away or refuse against a list the vendor never printed.
+    if (parsed === MALFORMED) return null;
+    levels = parsed ?? levels;
   }
   return levels;
 }
+
+/**
+ * A parenthesized group that ENUMERATES like a value list but carries a token
+ * that is not an `EffortHint`. Distinct from `null` (not a value list at all —
+ * an annotation like `(beta)`, which is skipped): this poisons the whole parse.
+ */
+const MALFORMED = Symbol("malformed-effort-group");
 
 /**
  * The levels one parenthesized group advertises, or null when the group is not a
@@ -99,17 +113,22 @@ export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
  * table, a lone `(high)` is indistinguishable from an annotation like
  * `(beta)`, and the vendor's real value list has always enumerated. A help
  * text that ever documents a genuine one-level ladder falls back to the
- * recorded snapshot instead of guessing. Levels are validated through
- * `EffortHint` rather than a hand-rolled shape test, so prose such as
- * "default: high" is ignored and an over-long token can never reach
- * `capabilities.effort_levels` and fail the manifest schema.
+ * recorded snapshot instead of guessing.
+ *
+ * STRICT inside an enumerating group, matching the codex probe's reviewed
+ * policy: a token that fails the `EffortHint` contract (prose, an over-long
+ * slug, invalid characters) is MALFORMED and fails the whole parse, because
+ * skipping it would publish a silently narrowed ladder as live — and the
+ * snapshot fallback is a real, usable ladder, so strictness costs freshness,
+ * never capability.
  */
-function readEffortGroup(body: string): EffortHint[] | null {
+function readEffortGroup(body: string): EffortHint[] | null | typeof MALFORMED {
   if (!/[,|]/.test(body)) return null;
   const levels: EffortHint[] = [];
   for (const raw of body.split(/[,|]/)) {
     const parsed = EffortHint.safeParse(raw.trim());
-    if (parsed.success && !levels.includes(parsed.data)) levels.push(parsed.data);
+    if (!parsed.success) return MALFORMED;
+    if (!levels.includes(parsed.data)) levels.push(parsed.data);
   }
   return levels.length > 0 ? levels : null;
 }
@@ -214,4 +233,32 @@ export async function probeClaudeEffortLevels(
   const probe = await probeClaudeHelp(abortSignal);
   const parsed = probe.ok ? parseClaudeEffortHelp(probe.help) : null;
   return parsed ? { levels: parsed, live: true } : { levels: CLAUDE_EFFORT_SNAPSHOT, live: false };
+}
+
+/**
+ * The INV-105 disclosure for an effort the RUN itself could not honor, or null
+ * when nothing was dropped. Preflight validates against the manifest ladder,
+ * but the arg builder resolves against what the INSTALLED binary advertises at
+ * run time (an older CLI's `--help` can be narrower than the discovered
+ * manifest), and its normalizer answers "send no flag" — which without this
+ * event was a silent vendor-default run. The payload rides the same
+ * `ignored_settings` channel governance uses (QA-070 timeline warning).
+ */
+export function claudeEffortIgnoredEvent(
+  spec: Pick<HarnessRunSpec, "session_id" | "effort_hint">,
+  advertised: readonly EffortHint[],
+): HarnessEvent | null {
+  if (!spec.effort_hint) return null;
+  if (normalizeEffort(spec.effort_hint, advertised) !== null) return null;
+  const detail =
+    `effort=${spec.effort_hint} (not accepted by the installed claude CLI` +
+    `${advertised.length > 0 ? `; it advertises: ${advertised.join(", ")}` : ""}; ` +
+    "the run used the vendor default)";
+  return {
+    type: "message",
+    session_id: spec.session_id,
+    ts: nowIso(),
+    text: `[effort] ignored: ${detail}`,
+    payload: { ignored_settings: [detail] },
+  };
 }

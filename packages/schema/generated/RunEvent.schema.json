@@ -72,6 +72,7 @@
             "output.ready",
             "gate.started",
             "gate.completed",
+            "review.preflight",
             "review.started",
             "review.skipped",
             "reviewer.started",

@@ -231,6 +231,7 @@ describe("EffortHint is an OPEN vocabulary, bounded by shape only", () => {
       ]),
     ).toEqual({
       order: ["low", "medium", "high", "xhigh", "hyperdrive", "max"],
+      unconstrained: [],
       consistent: true,
     });
     expect(

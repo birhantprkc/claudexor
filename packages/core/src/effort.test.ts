@@ -95,8 +95,35 @@ describe("merged-order derivation from vendor lists", () => {
   });
 
   it("merges the empty and trivial cases without noise", () => {
-    expect(mergeEffortLadders([])).toEqual({ order: [], consistent: true });
-    expect(mergeEffortLadders([[], ["low"]])).toEqual({ order: ["low"], consistent: true });
+    expect(mergeEffortLadders([])).toEqual({ order: [], unconstrained: [], consistent: true });
+    // A lone single-level list carries NO ordering constraint: the level is
+    // advertised but unrankable, so it lands in `unconstrained`, not `order`.
+    expect(mergeEffortLadders([[], ["low"]])).toEqual({
+      order: [],
+      unconstrained: ["low"],
+      consistent: true,
+    });
+  });
+
+  it("an unconstrained level's position is UNKNOWN, not maximal (the exact reported case)", () => {
+    // A plain topological tail used to park `medium` AFTER `high`, silently
+    // making the unconstrained level the strongest rank of the merge. The
+    // honest semantics: `medium` stays advertised (membership, pickers) but is
+    // EXCLUDED from the rank order, so clamping to or from it refuses with
+    // disclosure — exactly like the inconsistent-orders case.
+    const merged = mergeEffortLadders([["low", "high"], ["medium"]]);
+    expect(merged).toEqual({
+      order: ["low", "high"],
+      unconstrained: ["medium"],
+      consistent: true,
+    });
+    // Clamping FROM medium: the rank order cannot place it -> refuse, no guess.
+    expect(normalizeEffort("medium", ["low", "high"], merged.order)).toBeNull();
+    expect(resolveEffort("medium", ["low", "high"], merged.order).status).toBe("rejected");
+    // Clamping TO medium: it is not rankable, so it can never host a clamp...
+    expect(normalizeEffort("high", ["medium"], merged.order)).toBeNull();
+    // ...but exact advertised membership still passes through verbatim.
+    expect(normalizeEffort("medium", ["medium"], merged.order)).toBe("medium");
   });
 });
 

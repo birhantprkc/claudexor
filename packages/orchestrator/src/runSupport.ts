@@ -258,7 +258,13 @@ export function harnessEventPayload(
     (safe.usage
       ? `usage: ${safe.usage.input_tokens ?? 0} in / ${safe.usage.output_tokens ?? 0} out`
       : safe.type);
+  // INV-105 from INSIDE the adapter (an effort the run's resolved catalog
+  // refused after preflight passed it): hoist the adapter's `ignored_settings`
+  // to the projection's top level, where the timeline/live disclosure channel
+  // already reads it for harness.started (QA-070) — same warning either way.
+  const ignored = (safe.payload as Record<string, unknown> | undefined)?.["ignored_settings"];
   return {
+    ...(Array.isArray(ignored) ? { ignored_settings: ignored } : {}),
     harness_id: harnessId,
     attempt_id: attemptId,
     session_id: safe.session_id,

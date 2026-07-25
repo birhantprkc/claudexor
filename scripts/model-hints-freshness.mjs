@@ -85,7 +85,7 @@ const EFFORT_SNAPSHOTS = {
     module: "packages/harness-codex/dist/effort-probe.js",
     read: (m) =>
       Object.fromEntries(
-        Object.entries(m.CODEX_EFFORT_SNAPSHOT).map(([id, v]) => [id, v.levels.join(",")]),
+        Object.entries(m.CODEX_EFFORT_SNAPSHOT.models).map(([id, v]) => [id, v.levels.join(",")]),
       ),
     live: (caps) =>
       Object.fromEntries(

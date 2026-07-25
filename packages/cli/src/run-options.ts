@@ -21,7 +21,7 @@ import {
  * up with rides the unambiguous `--reviewer-effort family=level` spelling.
  */
 function snapshotAdvertisedEfforts(): ReadonlySet<string> {
-  return new Set([...CLAUDE_EFFORT_SNAPSHOT, ...unionEffortLevels(CODEX_EFFORT_SNAPSHOT)]);
+  return new Set([...CLAUDE_EFFORT_SNAPSHOT, ...unionEffortLevels(CODEX_EFFORT_SNAPSHOT.models)]);
 }
 
 export function stringFlagValues(values: Array<string | boolean>, flag: string): string[] {

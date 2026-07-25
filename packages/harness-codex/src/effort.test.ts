@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HarnessRunSpec } from "@claudexor/schema";
-import { effortLevelsForModel } from "@claudexor/schema";
+import type { HarnessEvent } from "@claudexor/schema";
+import { HarnessRunSpec, effortLevelsForModel } from "@claudexor/schema";
 import { resolveEffort } from "@claudexor/core";
 import { clearCodexEffortCache, createCodexAdapter } from "./index.js";
 import { codexExecArgs } from "./index.js";
@@ -11,11 +11,13 @@ import {
   CODEX_EFFORT_SNAPSHOT,
   codexEffortCacheSize,
   codexEffortCapability,
+  codexEffortIgnoredEvent,
   codexEffortsForEnv,
   probeCodexEfforts,
   readModelListEfforts,
   unionEffortLevels,
   type CodexEffortCapability,
+  type CodexEffortCatalog,
 } from "./effort-probe.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -65,8 +67,8 @@ describe("codex effort is resolved per MODEL, not per harness", () => {
   it("refuses ultra for gpt-5.4 with an error naming what IS advertised, on a surface that can talk back", () => {
     const advertised = effortLevelsForModel(
       {
-        effort_levels: unionEffortLevels(CODEX_EFFORT_SNAPSHOT),
-        model_effort_levels: CODEX_EFFORT_SNAPSHOT,
+        effort_levels: unionEffortLevels(CODEX_EFFORT_SNAPSHOT.models),
+        model_effort_levels: CODEX_EFFORT_SNAPSHOT.models,
       },
       "gpt-5.4",
     );
@@ -74,8 +76,8 @@ describe("codex effort is resolved per MODEL, not per harness", () => {
     // The same pairing accepts it on sol, which is exactly the per-model point.
     const onSol = effortLevelsForModel(
       {
-        effort_levels: unionEffortLevels(CODEX_EFFORT_SNAPSHOT),
-        model_effort_levels: CODEX_EFFORT_SNAPSHOT,
+        effort_levels: unionEffortLevels(CODEX_EFFORT_SNAPSHOT.models),
+        model_effort_levels: CODEX_EFFORT_SNAPSHOT.models,
       },
       "gpt-5.6-sol",
     );
@@ -101,12 +103,13 @@ describe("codex effort is resolved per MODEL, not per harness", () => {
 
   it("passes a level this repo has never heard of straight through when the model advertises it", () => {
     // A future codex release adding a level must work with NO change here.
-    const future: CodexEffortCapability = {
-      "gpt-9": { levels: ["low", "high", "hyperdrive"], default: "high" },
+    const future: CodexEffortCatalog = {
+      models: { "gpt-9": { levels: ["low", "high", "hyperdrive"], default: "high" } },
+      defaultModel: "gpt-9",
     };
     const args = codexExecArgs(
       { ...base, model_hint: "gpt-9", effort_hint: "hyperdrive" },
-      { effortCapability: future },
+      { effortCatalog: future },
     );
     expect(emittedEffort(args)).toBe("hyperdrive");
   });
@@ -204,8 +207,8 @@ describe("codex effort probe degrades gracefully", () => {
     for (let round = 0; round < 3; round += 1) {
       const probed = await probeCodexEfforts(bin, { timeoutMs: 5_000 });
       expect(probed).not.toBeNull();
-      expect(probed?.["gpt-9"]?.levels).toEqual(["low", "high"]);
-      expect(probed?.["gpt-9"]?.default).toBe("high");
+      expect(probed?.models["gpt-9"]?.levels).toEqual(["low", "high"]);
+      expect(probed?.models["gpt-9"]?.default).toBe("high");
     }
   }, 30_000);
 
@@ -216,7 +219,9 @@ describe("codex effort probe degrades gracefully", () => {
   });
 
   it("the recorded snapshot matches the live model/list capture it was taken from", () => {
-    expect(Object.keys(CODEX_EFFORT_SNAPSHOT).sort()).toEqual([
+    // `isDefault: true` rode gpt-5.6-sol in that capture (live-verified 0.144.1).
+    expect(CODEX_EFFORT_SNAPSHOT.defaultModel).toBe("gpt-5.6-sol");
+    expect(Object.keys(CODEX_EFFORT_SNAPSHOT.models).sort()).toEqual([
       "gpt-5.3-codex-spark",
       "gpt-5.4",
       "gpt-5.4-mini",
@@ -225,7 +230,7 @@ describe("codex effort probe degrades gracefully", () => {
       "gpt-5.6-sol",
       "gpt-5.6-terra",
     ]);
-    expect(unionEffortLevels(CODEX_EFFORT_SNAPSHOT)).toEqual([
+    expect(unionEffortLevels(CODEX_EFFORT_SNAPSHOT.models)).toEqual([
       "low",
       "medium",
       "high",
@@ -241,7 +246,7 @@ export type _CodexEffortSpecShape = Pick<HarnessRunSpec, "effort_hint" | "model_
 
 describe("the effort probe is cached, not re-spawned per call", () => {
   /** Adapter wired to a stub vendor so discovery runs without a real codex. */
-  function stubAdapter(probeEfforts: () => Promise<CodexEffortCapability | null>, nowMs = () => 0) {
+  function stubAdapter(probeEfforts: () => Promise<CodexEffortCatalog | null>, nowMs = () => 0) {
     let calls = 0;
     const adapter = createCodexAdapter({
       detectVersion: async () => "codex-cli 0.144.1",
@@ -259,7 +264,8 @@ describe("the effort probe is cached, not re-spawned per call", () => {
   it("probes once and serves later discoveries from the TTL cache", async () => {
     clearCodexEffortCache();
     const { adapter, calls } = stubAdapter(async () => ({
-      "gpt-9": { levels: ["low", "high"], default: "high" },
+      models: { "gpt-9": { levels: ["low", "high"], default: "high" } },
+      defaultModel: "gpt-9",
     }));
     const first = await adapter.discover();
     const second = await adapter.discover();
@@ -298,10 +304,14 @@ describe("the effort probe is cached, not re-spawned per call", () => {
 
 describe("the effort cache is keyed by the codex IDENTITY, not just the binary", () => {
   /** Two accounts, one binary — exactly the credential-profile / api-key shape. */
-  const CATALOGS: Record<string, CodexEffortCapability> = {
-    "/tmp/claudexor-profile-a": { "gpt-9": { levels: ["low", "high"], default: "high" } },
+  const CATALOGS: Record<string, CodexEffortCatalog> = {
+    "/tmp/claudexor-profile-a": {
+      models: { "gpt-9": { levels: ["low", "high"], default: "high" } },
+      defaultModel: "gpt-9",
+    },
     "/tmp/claudexor-profile-b": {
-      "gpt-9": { levels: ["low", "medium", "high", "ultra"], default: "low" },
+      models: { "gpt-9": { levels: ["low", "medium", "high", "ultra"], default: "low" } },
+      defaultModel: "gpt-9",
     },
   };
 
@@ -322,8 +332,8 @@ describe("the effort cache is keyed by the codex IDENTITY, not just the binary",
     // Keyed by the binary alone, profile B was served A's ladder for the whole
     // TTL — omitting `ultra`, which B genuinely advertises.
     expect(homes).toEqual(["/tmp/claudexor-profile-a", "/tmp/claudexor-profile-b"]);
-    expect(a.capability["gpt-9"]?.levels).toEqual(["low", "high"]);
-    expect(b.capability["gpt-9"]?.levels).toEqual(["low", "medium", "high", "ultra"]);
+    expect(a.catalog.models["gpt-9"]?.levels).toEqual(["low", "high"]);
+    expect(b.catalog.models["gpt-9"]?.levels).toEqual(["low", "medium", "high", "ultra"]);
     clearCodexEffortCache();
   });
 
@@ -336,8 +346,8 @@ describe("the effort cache is keyed by the codex IDENTITY, not just the binary",
     const bAgain = await codexEffortsForEnv(deps, { CODEX_HOME: "/tmp/claudexor-profile-b" });
     // Two probes total: each home was cached under its own key and both hit.
     expect(homes).toHaveLength(2);
-    expect(aAgain.capability["gpt-9"]?.levels).toEqual(["low", "high"]);
-    expect(bAgain.capability["gpt-9"]?.levels).toEqual(["low", "medium", "high", "ultra"]);
+    expect(aAgain.catalog.models["gpt-9"]?.levels).toEqual(["low", "high"]);
+    expect(bAgain.catalog.models["gpt-9"]?.levels).toEqual(["low", "medium", "high", "ultra"]);
     clearCodexEffortCache();
   });
 
@@ -346,10 +356,10 @@ describe("the effort cache is keyed by the codex IDENTITY, not just the binary",
     const { deps } = envProbe();
     const unknown = await codexEffortsForEnv(deps, { CODEX_HOME: "/tmp/claudexor-profile-none" });
     expect(unknown.live).toBe(false);
-    expect(unknown.capability).toBe(CODEX_EFFORT_SNAPSHOT);
+    expect(unknown.catalog).toBe(CODEX_EFFORT_SNAPSHOT);
     const a = await codexEffortsForEnv(deps, { CODEX_HOME: "/tmp/claudexor-profile-a" });
     expect(a.live).toBe(true);
-    expect(a.capability["gpt-9"]?.levels).toEqual(["low", "high"]);
+    expect(a.catalog.models["gpt-9"]?.levels).toEqual(["low", "high"]);
     clearCodexEffortCache();
   });
 
@@ -359,8 +369,9 @@ describe("the effort cache is keyed by the codex IDENTITY, not just the binary",
     // them (it is only consulted on a later read of the SAME key), so in a
     // long-lived daemon the map grew for the life of the process.
     clearCodexEffortCache();
-    const probe = async (): Promise<CodexEffortCapability> => ({
-      "gpt-9": { levels: ["low", "high"], default: "high" },
+    const probe = async (): Promise<CodexEffortCatalog> => ({
+      models: { "gpt-9": { levels: ["low", "high"], default: "high" } },
+      defaultModel: "gpt-9",
     });
     // A FROZEN clock: nothing can expire, so only the entry cap can bound this.
     // Without it the map would hold all 500 keys.
@@ -377,9 +388,12 @@ describe("the effort cache is keyed by the codex IDENTITY, not just the binary",
   it("still serves a stable home from cache while ephemeral homes churn past it", async () => {
     clearCodexEffortCache();
     let calls = 0;
-    const probe = async (): Promise<CodexEffortCapability> => {
+    const probe = async (): Promise<CodexEffortCatalog> => {
       calls += 1;
-      return { "gpt-9": { levels: ["low", "high"], default: "high" } };
+      return {
+        models: { "gpt-9": { levels: ["low", "high"], default: "high" } },
+        defaultModel: null,
+      };
     };
     const stable = { CODEX_HOME: "/tmp/claudexor-native-home" };
     await codexEffortCapability(probe, () => 0, "codex", stable);
@@ -408,7 +422,8 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
 
   it("accepts a well-formed payload, including a level the rank table never heard of", () => {
     expect(readModelListEfforts(entry(["low", "high", "hyperdrive"], "low"))).toEqual({
-      "gpt-9": { levels: ["low", "high", "hyperdrive"], default: "low" },
+      models: { "gpt-9": { levels: ["low", "high", "hyperdrive"], default: "low" } },
+      defaultModel: null,
     });
   });
 
@@ -424,7 +439,7 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
   it("refuses an over-long level rather than truncating or dropping it", () => {
     expect(readModelListEfforts(entry(["low", "x".repeat(33)]))).toBeNull();
     // One character under the bound is a legitimate (if odd) vendor level.
-    expect(readModelListEfforts(entry(["low", "x".repeat(32)]))?.["gpt-9"]?.levels).toEqual([
+    expect(readModelListEfforts(entry(["low", "x".repeat(32)]))?.models["gpt-9"]?.levels).toEqual([
       "low",
       "x".repeat(32),
     ]);
@@ -435,9 +450,10 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
     expect(readModelListEfforts(entry(["low", "high"], 3))).toBeNull();
     // An ABSENT default is ordinary vendor output, not malformed.
     expect(readModelListEfforts(entry(["low", "high"]))).toEqual({
-      "gpt-9": { levels: ["low", "high"], default: null },
+      models: { "gpt-9": { levels: ["low", "high"], default: null } },
+      defaultModel: null,
     });
-    expect(readModelListEfforts(entry(["low", "high"], ""))?.["gpt-9"]?.default).toBeNull();
+    expect(readModelListEfforts(entry(["low", "high"], ""))?.models["gpt-9"]?.default).toBeNull();
   });
 
   it("discards the WHOLE catalog when one model is malformed — no half-live ladder", () => {
@@ -456,8 +472,23 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
       { id: "gpt-7", supportedReasoningEfforts: [{}, { reasoningEffort: "high" }] },
     ];
     expect(readModelListEfforts(payload)).toEqual({
-      "gpt-7": { levels: ["high"], default: null },
+      models: { "gpt-7": { levels: ["high"], default: null } },
+      defaultModel: null,
     });
+  });
+
+  it("records the vendor's default model from `isDefault: true`, and only from a literal true", () => {
+    const payload = [
+      { id: "gpt-8", isDefault: "yes", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+      { id: "gpt-9", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+    ];
+    expect(readModelListEfforts(payload)?.defaultModel).toBe("gpt-9");
+    // No entry flagged: the default is honestly unknown, never guessed.
+    expect(
+      readModelListEfforts([
+        { id: "gpt-8", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+      ])?.defaultModel,
+    ).toBeNull();
   });
 
   it("returns null for a non-array payload and for an all-empty one", () => {
@@ -493,6 +524,7 @@ describe("the harness ladder is the positional MERGE of the vendor's own per-mod
       "gpt-hyper": { levels: ["low", "medium", "high", "xhigh", "hyper", "max"], default: "low" },
       "gpt-plain": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
     };
+    const catalog: CodexEffortCatalog = { models: capability, defaultModel: "gpt-hyper" };
     expect(unionEffortLevels(capability)).toEqual([
       "low",
       "medium",
@@ -505,7 +537,7 @@ describe("the harness ladder is the positional MERGE of the vendor's own per-mod
       emittedEffort(
         codexExecArgs(
           { ...base, model_hint: "gpt-hyper", effort_hint: "hyper" },
-          { effortCapability: capability },
+          { effortCatalog: catalog },
         ),
       ),
     ).toBe("hyper");
@@ -513,7 +545,7 @@ describe("the harness ladder is the positional MERGE of the vendor's own per-mod
       emittedEffort(
         codexExecArgs(
           { ...base, model_hint: "gpt-plain", effort_hint: "hyper" },
-          { effortCapability: capability },
+          { effortCatalog: catalog },
         ),
       ),
     ).toBe("xhigh");
@@ -524,15 +556,18 @@ describe("the harness ladder is the positional MERGE of the vendor's own per-mod
     // rank for the pair — so an unadvertised level sends NO flag (disclosed
     // upstream) instead of clamping along an order this repo would have had to
     // invent. Advertised levels still pass through verbatim.
-    const capability: CodexEffortCapability = {
-      "gpt-a": { levels: ["low", "high"], default: "low" },
-      "gpt-b": { levels: ["high", "low"], default: "high" },
+    const catalog: CodexEffortCatalog = {
+      models: {
+        "gpt-a": { levels: ["low", "high"], default: "low" },
+        "gpt-b": { levels: ["high", "low"], default: "high" },
+      },
+      defaultModel: "gpt-a",
     };
     expect(
       emittedEffort(
         codexExecArgs(
           { ...base, model_hint: "gpt-a", effort_hint: "medium" },
-          { effortCapability: capability },
+          { effortCatalog: catalog },
         ),
       ),
     ).toBeNull();
@@ -540,9 +575,131 @@ describe("the harness ladder is the positional MERGE of the vendor's own per-mod
       emittedEffort(
         codexExecArgs(
           { ...base, model_hint: "gpt-a", effort_hint: "high" },
-          { effortCapability: capability },
+          { effortCatalog: catalog },
         ),
       ),
     ).toBe("high");
+  });
+});
+
+describe("a hint-less run is held to the DEFAULT model's ladder, not the union", () => {
+  /** Default model stops at xhigh; a sibling advertises max/ultra. */
+  const catalog: CodexEffortCatalog = {
+    models: {
+      "gpt-def": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
+      "gpt-sib": { levels: ["low", "medium", "high", "xhigh", "max", "ultra"], default: "low" },
+    },
+    defaultModel: "gpt-def",
+  };
+
+  it("clamps a sibling-only level onto the default model's real ceiling with no model hint", () => {
+    // The bug this pins: a null hint used to validate against the harness-wide
+    // union, so `ultra` was sent while codex actually ran its default model —
+    // which rejects it. The default model's ladder is the honest authority.
+    const args = codexExecArgs(
+      { ...base, model_hint: null, effort_hint: "ultra" },
+      {
+        effortCatalog: catalog,
+      },
+    );
+    expect(emittedEffort(args)).toBe("xhigh");
+  });
+
+  it("refuses a level the merged order cannot place at all — no flag, disclosed upstream", () => {
+    const args = codexExecArgs(
+      { ...base, model_hint: null, effort_hint: "hyperdrive" },
+      {
+        effortCatalog: catalog,
+      },
+    );
+    expect(emittedEffort(args)).toBeNull();
+  });
+
+  it("keeps the union fallback only when the catalog recorded NO default model", () => {
+    const unknownDefault: CodexEffortCatalog = { models: catalog.models, defaultModel: null };
+    const args = codexExecArgs(
+      { ...base, model_hint: null, effort_hint: "ultra" },
+      {
+        effortCatalog: unknownDefault,
+      },
+    );
+    expect(emittedEffort(args)).toBe("ultra");
+  });
+});
+
+describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", () => {
+  /** The profile-account shape: preflight saw the default account's manifest
+   * (which advertises `ultra` on a sibling model), but THIS env's catalog has
+   * one model that stops at high and no rankable position for `ultra`. */
+  const profileCatalog: CodexEffortCatalog = {
+    models: { "gpt-9": { levels: ["low", "high"], default: "high" } },
+    defaultModel: "gpt-9",
+  };
+
+  it("codexEffortIgnoredEvent yields the ignored-settings disclosure exactly when the flag is dropped", () => {
+    const dropped = codexEffortIgnoredEvent(profileCatalog, {
+      session_id: "s1",
+      model_hint: "gpt-9",
+      effort_hint: "hyperdrive",
+    });
+    expect(dropped?.type).toBe("message");
+    expect(dropped?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=hyperdrive"),
+    ]);
+    // An honored level (verbatim or clamped) is NOT an ignored setting.
+    expect(
+      codexEffortIgnoredEvent(profileCatalog, {
+        session_id: "s1",
+        model_hint: "gpt-9",
+        effort_hint: "high",
+      }),
+    ).toBeNull();
+    // Nothing requested: nothing to disclose.
+    expect(
+      codexEffortIgnoredEvent(profileCatalog, {
+        session_id: "s1",
+        model_hint: "gpt-9",
+        effort_hint: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("the RUN discloses the drop and sends no flag when the profile-resolved catalog rejects the level", async () => {
+    clearCodexEffortCache();
+    let cliArgs: string[] | undefined;
+    const adapter = createCodexAdapter({
+      detectVersion: async () => "codex-cli 0.144.1",
+      probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
+      hasApiKey: () => false,
+      probeEfforts: async () => profileCatalog,
+      runCliHarness: async function* (options): AsyncGenerator<HarnessEvent> {
+        cliArgs = options.args;
+        yield {
+          type: "completed",
+          session_id: options.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    const spec = HarnessRunSpec.parse({
+      session_id: "codex-effort-drop",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/repo",
+      // Preflight accepted this level against the default account's union; the
+      // run's own catalog (probeEfforts above) cannot place it.
+      effort_hint: "hyperdrive",
+      model_hint: "gpt-9",
+      auth_preference: "auto",
+    });
+    const events: HarnessEvent[] = [];
+    for await (const ev of adapter.run(spec)) events.push(ev);
+    const disclosure = events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]));
+    expect(disclosure?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=hyperdrive"),
+    ]);
+    // ...and the child was really spawned WITHOUT any effort flag.
+    expect(cliArgs?.some((a) => a.startsWith("model_reasoning_effort="))).toBe(false);
+    clearCodexEffortCache();
   });
 });

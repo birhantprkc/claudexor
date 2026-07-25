@@ -113,6 +113,12 @@ export const RunEventType = z
     "output.ready",
     "gate.started",
     "gate.completed",
+    /** Reviewer-panel preflight disclosure (INV-105): a requested reviewer
+     * knob the resolved panel could not honor was DROPPED instead of refused
+     * (the auto panel's per-family `reviewerEfforts` map, which also rides
+     * stored replay surfaces). Payload: {ignored_settings: string[]} — the
+     * same disclosure channel harness.started uses (QA-070). */
+    "review.preflight",
     "review.started",
     /** QA-025: the paid reviewer panel was intentionally NOT run — every working
      * candidate had an empty diff, or no reviewers were configured. Emitted

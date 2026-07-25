@@ -43,12 +43,14 @@ import { probeClaudeCredentialProfile, resolveClaudeProfileRoute } from "./profi
 export { canonicalProfileConfigDir } from "./profile.js";
 import { smokeIsolatedApiKey, smokeIsolatedOAuthToken } from "./smoke.js";
 import {
+  BIN,
   CLAUDE_EFFORT_SNAPSHOT,
   CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
+  claudeEffortIgnoredEvent,
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
-export { CLAUDE_EFFORT_SNAPSHOT } from "./effort-probe.js";
+export { BIN, CLAUDE_EFFORT_SNAPSHOT } from "./effort-probe.js";
 import {
   claudeAttachmentBlocks,
   handleControlRequestFrame,
@@ -57,14 +59,11 @@ import {
   isResultFrame,
 } from "./interactive.js";
 
-export const BIN = process.env.CLAUDEXOR_CLAUDE_BIN || "claude";
 export const CLAUDE_PROVIDER_ENV_DENYLIST = PROVIDER_SECRET_ENV.filter(
   (k) => k !== "ANTHROPIC_API_KEY",
 );
 
-// `claude --effort` accepts whatever the INSTALLED binary documents, and that
-// changes between CLI versions (2.1.89 stops at `max`; 2.1.165 adds `xhigh`), so
-// the ladder is read from `claude --help` — see `probeClaudeEffortLevels`.
+// The `--effort` ladder is read from the INSTALLED binary (`probeClaudeEffortLevels`).
 
 /** Exported for focused route-policy tests; runtime uses this exact selector. */
 export const selectClaudeRunAuthRoute = selectStrictAuthRoute;
@@ -934,14 +933,15 @@ async function* runClaude(
   }
 
   const useSubscription = route === "subscription";
-  const args = claudeArgsForSpec(
-    spec,
-    interactive,
-    useSubscription,
-    // Shared with discovery through the memoized --help probe, so a run never
-    // re-spawns the CLI just to learn its ladder.
-    (await probeClaudeEffortLevels(abortSignalFromSpec(spec))).levels,
-  );
+  // Shared with discovery through the memoized --help probe, so a run never
+  // re-spawns the CLI just to learn its ladder.
+  const efforts = await runtime.probeEffortLevels(abortSignalFromSpec(spec));
+  const args = claudeArgsForSpec(spec, interactive, useSubscription, efforts.levels);
+  // INV-105 rides the RUN too: preflight passed this level against the manifest
+  // ladder, but the INSTALLED binary's can be narrower — disclosed, never a
+  // silent vendor-default run (claudeEffortIgnoredEvent).
+  const droppedEffort = claudeEffortIgnoredEvent(spec, efforts.levels);
+  if (droppedEffort) yield droppedEffort;
   // Scrub EVERY provider secret (incl. OpenAI/others — the cross-provider leak
   // fix) via the single core table, then re-add only the var this route needs.
   const env: Record<string, string | null | undefined> =

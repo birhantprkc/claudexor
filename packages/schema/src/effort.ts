@@ -117,12 +117,25 @@ export function effortLevelsForModel(
 /** Result of merging several vendor-ordered effort ladders into one. */
 export interface MergedEffortLadder {
   /**
-   * The merged order, weakest→strongest, honoring every input list's own
-   * order when they are mutually consistent. When they are NOT (`consistent`
-   * false), this is a first-seen deduplication — usable as a display set,
-   * never as a rank authority.
+   * The merged RANK order, weakest→strongest, honoring every input list's own
+   * order when they are mutually consistent. It carries ONLY levels some input
+   * list actually ordered against a neighbor; a level no list constrains lives
+   * in `unconstrained` instead. When the inputs are NOT consistent
+   * (`consistent` false), this is a first-seen deduplication — usable as a
+   * display set, never as a rank authority.
    */
   order: EffortHint[];
+  /**
+   * Levels that appear in some input list but share NO ordering constraint
+   * with any other level (each came only from single-level lists). Their
+   * position is UNKNOWN, not maximal: the old behavior let a plain topological
+   * tail place `medium` ABOVE `high` in a merge of ["low","high"] and
+   * ["medium"], silently making the unconstrained level the strongest rank.
+   * They stay advertised (membership, pickers), but clamping to or from them
+   * refuses with disclosure — exactly like the inconsistent case — because any
+   * rank for them would be invented.
+   */
+  unconstrained: EffortHint[];
   /**
    * False when two input lists genuinely contradict each other's relative
    * order (`a` before `b` in one, `b` before `a` in another). Cross-model
@@ -142,8 +155,18 @@ export interface MergedEffortLadder {
  * longest ladder, and a brand-new vendor level lands at its vendor-advertised
  * position with no code change here.
  *
+ * A level that carries NO ordering constraint at all (it only ever appears in
+ * single-level lists) has an UNKNOWN position, not a maximal one: a plain
+ * topological tail would park it after everything else and accidentally crown
+ * it the strongest rank (merging ["low","high"] with ["medium"] used to yield
+ * medium ABOVE high). Such levels are returned separately as `unconstrained`
+ * — advertised but unrankable — so no consumer can clamp along a position the
+ * vendor never stated. (Disconnected multi-level chains remain approximated
+ * by first-seen tie-breaking, as before.)
+ *
  * The Swift side orders its pickers by merging the manifest's already-ordered
- * `effort_levels`/`model_effort_levels` arrays the same way (`EffortLadder`).
+ * `effort_levels`/`model_effort_levels` arrays the same way (`EffortLadder`,
+ * display ordering only — Swift never clamps, so it keeps the flat merge).
  */
 export function mergeEffortLadders(
   lists: ReadonlyArray<readonly EffortHint[]>,
@@ -151,6 +174,7 @@ export function mergeEffortLadders(
   const firstSeen: EffortHint[] = [];
   const successors = new Map<EffortHint, Set<EffortHint>>();
   const indegree = new Map<EffortHint, number>();
+  const constrained = new Set<EffortHint>();
   for (const list of lists) {
     for (const level of list) {
       if (!indegree.has(level)) {
@@ -163,6 +187,8 @@ export function mergeEffortLadders(
       const before = list[i - 1] as EffortHint;
       const after = list[i] as EffortHint;
       if (before === after) continue;
+      constrained.add(before);
+      constrained.add(after);
       const outs = successors.get(before) as Set<EffortHint>;
       if (!outs.has(after)) {
         outs.add(after);
@@ -170,15 +196,20 @@ export function mergeEffortLadders(
       }
     }
   }
+  // Every edge connects two constrained levels, so excluding the unconstrained
+  // ones from the sort cannot change any indegree.
+  const ranked = firstSeen.filter((level) => constrained.has(level));
+  const unconstrained = firstSeen.filter((level) => !constrained.has(level));
   const order: EffortHint[] = [];
   const emitted = new Set<EffortHint>();
-  while (emitted.size < firstSeen.length) {
-    const next = firstSeen.find((level) => !emitted.has(level) && indegree.get(level) === 0);
+  while (emitted.size < ranked.length) {
+    const next = ranked.find((level) => !emitted.has(level) && indegree.get(level) === 0);
     if (next === undefined) {
       // A cycle: the vendors' own orders contradict each other. Do not invent
       // an order — fall back to first-seen for display and say so.
       return {
-        order: [...order, ...firstSeen.filter((level) => !emitted.has(level))],
+        order: [...order, ...ranked.filter((level) => !emitted.has(level))],
+        unconstrained,
         consistent: false,
       };
     }
@@ -188,5 +219,5 @@ export function mergeEffortLadders(
       indegree.set(succ, (indegree.get(succ) ?? 1) - 1);
     }
   }
-  return { order, consistent: true };
+  return { order, unconstrained, consistent: true };
 }

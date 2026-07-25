@@ -21,12 +21,14 @@ import {
   CODEX_EFFORT_SNAPSHOT,
   CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
   codexEffortFor,
+  codexEffortIgnoredEvent,
   codexEffortsForEnv,
   probeCodexEfforts,
   unionEffortLevels,
-  type CodexEffortCapability,
+  type CodexEffortCatalog,
   type CodexEffortProbe,
 } from "./effort-probe.js";
+import { tomlBasicString } from "./toml.js";
 export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
@@ -74,32 +76,6 @@ import {
   probeLogin,
   type CodexLoginProbe,
 } from "./auth.js";
-
-/**
- * A TOML basic-string literal for a `-c key=value` override. `developer_instructions`
- * is a documented additive Codex config key (layered as a developer block BEFORE
- * AGENTS.md, not a replacement); passing per-invocation `-c` keeps it isolated
- * to this run (never a shared-config mutation). Instructions may contain quotes
- * and newlines, so they are TOML-escaped.
- */
-function tomlBasicString(value: string): string {
-  // TOML basic-string escapes, built by code point so the SOURCE carries no
-  // literal control characters: a backslash and quote are escaped, a literal
-  // newline/tab/CR become their escapes (a raw newline is invalid in a basic
-  // string), other control chars become \uXXXX, and everything else is literal.
-  let out = '"';
-  for (const ch of value) {
-    const code = ch.charCodeAt(0);
-    if (ch === "\\") out += "\\\\";
-    else if (ch === '"') out += '\\"';
-    else if (code === 10) out += "\\n";
-    else if (code === 13) out += "\\r";
-    else if (code === 9) out += "\\t";
-    else if (code < 32 || code === 127) out += "\\u" + code.toString(16).padStart(4, "0");
-    else out += ch;
-  }
-  return out + '"';
-}
 
 function sandboxArgs(access: AccessProfile): string[] {
   switch (access) {
@@ -257,8 +233,8 @@ export function codexExecArgs(
   opts: {
     suppressNodeRepl?: boolean;
     outputSchemaPath?: string | null;
-    /** Advertised-per-model vocabulary; the snapshot by default. */
-    effortCapability?: CodexEffortCapability;
+    /** The account's advertised effort catalog; the snapshot by default. */
+    effortCatalog?: CodexEffortCatalog;
   } = {},
 ): string[] {
   // Codex.app's inherited `node_repl` MCP (its in-app-browser controller) can't
@@ -274,7 +250,7 @@ export function codexExecArgs(
   // Effort is resolved against what THIS MODEL advertises, not a harness-wide
   // ladder: gpt-5.6-sol takes `ultra`, gpt-5.4 stops at `xhigh`.
   const effort = codexEffortFor(
-    opts.effortCapability ?? CODEX_EFFORT_SNAPSHOT,
+    opts.effortCatalog ?? CODEX_EFFORT_SNAPSHOT,
     spec.model_hint,
     spec.effort_hint,
   );
@@ -440,8 +416,8 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           // Effort is per MODEL here (`model/list` → supportedReasoningEfforts),
           // so the harness-wide list is the UNION and `model_effort_levels`
           // carries the truth a specific model is held to.
-          effort_levels: unionEffortLevels(efforts.capability),
-          model_effort_levels: efforts.capability,
+          effort_levels: unionEffortLevels(efforts.catalog.models),
+          model_effort_levels: efforts.catalog.models,
           effort_levels_verified_against: efforts.live
             ? version
             : CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
@@ -775,12 +751,18 @@ async function* runCodex(
       );
     }
   }
+  // Probed in THIS run's resolved env, so a credential profile or API-key route
+  // gets its OWN account's catalog, not whichever one landed in the cache first.
+  const efforts = await codexEffortsForEnv(runtime, env);
+  // INV-105 rides the RUN too: preflight passed this level against the DEFAULT
+  // account's manifest, but THIS env's catalog may still refuse it — disclosed,
+  // never a silent vendor-default run (codexEffortIgnoredEvent).
+  const droppedEffort = codexEffortIgnoredEvent(efforts.catalog, spec);
+  if (droppedEffort) yield droppedEffort;
   const args = codexExecArgs(spec, {
     suppressNodeRepl: codexConfigHasNodeRepl(env["CODEX_HOME"]),
     outputSchemaPath,
-    // Probed in THIS run's resolved env, so a credential profile or API-key route
-    // gets its OWN account's catalog, not whichever one landed in the cache first.
-    effortCapability: (await codexEffortsForEnv(runtime, env)).capability,
+    effortCatalog: efforts.catalog,
   });
   // Route evidence: the auth mode this child ACTUALLY runs under, read from
   // the same auth.json codex loads (typed `auth_mode` field — chatgpt vs

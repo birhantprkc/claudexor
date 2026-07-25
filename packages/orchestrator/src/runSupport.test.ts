@@ -173,3 +173,32 @@ describe("harnessEventPayload (run-event projection)", () => {
     expect(harnessEventPayload("codex", "a01", narration)["final"]).toBeUndefined();
   });
 });
+
+describe("harnessEventPayload hoists adapter ignored_settings (INV-105 from inside the run)", () => {
+  it("lifts payload.ignored_settings to the projection top level, where the timeline reads it", () => {
+    const disclosure: HarnessEvent = {
+      type: "message",
+      session_id: "ses-1",
+      ts: "2026-07-25T00:00:00Z",
+      text: "[effort] ignored: effort=ultra (not accepted by the resolved catalog)",
+      payload: { ignored_settings: ["effort=ultra (not accepted by the resolved catalog)"] },
+    };
+    const projected = harnessEventPayload("codex", "a01", disclosure);
+    // The timeline/live channel reads the TOP-LEVEL key (QA-070) — nested-only
+    // would render a benign info row over a knob that silently went nowhere.
+    expect(projected["ignored_settings"]).toEqual([
+      "effort=ultra (not accepted by the resolved catalog)",
+    ]);
+  });
+
+  it("adds no ignored_settings key for ordinary events", () => {
+    const plain: HarnessEvent = {
+      type: "message",
+      session_id: "ses-1",
+      ts: "2026-07-25T00:00:00Z",
+      text: "working",
+      payload: { note: "nothing ignored" },
+    };
+    expect("ignored_settings" in harnessEventPayload("codex", "a01", plain)).toBe(false);
+  });
+});

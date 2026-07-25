@@ -18,32 +18,50 @@
  * snapshot below and the run proceeds.
  */
 import { spawn } from "node:child_process";
-import type { ModelEffortCapability } from "@claudexor/schema";
+import type { HarnessEvent, HarnessRunSpec, ModelEffortCapability } from "@claudexor/schema";
 import { EffortHint, effortLevelsForModel, mergeEffortLadders } from "@claudexor/schema";
 import { normalizeEffort } from "@claudexor/core";
+import { nowIso } from "@claudexor/util";
 import { BIN, probeEnv } from "./missing-cli.js";
 
 export type CodexEffortCapability = Record<string, ModelEffortCapability>;
 
 /**
+ * One account's whole advertised effort surface: the per-model vocabularies
+ * PLUS which model codex itself runs when no `-m` is given (`model/list` marks
+ * it with `isDefault`). The default matters for effort resolution: a run with
+ * no model hint executes on the DEFAULT model, so its ladder — not the
+ * harness-wide union — is what a requested level must be held to.
+ */
+export interface CodexEffortCatalog {
+  models: CodexEffortCapability;
+  /** `model/list` entry flagged `isDefault: true`; null when the vendor marked none. */
+  defaultModel: string | null;
+}
+
+/**
  * Recorded fallback, captured from a live `model/list` on the CLI version
  * stamped below. Used ONLY when the live probe cannot answer; it is a snapshot
  * of vendor state, never an allow-list this repo maintains by hand.
+ * (`defaultModel` is the entry that carried `isDefault: true` in that capture.)
  */
-export const CODEX_EFFORT_SNAPSHOT: CodexEffortCapability = {
-  "gpt-5.6-sol": {
-    levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
-    default: "low",
+export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
+  models: {
+    "gpt-5.6-sol": {
+      levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      default: "low",
+    },
+    "gpt-5.6-terra": {
+      levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      default: "medium",
+    },
+    "gpt-5.6-luna": { levels: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
+    "gpt-5.5": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
+    "gpt-5.4": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
+    "gpt-5.4-mini": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
+    "gpt-5.3-codex-spark": { levels: ["low", "medium", "high", "xhigh"], default: "high" },
   },
-  "gpt-5.6-terra": {
-    levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
-    default: "medium",
-  },
-  "gpt-5.6-luna": { levels: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
-  "gpt-5.5": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
-  "gpt-5.4": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
-  "gpt-5.4-mini": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
-  "gpt-5.3-codex-spark": { levels: ["low", "medium", "high", "xhigh"], default: "high" },
+  defaultModel: "gpt-5.6-sol",
 };
 
 /** Vendor CLI version `CODEX_EFFORT_SNAPSHOT` was captured from. */
@@ -60,13 +78,20 @@ export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "0.144.1";
  * harness ladder is the positional merge of those lists (`mergeEffortLadders`)
  * — never a table this repo maintains. The Swift composer merges the manifests'
  * already-ordered arrays the same way, so both sides of the wire agree.
+ *
+ * A level NO model orders against the rest (`unconstrained`) still belongs to
+ * the advertised set — some model really accepts it — but has no honest rank,
+ * so it trails the ranked merge here (membership/display) while staying
+ * excluded from the clamping order (`mergeEffortLadders.order`).
  */
 export function unionEffortLevels(capability: CodexEffortCapability): EffortHint[] {
-  return mergeEffortLadders(Object.values(capability).map((entry) => entry.levels)).order;
+  const merged = mergeEffortLadders(Object.values(capability).map((entry) => entry.levels));
+  return [...merged.order, ...merged.unconstrained];
 }
 
 interface ModelListEntry {
   id?: unknown;
+  isDefault?: unknown;
   defaultReasoningEffort?: unknown;
   supportedReasoningEfforts?: unknown;
 }
@@ -123,16 +148,24 @@ function readEntry(raw: ModelListEntry): [string, ModelEffortCapability] | null 
  * malformed value that reached the manifest would fail `HarnessManifest.parse`,
  * breaking discovery rather than degrading it. The snapshot is a real, usable
  * ladder, so strictness costs freshness and never capability.
+ *
+ * `defaultModel` is the entry the vendor flagged `isDefault: true`
+ * (live-verified on 0.144.1). Only a literal boolean true counts: the flag is
+ * model identity, not part of the effort wire contract, so an absent or odd
+ * value degrades the default to null rather than poisoning the catalog.
  */
-export function readModelListEfforts(data: unknown): CodexEffortCapability | null {
+export function readModelListEfforts(data: unknown): CodexEffortCatalog | null {
   if (!Array.isArray(data)) return null;
   const capability: CodexEffortCapability = {};
+  let defaultModel: string | null = null;
   for (const raw of data) {
     const entry = readEntry(raw as ModelListEntry);
     if (entry === MALFORMED) return null;
-    if (entry) capability[entry[0]] = entry[1];
+    if (!entry) continue;
+    capability[entry[0]] = entry[1];
+    if ((raw as ModelListEntry).isDefault === true) defaultModel ??= entry[0];
   }
-  return Object.keys(capability).length > 0 ? capability : null;
+  return Object.keys(capability).length > 0 ? { models: capability, defaultModel } : null;
 }
 
 /**
@@ -142,9 +175,9 @@ export function readModelListEfforts(data: unknown): CodexEffortCapability | nul
 export async function probeCodexEfforts(
   bin: string,
   opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
-): Promise<CodexEffortCapability | null> {
+): Promise<CodexEffortCatalog | null> {
   const timeoutMs = opts.timeoutMs ?? 10_000;
-  return await new Promise<CodexEffortCapability | null>((resolve) => {
+  return await new Promise<CodexEffortCatalog | null>((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(bin, ["app-server", "--stdio"], {
@@ -157,7 +190,7 @@ export async function probeCodexEfforts(
     }
 
     let settled = false;
-    const finish = (value: CodexEffortCapability | null): void => {
+    const finish = (value: CodexEffortCatalog | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -264,7 +297,7 @@ const CODEX_EFFORT_FAILURE_CACHE_TTL_MS = 60_000;
 const CODEX_EFFORT_CACHE_MAX_ENTRIES = 64;
 
 interface CodexEffortCacheEntry {
-  capability: CodexEffortCapability;
+  catalog: CodexEffortCatalog;
   /** True when a live `model/list` answered; false when the snapshot filled in. */
   live: boolean;
   expiresAtMs: number;
@@ -305,7 +338,7 @@ function storeCodexEfforts(key: string, entry: CodexEffortCacheEntry, nowMs: num
 export type CodexEffortProbe = (
   bin: string,
   env?: NodeJS.ProcessEnv,
-) => Promise<CodexEffortCapability | null>;
+) => Promise<CodexEffortCatalog | null>;
 
 /**
  * Cache identity of ONE codex effort catalog: the resolved `CODEX_HOME` plus the
@@ -334,26 +367,26 @@ export async function codexEffortCapability(
   nowMs: () => number,
   bin: string,
   env?: NodeJS.ProcessEnv,
-): Promise<{ capability: CodexEffortCapability; live: boolean }> {
+): Promise<{ catalog: CodexEffortCatalog; live: boolean }> {
   const now = nowMs();
   const key = codexEffortCacheKey(bin, env);
   const cached = codexEffortCache.get(key);
   if (cached && cached.expiresAtMs > now) {
-    return { capability: cached.capability, live: cached.live };
+    return { catalog: cached.catalog, live: cached.live };
   }
   const probed = await probe(bin, env);
   const live = probed !== null;
-  const capability = probed ?? CODEX_EFFORT_SNAPSHOT;
+  const catalog = probed ?? CODEX_EFFORT_SNAPSHOT;
   storeCodexEfforts(
     key,
     {
-      capability,
+      catalog,
       live,
       expiresAtMs: now + (live ? CODEX_EFFORT_CACHE_TTL_MS : CODEX_EFFORT_FAILURE_CACHE_TTL_MS),
     },
     now,
   );
-  return { capability, live };
+  return { catalog, live };
 }
 
 /**
@@ -369,7 +402,7 @@ export async function codexEffortCapability(
 export async function codexEffortsForEnv(
   deps: { probeEfforts: CodexEffortProbe; nowMs: () => number },
   envPatch?: Record<string, string | null | undefined>,
-): Promise<{ capability: CodexEffortCapability; live: boolean }> {
+): Promise<{ catalog: CodexEffortCatalog; live: boolean }> {
   return await codexEffortCapability(deps.probeEfforts, deps.nowMs, BIN, probeEnv(envPatch));
 }
 
@@ -386,14 +419,53 @@ export async function codexEffortsForEnv(
  * along an order this repo would have had to invent.
  */
 export function codexEffortFor(
-  capability: CodexEffortCapability,
+  catalog: CodexEffortCatalog,
   model: string | null | undefined,
   requested: EffortHint | null | undefined,
 ): EffortHint | null {
-  const merged = mergeEffortLadders(Object.values(capability).map((entry) => entry.levels));
+  const merged = mergeEffortLadders(Object.values(catalog.models).map((entry) => entry.levels));
+  // No model hint does NOT mean "any model": codex runs the catalog's DEFAULT
+  // model (`model/list` isDefault), so the requested level is held to THAT
+  // model's ladder. Validating a hint-less run against the harness-wide union
+  // let a sibling-only level (`ultra`) ride into a default model that rejects
+  // it. A catalog with no recorded default keeps the union fallback — the
+  // broadest honest set when the effective model is genuinely unknown.
+  const effectiveModel = model ?? catalog.defaultModel;
   const advertised = effortLevelsForModel(
-    { effort_levels: merged.order, model_effort_levels: capability },
-    model,
+    {
+      effort_levels: [...merged.order, ...merged.unconstrained],
+      model_effort_levels: catalog.models,
+    },
+    effectiveModel,
   );
   return normalizeEffort(requested, advertised, merged.consistent ? merged.order : advertised);
+}
+
+/**
+ * The INV-105 disclosure for an effort the RUN itself could not honor, or null
+ * when nothing was dropped. Preflight validates against the manifest — the
+ * DEFAULT account's catalog — but the adapter resolves against the catalog for
+ * the env the child actually runs in (profile / API-key homes have their own
+ * accounts), so a level can pass preflight and still resolve to "send no flag"
+ * here. Without this event that run silently executed at the vendor default;
+ * the payload rides the same `ignored_settings` channel governance uses, so
+ * the timeline renders the same warning either way.
+ */
+export function codexEffortIgnoredEvent(
+  catalog: CodexEffortCatalog,
+  spec: Pick<HarnessRunSpec, "session_id" | "model_hint" | "effort_hint">,
+): HarnessEvent | null {
+  if (!spec.effort_hint) return null;
+  if (codexEffortFor(catalog, spec.model_hint, spec.effort_hint) !== null) return null;
+  const target = spec.model_hint ?? catalog.defaultModel;
+  const detail =
+    `effort=${spec.effort_hint} (not accepted by the codex catalog resolved for this run's ` +
+    `environment${target ? ` on model ${target}` : ""}; the run used the vendor default)`;
+  return {
+    type: "message",
+    session_id: spec.session_id,
+    ts: nowIso(),
+    text: `[effort] ignored: ${detail}`,
+    payload: { ignored_settings: [detail] },
+  };
 }

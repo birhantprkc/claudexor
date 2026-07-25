@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import type { HarnessEvent } from "@claudexor/schema";
+import { HarnessRunSpec } from "@claudexor/schema";
 import { normalizeEffort, resolveEffort } from "@claudexor/core";
-import { CLAUDE_EFFORT_SNAPSHOT, parseClaudeEffortHelp } from "./effort-probe.js";
+import {
+  CLAUDE_EFFORT_SNAPSHOT,
+  claudeEffortIgnoredEvent,
+  parseClaudeEffortHelp,
+} from "./effort-probe.js";
+import { createClaudeAdapter } from "./index.js";
 
 /** Real `claude --help` shape: the values wrap onto the next line. */
 const HELP_2_1_165 = [
@@ -192,20 +199,34 @@ describe("the claude effort probe degrades gracefully", () => {
     expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
-  it("refuses an over-long token instead of letting it reach the manifest schema", () => {
-    const help = [
+  it("a malformed token inside the value list fails the WHOLE parse — codex probe policy", () => {
+    // Skipping the token instead would publish a silently NARROWED ladder as
+    // live (an over-long or prose token next to real levels), so the parse
+    // returns null and the recorded snapshot answers — freshness lost, never
+    // capability. Same reviewed policy as the codex `model/list` probe.
+    const overlong = [
       `  --effort <level>                      Effort level (low, ${"x".repeat(33)})`,
       "",
     ].join("\n");
-    // The bad token is dropped, not published: EffortHint bounds it, so
-    // capabilities.effort_levels can never carry a value the schema would reject.
-    expect(parseClaudeEffortHelp(help)).toEqual(["low"]);
-  });
-
-  it("ignores prose inside the parentheses rather than advertising it as a level", () => {
-    const help = [
+    expect(parseClaudeEffortHelp(overlong)).toBeNull();
+    const prose = [
       "  --effort <level>                      Effort level for the current session",
       "                                        (low, medium, high, default: high)",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(prose)).toBeNull();
+    const badChars = [
+      "  --effort <level>                      Effort level (low, HIGH!, max)",
+      "",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(badChars)).toBeNull();
+  });
+
+  it("still skips NON-list parentheticals (annotations) — strictness is per value list", () => {
+    // `(beta)` does not enumerate, so it is an annotation, not a malformed
+    // list: the real list after it still parses.
+    const help = [
+      "  --effort <level>                      Effort level (beta) (low, medium, high)",
+      "",
     ].join("\n");
     expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high"]);
   });
@@ -216,5 +237,69 @@ describe("the claude effort probe degrades gracefully", () => {
     expect(parseClaudeEffortHelp("garbage")).toBeNull();
     expect([...CLAUDE_EFFORT_SNAPSHOT]).toEqual(["low", "medium", "high", "xhigh", "max"]);
     expect(normalizeEffort("xhigh", CLAUDE_EFFORT_SNAPSHOT)).toBe("xhigh");
+  });
+});
+
+describe("an effort dropped AFTER preflight is disclosed on the run (INV-105)", () => {
+  it("claudeEffortIgnoredEvent yields the ignored-settings disclosure exactly when the flag is dropped", () => {
+    const advertised = ["low", "medium", "high", "max"] as const; // a 2.1.89-shaped binary
+    const dropped = claudeEffortIgnoredEvent(
+      { session_id: "s1", effort_hint: "xhigh" },
+      advertised,
+    );
+    expect(dropped?.type).toBe("message");
+    expect(dropped?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=xhigh"),
+    ]);
+    expect(
+      claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: "max" }, advertised),
+    ).toBeNull();
+    expect(
+      claudeEffortIgnoredEvent({ session_id: "s1", effort_hint: null }, advertised),
+    ).toBeNull();
+  });
+
+  it("the RUN discloses the drop and sends no --effort flag when the installed ladder is narrower", async () => {
+    // Preflight passed `xhigh` against the manifest ladder; the INSTALLED
+    // binary the run probes stops at `max` — the run must say so, not silently
+    // execute at the vendor default.
+    let cliArgs: string[] | undefined;
+    const adapter = createClaudeAdapter({
+      detectVersion: async () => "2.1.89",
+      probeReadonlyProfile: async () => ({ supported: true, missingFlags: [], detail: "ok" }),
+      probeAuthStatus: async () => ({
+        loggedIn: true,
+        authed: true,
+        authMethod: "claude.ai",
+        probeError: null,
+      }),
+      anthropicApiKey: () => null,
+      claudeOAuthToken: () => null,
+      probeEffortLevels: async () => ({ levels: ["low", "medium", "high", "max"], live: true }),
+      runCliHarness: async function* (options): AsyncGenerator<HarnessEvent> {
+        cliArgs = options.args;
+        yield {
+          type: "completed",
+          session_id: options.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    const spec = HarnessRunSpec.parse({
+      session_id: "claude-effort-drop",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/repo",
+      effort_hint: "xhigh",
+      auth_preference: "auto",
+    });
+    const events: HarnessEvent[] = [];
+    for await (const ev of adapter.run(spec)) events.push(ev);
+    const disclosure = events.find((ev) => Array.isArray(ev.payload?.["ignored_settings"]));
+    expect(disclosure?.payload?.["ignored_settings"]).toEqual([
+      expect.stringContaining("effort=xhigh"),
+    ]);
+    expect(cliArgs).toBeDefined();
+    expect(cliArgs).not.toContain("--effort");
   });
 });
