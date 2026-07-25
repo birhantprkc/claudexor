@@ -30,6 +30,7 @@ import { writeEvidencePacket } from "@claudexor/context";
 import type { ReviewerSpec } from "@claudexor/review";
 import { Orchestrator } from "./orchestrator.js";
 import type { OrchestratorResult } from "./orchestrator.js";
+import { buildRevisePrompt } from "./revisePrompt.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -831,6 +832,138 @@ describe("Orchestrator", () => {
     expect(termIdx).toBeGreaterThan(readyIdx);
     expect(events).not.toContain('"type":"work_product.emitted"');
   }, 15000);
+
+  it("a non-converged attempt is re-prompted with the buildRevisePrompt contract, not an inline string", async () => {
+    // The revise contract is only worth anything if the loop actually delivers
+    // it. buildRevisePrompt's own suite proves the text; this pins the single
+    // integration point, so reverting the call site to an inline template
+    // literal fails here instead of silently shipping.
+    const repo = await initRepo();
+    const seen: string[] = [];
+    const recorder: HarnessAdapter = {
+      id: "recorder",
+      async discover() {
+        return HarnessManifest.parse({
+          id: "recorder",
+          display_name: "recorder",
+          kind: "local_cli",
+          provider_family: "local",
+          capabilities: { implement: true },
+          access_profiles_supported: ["workspace_write"],
+        });
+      },
+      async doctor() {
+        return ConformanceReport.parse({
+          harness_id: "recorder",
+          status: "ok",
+          enabled_intents: ["implement"],
+        });
+      },
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        seen.push(spec.prompt);
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          observed_model: "recorder-model",
+          credential_route: "managed_api_key",
+        };
+        writeFileSync(join(spec.cwd, "CHANGED.txt"), `attempt ${seen.length}\n`);
+        yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+        yield {
+          type: "usage",
+          session_id: spec.session_id,
+          ts,
+          credential_route: "managed_api_key",
+          usage: { cost_usd: 0.001 },
+        };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    function blockingReviewer(id: string, family: ProviderFamily): ReviewerSpec {
+      const adapter: HarnessAdapter = {
+        id,
+        async discover() {
+          return HarnessManifest.parse({
+            id,
+            display_name: id,
+            kind: "local_cli",
+            provider_family: family,
+            capabilities: { review: true },
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: id,
+            status: "ok",
+            enabled_intents: ["review"],
+          });
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          yield { type: "started", session_id: spec.session_id, ts, observed_model: `${id}-model` };
+          yield {
+            type: "message",
+            session_id: spec.session_id,
+            ts,
+            text: JSON.stringify([
+              {
+                severity: "BLOCK",
+                category: "correctness",
+                claim: "off-by-one in the retry window",
+                evidence: { files: [{ path: "CHANGED.txt", lines: "1" }] },
+                proposed_fix: "clamp the window",
+              },
+            ]),
+          };
+          yield {
+            type: "completed",
+            session_id: spec.session_id,
+            ts,
+            observed_model: `${id}-model`,
+          };
+        },
+      };
+      return { adapter, providerFamily: family };
+    }
+
+    const orch = new Orchestrator({
+      registry: new Map<string, HarnessAdapter>([["recorder", recorder]]),
+      reviewers: [
+        blockingReviewer("rev-openai", "openai"),
+        blockingReviewer("rev-anthropic", "anthropic"),
+      ],
+    });
+    await orch.run({
+      repoRoot: repo,
+      prompt: "converge it",
+      mode: "agent",
+      harnesses: ["recorder"],
+      attempts: 2,
+    });
+
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    // Attempt 1 is the operator's own prompt, untouched.
+    expect(seen[0]).toBe("converge it");
+    // Attempt 2 carries every contract sentence buildRevisePrompt emits. Derived
+    // from the builder rather than re-typed, so the pin cannot drift from it.
+    const revise = seen[1] as string;
+    const contractSentences = buildRevisePrompt("__BASE__", [], "")
+      .split("\n")
+      .filter(
+        (line) =>
+          line.trim().length > 0 &&
+          line !== "__BASE__" &&
+          line !== "Review findings:" &&
+          line !== "(no findings recorded)",
+      );
+    expect(contractSentences.length).toBeGreaterThan(0);
+    for (const sentence of contractSentences) expect(revise).toContain(sentence);
+    // ...on top of the original prompt and the findings that blocked it.
+    expect(revise.startsWith("converge it\n\n")).toBe(true);
+    expect(revise).toContain("off-by-one in the retry window");
+  }, 20000);
 
   it("until-clean terminates on no-progress (bounded, not infinite)", async () => {
     const repo = await initRepo();

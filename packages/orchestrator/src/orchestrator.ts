@@ -98,6 +98,7 @@ import {
 } from "@claudexor/core";
 import { assertRouteModelsAllowed } from "./modelGovernance.js";
 import { RequestRequirementsResolver } from "./requestRequirements.js";
+import { buildRevisePrompt } from "./revisePrompt.js";
 import {
   type AnnouncedRunContext,
   cancelledResult,
@@ -114,7 +115,6 @@ import {
   redactHarnessEvent,
   harnessEventPayload,
   safeErrorMessage,
-  formatFindings,
   renderSummary,
   observeBudgetSignals,
   rotateOnStall,
@@ -4885,7 +4885,7 @@ export class Orchestrator {
         const prompt =
           attempt === 1
             ? input.prompt
-            : `${input.prompt}\n\nThe previous attempt did not converge. Address these review findings (verify each against the code; fix valid ones, rebut invalid ones with evidence):\n${formatFindings(lastFindings)}${runtimeErrors}`;
+            : buildRevisePrompt(input.prompt, lastFindings, runtimeErrors);
 
         // Loop detection (budget router): the 3rd identical repair prompt means
         // findings/errors are not changing — stop burning paid attempts.
