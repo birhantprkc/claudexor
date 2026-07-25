@@ -28,10 +28,24 @@ extension ThreadsScreen {
     /// manifest ladder is already in the VENDOR's own order, so the picker
     /// ordering is a positional merge (`EffortLadder`), never a rank table —
     /// a level added upstream sorts at its vendor position with no app change.
+    ///
+    /// Per-turn model selections narrow each family's ladder the same way the
+    /// Settings row and the engine do (`effortLevelsForModel`): the chosen
+    /// model's own recorded ladder when the manifest has one, else the
+    /// harness-wide merged ladder — so picking a model that stops at `xhigh`
+    /// no longer offers a sibling-only `ultra` for this turn.
     var composerEffortLevels: [String] {
         let families = primaryFamily.map { [$0] }
             ?? (resolvedPoolFamilies.isEmpty ? poolFamilies : resolvedPoolFamilies)
-        return EffortLadder.merge(families.map { model.harnessInfo(for: $0)?.effortLevels ?? [] })
+        return EffortLadder.merge(families.map { family in
+            guard let info = model.harnessInfo(for: family) else { return [] }
+            let chosen = (composerModels[family.rawValue] ?? "")
+                .trimmingCharacters(in: .whitespaces)
+            if !chosen.isEmpty, let perModel = info.modelEffortLevels[chosen], !perModel.isEmpty {
+                return perModel
+            }
+            return info.effortLevels
+        })
     }
 
     /// The advanced options popover ("⋯"): clean SOLID sections on the popover's
@@ -129,7 +143,7 @@ extension ThreadsScreen {
                     }
                     .labelsHidden()
                     .fixedSize()
-                    .help("Requested reasoning effort for THIS turn. Each harness clamps it onto its own declared ladder (e.g. codex xhigh, claude max).")
+                    .help("Requested reasoning effort for THIS turn. Each harness resolves it against the ladder its routed model actually advertises.")
                 }
             }
             // Per-turn auth route REQUEST (W18/R20) over the thread preference.
