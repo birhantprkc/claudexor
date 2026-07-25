@@ -61,9 +61,10 @@ node scripts/fixture-freshness-check.mjs  # recorded fixtures carry provenance +
 
 Review authority is the cumulative diff on an exact, clean, committed and
 frozen candidate SHA, reviewed under the Owner-review release protocol in
-[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (at least two independent
-full-context reviewer subagents, at most three rounds, sealed schemaVersion-3
-attestation — Bible INV-125); any tracked mutation invalidates the evidence
+[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (the exact slot-bound triad plus
+scope reviewer panel, one wave plus one confirmation wave under the owner's
+decision, sealed schema-v4 attestation — Bible INV-125); any tracked
+mutation invalidates the evidence
 and requires a new freeze. Claudexor intentionally has no per-commit review
 hook or staged-diff review authority.
 
