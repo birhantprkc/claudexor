@@ -1,5 +1,39 @@
 # @claudexor/cli
 
+## 3.1.1
+
+### Patch Changes
+
+- Exact retry on a pre-start terminal run answers with its typed refusal (a 403,
+  not a 202 handle), and the CLI retry and run-again paths read the refusal's
+  actual problem message instead of an `error` field the daemon never serves.
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @claudexor/core@3.1.1
+  - @claudexor/orchestrator@3.1.1
+  - @claudexor/review@3.1.1
+  - @claudexor/control-api@3.1.1
+  - @claudexor/harness-claude@3.1.1
+  - @claudexor/harness-codex@3.1.1
+  - @claudexor/schema@3.1.1
+  - @claudexor/mcp-server@3.1.1
+  - @claudexor/daemon@3.1.1
+  - @claudexor/delivery@3.1.1
+  - @claudexor/gateway@3.1.1
+  - @claudexor/harness-cursor@3.1.1
+  - @claudexor/harness-fake@3.1.1
+  - @claudexor/harness-opencode@3.1.1
+  - @claudexor/harness-raw-api@3.1.1
+  - @claudexor/workspace@3.1.1
+  - @claudexor/acp-server@3.1.1
+  - @claudexor/config@3.1.1
+  - @claudexor/artifact-store@3.1.1
+  - @claudexor/journal@3.1.1
+  - @claudexor/secrets@3.1.1
+  - @claudexor/util@3.1.1
+
 ## 3.1.0
 
 ### Minor Changes

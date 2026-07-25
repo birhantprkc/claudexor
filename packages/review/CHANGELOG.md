@@ -1,5 +1,20 @@
 # @claudexor/review
 
+## 3.1.1
+
+### Patch Changes
+
+- The review loop's finding contract is pinned explicitly in both loop prompts,
+  and a reviewer effort the selected reviewer does not advertise is refused (the
+  auto panel discloses and drops an unadvertised reviewer effort level).
+- Updated dependencies
+- Updated dependencies
+  - @claudexor/core@3.1.1
+  - @claudexor/schema@3.1.1
+  - @claudexor/context@3.1.1
+  - @claudexor/config@3.1.1
+  - @claudexor/util@3.1.1
+
 ## 3.1.0
 
 ### Patch Changes

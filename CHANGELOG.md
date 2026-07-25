@@ -3,6 +3,41 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.1.1** (2026-07-25) — patch release: engine honesty, per-model effort
+  ladders, and control-plane fixes on top of v3.1.0. Engine: a DELIVERED plan
+  now survives an unrecovered tool error — the planner no longer escalates a
+  finished deliverable to a harness error before the finalizer runs, so one
+  failing shell command cannot throw away a good plan; an empty thrown message
+  no longer reads as "no error", so a harness that threw can never terminalize
+  as a clean success; the grep-family exit-1 carve-out and secret-redaction
+  mirroring keep tool-error accounting truthful; and the automatic
+  economy-ranking pass reads ONE pinned clock instead of a fresh `Date.now()`
+  per candidate, so ranking is stable within a pass. Effort: the ladder is per
+  (harness, model) and follows the vendor-advertised order — the static rank
+  table is gone, levels are discovered live from each CLI (Claude `--effort`
+  help parsing reads the whole block and anchors on the enumerating
+  parenthesis; Codex discovery is keyed by the resolved `CODEX_HOME`, bounded,
+  refuses malformed model/list values, and settles its probe on close) with a
+  version-matched snapshot fallback; the full official vocabularies are
+  supported (+minimal/+ultra in the schema vocabulary, codex +max/+ultra,
+  claude +xhigh); a level the run cannot honor is disclosed instead of
+  silently clamped, a profile-scoped run is no longer held to the DEFAULT
+  account's ladder, hint-less runs resolve against the default model's own
+  ladder, and the macOS composer's effort menu narrows to the per-turn (or
+  persisted default) model's actual surface. Control plane: exact retry on a
+  run that never started answers with its typed refusal (a 403, not a 202
+  handle), and CLI retry/run-again read the refusal's real problem message
+  instead of an `error` field the daemon never serves. Review: both loop
+  prompts pin the finding contract explicitly, and a reviewer effort the
+  selected reviewer does not advertise is refused rather than silently
+  remapped. Maintenance: CI publishes the required `build-test` check context
+  from the matrix job (PRs no longer sit BLOCKED waiting for a context that
+  never arrives), the fast-uri floor is pinned at 3.1.4
+  (GHSA-v2hh-gcrm-f6hx), major bumps stay out of the dependabot groups, and
+  routine dependency/actions updates landed (knip 6.29.0, prettier 3.9.6,
+  turbo 2.10.6, @agentclientprotocol/sdk 1.3.0, attest/pages/artifact
+  actions).
+
 - **v3.1.0** (2026-07-24) — a five-phase release: engine truth, machine
   contracts, the macOS app, platform (engine-runtime auto-install + Codex
   login), and release/meta. Engine: a shared typed attempt-finalizer replaces

@@ -1,5 +1,19 @@
 # @claudexor/mcp-server
 
+## 3.1.1
+
+### Patch Changes
+
+- Effort ladders are per (harness, model) and follow the vendor-advertised order.
+  Levels are discovered live from each CLI (with a snapshot fallback when a probe
+  is unavailable), the full official vocabularies are supported, and a level the
+  run cannot honor is disclosed instead of silently clamped. A profile-scoped run
+  is no longer held to the default account's ladder, and hint-less runs resolve
+  against the default model's own ladder.
+- Updated dependencies
+  - @claudexor/schema@3.1.1
+  - @claudexor/util@3.1.1
+
 ## 3.1.0
 
 ### Patch Changes
