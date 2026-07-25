@@ -40,6 +40,11 @@ struct HarnessInfo: Identifiable, Hashable {
     var acceptsBrowser: Bool = false
     /// Adapter-declared effort ladder. Empty means the control must stay hidden.
     var effortLevels: [String] = []
+    /// Per-model advertised effort ladders (manifest `model_effort_levels`),
+    /// each in the vendor's own order. A model absent here falls back to the
+    /// harness-wide `effortLevels` — same rule as the engine's
+    /// `effortLevelsForModel`.
+    var modelEffortLevels: [String: [String]] = [:]
     var id: String { family.rawValue }
     var nativeSessionReady: Bool {
         authSources.first { $0.source == "native_session" }?.isVerifiedNativeSession == true

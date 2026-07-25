@@ -15,9 +15,14 @@ import type {
   ControlReviewerPanelEntry,
   EffortHint,
   Intent,
+  ModelEffortCapability,
   ProviderFamily,
 } from "@claudexor/schema";
-import { estimateEffectiveAuthRoute, knownModelIdsForRoute } from "@claudexor/schema";
+import {
+  effortLevelsForModel,
+  estimateEffectiveAuthRoute,
+  knownModelIdsForRoute,
+} from "@claudexor/schema";
 import type { HarnessAdapter } from "@claudexor/core";
 import { HarnessUnavailableError, validateModel } from "@claudexor/core";
 import { WorkspaceManager } from "@claudexor/workspace";
@@ -53,14 +58,27 @@ export interface ReviewerPanelDeps {
 function assertReviewerEffortAdvertised(
   harnessId: string,
   requestedEffort: EffortHint | null,
-  capabilities: { effort_levels: readonly EffortHint[] },
+  capabilities: {
+    effort_levels: readonly EffortHint[];
+    model_effort_levels: Record<string, ModelEffortCapability>;
+  },
+  model: string | null,
 ): void {
   if (!requestedEffort) return;
-  if (capabilities.effort_levels.includes(requestedEffort)) return;
-  const supported = capabilities.effort_levels.join(", ");
-  const suffix = supported
-    ? ` (supported: ${supported})`
-    : " (harness declares no effort controls)";
+  // Validate against the ladder of the model that will actually review: the
+  // model's own advertised list when the entry resolves one and the manifest
+  // recorded it, else the harness-wide merged ladder — which is then the only
+  // honest set, and the refusal says so.
+  const advertised = effortLevelsForModel(capabilities, model);
+  if (advertised.includes(requestedEffort)) return;
+  const perModel =
+    model !== null && (capabilities.model_effort_levels[model]?.levels.length ?? 0) > 0;
+  const supported = advertised.join(", ");
+  const suffix = !supported
+    ? " (harness declares no effort controls)"
+    : perModel
+      ? ` (model '${model}' advertises: ${supported})`
+      : ` (harness-wide advertised ladder — no per-model ladder recorded${model ? ` for '${model}'` : ""}: ${supported})`;
   throw new HarnessUnavailableError(
     `reviewer harness '${harnessId}' does not support requested effort '${requestedEffort}'${suffix}`,
   );
@@ -201,7 +219,12 @@ export async function resolveExplicitReviewerPanel(
         }
       }
       const requestedEffort = entry.effort ?? null;
-      assertReviewerEffortAdvertised(entry.harness, requestedEffort, manifest.capabilities);
+      assertReviewerEffortAdvertised(
+        entry.harness,
+        requestedEffort,
+        manifest.capabilities,
+        requestedModel,
+      );
       specs.push({
         adapter,
         providerFamily: manifest.provider_family,
@@ -294,7 +317,7 @@ export async function resolveAutoReviewerPanel(
       // wire, so the boundary caught a typo; the vocabulary is open now, and this
       // is the layer that knows what the chosen reviewer really accepts.
       const requestedEffort = overrides.reviewerEfforts?.[m.provider_family] ?? null;
-      assertReviewerEffortAdvertised(adapter.id, requestedEffort, m.capabilities);
+      assertReviewerEffortAdvertised(adapter.id, requestedEffort, m.capabilities, requestedModel);
       seen.add(m.provider_family);
       specs.push({
         adapter,

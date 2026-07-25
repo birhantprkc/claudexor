@@ -56,8 +56,9 @@ describe("codex effort is resolved per MODEL, not per harness", () => {
 
   it("does NOT send ultra to gpt-5.4, which stops at xhigh — the ceiling belongs to the model", () => {
     const args = codexExecArgs({ ...base, model_hint: "gpt-5.4", effort_hint: "ultra" });
-    // ultra is rankable, so it clamps onto gpt-5.4's real ceiling instead of
-    // being forwarded to die as an opaque vendor `unsupported_value`.
+    // The merged codex ladder places ultra above xhigh (sol's own advertised
+    // order), so it clamps onto gpt-5.4's real ceiling instead of being
+    // forwarded to die as an opaque vendor `unsupported_value`.
     expect(emittedEffort(args)).toBe("xhigh");
   });
 
@@ -98,7 +99,7 @@ describe("codex effort is resolved per MODEL, not per harness", () => {
     ).toBe("xhigh");
   });
 
-  it("passes a level the rank table has never heard of straight through when the model advertises it", () => {
+  it("passes a level this repo has never heard of straight through when the model advertises it", () => {
     // A future codex release adding a level must work with NO change here.
     const future: CodexEffortCapability = {
       "gpt-9": { levels: ["low", "high", "hyperdrive"], default: "high" },
@@ -466,21 +467,82 @@ describe("a malformed model/list is a FAILED probe, not a narrowed ladder", () =
   });
 });
 
-describe("the advertised union is RANKED, not probe-ordered", () => {
-  it("sorts weakest to strongest however the vendor listed its models", () => {
-    // `capabilities.effort_levels` promises weakest→strongest; the vendor listing
-    // its strongest model first must not invert the published ladder.
+describe("the harness ladder is the positional MERGE of the vendor's own per-model orders", () => {
+  it("merges subset lists into the longest vendor ladder (the real catalog shape)", () => {
     const capability: CodexEffortCapability = {
-      "gpt-strong": { levels: ["ultra", "max"], default: "max" },
-      "gpt-weak": { levels: ["low", "medium"], default: "low" },
+      "gpt-mid": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
+      "gpt-top": { levels: ["low", "medium", "high", "xhigh", "max", "ultra"], default: "low" },
+      "gpt-small": { levels: ["low", "medium"], default: "low" },
     };
-    expect(unionEffortLevels(capability)).toEqual(["low", "medium", "max", "ultra"]);
+    expect(unionEffortLevels(capability)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
   });
 
-  it("keeps unranked vendor levels at the tail (the Swift EffortRanking tail rule)", () => {
+  it("a new vendor level ('hyper') sorts by its vendor POSITION and hosts clamps there", () => {
+    // The generalization proof end to end: nothing in this repo knows `hyper`,
+    // yet it merges between xhigh and max because that is where the vendor put
+    // it — and a model that lacks it clamps a `hyper` request onto its own
+    // ceiling along that merged order.
     const capability: CodexEffortCapability = {
-      "gpt-9": { levels: ["zesty", "high", "hyperdrive", "low"], default: "low" },
+      "gpt-hyper": { levels: ["low", "medium", "high", "xhigh", "hyper", "max"], default: "low" },
+      "gpt-plain": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
     };
-    expect(unionEffortLevels(capability)).toEqual(["low", "high", "hyperdrive", "zesty"]);
+    expect(unionEffortLevels(capability)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "hyper",
+      "max",
+    ]);
+    expect(
+      emittedEffort(
+        codexExecArgs(
+          { ...base, model_hint: "gpt-hyper", effort_hint: "hyper" },
+          { effortCapability: capability },
+        ),
+      ),
+    ).toBe("hyper");
+    expect(
+      emittedEffort(
+        codexExecArgs(
+          { ...base, model_hint: "gpt-plain", effort_hint: "hyper" },
+          { effortCapability: capability },
+        ),
+      ),
+    ).toBe("xhigh");
+  });
+
+  it("REFUSES cross-model clamping when two vendor orders genuinely contradict each other", () => {
+    // No vendor does this today. If one ever does, there is no honest merged
+    // rank for the pair — so an unadvertised level sends NO flag (disclosed
+    // upstream) instead of clamping along an order this repo would have had to
+    // invent. Advertised levels still pass through verbatim.
+    const capability: CodexEffortCapability = {
+      "gpt-a": { levels: ["low", "high"], default: "low" },
+      "gpt-b": { levels: ["high", "low"], default: "high" },
+    };
+    expect(
+      emittedEffort(
+        codexExecArgs(
+          { ...base, model_hint: "gpt-a", effort_hint: "medium" },
+          { effortCapability: capability },
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      emittedEffort(
+        codexExecArgs(
+          { ...base, model_hint: "gpt-a", effort_hint: "high" },
+          { effortCapability: capability },
+        ),
+      ),
+    ).toBe("high");
   });
 });

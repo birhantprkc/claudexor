@@ -1,19 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { normalizeEffort } from "@claudexor/core";
-import { type ModelEffortCapability, effortLevelsForModel } from "@claudexor/schema";
+import {
+  type ModelEffortCapability,
+  effortLevelsForModel,
+  mergeEffortLadders,
+} from "@claudexor/schema";
 import { governRouteEffort } from "./effortGovernance.js";
 
 /**
- * The manifest this gate reads is discovered against the DEFAULT native harness
- * home, while the run itself may execute under a credential profile with its own
- * `CODEX_HOME` and therefore its own per-model ladders. These pin the split:
- * governance discloses, the profile-resolved adapter clamps.
+ * The layering contract: governance answers ONLY "does the harness's merged
+ * advertised ladder know this level at all?" and discloses when it does not;
+ * the adapter — which has resolved the profile env and the routed model — is
+ * the single layer that clamps, and only inside the vendor's own merged order.
  */
 describe("governRouteEffort", () => {
   const route = {
     id: "codex",
-    // The DEFAULT account's catalog, as `discover()` recorded it: capped at `xhigh`.
-    effortLevels: ["low", "medium", "high", "xhigh"] as const,
+    // The default account's merged ladder, exactly as the manifest carries it:
+    // the positional merge of every model's vendor-ordered list.
+    effortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"] as const,
   };
 
   /**
@@ -26,26 +31,20 @@ describe("governRouteEffort", () => {
     catalog: Record<string, ModelEffortCapability>,
     model: string,
     hint: string | null,
-  ): string | null =>
-    normalizeEffort(
-      hint,
-      effortLevelsForModel(
-        {
-          effort_levels: Object.values(catalog).flatMap((e) => e.levels),
-          model_effort_levels: catalog,
-        },
-        model,
-      ),
+  ): string | null => {
+    const merged = mergeEffortLadders(Object.values(catalog).map((entry) => entry.levels));
+    const advertised = effortLevelsForModel(
+      { effort_levels: merged.order, model_effort_levels: catalog },
+      model,
     );
+    return normalizeEffort(hint, advertised, merged.consistent ? merged.order : advertised);
+  };
 
-  it("does not clamp a profile-scoped run against the default account's ladder", () => {
-    // The default account's manifest says this model tops out at `xhigh`, but the
-    // run is routed to a credential profile whose CODEX_HOME advertises `ultra`.
+  it("forwards a ladder-known level VERBATIM; the profile-resolved adapter places it", () => {
+    // `ultra` is on the merged ladder, so governance must not clamp it — the
+    // manifest describes the DEFAULT account, while the run may execute under a
+    // credential profile whose CODEX_HOME advertises its own catalog.
     const governed = governRouteEffort("ultra", route);
-
-    // Governance must forward the request UNTOUCHED. Clamping to `xhigh` here
-    // would be authoritative downstream — an advertised level passes through the
-    // adapter verbatim — permanently costing the profile a level it really has.
     expect(governed.effort).toBe("ultra");
     expect(governed.ignored).toBeNull();
 
@@ -54,17 +53,12 @@ describe("governRouteEffort", () => {
         levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
         default: "low",
       },
-    };
-    expect(adapterResolves(profileCatalog, "gpt-5.6-sol", governed.effort)).toBe("ultra");
-  });
-
-  it("still lets the adapter clamp when the profile really does stop lower", () => {
-    const governed = governRouteEffort("ultra", route);
-    const profileCatalog = {
       "gpt-5.4": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
     };
-    // Same forwarded request, but this profile cannot place `ultra` — the clamp
-    // happens once, in the layer that actually knows the answer.
+    // On the model that advertises it: verbatim.
+    expect(adapterResolves(profileCatalog, "gpt-5.6-sol", governed.effort)).toBe("ultra");
+    // On the sibling that stops lower: clamped INSIDE the merged vendor order,
+    // by the one layer that actually knows the profile's catalog.
     expect(adapterResolves(profileCatalog, "gpt-5.4", governed.effort)).toBe("xhigh");
   });
 
@@ -72,11 +66,24 @@ describe("governRouteEffort", () => {
     expect(governRouteEffort("high", route)).toEqual({ effort: "high", ignored: null });
   });
 
-  it("discloses a level no ladder could place", () => {
+  it("discloses a level the merged ladder has never seen, naming the ladder", () => {
     const governed = governRouteEffort("banana", route);
     expect(governed.effort).toBeNull();
     expect(governed.ignored).toContain("effort=banana");
     expect(governed.ignored).toContain("codex");
+    expect(governed.ignored).toContain("low, medium, high, xhigh, max, ultra");
+  });
+
+  it("never clamps: refusal is pure ladder membership, with nothing left to rank against", () => {
+    // A ladder capped at xhigh does not know `ultra`, so the request is
+    // disclosed rather than silently landed on some "nearest" level — with the
+    // rank table gone there is no order here to invent one from.
+    const governed = governRouteEffort("ultra", {
+      id: "codex",
+      effortLevels: ["low", "medium", "high", "xhigh"],
+    });
+    expect(governed.effort).toBeNull();
+    expect(governed.ignored).toContain("effort=ultra");
   });
 
   it("discloses when the harness has no effort surface at all", () => {

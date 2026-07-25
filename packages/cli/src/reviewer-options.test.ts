@@ -5,6 +5,13 @@ import {
   parseReviewerPanel,
 } from "./reviewer-options.js";
 
+/**
+ * Parse-time disambiguation set: what the harnesses ADVERTISE (in production
+ * the snapshot union from run-options). There is no rank table — membership in
+ * this set is the only thing that decides whether a `:token` is an effort.
+ */
+const EFFORTS: ReadonlySet<string> = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
+
 describe("reviewer option parsing", () => {
   it("parses per-provider reviewer effort overrides", () => {
     expect(parseReviewerEffortMap("openai=xhigh,anthropic=high")).toEqual({
@@ -70,6 +77,7 @@ describe("reviewer option parsing", () => {
     expect(
       parseReviewerPanel(
         "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro,cursor=gemini-3.5-flash,cursor=gpt-5.5-extra-high",
+        EFFORTS,
       ),
     ).toEqual([
       { harness: "claude", model: "claude-opus-4-8", effort: "max" },
@@ -80,14 +88,14 @@ describe("reviewer option parsing", () => {
   });
 
   it("allows harness-only reviewer panel entries for default reviewer models", () => {
-    expect(parseReviewerPanel("claude,cursor=gpt-5.5")).toEqual([
+    expect(parseReviewerPanel("claude,cursor=gpt-5.5", EFFORTS)).toEqual([
       { harness: "claude" },
       { harness: "cursor", model: "gpt-5.5" },
     ]);
   });
 
   it("allows reviewer effort without an explicit model using harness-only spelling", () => {
-    expect(parseReviewerPanel("claude:max,cursor:xhigh,cursor=gemini-3.1-pro")).toEqual([
+    expect(parseReviewerPanel("claude:max,cursor:xhigh,cursor=gemini-3.1-pro", EFFORTS)).toEqual([
       { harness: "claude", effort: "max" },
       { harness: "cursor", effort: "xhigh" },
       { harness: "cursor", model: "gemini-3.1-pro" },
@@ -95,23 +103,38 @@ describe("reviewer option parsing", () => {
   });
 
   it("keeps colons inside model ids unless the suffix is a valid effort", () => {
-    expect(parseReviewerPanel("cursor=org:model:v2,claude=vendor:opus:max")).toEqual([
+    expect(parseReviewerPanel("cursor=org:model:v2,claude=vendor:opus:max", EFFORTS)).toEqual([
       { harness: "cursor", model: "org:model:v2" },
       { harness: "claude", model: "vendor:opus", effort: "max" },
     ]);
   });
 
   it("fails loudly on malformed explicit reviewer panel entries", () => {
-    expect(() => parseReviewerPanel(" , ")).toThrow(/empty entries are not allowed/);
-    expect(() => parseReviewerPanel("claude,,cursor=gpt-5.5")).toThrow(
+    expect(() => parseReviewerPanel(" , ", EFFORTS)).toThrow(/empty entries are not allowed/);
+    expect(() => parseReviewerPanel("claude,,cursor=gpt-5.5", EFFORTS)).toThrow(
       /empty entries are not allowed/,
     );
-    expect(() => parseReviewerPanel("claude,cursor=gpt-5.5,")).toThrow(
+    expect(() => parseReviewerPanel("claude,cursor=gpt-5.5,", EFFORTS)).toThrow(
       /empty entries are not allowed/,
     );
-    expect(() => parseReviewerPanel("=gpt-5.5")).toThrow(/invalid --reviewer-panel entry/);
-    expect(() => parseReviewerPanel("cursor=")).toThrow(/missing model after '='/);
-    expect(() => parseReviewerPanel("cursor=:max")).toThrow(/missing model after '='/);
-    expect(() => parseReviewerPanel("claude:turbo")).toThrow(/expected harness\[:effort\]/);
+    expect(() => parseReviewerPanel("=gpt-5.5", EFFORTS)).toThrow(/invalid --reviewer-panel entry/);
+    expect(() => parseReviewerPanel("cursor=", EFFORTS)).toThrow(/missing model after '='/);
+    expect(() => parseReviewerPanel("cursor=:max", EFFORTS)).toThrow(/missing model after '='/);
+    expect(() => parseReviewerPanel("claude:turbo", EFFORTS)).toThrow(
+      /expected harness\[:effort\]/,
+    );
+  });
+
+  it("splits a NEW advertised vendor level ('hyper') once the set carries it — no code change", () => {
+    // Generalization proof for the parse layer: disambiguation is membership in
+    // the advertised set, so the day a vendor ships `hyper` the same spelling
+    // starts working with an updated snapshot and nothing else.
+    const withHyper = new Set([...EFFORTS, "hyper"]);
+    expect(parseReviewerPanel("codex=gpt-9:hyper", EFFORTS)).toEqual([
+      { harness: "codex", model: "gpt-9:hyper" },
+    ]);
+    expect(parseReviewerPanel("codex=gpt-9:hyper", withHyper)).toEqual([
+      { harness: "codex", model: "gpt-9", effort: "hyper" },
+    ]);
   });
 });

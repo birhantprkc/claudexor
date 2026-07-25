@@ -61,7 +61,14 @@ struct HarnessDefaultsRow: View {
     private static let debounceMs: UInt64 = 600
 
     private var effortLevels: [String] {
-        var levels = model.harnessInfo(for: family)?.effortLevels ?? []
+        let info = model.harnessInfo(for: family)
+        // Per-model narrowing, same rule as the engine's `effortLevelsForModel`:
+        // when a default model is chosen and the manifest recorded its ladder,
+        // the menu offers exactly what THAT model advertises (in the vendor's
+        // own order); otherwise the harness-wide merged ladder.
+        let chosenModel = modelDraft.trimmingCharacters(in: .whitespaces)
+        var levels = (chosenModel.isEmpty ? nil : info?.modelEffortLevels[chosenModel])
+            ?? info?.effortLevels ?? []
         if effort != "__default", !levels.contains(effort) { levels.insert(effort, at: 0) }
         return levels
     }

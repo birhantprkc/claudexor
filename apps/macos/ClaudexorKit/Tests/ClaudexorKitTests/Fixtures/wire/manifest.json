@@ -1,5 +1,4 @@
 {
-  "effort-rank-order": "EffortRankOrder",
   "handshake-response": "ControlHandshakeResponse",
   "handshake-response-unknown-sha": "ControlHandshakeResponse",
   "problem-minimal": "ControlProblem",

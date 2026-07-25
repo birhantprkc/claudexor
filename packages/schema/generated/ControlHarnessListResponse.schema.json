@@ -375,7 +375,7 @@
                               "minLength": 1,
                               "maxLength": 32,
                               "pattern": "^[a-z0-9]+(?:[_-][a-z0-9]+)*$",
-                              "description": "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model and a shared normalizer passes advertised levels through, clamps rankable ones, and refuses unrankable ones."
+                              "description": "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model, ordered weakest to strongest by the vendor itself, and a shared normalizer passes advertised levels through, clamps inside the vendor order, and refuses levels the advertised ladder has never seen."
                             },
                             "default": [],
                             "description": "Ordered (weakest to strongest) reasoning-effort levels this harness accepts across all its models; empty means effort is not a tunable surface."

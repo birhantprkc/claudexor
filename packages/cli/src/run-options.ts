@@ -5,11 +5,24 @@ import type {
   ProviderFamily,
   TestCommandInvocation,
 } from "@claudexor/schema";
+import { CLAUDE_EFFORT_SNAPSHOT } from "@claudexor/harness-claude";
+import { CODEX_EFFORT_SNAPSHOT, unionEffortLevels } from "@claudexor/harness-codex";
 import {
   parseReviewerEffortMap,
   parseReviewerModelMap,
   parseReviewerPanel,
 } from "./reviewer-options.js";
+
+/**
+ * Effort levels the recorded vendor snapshots advertise, unioned across
+ * harnesses — the CLI's parse-time answer to "could this `:token` be an
+ * effort?". Stamped vendor data (the same snapshots discovery falls back to),
+ * never a hand-ranked table; a live-only level the snapshots have not caught
+ * up with rides the unambiguous `--reviewer-effort family=level` spelling.
+ */
+function snapshotAdvertisedEfforts(): ReadonlySet<string> {
+  return new Set([...CLAUDE_EFFORT_SNAPSHOT, ...unionEffortLevels(CODEX_EFFORT_SNAPSHOT)]);
+}
 
 export function stringFlagValues(values: Array<string | boolean>, flag: string): string[] {
   const strings = values.filter((value): value is string => typeof value === "string");
@@ -80,7 +93,10 @@ export function parseReviewerPanelFlags(
   values: Array<string | boolean>,
 ): ControlReviewerPanelEntry[] | undefined {
   const strings = stringFlagValues(values, "reviewer-panel");
-  return parseReviewerPanel(strings.length > 0 ? strings.join(",") : undefined);
+  return parseReviewerPanel(
+    strings.length > 0 ? strings.join(",") : undefined,
+    snapshotAdvertisedEfforts(),
+  );
 }
 
 export function parseReviewerModelFlags(

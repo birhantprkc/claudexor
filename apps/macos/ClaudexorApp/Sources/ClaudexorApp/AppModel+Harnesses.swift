@@ -26,6 +26,16 @@ extension AppModel {
                     guard case .array(let values) = status.manifest?["capabilities"]?["effort_levels"] else { return [] }
                     return values.compactMap(\.stringValue)
                 }()
+                let modelEffortLevels: [String: [String]] = {
+                    // Per-model narrowing (`model_effort_levels`): each entry's
+                    // `levels` array rides in the vendor's own order.
+                    guard case .object(let entries) = status.manifest?["capabilities"]?["model_effort_levels"] else { return [:] }
+                    return entries.compactMapValues { entry in
+                        guard case .array(let values) = entry["levels"] else { return nil }
+                        let levels = values.compactMap(\.stringValue)
+                        return levels.isEmpty ? nil : levels
+                    }
+                }()
                 // The configured-model verdict is a typed `configured_model`
                 // readiness row (daemon-normalized) — the ONE owner; no
                 // separate string projection here (F4 review lane 2 #2).
@@ -34,7 +44,7 @@ extension AppModel {
                                    intents: status.enabledIntents, routableIntents: status.routableIntents,
                                    reasons: status.reasons ?? [], readiness: status.readiness,
                                    acceptsImages: acceptsImages, acceptsBrowser: acceptsBrowser,
-                                   effortLevels: effortLevels)
+                                   effortLevels: effortLevels, modelEffortLevels: modelEffortLevels)
             }
             return true
         } catch {

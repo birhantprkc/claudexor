@@ -1,36 +1,36 @@
 /**
  * Run-preflight effort gate (INV-105), the effort analog of `modelGovernance`.
  *
- * This gate DISCLOSES, it does not clamp. A requested effort that no harness
- * ladder could ever place is refused here and reported as ignored — the adapter
- * would otherwise just omit the flag and the user would never learn their level
- * went nowhere. Everything else rides through VERBATIM and is resolved by the
- * adapter.
+ * This gate DISCLOSES, it does not clamp. It answers exactly one question:
+ * does the harness's merged advertised ladder (`capabilities.effort_levels`,
+ * the positional merge of its models' vendor-ordered lists) know this level at
+ * all? A level the merged ladder has never seen is disclosed as ignored — the
+ * adapter would otherwise just omit the flag and the user would never learn
+ * their level went nowhere. A level the ladder DOES know rides through
+ * VERBATIM and is resolved by the adapter.
  *
  * Why the clamp lives downstream and not here: the manifest is discovered
  * ONCE, against the DEFAULT native harness home (`discover()` takes no
- * arguments), so `capabilities.model_effort_levels` describes the DEFAULT
- * account's catalog. Codex advertises its ladders per ACCOUNT — every
- * credential profile and API-key route gets its own `CODEX_HOME`, and
- * `model/list` answers for whoever that home is logged into. Clamping here
- * would therefore hold a profile-scoped run to another account's ceiling
- * (asking for `ultra` on a profile whose model advertises it, and silently
- * getting `xhigh` because the default account stops there). The adapter
- * re-resolves against the catalog for the env the child will ACTUALLY run in
- * (`codexEffortsForEnv`), so it is the only layer entitled to clamp.
+ * arguments), so its ladders describe the DEFAULT account's catalog. Codex
+ * advertises its ladders per ACCOUNT — every credential profile and API-key
+ * route gets its own `CODEX_HOME`, and `model/list` answers for whoever that
+ * home is logged into. Clamping here would therefore hold a profile-scoped run
+ * to another account's ceiling. The adapter re-resolves against the catalog
+ * for the env the child will ACTUALLY run in (`codexEffortsForEnv`), so it is
+ * the only layer entitled to clamp — and clamping is only ever a move INSIDE
+ * the vendor's own order, which only the adapter's resolved catalog carries.
  *
- * The refusal test runs against the harness-wide advertised UNION rather than
- * the per-model narrowing, for the same reason: the union is the broadest and
- * least account-specific signal the manifest carries, so refusing against it
- * cannot reject a level merely because the DEFAULT account's copy of one model
- * happens not to list it.
+ * The membership test runs against the harness-wide merged ladder rather than
+ * the per-model narrowing, because the ladder is the broadest and least
+ * account-specific signal the manifest carries: a level any of the harness's
+ * models advertises is in it, so this gate cannot reject a level merely
+ * because the routed model's copy happens not to list it.
  */
 import type { EffortHint } from "@claudexor/schema";
-import { resolveEffort } from "@claudexor/core";
 
 export interface EffortGovernedRoute {
   id: string;
-  /** Harness-wide advertised ladder; empty = effort is not a tunable surface. */
+  /** Harness-wide merged advertised ladder; empty = effort is not a tunable surface. */
   effortLevels: readonly EffortHint[];
 }
 
@@ -55,14 +55,19 @@ export function governRouteEffort(
       ignored: `effort=${requested} (manifest capabilities.effort_levels is empty for ${route.id})`,
     };
   }
-  // `resolveEffort` stays the single owner of effort semantics (INV-122); only
-  // its REJECTION verdict is read here. A level that is advertised, or that the
-  // rank table can place against what is advertised, is forwardable — the
-  // adapter decides where it actually lands. A level that is neither is one no
-  // "nearest" could be invented for, so it is disclosed instead of vanishing.
-  const check = resolveEffort(requested, route.effortLevels);
-  if (check.status === "rejected") {
-    return { effort: null, ignored: `effort=${requested} (${check.message} for ${route.id})` };
+  // Pure membership against the merged vendor ladder: with no static rank
+  // table there is nothing else for this layer to rank against, which is the
+  // point — a level the harness's own advertised order has never seen is one
+  // no honest "nearest" could be invented for, so it is disclosed instead of
+  // vanishing. Anything the ladder knows is forwardable; WHERE it lands on the
+  // routed model is the adapter's call.
+  if (!route.effortLevels.includes(requested)) {
+    return {
+      effort: null,
+      ignored:
+        `effort=${requested} (not on the advertised ladder of ${route.id}: ` +
+        `${route.effortLevels.join(", ")})`,
+    };
   }
   return { effort: requested, ignored: null };
 }

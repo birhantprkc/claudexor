@@ -1,29 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { EFFORT_RANK_ORDER } from "@claudexor/schema";
+import { mergeEffortLadders } from "@claudexor/schema";
 import { normalizeEffort, resolveEffort } from "./effort.js";
 
-describe("normalizeEffort", () => {
+/**
+ * There is NO static rank table: rank is a level's position in the ladder the
+ * VENDOR advertised. `advertised` is what the resolved target accepts;
+ * `ladder` (optional) is the harness's merged vendor order, which is what lets
+ * a sibling model's level clamp onto this model's ceiling.
+ */
+describe("normalizeEffort against vendor-ordered ladders", () => {
   it("passes an exactly-supported level through unchanged", () => {
     expect(normalizeEffort("high", ["low", "medium", "high"])).toBe("high");
     expect(normalizeEffort("low", ["low", "medium", "high"])).toBe("low");
   });
 
-  it("clamps a too-strong request DOWN to the strongest supported level", () => {
-    // xhigh is above the ceiling of [low,medium,high] -> high (the claude bug fix).
-    expect(normalizeEffort("xhigh", ["low", "medium", "high"])).toBe("high");
-    // max above a [..,xhigh] ceiling -> xhigh (the codex max->xhigh behavior).
-    expect(normalizeEffort("max", ["low", "medium", "high", "xhigh"])).toBe("xhigh");
+  it("clamps a too-strong request DOWN inside the merged vendor order", () => {
+    const MERGED = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    // ultra on a model that stops at xhigh -> xhigh, because the merged codex
+    // ladder places ultra above it (the codex ultra->xhigh behavior).
+    expect(normalizeEffort("ultra", ["low", "medium", "high", "xhigh"], MERGED)).toBe("xhigh");
+    expect(normalizeEffort("max", ["low", "medium", "high", "xhigh"], MERGED)).toBe("xhigh");
   });
 
   it("clamps a too-weak request UP to the weakest supported level", () => {
-    expect(normalizeEffort("low", ["high", "xhigh"])).toBe("high");
+    const MERGED = ["low", "medium", "high", "xhigh"];
+    expect(normalizeEffort("low", ["high", "xhigh"], MERGED)).toBe("high");
   });
 
-  it("clamps an interior gap to the nearest rank (ties -> the cheaper level)", () => {
-    // medium (rank 1) is equidistant from low (0) and high (2) -> the lower wins.
-    expect(normalizeEffort("medium", ["low", "high"])).toBe("low");
-    // xhigh (rank 3) between high(2) and max(4) is a tie -> high (cheaper).
-    expect(normalizeEffort("xhigh", ["high", "max"])).toBe("high");
+  it("clamps an interior gap to the nearest position (ties -> the cheaper level)", () => {
+    const MERGED = ["low", "medium", "high", "xhigh", "max"];
+    // medium is equidistant from low and high in the merged order -> the lower wins.
+    expect(normalizeEffort("medium", ["low", "high"], MERGED)).toBe("low");
+    // xhigh between high and max is a tie -> high (cheaper).
+    expect(normalizeEffort("xhigh", ["high", "max"], MERGED)).toBe("high");
   });
 
   it("returns null when effort is not a tunable surface (empty supported)", () => {
@@ -35,49 +44,64 @@ describe("normalizeEffort", () => {
     expect(normalizeEffort(null, ["low", "medium", "high"])).toBeNull();
     expect(normalizeEffort(undefined, ["low", "medium", "high"])).toBeNull();
   });
+
+  it("without a wider ladder, an unadvertised level cannot clamp and is refused", () => {
+    // The degenerate single-list case: the target's own order IS the only order
+    // known, so there is no honest position for `xhigh` here — no invented
+    // "nearest", the caller discloses instead (the claude 2.1.89 shape).
+    expect(normalizeEffort("xhigh", ["low", "medium", "high", "max"])).toBeNull();
+    const check = resolveEffort("xhigh", ["low", "medium", "high", "max"]);
+    expect(check.status).toBe("rejected");
+  });
 });
 
-describe("expanded vocabulary: the open ladder (official vendor ladders)", () => {
-  it("ranks the full vocabulary weakest -> strongest", () => {
-    // The rank table is the SSOT for ordering; this pins it. It is deliberately
-    // WIDER than what anyone advertises: none/minimal are rank positions kept so
-    // they sort correctly the day a vendor ships them.
-    expect([...EFFORT_RANK_ORDER]).toEqual([
-      "none",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
+describe("merged-order derivation from vendor lists", () => {
+  it("merges subset/prefix lists into the longest vendor ladder", () => {
+    const merged = mergeEffortLadders([
+      ["low", "medium", "high", "xhigh"],
+      ["low", "medium", "high", "xhigh", "max", "ultra"],
+      ["low", "medium", "high"],
     ]);
+    expect(merged.consistent).toBe(true);
+    expect(merged.order).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
-  it("xhigh passes through a claude-shaped ladder unchanged (regression: the old 4-level ladder silently downgraded xhigh)", () => {
-    const CLAUDE = ["low", "medium", "high", "xhigh", "max"] as const;
-    expect(normalizeEffort("xhigh", CLAUDE)).toBe("xhigh");
+  it("a brand-new vendor level ('hyper') sorts by its VENDOR position, not a table", () => {
+    // The generalization proof: no code here knows `hyper`, yet it lands where
+    // the vendor put it — between xhigh and max — because position in the
+    // advertised list IS the rank.
+    const merged = mergeEffortLadders([
+      ["low", "medium", "high", "xhigh", "max", "ultra"],
+      ["low", "medium", "high", "xhigh", "hyper", "max"],
+    ]);
+    expect(merged.consistent).toBe(true);
+    expect(merged.order).toEqual(["low", "medium", "high", "xhigh", "hyper", "max", "ultra"]);
+    // ...and it passes through verbatim where advertised, and hosts clamps.
+    expect(normalizeEffort("hyper", ["low", "xhigh", "hyper", "max"], merged.order)).toBe("hyper");
+    expect(normalizeEffort("hyper", ["low", "medium", "high", "xhigh"], merged.order)).toBe(
+      "xhigh",
+    );
   });
 
-  it("ultra clamps DOWN to max on a ladder without ultra (claude)", () => {
-    const CLAUDE = ["low", "medium", "high", "xhigh", "max"] as const;
-    expect(normalizeEffort("ultra", CLAUDE)).toBe("max");
+  it("flags genuinely contradictory vendor orders instead of inventing one", () => {
+    const merged = mergeEffortLadders([
+      ["low", "high"],
+      ["high", "low"],
+    ]);
+    expect(merged.consistent).toBe(false);
+    // First-seen fallback is a display set only; clamping against it is the
+    // caller's responsibility to REFUSE (pass advertised as its own ladder).
+    expect(merged.order).toEqual(["low", "high"]);
   });
 
-  it("max and ultra pass through a codex-shaped ladder (regression: the old ladder clamped max to xhigh, under-driving models that accept max/ultra)", () => {
-    const CODEX = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
-    expect(normalizeEffort("max", CODEX)).toBe("max");
-    expect(normalizeEffort("ultra", CODEX)).toBe("ultra");
-  });
-
-  it("minimal clamps UP to low on ladders that exclude it (no current model advertises minimal)", () => {
-    const CODEX = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
-    expect(normalizeEffort("minimal", CODEX)).toBe("low");
+  it("merges the empty and trivial cases without noise", () => {
+    expect(mergeEffortLadders([])).toEqual({ order: [], consistent: true });
+    expect(mergeEffortLadders([[], ["low"]])).toEqual({ order: ["low"], consistent: true });
   });
 });
 
-describe("open vocabulary: levels the rank table has never heard of", () => {
-  it("passes an ADVERTISED but unrankable vendor level through untouched", () => {
+describe("open vocabulary: levels no ladder places", () => {
+  it("passes an ADVERTISED but never-seen vendor level through untouched", () => {
     // The whole point of the design: codex types ReasoningEffort as any non-empty
     // advertised string, so a level newer than this repo must work with NO code
     // change here. It must not be clamped to a neighbour we merely guessed at.
@@ -90,14 +114,7 @@ describe("open vocabulary: levels the rank table has never heard of", () => {
     });
   });
 
-  it("still ranks and clamps the KNOWN levels on a ladder that also advertises an unknown one", () => {
-    const FUTURE = ["low", "medium", "high", "hyper"] as const;
-    // `max` is rankable and unadvertised -> clamps onto the nearest RANKABLE
-    // advertised level; the unrankable `hyper` can never be a clamp target.
-    expect(normalizeEffort("max", FUTURE)).toBe("high");
-  });
-
-  it("REFUSES an unrankable level the model does not advertise, naming what IS advertised", () => {
+  it("REFUSES a level the ladder cannot place, naming what IS advertised", () => {
     const CODEX_54 = ["low", "medium", "high", "xhigh"] as const;
     const check = resolveEffort("turbo", CODEX_54);
     expect(check.status).toBe("rejected");
@@ -106,15 +123,17 @@ describe("open vocabulary: levels the rank table has never heard of", () => {
     expect(check.message).toContain("low, medium, high, xhigh");
   });
 
-  it("never silently downgrades an unrankable level: the arg builder gets null, not a guess", () => {
+  it("never silently downgrades an unplaceable level: the arg builder gets null, not a guess", () => {
     // A typo must not quietly become `high`. normalizeEffort answers "send no
     // flag" so the vendor default stands, and the refusal text reaches the user
     // through the surfaces that can talk back.
     expect(normalizeEffort("turbo", ["low", "medium", "high"])).toBeNull();
   });
 
-  it("refuses when NOTHING advertised can be ranked and the request is not one of them", () => {
-    const check = resolveEffort("high", ["hyper", "turbo"]);
+  it("refuses to clamp when the ladder places the request but none of the advertised levels", () => {
+    // Defensive shape: a ladder that knows the request but not the targets has
+    // no honest landing spot either.
+    const check = resolveEffort("high", ["hyper", "turbo"], ["low", "high"]);
     expect(check.status).toBe("rejected");
   });
 });

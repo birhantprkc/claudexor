@@ -48,6 +48,7 @@ import {
   probeClaudeEffortLevels,
   probeClaudeHelp,
 } from "./effort-probe.js";
+export { CLAUDE_EFFORT_SNAPSHOT } from "./effort-probe.js";
 import {
   claudeAttachmentBlocks,
   handleControlRequestFrame,

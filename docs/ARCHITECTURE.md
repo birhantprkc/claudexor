@@ -251,31 +251,40 @@ above — there is no warn-and-pass-through tier.
 Reasoning effort is an OPEN vocabulary, mirroring the vendors: codex types its
 own `ReasoningEffort` as any non-empty value the model advertises, and Claude
 Code's ladder belongs to the INSTALLED binary (2.1.89 stops at `max`; 2.1.165
-adds `xhigh`). So `EffortHint` is a bounded lowercase slug rather than an enum,
-and `EFFORT_RANK_ORDER` is a separate RANK table — an ordering aid, never an
-allow-list. Adapters discover what is really advertised at discovery time
-(codex `app-server` `model/list` → `supportedReasoningEfforts` per model; the
-`--effort` line of `claude --help`) and fall back to a recorded snapshot when a
+adds `xhigh`). So `EffortHint` is a bounded lowercase slug rather than an
+enum, and the ORDERING AUTHORITY is the vendor's own advertised sequence —
+there is no static rank table. Vendors return their levels already ordered
+weakest→strongest (codex `app-server` `model/list` →
+`supportedReasoningEfforts` per model; the `--effort` line of `claude --help`),
+so a model's ladder is its own ordered list, a harness's ladder is the
+positional merge of its models' lists (`mergeEffortLadders`; the Swift
+`EffortLadder` merges the manifest's already-ordered arrays the same way), and
+a level's rank is its position in that merged order — which is what lets a
+brand-new vendor level sort correctly with no code change. Should two models
+ever advertise genuinely contradictory orders, the merge flags it and
+cross-model clamping is refused rather than an order invented. Adapters
+discover what is really advertised at discovery time and fall back to a
+recorded snapshot (stamped vendor data, kept in its captured order) when a
 probe cannot answer, so a probe failure costs freshness, never the run; both
 probes are cached, and `scripts/model-hints-freshness.mjs` WARNS when the live
 ladders disagree with the snapshot. Effort ceilings are per MODEL, not per
 harness (gpt-5.6-sol takes `ultra`, gpt-5.4 stops at `xhigh`), so
-`effortLevelsForModel` narrows the harness-wide union for the routed model. The
-shared normalizer then passes an ADVERTISED level through verbatim — including
-one this repo has never heard of, which is what lets a new vendor level work
-with no code change — clamps a rankable-but-unadvertised level onto the nearest
-advertised one, and refuses a level that is neither, disclosed via
+`effortLevelsForModel` narrows the harness-wide merged ladder for the routed
+model. The shared normalizer then passes an ADVERTISED level through verbatim,
+clamps an unadvertised one onto the nearest advertised level INSIDE the merged
+vendor order, and refuses a level that order has never seen, disclosed via
 `ignored_settings` rather than silently downgraded. WHICH LAYER clamps is part
 of the contract: `discover()` probes the DEFAULT native harness home, so the
 manifest carries the default account's ladders, while codex advertises per
 ACCOUNT and every credential profile and API-key route runs under its own
 `CODEX_HOME`. Run preflight (`governRouteEffort`) therefore only DISCLOSES a
-level that no advertised ladder could place and forwards everything else
+level the harness's merged ladder does not know and forwards everything else
 verbatim; the adapter, which has resolved the profile env the child will
 actually run in, is the single layer that clamps. Reviewer efforts have no
 adapter-side disclosure channel, so the panel resolvers refuse a level the
-SELECTED reviewer does not advertise instead of forwarding it to be dropped.
-The CLI help, the MCP tool
+SELECTED reviewer does not advertise — against the named model's own ladder
+when the entry resolves one, else the harness-wide merged ladder — instead of
+forwarding it to be dropped. The CLI help, the MCP tool
 schema and the macOS picker's ordering all derive from that single source. `doctor` validates each
 harness's CONFIGURED default model against the truth source, so a broken
 default (e.g. a model the CLI cannot run) is reported honestly instead of

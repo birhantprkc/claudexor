@@ -31,7 +31,6 @@ import Testing
         case "ControlQuotaResponse": return try recode(ControlQuotaResponse.self, data)
         case "ControlHarnessSettingsPatch": return try recode(HarnessSettingsPatch.self, data)
         case "ControlSettingsSnapshot": return try recode(SettingsSnapshot.self, data)
-        case "EffortRankOrder": return try recode([String].self, data)
         default: return nil
         }
     }
@@ -41,7 +40,7 @@ import Testing
         "ControlHandshakeResponse", "ControlProblem", "ControlThread", "ControlThreadTurn",
         "RunOutcomeFacts", "ControlBudgetSnapshot", "PlanReadiness", "PlanQuestionsArtifact",
         "ApplyEligibility", "ControlQuotaResponse", "ControlHarnessSettingsPatch",
-        "ControlSettingsSnapshot", "EffortRankOrder",
+        "ControlSettingsSnapshot",
     ]
 
     private static func recode<T: Codable>(_ type: T.Type, _ data: Data) throws -> Data {
@@ -63,27 +62,26 @@ import Testing
         )
     }
 
-    /// The Swift rank table IS the TS one. The generator emits EFFORT_RANK_ORDER
-    /// straight from the schema SSOT, so adding a level upstream fails here until
-    /// `EffortRanking.order` follows — the ordering can never rot into "unknown
-    /// levels land after max".
-    @Test func effortRankingMatchesTheGeneratedSchemaOrder() throws {
-        let url = try #require(Bundle.module.url(
-            forResource: "effort-rank-order", withExtension: "json", subdirectory: "Fixtures/wire"
-        ))
-        let wrapper = try #require(
-            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+    /// There is NO rank table on either side of the wire: the manifest's
+    /// `effort_levels` arrive in the vendor's own order and the picker merges
+    /// them positionally. Subset ladders merge into the longest one, and a
+    /// vendor level this app has never heard of ("hyper") lands at its
+    /// vendor-advertised position — not at the tail of a hardcoded list.
+    @Test func effortLadderMergesVendorOrderedLaddersPositionally() {
+        #expect(
+            EffortLadder.merge([
+                ["low", "medium", "high", "xhigh", "max", "ultra"],
+                ["low", "medium", "high", "xhigh"],
+                ["low", "medium", "high", "xhigh", "hyper", "max"],
+            ]) == ["low", "medium", "high", "xhigh", "hyper", "max", "ultra"]
         )
-        let generated = try #require(wrapper["value"] as? [String])
-        #expect(EffortRanking.order == generated)
     }
 
-    /// A level no ranking table knows is still OFFERED, just sorted to the tail —
-    /// the whole point of the open vocabulary reaching the picker.
-    @Test func effortRankingSortsUnrankedVendorLevelsToTheTail() {
+    /// Contradictory vendor orders cannot be ranked honestly; the picker falls
+    /// back to first-seen order instead of inventing one.
+    @Test func effortLadderFallsBackToFirstSeenOnContradiction() {
         #expect(
-            EffortRanking.sorted(["max", "turbo", "low", "xhigh"])
-                == ["low", "xhigh", "max", "turbo"]
+            EffortLadder.merge([["low", "high"], ["high", "low"]]) == ["low", "high"]
         )
     }
 

@@ -99,18 +99,22 @@ describe("the claude ladder is a property of the INSTALLED binary", () => {
     expect(normalizeEffort("xhigh", advertised ?? [])).toBe("xhigh");
   });
 
-  it("the SAME request clamps to max on a CLI that does not advertise xhigh, instead of being sent and rejected", () => {
-    // This is the defect the ladder split fixes: 2.1.89 would have taken a
-    // hardcoded `xhigh` and died on it, while a hardcoded 4-level ladder
-    // silently downgraded 2.1.165 users who asked for `xhigh`.
+  it("the SAME request sends NO flag on a CLI that does not advertise xhigh — no invented downgrade", () => {
+    // The claude ladder is a single vendor list: the installed binary's own
+    // `--help` order. A level that list has never seen has no honest position
+    // on it (there is no rank table to guess with), so the arg builder sends
+    // no flag — the vendor default stands — and preflight disclosure
+    // (`governRouteEffort`) tells the user the level went nowhere.
     const advertised = parseClaudeEffortHelp(HELP_2_1_89) ?? [];
-    // xhigh (rank 5) sits between high (4) and max (6): a tie resolving to the
-    // cheaper level, so the run stays honest rather than over-spending.
-    expect(normalizeEffort("xhigh", advertised)).toBe("high");
     expect(advertised).not.toContain("xhigh");
+    expect(normalizeEffort("xhigh", advertised)).toBeNull();
+    const check = resolveEffort("xhigh", advertised);
+    expect(check.status).toBe("rejected");
+    if (check.status !== "rejected") throw new Error("expected a rejection");
+    expect(check.message).toContain("low, medium, high, max");
   });
 
-  it("refuses a level neither advertised nor rankable, naming this binary's set", () => {
+  it("refuses a level the binary's advertised list cannot place, naming this binary's set", () => {
     const advertised = parseClaudeEffortHelp(HELP_2_1_165) ?? [];
     const check = resolveEffort("ultracode", advertised);
     expect(check.status).toBe("rejected");
@@ -169,9 +173,23 @@ describe("the claude effort probe degrades gracefully", () => {
     expect(parseClaudeEffortHelp(help)).toBeNull();
   });
 
-  it("accepts a single-level group when the level is one the rank table knows", () => {
+  it("treats a single-token group as an annotation, not a one-level ladder", () => {
+    // With no rank table, `(high)` is indistinguishable from `(beta)`; the
+    // vendor's real value list has always enumerated, so a lone token falls
+    // back to the snapshot instead of publishing a one-level ladder.
     const help = ["  --effort <level>                      Effort level (high)", ""].join("\n");
-    expect(parseClaudeEffortHelp(help)).toEqual(["high"]);
+    expect(parseClaudeEffortHelp(help)).toBeNull();
+  });
+
+  it("anchors on the --effort flag TOKEN, not any line containing the substring", () => {
+    // `--effort-budget` contains "--effort"; a substring match anchored the
+    // parse on the WRONG flag's block and read its parenthetical as the ladder.
+    const help = [
+      "  --effort-budget <n>                   Token budget for effort (tokens, dollars)",
+      "  --effort <level>                      Effort level for the current session",
+      "                                        (low, medium, high, xhigh, max)",
+    ].join("\n");
+    expect(parseClaudeEffortHelp(help)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
   it("refuses an over-long token instead of letting it reach the manifest schema", () => {

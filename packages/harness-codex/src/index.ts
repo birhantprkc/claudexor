@@ -27,7 +27,7 @@ import {
   type CodexEffortCapability,
   type CodexEffortProbe,
 } from "./effort-probe.js";
-export { clearCodexEffortCache } from "./effort-probe.js";
+export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,

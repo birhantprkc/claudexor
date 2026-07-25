@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EFFORT_RANK_ORDER, EffortHint, isRankedEffort } from "./effort.js";
+import { EffortHint, mergeEffortLadders } from "./effort.js";
 import {
   CredentialProfile,
   ControlRunDecisionRequest,
@@ -219,20 +219,26 @@ describe("EffortHint is an OPEN vocabulary, bounded by shape only", () => {
     }
   });
 
-  it("keeps the rank table narrower than the vocabulary, and in rank order", () => {
-    expect([...EFFORT_RANK_ORDER]).toEqual([
-      "none",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra",
-    ]);
-    // Ranked is not advertised: these two are rank placeholders only.
-    expect(isRankedEffort("none")).toBe(true);
-    expect(isRankedEffort("hyperdrive")).toBe(false);
+  it("derives ordering from the vendor's own advertised sequences — there is no rank table", () => {
+    // The ONE ordering owner is `mergeEffortLadders`: position in the vendor's
+    // advertised list IS the rank, so a brand-new level ("hyperdrive") sorts
+    // where the vendor put it and contradictory vendor orders are flagged
+    // instead of silently re-ranked.
+    expect(
+      mergeEffortLadders([
+        ["low", "medium", "high", "xhigh"],
+        ["low", "medium", "high", "xhigh", "hyperdrive", "max"],
+      ]),
+    ).toEqual({
+      order: ["low", "medium", "high", "xhigh", "hyperdrive", "max"],
+      consistent: true,
+    });
+    expect(
+      mergeEffortLadders([
+        ["low", "max"],
+        ["max", "low"],
+      ]).consistent,
+    ).toBe(false);
   });
 });
 

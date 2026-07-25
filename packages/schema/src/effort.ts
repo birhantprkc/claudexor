@@ -1,47 +1,22 @@
 import { z } from "zod";
 
 /**
- * Reasoning-effort vocabulary: the rank table, the open wire type, and the ONE
- * owner of every derived lookup (per-model narrowing, untyped-surface schema,
+ * Reasoning-effort vocabulary: the open wire type and the ONE owner of every
+ * derived lookup (per-model narrowing, ladder merging, untyped-surface schema,
  * help text). Split out of harness.ts because effort is its own contract with
  * its own consumers — adapters, the CLI, the MCP tool schema and the macOS
  * picker all resolve through here rather than copying a level list.
- */
-/**
- * Canonical cross-harness effort RANK order, weakest→strongest. ONE owner of
- * effort ordering (INV-122): the normalizer, the CLI/MCP surfaces and the
- * generated Swift ordering all read this table instead of copying a list.
  *
- * It is a RANKING aid, NOT an allow-list. Vendors advertise their own
- * vocabularies PER MODEL (codex `model/list` → `supportedReasoningEfforts`,
- * `claude --help` → `--effort`), and a level this table has never heard of must
- * still work when the model advertises it — that is why `EffortHint` below is an
- * open slug rather than an enum. Levels listed here that no adapter currently
- * advertises (`none`, `minimal`) are kept ONLY so they rank correctly the day a
- * vendor ships them; declaring them is the probe's job, never this table's.
+ * There is deliberately NO static rank table here. Vendors already return
+ * their effort levels ORDERED weakest→strongest (codex `model/list` →
+ * `supportedReasoningEfforts` is an ordered array per model; `claude --help`
+ * prints the `--effort` values in order), and that order is part of the parsed
+ * vendor response. Ordering authority is therefore the vendor's own advertised
+ * sequence: a model's ladder is its own ordered list, a harness's ladder is
+ * the positional merge of its models' lists (`mergeEffortLadders`), and a
+ * level's rank is its position in that merged list. A second, hand-maintained
+ * copy of that knowledge can only ever disagree with the first.
  */
-export const EFFORT_RANK_ORDER = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra",
-] as const;
-
-/**
- * Wire carrier for `EFFORT_RANK_ORDER` so NON-TypeScript surfaces (the macOS app)
- * read the rank table out of the generated schema and the derived wire fixture
- * instead of hardcoding an ordering that silently rots.
- */
-export const EffortRankOrder = z
-  .array(z.enum(EFFORT_RANK_ORDER))
-  .describe(
-    "Canonical cross-harness reasoning-effort rank order, weakest to strongest. A ranking table, not an allow-list: harnesses advertise their own per-model vocabularies and a level outside this table is passed through untouched when the model advertises it.",
-  );
-export type EffortRankOrder = z.infer<typeof EffortRankOrder>;
 
 /** Longest effort slug accepted on the wire. */
 export const EFFORT_HINT_MAX_LENGTH = 32;
@@ -54,9 +29,10 @@ export const EFFORT_HINT_PATTERN = /^[a-z0-9]+(?:[_-][a-z0-9]+)*$/;
  * `ReasoningEffort` as "a non-empty reasoning effort value advertised by the
  * model"). Adapters advertise the subset they actually accept per (harness,
  * model); the shared normalizer passes an advertised level through verbatim,
- * clamps a rankable-but-unadvertised one onto the nearest advertised level, and
- * REFUSES a level that is neither — so a vendor level newer than this repo works
- * with no code change, and a typo is never silently downgraded.
+ * clamps an unadvertised-but-mergeable one onto the nearest advertised level
+ * inside the vendor's own order, and REFUSES a level the merged ladder has
+ * never seen — so a vendor level newer than this repo works with no code
+ * change, and a typo is never silently downgraded.
  */
 export const EffortHint = z
   .string()
@@ -67,7 +43,7 @@ export const EffortHint = z
     "effort must be a lowercase slug (letters, digits, single - or _ separators)",
   )
   .describe(
-    "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model and a shared normalizer passes advertised levels through, clamps rankable ones, and refuses unrankable ones.",
+    "Cross-harness reasoning-effort level as a lowercase slug (open vocabulary, mirroring the vendor contract); adapters advertise the levels they accept per model, ordered weakest to strongest by the vendor itself, and a shared normalizer passes advertised levels through, clamps inside the vendor order, and refuses levels the advertised ladder has never seen.",
   );
 export type EffortHint = z.infer<typeof EffortHint>;
 
@@ -89,40 +65,15 @@ export const ModelEffortCapability = z
 export type ModelEffortCapability = z.infer<typeof ModelEffortCapability>;
 
 /**
- * Is this level one the rank table knows?
- *
- * Used where a syntax must DISAMBIGUATE an effort from neighbouring text — the
- * `harness=model:effort` panel spelling, where `cursor=org:model:v2` must keep
- * `v2` in the model id. The open vocabulary cannot answer that question (every
- * slug is well-formed), so those parsers key off the bounded rank table and an
- * unranked vendor level is passed in the unambiguous position instead
- * (`--reviewer-effort family=level`).
- */
-export function isRankedEffort(value: string): boolean {
-  return (EFFORT_RANK_ORDER as readonly string[]).includes(value);
-}
-
-/**
- * Rank positions kept for ORDERING only: they sit below `low` so they sort
- * correctly the day a vendor ships them, but no adapter advertises them today.
- * Named separately from `EFFORT_RANK_ORDER` so user-facing text can say so
- * instead of listing them beside levels a harness will actually accept.
- */
-export const EFFORT_RANK_RESERVED: readonly string[] = ["none", "minimal"];
-
-/**
  * How every surface describes the effort vocabulary in help and refusal text.
  * ONE owner (INV-122) so no CLI string hand-copies a level list — and it
- * deliberately does NOT read as an allow-list, because the real answer is per
- * (harness, model) and lives in the manifest. The reserved positions are named
- * as reserved rather than listed inline: this string is surfaced verbatim by the
- * `--effort` and `--reviewer-effort` refusals, where a bare `none < minimal <
- * low` reads as an offer of two levels no harness would take.
+ * deliberately names NO levels of its own: the real answer is per (harness,
+ * model), lives in the manifest, and is ordered by the vendor. Surfaces that
+ * know the resolved harness/model name the actual advertised set instead.
  */
 export const EFFORT_HINT_HELP =
-  `harness-advertised level, weakest to strongest: ` +
-  `${EFFORT_RANK_ORDER.filter((level) => !EFFORT_RANK_RESERVED.includes(level)).join(" < ")}; ` +
-  `${EFFORT_RANK_RESERVED.join(" and ")} rank below them but no harness advertises them yet`;
+  "reasoning-effort level the resolved harness/model advertises " +
+  "(a lowercase slug; each vendor lists its own levels, weakest to strongest)";
 
 /**
  * JSON-Schema fragment for an effort value on UNTYPED surfaces (the MCP tool
@@ -130,13 +81,10 @@ export const EFFORT_HINT_HELP =
  * zod SSOT enforces, so no surface hand-copies a level list — and, critically,
  * the surface stays as OPEN as the vendor contract. Pinning an enum here would
  * reject a level a model genuinely advertises, which is the bug this design
- * exists to prevent; the ranked levels ride in the description as guidance.
+ * exists to prevent.
  *
  * The guidance is `EFFORT_HINT_HELP`, the SAME string the CLI renders, so an MCP
- * client and a `--effort` refusal describe the vocabulary identically. Rendering
- * the raw rank order here instead put `none` and `minimal` in front of every MCP
- * client beside levels a harness will actually accept — precisely the allow-list
- * misreading the CLI text was rewritten to avoid.
+ * client and a `--effort` refusal describe the vocabulary identically.
  */
 export function effortJsonSchema(description: string): Record<string, unknown> {
   return {
@@ -144,15 +92,15 @@ export function effortJsonSchema(description: string): Record<string, unknown> {
     minLength: 1,
     maxLength: EFFORT_HINT_MAX_LENGTH,
     pattern: EFFORT_HINT_PATTERN.source,
-    description: `${description} Expects a ${EFFORT_HINT_HELP}; a harness may advertise others per model, and an advertised level is passed through as-is.`,
+    description: `${description} Expects a ${EFFORT_HINT_HELP}; an advertised level is passed through as-is.`,
   };
 }
 
 /**
  * The effort vocabulary advertised for one (harness, model) pair. ONE owner for
  * the per-model narrowing (INV-122): the model's own advertised list when the
- * probe recorded one, else the harness-wide union. Every surface that needs to
- * know "what efforts may this run use" resolves through here.
+ * probe recorded one, else the harness-wide merged ladder. Every surface that
+ * needs to know "what efforts may this run use" resolves through here.
  */
 export function effortLevelsForModel(
   capabilities: {
@@ -164,4 +112,81 @@ export function effortLevelsForModel(
   const id = typeof model === "string" ? model.trim() : "";
   const advertised = id ? capabilities.model_effort_levels[id]?.levels : undefined;
   return advertised && advertised.length > 0 ? advertised : capabilities.effort_levels;
+}
+
+/** Result of merging several vendor-ordered effort ladders into one. */
+export interface MergedEffortLadder {
+  /**
+   * The merged order, weakest→strongest, honoring every input list's own
+   * order when they are mutually consistent. When they are NOT (`consistent`
+   * false), this is a first-seen deduplication — usable as a display set,
+   * never as a rank authority.
+   */
+  order: EffortHint[];
+  /**
+   * False when two input lists genuinely contradict each other's relative
+   * order (`a` before `b` in one, `b` before `a` in another). Cross-model
+   * clamping is then IMPOSSIBLE for the affected harness — there is no honest
+   * rank to clamp along — and consumers must refuse with disclosure rather
+   * than invent an order (see `resolveEffort`'s ladder argument).
+   */
+  consistent: boolean;
+}
+
+/**
+ * Positional merge of vendor-ordered effort ladders — the ONE owner of
+ * cross-model effort ordering (INV-122). Each input list is treated as a chain
+ * of ordering constraints exactly as the vendor advertised it; the merge is a
+ * stable topological sort (ties break on first appearance across the inputs),
+ * so a set of lists that are prefixes/subsets of one another merge into the
+ * longest ladder, and a brand-new vendor level lands at its vendor-advertised
+ * position with no code change here.
+ *
+ * The Swift side orders its pickers by merging the manifest's already-ordered
+ * `effort_levels`/`model_effort_levels` arrays the same way (`EffortLadder`).
+ */
+export function mergeEffortLadders(
+  lists: ReadonlyArray<readonly EffortHint[]>,
+): MergedEffortLadder {
+  const firstSeen: EffortHint[] = [];
+  const successors = new Map<EffortHint, Set<EffortHint>>();
+  const indegree = new Map<EffortHint, number>();
+  for (const list of lists) {
+    for (const level of list) {
+      if (!indegree.has(level)) {
+        indegree.set(level, 0);
+        successors.set(level, new Set());
+        firstSeen.push(level);
+      }
+    }
+    for (let i = 1; i < list.length; i += 1) {
+      const before = list[i - 1] as EffortHint;
+      const after = list[i] as EffortHint;
+      if (before === after) continue;
+      const outs = successors.get(before) as Set<EffortHint>;
+      if (!outs.has(after)) {
+        outs.add(after);
+        indegree.set(after, (indegree.get(after) ?? 0) + 1);
+      }
+    }
+  }
+  const order: EffortHint[] = [];
+  const emitted = new Set<EffortHint>();
+  while (emitted.size < firstSeen.length) {
+    const next = firstSeen.find((level) => !emitted.has(level) && indegree.get(level) === 0);
+    if (next === undefined) {
+      // A cycle: the vendors' own orders contradict each other. Do not invent
+      // an order — fall back to first-seen for display and say so.
+      return {
+        order: [...order, ...firstSeen.filter((level) => !emitted.has(level))],
+        consistent: false,
+      };
+    }
+    emitted.add(next);
+    order.push(next);
+    for (const succ of successors.get(next) ?? []) {
+      indegree.set(succ, (indegree.get(succ) ?? 1) - 1);
+    }
+  }
+  return { order, consistent: true };
 }

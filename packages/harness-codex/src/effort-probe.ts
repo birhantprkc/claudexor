@@ -19,7 +19,7 @@
  */
 import { spawn } from "node:child_process";
 import type { ModelEffortCapability } from "@claudexor/schema";
-import { EFFORT_RANK_ORDER, EffortHint, effortLevelsForModel } from "@claudexor/schema";
+import { EffortHint, effortLevelsForModel, mergeEffortLadders } from "@claudexor/schema";
 import { normalizeEffort } from "@claudexor/core";
 import { BIN, probeEnv } from "./missing-cli.js";
 
@@ -50,24 +50,19 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCapability = {
 export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "0.144.1";
 
 /**
- * Harness-wide UNION of an advertised set, RANKED weakest→strongest. Kept as the
- * coarse `effort_levels` fallback so every existing reader (settings validation,
- * the composer's picker, INV-105 disclosure) keeps working while per-model
- * narrowing happens through `effortLevelsForModel`.
+ * Harness-wide merged ladder of an advertised catalog, weakest→strongest. Kept
+ * as the coarse `effort_levels` fallback so every existing reader (settings
+ * validation, the composer's picker, INV-105 disclosure) keeps working while
+ * per-model narrowing happens through `effortLevelsForModel`.
  *
- * The union is sorted through `EFFORT_RANK_ORDER` rather than emitted in
- * first-seen probe order, because `capabilities.effort_levels` PROMISES weakest
- * to strongest and probe order is really "whatever order the vendor listed its
- * models in". Unranked vendor levels cannot be placed, so they follow the ranked
- * ones sorted lexicographically — the same tail rule the Swift `EffortRanking`
- * contract applies, so both sides of the wire order a union identically.
+ * Ordering authority is the VENDOR: `model/list` returns each model's
+ * `supportedReasoningEfforts` already ordered weakest→strongest, so the
+ * harness ladder is the positional merge of those lists (`mergeEffortLadders`)
+ * — never a table this repo maintains. The Swift composer merges the manifests'
+ * already-ordered arrays the same way, so both sides of the wire agree.
  */
 export function unionEffortLevels(capability: CodexEffortCapability): EffortHint[] {
-  const seen = new Set<EffortHint>();
-  for (const entry of Object.values(capability)) for (const level of entry.levels) seen.add(level);
-  const ranked = (EFFORT_RANK_ORDER as readonly EffortHint[]).filter((level) => seen.has(level));
-  const unranked = [...seen].filter((level) => !ranked.includes(level)).sort();
-  return [...ranked, ...unranked];
+  return mergeEffortLadders(Object.values(capability).map((entry) => entry.levels)).order;
 }
 
 interface ModelListEntry {
@@ -380,18 +375,25 @@ export async function codexEffortsForEnv(
 
 /**
  * The effort value to send for one (model, requested) pair: advertised passes
- * through verbatim, rankable clamps, anything else sends no flag at all.
+ * through verbatim, a level a SIBLING model advertises clamps inside the merged
+ * vendor order (`ultra` on gpt-5.4 → `xhigh` because the merged codex ladder
+ * places it), anything else sends no flag at all.
+ *
+ * If a future catalog ever contains two models whose advertised orders
+ * genuinely contradict each other, there is no honest merged rank — so
+ * cross-model clamping is treated as IMPOSSIBLE (the ladder collapses to the
+ * model's own list) and an unadvertised level is refused rather than clamped
+ * along an order this repo would have had to invent.
  */
 export function codexEffortFor(
   capability: CodexEffortCapability,
   model: string | null | undefined,
   requested: EffortHint | null | undefined,
 ): EffortHint | null {
-  return normalizeEffort(
-    requested,
-    effortLevelsForModel(
-      { effort_levels: unionEffortLevels(capability), model_effort_levels: capability },
-      model,
-    ),
+  const merged = mergeEffortLadders(Object.values(capability).map((entry) => entry.levels));
+  const advertised = effortLevelsForModel(
+    { effort_levels: merged.order, model_effort_levels: capability },
+    model,
   );
+  return normalizeEffort(requested, advertised, merged.consistent ? merged.order : advertised);
 }

@@ -16,7 +16,7 @@
  * On a missing binary, an unparseable help text, or a `--help` that stops
  * documenting the values, the recorded snapshot fills in and the run proceeds.
  */
-import { EffortHint, isRankedEffort } from "@claudexor/schema";
+import { EffortHint } from "@claudexor/schema";
 import { runCapture } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
 
@@ -54,7 +54,11 @@ const EFFORT_HELP_BLOCK_MAX_LINES = 8;
  */
 export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
   const lines = help.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.includes("--effort"));
+  // Match the flag TOKEN, not a substring: `line.includes("--effort")` also
+  // matched `--effort-budget`, anchoring the parse on the wrong flag's block.
+  const start = lines.findIndex((line) =>
+    line.split(/[\s,]+/).some((token) => token === "--effort"),
+  );
   if (start < 0) return null;
   // The value list wraps at the rendering width, and a narrower terminal pushes
   // the closing paren further down (2.1.165 at 40 columns needs four lines), so
@@ -91,21 +95,23 @@ export function parseClaudeEffortHelp(help: string): EffortHint[] | null {
  * The levels one parenthesized group advertises, or null when the group is not a
  * value list at all.
  *
- * A group qualifies only if it ENUMERATES (a comma or pipe) or names a level the
- * rank table knows — otherwise a lone annotation like `(beta)` would pass as a
- * ladder. Levels are validated through `EffortHint` rather than a hand-rolled
- * shape test, so prose such as "default: high" is ignored and an over-long token
- * can never reach `capabilities.effort_levels` and fail the manifest schema.
+ * A group qualifies only if it ENUMERATES (a comma or pipe): with no rank
+ * table, a lone `(high)` is indistinguishable from an annotation like
+ * `(beta)`, and the vendor's real value list has always enumerated. A help
+ * text that ever documents a genuine one-level ladder falls back to the
+ * recorded snapshot instead of guessing. Levels are validated through
+ * `EffortHint` rather than a hand-rolled shape test, so prose such as
+ * "default: high" is ignored and an over-long token can never reach
+ * `capabilities.effort_levels` and fail the manifest schema.
  */
 function readEffortGroup(body: string): EffortHint[] | null {
+  if (!/[,|]/.test(body)) return null;
   const levels: EffortHint[] = [];
   for (const raw of body.split(/[,|]/)) {
     const parsed = EffortHint.safeParse(raw.trim());
     if (parsed.success && !levels.includes(parsed.data)) levels.push(parsed.data);
   }
-  if (levels.length === 0) return null;
-  if (!/[,|]/.test(body) && !levels.some((level) => isRankedEffort(level))) return null;
-  return levels;
+  return levels.length > 0 ? levels : null;
 }
 
 type ClaudeHelpProbe =
