@@ -403,8 +403,11 @@ invariant or owner decision before proceeding.
   is a server-owned file reference materialized outside every worktree, the
   engine verifies the hash before any harness spawns, and a tampered or
   unreadable plan fails loudly. Retry replays the reference verbatim — a
-  retried implement can never silently run without its plan. verify:
-  withPlanBrief hash tests; thread-turn plan_hash/409 tests.
+  retried implement can never silently run without its plan, and a client
+  can never mint the reference (POST /runs rejects planRef). verify:
+  `[INV-081:plan-brief-materialized]`, `[INV-081:plan-hash-mismatch]`,
+  `[INV-081:plan-missing]`, `[INV-081:planref-boundary]`; thread-turn
+  plan_hash/409 tests.
 - **INV-082** Plans and repo config cannot carry protected-path approvals;
   operator approval is always supplied on the current run. verify:
   run-level approval schema strictness.

@@ -9480,3 +9480,93 @@ describe("delegation belt injection (D32)", () => {
     expect(failure).toMatch(/delegation belt|mcp_injection|nocap/);
   });
 });
+
+describe("frozen-plan brief delivery (withPlanBrief, INV-081)", () => {
+  type PlanBriefInput = {
+    prompt: string;
+    planRef?: { runId: string; sha256: string; path: string };
+  };
+  function planBriefFixture() {
+    const dir = reapMk(join(tmpdir(), "claudexor-planbrief-"));
+    const store = new ArtifactStore(join(dir, "repo"), { claudexorDir: join(dir, "claudexor") });
+    const paths = store.createRun("run-planbrief");
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const orch = new Orchestrator({ registry: new Map() });
+    const apply = (input: PlanBriefInput): PlanBriefInput =>
+      (
+        orch as unknown as {
+          withPlanBrief(
+            input: PlanBriefInput,
+            store: ArtifactStore,
+            paths: unknown,
+            log: unknown,
+          ): PlanBriefInput;
+        }
+      ).withPlanBrief(input, store, paths, {
+        emit: (type: string, payload: Record<string, unknown>) => events.push({ type, payload }),
+      });
+    return { dir, paths, events, apply };
+  }
+
+  it("[INV-081:plan-brief-materialized] verifies the frozen hash and materializes context/PLAN.md in the run artifact tree", () => {
+    const { dir, paths, events, apply } = planBriefFixture();
+    const planText = "# Plan\n\n1. do the thing\n";
+    const planPath = join(dir, "final-plan.md");
+    writeFileSync(planPath, planText);
+    const digest = sha256(planText).replace(/^sha256:/, "");
+    const out = apply({
+      prompt: "implement it",
+      planRef: { runId: "run-plan", sha256: digest, path: planPath },
+    });
+    const briefPath = join(paths.contextDir, "PLAN.md");
+    // The brief lands OUTSIDE every worktree (the run artifact tree), and the
+    // prompt points at that absolute path — the plan is a file, never
+    // re-embedded prose.
+    expect(readFileSync(briefPath, "utf8")).toBe(planText);
+    expect(out.prompt).toContain("implement it");
+    expect(out.prompt).toContain(`The approved plan is at: ${briefPath}`);
+    expect(events).toEqual([
+      {
+        type: "plan.brief.materialized",
+        payload: { plan_run_id: "run-plan", sha256: digest, path: "context/PLAN.md" },
+      },
+    ]);
+  });
+
+  it("[INV-081:plan-missing] a missing or unreadable frozen plan fails LOUDLY before any harness spawns", () => {
+    const { dir, paths, events, apply } = planBriefFixture();
+    const gone = join(dir, "no-such-plan.md");
+    expect(() =>
+      apply({
+        prompt: "implement it",
+        planRef: { runId: "run-plan", sha256: "c".repeat(64), path: gone },
+      }),
+    ).toThrow(`implement plan: the frozen plan at ${gone} is missing or unreadable`);
+    expect(existsSync(join(paths.contextDir, "PLAN.md"))).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it("[INV-081:plan-hash-mismatch] a plan modified after freeze is a loud tamper failure, never a silent run", () => {
+    const { dir, paths, events, apply } = planBriefFixture();
+    const planPath = join(dir, "final-plan.md");
+    writeFileSync(planPath, "# Plan (original)\n");
+    const frozen = sha256(readFileSync(planPath, "utf8")).replace(/^sha256:/, "");
+    writeFileSync(planPath, "# Plan (tampered after freeze)\n");
+    expect(() =>
+      apply({
+        prompt: "implement it",
+        planRef: { runId: "run-plan", sha256: frozen, path: planPath },
+      }),
+    ).toThrow(/plan hash mismatch .*the plan was modified after freeze/);
+    expect(existsSync(join(paths.contextDir, "PLAN.md"))).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it("input without a planRef passes through untouched (one-shot runs carry no plan brief)", () => {
+    const { paths, events, apply } = planBriefFixture();
+    const input = { prompt: "just do it" };
+    expect(apply(input)).toBe(input);
+    expect(existsSync(join(paths.contextDir, "PLAN.md"))).toBe(false);
+    expect(events).toEqual([]);
+  });
+});

@@ -2906,6 +2906,7 @@ describe("DaemonControlApiServer", () => {
       const threadObj = planThread(repo, "run-plan");
       const turns: Record<string, unknown>[] = [];
       let overriddenRecorded: boolean | undefined;
+      let enqueuedParams: Record<string, unknown> | undefined;
       const jobs = new Map<string, DaemonRunRecord>([
         ["job-plan", { id: "job-plan", state: "succeeded", runId: "run-plan", runDir: planRunDir }],
       ]);
@@ -2913,6 +2914,7 @@ describe("DaemonControlApiServer", () => {
         // Override recorded on the turn -> the runner SKIPS the readiness gate
         // and the run binds normally.
         async enqueue(params: unknown) {
+          enqueuedParams = params as Record<string, unknown>;
           const rec: DaemonRunRecord = {
             id: "job-override",
             state: "running",
@@ -2978,6 +2980,14 @@ describe("DaemonControlApiServer", () => {
           // The override provenance is recorded on the turn (D17), not silently
           // dropped.
           expect(overriddenRecorded).toBe(true);
+          // The turn pipeline MINTS the frozen-plan reference server-side and
+          // enqueues it directly — the POST /runs planRef guard never applies
+          // to this path (INV-081).
+          expect(enqueuedParams?.["planRef"]).toEqual({
+            runId: "run-plan",
+            sha256: sha256("# Plan\n\nDo the thing.\n").replace(/^sha256:/, ""),
+            path: join(planRunDir, "final", "plan.md"),
+          });
         },
         undefined,
         services,
@@ -7292,7 +7302,10 @@ describe("DaemonControlApiServer", () => {
     record.params = {
       ...(record.params as Record<string, unknown>),
       turnId: "tn-old",
+      retryOf: "run-d0",
       planRunId: "run-plan",
+      planRef: { runId: "run-plan", sha256: "a".repeat(64), path: "/tmp/final/plan.md" },
+      threadId: "th-old",
     };
     await withDaemonServer(daemon, async (base) => {
       const response = await apiFetch(`${base}/runs/run-d1/run-again`, {
@@ -7304,9 +7317,21 @@ describe("DaemonControlApiServer", () => {
         differences: Array<{ field: string }>;
       };
       expect(body.request).toMatchObject({ prompt: "hello", mode: "agent" });
+      // The draft must be POSTable as-is: POST /runs 400s every one of these
+      // (planRef/threadId included — a surviving planRef would replay the
+      // frozen-plan reference past the boundary, INV-081).
       expect(body.request).not.toHaveProperty("turnId");
+      expect(body.request).not.toHaveProperty("retryOf");
       expect(body.request).not.toHaveProperty("planRunId");
-      expect(body.differences.map((entry) => entry.field)).toEqual(["turnId", "planRunId"]);
+      expect(body.request).not.toHaveProperty("planRef");
+      expect(body.request).not.toHaveProperty("threadId");
+      expect(body.differences.map((entry) => entry.field)).toEqual([
+        "turnId",
+        "retryOf",
+        "planRunId",
+        "planRef",
+        "threadId",
+      ]);
     });
   });
 
@@ -7967,6 +7992,82 @@ describe("DaemonControlApiServer", () => {
       await server.stop();
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+
+  it("[INV-081:planref-boundary] rejects client-supplied planRef on POST /runs (a self-consistent forged hash never reaches the orchestrator)", async () => {
+    // The withPlanBrief tamper fence verifies the sha256 the planRef CARRIES,
+    // so a forged reference whose hash matches its own file passes the fence
+    // by construction — the boundary must refuse the field entirely.
+    const { daemon } = fakeDaemon();
+    let enqueued = 0;
+    const guarded: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue(params, options) {
+        enqueued += 1;
+        return daemon.enqueue(params, options);
+      },
+    };
+    const server = new DaemonControlApiServer({ ...readyIdentity, token, daemon: guarded });
+    const { host, port } = await server.start();
+    const base = `http://${host}:${port}`;
+    const repo = reapMk(join(tmpdir(), "claudexor-planref-"));
+    try {
+      const secret = join(repo, "not-a-plan.txt");
+      writeFileSync(secret, "arbitrary file the forged planRef points at\n");
+      const forged = {
+        runId: "run-plan",
+        sha256: sha256(readFileSync(secret, "utf8")).replace(/^sha256:/, ""),
+        path: secret,
+      };
+      const response = await apiFetch(`${base}/runs`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          prompt: "x",
+          mode: "agent",
+          scope: { kind: "project", root: repo },
+          planRef: forged,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as { message: string }).message).toContain(
+        "planRef is not accepted on POST /runs",
+      );
+      expect(enqueued).toBe(0);
+    } finally {
+      await server.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("Exact Retry still replays a server-minted planRef verbatim (the boundary guard is POST /runs only)", async () => {
+    const { daemon, record } = fakeDaemon();
+    const planRef = { runId: "run-plan", sha256: "b".repeat(64), path: "/tmp/final/plan.md" };
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      planRunId: "run-plan",
+      planRef,
+    };
+    let enqueuedParams: Record<string, unknown> | undefined;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue(params, options) {
+        enqueuedParams = params as Record<string, unknown>;
+        return daemon.enqueue(params, options);
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const retry = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "planref-retry" },
+        body: "{}",
+      });
+      expect(retry.status).toBe(200);
+      // INV-081: the frozen-plan reference survives the replay UNCHANGED — a
+      // retried implement can never silently run without its plan.
+      expect(enqueuedParams?.["planRef"]).toEqual(planRef);
+      expect(enqueuedParams?.["retryOf"]).toBe("run-d1");
+    });
   });
 });
 

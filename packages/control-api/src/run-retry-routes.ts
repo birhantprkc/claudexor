@@ -169,7 +169,12 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
     const parsed = ControlRunStartRequest.parse(
       await sourceParamsWithThreadAttachments(ctx, source),
     );
-    const { turnId, retryOf, planRunId, ...request } = parsed;
+    // Strip EVERY server-owned binding, with disclosure: the draft is an
+    // editable POST /runs request, and POST /runs 400s threadId/planRef (they
+    // belong to the turn pipeline) — surviving here would make the draft
+    // unpostable, and a replayed planRef would smuggle the frozen-plan
+    // reference past the boundary (INV-081). Same set as decision-rerun.
+    const { turnId, retryOf, planRunId, planRef, threadId, ...request } = parsed;
     const differences = [
       ...(turnId
         ? [{ field: "turnId", change: "omitted" as const, reason: "server-owned turn binding" }]
@@ -179,6 +184,18 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
         : []),
       ...(planRunId
         ? [{ field: "planRunId", change: "omitted" as const, reason: "server-owned plan binding" }]
+        : []),
+      ...(planRef
+        ? [
+            {
+              field: "planRef",
+              change: "omitted" as const,
+              reason: "server-owned frozen-plan reference",
+            },
+          ]
+        : []),
+      ...(threadId
+        ? [{ field: "threadId", change: "omitted" as const, reason: "server-owned thread binding" }]
         : []),
     ];
     ctx.json(
