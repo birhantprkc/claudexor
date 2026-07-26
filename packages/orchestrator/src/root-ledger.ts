@@ -11,11 +11,17 @@ export function createRootLedger(args: {
   authority?: DelegationBudgetAuthority;
   quotaSnapshots: readonly QuotaSnapshot[];
 }): BudgetLedger {
-  const onCashSettled = (cashSpendUsd: number, valuationUsd: number, estimated: boolean) =>
+  const onCashSettled = (
+    cashSpendUsd: number,
+    valuationUsd: number,
+    cashEstimated: boolean,
+    valuationKnowledge: "exact" | "estimated" | "unknown",
+  ) =>
     args.log.emit("budget.cash", {
       cash_spend_usd: cashSpendUsd,
       valuation_usd: valuationUsd,
-      estimated,
+      estimated: cashEstimated,
+      valuation_knowledge: valuationKnowledge,
     });
   const ledger = args.input.delegatedFromRunId
     ? args.authority?.attachChild(

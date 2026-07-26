@@ -23,6 +23,7 @@ import { safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
 import { streamRunEvents } from "./run-events-stream.js";
 import { boundedArtifactText, outputReadyState, primaryOutput } from "./primary-output.js";
+import { budgetValuationFromEvents } from "./budget-valuation.js";
 import {
   type RunEventsIntegrity,
   controlWebEvidence,
@@ -2778,44 +2779,6 @@ function parseAccessMaybe(value: unknown): AccessProfile | undefined {
   if (typeof value !== "string") return undefined;
   const parsed = AccessProfile.safeParse(value);
   return parsed.success ? parsed.data : undefined;
-}
-
-/**
- * Pure subscription-VALUATION fold over a run's events (QA-023c/QA-017b),
- * independent of the cash truth. The owner-locked ledger settles native-
- * subscription work to cash $0 while accumulating its token valuation on
- * `budget.cash.valuation_usd` (last-wins, cumulative). An UNKNOWN valuation (no
- * usage ever reported — e.g. a Cursor draft) stays NULL and is never coerced to
- * a fake $0. The legacy fallback for runs predating budget.cash is the summed
- * `budget.observation` spend. Vendor token valuation is at best an estimate.
- */
-export function budgetValuationFromEvents(events: Record<string, unknown>[]): {
-  valuationUsd: number | null;
-  valuationKnowledge: "exact" | "estimated" | "unknown";
-} {
-  let valuationUsd: number | null = null;
-  let observation = 0;
-  let sawObservation = false;
-  for (const ev of events) {
-    const payload = eventPayload(ev);
-    if (ev["type"] === "budget.cash") {
-      const val = payload["valuation_usd"];
-      if (typeof val === "number" && Number.isFinite(val)) valuationUsd = val;
-      continue;
-    }
-    if (ev["type"] === "budget.observation" && payload["kind"] === "spend") {
-      const usd = payload["usd"];
-      if (typeof usd === "number" && Number.isFinite(usd)) {
-        observation += usd;
-        sawObservation = true;
-      }
-    }
-  }
-  if (valuationUsd === null && sawObservation) valuationUsd = observation;
-  return {
-    valuationUsd,
-    valuationKnowledge: valuationUsd === null ? "unknown" : "estimated",
-  };
 }
 
 /** Typed severity per event type — no string matching over event names. */

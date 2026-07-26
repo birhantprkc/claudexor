@@ -447,7 +447,7 @@
             },
             "spendEstimated": {
               "type": "boolean",
-              "description": "True when spend is token-derived rather than natively reported."
+              "description": "True when settled cash is estimated rather than exact."
             },
             "inputTokens": {
               "anyOf": [
@@ -1573,7 +1573,7 @@
             "estimated": {
               "type": "boolean",
               "default": false,
-              "description": "True when spend is token-derived rather than natively reported."
+              "description": "True when settled cash is estimated rather than exact; subscription valuation confidence is reported separately."
             },
             "source": {
               "type": "string",
@@ -1757,7 +1757,7 @@
                     "estimated": {
                       "type": "boolean",
                       "default": false,
-                      "description": "True when any of the spend is token-derived rather than natively reported."
+                      "description": "True when settled cash is estimated rather than exact."
                     },
                     "cash_usd": {
                       "type": [

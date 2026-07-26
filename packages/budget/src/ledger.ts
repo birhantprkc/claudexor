@@ -19,6 +19,7 @@ import {
   recordSharedSettlement,
   settlementIsEstimated,
   taskFinancialTotals,
+  settlementValuationKnowledge,
   type SharedFinancialState,
 } from "./shared-financial-state.js";
 
@@ -46,6 +47,10 @@ export interface ReserveInput {
 
 export interface BudgetSettlement {
   knowledge: CostKnowledge;
+  /** Cash certainty is independent from subscription valuation certainty. */
+  cashKnowledge?: CostKnowledge;
+  /** Valuation certainty is independent from billed cash certainty. */
+  valuationKnowledge?: CostKnowledge;
   source: string;
   provenance: string[];
   cashUsd?: number;
@@ -88,7 +93,8 @@ export class BudgetLedger {
   private readonly localOnCashSettled?: (
     cashSpendUsd: number,
     valuationUsd: number,
-    estimated: boolean,
+    cashEstimated: boolean,
+    valuationKnowledge: CostKnowledge,
   ) => void;
   private released = false;
 
@@ -103,7 +109,12 @@ export class BudgetLedger {
        * consumers (run events → UI) render cash without inferring from route
        * labels. Valuation rides along for telemetry, never for the cash fact.
        */
-      onCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void;
+      onCashSettled?: (
+        cashSpendUsd: number,
+        valuationUsd: number,
+        cashEstimated: boolean,
+        valuationKnowledge: CostKnowledge,
+      ) => void;
     } = {},
     shared?: { financial: SharedFinancialState; taskScope: string },
   ) {
@@ -115,7 +126,12 @@ export class BudgetLedger {
 
   scopedToTask(
     taskId: string,
-    onCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void,
+    onCashSettled?: (
+      cashSpendUsd: number,
+      valuationUsd: number,
+      cashEstimated: boolean,
+      valuationKnowledge: CostKnowledge,
+    ) => void,
   ): BudgetLedger {
     if (!taskId.trim()) throw new Error("budget task scope must not be empty");
     return new BudgetLedger(
@@ -211,13 +227,13 @@ export class BudgetLedger {
     return { granted: true, tier: this.tier(), lease };
   }
 
-  updateHold(leaseId: string, streamedUsd: number): void {
+  /** Raise the hold from actual streamed cash/unknown usage. Subscription
+   * valuation never calls this; an in-attempt API fallback does. */
+  updateHold(leaseId: string, streamedCashUsd: number): void {
     const lease = this.leaseForMutation(leaseId, false);
     if (!lease || lease.state !== "reserved") return;
-    if (lease.cost.billing === "proven_zero" || lease.cost.billing === "subscription_entitlement")
-      return;
     const current = this.financial.holds.get(leaseId) ?? 0;
-    if (streamedUsd > current) this.financial.holds.set(leaseId, streamedUsd);
+    if (streamedCashUsd > current) this.financial.holds.set(leaseId, streamedCashUsd);
   }
 
   settle(leaseId: string, settlement: BudgetSettlement): void {
@@ -226,21 +242,44 @@ export class BudgetLedger {
     lease.state = "settled";
     this.financial.holds.delete(leaseId);
     this.financial.unknownPaidInFlight.delete(leaseId);
-    const zeroCash =
+    const reservedZeroCash =
       lease.cost.billing === "proven_zero" || lease.cost.billing === "subscription_entitlement";
+    // A route can change inside one attempt. Component-specific settlement
+    // evidence from the actual usage stream outranks the preflight reservation:
+    // an API retry must remain cash even when the lease began on subscription.
+    const settledCashComponent =
+      settlement.cashKnowledge !== undefined && settlement.cashUsd !== undefined;
+    const zeroCash = reservedZeroCash && !settledCashComponent;
     const cashUsd = zeroCash ? 0 : Math.max(0, settlement.cashUsd ?? 0);
     const valuationUsd = Math.max(
       0,
       settlement.valuationUsd ?? (zeroCash ? (settlement.cashUsd ?? 0) : 0),
     );
     const taskTotals = taskFinancialTotals(this.financial, lease.task_id);
-    const settlementEstimated = settlement.knowledge !== "exact";
-    recordSharedSettlement(this.financial, taskTotals, cashUsd, valuationUsd, settlementEstimated);
+    const cashKnowledge = zeroCash ? "exact" : (settlement.cashKnowledge ?? settlement.knowledge);
+    const cashEstimated = cashKnowledge !== "exact";
+    const valuationReported =
+      settlement.valuationUsd !== undefined ||
+      settlement.valuationKnowledge !== undefined ||
+      (zeroCash && settlement.cashUsd !== undefined);
+    recordSharedSettlement(
+      this.financial,
+      taskTotals,
+      cashUsd,
+      valuationUsd,
+      cashEstimated,
+      valuationReported ? (settlement.valuationKnowledge ?? settlement.knowledge) : null,
+    );
     if (this.financial.budget.kind === "finite") {
-      if (!zeroCash && settlement.knowledge === "unknown") this.financial.unverifiable = true;
+      if (cashKnowledge === "unknown") this.financial.unverifiable = true;
       if (this.financial.cashUsd > this.financial.budget.maxUsd) this.financial.overshot = true;
     }
-    this.localOnCashSettled?.(taskTotals.cashUsd, taskTotals.valuationUsd, taskTotals.estimated);
+    this.localOnCashSettled?.(
+      taskTotals.cashUsd,
+      taskTotals.valuationUsd,
+      taskTotals.cashEstimated,
+      taskTotals.valuationKnowledge ?? "unknown",
+    );
   }
   cancel(leaseId: string): void {
     const lease = this.leaseForMutation(leaseId, false);
@@ -262,6 +301,10 @@ export class BudgetLedger {
 
   estimated(): boolean {
     return settlementIsEstimated(this.financial, this.taskScope);
+  }
+
+  valuationKnowledge(): CostKnowledge {
+    return settlementValuationKnowledge(this.financial, this.taskScope);
   }
 
   terminal(): BudgetTerminal {
@@ -502,87 +545,6 @@ export function attemptCostEvidence(
     knowledge: estimatedUsd === undefined ? "unknown" : "estimated",
     estimatedUsd: estimatedUsd ?? null,
   });
-}
-
-export function usageCostSettlement(
-  cashUsd: number,
-  estimated: boolean,
-  source: string,
-  provenance: string[],
-): BudgetSettlement {
-  return cashUsd > 0
-    ? { knowledge: estimated ? "estimated" : "exact", source, provenance, cashUsd }
-    : { knowledge: "unknown", source: `${source}-missing`, provenance };
-}
-
-export function reviewUsageCostSettlement(
-  cashUsd: number,
-  valuationUsd: number,
-  estimated: boolean,
-  provenance: string[],
-  unknownUsd = 0,
-): BudgetSettlement {
-  const observed = cashUsd > 0 || valuationUsd > 0 || unknownUsd > 0;
-  return {
-    knowledge: observed && unknownUsd === 0 ? (estimated ? "estimated" : "exact") : "unknown",
-    source: observed ? "review-usage" : "review-usage-missing",
-    provenance,
-    cashUsd: Math.max(0, cashUsd),
-    valuationUsd: Math.max(0, valuationUsd),
-  };
-}
-
-export function attemptUsageCostSettlement(
-  totalUsd: number,
-  estimated: boolean,
-  attemptId: string,
-  harnessId: string,
-  authMode?: "local_session" | "api_key" | null,
-  split?: { cashUsd: number; valuationUsd: number; unknownUsd: number },
-): BudgetSettlement {
-  if (split) {
-    const observed = split.cashUsd + split.valuationUsd + split.unknownUsd;
-    if (observed > 0) {
-      return {
-        knowledge: split.unknownUsd > 0 ? "unknown" : estimated ? "estimated" : "exact",
-        source: "harness-usage-by-route",
-        provenance: [`attempt:${attemptId}`, `harness:${harnessId}`, "route:per-usage-event"],
-        cashUsd: split.cashUsd,
-        valuationUsd: split.valuationUsd,
-      };
-    }
-  }
-  if (isSubscriptionValuation(authMode)) {
-    return {
-      knowledge: estimated ? "estimated" : "exact",
-      source: "harness-token-valuation",
-      provenance: [`attempt:${attemptId}`, `harness:${harnessId}`, "route:vendor_native"],
-      valuationUsd: totalUsd,
-    };
-  }
-  return usageCostSettlement(totalUsd, estimated, "harness-usage", [
-    `attempt:${attemptId}`,
-    `harness:${harnessId}`,
-    ...(authMode ? [`route:${authMode}`] : []),
-  ]);
-}
-
-/** One owner for the W4.3 fact used at settlement AND mid-flight cap checks. */
-export function isSubscriptionValuation(authMode?: "local_session" | "api_key" | null): boolean {
-  // Vendor-reported cost on a native subscription route is VALUATION,
-  // regardless of whether the vendor labels it estimated or exact. It never
-  // becomes incremental cash (live-found: Claude reported estimated=false
-  // and the UI incorrectly showed ~$0.37 cash for subscription work).
-  return authMode === "local_session";
-}
-
-export function unknownCostSettlement(source: string, cashUsd?: number): BudgetSettlement {
-  return {
-    knowledge: "unknown",
-    source,
-    provenance: [`orchestrator:${source}`],
-    ...(cashUsd === undefined ? {} : { cashUsd }),
-  };
 }
 
 export function isBudgetTerminal(reason: string | null): reason is Exclude<BudgetTerminal, null> {

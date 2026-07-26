@@ -479,10 +479,11 @@ extension AppModel {
                 // real-money spend at every settle — subscription work settles
                 // to 0 there. Vendor cost ticks (budget.observation) are
                 // VALUATION and never move this number; the app renders the
-                // engine's cash truth verbatim, without route inference.
+                // engine's cash truth and its cash-specific certainty verbatim,
+                // without route inference.
                 box.spendUsd = cash
                 box.spendKnown = true
-                box.spendEstimated = false
+                box.spendEstimated = payload["estimated"]?.boolValue ?? false
             }
             if let cap = payload["max_usd"]?.doubleValue, cap >= 0, cap != t.capUsd || !t.capKnown {
                 t.capUsd = cap

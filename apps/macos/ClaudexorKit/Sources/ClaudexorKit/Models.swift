@@ -393,7 +393,8 @@ public struct BudgetSnapshot: Codable, Sendable, Equatable {
     public let valuationKnowledge: String
     /// Remaining budget in USD; null when no cap or unknown spend.
     public let remainingUsd: Double?
-    /// True when spend is token-derived rather than natively reported.
+    /// True when settled cash is estimated rather than exact. Subscription
+    /// valuation confidence lives separately in `valuationKnowledge`.
     public let estimated: Bool
     /// Where the snapshot came from: decision | events | settings | unknown.
     public let source: String

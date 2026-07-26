@@ -242,8 +242,8 @@ export const DecisionRecord = z
       .describe("Evidence facts the decision rests on."),
     budget_summary: z
       .object({
-        // Total settled spend. `estimated` is true when any of it is token-derived
-        // (e.g. codex) rather than natively reported — never present an estimate as exact.
+        // Total settled CASH. Subscription token valuation is independent and
+        // must never make an exact $0 cash settlement look estimated.
         spend_usd: z
           .number()
           .nullable()
@@ -252,7 +252,7 @@ export const DecisionRecord = z
         estimated: z
           .boolean()
           .default(false)
-          .describe("True when any of the spend is token-derived rather than natively reported."),
+          .describe("True when settled cash is estimated rather than exact."),
         // QA-010b: the settled CASH vs subscription-VALUATION split, so the
         // terminal decision record is self-contained. `spend_usd` above is the
         // cash figure (0 on native-subscription routes); `valuation_usd`

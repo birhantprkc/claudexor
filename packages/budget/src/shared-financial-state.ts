@@ -1,10 +1,11 @@
-import type { BudgetLease, PaidBudget } from "@claudexor/schema";
+import type { BudgetLease, CostKnowledge, PaidBudget } from "@claudexor/schema";
 import type { CircuitThresholds } from "./ledger.js";
 
 export interface TaskFinancialTotals {
   cashUsd: number;
   valuationUsd: number;
-  estimated: boolean;
+  cashEstimated: boolean;
+  valuationKnowledge: CostKnowledge | null;
 }
 
 export interface SharedFinancialState {
@@ -16,16 +17,27 @@ export interface SharedFinancialState {
   totalsByTask: Map<string, TaskFinancialTotals>;
   cashUsd: number;
   valuationUsd: number;
-  estimated: boolean;
+  cashEstimated: boolean;
+  valuationKnowledge: CostKnowledge | null;
   overshot: boolean;
   unverifiable: boolean;
-  rootOnCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void;
+  rootOnCashSettled?: (
+    cashSpendUsd: number,
+    valuationUsd: number,
+    cashEstimated: boolean,
+    valuationKnowledge: CostKnowledge,
+  ) => void;
 }
 
 export function newSharedFinancialState(
   budget: PaidBudget,
   thresholds: CircuitThresholds,
-  rootOnCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void,
+  rootOnCashSettled?: (
+    cashSpendUsd: number,
+    valuationUsd: number,
+    cashEstimated: boolean,
+    valuationKnowledge: CostKnowledge,
+  ) => void,
 ): SharedFinancialState {
   return {
     budget,
@@ -36,7 +48,8 @@ export function newSharedFinancialState(
     totalsByTask: new Map(),
     cashUsd: 0,
     valuationUsd: 0,
-    estimated: false,
+    cashEstimated: false,
+    valuationKnowledge: null,
     overshot: false,
     unverifiable: false,
     rootOnCashSettled,
@@ -48,15 +61,28 @@ export function recordSharedSettlement(
   taskTotals: TaskFinancialTotals,
   cashUsd: number,
   valuationUsd: number,
-  estimated: boolean,
+  cashEstimated: boolean,
+  valuationKnowledge: CostKnowledge | null,
 ): void {
   financial.cashUsd += cashUsd;
   financial.valuationUsd += valuationUsd;
   taskTotals.cashUsd += cashUsd;
   taskTotals.valuationUsd += valuationUsd;
-  taskTotals.estimated ||= estimated;
-  financial.estimated ||= estimated;
-  financial.rootOnCashSettled?.(financial.cashUsd, financial.valuationUsd, financial.estimated);
+  taskTotals.cashEstimated ||= cashEstimated;
+  financial.cashEstimated ||= cashEstimated;
+  if (valuationKnowledge !== null) {
+    taskTotals.valuationKnowledge = mergeKnowledge(
+      taskTotals.valuationKnowledge,
+      valuationKnowledge,
+    );
+    financial.valuationKnowledge = mergeKnowledge(financial.valuationKnowledge, valuationKnowledge);
+  }
+  financial.rootOnCashSettled?.(
+    financial.cashUsd,
+    financial.valuationUsd,
+    financial.cashEstimated,
+    financial.valuationKnowledge ?? "unknown",
+  );
 }
 
 export function taskFinancialTotals(
@@ -65,7 +91,7 @@ export function taskFinancialTotals(
 ): TaskFinancialTotals {
   let totals = financial.totalsByTask.get(taskId);
   if (!totals) {
-    totals = { cashUsd: 0, valuationUsd: 0, estimated: false };
+    totals = { cashUsd: 0, valuationUsd: 0, cashEstimated: false, valuationKnowledge: null };
     financial.totalsByTask.set(taskId, totals);
   }
   return totals;
@@ -76,6 +102,22 @@ export function settlementIsEstimated(
   taskScope: string | null,
 ): boolean {
   return taskScope === null
-    ? financial.estimated
-    : (financial.totalsByTask.get(taskScope)?.estimated ?? false);
+    ? financial.cashEstimated
+    : (financial.totalsByTask.get(taskScope)?.cashEstimated ?? false);
+}
+
+export function settlementValuationKnowledge(
+  financial: SharedFinancialState,
+  taskScope: string | null,
+): CostKnowledge {
+  return taskScope === null
+    ? (financial.valuationKnowledge ?? "unknown")
+    : (financial.totalsByTask.get(taskScope)?.valuationKnowledge ?? "unknown");
+}
+
+function mergeKnowledge(current: CostKnowledge | null, incoming: CostKnowledge): CostKnowledge {
+  if (current === null) return incoming;
+  if (current === "unknown" || incoming === "unknown") return "unknown";
+  if (current === "estimated" || incoming === "estimated") return "estimated";
+  return "exact";
 }

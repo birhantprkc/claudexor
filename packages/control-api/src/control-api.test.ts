@@ -6884,7 +6884,12 @@ describe("DaemonControlApiServer", () => {
           run_id: "run-d1",
           task_id: "task-d1",
           type: "budget.cash",
-          payload: { cash_spend_usd: 0, valuation_usd: 2.5, estimated: true },
+          payload: {
+            cash_spend_usd: 0,
+            valuation_usd: 2.5,
+            estimated: false,
+            valuation_knowledge: "estimated",
+          },
         }),
         "",
       ].join("\n"),
@@ -6895,11 +6900,19 @@ describe("DaemonControlApiServer", () => {
       });
       expect(detail.status).toBe(200);
       const body = (await detail.json()) as {
-        budget: { spendUsd?: number | null; source: string; estimated: boolean };
+        budget: {
+          spendUsd?: number | null;
+          valuationUsd?: number | null;
+          valuationKnowledge: string;
+          source: string;
+          estimated: boolean;
+        };
       };
       expect(body.budget.spendUsd).toBe(0); // the cash truth, not the $2.50 valuation
+      expect(body.budget.valuationUsd).toBe(2.5);
+      expect(body.budget.valuationKnowledge).toBe("estimated");
       expect(body.budget.source).toBe("events");
-      expect(body.budget.estimated).toBe(true); // carried by the authoritative cash receipt
+      expect(body.budget.estimated).toBe(false); // exact $0 cash; valuation confidence is separate
     });
   });
 

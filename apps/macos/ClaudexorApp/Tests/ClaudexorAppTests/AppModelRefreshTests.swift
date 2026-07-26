@@ -521,6 +521,8 @@ struct AppModelRefreshTests {
     @MainActor
     @Test func cashSpendFormatsThroughTheOneOwner() {
         #expect(CashSpend.label(0) == "$0.00")
+        #expect(CashSpend.label(0, estimated: false) == "$0.00")
+        #expect(CashSpend.label(0, estimated: true) == "~$0.00")
         #expect(CashSpend.label(1.234) == "$1.23")
         #expect(CashSpend.label(0.0043) == "$0.0043")
         #expect(CashSpend.label(0.01) == "$0.01")
@@ -1899,7 +1901,11 @@ struct AppModelRefreshTests {
             seq: 2, kind: "budget",
             event: .object([
                 "type": .string("budget.cash"),
-                "payload": .object(["cash_spend_usd": .number(0.4), "valuation_usd": .number(2)])
+                "payload": .object([
+                    "cash_spend_usd": .number(0.4),
+                    "valuation_usd": .number(2),
+                    "estimated": .bool(true)
+                ])
             ])
         ), to: "run-cash")
         // The cash disclosure MUST land. A fixed 150ms wait proved flaky on a
@@ -1910,6 +1916,7 @@ struct AppModelRefreshTests {
         }
         #expect(model.liveBoxes["run-cash"]?.spendUsd == 0.4)
         #expect(model.liveBoxes["run-cash"]?.spendKnown == true)
+        #expect(model.liveBoxes["run-cash"]?.spendEstimated == true)
     }
 
     @Test func winnerEvidenceSeparatesSelectionFromFinalReviewTruth() throws {

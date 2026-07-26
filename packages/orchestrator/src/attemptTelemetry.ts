@@ -15,6 +15,11 @@ import type {
   ToolKind,
   WorkState,
 } from "@claudexor/schema";
+import {
+  newAttemptUsageCost,
+  recordAttemptUsageCost,
+  type AttemptUsageCost,
+} from "./attemptUsageCost.js";
 import { redactSecrets } from "@claudexor/util";
 import * as belt from "./delegationToolEvidence.js";
 import {
@@ -160,7 +165,7 @@ export interface AttemptTelemetry {
   };
   /** Per-usage-event billing split. Route can change across native retries,
    * so this is deliberately not derived from the attempt's first route. */
-  usageCost: { cashUsd: number; valuationUsd: number; unknownUsd: number };
+  usageCost: AttemptUsageCost;
 }
 
 export function createAttemptTelemetry(
@@ -221,7 +226,7 @@ export function createAttemptTelemetry(
     sideToolWorkReport: null,
     outcome: null,
     usage: { inputTokens: null, outputTokens: null, cachedInputTokens: null },
-    usageCost: { cashUsd: 0, valuationUsd: 0, unknownUsd: 0 },
+    usageCost: newAttemptUsageCost(),
   };
 }
 
@@ -330,9 +335,7 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
         : ev.credential_route === "managed_api_key"
           ? "api_key"
           : t.currentAuthMode;
-    if (usageMode === "local_session") t.usageCost.valuationUsd += ev.usage.cost_usd;
-    else if (usageMode === "api_key") t.usageCost.cashUsd += ev.usage.cost_usd;
-    else t.usageCost.unknownUsd += ev.usage.cost_usd;
+    recordAttemptUsageCost(t.usageCost, usageMode, ev.usage.cost_usd, ev.usage.estimated === true);
   }
   // First-wins like the route: the source is decided once before spawn.
   if (!t.authSource && ev.credential_source) t.authSource = ev.credential_source;

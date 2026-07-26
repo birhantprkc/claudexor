@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { BudgetLedger, promptFingerprint, routeCostEvidence } from "./ledger.js";
 import { observationsFromEvent } from "./observe.js";
 import {
+  attemptUsageCostSettlement,
+  isSubscriptionValuation,
+  reviewUsageCostSettlement,
+} from "./settlements.js";
+import {
   RoutingPreflightError,
   type RouterCandidate,
   billingKnowledgeForAuthRoute,
@@ -112,9 +117,15 @@ describe("BudgetLedger", () => {
   it("discloses CUMULATIVE cash after every settle — subscription work discloses 0 (W4.3)", () => {
     // The ledger is the one owner of the cash fact: consumers (run events →
     // UI) render what it discloses and never infer money from route labels.
-    const disclosed: Array<{ cash: number; valuation: number }> = [];
+    const disclosed: Array<{
+      cash: number;
+      valuation: number;
+      cashEstimated: boolean;
+      valuationKnowledge: "exact" | "estimated" | "unknown";
+    }> = [];
     const led = new BudgetLedger({ kind: "unlimited" }, undefined, {
-      onCashSettled: (cash, valuation) => disclosed.push({ cash, valuation }),
+      onCashSettled: (cash, valuation, cashEstimated, valuationKnowledge) =>
+        disclosed.push({ cash, valuation, cashEstimated, valuationKnowledge }),
     });
     const entitled = led.reserve({
       taskId: "t",
@@ -135,7 +146,11 @@ describe("BudgetLedger", () => {
       cashUsd: 3,
     });
     // Vendor priced the subscription work at $3 — the CASH fact is still $0.
-    expect(disclosed).toEqual([{ cash: 0, valuation: 3 }]);
+    expect(disclosed).toEqual([
+      { cash: 0, valuation: 3, cashEstimated: false, valuationKnowledge: "estimated" },
+    ]);
+    expect(led.estimated()).toBe(false);
+    expect(led.valuationKnowledge()).toBe("estimated");
 
     const paid = led.reserve({
       taskId: "t",
@@ -146,13 +161,12 @@ describe("BudgetLedger", () => {
     led.settle(paid.lease!.lease_id, exactSettlement(0.4));
     // Cumulative, not per-settle: the second disclosure carries the total.
     expect(disclosed).toEqual([
-      { cash: 0, valuation: 3 },
-      { cash: 0.4, valuation: 3 },
+      { cash: 0, valuation: 3, cashEstimated: false, valuationKnowledge: "estimated" },
+      { cash: 0.4, valuation: 3, cashEstimated: false, valuationKnowledge: "estimated" },
     ]);
   });
 
   it("settles all native token costs as valuation while API-key costs remain cash", async () => {
-    const { attemptUsageCostSettlement, isSubscriptionValuation } = await import("./ledger.js");
     expect(isSubscriptionValuation("local_session")).toBe(true);
     expect(isSubscriptionValuation("api_key")).toBe(false);
     expect(isSubscriptionValuation(null)).toBe(false);
@@ -162,6 +176,13 @@ describe("BudgetLedger", () => {
       attemptId: "native-attempt",
       intent: "implement",
       harnessId: "codex",
+      cost: routeCostEvidence({
+        billing: "subscription_entitlement",
+        knowledge: "exact",
+        source: "native-route",
+        provenance: ["route:local_session"],
+        estimatedUsd: 0,
+      }),
     });
     native.settle(
       nativeLease.lease!.lease_id,
@@ -169,6 +190,8 @@ describe("BudgetLedger", () => {
     );
     expect(native.spend()).toBe(0);
     expect(native.valuation()).toBe(0.25);
+    expect(native.estimated()).toBe(false);
+    expect(native.valuationKnowledge()).toBe("estimated");
     expect(native.terminal()).toBeNull();
 
     const nativeExact = new BudgetLedger({ kind: "unlimited" });
@@ -177,6 +200,13 @@ describe("BudgetLedger", () => {
       attemptId: "native-exact-attempt",
       intent: "implement",
       harnessId: "claude",
+      cost: routeCostEvidence({
+        billing: "subscription_entitlement",
+        knowledge: "exact",
+        source: "native-route",
+        provenance: ["route:local_session"],
+        estimatedUsd: 0,
+      }),
     });
     nativeExact.settle(
       nativeExactLease.lease!.lease_id,
@@ -184,6 +214,8 @@ describe("BudgetLedger", () => {
     );
     expect(nativeExact.spend()).toBe(0);
     expect(nativeExact.valuation()).toBe(0.37);
+    expect(nativeExact.estimated()).toBe(false);
+    expect(nativeExact.valuationKnowledge()).toBe("exact");
     expect(nativeExact.terminal()).toBeNull();
 
     const api = new BudgetLedger({ kind: "finite", maxUsd: 1 });
@@ -206,11 +238,12 @@ describe("BudgetLedger", () => {
     );
     expect(api.spend()).toBe(0.25);
     expect(api.valuation()).toBe(0);
+    expect(api.estimated()).toBe(true);
+    expect(api.valuationKnowledge()).toBe("unknown");
     expect(api.terminal()).toBeNull();
   });
 
   it("settles mixed reviewer routes as separated cash and valuation", async () => {
-    const { reviewUsageCostSettlement } = await import("./ledger.js");
     const ledger = new BudgetLedger({ kind: "unlimited" });
     const lease = ledger.reserve({
       taskId: "review-task",
@@ -224,6 +257,69 @@ describe("BudgetLedger", () => {
     );
     expect(ledger.spend()).toBe(0.25);
     expect(ledger.valuation()).toBe(0.75);
+  });
+
+  it("keeps subscription-only review cash exact and API-only valuation unknown", async () => {
+    const subscription = new BudgetLedger({ kind: "unlimited" });
+    const subscriptionLease = subscription.reserve({
+      taskId: "subscription-review",
+      intent: "review",
+      harnessId: "review-panel",
+    }).lease!;
+    subscription.settle(
+      subscriptionLease.lease_id,
+      reviewUsageCostSettlement(0, 0.75, true, ["review:subscription"]),
+    );
+    expect(subscription.spend()).toBe(0);
+    expect(subscription.estimated()).toBe(false);
+    expect(subscription.valuation()).toBe(0.75);
+    expect(subscription.valuationKnowledge()).toBe("estimated");
+
+    const api = new BudgetLedger({ kind: "unlimited" });
+    const apiLease = api.reserve({
+      taskId: "api-review",
+      intent: "review",
+      harnessId: "review-panel",
+    }).lease!;
+    api.settle(apiLease.lease_id, reviewUsageCostSettlement(0.25, 0, false, ["review:api"]));
+    expect(api.spend()).toBe(0.25);
+    expect(api.estimated()).toBe(false);
+    expect(api.valuation()).toBe(0);
+    expect(api.valuationKnowledge()).toBe("unknown");
+  });
+
+  it("keeps mixed-route cash exact when only the subscription valuation is estimated", async () => {
+    const ledger = new BudgetLedger({ kind: "unlimited" });
+    const lease = ledger.reserve({
+      taskId: "mixed-task",
+      attemptId: "mixed-attempt",
+      intent: "implement",
+      harnessId: "claude",
+      cost: routeCostEvidence({
+        // The attempt started native, then retried through an API key. Actual
+        // per-route settlement must override the native reservation for cash.
+        billing: "subscription_entitlement",
+        knowledge: "estimated",
+        source: "route-preflight",
+        provenance: ["route:local_session"],
+        estimatedUsd: 0,
+      }),
+    }).lease!;
+    ledger.settle(
+      lease.lease_id,
+      attemptUsageCostSettlement(1, true, "mixed-attempt", "claude", "local_session", {
+        cashUsd: 0.25,
+        valuationUsd: 0.75,
+        unknownUsd: 0,
+        cashEstimated: false,
+        valuationEstimated: true,
+      }),
+    );
+
+    expect(ledger.spend()).toBe(0.25);
+    expect(ledger.valuation()).toBe(0.75);
+    expect(ledger.estimated()).toBe(false);
+    expect(ledger.valuationKnowledge()).toBe("estimated");
   });
 
   it("counts in-flight holds against the cap (mid-flight enforcement, #9)", () => {
@@ -247,6 +343,28 @@ describe("BudgetLedger", () => {
     led.settle(r.lease?.lease_id ?? "", exactSettlement(0.5));
     expect(led.spend()).toBeCloseTo(0.5, 8);
     expect(led.tier()).toBe("ok");
+  });
+
+  it("counts an in-attempt API fallback hold even when the lease began on subscription", () => {
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 0.2 });
+    const lease = ledger.reserve({
+      taskId: "mixed-hold",
+      intent: "implement",
+      harnessId: "claude",
+      cost: routeCostEvidence({
+        billing: "subscription_entitlement",
+        knowledge: "exact",
+        source: "native-route",
+        provenance: ["route:local_session"],
+        estimatedUsd: 0,
+      }),
+    }).lease!;
+
+    // The orchestrator calls updateHold only for streamed API/unknown usage;
+    // native valuation never reaches this method.
+    ledger.updateHold(lease.lease_id, 0.25);
+    expect(ledger.tier()).toBe("hard");
+    expect(ledger.remainingUsd()).toBe(0);
   });
 
   it("permits at most one unknown-cost paid unit in flight under a finite cap", () => {

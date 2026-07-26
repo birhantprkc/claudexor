@@ -473,7 +473,7 @@
                 "estimated": {
                   "type": "boolean",
                   "default": false,
-                  "description": "True when spend is token-derived rather than natively reported."
+                  "description": "True when settled cash is estimated rather than exact; subscription valuation confidence is reported separately."
                 },
                 "source": {
                   "type": "string",

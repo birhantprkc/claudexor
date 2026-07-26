@@ -298,7 +298,7 @@
             "estimated": {
               "type": "boolean",
               "default": false,
-              "description": "True when any of the spend is token-derived rather than natively reported."
+              "description": "True when settled cash is estimated rather than exact."
             },
             "cash_usd": {
               "type": [

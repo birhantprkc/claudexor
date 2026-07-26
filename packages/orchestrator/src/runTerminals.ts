@@ -92,6 +92,17 @@ function settledBudgetSnapshot(context: AnnouncedRunContext): SettledBudgetSnaps
   };
 }
 
+function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
+  try {
+    return context.recheckBudgetAfterBarrier?.() === true;
+  } catch {
+    // Reconciliation is an extra authority granted only to a proven Delegate
+    // drain owner. An unreadable ownership predicate must fail closed instead
+    // of touching an ordinary Agent's already-terminal artifacts.
+    return false;
+  }
+}
+
 /** A Delegate family may settle child cash during the terminal barrier, after
  * strategy arbitration wrote decision.yaml. Reconcile that existing artifact
  * in place so its self-contained budget and optional terminal facts match the
@@ -408,7 +419,7 @@ export async function guardAnnouncedRun(
     if (context) {
       await runBarrier(context);
       const budget = settledBudgetSnapshot(context);
-      const delegateBarrierArmed = context.recheckBudgetAfterBarrier?.() === true;
+      const delegateBarrierArmed = ownsDelegateDrain(context);
       if (delegateBarrierArmed && signal?.aborted) {
         context.log.clearDeferredTerminal();
         const cancelFacts = terminalOutcomeFacts(
@@ -460,7 +471,7 @@ export async function guardAnnouncedRun(
         context.log.flushDeferredTerminal();
         return failed;
       }
-      reconcileDecisionBudget(context, budget);
+      if (delegateBarrierArmed) reconcileDecisionBudget(context, budget);
       context.log.flushDeferredTerminal();
       if (budget.spendUsd !== null) return { ...result, spendUsd: budget.spendUsd };
     }
@@ -481,6 +492,7 @@ export async function guardAnnouncedRun(
     // must not mask the original failure, so it degrades to null loudly-typed.
     const budget = settledBudgetSnapshot(a);
     const spendUsd = budget.spendUsd;
+    const delegateBarrierArmed = ownsDelegateDrain(a);
     if (signal?.aborted && terminalError === err) {
       const priorFacts = preparedResult?.facts;
       const cancelFacts = terminalOutcomeFacts(
@@ -493,7 +505,9 @@ export async function guardAnnouncedRun(
           ? "run cancelled: wall-clock deadline (maxSeconds) exceeded"
           : "run cancelled";
       try {
-        reconcileDecisionBudget(a, budget, { facts: cancelFacts, why: cancelSummary });
+        if (delegateBarrierArmed) {
+          reconcileDecisionBudget(a, budget, { facts: cancelFacts, why: cancelSummary });
+        }
         reconcileWorkProductTerminal(a, cancelFacts);
         clearFailureArtifact(a);
       } catch {
@@ -532,7 +546,9 @@ export async function guardAnnouncedRun(
       terminalError instanceof Error ? terminalError.message : String(terminalError),
     );
     try {
-      reconcileDecisionBudget(a, budget, { facts: pendingFacts, why: pendingSummary });
+      if (delegateBarrierArmed) {
+        reconcileDecisionBudget(a, budget, { facts: pendingFacts, why: pendingSummary });
+      }
       reconcileWorkProductTerminal(a, pendingFacts);
     } catch {
       /* the failure terminal below remains authoritative */

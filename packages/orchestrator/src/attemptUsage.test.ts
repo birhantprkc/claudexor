@@ -16,7 +16,7 @@ describe("processAttemptUsage", () => {
     observeAttemptTelemetry(telemetry, {
       ...usageEvent(false),
       credential_route: "vendor_native",
-      usage: { cost_usd: 0.75 },
+      usage: { cost_usd: 0.75, estimated: true },
     });
     observeAttemptTelemetry(telemetry, {
       ...usageEvent(false),
@@ -29,6 +29,8 @@ describe("processAttemptUsage", () => {
       cashUsd: 0.25,
       valuationUsd: 0.75,
       unknownUsd: 0,
+      cashEstimated: false,
+      valuationEstimated: true,
     });
   });
 
@@ -39,7 +41,13 @@ describe("processAttemptUsage", () => {
       const result = processAttemptUsage({
         event: usageEvent(estimated),
         telemetry: {
-          usageCost: { cashUsd: 0, valuationUsd: 0.37, unknownUsd: 0 },
+          usageCost: {
+            cashUsd: 0,
+            valuationUsd: 0.37,
+            unknownUsd: 0,
+            cashEstimated: false,
+            valuationEstimated: estimated,
+          },
         },
         harnessId: "claude",
         attemptId: "a01",
@@ -64,7 +72,13 @@ describe("processAttemptUsage", () => {
     const result = processAttemptUsage({
       event: usageEvent(false),
       telemetry: {
-        usageCost: { cashUsd: 0.37, valuationUsd: 0, unknownUsd: 0 },
+        usageCost: {
+          cashUsd: 0.37,
+          valuationUsd: 0,
+          unknownUsd: 0,
+          cashEstimated: false,
+          valuationEstimated: false,
+        },
       },
       harnessId: "claude",
       attemptId: "a01",

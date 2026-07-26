@@ -700,7 +700,7 @@ export const ControlRunSummary = z
     spendEstimated: z
       .boolean()
       .optional()
-      .describe("True when spend is token-derived rather than natively reported."),
+      .describe("True when settled cash is estimated rather than exact."),
     /** Token usage summed across every attempt (money stays in spendUsd). Each
      * field null until a harness reported it — never render null as 0, and never
      * sum into a grand total (codex cached ⊆ input; claude cached disjoint). */
@@ -915,7 +915,9 @@ export const ControlBudgetSnapshot = z
     estimated: z
       .boolean()
       .default(false)
-      .describe("True when spend is token-derived rather than natively reported."),
+      .describe(
+        "True when settled cash is estimated rather than exact; subscription valuation confidence is reported separately.",
+      ),
     source: z
       .enum(["decision", "events", "settings", "unknown"])
       .default("unknown")

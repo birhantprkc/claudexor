@@ -612,6 +612,89 @@ describe("Delegate terminal drain ordering", () => {
     expect(types).toEqual(["run.created", "output.ready", "run.completed"]);
   });
 
+  it("never reads or re-terminalizes an ordinary success because its decision is malformed", async () => {
+    const { store, paths, log } = fixture("run-ordinary-malformed-decision");
+    const decisionPath = join(paths.arbitrationDir, "decision.yaml");
+    const originalDecision = "winner: [malformed\n";
+    store.writeText(decisionPath, originalDecision);
+
+    const result = await guardAnnouncedRun(undefined, async (announce) => {
+      log.emit("run.created", { mode: "agent", prompt: "x" });
+      announce({
+        log,
+        store,
+        paths,
+        runId: "run-ordinary-malformed-decision",
+        taskId: "task-parent",
+        mode: "agent",
+        phase: "race",
+        spend: () => 0.2,
+        recheckBudgetAfterBarrier: () => false,
+      });
+      log.emit("run.completed", { lifecycle: "succeeded" });
+      return {
+        runId: "run-ordinary-malformed-decision",
+        taskId: "task-parent",
+        mode: "agent",
+        lifecycle: "succeeded",
+        facts: makeOutcomeFacts("succeeded"),
+        winner: null,
+        runDir: paths.root,
+        summary: "done",
+        candidates: [],
+      };
+    });
+
+    expect(result.lifecycle).toBe("succeeded");
+    expect(readFileSync(decisionPath, "utf8")).toBe(originalDecision);
+    const types = readFileSync(paths.eventsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types).toEqual(["run.created", "run.completed"]);
+  });
+
+  it("leaves an ordinary decision untouched when the ordinary run fails", async () => {
+    const { store, paths, log } = fixture("run-ordinary-failed-decision");
+    const decisionPath = join(paths.arbitrationDir, "decision.yaml");
+    store.writeYaml(decisionPath, {
+      winner: "a01",
+      facts: makeOutcomeFacts("succeeded"),
+      why_winner: "owned by the ordinary strategy",
+      budget_summary: {
+        spend_usd: 0.1,
+        cash_usd: 0.1,
+        valuation_usd: 0,
+        estimated: false,
+      },
+    });
+    const originalDecision = readFileSync(decisionPath, "utf8");
+
+    const result = await guardAnnouncedRun(undefined, async (announce) => {
+      log.emit("run.created", { mode: "agent", prompt: "x" });
+      announce({
+        log,
+        store,
+        paths,
+        runId: "run-ordinary-failed-decision",
+        taskId: "task-parent",
+        mode: "agent",
+        phase: "harness",
+        spend: () => 0.2,
+        recheckBudgetAfterBarrier: () => false,
+      });
+      throw new Error("ordinary harness failed");
+    });
+
+    expect(result.lifecycle).toBe("failed");
+    expect(readFileSync(decisionPath, "utf8")).toBe(originalDecision);
+    const types = readFileSync(paths.eventsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types).toEqual(["run.created", "output.ready", "run.failed"]);
+  });
+
   it("does not re-terminalize an ordinary non-deferred budget failure", async () => {
     const { store, paths, log } = fixture("run-ordinary-budget");
     const result = await guardAnnouncedRun(undefined, async (announce) => {

@@ -86,7 +86,12 @@ export class DelegationBudgetAuthority {
     admissionId: string,
     childRunId: string,
     taskId: string,
-    onCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void,
+    onCashSettled?: (
+      cashSpendUsd: number,
+      valuationUsd: number,
+      cashEstimated: boolean,
+      valuationKnowledge: "exact" | "estimated" | "unknown",
+    ) => void,
   ): BudgetLedger {
     const parent = this.parents.get(parentRunId);
     if (!parent || !parent.pendingAdmissions.has(admissionId)) {
