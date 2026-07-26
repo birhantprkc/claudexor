@@ -53,22 +53,27 @@ function rasterBytesIfSafe(
   bytes: Buffer;
   mode: number;
 } | null {
-  let fd: number;
+  let fd: number | null = null;
   try {
     fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ELOOP") return null;
-    throw error;
-  }
-  try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > maxBytes) return null;
     const bytes = readFileSync(fd);
     if (bytes.length > maxBytes || containsSecretLikeToken(bytes.toString("latin1"))) return null;
     return { bytes, mode: stat.mode & 0o777 };
+  } catch {
+    // Detection callers interpret an unreadable raster as an unprovable secret
+    // risk; persistence callers skip it. Never let a filesystem race turn the
+    // fail-closed artifact fence into an untyped attempt crash.
+    return null;
   } finally {
-    closeSync(fd);
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // The bytes are already bounded in memory or the read failed closed.
+      }
+    }
   }
 }
 
@@ -258,6 +263,9 @@ export function writeCandidateAttemptArtifacts(input: {
   /** False for a secret-refused candidate: even an empty placeholder named
    * patch.diff would falsely imply that an inspectable patch was retained. */
   persistPatch?: boolean;
+  /** False for a secret-refused candidate: no answer-adjacent or artifact-dir
+   * media is retained, even when an individual raster is otherwise safe. */
+  persistProducedMedia?: boolean;
   answerText?: string;
   record: Record<string, unknown>;
 }): string[] {
@@ -265,23 +273,26 @@ export function writeCandidateAttemptArtifacts(input: {
     input.store.writeText(join(input.attemptDir, "patch.diff"), input.diff);
   }
   const stats = summarizeDiffPaths(input.diff);
-  const produced = [
-    ...new Set([
-      ...persistCandidateOutputs({
-        worktreePath: input.worktreePath,
-        attemptDir: input.attemptDir,
-        changedPaths: [
-          ...new Set([...stats.paths, ...rasterLinksInMarkdown(input.answerText ?? "")]),
-        ],
-      }),
-      // F4: media in the claudexor-owned artifact dir is excluded from the diff,
-      // so it is never in `stats.paths` — collect it into the gallery here.
-      ...collectArtifactDirMedia({
-        worktreePath: input.worktreePath,
-        attemptDir: input.attemptDir,
-      }),
-    ]),
-  ];
+  const produced =
+    input.persistProducedMedia === false
+      ? []
+      : [
+          ...new Set([
+            ...persistCandidateOutputs({
+              worktreePath: input.worktreePath,
+              attemptDir: input.attemptDir,
+              changedPaths: [
+                ...new Set([...stats.paths, ...rasterLinksInMarkdown(input.answerText ?? "")]),
+              ],
+            }),
+            // F4: media in the claudexor-owned artifact dir is excluded from the diff,
+            // so it is never in `stats.paths` — collect it into the gallery here.
+            ...collectArtifactDirMedia({
+              worktreePath: input.worktreePath,
+              attemptDir: input.attemptDir,
+            }),
+          ]),
+        ];
   input.store.writeYaml(join(input.attemptDir, "attempt.yaml"), {
     ...input.record,
     diffstat: {

@@ -10503,6 +10503,9 @@ describe("delegation belt injection (D32)", () => {
               : join(cwd, "preview.png");
           mkdirSync(join(path, ".."), { recursive: true });
           writeFileSync(path, Buffer.concat([Buffer.from([0]), Buffer.from(secret)]));
+          const clean = join(cwd, ".claudexor-artifacts", "browser", "clean.png");
+          mkdirSync(join(clean, ".."), { recursive: true });
+          writeFileSync(clean, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
         },
         source === "ignored markdown link" ? "![preview](preview.png)" : "Implemented.",
       );
@@ -10518,8 +10521,58 @@ describe("delegation belt injection (D32)", () => {
       expect(treeContainsBytes(res.runDir, secret)).toBe(false);
       expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
       expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
+      expect(existsSync(join(res.runDir, "attempts", "a01", "produced"))).toBe(false);
     },
   );
+
+  it("turns an unreadable raster into a sanitized artifact-security refusal", async () => {
+    const repo = await initRepo();
+    writeFileSync(join(repo, ".gitignore"), "unreadable.png\n");
+    execFileSync("git", ["-C", repo, "add", ".gitignore"]);
+    execFileSync("git", [
+      "-C",
+      repo,
+      "-c",
+      "user.email=t@t.dev",
+      "-c",
+      "user.name=Test",
+      "commit",
+      "-m",
+      "ignore unreadable preview",
+    ]);
+    const adapter = delegatingAdapter(
+      "deleg",
+      true,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      (cwd) => {
+        const path = join(cwd, "unreadable.png");
+        writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        chmodSync(path, 0o000);
+      },
+      "![preview](unreadable.png)",
+    );
+    const orch = new Orchestrator({ registry: new Map([["deleg", adapter]]), reviewers: [] });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8")).toContain(
+      "secret_diff_refusal:",
+    );
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "phase: artifact_security",
+    );
+    expect(existsSync(join(res.runDir, "attempts", "a01", "produced"))).toBe(false);
+  });
 
   it("keeps harness commits inside the disposable candidate clone", async () => {
     const repo = await initRepo();

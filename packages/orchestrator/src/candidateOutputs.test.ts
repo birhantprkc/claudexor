@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildFileBackedSynthesisInput,
+  candidateOutputsContainSecret,
   collectArtifactDirMedia,
   materializeWinnerOutputs,
   persistCandidateOutputs,
@@ -77,6 +78,20 @@ describe("candidate produced-output persistence", () => {
     expect(existsSync(join(attemptDir, "produced", ".claudexor-artifacts", "large.png"))).toBe(
       false,
     );
+  });
+
+  it("treats an unreadable raster as an unprovable secret risk", () => {
+    const worktree = root("claudexor-art-unreadable-");
+    const path = join(worktree, "unreadable.png");
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    chmodSync(path, 0o000);
+    try {
+      expect(
+        candidateOutputsContainSecret({ worktreePath: worktree, changedPaths: ["unreadable.png"] }),
+      ).toBe(true);
+    } finally {
+      chmodSync(path, 0o600);
+    }
   });
 
   it("keeps giant candidate diffs out of the argv prompt without truncation", () => {
@@ -185,5 +200,33 @@ describe("candidate produced-output persistence", () => {
     expect(produced).toEqual(["screenshots/ignored.png"]);
     expect(existsSync(join(attemptDir, "produced", "screenshots", "ignored.png"))).toBe(true);
     expect(writes[0]?.["produced_files"]).toEqual(["screenshots/ignored.png"]);
+  });
+
+  it("persists no produced media for a secret-refused candidate", () => {
+    const worktree = root("claudexor-refused-output-tree-");
+    const attemptDir = root("claudexor-refused-output-attempt-");
+    mkdirSync(join(worktree, ".claudexor-artifacts"), { recursive: true });
+    writeFileSync(join(worktree, "clean.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    writeFileSync(
+      join(worktree, ".claudexor-artifacts", "clean.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    const writes: Record<string, unknown>[] = [];
+    const produced = writeCandidateAttemptArtifacts({
+      store: {
+        writeText: () => undefined,
+        writeYaml: (_path: string, value: unknown) => writes.push(value as Record<string, unknown>),
+      } as never,
+      attemptDir,
+      worktreePath: worktree,
+      diff: "diff --git a/clean.png b/clean.png\n",
+      answerText: "![clean](clean.png)",
+      persistPatch: false,
+      persistProducedMedia: false,
+      record: { attempt_id: "a01", secret_diff_refusal: { reason: "secret_like_output" } },
+    });
+    expect(produced).toEqual([]);
+    expect(existsSync(join(attemptDir, "produced"))).toBe(false);
+    expect(writes[0]?.["produced_files"]).toEqual([]);
   });
 });

@@ -2657,7 +2657,6 @@ export class Orchestrator {
       webRequiredUnsatisfied: webBlocked,
       workState: finalized.workState,
     });
-
     const attemptDir = join(paths.attemptsDir, attemptId);
     recordCleanAttemptMetrics(globalConfigDir(), adapter.id, {
       costUsd: cost,
@@ -2672,6 +2671,7 @@ export class Orchestrator {
       worktreePath: envelope.worktree_path,
       diff,
       persistPatch: secretDiffRefusal === undefined,
+      persistProducedMedia: secretDiffRefusal === undefined,
       answerText,
       record: {
         attempt_id: attemptId,
