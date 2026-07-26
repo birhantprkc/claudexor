@@ -134,6 +134,16 @@ enum RunFacts {
         var facts: [Fact] = []
         facts.append(Fact(id: "mode", text: task.mode.label, glyph: task.mode.glyph,
                           tone: .neutral, help: nil))
+        if let child = DelegationPresentation.childReceipt(
+            delegatedFromRunId: task.delegatedFromRunId) {
+            facts.append(Fact(
+                id: "delegated_child",
+                text: child.badge,
+                glyph: "arrow.turn.down.right",
+                tone: .neutral,
+                help: "Claudexor child run delegated by \(child.parentRunId)."
+            ))
+        }
         if let mismatch = task.authRoute?.modelMismatch {
             facts.append(Fact(
                 id: "model_mismatch",

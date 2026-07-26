@@ -260,7 +260,8 @@
                       "type": "string",
                       "enum": [
                         "browser",
-                        "path_deny"
+                        "path_deny",
+                        "delegation"
                       ]
                     },
                     "harness_id": {
@@ -284,6 +285,7 @@
                         "manifest_unsupported",
                         "web_policy_off",
                         "access_profile_incompatible",
+                        "runtime_unavailable",
                         "postdiff_only"
                       ]
                     },
@@ -780,6 +782,61 @@
           "default": [],
           "description": "All selected-lane capability receipts for this run."
         },
+        "delegation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "requested": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "effective": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "used": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "not_requested",
+                    "injected_unused",
+                    "used",
+                    "runtime_unavailable",
+                    "manifest_unsupported",
+                    "access_profile_incompatible",
+                    "partially_degraded",
+                    "startup_failed"
+                  ],
+                  "default": "not_requested"
+                },
+                "remediation": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "additionalProperties": false,
+              "description": "Engine-owned Delegate requested/effective/used receipt; surfaces project it without parsing model output."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Run-level Delegate receipt aggregated from engine injection and typed tool evidence; null on legacy artifacts that did not record it.",
+          "default": null
+        },
         "tool_warnings_total": {
           "type": "integer",
           "minimum": 0,
@@ -948,6 +1005,8 @@
                     "quality_tier",
                     "expiring_quota_slack",
                     "all_incremental_cash_unknown",
+                    "delegate_effective_first",
+                    "explicit_primary",
                     "declared_order"
                   ],
                   "description": "Typed decisive reason the pool ranked the way it did (QA-034)."

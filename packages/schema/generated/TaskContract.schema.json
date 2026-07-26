@@ -70,6 +70,48 @@
           "additionalProperties": false,
           "description": "Canonical run mode for this task."
         },
+        "delegation_requested": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the caller requested the Delegate agent strategy."
+        },
+        "run_lineage": {
+          "type": "object",
+          "properties": {
+            "parent_run_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Non-empty identifier string."
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Non-empty identifier string.",
+              "default": null
+            },
+            "delegated_from_run_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TaskContract/properties/run_lineage/properties/parent_run_id/anyOf/0"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Non-empty identifier string.",
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "parent_run_id": null,
+            "delegated_from_run_id": null
+          },
+          "description": "Server-owned run lineage; delegated_from_run_id is present only for a Claudexor belt child."
+        },
         "user_intent": {
           "type": "object",
           "properties": {
@@ -118,9 +160,7 @@
         "credential_profile_id": {
           "anyOf": [
             {
-              "type": "string",
-              "minLength": 1,
-              "description": "Non-empty identifier string."
+              "$ref": "#/definitions/TaskContract/properties/run_lineage/properties/parent_run_id/anyOf/0"
             },
             {
               "type": "null"

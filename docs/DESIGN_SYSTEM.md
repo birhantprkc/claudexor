@@ -744,6 +744,14 @@ views in the shared design-system files; screens compose them.
     thread can choose `isolated` — turns accumulate in a persistent thread
     worktree — instead of the default in-place execution);
   - **repair strategies** (until-clean / max-attempts) for agent turns.
+  - **Delegate** remains visible for every Agent turn. It is enabled only from
+    the selected route's engine-owned Delegate capability projection (Auto may
+    use any capable route in its pool) and only under a compatible access
+    profile. A known-incapable runtime/harness leaves the switch visible but
+    disabled and OFF, with the server remediation rendered underneath and in
+    hover/accessibility help. Changing route or access after enabling Delegate
+    turns it off before Send; the request can never outlive its capability.
+    Enabling it grants permission, not a promise that a child will be created.
   Routing goal, quality tiers, and deterministic gate commands are engine/Settings
   concerns, not per-turn composer controls. The paid-fallback/auth-route CHOICE is a
   per-turn composer control (the Auth route row above); its outcome is a post-run
@@ -883,8 +891,28 @@ views in the shared design-system files; screens compose them.
 - **Inline failure card.** A terminal turn that FAILED with no answer/transcript
   renders an inline failure card with the engine's honest failure reason,
   instead of reading as idle next to a red status pill. The card also carries
-  the run's TYPED failure category as a small chip and the auth route the turn
-  actually ran under (from the route receipt) — never inferred from prose.
+  the run's TYPED failure category as a small chip; diagnostics preserve any
+  machine-readable failure sub-code, including Delegate child-drain timeout.
+  The auth route the turn actually ran under comes from the route receipt —
+  never inferred from prose.
+- **Delegate outcome + child rows.** A requested Delegate run that the engine
+  continued before injection renders a persistent amber “Done with warnings ·
+  continued without Delegate” receipt with the typed cause and remedy; it is
+  run-summary state, never a toast. A mixed pool keeps `effective:true` for its
+  capable lane but renders “one lane continued without Delegate” from the typed
+  `partially_degraded` receipt. Failure after belt injection remains a normal
+  terminal failure. Real Claudexor children render as ordinary flat run
+  rows directly after their parent, with one quiet `Delegated` badge and a
+  clickable `Parent · <short id>` link. Admission uses only the server's narrow
+  `delegatedFromRunId`; `parentRunId` alone, model text, and vendor-native
+  subagents never produce the badge. Child rows also join the parent thread's
+  Changes / Artifacts / Evidence aggregation without introducing a tree UI.
+  Each compact turn card carries at most eight server-owned direct-child IDs so
+  the whole-thread workspace is complete without eagerly fetching every old
+  run. A visible Delegate parent's bounded Run Detail snapshot carries the
+  corresponding child summaries, so reopening an older thread restores flat
+  rows even after they leave the bounded global runs page; Changes and Evidence
+  hydrate a missing projected child only when that tab or disclosure needs it.
 - **Run route disclosure (run-filtered workspace header).** The finished run's header shows
   the auth route ACTUALLY taken (Subscription / API key, from the engine's
   route receipt; hover reveals requested preference, source, and the typed

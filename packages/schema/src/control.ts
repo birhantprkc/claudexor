@@ -28,6 +28,7 @@ import { ProtectedPathApproval, TestCommandInvocation } from "./task.js";
 import { RunScope } from "./control-run-scope.js";
 import { HarnessStatusDto } from "./readiness.js";
 import { makeControlRunRetrySchemas } from "./control-run-retry.js";
+import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
 
 export const RunExecution = z
   .object({
@@ -216,7 +217,12 @@ export const ControlRunStartRequest = z
     turnId: Id.optional().describe(
       "Internal daemon handoff only; rejected (400) when supplied by a client on POST /runs — use POST /threads/:id/turns instead.",
     ),
-    parentRunId: Id.optional().describe("Run this turn follows up on."),
+    parentRunId: Id.optional().describe(
+      "Server-owned parent/follow-up lineage; rejected on direct POST /runs.",
+    ),
+    delegatedFromRunId: Id.optional().describe(
+      "Internal belt-child provenance only; equals parentRunId and is rejected on direct POST /runs.",
+    ),
     retryOf: Id.optional().describe(
       "Server-owned Exact Retry lineage; direct POST /runs rejects it.",
     ),
@@ -268,13 +274,14 @@ export const ControlRunStartRequest = z
      * routed harness declares `capability_profile.mcp_injection`, the engine
      * injects the scoped Claudexor delegation belt (ask/plan/isolated sub-run/
      * best-of/status/result) into the harness sandbox so the harness can spawn
-     * bounded isolated sub-runs. Refused (typed preflight) on a non-agent mode
-     * or a harness that cannot inject. Default off. */
+     * bounded isolated sub-runs. A known unavailable belt or incapable harness
+     * degrades before start to ordinary Agent with a durable warning; a
+     * non-agent mode still refuses the incoherent strategy flag. Default off. */
     delegate: z
       .boolean()
       .optional()
       .describe(
-        "Agent-only: inject the Claudexor delegation belt so the harness can spawn bounded isolated sub-runs; refused on non-agent modes or harnesses without mcp_injection.",
+        "Agent-only: inject the Claudexor delegation belt so the harness can spawn bounded isolated sub-runs; non-agent modes refuse, while known belt or harness unavailability degrades before start to ordinary Agent with a durable warning.",
       ),
     /** Hard wall-clock deadline for the WHOLE run, measured from scheduler
      * start. On expiry the run is cooperatively cancelled (hard-kill fallback)
@@ -364,9 +371,10 @@ export const RunFailureCode = z
     "unknown_paid_in_flight",
     "budget_overshoot",
     "cost_unverifiable",
+    "delegation_child_drain_timeout",
   ])
   .describe(
-    "Machine-readable failure sub-code within a RunFailure category (today the typed budget-denial reasons produced by the budget ledger).",
+    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons and Delegate child-drain timeout).",
   );
 export type RunFailureCode = z.infer<typeof RunFailureCode>;
 
@@ -394,7 +402,7 @@ export const RunFailure = z
     code: RunFailureCode.nullable()
       .default(null)
       .describe(
-        "Machine-readable failure sub-code within the category (today the typed budget-denial reason from the ledger); null when the category alone is sufficient. Surfaces choose remediation from this, never by parsing safeMessage.",
+        "Machine-readable failure sub-code within the category; null when the category alone is sufficient. Surfaces choose remediation from this, never by parsing safeMessage.",
       ),
     harnessId: z
       .string()
@@ -645,6 +653,17 @@ export const ControlRunSummary = z
   .object({
     jobId: z.string().describe("Daemon job id backing the run."),
     runId: z.string().describe("Run id."),
+    parentRunId: Id.nullable().default(null).describe("Parent/follow-up run id, when any."),
+    delegatedFromRunId: Id.nullable()
+      .default(null)
+      .describe(
+        "Claudexor Delegate parent run id; null for ordinary runs and native vendor subagents.",
+      ),
+    delegation: RunDelegationInfo.nullable()
+      .default(null)
+      .describe(
+        "Durable Delegate requested/effective/used receipt projected from engine telemetry; null when legacy telemetry has no receipt.",
+      ),
     taskId: z.string().optional().describe("Task id, when allocated."),
     state: ControlRunState,
     runDir: z.string().optional().describe("On-disk run artifact directory."),
@@ -984,19 +1003,6 @@ export const ControlInteractionAnswerRequest = z
   .describe("Request body answering a pending interactive question.");
 export type ControlInteractionAnswerRequest = z.infer<typeof ControlInteractionAnswerRequest>;
 
-export const ControlInteractionAnswerResponse = z
-  .object({
-    accepted: z.boolean().describe("Whether the answer was accepted."),
-    status: z
-      .enum(["delivered", "not_found", "already_resolved", "rejected"])
-      .describe(
-        "Delivery outcome: delivered into the live session, interaction not found, already resolved, or rejected.",
-      ),
-    message: z.string().optional().describe("Human-readable detail."),
-  })
-  .describe("Response to an interaction answer.");
-export type ControlInteractionAnswerResponse = z.infer<typeof ControlInteractionAnswerResponse>;
-
 export const RunControlTarget = z
   .object({
     attemptId: z.string().optional().describe("Attempt to target; omitted = the whole run."),
@@ -1024,19 +1030,6 @@ export const ControlRunControlRequest = z
   })
   .describe("Request body for POST /runs/:id/control.");
 export type ControlRunControlRequest = z.infer<typeof ControlRunControlRequest>;
-
-export const ControlRunControlResponse = z
-  .object({
-    accepted: z.boolean().describe("Whether the control was accepted."),
-    status: z
-      .enum(["applied", "queued", "rejected", "unsupported"])
-      .default("queued")
-      .describe("Outcome: applied immediately, queued, rejected, or unsupported for this run."),
-    runId: Id.optional().describe("Run the control was applied to."),
-    message: z.string().optional().describe("Human-readable detail."),
-  })
-  .describe("Response to a run control request.");
-export type ControlRunControlResponse = z.infer<typeof ControlRunControlResponse>;
 
 export const ApplyTarget = z
   .discriminatedUnion("kind", [
@@ -1254,6 +1247,10 @@ export const ControlTurnRunCard = z
       .nullable()
       .default(null)
       .describe("When the run finished; null while live."),
+    delegation: RunDelegationInfo.nullable()
+      .default(null)
+      .describe("Durable Delegate outcome receipt; null for ordinary and legacy turns."),
+    delegatedChildRunIds: DelegatedChildRunIds,
   })
   .describe(
     "Compact run state embedded on a turn so a chat surface renders the whole conversation from one thread fetch.",

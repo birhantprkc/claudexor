@@ -222,6 +222,43 @@
                   "none"
                 ],
                 "description": "HOW read-only is enforced (fs_sandbox | permission_deny | tool_allowlist | none) — none means read-only intent is advisory for this harness."
+              },
+              "delegation": {
+                "type": "object",
+                "properties": {
+                  "available": {
+                    "type": "boolean",
+                    "description": "Whether this harness can receive the packaged delegation belt."
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "ready",
+                      "runtime_unavailable",
+                      "manifest_unsupported"
+                    ],
+                    "description": "Stable reason for the current delegation capability verdict."
+                  },
+                  "remediation": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null,
+                    "description": "Concrete update/repair guidance when unavailable; null when ready."
+                  },
+                  "requiresFullAccess": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether this harness can reach the belt only under a full-access profile."
+                  }
+                },
+                "required": [
+                  "available",
+                  "reason"
+                ],
+                "additionalProperties": false,
+                "description": "Whether this installed runtime can offer Delegate through this harness."
               }
             },
             "required": [
@@ -240,7 +277,8 @@
               "attachmentInputs",
               "effortLevels",
               "accessProfilesSupported",
-              "readonlyMechanism"
+              "readonlyMechanism",
+              "delegation"
             ],
             "additionalProperties": false,
             "description": "Per-harness live capability row (manifest + doctor + model truth)."

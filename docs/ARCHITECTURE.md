@@ -52,6 +52,8 @@ engine strategies are flags on a mode, never modes:
 `--delegate` (agent-only) injects a SCOPED Claudexor MCP belt into the harness
 sandbox — the generalized `HarnessRunSpec.extra_mcp_servers` seam translated per
 adapter (claude `--mcp-config` inline JSON, codex `-c mcp_servers.<name>.*`).
+The running daemon entry must itself dispatch `mcp serve-belt`; every in-repo
+launcher preserves that executable-entry contract.
 The harness decides when to spawn bounded, isolated sub-runs; the belt exposes
 ONLY `claudexor_ask`, `claudexor_plan`, `claudexor_run` (isolated envelope
 sub-run — forced envelope, forced no-thread), `claudexor_best_of`,
@@ -60,13 +62,42 @@ apply/decision/thread/settings tool: the PARENT integrates results in its own
 workspace. Policy is enforced SERVER-SIDE at the tool boundary (never trusting
 the harness): nesting depth is 1 (the sub-runs a belt spawns carry no belt of
 their own, so nesting cannot exceed 1 — the belt also refuses when observed at
-depth>0), a max sub-run count per parent (default 8), and each sub-run draws a
-paid budget bounded by the parent ledger's headroom snapshot (finite headroom,
-or a typed refusal when exhausted — never a silent unlimited run). Only adapters
+depth>0), a max sub-run count per parent (default 8), and one live parent-owned
+paid-budget authority shared by the parent and every child. Reservations and
+settlements are global to that authority, while each child reports its own spend
+and the parent reports the aggregate; exhaustion is a typed refusal, never a
+silent independent or unlimited budget. The daemon keeps that family authority
+for the run lifetime: child admission is atomic and monotonic (pending starts
+count toward the max of 8), parent cancellation closes admission before it
+cascades, and the parent's terminal record waits for child drain. A bounded
+broken-runner fail-safe financially fences a survivor and records a typed
+failure; it never permits late child cash to appear after a successful parent
+terminal. After the drain, the ledger rechecks the family terminal state and
+reconciles the returned result plus `decision.yaml`; a late overshoot or
+unverifiable child settlement replaces the prepared success with a typed budget
+failure. Only adapters
 whose `capability_profile.mcp_injection` is true (claude, codex) can host the
-belt; `--delegate` on any other harness is a typed preflight refusal naming the
-harness. This replaces the former `orchestrate` mode (retired in v3); ordinary
-`claudexor plan` covers the "suggest"-style use-case.
+belt. `HarnessStatusDto` and the agent capability catalog carry one derived
+`delegation` projection (`available`, typed `reason`, remediation, and the access
+requirement), so CLI, Control API, and macOS consume the same readiness truth.
+The flag is permission, not a child-count promise: current top-level summaries
+record `delegation {requested,effective,used,reason,remediation}`; the field is
+nullable when reading legacy artifacts that predate this receipt. A known pre-injection
+runtime, manifest, or access incompatibility may continue as an ordinary Agent
+run with `effective:false` and a durable warning. An MCP startup failure AFTER
+the descriptor was injected is terminal and never silently degrades. In a mixed
+pool, a capable lane keeps the run `effective:true`, while any selected lane
+that continued before injection makes the run reason `partially_degraded` and
+keeps the prominent warning; per-lane requirement receipts preserve its cause.
+
+Every belt child receives the real top-level `parentRunId` plus
+`delegatedFromRunId`; only the latter establishes Delegate provenance. Parent
+cancellation cascades to those children, and retry/run-again creates a fresh
+top-level family rather than inheriting Delegate lineage or admission state.
+Native Claude Code/Codex subagents do
+not receive `delegatedFromRunId`, are not Claudexor children, and cannot satisfy
+`used:true`. This replaces the former `orchestrate` mode (retired in v3);
+ordinary `claudexor plan` covers the "suggest"-style use-case.
 
 Old mode ids (`audit`, `orchestrate`, `best_of_n`, `max_attempts`,
 `until_clean`, `explore`, `create`, `readonly_audit`, plus the older
@@ -1771,6 +1802,10 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   routing readiness, setup progress, and budget truth are projections of
   control-api DTOs and run artifacts, never app-local logic. Read-only modes
   expose no patch/apply controls.
+- Delegate readiness comes from each harness row's engine-owned `delegation`
+  projection. Run summaries carry the requested/effective/used/reason/remediation outcome
+  and the narrow `delegatedFromRunId` child link. The exact composer and run-row
+  presentation is defined in [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md).
 - Attachments use a daemon-owned resource pipeline. `/v2/uploads` streams bytes
   to an external temporary file; finalize fsyncs, hashes, deduplicates the blob,
   atomically publishes it, and returns an immutable resource ID. `/v2/runs` and
@@ -1940,8 +1975,9 @@ code touching one of these areas must honor it or change it explicitly here.
 - The delegation belt (`agent --delegate`) has NO apply/decision/thread/settings
   tool: the parent integrates sub-run results in its own workspace, so a
   delegated sub-run adds no new live-tree mutation path. Sub-runs are isolated
-  envelopes (forced no-thread), depth is capped at 1, and each draws from the
-  parent budget headroom.
+  envelopes (forced no-thread), depth is capped at 1, and all family reservations
+  and settlements cross one daemon-owned parent budget authority. Child detail
+  exposes only the child's spend; the parent detail exposes the aggregate.
 - Planning rides the normal thread/turn path (the spec-interview state machine
   and its in-process grounding runs were retired in v3): a `plan` run surfaces
   typed open questions, answer turns refine it on the same persisted lane, and

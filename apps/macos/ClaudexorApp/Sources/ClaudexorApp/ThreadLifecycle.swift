@@ -6,21 +6,45 @@ import ClaudexorKit
 extension AppModel {
     func openThread(_ id: String) async {
         guard let client else { return }
+        // View hydration is presentation-scoped. Once another thread is
+        // selected, a later bounded runs refresh may evict this thread's
+        // off-page Delegate family; reopening must be allowed to restore it.
+        let reconcileRunList = runListReconciliationNeeded || (
+            selectedThreadId != nil && selectedThreadId != id && !liveTasks.isEmpty)
+        if selectedThreadId != id { hydratedRunDetails.removeAll() }
         threadLoadGeneration += 1
         let generation = threadLoadGeneration
         selectedThreadId = id
         selectedThreadDetail = nil
         threadStatus = nil
+        // Start the new thread fetch before reconciling the bounded global run
+        // page. The two requests overlap, while the list pass reclaims any
+        // detail-restored family from the previous selection in a quiet daemon.
+        let detailLoad = Task { try await client.threadDetail(id: id) }
+        if reconcileRunList {
+            // Dirty-before-I/O: a direct A→B switch must retry reclamation if
+            // this bounded list request fails, just like the draft detour.
+            runListReconciliationNeeded = true
+            let refreshSuccesses = successfulRunsRefreshes
+            await refreshRuns()
+            guard selectedThreadId == id, threadLoadGeneration == generation else { return }
+            if successfulRunsRefreshes > refreshSuccesses {
+                runListReconciliationNeeded = false
+            }
+        }
         do {
-            let detail = try await client.threadDetail(id: id)
+            let detail = try await detailLoad.value
             guard selectedThreadId == id, threadLoadGeneration == generation else { return }
             selectedThreadDetail = detail
             guard selectedThreadId == id, threadLoadGeneration == generation else { return }
             evictBackgroundRunData()
             for turn in detail.turns.suffix(5) {
                 guard selectedThreadId == id, threadLoadGeneration == generation else { return }
-                if let runId = turn.runId, liveTasks.contains(where: { $0.id == runId }) {
-                    await loadRunDetail(runId)
+                if let runId = turn.runId {
+                    let missing = !liveTasks.contains(where: { $0.id == runId })
+                    if !missing || turn.run?.delegation?.requested == true {
+                        await ensureRunDetail(runId, insertingIfMissing: missing)
+                    }
                 }
             }
         } catch {
@@ -30,6 +54,8 @@ extension AppModel {
     }
 
     func startDraftThread() {
+        runListReconciliationNeeded = runListReconciliationNeeded || !liveTasks.isEmpty
+        hydratedRunDetails.removeAll()
         threadLoadGeneration += 1
         selectedThreadId = nil
         selectedThreadDetail = nil

@@ -15,6 +15,7 @@ import {
 import type { RunnerFn } from "./index.js";
 
 const unlimited: DelegationPolicy = {
+  parentRunId: "run-parent",
   depth: 0,
   maxSubRuns: DEFAULT_MAX_SUBRUNS,
   parentBudget: { kind: "unlimited" },
@@ -80,11 +81,13 @@ describe("delegation belt policy (D32)", () => {
       parentBudget: { kind: "finite", maxUsd: 2 },
     });
     const policy = readDelegationPolicy(env);
+    expect(policy.parentRunId).toBe("run-1");
     expect(policy.depth).toBe(0);
     expect(policy.maxSubRuns).toBe(3);
     expect(policy.parentBudget).toEqual({ kind: "finite", maxUsd: 2 });
     // Missing env => fail closed: depth 1 (refuse), finite(0) budget (refuse).
     const empty = readDelegationPolicy({});
+    expect(empty.parentRunId).toBeNull();
     expect(empty.depth).toBe(1);
     expect(empty.maxSubRuns).toBe(DEFAULT_MAX_SUBRUNS);
     expect(empty.parentBudget).toEqual({ kind: "finite", maxUsd: 0 });
@@ -121,6 +124,7 @@ describe("delegation belt tool surface (D32)", () => {
     const tools = beltClaudexorTools(
       runner,
       {
+        parentRunId: "run-parent",
         depth: 0,
         maxSubRuns: 8,
         parentBudget: { kind: "finite", maxUsd: 1 },
@@ -135,6 +139,8 @@ describe("delegation belt tool surface (D32)", () => {
     expect(calls[0]).toMatchObject({
       mode: "agent",
       delegate: false,
+      parentRunId: "run-parent",
+      delegatedFromRunId: "run-parent",
       prompt: "fix the bug",
       paidBudget: { kind: "finite", maxUsd: 1 },
     });
@@ -158,7 +164,12 @@ describe("delegation belt tool surface (D32)", () => {
     const ledger = newBeltLedger();
     const tools = beltClaudexorTools(
       runner,
-      { depth: 0, maxSubRuns: 8, parentBudget: { kind: "finite", maxUsd: 1 } },
+      {
+        parentRunId: "run-parent",
+        depth: 0,
+        maxSubRuns: 8,
+        parentBudget: { kind: "finite", maxUsd: 1 },
+      },
       ledger,
     );
     const run = tools.find((t) => t.name === "claudexor_run")!;
@@ -187,7 +198,12 @@ describe("delegation belt tool surface (D32)", () => {
     };
     const tools = beltClaudexorTools(
       runner,
-      { depth: 0, maxSubRuns: 8, parentBudget: { kind: "finite", maxUsd: 1 } },
+      {
+        parentRunId: "run-parent",
+        depth: 0,
+        maxSubRuns: 8,
+        parentBudget: { kind: "finite", maxUsd: 1 },
+      },
       ledger,
     );
     const run = tools.find((t) => t.name === "claudexor_run")!;
@@ -203,6 +219,7 @@ describe("delegation belt tool surface (D32)", () => {
       return { runId: `sub-${runs}`, status: "succeeded", spendUsd: 0 };
     };
     const tools = beltClaudexorTools(runner, {
+      parentRunId: "run-parent",
       depth: 0,
       maxSubRuns: 2,
       parentBudget: { kind: "unlimited" },
@@ -222,6 +239,7 @@ describe("delegation belt tool surface (D32)", () => {
       return {};
     };
     const tools = beltClaudexorTools(runner, {
+      parentRunId: "run-parent",
       depth: 1,
       maxSubRuns: 8,
       parentBudget: { kind: "unlimited" },
@@ -234,11 +252,15 @@ describe("delegation belt tool surface (D32)", () => {
 
   it("read tools pass through to the daemon recovery projections without policy gating", async () => {
     const modes: string[] = [];
+    const parents: unknown[] = [];
     const runner: RunnerFn = async (params) => {
-      modes.push((params as { mode: string }).mode);
+      const input = params as { mode: string; delegatedFromRunId?: unknown };
+      modes.push(input.mode);
+      parents.push(input.delegatedFromRunId);
       return { runId: "sub-1", status: "running", summary: "in progress" };
     };
     const tools = beltClaudexorTools(runner, {
+      parentRunId: "run-parent",
       depth: 1,
       maxSubRuns: 0,
       parentBudget: { kind: "finite", maxUsd: 0 },
@@ -247,5 +269,27 @@ describe("delegation belt tool surface (D32)", () => {
     await tools.find((t) => t.name === "claudexor_run_result")!.handler({ runId: "sub-1" }, {});
     // Read tools work even under the most restrictive policy (they never spawn).
     expect(modes).toEqual(["__run_status", "__run_result"]);
+    expect(parents).toEqual(["run-parent", "run-parent"]);
+  });
+
+  it("refuses unscoped status/result reads when the belt has no parent id", async () => {
+    let calls = 0;
+    const tools = beltClaudexorTools(
+      async () => {
+        calls += 1;
+        return {};
+      },
+      {
+        parentRunId: null,
+        depth: 1,
+        maxSubRuns: 8,
+        parentBudget: { kind: "finite", maxUsd: 0 },
+      },
+    );
+    for (const name of ["claudexor_run_status", "claudexor_run_result"]) {
+      const out = await tools.find((tool) => tool.name === name)!.handler({ runId: "sub-1" }, {});
+      expect(String(typeof out === "string" ? out : out.text)).toMatch(/missing.*unscoped read/);
+    }
+    expect(calls).toBe(0);
   });
 });

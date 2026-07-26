@@ -24,6 +24,14 @@
           "minLength": 1,
           "description": "Run the control was applied to."
         },
+        "cascadeRunIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ControlRunControlResponse/properties/runId"
+          },
+          "default": [],
+          "description": "Active Claudexor Delegate descendants included in this cancellation."
+        },
         "message": {
           "type": "string",
           "description": "Human-readable detail."

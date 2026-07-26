@@ -106,6 +106,13 @@ public struct TurnRunCard: Codable, Sendable, Equatable {
     public let outputReadyState: String?
     public let waitingOnUser: Bool?
     public let finishedAt: String?
+    /// Engine-owned Delegate receipt. Optional for version-skewed thread cards;
+    /// a requested receipt lets the app hydrate that one parent's bounded child
+    /// snapshot without N+1 detail loads for ordinary historical turns.
+    public let delegation: RunDelegationInfo?
+    /// Server-owned direct Delegate child identities for whole-thread workspace
+    /// aggregation. Optional keeps older daemon responses decode-compatible.
+    public let delegatedChildRunIds: [String]?
 }
 
 public struct ThreadSessionInfo: Codable, Sendable, Identifiable, Equatable {

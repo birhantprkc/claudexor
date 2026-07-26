@@ -15,6 +15,9 @@ struct RunOutcomeSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            if let warning = DelegationPresentation.warning(task.delegation, phase: task.phase) {
+                DelegationWarningRow(warning: warning)
+            }
             factsRow
             answerBlock
             if task.planReadiness != nil || !task.planQuestions.isEmpty || !task.plan.isEmpty {

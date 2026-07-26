@@ -15,6 +15,65 @@ describe("parseClaudeEvent", () => {
     expect(() => HarnessEvent.parse(out?.[0])).not.toThrow();
   });
 
+  it("fails closed when a required injected MCP server is missing from init", () => {
+    const parse = createClaudeParser({ requiredMcpServers: ["claudexor"] });
+    const out = parse(
+      { type: "system", subtype: "init", model: "claude-opus", mcp_servers: [] },
+      "s-required",
+    );
+    expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "failed" }]);
+    expect(out?.[1]).toMatchObject({
+      type: "error",
+      payload: { code: "required_mcp_startup_failed" },
+    });
+  });
+
+  it("preserves connected required MCP startup evidence from Claude init", () => {
+    const parse = createClaudeParser({ requiredMcpServers: ["claudexor"] });
+    const out = parse(
+      {
+        type: "system",
+        subtype: "init",
+        mcp_servers: [{ name: "claudexor", status: "connected" }],
+      },
+      "s-required",
+    );
+    expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([
+      { name: "claudexor", status: "connected" },
+    ]);
+    expect(out).toHaveLength(1);
+  });
+
+  it("stops on an explicitly failed required MCP server", () => {
+    const parse = createClaudeParser({ requiredMcpServers: ["claudexor"] });
+    const out = parse(
+      {
+        type: "system",
+        subtype: "init",
+        mcp_servers: [{ name: "claudexor", status: "failed" }],
+      },
+      "s-required",
+    );
+    expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "failed" }]);
+    expect(out?.[1]?.payload?.["code"]).toBe("required_mcp_startup_failed");
+  });
+
+  it("does not synthesize a fatal for an optional failed MCP server", () => {
+    const parse = createClaudeParser();
+    const out = parse(
+      {
+        type: "system",
+        subtype: "init",
+        mcp_servers: [{ name: "optional_docs", status: "failed" }],
+      },
+      "s-optional",
+    );
+    expect(out).toHaveLength(1);
+    expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([
+      { name: "optional_docs", status: "failed" },
+    ]);
+  });
+
   it("returns null for unrecognized shapes so the run loop can count drops", () => {
     expect(parseClaudeEvent({ type: "totally_new_event" }, "s1")).toBeNull();
     expect(parseClaudeEvent({ type: "system", subtype: "compact" }, "s1")).toEqual([]);

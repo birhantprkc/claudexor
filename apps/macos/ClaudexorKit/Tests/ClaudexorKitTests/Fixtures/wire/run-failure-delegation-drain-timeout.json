@@ -1,0 +1,20 @@
+{
+  "schema": "RunFailure",
+  "value": {
+    "phase": "terminalization",
+    "category": "internal",
+    "code": "delegation_child_drain_timeout",
+    "harnessId": null,
+    "attemptId": null,
+    "safeMessage": "Timed out draining delegated children before parent terminalization.",
+    "rawDetailRef": null,
+    "logRefs": [],
+    "eventRefs": [
+      "events.jsonl#delegation-child-drain"
+    ],
+    "runDir": null,
+    "nextActions": [
+      "Inspect child run terminals and retry the parent after recovery."
+    ]
+  }
+}

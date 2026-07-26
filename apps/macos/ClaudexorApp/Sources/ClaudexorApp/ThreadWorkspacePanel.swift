@@ -28,12 +28,42 @@ struct ThreadWorkspacePanel: View {
         var seen = Set<String>()
         var ordered: [String] = []
         for turn in detail.turns {
-            if let runId = turn.runId, seen.insert(runId).inserted { ordered.append(runId) }
+            guard let runId = turn.runId else { continue }
+            if seen.insert(runId).inserted { ordered.append(runId) }
+            for childRunId in (turn.run?.delegatedChildRunIds ?? []).prefix(8)
+                where seen.insert(childRunId).inserted {
+                ordered.append(childRunId)
+            }
         }
         return ordered
     }
 
-    private var runIds: [String] { detail.map(Self.threadRunIds) ?? [] }
+    /// Add real Claudexor Delegate children immediately after their parent.
+    /// The result stays a FLAT list; depth is engine-capped at one and the UI
+    /// does not create a second run-tree model.
+    static func workspaceRunIds(parentRunIds: [String], tasks: [TaskRun]) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        let projectedIds = Set(parentRunIds)
+        for parentRunId in parentRunIds {
+            if seen.insert(parentRunId).inserted { ordered.append(parentRunId) }
+            // Current runtimes already project bounded child ids in canonical
+            // server order. Task discovery is only the legacy fallback for a
+            // child absent from that projection; it must never reorder c1/c2
+            // according to the unrelated global runs page.
+            for child in tasks
+                where !projectedIds.contains(child.id)
+                    && DelegationPresentation.isChild(child, of: parentRunId) {
+                if seen.insert(child.id).inserted { ordered.append(child.id) }
+            }
+        }
+        return ordered
+    }
+
+    private var runIds: [String] {
+        let parents = detail.map(Self.threadRunIds) ?? []
+        return Self.workspaceRunIds(parentRunIds: parents, tasks: model.tasks)
+    }
 
     /// The receipt filter: the run the panel is scoped/highlighted to, or nil for
     /// the whole-thread view. Reuses the existing `.task(id)` route (openRun) so
@@ -87,7 +117,7 @@ struct ThreadWorkspacePanel: View {
             // Filtering to a fresh receipt loads that run's detail (eligibility,
             // review, diagnostics) — the run-filtered view IS the demoted detail.
             .task(id: filterRunId ?? "") {
-                if let id = filterRunId, model.task(id)?.isLive == true { await model.loadRunDetail(id) }
+                if let id = filterRunId, model.task(id)?.isLive == true { await model.ensureRunDetail(id) }
             }
             .onChange(of: filterRunId) { _, _ in userSelectedTab = false; autoSelectDefaultTab() }
             .onChange(of: filteredRun?.phase) { _, _ in autoSelectDefaultTab() }

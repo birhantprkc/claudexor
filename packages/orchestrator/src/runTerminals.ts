@@ -8,11 +8,18 @@
  * forever.
  */
 import { join } from "node:path";
-import type { ModeKind, RunFailureCode } from "@claudexor/schema";
-import { makeOutcomeFacts } from "@claudexor/schema";
+import {
+  DecisionRecord,
+  makeOutcomeFacts,
+  RunFailureCode,
+  type ModeKind,
+  type RunOutcomeFacts,
+} from "@claudexor/schema";
 import type { ArtifactStore } from "@claudexor/artifact-store";
+import type { BudgetLedger, BudgetTerminal } from "@claudexor/budget";
 import type { EventLog } from "@claudexor/event-log";
 import { redactSecrets } from "@claudexor/util";
+import { budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import type { OrchestratorResult } from "./orchestrator.js";
 
 export interface AnnouncedRunContext {
@@ -27,6 +34,139 @@ export interface AnnouncedRunContext {
   /** Settled ledger spend snapshot — failure/cancel terminals must account
    * for money already spent exactly like success terminals do. */
   spend?: () => number;
+  valuation?: () => number;
+  spendEstimated?: () => boolean;
+  /** Re-evaluated after Delegate child drain. A child settlement can make the
+   * shared family overshoot or become unverifiable after strategy synthesis. */
+  budgetTerminal?: () => BudgetTerminal;
+  /** True only while this run owns the effective Delegate family authority.
+   * Ordinary runs may already have emitted a non-deferred terminal and must
+   * never be terminalized a second time by the post-drain recheck. */
+  recheckBudgetAfterBarrier?: () => boolean;
+}
+
+type AnnouncedRunIdentity = Pick<
+  AnnouncedRunContext,
+  "log" | "store" | "paths" | "runId" | "taskId" | "mode" | "phase"
+>;
+
+export function announcedRunContext(
+  identity: AnnouncedRunIdentity,
+  ledger: BudgetLedger,
+  hasDelegateAuthority: () => boolean,
+): AnnouncedRunContext {
+  return {
+    ...identity,
+    spend: () => ledger.spend(),
+    valuation: () => ledger.valuation(),
+    spendEstimated: () => ledger.estimated(),
+    budgetTerminal: () => ledger.terminal(),
+    recheckBudgetAfterBarrier: hasDelegateAuthority,
+  };
+}
+
+interface SettledBudgetSnapshot {
+  spendUsd: number | null;
+  valuationUsd: number | null;
+  estimated: boolean;
+}
+
+function settledBudgetSnapshot(context: AnnouncedRunContext): SettledBudgetSnapshot {
+  const read = (value: (() => number) | undefined): number | null => {
+    try {
+      const result = value?.();
+      return typeof result === "number" && Number.isFinite(result) ? result : null;
+    } catch {
+      return null;
+    }
+  };
+  let estimated = false;
+  try {
+    estimated = context.spendEstimated?.() === true;
+  } catch {
+    estimated = true;
+  }
+  return {
+    spendUsd: read(context.spend),
+    valuationUsd: read(context.valuation),
+    estimated,
+  };
+}
+
+/** A Delegate family may settle child cash during the terminal barrier, after
+ * strategy arbitration wrote decision.yaml. Reconcile that existing artifact
+ * in place so its self-contained budget and optional terminal facts match the
+ * drained ledger. Runs without a decision artifact are intentionally no-ops. */
+function reconcileDecisionBudget(
+  context: AnnouncedRunContext,
+  budget: SettledBudgetSnapshot,
+  terminal?: { facts: RunOutcomeFacts; why: string },
+): void {
+  const path = join(context.paths.arbitrationDir, "decision.yaml");
+  const current = context.store.readYaml<unknown>(path);
+  if (!current || typeof current !== "object" || Array.isArray(current)) return;
+  const record = current as Record<string, unknown>;
+  const priorBudget =
+    record["budget_summary"] && typeof record["budget_summary"] === "object"
+      ? (record["budget_summary"] as Record<string, unknown>)
+      : {};
+  const reconciled = {
+    ...record,
+    ...(terminal
+      ? {
+          facts: terminal.facts,
+          why_winner: terminal.why,
+          apply_recommendation: "continue",
+        }
+      : {}),
+    budget_summary: {
+      ...priorBudget,
+      spend_usd: budget.spendUsd,
+      cash_usd: budget.spendUsd,
+      valuation_usd: budget.valuationUsd,
+      estimated: budget.estimated,
+    },
+  };
+  // Validate the canonical decision fields, but write the reconciled original
+  // object so forward-compatible extension receipts (for example
+  // delivery_receipt) are not stripped by Zod's default object projection.
+  DecisionRecord.parse(reconciled);
+  context.store.writeYaml(path, reconciled);
+}
+
+function postDrainBudgetFailure(
+  context: AnnouncedRunContext,
+  terminal: Exclude<BudgetTerminal, null>,
+  budget: SettledBudgetSnapshot,
+  prior: OrchestratorResult,
+): OrchestratorResult {
+  const mapping = classifyBudgetFailure({ denial: null, terminal });
+  const facts = makeOutcomeFacts("failed", { reason: mapping.reason });
+  reconcileDecisionBudget(context, budget, { facts, why: mapping.safeMessage });
+  context.store.writeText(
+    join(context.paths.finalDir, "summary.md"),
+    `# Run ${context.runId} (${context.mode})\n\n- Lifecycle: failed (${mapping.reason})\n- Phase: budget\n\n${mapping.safeMessage}\n`,
+  );
+  writeFailure(
+    context.store,
+    context.paths,
+    budgetFailureRecord(mapping, { runDir: context.paths.root }),
+  );
+  context.log.emit("run.failed", {
+    lifecycle: "failed",
+    facts,
+    reason: mapping.reason,
+    phase: "budget",
+    error: mapping.safeMessage,
+    failure_ref: "final/failure.yaml",
+  });
+  return {
+    ...prior,
+    lifecycle: "failed",
+    facts,
+    summary: mapping.safeMessage,
+    spendUsd: budget.spendUsd,
+  };
 }
 
 export function writeFailure(
@@ -164,6 +304,9 @@ export function failTerminally(
   spendUsd?: number | null,
 ): OrchestratorResult {
   const message = redactSecrets(err instanceof Error ? err.message : String(err));
+  const parsedCode = RunFailureCode.safeParse(
+    err && typeof err === "object" ? (err as { code?: unknown }).code : undefined,
+  );
   const failFacts = makeOutcomeFacts("failed", { reason: "harness_failed" });
   store.writeText(
     join(paths.finalDir, "summary.md"),
@@ -172,6 +315,7 @@ export function failTerminally(
   writeFailure(store, paths, {
     phase,
     category: "internal",
+    code: parsedCode.success ? parsedCode.data : null,
     safeMessage: message,
     runDir: paths.root,
     nextActions: ["Open diagnostics", "Retry the run"],
@@ -209,34 +353,65 @@ export function failTerminally(
 export async function guardAnnouncedRun(
   signal: AbortSignal | undefined,
   body: (announce: (a: AnnouncedRunContext) => void) => Promise<OrchestratorResult>,
+  /** Awaited after strategy work but before a deferred terminal is flushed.
+   * Delegate parents use it to fence admission and drain child settlements. */
+  beforeTerminal?: (context: AnnouncedRunContext) => void | Promise<void>,
   /**
    * Invoked once with the announced runId when the strategy settles (return OR
    * throw). The single per-run terminalization hook: per-run engine state keyed
    * by runId (e.g. the routing-rationale map) is released HERE so a run that
    * dies before its telemetry writer runs cannot leak it (QA-034 map leak).
    */
-  onSettled?: (runId: string) => void,
+  onSettled?: (runId: string) => void | Promise<void>,
 ): Promise<OrchestratorResult> {
   let announced: AnnouncedRunContext | null = null;
+  let barrierAttempted = false;
+  const runBarrier = async (context: AnnouncedRunContext): Promise<void> => {
+    if (barrierAttempted) return;
+    barrierAttempted = true;
+    await beforeTerminal?.(context);
+  };
   try {
-    return await body((a) => {
+    const result = await body((a) => {
       announced = a;
     });
+    const context = announced as AnnouncedRunContext | null;
+    if (context) {
+      await runBarrier(context);
+      const budget = settledBudgetSnapshot(context);
+      const budgetTerminal =
+        context.recheckBudgetAfterBarrier?.() === true
+          ? (context.budgetTerminal?.() ?? null)
+          : null;
+      if (budgetTerminal && result.lifecycle === "succeeded") {
+        context.log.clearDeferredTerminal();
+        const failed = postDrainBudgetFailure(context, budgetTerminal, budget, result);
+        context.log.flushDeferredTerminal();
+        return failed;
+      }
+      reconcileDecisionBudget(context, budget);
+      context.log.flushDeferredTerminal();
+      if (budget.spendUsd !== null) return { ...result, spendUsd: budget.spendUsd };
+    }
+    return result;
   } catch (err) {
     // TS cannot see the closure assignment; the cast is safe (set-once).
     const a = announced as AnnouncedRunContext | null;
     if (!a) throw err;
+    a.log.clearDeferredTerminal();
+    let terminalError = err;
+    try {
+      await runBarrier(a);
+    } catch (barrierError) {
+      terminalError = barrierError;
+    }
     // Settled-spend accounting is part of the terminal contract on EVERY
     // path (the orchestrate executor aggregates it); a broken spend snapshot
     // must not mask the original failure, so it degrades to null loudly-typed.
-    let spendUsd: number | null = null;
-    try {
-      spendUsd = a.spend ? a.spend() : null;
-    } catch {
-      spendUsd = null;
-    }
-    if (signal?.aborted) {
-      return cancelledResult(
+    const budget = settledBudgetSnapshot(a);
+    const spendUsd = budget.spendUsd;
+    if (signal?.aborted && terminalError === err) {
+      const result = cancelledResult(
         a.log,
         a.runId,
         a.taskId,
@@ -250,8 +425,15 @@ export async function guardAnnouncedRun(
         signal,
         a.store,
       );
+      try {
+        reconcileDecisionBudget(a, budget, { facts: result.facts, why: result.summary });
+      } catch {
+        /* the cancellation terminal remains authoritative */
+      }
+      a.log.flushDeferredTerminal();
+      return result;
     }
-    return failTerminally(
+    const result = failTerminally(
       a.log,
       a.store,
       a.paths,
@@ -259,13 +441,20 @@ export async function guardAnnouncedRun(
       a.taskId,
       a.mode,
       a.phase,
-      err,
+      terminalError,
       spendUsd,
     );
+    try {
+      reconcileDecisionBudget(a, budget, { facts: result.facts, why: result.summary });
+    } catch {
+      /* the failure terminal remains authoritative */
+    }
+    a.log.flushDeferredTerminal();
+    return result;
   } finally {
     // Release per-run engine state on EVERY terminal path (normal return, failure
     // net, cancel), but only for a run that actually announced a runId.
     const settled = announced as AnnouncedRunContext | null;
-    if (settled) onSettled?.(settled.runId);
+    if (settled) await onSettled?.(settled.runId);
   }
 }

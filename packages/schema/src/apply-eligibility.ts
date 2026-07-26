@@ -2,6 +2,7 @@ import { z } from "zod";
 import { RunOutcomeFacts } from "./decision.js";
 import { PlanReadiness, CouncilProjection } from "./plan.js";
 import { ControlBudgetSnapshot } from "./control.js";
+import { RunDelegationInfo } from "./delegation.js";
 
 /**
  * ApplyEligibility — the derived "can this run's WorkProduct be applied RIGHT
@@ -87,6 +88,9 @@ export const McpRunToolResult = z
       .describe(
         "Council membership + merge disclosure (QA-023b); null for solo/non-plan tools or deferred handles.",
       ),
+    parentRunId: z.string().nullable().default(null),
+    delegatedFromRunId: z.string().nullable().default(null),
+    delegation: RunDelegationInfo.nullable().default(null),
   })
   .describe("Structured MCP tool result for Claudexor run tools.");
 export type McpRunToolResult = z.infer<typeof McpRunToolResult>;
@@ -150,6 +154,19 @@ export const McpRunHandleResult = z
       .describe(
         "Run budget snapshot (cash + subscription valuation, QA-023c); null when unavailable.",
       ),
+    parentRunId: z
+      .string()
+      .nullable()
+      .default(null)
+      .describe("Server-owned ordinary parent/follow-up run id, when present."),
+    delegatedFromRunId: z
+      .string()
+      .nullable()
+      .default(null)
+      .describe("Claudexor Delegate parent id; null for ordinary runs and native subagents."),
+    delegation: RunDelegationInfo.nullable()
+      .default(null)
+      .describe("Typed Delegate receipt; null when unavailable or legacy."),
   })
   .strict()
   .describe("Structured MCP result for Claudexor durable-run read tools (inspect/status/result).");

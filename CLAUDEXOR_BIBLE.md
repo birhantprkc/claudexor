@@ -150,10 +150,17 @@ invariant or owner decision before proceeding.
   the harness sandbox so the harness spawns bounded, isolated sub-runs
   (ask/plan/run/best-of + status/result — NO apply/decision/thread/settings);
   server-side policy at the tool boundary caps nesting depth at 1, sub-run count
-  per parent (default 8), and the paid-budget draw from the parent ledger
-  headroom. Only adapters declaring `capability_profile.mcp_injection` (claude,
-  codex) can host the belt; `--delegate` elsewhere is a typed preflight refusal.
-  verify: `ModeKind` in schema; docs-truth mode-id check; canary
+  per parent (default 8), and one live daemon-owned paid-budget authority shared
+  by the parent and every child. The flag grants permission; the parent may finish without creating
+  a child. Only adapters declaring `capability_profile.mcp_injection` (claude,
+  codex) can host the belt, and the engine projects belt readiness instead of a
+  surface guessing it. A known failure BEFORE injection may continue as an
+  ordinary Agent run only with durable requested/effective/used/reason/remediation
+  facts and a visible warning. Once a ready belt was injected, startup failure is terminal:
+  it can never silently degrade or be counted as a native vendor subagent.
+  Claudexor children carry server-owned Delegate lineage; model prose never
+  establishes provenance. verify: `ModeKind` in schema; docs-truth mode-id
+  check; delegation capability/outcome/lineage + failed-start tests; canary
   `[INV-030:orchestrate-retired]`.
 - **INV-031** Engine strategies are FLAGS on a mode, never modes of their
   own: best-of-N (`--n`), capped repair (`--attempts`), repair-to-clean

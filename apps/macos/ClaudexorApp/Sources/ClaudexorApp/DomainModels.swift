@@ -552,6 +552,13 @@ struct TaskRun: Identifiable, Hashable {
     var artifactPaths: [String] = []
     var runDir: String?
     var repoRoot: String?
+    /// General server-owned lineage (retry/follow-up/delegation).
+    var parentRunId: String? = nil
+    /// Narrow provenance set only by the Claudexor belt. Native vendor
+    /// subagents never produce a Claudexor run row and never set this field.
+    var delegatedFromRunId: String? = nil
+    /// Durable requested/effective/used Delegate outcome facts.
+    var delegation: RunDelegationInfo? = nil
     var outputReadyState: String?
     var webEvidenceStatus: String?
     var webEvidenceDetail: String?
@@ -604,54 +611,6 @@ struct TaskRun: Identifiable, Hashable {
     /// Council plan-strategy projection (D31); nil for non-council runs.
     var council: CouncilInfo?
 
-    /// The review gate needs an operator decision: blocking findings remain and
-    /// no decision has been recorded yet. Derived from the honest axes
-    /// (outcomeFacts.review / reviewVerdict), never from a mixed status enum.
-    var reviewNeedsDecision: Bool {
-        guard phase.isTerminal else { return false }
-        let blocked = outcomeFacts?.review == "blocked" || reviewVerdict == .findings
-        return blocked && operatorDecisionAction == nil
-    }
-
-    /// "Full access" or "Read-only → Workspace write" style badge; nil when unknown.
-    /// Humanizes raw engine wire values (all five profiles) instead of leaking them.
-    var accessLabel: String? {
-        guard let effective = effectiveAccess else { return requestedAccess.map(AccessProfile.humanize) }
-        if let requested = requestedAccess, requested != effective {
-            return "\(AccessProfile.humanize(requested)) → \(AccessProfile.humanize(effective))"
-        }
-        return AccessProfile.humanize(effective)
-    }
-
-    var planDone: Int { plan.filter { $0.state == .done }.count }
-    var filesChanged: Int { diff.count }
-    var spendFraction: Double { spendKnown && capKnown && capUsd > 0 ? min(spendUsd / capUsd, 1) : 0 }
-    var budgetLabel: String {
-        let spend = spendKnown ? "\(spendEstimated ? "~" : "")\(String(format: "$%.4f", spendUsd))" : "Unknown"
-        let cap = budgetUnlimited ? "Unlimited" : capKnown ? String(format: "$%.2f", capUsd) : "Unknown"
-        return "\(spend) / \(cap)"
-    }
-
-    /// State-machine invariant: a terminal status may only be PRESENTED with
-    /// its final content. Until the snapshot lands, the run is "Finalizing" —
-    /// never a green Succeeded badge next to an empty Outcome.
-    var isFinalizing: Bool {
-        guard isLive, phase.isTerminal, phase != .cancelled else { return false }
-        // loadRunDetail ALWAYS fills diagnosticText with at least a
-        // placeholder, so for a GREEN badge (succeeded) diagnostics only
-        // count as content when the engine explicitly marked the output as
-        // diagnostic — otherwise "Succeeded" could sit next to an empty
-        // Outcome, exactly the bug this state exists to prevent. For
-        // failure-shaped terminals (failed/blocked/exhausted/no-op/...) the
-        // diagnostics blob IS the legitimate final content.
-        let diagnosticIsContent = phase != .succeeded || outputReadyState == "diagnostic"
-        let hasContent =
-            !(answerText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || hasPatchArtifact
-            || (diagnosticIsContent && !(diagnosticText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            || engineError != nil
-        return !hasContent
-    }
 }
 
 // MARK: - Projects & specs

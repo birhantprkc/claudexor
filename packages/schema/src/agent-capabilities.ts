@@ -4,6 +4,7 @@ import { AdapterStatus, EffortHint, ReadonlyMechanism } from "./harness.js";
 import { WorkspaceMode } from "./thread.js";
 import { AttachmentInputClass } from "./attachment.js";
 import { OutputSchemaDialect } from "./output-schema-dialect.js";
+import { DelegationCapability } from "./delegation.js";
 
 /**
  * AgentCapabilityCatalog — the machine-readable answer to "what can this
@@ -36,6 +37,9 @@ export const RUN_START_CLIENT_REJECTED_KEYS = [
   "turnId",
   "planRunId",
   "planRef",
+  "retryOf",
+  "parentRunId",
+  "delegatedFromRunId",
 ] as const;
 
 /**
@@ -121,6 +125,9 @@ export const CatalogHarness = z
       .describe("Access profiles the adapter can enforce."),
     readonlyMechanism: ReadonlyMechanism.describe(
       "HOW read-only is enforced (fs_sandbox | permission_deny | tool_allowlist | none) — none means read-only intent is advisory for this harness.",
+    ),
+    delegation: DelegationCapability.describe(
+      "Whether this installed runtime can offer Delegate through this harness.",
     ),
   })
   .describe("Per-harness live capability row (manifest + doctor + model truth).");

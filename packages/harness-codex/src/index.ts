@@ -44,7 +44,7 @@ import {
   shouldVerifyApiKey,
 } from "@claudexor/core";
 import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
-import { parseCodexEvent, type CodexParseState } from "./parse.js";
+import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "./parse.js";
 import { probeCodexCredentialProfile, resolveCodexProfileRoute } from "./profile.js";
 import { smokeIsolatedApiKey } from "./smoke.js";
 export { canonicalCodexProfileHome, codexAccountIdentity } from "./profile.js";
@@ -184,6 +184,9 @@ export function codexBrowserArgs(
       "-c",
       `mcp_servers.${server.name}.tool_timeout_sec=120`,
     );
+    if (server.required) {
+      args.push("-c", `mcp_servers.${server.name}.required=true`);
+    }
     // Env rides as PER-KEY dotted `-c` overrides, one flag per entry. codex's
     // `-c` parser wants a TOML value; a single `env=${JSON.stringify(map)}`
     // hands it a whole JSON-object STRING, which it rejects ("invalid type:
@@ -779,7 +782,12 @@ async function* runCodex(
   // codex recorded in its own rollout transcript; cache that one read.
   let codexThreadId: string | undefined;
   let transcriptModel: string | undefined;
-  const parseState: CodexParseState = { envelopeActive: !!spec.output_schema }; // finality + #19816
+  const parseState: CodexParseState = {
+    envelopeActive: !!spec.output_schema,
+    requiredMcpServers: (spec.extra_mcp_servers ?? [])
+      .filter((server) => server.required)
+      .map((server) => server.name),
+  }; // finality + #19816 + required MCP startup proof
 
   try {
     yield* runtime.runCliHarness({
@@ -858,6 +866,15 @@ async function* runCodex(
           // unstamped null would register as the engine-default subject.
         }
         return out;
+      },
+      parseStderrFailure: (message, sessionId) => {
+        const event = parseCodexStderrFailure(message, sessionId, parseState);
+        if (event) {
+          event.credential_route = credentialRoute;
+          event.credential_source = credentialSource;
+          if (profile) event.credential_profile_id = profile.profile_id;
+        }
+        return event;
       },
     });
   } finally {

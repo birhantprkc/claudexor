@@ -147,6 +147,10 @@ export function formatRunEventLine(ev: Record<string, unknown>): string | null {
       return `[${who}] delegation belt unavailable (${String(p["server_name"] ?? "?")}: ${String(
         p["reason"] ?? "unknown",
       )})`;
+    case "delegation.belt.degraded":
+      return p["effective"] === true
+        ? `[${who}] one Delegate lane was unavailable; another effective Delegate lane remains (${String(p["reason"] ?? "unavailable")})`
+        : `[${who}] WARNING: continued without Delegate (${String(p["reason"] ?? "unavailable")})`;
     case "route.pool.degraded": {
       const dropped = Array.isArray(p["dropped_lanes"])
         ? (p["dropped_lanes"] as Array<Record<string, unknown>>)

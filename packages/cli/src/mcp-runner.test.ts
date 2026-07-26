@@ -157,6 +157,84 @@ describe("makeCancelBridge (host cancel -> typed daemon cancel)", () => {
 });
 
 describe("mcp daemon body mapping", () => {
+  it("requires the existing parent daemon for belt runs and never auto-starts one", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(null);
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon");
+    try {
+      await expect(
+        mcpSurfaceRunner({ requireExistingDaemon: true })({ mode: "agent", prompt: "go" }),
+      ).rejects.toThrow("cannot reach its parent daemon");
+      expect(connectSpy).toHaveBeenCalledOnce();
+      expect(ensureSpy).not.toHaveBeenCalled();
+    } finally {
+      connectSpy.mockRestore();
+      ensureSpy.mockRestore();
+    }
+  });
+
+  it("never auto-starts a daemon for a belt-context catalog query", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(null);
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon");
+    try {
+      await expect(
+        mcpSurfaceRunner({ requireExistingDaemon: true })({ mode: "__status" }),
+      ).rejects.toThrow(/cannot reach its parent daemon/);
+      expect(connectSpy).toHaveBeenCalledOnce();
+      expect(ensureSpy).not.toHaveBeenCalled();
+    } finally {
+      connectSpy.mockRestore();
+      ensureSpy.mockRestore();
+    }
+  });
+
+  it("does not tell a stranded belt read tool to start a second daemon", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(null);
+    try {
+      const result = (await mcpSurfaceRunner({ requireExistingDaemon: true })({
+        mode: "__run_status",
+        runId: "run-child",
+      })) as { summary: string };
+      expect(result.summary).toContain("cannot reach its parent daemon");
+      expect(result.summary).not.toContain("daemon start");
+    } finally {
+      connectSpy.mockRestore();
+    }
+  });
+
+  it("preserves the daemon's typed error field for a missing-run belt roundtrip", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 404,
+        json: async () => ({ error: "no such run smoke-missing-run" }),
+      })) as never,
+    );
+    try {
+      await expect(
+        mcpSurfaceRunner({ requireExistingDaemon: true })({
+          mode: "__run_status",
+          runId: "smoke-missing-run",
+        }),
+      ).rejects.toThrow("no such run smoke-missing-run");
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("honors the externalContextPolicy alias when web is absent (schema advertises both)", async () => {
     // The alias is validated equal to web when both are present; alone it IS
     // the web policy — silently dropping it would run the daemon default.
@@ -192,6 +270,82 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it("ignores raw Delegate lineage and enables internal enqueue only from the bound belt constructor", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connection = {
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    };
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue(connection);
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(connection);
+    const calls: Array<{ body: Record<string, unknown>; options: Record<string, unknown> }> = [];
+    const enqueueSpy = vi
+      .spyOn(daemonRun, "enqueueAndAwait")
+      .mockImplementation(async (_client, _addr, body, options) => {
+        calls.push({ body, options: options as Record<string, unknown> });
+        return { runId: "run-child", runDir: "", status: "running", jobId: "job-child" };
+      });
+    try {
+      await mcpSurfaceRunner()({
+        mode: "agent",
+        prompt: "raw",
+        deferred: true,
+        parentRunId: "forged",
+        delegatedFromRunId: "forged",
+      });
+      await mcpSurfaceRunner({
+        requireExistingDaemon: true,
+        delegationParentRunId: "run-parent",
+      })({ mode: "agent", prompt: "bound", deferred: true, delegatedFromRunId: "forged" });
+      expect(calls[0]!.body).not.toHaveProperty("parentRunId");
+      expect(calls[0]!.body).not.toHaveProperty("delegatedFromRunId");
+      expect(calls[0]!.options).not.toHaveProperty("internalDaemonEnqueue");
+      expect(calls[1]!.body).toMatchObject({
+        parentRunId: "run-parent",
+        delegatedFromRunId: "run-parent",
+      });
+      expect(calls[1]!.options).toMatchObject({ internalDaemonEnqueue: true });
+    } finally {
+      ensureSpy.mockRestore();
+      connectSpy.mockRestore();
+      enqueueSpy.mockRestore();
+    }
+  });
+
+  it("refuses a belt status/result read for a run outside its bound parent", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          summary: { runId: "run-other", delegatedFromRunId: "another-parent" },
+        }),
+      })) as never,
+    );
+    try {
+      const runner = mcpSurfaceRunner({
+        requireExistingDaemon: true,
+        delegationParentRunId: "run-parent",
+      });
+      for (const mode of ["__run_status", "__run_result"]) {
+        await expect(runner({ mode, runId: "run-other" })).rejects.toMatchObject({
+          code: "delegation_child_scope_violation",
+          status: 403,
+        });
+      }
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("requests a durable handle instead of waiting for terminal when MCP marks a run deferred", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
@@ -218,6 +372,61 @@ describe("mcp daemon body mapping", () => {
     } finally {
       ensureSpy.mockRestore();
       enqueueSpy.mockRestore();
+    }
+  });
+
+  it("projects an immediate child result lineage and terminal fields from one detail snapshot", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-child",
+      runDir: "",
+      status: "succeeded",
+      jobId: "job-child",
+    });
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        summary: {
+          parentRunId: "run-parent",
+          delegatedFromRunId: "run-parent",
+          spendUsd: 0.25,
+          delegation: {
+            requested: false,
+            effective: false,
+            used: false,
+            reason: "not_requested",
+            remediation: null,
+          },
+        },
+        applyEligibility: { eligible: false, state: "no_op" },
+        outcomeBanner: "Completed",
+        council: null,
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = (await mcpSurfaceRunner()({ mode: "agent", prompt: "go" })) as Record<
+        string,
+        unknown
+      >;
+      expect(result).toMatchObject({
+        runId: "run-child",
+        parentRunId: "run-parent",
+        delegatedFromRunId: "run-parent",
+        spendUsd: 0.25,
+        outcomeBanner: "Completed",
+        delegation: { reason: "not_requested" },
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      vi.unstubAllGlobals();
     }
   });
 

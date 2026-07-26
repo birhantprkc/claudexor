@@ -1,0 +1,10 @@
+{
+  "schema": "RunDelegationInfo",
+  "value": {
+    "requested": true,
+    "effective": false,
+    "used": false,
+    "reason": "runtime_unavailable",
+    "remediation": "Update or repair the Claudexor runtime, then retry Delegate."
+  }
+}

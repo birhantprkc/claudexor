@@ -366,6 +366,75 @@
           ],
           "description": "Council membership + merge disclosure (QA-023b); null for solo/non-plan tools or deferred handles.",
           "default": null
+        },
+        "parentRunId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "delegatedFromRunId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "delegation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "requested": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "effective": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "used": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "not_requested",
+                    "injected_unused",
+                    "used",
+                    "runtime_unavailable",
+                    "manifest_unsupported",
+                    "access_profile_incompatible",
+                    "partially_degraded",
+                    "startup_failed"
+                  ],
+                  "default": "not_requested"
+                },
+                "remediation": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "additionalProperties": false,
+              "description": "Engine-owned Delegate requested/effective/used receipt; surfaces project it without parsing model output."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Engine-owned Delegate requested/effective/used receipt; surfaces project it without parsing model output.",
+          "default": null
         }
       },
       "required": [

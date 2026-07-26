@@ -102,6 +102,18 @@ struct TurnCard: View {
                         else { transcriptExpanded = !(transcriptExpanded ?? run.phase.isActive) }
                     },
                     onOpenWorkspace: { model.openRun(run.id) })
+                if let warning = DelegationPresentation.warning(run.delegation, phase: run.phase) {
+                    DelegationWarningRow(warning: warning)
+                }
+                // Delegate children remain ordinary FLAT run rows. The narrow
+                // server-owned `delegatedFromRunId` field is the only admission
+                // rule; native vendor subagents never appear in this list.
+                ForEach(model.delegatedChildren(
+                    of: run.id,
+                    projectedIds: turn.run?.delegatedChildRunIds ?? []
+                )) { child in
+                    DelegatedRunRow(child: child)
+                }
                 inlineActivity(run, runId: runId)
                 // Non-blocking account-rotation note (INV-135), inline + transient.
                 if let note = run.attentionNote {
@@ -158,7 +170,17 @@ struct TurnCard: View {
         // this covers an already-decided run reopened cold.
         .task(id: applyLoadKey) {
             if let run, isDecisionFlow(run), run.applyEligibility == nil, model.task(run.id) != nil {
-                await model.loadRunDetail(run.id)
+                await model.ensureRunDetail(run.id)
+            }
+        }
+        // A cold reload may no longer include an older child in the bounded
+        // global runs page. Hydrate Delegate parents once so their direct-child
+        // snapshot can restore the same flat rows without an unbounded list.
+        .task(id: delegationChildLoadKey) {
+            if let runId = turn.runId,
+               (run?.delegation ?? turn.run?.delegation)?.requested == true {
+                await model.ensureRunDetail(
+                    runId, insertingIfMissing: model.task(runId) == nil)
             }
         }
     }
@@ -170,6 +192,14 @@ struct TurnCard: View {
     /// unrelated refresh.
     private var applyLoadKey: String {
         DecisionApplyPresentation.applyLoadKey(run, riskAccepted: riskAccepted)
+    }
+
+    private var delegationChildLoadKey: String {
+        guard let runId = turn.runId,
+              (run?.delegation ?? turn.run?.delegation)?.requested == true else {
+            return "delegate-children:none"
+        }
+        return "delegate-children:\(runId):\(run?.phase.rawValue ?? turn.run?.state ?? "unknown")"
     }
 
     // MARK: Answer bubble
@@ -280,11 +310,9 @@ struct TurnCard: View {
         if DecisionApplyPresentation.showsDecisionBar(run, riskAccepted: riskAccepted) {
             DecisionBar(runId: run.id) {
                 riskAccepted = true
-                // B6: pull the SERVER apply-eligibility right after accept-risk so
-                // Apply renders from the refreshed (now-eligible) gate — not the
-                // stale blocked eligibility. isDecisionFlow stays true (the
-                // operator decision is recorded), so Apply renders on THIS receipt.
-                await model.loadRunDetail(run.id)
+                // DecisionBar owns the one post-mutation detail refresh before
+                // invoking this callback. The receipt is therefore current; a
+                // second GET here would only duplicate the same snapshot.
             }
         }
         if applied {

@@ -31,6 +31,12 @@ extension AppModel {
         if task.routeProof == .unverified, existing.routeProof != .unverified { task.routeProof = existing.routeProof }
         task.authRoute = task.authRoute ?? existing.authRoute
         task.failureCategory = task.failureCategory ?? existing.failureCategory
+        // Delegation lineage/outcome rides the list summary in current engines.
+        // Preserve the last engine-owned projection across a skewed/older
+        // summary rather than making a durable warning or child link flicker.
+        task.parentRunId = task.parentRunId ?? existing.parentRunId
+        task.delegatedFromRunId = task.delegatedFromRunId ?? existing.delegatedFromRunId
+        task.delegation = task.delegation ?? existing.delegation
         // Detail-only truth the list summary NEVER carries (crit #1): the summary
         // build resets these to nil/empty, so a refresh mid-thread would blank the
         // Run Detail receipts unless the last hydrated value is kept.

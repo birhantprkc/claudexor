@@ -933,16 +933,11 @@ async function* runClaude(
   }
 
   const useSubscription = route === "subscription";
-  // Shared with discovery through the memoized --help probe, so a run never
-  // re-spawns the CLI just to learn its ladder.
-  // INV-105 on the RUN: probe the installed ladder, version-gate snapshot
-  // fallback trust (an installed 2.1.89 is never sent the 2.1.165 snapshot's
-  // xhigh), and disclose a DROP/CLAMP on the same inputs the args resolve with.
+  // Probe the installed effort ladder through the shared memoized help capture.
   const effort = await claudeRunEffortResolution(spec, runtime, abortSignalFromSpec(spec));
   const args = claudeArgsForSpec(spec, interactive, useSubscription, effort.advertised);
   if (effort.disclosure) yield effort.disclosure;
-  // Scrub EVERY provider secret (incl. OpenAI/others — the cross-provider leak
-  // fix) via the single core table, then re-add only the var this route needs.
+  // Scrub all provider secrets, then re-add only this route's credential.
   const env: Record<string, string | null | undefined> =
     subscriptionSource === "native_session" ? nativeEnv : { ...spec.env, ...providerScrubEnv() };
   if (route === "api_key" && key) {
@@ -951,13 +946,17 @@ async function* runClaude(
     env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
   }
 
-  // Route evidence: disclose the ACTUAL auth route on the started event
-  // (typed `auth_route` payload); quota attribution consumes it.
+  // Disclose the actual auth route on every normalized event.
   const credentialRoute = useSubscription
     ? ("vendor_native" as const)
     : ("managed_api_key" as const);
   const credentialSource = useSubscription ? subscriptionSource! : ("api_key_env" as const);
-  const baseParser = createClaudeParser({ deniedTools: toolPermissionSets(spec).deny });
+  const baseParser = createClaudeParser({
+    deniedTools: toolPermissionSets(spec).deny,
+    requiredMcpServers: (spec.extra_mcp_servers ?? [])
+      .filter((server) => server.required)
+      .map((server) => server.name),
+  });
   yield* runtime.runCliHarness({
     bin: BIN,
     args,
@@ -978,6 +977,7 @@ async function* runClaude(
       }
       return out;
     },
+    stopAfterEvent: (event) => event.payload?.["code"] === "required_mcp_startup_failed",
     ...(interactive
       ? {
           session: {

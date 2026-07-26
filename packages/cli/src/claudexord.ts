@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import {
   DaemonClient,
   awaitDaemonTermination,
@@ -33,7 +32,7 @@ import { DaemonControlApiServer, normalizeRunStartRequest } from "@claudexor/con
 import { armDaemonLifecycle, logLine, runStartupCrashGc } from "./daemon-lifecycle.js";
 import { assertPlanImplementReady } from "./plan-implement-readiness.js";
 import { Orchestrator } from "@claudexor/orchestrator";
-import { buildDelegationBeltDescriptor } from "./delegation-belt-descriptor.js";
+import { delegationBeltForRun } from "./delegation-belt-descriptor.js";
 import { loadConfig, sweepRetiredConfigKeysAtStartup } from "@claudexor/config";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
 import { type QuotaSubject, type ResourceAttachmentRef } from "@claudexor/schema";
@@ -49,6 +48,8 @@ import { refreshCodexQuota } from "./codex-quota-source.js";
 import { refreshClaudeStatuslineQuota } from "./claude-statusline.js";
 import { refreshClaudeOauthUsageQuota } from "./claude-oauth-usage.js";
 import { resolveThreadExecutionWorkspace } from "./thread-execution-workspace.js";
+import { dispatchClaudexordEntry, runIfDirectEntry } from "./claudexord-entry.js";
+import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 
 /** The registered quota-subject UNIVERSE (release cut V11a): for each harness,
@@ -161,6 +162,8 @@ export async function main(): Promise<void> {
     }
 
     const bus = new RunEventBus();
+    const { authority: delegationBudgetAuthority, bind: bindDelegationDaemon } =
+      createDelegationDaemonBinding();
     const journalManager = new JournalManager(daemonDir());
     const commandStoreSlot = journalManager.registerProjection(commandProjection());
     const interactionStoreSlot = journalManager.registerProjection(interactionProjection());
@@ -222,6 +225,7 @@ export async function main(): Promise<void> {
       socketPath,
       token,
       commands: threads,
+      delegationAuthority: delegationBudgetAuthority,
       onRunTerminal: (runId, threadId) => {
         interactions.dropForRun(runId);
         // Run-terminal is the one W12 path with no thread-store mutation to
@@ -242,6 +246,7 @@ export async function main(): Promise<void> {
         if (noProjectAsk) mkdirSync(NO_PROJECT_ROOT, { recursive: true, mode: 0o700 });
         const orchestrator = new Orchestrator({
           registry: buildRegistry(),
+          delegationBudgetAuthority,
           routingGoal: p.routingGoal,
           quotaSnapshots: () => quotaStoreSlot.current().read().snapshots,
           quotaEventSink: (harnessId, event) => quotaStoreSlot.current().ingest(harnessId, event),
@@ -356,6 +361,7 @@ export async function main(): Promise<void> {
           deadlineTimer.unref?.();
           runSignal = ctx.signal ? AbortSignal.any([ctx.signal, deadline.signal]) : deadline.signal;
         }
+        const delegationBelt = delegationBeltForRun(p.delegate === true, p.paidBudget);
         return orchestrator
           .run({
             onEvent: (event) => {
@@ -413,6 +419,9 @@ export async function main(): Promise<void> {
               : undefined,
             authPreference: p.authPreference,
             credentialProfileId: requestedProfileId,
+            parentRunId: p.parentRunId ?? null,
+            delegatedFromRunId: p.delegatedFromRunId ?? null,
+            delegationAdmissionId: ctx.jobId,
             repoRoot,
             prompt: String(p.prompt ?? ""),
             planRef:
@@ -449,8 +458,7 @@ export async function main(): Promise<void> {
             // Belt descriptor (D32): built once per delegate run with the parent
             // budget snapshot; injected into agent lanes whose adapter can host
             // MCP servers. Null when delegate is off (no belt).
-            delegationBelt:
-              p.delegate === true ? buildDelegationBeltDescriptor(p.paidBudget) : null,
+            delegationBelt,
             synthesis: p.synthesis,
             paidBudget: p.paidBudget,
             access: p.access,
@@ -473,6 +481,7 @@ export async function main(): Promise<void> {
           });
       },
     });
+    bindDelegationDaemon(server);
 
     const authReadiness = new AuthReadinessService(buildGateway({ includeFakes: false }), {
       cwd: NO_PROJECT_ROOT,
@@ -626,27 +635,9 @@ export async function main(): Promise<void> {
   }
 }
 
-/** Boot the daemon and translate a fatal error into a nonzero exit. The npm
- * bin wrapper (packages/claudexor/bin/claudexord.js) calls this EXPLICITLY —
- * a bare import must never boot the daemon (X228: the probe test's import
- * would race the LIVE daemon for the journal writer lease). */
+/** Explicit entry preserves import-side-effect freedom for daemon probes. */
 export function runClaudexordEntry(): void {
-  main().catch((err: unknown) => {
-    process.stderr.write(`claudexord: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exitCode = 1;
-  });
+  dispatchClaudexordEntry(main);
 }
 
-// Direct execution (node dist/claudexord.js) boots via the entry guard;
-// imports (tests, the bin wrapper) get NO side effect and call
-// runClaudexordEntry() themselves.
-const invokedAsEntry = (() => {
-  try {
-    return (
-      typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href
-    );
-  } catch {
-    return false;
-  }
-})();
-if (invokedAsEntry) runClaudexordEntry();
+runIfDirectEntry(import.meta.url, runClaudexordEntry);

@@ -17,6 +17,20 @@ export interface BrowserLaneRequirementInput {
   access: AccessProfile;
 }
 
+export interface DelegationLaneRequirementInput {
+  harnessId: string;
+  requested: boolean;
+  runtimeAvailable: boolean;
+  manifestCapable: boolean;
+  requiresFullAccess: boolean;
+  fullAccess: boolean;
+}
+
+/** Access profiles that map to an unsandboxed/full-access harness lane. */
+export function isFullAccess(access: AccessProfile): boolean {
+  return access === "full" || access === "external_sandbox_full";
+}
+
 export class RequestRequirementsError extends HarnessUnavailableError {
   readonly code = "browser_unavailable";
 
@@ -118,7 +132,7 @@ export class RequestRequirementsResolver {
         evidence_refs: ["request.external_context_policy"],
       };
     }
-    if (input.access !== "full" && input.access !== "external_sandbox_full") {
+    if (!isFullAccess(input.access)) {
       return {
         capability: "browser",
         harness_id: input.harnessId,
@@ -160,6 +174,71 @@ export class RequestRequirementsResolver {
       effective: false,
       reason: requested ? "postdiff_only" : "not_requested",
       evidence_refs: ["request.deny_paths"],
+    };
+  }
+
+  /**
+   * Resolve Delegate independently for each selected lane. Known pre-start
+   * unavailability is a disclosed degradation, not a routing refusal; an
+   * injected server that later reports startup failure is handled separately
+   * by attempt telemetry and remains terminal.
+   */
+  resolveDelegation(input: DelegationLaneRequirementInput): RequestRequirementResolution {
+    if (!input.requested) {
+      return {
+        capability: "delegation",
+        harness_id: input.harnessId,
+        eligible: input.manifestCapable,
+        requested: false,
+        effective: false,
+        reason: "not_requested",
+        evidence_refs: ["task.delegation_requested"],
+      };
+    }
+    if (!input.manifestCapable) {
+      return {
+        capability: "delegation",
+        harness_id: input.harnessId,
+        eligible: false,
+        requested: true,
+        effective: false,
+        reason: "manifest_unsupported",
+        evidence_refs: ["manifest.capability_profile.mcp_injection"],
+      };
+    }
+    if (!input.runtimeAvailable) {
+      return {
+        capability: "delegation",
+        harness_id: input.harnessId,
+        eligible: false,
+        requested: true,
+        effective: false,
+        reason: "runtime_unavailable",
+        evidence_refs: ["runtime.delegation_belt"],
+      };
+    }
+    if (input.requiresFullAccess && !input.fullAccess) {
+      return {
+        capability: "delegation",
+        harness_id: input.harnessId,
+        eligible: true,
+        requested: true,
+        effective: false,
+        reason: "access_profile_incompatible",
+        evidence_refs: [
+          "manifest.capability_profile.mcp_injection_requires_full_access",
+          "task.access.effective_profile",
+        ],
+      };
+    }
+    return {
+      capability: "delegation",
+      harness_id: input.harnessId,
+      eligible: true,
+      requested: true,
+      effective: true,
+      reason: "effective",
+      evidence_refs: ["runtime.delegation_belt", "manifest.capability_profile.mcp_injection"],
     };
   }
 

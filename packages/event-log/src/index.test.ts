@@ -41,6 +41,25 @@ describe("EventLog seq stamping", () => {
     expect(lines.map((l) => l.seq)).toEqual([1, 2, 3]);
   });
 
+  it("defers a Delegate terminal so late child cash stays before the final event", () => {
+    const path = join(reapMk(join(tmpdir(), "claudexor-eventlog-")), "events.jsonl");
+    const log = new EventLog(path, "run-1", "task-1");
+    log.emit("run.created", {});
+    log.deferTerminal();
+    log.emit("run.completed", { lifecycle: "succeeded" });
+    log.emit("budget.cash", { cash_spend_usd: 0.4, valuation_usd: 0 });
+    log.flushDeferredTerminal();
+    const lines = readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { seq: number; type: string });
+    expect(lines.map(({ seq, type }) => [seq, type])).toEqual([
+      [1, "run.created"],
+      [2, "budget.cash"],
+      [3, "run.completed"],
+    ]);
+  });
+
   it("continues the sequence when reopening an existing log (no cursor reuse)", () => {
     const path = join(reapMk(join(tmpdir(), "claudexor-eventlog-")), "events.jsonl");
     new EventLog(path, "run-1", "task-1").emit("run.created", {});

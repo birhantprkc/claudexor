@@ -233,6 +233,7 @@ const WARNING_EVENT_TYPES = new Set([
   "route.pool.degraded",
   "route.profile.headroom_exceeded",
   "route.profile.rotation_exhausted",
+  "delegation.belt.degraded",
   "policy.web.upgraded",
   "run.blocked",
 ]);

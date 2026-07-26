@@ -48,6 +48,8 @@ export const RouteRankingReason = z
     "quality_tier",
     "expiring_quota_slack",
     "all_incremental_cash_unknown",
+    "delegate_effective_first",
+    "explicit_primary",
     "declared_order",
   ])
   .describe("Typed decisive reason the pool ranked the way it did (QA-034).");

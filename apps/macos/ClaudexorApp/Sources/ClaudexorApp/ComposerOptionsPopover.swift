@@ -8,6 +8,17 @@ import ClaudexorKit
 // small, single-owner unit. Pure move — zero behavior change.
 
 extension ThreadsScreen {
+    /// Delegate readiness is one engine projection for the selected primary
+    /// route plus the draft's typed access profile. The control stays visible
+    /// when unavailable so the user sees the concrete repair/update path.
+    var delegateControlState: DelegationPresentation.ControlState {
+        let families = primaryFamily.map { [$0] } ?? effectiveIncludedFamilies
+        return DelegationPresentation.control(
+            capabilities: families.map { model.harnessInfo(for: $0)?.delegation },
+            hasFullAccess: access == .full
+        )
+    }
+
     /// The effective per-turn credential route for MODEL enumeration (W20):
     /// the thread's sticky auth preference (falling back to the global
     /// default) mapped onto the ?route= vocabulary. Auto = nil = unfiltered —
@@ -257,9 +268,32 @@ extension ThreadsScreen {
                                       : "Hard cap on repair attempts")
                         }
                     }
+                    let delegateState = delegateControlState
                     Toggle("Delegate — let the agent spawn bounded sub-runs", isOn: $delegate)
                         .toggleStyle(.switch).tint(Theme.accent)
-                        .help("Inject the Claudexor delegation belt (ask / plan / isolated sub-run / best-of / status / result). The harness decides when to delegate; sub-runs are isolated, depth-1, budget- and count-capped. Refused server-side on harnesses without MCP injection.")
+                        .disabled(!delegateState.available)
+                        .help(delegateState.explanation)
+                        .accessibilityHint(delegateState.explanation)
+                        .onChange(of: delegateState.available) { _, _ in
+                            delegate = DelegationPresentation.visibleToggleValue(
+                                isOn: delegate,
+                                control: delegateState
+                            )
+                        }
+                        .onAppear {
+                            delegate = DelegationPresentation.visibleToggleValue(
+                                isOn: delegate,
+                                control: delegateState
+                            )
+                        }
+                    if !delegateState.available {
+                        Label(delegateState.explanation, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.status(.caution))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityLabel("Delegate unavailable")
+                            .accessibilityValue(delegateState.explanation)
+                    }
                     // QA-010: Create scaffolds a brand-new project, so its test
                     // script does not exist until the run writes it — yet the
                     // operator already knows the command they expect (`npm test`).

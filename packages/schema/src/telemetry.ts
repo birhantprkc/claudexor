@@ -16,6 +16,7 @@ import { AuthPreference } from "./primitives.js";
 import { AuthRouteReason, AuthSourceKind } from "./auth.js";
 import { RequestRequirementResolution } from "./request-requirements.js";
 import { WorkState } from "./work-report.js";
+import { RunDelegationInfo } from "./delegation.js";
 
 /**
  * Run telemetry artifact (`final/telemetry.yaml`).
@@ -506,13 +507,11 @@ export const RunTelemetry = z
       "Web policy actually executed by the selected route.",
     ),
     web_required: z.boolean().default(false).describe("Whether the run required web evidence."),
-    /** Attempt whose output became the final answer/patch; null when no attempt succeeded. */
     final_attempt_id: Id.nullable()
       .default(null)
       .describe(
         "Attempt whose output became the final answer/patch; null when no attempt succeeded.",
       ),
-    /** Run-level web evidence: the final attempt's evidence, else the most severe attempt evidence. */
     web: WebEvidenceRecord.describe(
       "Run-level web evidence: the final attempt's evidence, else the most severe attempt evidence.",
     ),
@@ -524,16 +523,17 @@ export const RunTelemetry = z
       .array(RequestRequirementResolution)
       .default([])
       .describe("All selected-lane capability receipts for this run."),
-    /** Sum of attempt outcome warnings; surfaces render this separately from terminal state. */
+    delegation: RunDelegationInfo.nullable()
+      .default(null)
+      .describe(
+        "Run-level Delegate receipt aggregated from engine injection and typed tool evidence; null on legacy artifacts that did not record it.",
+      ),
     tool_warnings_total: z
       .number()
       .int()
       .nonnegative()
       .default(0)
       .describe("Sum of attempt tool warnings; rendered separately from terminal state."),
-    /** Token usage summed across every attempt (candidates + synthesis), the
-     * same accounting scope as spendUsd. Each field null until some attempt
-     * reports it. Not a grand total (see TokenUsage). */
     usage_totals: TokenUsage.default({}),
     /** The run's auth ROUTE RECEIPT (INV-061 disclosure): requested preference,
      * the effective route/source the deciding attempt disclosed, and a
@@ -585,7 +585,6 @@ export const RunTelemetry = z
       .describe(
         "Typed routing rationale recorded once at pool ordering (QA-034); null on legacy artifacts or when no ranking was computed.",
       ),
-    /** Deep-scan reducer outcome (#27 / D-6); null on non-deep-scan/legacy runs. */
     deep_scan_synthesis: DeepScanSynthesis.nullable()
       .default(null)
       .describe(

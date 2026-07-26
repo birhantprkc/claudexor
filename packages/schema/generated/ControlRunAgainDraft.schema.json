@@ -393,7 +393,11 @@
             },
             "parentRunId": {
               "$ref": "#/definitions/ControlRunAgainDraft/properties/sourceRunId",
-              "description": "Run this turn follows up on."
+              "description": "Server-owned parent/follow-up lineage; rejected on direct POST /runs."
+            },
+            "delegatedFromRunId": {
+              "$ref": "#/definitions/ControlRunAgainDraft/properties/sourceRunId",
+              "description": "Internal belt-child provenance only; equals parentRunId and is rejected on direct POST /runs."
             },
             "retryOf": {
               "$ref": "#/definitions/ControlRunAgainDraft/properties/sourceRunId",
@@ -478,7 +482,7 @@
             },
             "delegate": {
               "type": "boolean",
-              "description": "Agent-only: inject the Claudexor delegation belt so the harness can spawn bounded isolated sub-runs; refused on non-agent modes or harnesses without mcp_injection."
+              "description": "Agent-only: inject the Claudexor delegation belt so the harness can spawn bounded isolated sub-runs; non-agent modes refuse, while known belt or harness unavailability degrades before start to ordinary Agent with a durable warning."
             },
             "maxSeconds": {
               "type": "integer",

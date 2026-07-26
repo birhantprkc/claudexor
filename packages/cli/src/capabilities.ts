@@ -17,6 +17,7 @@ import { defaultClaudexorTools } from "@claudexor/mcp-server";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import { CLI_COMMANDS } from "./command-registry.js";
 import { buildGateway, harnessModels } from "./registry.js";
+import { delegationCapabilityFor } from "./delegation-capability.js";
 
 /** MCP tool names from the server's own descriptor producer (noop runner). */
 export function mcpToolNames(): readonly string[] {
@@ -86,6 +87,7 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
         effortLevels: [...(s.manifest?.capabilities.effort_levels ?? [])],
         accessProfilesSupported: [...(s.manifest?.access_profiles_supported ?? [])],
         readonlyMechanism: profile?.access_control.readonly_mechanism ?? "none",
+        delegation: delegationCapabilityFor(s.manifest),
       };
     }),
   );

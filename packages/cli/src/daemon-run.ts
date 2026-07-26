@@ -20,6 +20,12 @@ import {
   type ControlApiAddress,
 } from "./live.js";
 import { TERMINAL_LIFECYCLES, type RunOutcomeFacts, outcomeExitCode } from "@claudexor/schema";
+import {
+  projectApplyEligibility,
+  projectOutcomeBanner,
+  type ApplyEligibilityProjection,
+} from "./run-detail-projections.js";
+export { projectOutcomeBanner, type ApplyEligibilityProjection } from "./run-detail-projections.js";
 export {
   daemonOutcomeProblemFields,
   fetchRunOutcomeFacts,
@@ -187,6 +193,9 @@ export async function enqueueAndAwait(
   body: Record<string, unknown>,
   opts: {
     waitForTerminal: boolean;
+    /** Belt-only path: enqueue through the authenticated daemon socket so
+     * server-owned delegation lineage never becomes forgeable on POST /runs. */
+    internalDaemonEnqueue?: boolean;
     startTimeoutMs?: number;
     /** Invoked each terminal-wait iteration once the run is bound (MCP uses
      * this to bridge pendingInteractions -> host elicitation). Awaited: a
@@ -201,45 +210,55 @@ export async function enqueueAndAwait(
   // thread-less surface and now REFUSES threadId. Server-owned keys (scope,
   // execution, lineage) are stripped: the turns request schema is strict and
   // the route derives them from the thread.
-  const turnThreadId = typeof body["threadId"] === "string" ? (body["threadId"] as string) : "";
-  const { url, postBody } = turnThreadId
-    ? { url: `/threads/${encodeURIComponent(turnThreadId)}/turns`, postBody: threadTurnBody(body) }
-    : { url: "/runs", postBody: body };
-  const startRes = await controlApiFetch(addr, url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
-    body: JSON.stringify(postBody),
-  });
-  const startText = await startRes.text();
-  const start = startText ? (JSON.parse(startText) as Record<string, unknown>) : {};
-  if (!startRes.ok) {
-    const message =
-      typeof start["message"] === "string"
-        ? (start["message"] as string)
-        : `run enqueue failed (HTTP ${startRes.status})`;
-    const code = typeof start["code"] === "string" ? (start["code"] as string) : undefined;
-    // Output-schema refusals are born before a job exists. Preserve their
-    // typed public contract as a terminal outcome instead of throwing through
-    // the CLI's legacy string-only catch; the general problem projector is
-    // intentionally owned by #28.
-    if (code === "unsupported_schema_dialect" || code === "invalid_output_schema") {
-      return {
-        runId: "",
-        runDir: "",
-        status: "failed",
-        jobId: "",
-        error: message,
-        errorCode: code,
-        errorStatus: startRes.status,
-        errorRetryable:
-          typeof start["retryable"] === "boolean" ? (start["retryable"] as boolean) : false,
-      };
+  let jobId = "";
+  let runId = "";
+  let runDir = "";
+  if (opts.internalDaemonEnqueue) {
+    const accepted = await client.enqueue(body, {
+      clientId: "delegation-belt",
+      operation: "delegated-run",
+    });
+    jobId = accepted.id;
+  } else {
+    const turnThreadId = typeof body["threadId"] === "string" ? (body["threadId"] as string) : "";
+    const { url, postBody } = turnThreadId
+      ? {
+          url: `/threads/${encodeURIComponent(turnThreadId)}/turns`,
+          postBody: threadTurnBody(body),
+        }
+      : { url: "/runs", postBody: body };
+    const startRes = await controlApiFetch(addr, url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
+      body: JSON.stringify(postBody),
+    });
+    const startText = await startRes.text();
+    const start = startText ? (JSON.parse(startText) as Record<string, unknown>) : {};
+    if (!startRes.ok) {
+      const message =
+        typeof start["message"] === "string"
+          ? (start["message"] as string)
+          : `run enqueue failed (HTTP ${startRes.status})`;
+      const code = typeof start["code"] === "string" ? (start["code"] as string) : undefined;
+      if (code === "unsupported_schema_dialect" || code === "invalid_output_schema") {
+        return {
+          runId: "",
+          runDir: "",
+          status: "failed",
+          jobId: "",
+          error: message,
+          errorCode: code,
+          errorStatus: startRes.status,
+          errorRetryable:
+            typeof start["retryable"] === "boolean" ? (start["retryable"] as boolean) : false,
+        };
+      }
+      throw new Error(message);
     }
-    throw new Error(message);
+    jobId = String(start["jobId"] ?? "");
+    runId = typeof start["runId"] === "string" ? (start["runId"] as string) : "";
+    runDir = typeof start["runDir"] === "string" ? (start["runDir"] as string) : "";
   }
-  const jobId = String(start["jobId"] ?? "");
-  let runId = typeof start["runId"] === "string" ? (start["runId"] as string) : "";
-  let runDir = typeof start["runDir"] === "string" ? (start["runDir"] as string) : "";
 
   // Ctrl-C while the CLI waits on a daemon run must CANCEL THE RUN, not just
   // kill the waiting CLI (which would leave the daemon mutating the tree with
@@ -349,6 +368,7 @@ function threadTurnBody(body: Record<string, unknown>): Record<string, unknown> 
     execution: _execution,
     turnId: _turnId,
     parentRunId: _parentRunId,
+    delegatedFromRunId: _delegatedFromRunId,
     retryOf: _retryOf,
     ...rest
   } = body;
@@ -472,35 +492,6 @@ export async function fetchCouncil(
 }
 
 /**
- * The sub-run's settled cash spend (USD) as projected by the control-plane
- * budget owner (`GET /runs/:id` → `summary.spendUsd`). Single producer of the
- * real drawn amount the delegation belt reconciles its reservation against;
- * null when the run has no known settled cost yet. Soft-fail — a detail hiccup
- * yields null, never an inflated commit.
- */
-export async function fetchRunSpendUsd(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<number | null> {
-  if (!runId) return null;
-  try {
-    const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
-      headers: { authorization: `Bearer ${addr.token}` },
-    });
-    if (!res.ok) return null;
-    const detail = (await res.json()) as Record<string, unknown>;
-    const summary = detail["summary"];
-    const spend =
-      summary && typeof summary === "object"
-        ? (summary as { spendUsd?: unknown }).spendUsd
-        : undefined;
-    return typeof spend === "number" && Number.isFinite(spend) ? spend : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * ONE GET /runs/:id for the terminal path (INV-120/122): fetch the run detail
  * once and feed every pure projection below, instead of one round-trip per
  * projection. Soft-fails to null (a detail hiccup must never eat a finished
@@ -523,22 +514,6 @@ export async function fetchRunDetail(
   }
 }
 
-export type ApplyEligibilityProjection = {
-  eligible: boolean;
-  state: string | null;
-  reason: string | null;
-  requiredAction: string | null;
-};
-
-/** Pure projection of the delivery-gate verdict from an already-fetched detail. */
-export function projectApplyEligibility(
-  detail: Record<string, unknown> | null,
-): ApplyEligibilityProjection | null {
-  if (!detail) return null;
-  const v = detail["applyEligibility"];
-  return v && typeof v === "object" ? (v as ApplyEligibilityProjection) : null;
-}
-
 export async function fetchApplyEligibility(
   addr: ControlApiAddress,
   runId: string,
@@ -553,12 +528,6 @@ export async function fetchApplyEligibility(
  * the arbitrated truth. Null while the run is not terminal or unavailable.
  */
 /** Pure projection of the server-owned outcome banner from a fetched detail. */
-export function projectOutcomeBanner(detail: Record<string, unknown> | null): string | null {
-  if (!detail) return null;
-  const banner = detail["outcomeBanner"];
-  return typeof banner === "string" && banner.length > 0 ? banner : null;
-}
-
 export async function fetchOutcomeBanner(
   addr: ControlApiAddress,
   runId: string,

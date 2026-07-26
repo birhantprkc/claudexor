@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,7 +11,7 @@ import {
   selectClaudeRunAuthRoute,
 } from "./index.js";
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
-import type { CliRunLoopOptions } from "@claudexor/core";
+import { runCliHarness, type CliRunLoopOptions } from "@claudexor/core";
 
 const readonlySupported = async () => ({
   supported: true,
@@ -497,6 +497,77 @@ describe("Claude transport-aware source selection", () => {
       credential_source: "native_session",
       payload: { api_retry: true },
     });
+  });
+
+  it("projects a missing required injected MCP server as failed startup evidence", async () => {
+    let cliOptions: CliRunLoopOptions | undefined;
+    const adapter = createClaudeAdapter({
+      detectVersion: async () => "2.1.165",
+      probeReadonlyProfile: readonlySupported,
+      probeAuthStatus: async () => nativeProbe,
+      anthropicApiKey: () => null,
+      claudeOAuthToken: () => null,
+      probeEffortLevels: async () => ({ levels: [], live: true }),
+      runCliHarness: async function* (options: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
+        cliOptions = options;
+        yield {
+          type: "completed",
+          session_id: options.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    for await (const _event of adapter.run(
+      spec({
+        extra_mcp_servers: [
+          {
+            name: "claudexor",
+            command: process.execPath,
+            args: ["belt.js"],
+            env: {},
+            required: true,
+          },
+        ],
+      }),
+    )) {
+      // drain
+    }
+    const init = cliOptions?.parseEvent?.(
+      { type: "system", subtype: "init", mcp_servers: [] },
+      "s-required",
+    );
+    expect(init?.[0]?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "failed" }]);
+    const fatal = init?.[1];
+    expect(fatal).toMatchObject({
+      type: "error",
+      payload: { code: "required_mcp_startup_failed" },
+    });
+    expect(fatal && cliOptions?.stopAfterEvent?.(fatal)).toBe(true);
+
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-required-mcp-stop-"));
+    const marker = join(dir, "late-write.txt");
+    try {
+      if (!cliOptions) throw new Error("CLI options were not captured");
+      const events: HarnessEvent[] = [];
+      const script = [
+        `console.log(JSON.stringify({type:"system",subtype:"init",mcp_servers:[]}))`,
+        `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "late"), 2000)`,
+        `setTimeout(() => process.exit(0), 5000)`,
+      ].join(";");
+      for await (const event of runCliHarness({
+        ...cliOptions,
+        bin: process.execPath,
+        args: ["-e", script],
+        spec: { ...cliOptions.spec, cwd: dir },
+        env: {},
+      })) {
+        events.push(event);
+      }
+      expect(events.map((event) => event.type)).toEqual(["started", "error", "completed"]);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("selects the OAuth-token subscription source only after native is unavailable", async () => {

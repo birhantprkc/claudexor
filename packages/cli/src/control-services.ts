@@ -1,8 +1,4 @@
-/**
- * Factory of the daemon's control-api service closures (extracted from the
- * claudexord composition root, which stays thin). Each closure binds one
- * typed control operation to the daemon's stores and engine entrypoints.
- */
+/** Bind typed control operations to daemon stores and engine entrypoints. */
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join, sep } from "node:path";
 import {
@@ -45,6 +41,7 @@ import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
 import { AuthReadinessService, normalizeReadiness } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
+import { delegationCapabilityFor } from "./delegation-capability.js";
 import { commitSettingsUpdate, settingsSnapshot } from "./settings-service.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 import { ACTIVE_SETUP_STATES, SetupJobStore } from "./setup-job-store.js";
@@ -327,6 +324,7 @@ export function controlServices(
               ...s,
               configuredModel: configured,
               configuredModelCheck: check,
+              delegation: delegationCapabilityFor(s.manifest),
               // The display-ready readiness list (W4.7): normalized ONCE here;
               // Swift renders it verbatim and never parses ids or strings.
               readiness: normalizeReadiness({

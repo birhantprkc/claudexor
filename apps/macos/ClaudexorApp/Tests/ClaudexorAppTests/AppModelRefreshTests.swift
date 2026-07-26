@@ -856,6 +856,447 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func detailRefreshesDelegateLineageAndTerminalFacts() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        var task = TaskRun(
+            id: "run-child", title: "Run", prompt: "", mode: .agent, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )
+        task.delegation = RunDelegationInfo(
+            requested: true, effective: false, used: false, reason: "pending")
+        model.liveTasks = [task]
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-child" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let json = #"{"summary":{"runId":"run-child","state":"succeeded","mode":"agent","parentRunId":"run-parent","delegatedFromRunId":"run-parent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"lastSeq":7}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        await model.loadRunDetail("run-child")
+
+        let refreshed = try #require(model.liveTasks.first)
+        #expect(refreshed.parentRunId == "run-parent")
+        #expect(refreshed.delegatedFromRunId == "run-parent")
+        #expect(refreshed.delegation == RunDelegationInfo(
+            requested: true, effective: true, used: true, reason: "used"))
+    }
+
+    @MainActor
+    @Test func detailAcceptsExistingOptimisticJobIdAlias() async {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "job-queued", title: "Queued", prompt: "", mode: .agent, phase: .queued,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/job-queued" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let json = #"{"summary":{"jobId":"job-queued","runId":"run-real","state":"succeeded","mode":"agent"},"lastSeq":3}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        await model.loadRunDetail("job-queued")
+
+        #expect(model.liveTasks.map(\.id) == ["job-queued"])
+        #expect(model.liveTasks.first?.phase == .succeeded)
+    }
+
+    @MainActor
+    @Test func parentDetailRestoresHistoricalDelegateChildOutsideRunList() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        nonisolated(unsafe) var detailCalls = 0
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/threads/thread-old":
+                let json = #"{"thread":{"id":"thread-old","title":"Old","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":["run-parent"],"headRunId":"run-parent","needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"},"sessions":[],"turns":[{"id":"turn-old","threadId":"thread-old","runId":"run-parent","parentRunId":null,"kind":"agent","prompt":"Old Delegate turn","run":{"state":"succeeded","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"createdAt":"2026-07-15T00:00:00Z"}]}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/runs/run-parent":
+                detailCalls += 1
+                let json = #"{"summary":{"runId":"run-parent","state":"succeeded","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"children":[{"runId":"run-historical-child","state":"succeeded","mode":"ask","parentRunId":"run-parent","delegatedFromRunId":"run-parent"}],"lastSeq":9}"#
+                return (appResponse(for: request), Data(json.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        // Neither row exists in the bounded global list. The embedded Delegate
+        // receipt authorizes exactly one targeted parent detail hydration.
+        await model.openThread("thread-old")
+
+        #expect(model.liveTasks.map(\.id) == ["run-parent", "run-historical-child"])
+        #expect(model.delegatedChildren(of: "run-parent").map(\.id) == ["run-historical-child"])
+        #expect(detailCalls == 1)
+    }
+
+    @MainActor
+    @Test func coldDelegateHydrationRejectsWrongSummaryIdentity() async {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/threads/thread-wrong":
+                let json = #"{"thread":{"id":"thread-wrong","title":"Wrong","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":["run-parent"],"headRunId":"run-parent","needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"},"sessions":[],"turns":[{"id":"turn-wrong","threadId":"thread-wrong","runId":"run-parent","parentRunId":null,"kind":"agent","prompt":"Delegate","run":{"state":"succeeded","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"createdAt":"2026-07-15T00:00:00Z"}]}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/runs/run-parent":
+                let json = #"{"summary":{"runId":"run-foreign","state":"succeeded","mode":"agent"},"children":[{"runId":"run-child","state":"succeeded","delegatedFromRunId":"run-parent"}],"lastSeq":1}"#
+                return (appResponse(for: request), Data(json.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        await model.openThread("thread-wrong")
+
+        #expect(model.liveTasks.isEmpty)
+        #expect(!model.hydratedRunDetails.contains("run-parent"))
+    }
+
+    @MainActor
+    @Test func projectedThreadChildIdAuthorizesLazyColdInsertion() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let thread = try JSONDecoder().decode(ThreadSummary.self, from: Data(
+            #"{"id":"thread-child","title":"Child","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":["run-parent"],"headRunId":"run-parent","needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"}"#.utf8))
+        let card = try JSONDecoder().decode(TurnRunCard.self, from: Data(
+            #"{"state":"succeeded","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"},"delegatedChildRunIds":["run-child-projected"]}"#.utf8))
+        let turn = ThreadTurnInfo(
+            id: "turn-parent", threadId: thread.id, runId: "run-parent",
+            parentRunId: nil, planRunId: nil, kind: "agent", prompt: "Delegate",
+            run: card, createdAt: "2026-07-15T00:00:00Z")
+        model.selectedThreadId = thread.id
+        model.selectedThreadDetail = ThreadDetailResponse(
+            thread: thread, sessions: [], turns: [turn])
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-child-projected" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let json = #"{"summary":{"runId":"run-child-projected","state":"succeeded","mode":"ask","delegatedFromRunId":"run-parent"},"lastSeq":2}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        await model.ensureRunDetail("run-child-projected", insertingIfMissing: true)
+
+        #expect(model.liveTasks.map(\.id) == ["run-child-projected"])
+        #expect(model.liveTasks.first?.delegatedFromRunId == "run-parent")
+    }
+
+    @MainActor
+    @Test func lateColdDetailFromPreviousThreadCannotRestoreRowsOrStreams() async throws {
+        let releaseParent = DispatchSemaphore(value: 0)
+        defer {
+            releaseParent.signal()
+            AppRequestStubURLProtocol.handler = nil
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let parentStarted = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/threads/A":
+                let json = #"{"thread":{"id":"A","title":"A","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":["run-parent"],"headRunId":"run-parent","needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"},"sessions":[],"turns":[{"id":"turn-A","threadId":"A","runId":"run-parent","parentRunId":null,"kind":"agent","prompt":"Delegate","run":{"state":"running","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"createdAt":"2026-07-15T00:00:00Z"}]}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/threads/B":
+                let json = #"{"thread":{"id":"B","title":"B","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":[],"headRunId":null,"needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"},"sessions":[],"turns":[]}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/runs/run-parent":
+                parentStarted.increment()
+                _ = releaseParent.wait(timeout: .now() + 5)
+                let json = #"{"summary":{"runId":"run-parent","state":"running","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"children":[{"runId":"run-child","state":"running","mode":"ask","delegatedFromRunId":"run-parent"}],"lastSeq":9}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/runs":
+                return (appResponse(for: request), Data(#"{"runs":[]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let openA = Task { await model.openThread("A") }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while parentStarted.count == 0 {
+            try #require(ContinuousClock.now <= deadline, "parent detail never reached the stub")
+            await Task.yield()
+        }
+        model.runListReconciliationNeeded = true
+        await model.openThread("B")
+        releaseParent.signal()
+        await openA.value
+
+        #expect(model.selectedThreadId == "B")
+        #expect(model.liveTasks.isEmpty)
+        #expect(model.streamTasks["run-child"] == nil)
+        #expect(!model.hydratedRunDetails.contains("run-parent"))
+    }
+
+    @MainActor
+    @Test func failedDirectThreadSwitchReconciliationStaysDirtyUntilRetrySucceeds() async {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        nonisolated(unsafe) var parentDetailCalls = 0
+        nonisolated(unsafe) var listCalls = 0
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/threads/A":
+                let json = #"{"thread":{"id":"A","title":"A","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":["run-parent"],"headRunId":"run-parent","needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"},"sessions":[],"turns":[{"id":"turn-A","threadId":"A","runId":"run-parent","parentRunId":null,"kind":"agent","prompt":"Delegate","run":{"state":"succeeded","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"createdAt":"2026-07-15T00:00:00Z"}]}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/threads/B":
+                let json = #"{"thread":{"id":"B","title":"B","repoRoot":null,"mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":[],"headRunId":null,"needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"},"sessions":[],"turns":[]}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/runs/run-parent":
+                parentDetailCalls += 1
+                let json = #"{"summary":{"runId":"run-parent","state":"succeeded","mode":"agent","delegation":{"requested":true,"effective":true,"used":true,"reason":"used"}},"children":[{"runId":"run-child","state":"succeeded","mode":"ask","delegatedFromRunId":"run-parent"}],"lastSeq":9}"#
+                return (appResponse(for: request), Data(json.utf8))
+            case "/v2/runs":
+                listCalls += 1
+                if listCalls == 1 { throw AppRefreshTestError.badRequest }
+                return (appResponse(for: request), Data(#"{"runs":[]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        await model.openThread("A")
+        #expect(model.liveTasks.map(\.id) == ["run-parent", "run-child"])
+        await model.openThread("B")
+        #expect(model.liveTasks.map(\.id) == ["run-parent", "run-child"])
+        #expect(model.runListReconciliationNeeded)
+
+        // No daemon event: reopening the same selected thread retries the dirty
+        // bounded reconciliation instead of losing it after the failed list.
+        await model.openThread("B")
+        #expect(model.liveTasks.isEmpty)
+        #expect(!model.runListReconciliationNeeded)
+
+        await model.openThread("A")
+        #expect(model.liveTasks.map(\.id) == ["run-parent", "run-child"])
+        #expect(parentDetailCalls == 2)
+    }
+
+    @MainActor
+    @Test func overlappingViewHydrationUsesOneRunDetailRequest() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-static", title: "Run", prompt: "", mode: .agent, phase: .succeeded,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        nonisolated(unsafe) var calls = 0
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-static" else {
+                throw AppRefreshTestError.badRequest
+            }
+            calls += 1
+            Thread.sleep(forTimeInterval: 0.06)
+            return (appResponse(for: request), Data(
+                #"{"summary":{"runId":"run-static","state":"succeeded","mode":"agent"},"lastSeq":2}"#.utf8))
+        }
+
+        let first = Task { await model.ensureRunDetail("run-static") }
+        try await Task.sleep(for: .milliseconds(10))
+        await model.ensureRunDetail("run-static")
+        await first.value
+        await model.ensureRunDetail("run-static")
+
+        #expect(calls == 1)
+    }
+
+    @MainActor
+    @Test func delayedOldClientDetailCannotRepopulateAfterReconnectFence() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-stale-detail", title: "Run", prompt: "", mode: .agent, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-stale-detail" else {
+                throw AppRefreshTestError.badRequest
+            }
+            Thread.sleep(forTimeInterval: 0.12)
+            return (appResponse(for: request), Data(
+                #"{"summary":{"runId":"run-stale-detail","state":"succeeded","mode":"agent"},"lastSeq":4}"#.utf8))
+        }
+
+        let load = Task { await model.loadRunDetail("run-stale-detail") }
+        try await Task.sleep(for: .milliseconds(20))
+        model.enterHardOffline()
+        await load.value
+
+        #expect(model.liveTasks.isEmpty)
+    }
+
+    @MainActor
+    @Test func delayedOldArtifactFallbackCannotPoisonReconnectHydration() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-stale-artifact", title: "Run", prompt: "", mode: .agent, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        let artifactStarted = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/runs/run-stale-artifact":
+                return (appResponse(for: request), Data(
+                    #"{"summary":{"runId":"run-stale-artifact","state":"succeeded","mode":"agent"},"lastSeq":4}"#.utf8))
+            case "/v2/runs/run-stale-artifact/artifacts/final/answer.md":
+                artifactStarted.increment()
+                Thread.sleep(forTimeInterval: 0.15)
+                return (appResponse(for: request), Data("stale answer".utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let load = Task { await model.loadRunDetail("run-stale-artifact") }
+        for _ in 0..<100 where artifactStarted.count == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(artifactStarted.count == 1)
+        model.enterHardOffline()
+        await load.value
+
+        #expect(model.liveTasks.isEmpty)
+        #expect(!model.hydratedRunDetails.contains("run-stale-artifact"))
+    }
+
+    @MainActor
+    @Test func lateOldClientCannotClearNewSameRunDetailState() async throws {
+        let releaseOld = DispatchSemaphore(value: 0)
+        defer {
+            releaseOld.signal()
+            AppRequestStubURLProtocol.handler = nil
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let oldClient = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1111")!, token: "old",
+            session: URLSession(configuration: config))
+        let newClient = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:2222")!, token: "new",
+            session: URLSession(configuration: config))
+        let model = AppModel(client: oldClient, requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-overlap", title: "Run", prompt: "", mode: .agent, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        let oldStarted = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-overlap" else {
+                throw AppRefreshTestError.badRequest
+            }
+            if request.url?.port == 1111 {
+                oldStarted.increment()
+                _ = releaseOld.wait(timeout: .now() + 5)
+                let json = #"{"summary":{"runId":"run-overlap","state":"failed","mode":"agent","error":"old failure"},"primaryOutput":{"kind":"answer","path":"final/answer.md","text":"old answer","truncated":false},"lastSeq":5}"#
+                return (appResponse(for: request), Data(json.utf8))
+            }
+            let json = #"{"summary":{"runId":"run-overlap","state":"succeeded","mode":"agent"},"primaryOutput":{"kind":"answer","path":"final/answer.md","text":"new answer","truncated":false},"lastSeq":20}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        let oldLoad = Task { await model.loadRunDetail("run-overlap") }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while oldStarted.count == 0 {
+            try #require(ContinuousClock.now <= deadline, "old detail never reached the stub")
+            await Task.yield()
+        }
+        // Same state retirement as hard-offline, without cancelling the old
+        // task, so its response can land deterministically after the new load.
+        model.retireRunDetailState(cancelInFlight: false)
+        model.adoptClientForReconnect(newClient)
+        await model.loadRunDetail("run-overlap")
+        releaseOld.signal()
+        await oldLoad.value
+
+        let task = try #require(model.liveTasks.first)
+        #expect(task.phase == .succeeded)
+        #expect(task.answerText == "new answer")
+        #expect(task.engineError == nil)
+        #expect(model.hydratedRunDetails.contains("run-overlap"))
+        #expect(model.runDetailLoads["run-overlap"] == nil)
+        #expect(model.runDetailLoadTokens["run-overlap"] == nil)
+        #expect(model.snapshotLoadDepth["run-overlap"] == nil)
+    }
+
+    @MainActor
     @Test func eventNewerThanDelayedDetailSnapshotReplaysAfterSnapshotMerge() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
@@ -919,7 +1360,7 @@ struct AppModelRefreshTests {
         let artifactFetches = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in
             if request.url?.path == "/v2/runs/run-diag" {
-                let json = #"{"summary":{"runId":"run-diag","state":"failed","mode":"agent"},"lastSeq":10,"artifacts":[{"path":"events.jsonl","kind":"file","bytes":3000000},{"path":"attempts/a01/rollout.jsonl","kind":"file","bytes":5000000},{"path":"final/patch.diff","kind":"file","bytes":2461063}]}"#
+                let json = #"{"summary":{"runId":"run-diag","state":"failed","mode":"agent","failure":{"phase":"terminalization","category":"internal","code":"delegation_child_drain_timeout","safeMessage":"Timed out draining delegated children.","logRefs":[],"eventRefs":[],"nextActions":[]}},"failure":{"phase":"terminalization","category":"internal","code":"delegation_child_drain_timeout","safeMessage":"Timed out draining delegated children.","logRefs":[],"eventRefs":[],"nextActions":[]},"lastSeq":10,"artifacts":[{"path":"events.jsonl","kind":"file","bytes":3000000},{"path":"attempts/a01/rollout.jsonl","kind":"file","bytes":5000000},{"path":"final/patch.diff","kind":"file","bytes":2461063}]}"#
                 return (appResponse(for: request), Data(json.utf8))
             }
             if request.url?.path.contains("/artifacts/") == true {
@@ -956,6 +1397,7 @@ struct AppModelRefreshTests {
         let summary = model.liveTasks.first?.diagnosticText ?? ""
         #expect(summary.contains("events.jsonl · 3000000 bytes"))
         #expect(summary.contains("not loaded into the UI"))
+        #expect(summary.contains("code: delegation_child_drain_timeout"))
         #expect(summary.count < 2_000)
 
         await model.loadRunDiff("run-diag")

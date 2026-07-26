@@ -110,6 +110,9 @@ export const RunEventType = z
      * failed belt so the terminal outcome and UI can disclose it. Payload:
      * {attempt_id, harness_id, server_name, reason}. */
     "delegation.belt.unavailable",
+    /** Delegate was requested but known unavailable before harness startup, so
+     * the run continued as an ordinary Agent with a durable warning. */
+    "delegation.belt.degraded",
     "output.ready",
     "gate.started",
     "gate.completed",

@@ -1,4 +1,4 @@
-import { type Server, type Socket, connect, createServer } from "node:net";
+import { type Server, type Socket, createServer } from "node:net";
 import { timingSafeEqual } from "node:crypto";
 import { chmodSync, lstatSync, unlinkSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -17,8 +17,25 @@ import {
   type CommandAuthority,
 } from "./command-authority.js";
 import { productCommandRecords, prunableCommandIds } from "./command-retention.js";
+import {
+  admitDelegatedRequest,
+  delegatedParentOf,
+  isDelegatedChildRecord,
+  type DelegationAdmissionAuthority,
+} from "./delegation-admission.js";
+import {
+  JOB_STATES,
+  jobStateFromResult,
+  publicJobRecord,
+  resultReason,
+  resultSummary,
+  type JobRecord,
+} from "./job-record.js";
+import { socketAlive } from "./socket-probe.js";
+export { JOB_STATES, jobStateFromResult, socketAlive, type JobRecord };
 
 export interface RunContext {
+  jobId: string;
   signal: AbortSignal;
   onRunStart: (info: { runId: string; taskId: string; runDir: string }) => void;
 }
@@ -31,6 +48,7 @@ export interface DaemonOptions {
   runner: RunnerFn;
   maxConcurrent?: number;
   commands: CommandAuthority;
+  delegationAuthority?: DelegationAdmissionAuthority;
   maxHistory?: number;
   idempotencyRetentionMs?: number;
   now?: () => Date;
@@ -62,45 +80,6 @@ export interface DaemonOptions {
 // Daemon job state is EXACTLY the run LIFECYCLE (D8): outcome quality
 // (checks/review/reason) lives on the run's facts, projected by the control
 // plane — the job state machine never re-encodes it.
-export const JOB_STATES = [
-  "queued",
-  "running",
-  "succeeded",
-  "failed",
-  "cancelled",
-  "interrupted",
-] as const;
-
-export type JobState = (typeof JOB_STATES)[number];
-
-export interface JobRecord {
-  id: string;
-  state: JobState;
-  params: unknown;
-  result?: unknown;
-  error?: string;
-  /** Machine-readable code carried by a typed throw (e.g. the trust gate's
-   * trust_full_access_required) — lets surfaces key remedies on the CODE,
-   * never on substring-matching the human message. */
-  errorCode?: string;
-  /** HTTP status carried by a typed throw (400-599). Refusal semantics are
-   * born AT THE THROW (trust=403, requirements=400, journal recovery=503) —
-   * a bare errno-style `code` without a status is an infra failure and must
-   * not masquerade as a client-actionable 4xx. */
-  errorStatus?: number;
-  /** Retryability from a typed throw. `false` marks a refusal Exact Retry can
-   * never repair by replaying the recorded params (plan_not_ready: the frozen
-   * planRef keeps its open questions, INV-081); absent = no claim. */
-  errorRetryable?: boolean;
-  createdAt: string;
-  /** Surfaced as soon as the run starts so a client can tail the external run's events.jsonl. */
-  runId?: string;
-  taskId?: string;
-  runDir?: string;
-  startedAt?: string;
-  finishedAt?: string;
-}
-
 /** Unix-socket worker pool; scheduling stays in the injected Orchestrator. */
 export class DaemonServer {
   private server?: Server;
@@ -317,17 +296,36 @@ export class DaemonServer {
           idempotencyRequest?: unknown;
           operation?: unknown;
         };
-        const request = envelope?.request;
+        const rawRequest = envelope?.request;
+        const operation = typeof envelope.operation === "string" ? envelope.operation : undefined;
         const idempotencyKey = String(envelope?.idempotencyKey ?? "");
         const clientId = String(envelope?.clientId ?? "daemon-client");
-        assertNoInlineSecretValues(request, "$", "daemon job params");
+        assertNoInlineSecretValues(rawRequest, "$", "daemon job params");
+        // Idempotency precedes Delegate admission: replaying the exact command
+        // must keep returning its durable job even after the parent is fenced
+        // or its monotonic eight-child allowance is full. A different request
+        // under the same key still conflicts inside find().
+        const store = commandStoreForRequest(this.opts.commands, rawRequest);
+        const replay = store.find({
+          params: rawRequest,
+          idempotencyKey,
+          clientId,
+          operation,
+          idempotencyParams: envelope.idempotencyRequest,
+        });
+        if (replay) return { id: replay.id, state: replay.state };
+        const request = this.admitDelegatedRequest(rawRequest, operation);
+        const delegatedFrom = delegatedParentOf(request);
         const accepted = this.acceptCommand(
           request,
           idempotencyKey,
           clientId,
           envelope.idempotencyRequest,
-          typeof envelope.operation === "string" ? envelope.operation : undefined,
+          operation,
         );
+        if (!accepted.reused && delegatedFrom) {
+          this.opts.delegationAuthority!.noteChildAccepted(delegatedFrom, accepted.record.id);
+        }
         if (!accepted.reused) this.queue.push(accepted.record.id);
         void this.drain();
         return { id: accepted.record.id, state: accepted.record.state };
@@ -350,13 +348,25 @@ export class DaemonServer {
       case "claudexor.list":
         return productCommandRecords(this.allRecords()).map(publicJobRecord);
       case "claudexor.cancel": {
-        const jid = String(params?.id);
-        const rec = this.getRecord(jid);
-        if (!rec) throw new Error(`no such job: ${jid}`);
-        this.cancelled.add(jid);
-        if (rec.state === "queued") this.updateRecord(rec, { state: "cancelled" });
-        this.controllers.get(jid)?.abort();
-        return { id: jid, cancelled: true };
+        return this.cancelJob(String(params?.id));
+      }
+      case "claudexor.delegationFence": {
+        const runId = String(params?.runId ?? "");
+        const rec = this.allRecords().find((record) => record.runId === runId);
+        if (!rec || rec.state !== "running") {
+          throw Object.assign(new Error(`no running Delegate parent run ${runId}`), {
+            code: "delegation_parent_invalid",
+            status: 409,
+          });
+        }
+        if (!this.opts.delegationAuthority) {
+          throw Object.assign(new Error(`no Delegate authority available for parent ${runId}`), {
+            code: "delegation_budget_parent_unavailable",
+            status: 409,
+          });
+        }
+        this.opts.delegationAuthority.beginParentClose(runId);
+        return { runId, fenced: true };
       }
       case "claudexor.shutdown":
         setTimeout(() => {
@@ -374,6 +384,22 @@ export class DaemonServer {
 
   private get maxConcurrent(): number {
     return this.opts.maxConcurrent ?? 4;
+  }
+
+  /** Daemon-owned cancellation primitive used by RPC and the Delegate drain
+   * barrier. It is safe to repeat and preserves queued-admission cleanup. */
+  cancelJob(jid: string): { id: string; cancelled: true } {
+    const rec = this.getRecord(jid);
+    if (!rec) throw new Error(`no such job: ${jid}`);
+    this.cancelled.add(jid);
+    if (rec.state === "queued") {
+      this.updateRecord(rec, { state: "cancelled", finishedAt: nowIso() });
+      const delegatedFrom = delegatedParentOf(rec.params);
+      if (delegatedFrom) this.opts.delegationAuthority?.cancelAcceptedChild(delegatedFrom, rec.id);
+    }
+    if (rec.runId) this.opts.delegationAuthority?.beginParentClose(rec.runId);
+    this.controllers.get(jid)?.abort();
+    return { id: jid, cancelled: true };
   }
 
   private stoppingError(message: string): Error & { code: string; status: number } {
@@ -411,6 +437,21 @@ export class DaemonServer {
     });
   }
 
+  /**
+   * Atomic daemon-side admission for belt children. Every belt process has its
+   * own local ledger, so the durable daemon journal is the only place that can
+   * enforce the max-eight count across retries/attempts/processes. Ordinary
+   * parentRunId lineage never enters this rule.
+   */
+  private admitDelegatedRequest(request: unknown, operation?: string): unknown {
+    return admitDelegatedRequest(
+      request,
+      operation,
+      this.allRecords(),
+      this.opts.delegationAuthority,
+    );
+  }
+
   private allRecords(): JobRecord[] {
     return commandStores(this.opts.commands).flatMap((store) => store.records());
   }
@@ -431,7 +472,8 @@ export class DaemonServer {
   }
 
   /**
-   * Schedule queued jobs up to the concurrency limit (non-blocking).
+   * Schedule queued jobs up to the concurrency limit (non-blocking), plus the
+   * single Delegate-child overflow lane documented below.
    *
    * One active run per thread: a thread is a linear conversation and an in-place
    * turn mutates the live tree, so two concurrent turns on the same thread would
@@ -442,21 +484,35 @@ export class DaemonServer {
    */
   private drain(): void {
     if (this.stopping) return;
-    while (this.active < this.maxConcurrent && this.queue.length > 0) {
+    while (this.queue.length > 0) {
+      const records = this.allRecords();
+      const running = records.filter((record) => record.state === "running");
       const busyThreads = new Set(
-        this.allRecords()
-          .filter((r) => r.state === "running")
-          .map((r) => this.threadIdOf(r))
-          .filter((t): t is string => !!t),
+        running.map((r) => this.threadIdOf(r)).filter((t): t is string => !!t),
       );
-      let pickIdx = -1;
-      for (let i = 0; i < this.queue.length; i++) {
-        const rec = this.getRecord(this.queue[i]);
+      const regularSlotAvailable = this.active < this.maxConcurrent;
+      // A Delegate parent can synchronously wait for its belt child. If every
+      // regular slot is occupied by such parents, a FIFO-only pool deadlocks.
+      // Admit exactly one already-validated child as overflow while no child is
+      // running; delegated children themselves have Delegate disabled, so this
+      // cannot recurse into an unbounded overflow tree.
+      const delegatedOverflowAvailable =
+        !regularSlotAvailable && !running.some((record) => isDelegatedChildRecord(record));
+      if (!regularSlotAvailable && !delegatedOverflowAvailable) break;
+
+      const eligible = (index: number): boolean => {
+        const rec = this.getRecord(this.queue[index]);
         const tid = rec ? this.threadIdOf(rec) : undefined;
-        if (!rec || !tid || !busyThreads.has(tid)) {
-          pickIdx = i;
-          break;
-        }
+        return !rec || !tid || !busyThreads.has(tid);
+      };
+      // Children go first so a parent waiting inside a regular slot makes
+      // progress. Ordinary work may use only a regular slot.
+      let pickIdx = this.queue.findIndex((id, index) => {
+        const rec = this.getRecord(id);
+        return !!rec && isDelegatedChildRecord(rec) && eligible(index);
+      });
+      if (pickIdx === -1 && regularSlotAvailable) {
+        pickIdx = this.queue.findIndex((_id, index) => eligible(index));
       }
       if (pickIdx === -1) break; // every queued job waits on a busy thread
       const id = this.queue.splice(pickIdx, 1)[0];
@@ -485,6 +541,7 @@ export class DaemonServer {
     rec = this.updateRecord(rec, { state: "running", startedAt: nowIso() });
     try {
       const result = await this.opts.runner(rec.params, {
+        jobId: id,
         signal: controller.signal,
         onRunStart: (info) => {
           rec = this.updateRecord(rec, info);
@@ -532,6 +589,14 @@ export class DaemonServer {
     } finally {
       this.controllers.delete(id);
       this.active -= 1;
+      // An admitted child can fail before the orchestrator attaches its
+      // task-scoped ledger (contract/preflight/artifact setup). Clear that
+      // pending admission at the daemon-owned job boundary; after attachment
+      // this is intentionally a no-op and the orchestrator releases by runId.
+      const delegatedFrom = delegatedParentOf(rec.params);
+      if (delegatedFrom) {
+        this.opts.delegationAuthority?.cancelAcceptedChild(delegatedFrom, id);
+      }
       if (rec.runId) {
         try {
           this.opts.onRunTerminal?.(rec.runId, this.threadIdOf(rec));
@@ -562,91 +627,10 @@ export class DaemonServer {
   }
 }
 
-/**
- * Terminal job state from the runner result. Receipt truth (QA-027): an aborted
- * run is `cancelled` regardless of what the runner returned — a harness stream
- * that closed without throwing must never be re-encoded as `succeeded` over a
- * user/timeout cancel.
- */
-export function jobStateFromResult(result: unknown, aborted: boolean): JobState {
-  if (aborted) return "cancelled";
-  // The daemon job state IS the run lifecycle (D8), mapped 1:1 from the
-  // engine result's facts.lifecycle. Outcome quality is projected from facts
-  // by the control plane — never re-encoded into the job state here.
-  const lifecycle = resultLifecycle(result);
-  if (
-    lifecycle === "succeeded" ||
-    lifecycle === "failed" ||
-    lifecycle === "cancelled" ||
-    lifecycle === "interrupted"
-  ) {
-    return lifecycle;
-  }
-  // Fail loudly: a runner result without a recognizable lifecycle is NOT a
-  // success — success-by-default would mask malformed results forever.
-  return "failed";
-}
-
 /** Constant-time token comparison (parity with the HTTP control facade). */
 function tokenMatches(candidate: string, expected: string): boolean {
   const a = Buffer.from(candidate);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
-}
-
-/** Is a daemon already listening on this socket? Exported so the claudexord
- * entrypoint can refuse BEFORE running crash GC — a second daemon must never
- * reap the live daemon's children or sweep envelopes its jobs still own. */
-export function socketAlive(socketPath: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = connect(socketPath);
-    const done = (alive: boolean) => {
-      sock.destroy();
-      resolve(alive);
-    };
-    sock.once("connect", () => done(true));
-    sock.once("error", () => done(false));
-    setTimeout(() => done(false), 500).unref();
-  });
-}
-
-function resultLifecycle(result: unknown): string | null {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
-  const lifecycle = (result as Record<string, unknown>)["lifecycle"];
-  return typeof lifecycle === "string" ? lifecycle : null;
-}
-
-function resultReason(result: unknown): string | null {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
-  const facts = (result as Record<string, unknown>)["facts"];
-  if (!facts || typeof facts !== "object") return null;
-  const reason = (facts as Record<string, unknown>)["reason"];
-  return typeof reason === "string" ? reason : null;
-}
-
-function resultSummary(result: unknown): string | null {
-  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
-  const summary = (result as Record<string, unknown>)["summary"];
-  return typeof summary === "string" ? redactSecrets(summary) : null;
-}
-
-function publicJobRecord(rec: JobRecord): JobRecord {
-  return {
-    ...rec,
-    error: rec.error ? redactSecrets(rec.error) : undefined,
-    params: redactParams(rec.params),
-  };
-}
-
-function redactParams(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return value.map(redactParams);
-  if (!value || typeof value !== "object") return value;
-  const out: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    out[key] =
-      key === "prompt" && typeof child === "string" ? redactSecrets(child) : redactParams(child);
-  }
-  return out;
 }

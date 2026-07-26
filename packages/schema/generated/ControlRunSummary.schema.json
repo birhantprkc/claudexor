@@ -12,6 +12,87 @@
           "type": "string",
           "description": "Run id."
         },
+        "parentRunId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "Non-empty identifier string."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Parent/follow-up run id, when any.",
+          "default": null
+        },
+        "delegatedFromRunId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ControlRunSummary/properties/parentRunId/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Claudexor Delegate parent run id; null for ordinary runs and native vendor subagents.",
+          "default": null
+        },
+        "delegation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "requested": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "effective": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "used": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "not_requested",
+                    "injected_unused",
+                    "used",
+                    "runtime_unavailable",
+                    "manifest_unsupported",
+                    "access_profile_incompatible",
+                    "partially_degraded",
+                    "startup_failed"
+                  ],
+                  "default": "not_requested"
+                },
+                "remediation": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "additionalProperties": false,
+              "description": "Engine-owned Delegate requested/effective/used receipt; surfaces project it without parsing model output."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Durable Delegate requested/effective/used receipt projected from engine telemetry; null when legacy telemetry has no receipt.",
+          "default": null
+        },
         "taskId": {
           "type": "string",
           "description": "Task id, when allocated."
@@ -74,15 +155,16 @@
                         "estimate_headroom",
                         "unknown_paid_in_flight",
                         "budget_overshoot",
-                        "cost_unverifiable"
+                        "cost_unverifiable",
+                        "delegation_child_drain_timeout"
                       ],
-                      "description": "Machine-readable failure sub-code within a RunFailure category (today the typed budget-denial reasons produced by the budget ledger)."
+                      "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons and Delegate child-drain timeout)."
                     },
                     {
                       "type": "null"
                     }
                   ],
-                  "description": "Machine-readable failure sub-code within the category (today the typed budget-denial reason from the ledger); null when the category alone is sufficient. Surfaces choose remediation from this, never by parsing safeMessage.",
+                  "description": "Machine-readable failure sub-code within the category; null when the category alone is sufficient. Surfaces choose remediation from this, never by parsing safeMessage.",
                   "default": null
                 },
                 "harnessId": {
@@ -659,7 +741,8 @@
                 "type": "string",
                 "enum": [
                   "browser",
-                  "path_deny"
+                  "path_deny",
+                  "delegation"
                 ]
               },
               "harness_id": {
@@ -683,6 +766,7 @@
                   "manifest_unsupported",
                   "web_policy_off",
                   "access_profile_incompatible",
+                  "runtime_unavailable",
                   "postdiff_only"
                 ]
               },
@@ -1070,9 +1154,7 @@
                 "order": {
                   "type": "array",
                   "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Non-empty identifier string."
+                    "$ref": "#/definitions/ControlRunSummary/properties/parentRunId/anyOf/0"
                   },
                   "default": [],
                   "description": "Final ranked order, harness ids."
@@ -1080,7 +1162,7 @@
                 "dropped": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/definitions/ControlRunSummary/properties/routingRationale/anyOf/0/properties/order/items"
+                    "$ref": "#/definitions/ControlRunSummary/properties/parentRunId/anyOf/0"
                   },
                   "default": [],
                   "description": "Ids removed by paid_fallback or cooldown before ranking."
@@ -1093,6 +1175,8 @@
                     "quality_tier",
                     "expiring_quota_slack",
                     "all_incremental_cash_unknown",
+                    "delegate_effective_first",
+                    "explicit_primary",
                     "declared_order"
                   ],
                   "description": "Typed decisive reason the pool ranked the way it did (QA-034)."

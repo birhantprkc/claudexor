@@ -56,6 +56,10 @@ for (const [label, pattern] of [
     /review_attestation_b64:\s*\n\s*description:[^\n]*schema-v4 owner-review attestation/,
   ],
   ["npm provenance is mandatory", /--provenance/],
+  [
+    "installed npm daemon wrapper serves the scoped delegation belt",
+    /smoke-delegation-belt-entry\.mjs[\s\S]*?node_modules\/\.bin\/claudexord/,
+  ],
   ["artifact provenance is emitted", /actions\/attest-build-provenance@[0-9a-f]{40}/],
   ["signing is fail-closed", /Signing and notarization secrets are required/],
   ["release assets use collision checks", /Release asset collision/],
@@ -147,6 +151,7 @@ if (!String(coreManifest.scripts?.prepack ?? "").includes("verify-npm-darwin-pac
 const npmPublisher = readFileSync("scripts/publish-npm-release.mjs", "utf8");
 const verifyDarwinPackage = npmPublisher.indexOf("verify-npm-darwin-package.mjs");
 const verifyClaudexorPackage = npmPublisher.indexOf("verify-npm-claudexor-package.mjs");
+const smokePackedDelegationBelt = npmPublisher.indexOf("smokePackedDelegationBelt(packed");
 const publishTarball = npmPublisher.indexOf('"publish"');
 if (verifyDarwinPackage < 0 || publishTarball < 0 || verifyDarwinPackage > publishTarball) {
   errors.push("publish-npm-release.mjs: Darwin package verification must precede npm publish");
@@ -154,6 +159,15 @@ if (verifyDarwinPackage < 0 || publishTarball < 0 || verifyDarwinPackage > publi
 if (verifyClaudexorPackage < 0 || publishTarball < 0 || verifyClaudexorPackage > publishTarball) {
   errors.push(
     "publish-npm-release.mjs: Claudexor MCP package verification must precede npm publish",
+  );
+}
+if (
+  smokePackedDelegationBelt < 0 ||
+  publishTarball < 0 ||
+  smokePackedDelegationBelt > publishTarball
+) {
+  errors.push(
+    "publish-npm-release.mjs: exact packed delegation belt smoke must precede npm publish",
   );
 }
 for (const [label, pattern] of [

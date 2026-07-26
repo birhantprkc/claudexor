@@ -195,6 +195,12 @@ export async function handleRunCreate(
       error: "retryOf is server-owned; use POST /runs/:id/retry for Exact Retry",
     });
   }
+  if (params.parentRunId || params.delegatedFromRunId) {
+    return ctx.json(res, 400, {
+      error:
+        "parentRunId and delegatedFromRunId are server-owned lineage; Delegate children are created only by the scoped belt",
+    });
+  }
   let job: { id: string };
   try {
     job = await ctx.daemon.enqueue(params, {

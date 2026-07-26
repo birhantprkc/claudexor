@@ -167,6 +167,124 @@ describe("DaemonServer", () => {
     }
   });
 
+  it.each([
+    ["cap", "delegation_subrun_cap"],
+    ["fence", "delegation_budget_parent_unavailable"],
+  ] as const)(
+    "replays an accepted delegated command after the parent %s without admitting a new child",
+    async (_condition, refusalCode) => {
+      const dir = tempDir(_condition === "cap" ? "dr-cap" : "dr-fence");
+      const commands = commandAuthority(dir);
+      const socketPath = join(dir, "daemon.sock");
+      commands.store.accept({
+        id: "job-parent",
+        params: { delegate: true },
+        idempotencyKey: "parent",
+        clientId: "test",
+      });
+      commands.store.update("job-parent", {
+        state: "running",
+        runId: "run-parent",
+        startedAt: new Date().toISOString(),
+      });
+      let refuseNew = false;
+      let accepted = 0;
+      const server = new DaemonServer({
+        socketPath,
+        token: "token",
+        commands: commands.slot,
+        delegationAuthority: {
+          assertCanAdmitChild: () => {
+            if (!refuseNew) return;
+            throw Object.assign(new Error(refusalCode), { code: refusalCode, status: 409 });
+          },
+          noteChildAccepted: () => {
+            accepted += 1;
+          },
+          cancelAcceptedChild: () => {},
+          beginParentClose: () => {},
+        },
+        runner: async () => ({ lifecycle: "succeeded" }),
+      });
+      await server.start();
+      try {
+        const client = new DaemonClient(socketPath, "token");
+        const child = {
+          prompt: "child",
+          parentRunId: "run-parent",
+          delegatedFromRunId: "run-parent",
+        };
+        const options = {
+          idempotencyKey: "child-one",
+          clientId: "belt",
+          operation: "delegated-run",
+        };
+        const first = await client.enqueue(child, options);
+        refuseNew = true;
+        const replay = await client.enqueue(child, options);
+        expect(replay.id).toBe(first.id);
+        expect(accepted).toBe(1);
+        await expect(
+          client.enqueue(child, { ...options, idempotencyKey: "child-two" }),
+        ).rejects.toMatchObject({ code: refusalCode, status: 409 });
+      } finally {
+        await server.stop();
+        commands.journal.close();
+      }
+    },
+  );
+
+  it("releases a delegated pending admission when the runner fails before binding a run", async () => {
+    const dir = tempDir("d-pre");
+    const commands = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    commands.store.accept({
+      id: "job-parent",
+      params: { delegate: true },
+      idempotencyKey: "parent",
+      clientId: "test",
+    });
+    commands.store.update("job-parent", {
+      state: "running",
+      runId: "run-parent",
+      startedAt: new Date().toISOString(),
+    });
+    const pending = new Set<string>();
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: commands.slot,
+      delegationAuthority: {
+        assertCanAdmitChild: () => {},
+        noteChildAccepted: (_parentRunId, admissionId) => pending.add(admissionId),
+        cancelAcceptedChild: (_parentRunId, admissionId) => {
+          pending.delete(admissionId);
+        },
+        beginParentClose: () => {},
+      },
+      runner: async () => {
+        throw new Error("pre-announce contract failure");
+      },
+    });
+    await server.start();
+    try {
+      const client = new DaemonClient(socketPath, "token");
+      const child = await client.enqueue(
+        {
+          prompt: "child",
+          parentRunId: "run-parent",
+          delegatedFromRunId: "run-parent",
+        },
+        { idempotencyKey: "child", clientId: "belt", operation: "delegated-run" },
+      );
+      await expect(terminal(client, child.id)).resolves.toMatchObject({ state: "failed" });
+      expect(pending).toEqual(new Set());
+    } finally {
+      await server.stop();
+      commands.journal.close();
+    }
+  });
+
   it("retains recent idempotency handles beyond the history cap and restores terminal results", async () => {
     const dir = tempDir("retention");
     const authority = commandAuthority(dir);
@@ -288,6 +406,101 @@ describe("DaemonServer", () => {
       expect(records[0]).toMatchObject({ state: "cancelled", runId: "run-1" });
       expect(records.slice(1).map((record) => record.state)).toEqual(["succeeded", "succeeded"]);
     } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("reserves one overflow lane for children when a Delegate parent occupies the only slot", async () => {
+    const dir = tempDir("dov");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let client!: DaemonClient;
+    let active = 0;
+    let maxActive = 0;
+    let firstChildReleased = false;
+    let secondStartedBeforeRelease = false;
+    let releaseFirstChild!: () => void;
+    const firstChildBarrier = new Promise<void>((resolve) => {
+      releaseFirstChild = resolve;
+    });
+    const childJobIds: string[] = [];
+    const acceptedChildren = new Set<string>();
+    let delegationAccepting = true;
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      delegationAuthority: {
+        assertCanAdmitChild: () => {
+          if (!delegationAccepting) throw new Error("parent closing");
+          if (acceptedChildren.size >= 8) throw new Error("cap reached");
+        },
+        noteChildAccepted: (_parentRunId, admissionId) => {
+          acceptedChildren.add(admissionId);
+        },
+        cancelAcceptedChild: (_parentRunId, admissionId) => {
+          acceptedChildren.delete(admissionId);
+        },
+        beginParentClose: () => {
+          delegationAccepting = false;
+        },
+      },
+      maxConcurrent: 1,
+      runner: async (params, ctx) => {
+        const input = params as { kind: "parent" | "child"; child?: number };
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        ctx.onRunStart({
+          runId: input.kind === "parent" ? "run-parent" : `run-child-${input.child}`,
+          taskId: "task",
+          runDir: dir,
+        });
+        try {
+          if (input.kind === "parent") {
+            for (const child of [1, 2]) {
+              const accepted = await client.enqueue(
+                {
+                  kind: "child",
+                  child,
+                  parentRunId: "run-parent",
+                  delegatedFromRunId: "run-parent",
+                },
+                { clientId: "delegation-belt", operation: "delegated-run" },
+              );
+              childJobIds.push(accepted.id);
+            }
+            // The first child is running in the sole overflow lane; releasing
+            // it lets the second reuse that lane while this parent waits.
+            firstChildReleased = true;
+            releaseFirstChild();
+            for (const id of childJobIds) {
+              const childRecord = await terminal(client, id);
+              if (childRecord.state !== "succeeded") {
+                throw new Error(`child ${id} ended ${childRecord.state}`);
+              }
+            }
+          } else if (input.child === 1) {
+            await firstChildBarrier;
+          } else if (!firstChildReleased) {
+            secondStartedBeforeRelease = true;
+          }
+          return { lifecycle: "succeeded" };
+        } finally {
+          active -= 1;
+        }
+      },
+    });
+    await server.start();
+    try {
+      client = new DaemonClient(socketPath, "token");
+      const parentJob = await client.enqueue({ kind: "parent", delegate: true });
+      await expect(terminal(client, parentJob.id)).resolves.toMatchObject({ state: "succeeded" });
+      expect(childJobIds).toHaveLength(2);
+      expect(secondStartedBeforeRelease).toBe(false);
+      expect(maxActive).toBe(2);
+    } finally {
+      releaseFirstChild();
       await server.stop();
       authority.journal.close();
     }

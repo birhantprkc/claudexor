@@ -1,0 +1,9 @@
+{
+  "schema": "DelegationCapability",
+  "value": {
+    "available": true,
+    "reason": "ready",
+    "remediation": null,
+    "requiresFullAccess": true
+  }
+}

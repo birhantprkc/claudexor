@@ -37,15 +37,16 @@
                 "estimate_headroom",
                 "unknown_paid_in_flight",
                 "budget_overshoot",
-                "cost_unverifiable"
+                "cost_unverifiable",
+                "delegation_child_drain_timeout"
               ],
-              "description": "Machine-readable failure sub-code within a RunFailure category (today the typed budget-denial reasons produced by the budget ledger)."
+              "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons and Delegate child-drain timeout)."
             },
             {
               "type": "null"
             }
           ],
-          "description": "Machine-readable failure sub-code within the category (today the typed budget-denial reason from the ledger); null when the category alone is sufficient. Surfaces choose remediation from this, never by parsing safeMessage.",
+          "description": "Machine-readable failure sub-code within the category; null when the category alone is sufficient. Surfaces choose remediation from this, never by parsing safeMessage.",
           "default": null
         },
         "harnessId": {

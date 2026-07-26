@@ -21,6 +21,8 @@ const CODEX_TRANSIENT_RE =
  */
 export interface CodexParseState {
   lastAgentMessage?: string;
+  /** Engine-injected MCP servers whose startup Codex was told to require. */
+  requiredMcpServers?: string[];
   /**
    * D-16 / codex #19816: true when THIS run armed a WorkReport output-schema
    * envelope (`--output-schema` present). codex applies the schema to
@@ -92,7 +94,18 @@ export function parseCodexEvent(
         type: "started",
         session_id: sessionId,
         ts,
-        payload: { thread_id: obj.thread_id, native_session_id: obj.thread_id },
+        payload: {
+          thread_id: obj.thread_id,
+          native_session_id: obj.thread_id,
+          ...(state?.requiredMcpServers?.length
+            ? {
+                mcp_servers: state.requiredMcpServers.map((name) => ({
+                  name,
+                  status: "connected",
+                })),
+              }
+            : {}),
+        },
       },
     ];
   }
@@ -159,6 +172,7 @@ export function parseCodexEvent(
       error: message,
       payload: obj,
     };
+    applyRequiredMcpFailure(ev, message, state);
     applyCodexRateLimit(ev, message, obj.error?.resets_at ?? obj.resets_at);
     applyCodexTransient(ev, message);
     return [ev];
@@ -191,6 +205,7 @@ export function parseCodexEvent(
       error: message,
       payload: obj,
     };
+    applyRequiredMcpFailure(ev, message, state);
     applyCodexRateLimit(ev, message, obj.resets_at ?? obj.error?.resets_at);
     applyCodexTransient(ev, message);
     return [ev];
@@ -400,6 +415,50 @@ export function parseCodexEvent(
     }
   }
   return null;
+}
+
+const REQUIRED_MCP_FAILURE_PREFIX = "required MCP servers failed to initialize:";
+
+function applyRequiredMcpFailure(
+  event: HarnessEvent,
+  message: string,
+  state: CodexParseState | undefined,
+): void {
+  if (!state?.requiredMcpServers?.length) return;
+  const failureLine = message
+    .split(/\r?\n/)
+    .find((line) => line.startsWith(REQUIRED_MCP_FAILURE_PREFIX));
+  if (!failureLine) return;
+  const failedNames = failureLine.slice(REQUIRED_MCP_FAILURE_PREFIX.length);
+  const failed = state.requiredMcpServers.filter((name) =>
+    new RegExp(`(^|[^a-zA-Z0-9_-])${escapeRegex(name)}([^a-zA-Z0-9_-]|$)`).test(failedNames),
+  );
+  if (failed.length === 0) return;
+  event.payload = {
+    ...(event.payload ?? {}),
+    code: "required_mcp_startup_failed",
+    mcp_servers: failed.map((name) => ({ name, status: "failed" })),
+  };
+}
+
+/** Translate Codex's stderr-only required-MCP fatal into the same typed receipt as JSON errors. */
+export function parseCodexStderrFailure(
+  message: string,
+  sessionId: string,
+  state: CodexParseState | undefined,
+): HarnessEvent | null {
+  const event: HarnessEvent = {
+    type: "error",
+    session_id: sessionId,
+    ts: nowIso(),
+    error: message,
+  };
+  applyRequiredMcpFailure(event, message, state);
+  return event.payload?.["mcp_servers"] ? event : null;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**

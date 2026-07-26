@@ -2,10 +2,12 @@ import { join } from "node:path";
 import {
   SCHEMA_VERSION,
   deriveAuthRouteReason,
+  delegationRemediationForReason,
   RunTelemetry as RunTelemetrySchema,
   type DeepScanSynthesis,
   type ModeKind,
   type RouteRankingRationale,
+  RunDelegationInfo,
   type TaskContract,
 } from "@claudexor/schema";
 import type { ArtifactStore } from "@claudexor/artifact-store";
@@ -16,6 +18,84 @@ import {
   attemptTelemetryRecord,
   type AttemptTelemetry,
 } from "./attemptTelemetry.js";
+
+/** Aggregate the run-level Delegate receipt from engine-owned request facts,
+ * per-lane preflight receipts, injection evidence, and typed belt tool events. */
+export function aggregateRunDelegation(
+  requested: boolean,
+  records: ReturnType<typeof attemptTelemetryRecord>[],
+): RunDelegationInfo {
+  if (!requested) {
+    return {
+      requested: false,
+      effective: false,
+      used: false,
+      reason: "not_requested",
+      remediation: null,
+    };
+  }
+  const belts = records.flatMap((record) =>
+    record.delegation_belt ? [record.delegation_belt] : [],
+  );
+  const used = belts.some((belt) => belt.tool_evidence);
+  const effective = belts.some((belt) => belt.requested);
+  if (belts.some((belt) => belt.failed)) {
+    return {
+      requested: true,
+      effective: true,
+      used,
+      reason: "startup_failed",
+      remediation: delegationRemediationForReason("startup_failed"),
+    };
+  }
+  const degradedReceipts = records
+    .flatMap((record) => record.request_requirements)
+    .filter(
+      (receipt) => receipt.capability === "delegation" && receipt.requested && !receipt.effective,
+    );
+  if (effective && degradedReceipts.length > 0) {
+    return {
+      requested: true,
+      effective: true,
+      used,
+      reason: "partially_degraded",
+      remediation: delegationRemediationForReason("partially_degraded"),
+    };
+  }
+  if (used)
+    return { requested: true, effective: true, used: true, reason: "used", remediation: null };
+  if (effective) {
+    return {
+      requested: true,
+      effective: true,
+      used: false,
+      reason: "injected_unused",
+      remediation: null,
+    };
+  }
+  const reasons = degradedReceipts.map((receipt) => receipt.reason);
+  if (reasons.length === 0) {
+    return {
+      requested: true,
+      effective: false,
+      used: false,
+      reason: "pending",
+      remediation: null,
+    };
+  }
+  const reason = reasons.includes("runtime_unavailable")
+    ? "runtime_unavailable"
+    : reasons.includes("access_profile_incompatible")
+      ? "access_profile_incompatible"
+      : "manifest_unsupported";
+  return {
+    requested: true,
+    effective: false,
+    used: false,
+    reason,
+    remediation: delegationRemediationForReason(reason),
+  };
+}
 
 /** The run's final telemetry artifact incl. the auth-route receipt (one owner). */
 export function writeRunTelemetryArtifact(args: {
@@ -58,6 +138,7 @@ export function writeRunTelemetryArtifact(args: {
       web: runWeb,
       attempts: records,
       request_requirements: records.flatMap((record) => record.request_requirements),
+      delegation: aggregateRunDelegation(contract.delegation_requested, records),
       tool_warnings_total: records.reduce((sum, r) => sum + r.outcome.tool_warnings_count, 0),
       usage_totals: aggregateRunTokenUsage(records),
       auth_route: (() => {

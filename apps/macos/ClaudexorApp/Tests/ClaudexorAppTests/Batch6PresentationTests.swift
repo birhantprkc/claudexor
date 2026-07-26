@@ -62,10 +62,10 @@ import ClaudexorKit
 }
 
 /// D42: the thread's runs are aggregated in conversation order, de-duplicated.
-@Suite struct ThreadWorkspaceRunIdsTests {
-    private func turn(_ id: String, run: String?) -> ThreadTurnInfo {
+@Suite @MainActor struct ThreadWorkspaceRunIdsTests {
+    private func turn(_ id: String, run: String?, card: TurnRunCard? = nil) -> ThreadTurnInfo {
         ThreadTurnInfo(id: id, threadId: "t", runId: run, parentRunId: nil, planRunId: nil,
-                       kind: nil, prompt: "", run: nil, createdAt: "2026-07-20T00:00:00Z")
+                       kind: nil, prompt: "", run: card, createdAt: "2026-07-20T00:00:00Z")
     }
 
     @Test func orderedAndDeduped() {
@@ -79,6 +79,16 @@ import ClaudexorKit
     @Test func emptyWhenNoRuns() {
         let detail = ThreadDetailResponse(thread: sampleThread(), sessions: [], turns: [turn("a", run: nil)])
         #expect(ThreadWorkspacePanel.threadRunIds(detail).isEmpty)
+    }
+
+    @Test func projectedDelegateChildrenFollowParentAndDedupe() throws {
+        let card = try JSONDecoder().decode(
+            TurnRunCard.self,
+            from: Data(#"{"state":"succeeded","delegatedChildRunIds":["c1","c2","c1"]}"#.utf8))
+        let detail = ThreadDetailResponse(
+            thread: sampleThread(), sessions: [],
+            turns: [turn("a", run: "p", card: card), turn("b", run: "c2")])
+        #expect(ThreadWorkspacePanel.threadRunIds(detail) == ["p", "c1", "c2"])
     }
 
     private func sampleThread() -> ThreadSummary {

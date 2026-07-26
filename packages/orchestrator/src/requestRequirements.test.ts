@@ -104,3 +104,24 @@ describe("RequestRequirementsResolver browser preflight", () => {
     ).toBeNull();
   });
 });
+
+describe("RequestRequirementsResolver Delegate preflight", () => {
+  const resolver = new RequestRequirementsResolver();
+
+  it("gives manifest incapability precedence when both manifest and runtime are unavailable", () => {
+    expect(
+      resolver.resolveDelegation({
+        harnessId: "incapable",
+        requested: true,
+        manifestCapable: false,
+        runtimeAvailable: false,
+        requiresFullAccess: false,
+        fullAccess: false,
+      }),
+    ).toMatchObject({
+      effective: false,
+      reason: "manifest_unsupported",
+      evidence_refs: ["manifest.capability_profile.mcp_injection"],
+    });
+  });
+});

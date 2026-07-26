@@ -33,9 +33,12 @@ public struct HarnessStatus: Codable, Sendable, Identifiable, Equatable {
     /// Strict truth-source verdict for `configuredModel` ("ok"/"rejected" +
     /// actionable message) — the UI renders the doctor's honesty.
     public let configuredModelCheck: HarnessModelCheck?
+    /// Engine-owned readiness for the selected runtime/harness Delegate belt.
+    /// Absence means an older runtime and therefore fails closed in the UI.
+    public let delegation: HarnessDelegationCapability?
 
     enum CodingKeys: String, CodingKey {
-        case id, status, manifest, enabledIntents, routableIntents, disabledIntents, checks, reasons, authSources, readiness, configuredModel, configuredModelCheck
+        case id, status, manifest, enabledIntents, routableIntents, disabledIntents, checks, reasons, authSources, readiness, configuredModel, configuredModelCheck, delegation
     }
 
     public init(from decoder: Decoder) throws {
@@ -52,6 +55,25 @@ public struct HarnessStatus: Codable, Sendable, Identifiable, Equatable {
         readiness = try c.decodeIfPresent([ReadinessCheck].self, forKey: .readiness) ?? []
         configuredModel = try c.decodeIfPresent(String.self, forKey: .configuredModel)
         configuredModelCheck = try c.decodeIfPresent(HarnessModelCheck.self, forKey: .configuredModelCheck)
+        delegation = try c.decodeIfPresent(HarnessDelegationCapability.self, forKey: .delegation)
+    }
+}
+
+/// `HarnessStatusDto.delegation` / `CatalogHarness.delegation`. The reason is
+/// a closed engine vocabulary (`ready`, `runtime_unavailable`, or
+/// `manifest_unsupported`); the app displays the server-projected remediation
+/// instead of reconstructing install/update advice.
+public struct HarnessDelegationCapability: Codable, Sendable, Equatable, Hashable {
+    public let available: Bool
+    public let reason: String
+    public let remediation: String?
+    public let requiresFullAccess: Bool
+
+    public init(available: Bool, reason: String, remediation: String? = nil, requiresFullAccess: Bool) {
+        self.available = available
+        self.reason = reason
+        self.remediation = remediation
+        self.requiresFullAccess = requiresFullAccess
     }
 }
 

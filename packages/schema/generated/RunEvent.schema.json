@@ -69,6 +69,7 @@
             "council.merged",
             "budget.quota_pressure",
             "delegation.belt.unavailable",
+            "delegation.belt.degraded",
             "output.ready",
             "gate.started",
             "gate.completed",

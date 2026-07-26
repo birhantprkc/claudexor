@@ -200,6 +200,9 @@ public enum RunStartResult: Sendable, Equatable {
 public struct RunFailureInfo: Codable, Sendable, Equatable {
     public let phase: String
     public let category: String
+    /// Machine-readable sub-code used for exact remediation. Optional keeps
+    /// pre-code runtimes decodable without parsing safeMessage.
+    public let code: String?
     public let harnessId: String?
     public let attemptId: String?
     public let safeMessage: String
@@ -210,13 +213,14 @@ public struct RunFailureInfo: Codable, Sendable, Equatable {
     public let nextActions: [String]
 
     enum CodingKeys: String, CodingKey {
-        case phase, category, harnessId, attemptId, safeMessage, rawDetailRef, logRefs, eventRefs, runDir, nextActions
+        case phase, category, code, harnessId, attemptId, safeMessage, rawDetailRef, logRefs, eventRefs, runDir, nextActions
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         phase = try c.decodeIfPresent(String.self, forKey: .phase) ?? "unknown"
         category = try c.decodeIfPresent(String.self, forKey: .category) ?? "unknown"
+        code = try c.decodeIfPresent(String.self, forKey: .code)
         harnessId = try c.decodeIfPresent(String.self, forKey: .harnessId)
         attemptId = try c.decodeIfPresent(String.self, forKey: .attemptId)
         safeMessage = try c.decode(String.self, forKey: .safeMessage)
@@ -228,27 +232,18 @@ public struct RunFailureInfo: Codable, Sendable, Equatable {
     }
 }
 
-public struct RunProjectInfo: Codable, Sendable, Equatable {
-    public let kind: String
-    public let root: String?
-    public let projectName: String?
-    public let context: String
-}
-
-/// Run-level route evidence: requested vs STREAM-OBSERVED model. `verified`
-/// is true only when the harness stream itself disclosed a model identity.
-public struct RouteInfo: Codable, Sendable, Equatable {
-    public let requestedModel: String?
-    public let observedModel: String?
-    public let harnessId: String?
-    public let verified: Bool?
-}
-
 public struct RunSummary: Codable, Sendable, Identifiable, Equatable {
     public let jobId: String?
     public let runId: String
     public let taskId: String?
     public let state: String
+    /// General server-owned run lineage (retry/follow-up/delegation).
+    public let parentRunId: String?
+    /// Narrow Delegate provenance. Only the Claudexor belt sets this field;
+    /// native vendor subagents are not Claudexor runs and never populate it.
+    public let delegatedFromRunId: String?
+    /// Requested/effective/used Delegate facts for the run.
+    public let delegation: RunDelegationInfo?
     public let runDir: String?
     public let error: String?
     public let failure: RunFailureInfo?

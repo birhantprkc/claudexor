@@ -387,7 +387,7 @@
         },
         "delegate": {
           "type": "boolean",
-          "description": "Agent-only: inject the Claudexor delegation belt so the harness can spawn bounded isolated sub-runs; refused on non-agent modes or harnesses without mcp_injection."
+          "description": "Agent-only: inject the Claudexor delegation belt so the harness can spawn bounded isolated sub-runs; non-agent modes refuse, while known belt or harness unavailability degrades before start to ordinary Agent with a durable warning."
         },
         "maxSeconds": {
           "type": "integer",

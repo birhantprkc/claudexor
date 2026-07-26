@@ -289,6 +289,49 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   rm -rf "$BROWSER_SMOKE_HOME"
   echo "    bundled Browser MCP launches offline"
 
+  # Exact-artifact delegation smoke: the SAME single-file daemon entry shipped
+  # in the app must self-dispatch `mcp serve-belt`. Closing stdin terminates the
+  # stdio server; it must exit cleanly without creating daemon runtime state.
+  BELT_SMOKE_HOME="$(cd "$(mktemp -d /tmp/claudexor-belt-smoke.XXXXXX)" && pwd -P)"
+  set +e
+  env -i HOME="$BELT_SMOKE_HOME" PATH="/usr/bin:/bin" \
+    CLAUDEXOR_CONFIG_DIR="$BELT_SMOKE_HOME/config" \
+    CLAUDEXOR_ROOT_MODE=explicit \
+    CLAUDEXOR_PLUGIN_VERSION="$VERSION" \
+    CLAUDEXOR_DELEGATION_DEPTH=0 \
+    CLAUDEXOR_DELEGATION_MAX_SUBRUNS=8 \
+    CLAUDEXOR_DELEGATION_BUDGET='{"kind":"unlimited"}' \
+    "$APP/Contents/Resources/node" "$ENGINE_JS" mcp serve-belt </dev/null \
+    >"$BELT_SMOKE_HOME/belt.out" 2>"$BELT_SMOKE_HOME/belt.err"
+  BELT_SMOKE_STATUS=$?
+  set -e
+  if [ "$BELT_SMOKE_STATUS" -ne 0 ] || [ -e "$BELT_SMOKE_HOME/config" ]; then
+    echo "ERROR: bundled claudexord did not serve the belt side-effect-free" >&2
+    cat "$BELT_SMOKE_HOME/belt.err" >&2
+    rm -rf "$BELT_SMOKE_HOME"
+    exit 1
+  fi
+  rm -rf "$BELT_SMOKE_HOME"
+  echo "    bundled delegation belt launches without daemon state"
+
+  # Positive protocol proof over the exact packaged bytes: assert the scoped
+  # six-tool allowlist, then start the same entry as a scratch daemon and require
+  # a daemon-origin typed missing-run response through the belt.
+  BELT_PROTOCOL_HOME="$(cd "$(mktemp -d /tmp/claudexor-belt-proto.XXXXXX)" && pwd -P)"
+  if HOME="$BELT_PROTOCOL_HOME" PATH="/usr/bin:/bin" \
+    CLAUDEXOR_ROOT_MODE=explicit CLAUDEXOR_PLUGIN_VERSION="$VERSION" \
+    "$APP/Contents/Resources/node" "$REPO_ROOT/scripts/smoke-delegation-belt-entry.mjs" \
+      --node "$APP/Contents/Resources/node" \
+      --entry "$ENGINE_JS" \
+      --config-root "$BELT_PROTOCOL_HOME/config" >/dev/null; then
+    echo "    bundled delegation belt negotiates MCP and roundtrips its packaged daemon"
+    rm -rf "$BELT_PROTOCOL_HOME"
+  else
+    echo "ERROR: bundled claudexord delegation belt protocol smoke failed" >&2
+    rm -rf "$BELT_PROTOCOL_HOME"
+    exit 1
+  fi
+
   # Boot smoke: the bundled daemon must actually START (a load-time crash in
   # the bundle shipped in v1.0.0 and survived every gate because nothing
   # executed the bundle). Scratch HOME so the smoke never touches real state.

@@ -30,7 +30,9 @@
       "spendUsd": 0.12,
       "outputReadyState": "ready",
       "waitingOnUser": false,
-      "finishedAt": "2026-07-19T12:00:00.000Z"
+      "finishedAt": "2026-07-19T12:00:00.000Z",
+      "delegation": null,
+      "delegatedChildRunIds": []
     },
     "enqueueError": null,
     "continuity": {

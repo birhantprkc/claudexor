@@ -14,12 +14,12 @@ export class ContextOverflowError extends ClaudexorError {}
 export class WorkspaceError extends ClaudexorError {}
 
 /**
- * The Claudexor delegation belt (D32) cannot be made operational for this run:
- * no `cli.js` entry that hosts `mcp serve-belt` exists next to the launching
- * process OR this module. Emitting the belt descriptor anyway would spawn
- * `node <missing cli.js> mcp serve-belt`, which MODULE_NOT_FOUNDs inside the
- * harness — the belt reports `failed`, the harness silently answers from its
- * own native subagent, and the run terminalizes a false success (QA-024). We
- * refuse TYPED at preflight instead, naming the probed entry and the remedy.
+ * A known pre-start condition prevents construction of the Claudexor
+ * delegation belt descriptor. Agent start may catch this exact typed error and
+ * continue without Delegate while recording the durable degradation receipt;
+ * errors after descriptor injection remain hard failures.
  */
-export class DelegationBeltUnavailableError extends ClaudexorError {}
+export class DelegationBeltUnavailableError extends ClaudexorError {
+  readonly code = "delegation_belt_unavailable";
+  readonly status = 503;
+}

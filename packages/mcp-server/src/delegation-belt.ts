@@ -12,16 +12,21 @@
  * Server-side policy is enforced at the tool boundary (never trusting the
  * harness): nesting depth = 1 (a belt at depth>0 refuses — structurally the
  * sub-runs it spawns carry no belt, so this is defense-in-depth), a max sub-run
- * count per parent, and a paid-budget draw bounded by the parent ledger's
- * headroom snapshot. The policy checks are PURE functions so they are unit
- * testable without a live daemon.
+ * count per parent, and a conservative paid-budget draw bounded by the parent
+ * ledger's launch-time headroom snapshot. The daemon-lifetime shared budget
+ * authority is the authoritative cap across every belt process/child; this
+ * local snapshot only refuses obvious overdraw earlier. The policy checks are
+ * PURE functions so they are unit testable without a live daemon.
  */
-import type { PaidBudget } from "@claudexor/schema";
+import { MAX_DELEGATED_CHILDREN, type PaidBudget } from "@claudexor/schema";
 import { DELEGATION_ENV } from "@claudexor/util";
 import type { McpTool, McpToolAnnotations, RunnerFn } from "./index.js";
 
 /** Runtime policy the belt enforces, derived from the injected delegation env. */
 export interface DelegationPolicy {
+  /** Current top-level Delegate run. This is not the parent's own thread/retry
+   * ancestor; every belt child persists this exact id as its delegation parent. */
+  parentRunId: string | null;
   /** This belt's nesting depth. A top-level delegate run injects depth 0; a
    * belt observing depth>0 refuses every sub-run (belt-and-suspenders — the
    * sub-runs a belt spawns are delegate-less and carry no belt of their own). */
@@ -33,7 +38,7 @@ export interface DelegationPolicy {
   parentBudget: PaidBudget;
 }
 
-export const DEFAULT_MAX_SUBRUNS = 8;
+export const DEFAULT_MAX_SUBRUNS = MAX_DELEGATED_CHILDREN;
 
 /** Depth guard: a belt may only run at depth 0. Returns a typed refusal string
  * (never throws) when nested, else null. */
@@ -102,6 +107,9 @@ export function evaluateBeltRun(
   policy: DelegationPolicy,
   ledger: BeltLedger,
 ): { refusal: string } | { budget: PaidBudget } {
+  if (!policy.parentRunId) {
+    return { refusal: "delegation parent run id is missing; refusing untraceable sub-run" };
+  }
   const depthRefusal = delegationDepthRefusal(policy.depth);
   if (depthRefusal) return { refusal: depthRefusal };
   const countRefusal = subRunCountRefusal(ledger.started, policy.maxSubRuns);
@@ -130,6 +138,11 @@ export function readDelegationPolicy(env: NodeJS.ProcessEnv): DelegationPolicy {
     }
   }
   return {
+    parentRunId:
+      typeof env[DELEGATION_ENV.parentRunId] === "string" &&
+      env[DELEGATION_ENV.parentRunId]!.trim().length > 0
+        ? env[DELEGATION_ENV.parentRunId]!.trim()
+        : null,
     // Absent depth => 1 (fail closed: refuse), present + finite => the value.
     depth: Number.isFinite(depthRaw) ? depthRaw : 1,
     maxSubRuns: Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : DEFAULT_MAX_SUBRUNS,
@@ -240,6 +253,8 @@ export function beltClaudexorTools(
             // envelope and binds no thread); belt sub-runs never delegate again.
             deferred: false,
             delegate: false,
+            parentRunId: policy.parentRunId,
+            delegatedFromRunId: policy.parentRunId,
             paidBudget: decision.budget,
           },
           ctx.signal ? { signal: ctx.signal } : {},
@@ -267,9 +282,13 @@ export function beltClaudexorTools(
     inputSchema: runIdSchema,
     annotations: readOnly,
     handler: async (args) => {
+      if (!policy.parentRunId) {
+        return "delegation refused: delegation parent run id is missing; refusing unscoped read";
+      }
       const result = await runner({
         mode,
         runId: String((args as { runId?: unknown }).runId ?? ""),
+        delegatedFromRunId: policy.parentRunId,
       });
       return formatBeltResult(result);
     },

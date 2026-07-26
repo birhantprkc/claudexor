@@ -10,6 +10,16 @@ import {
   ControlTurnRunCard,
   type ControlRunSummary,
 } from "@claudexor/schema";
+import { directDelegatedChildrenFromRecords, type DaemonRunRecord } from "./run-record.js";
+
+export function delegatedChildRunIds(
+  parentRunId: string,
+  runs: readonly DaemonRunRecord[],
+): string[] {
+  return directDelegatedChildrenFromRecords(parentRunId, runs).map(
+    (child) => child.runId ?? child.id,
+  );
+}
 
 export function projectThread(raw: unknown, needsHuman: boolean): ControlThread {
   const t = raw as Record<string, unknown>;
@@ -51,7 +61,10 @@ export function projectSession(raw: unknown): ControlSession {
 }
 
 /** Project a run summary down to the compact card embedded on a thread turn. */
-export function turnRunCard(summary: ControlRunSummary): ControlTurnRunCard {
+export function turnRunCard(
+  summary: ControlRunSummary,
+  delegatedChildRunIds: readonly string[] = [],
+): ControlTurnRunCard {
   return ControlTurnRunCard.parse({
     state: summary.state,
     mode: summary.mode,
@@ -62,7 +75,26 @@ export function turnRunCard(summary: ControlRunSummary): ControlTurnRunCard {
     outputReadyState: summary.outputReadyState,
     waitingOnUser: summary.waitingOnUser,
     finishedAt: summary.finishedAt ?? null,
+    delegation: summary.delegation,
+    delegatedChildRunIds,
   });
+}
+
+export function projectTurnRunCards(
+  turns: readonly { run_id?: string | null }[],
+  runs: readonly DaemonRunRecord[],
+  summarize: (record: DaemonRunRecord) => ControlRunSummary,
+): Map<string, ControlTurnRunCard> {
+  const byRun = new Map(runs.map((run) => [run.runId ?? run.id, run]));
+  const cards = new Map<string, ControlTurnRunCard>();
+  for (const turn of turns) {
+    const runId = turn.run_id ?? null;
+    const record = runId ? byRun.get(runId) : undefined;
+    if (runId && record && !cards.has(runId)) {
+      cards.set(runId, turnRunCard(summarize(record), delegatedChildRunIds(runId, runs)));
+    }
+  }
+  return cards;
 }
 
 export function projectTurn(

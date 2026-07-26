@@ -13,6 +13,7 @@ enum RunDiagnosticsPresentation {
                 "category: \(failure.category)",
                 "message: \(failure.safeMessage)"
             ]
+            if let code = failure.code { lines.insert("code: \(code)", at: 2) }
             if let harness = failure.harnessId { lines.append("harness: \(harness)") }
             if let attempt = failure.attemptId { lines.append("attempt: \(attempt)") }
             if let ref = failure.rawDetailRef { lines.append("detail: \(ref)") }

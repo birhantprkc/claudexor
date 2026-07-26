@@ -64,9 +64,11 @@ import Testing
             runExists: true, diffIsEmpty: true, phase: .succeeded, hasPatchArtifact: false) == .noPatch)
     }
 
-    @Test func missingRunIsEmpty() {
+    @Test func missingProjectedRunIsRetryableFailureNotFalseEmpty() {
         #expect(RunDiffSection.diffLoadStep(
             runExists: false, diffIsEmpty: true, phase: nil, hasPatchArtifact: false) == .noRun)
+        #expect(RunDiffSection.missingProjectedRunMessage.contains("retry"))
+        #expect(!RunDiffSection.missingProjectedRunMessage.contains("No changes"))
     }
 
     @Test func terminalWithPatchFetches() {

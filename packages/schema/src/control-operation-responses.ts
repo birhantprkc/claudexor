@@ -14,6 +14,36 @@ export const ControlRunStartResponse = z
   .describe("Immediate or queued durable handle returned by POST /runs.");
 export type ControlRunStartResponse = z.infer<typeof ControlRunStartResponse>;
 
+export const ControlInteractionAnswerResponse = z
+  .object({
+    accepted: z.boolean().describe("Whether the answer was accepted."),
+    status: z
+      .enum(["delivered", "not_found", "already_resolved", "rejected"])
+      .describe(
+        "Delivery outcome: delivered into the live session, interaction not found, already resolved, or rejected.",
+      ),
+    message: z.string().optional().describe("Human-readable detail."),
+  })
+  .describe("Response to an interaction answer.");
+export type ControlInteractionAnswerResponse = z.infer<typeof ControlInteractionAnswerResponse>;
+
+export const ControlRunControlResponse = z
+  .object({
+    accepted: z.boolean().describe("Whether the control was accepted."),
+    status: z
+      .enum(["applied", "queued", "rejected", "unsupported"])
+      .default("queued")
+      .describe("Outcome: applied immediately, queued, rejected, or unsupported for this run."),
+    runId: Id.optional().describe("Run the control was applied to."),
+    cascadeRunIds: z
+      .array(Id)
+      .default([])
+      .describe("Active Claudexor Delegate descendants included in this cancellation."),
+    message: z.string().optional().describe("Human-readable detail."),
+  })
+  .describe("Response to a run control request.");
+export type ControlRunControlResponse = z.infer<typeof ControlRunControlResponse>;
+
 export const ControlRunListResponse = z
   .object({
     runs: z.array(ControlRunSummary).default([]),
@@ -85,6 +115,7 @@ export const ControlThreadTurnRequest = ControlRunStartRequest.omit({
   threadId: true,
   turnId: true,
   parentRunId: true,
+  delegatedFromRunId: true,
   retryOf: true,
 })
   .extend({

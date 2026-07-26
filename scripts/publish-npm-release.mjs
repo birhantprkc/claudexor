@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -46,6 +55,7 @@ async function main() {
       );
     }
   }
+  smokePackedDelegationBelt(packed, releaseVersion);
   for (const { pkg, tarball } of packed) {
     const bytes = readFileSync(tarball);
     const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
@@ -86,6 +96,56 @@ async function main() {
     console.log(`npm published with provenance: ${spec}`);
   }
   verifyRegistrySignatures(packed);
+}
+
+/** Install the complete exact tarball set and prove the public daemon wrapper
+ * serves the scoped belt BEFORE the first irreversible npm publish. Internal
+ * workspace dependencies are supplied by their candidate tarballs in the same
+ * install, so this never relies on the version already existing in the registry. */
+function smokePackedDelegationBelt(packed, releaseVersion) {
+  const smokeRoot = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "cx-publish-belt-")));
+  try {
+    writeFileSync(
+      join(smokeRoot, "package.json"),
+      `${JSON.stringify({ name: "claudexor-prepublish-belt", version: "0.0.0", private: true })}\n`,
+      { mode: 0o600 },
+    );
+    run(
+      "npm",
+      [
+        "install",
+        "--ignore-scripts",
+        "--no-audit",
+        "--no-fund",
+        "--legacy-peer-deps",
+        ...packed.map(({ tarball }) => tarball),
+      ],
+      smokeRoot,
+    );
+    const home = join(smokeRoot, "home");
+    mkdirSync(home, { mode: 0o700 });
+    run(
+      process.execPath,
+      [
+        resolve(root, "scripts/smoke-delegation-belt-entry.mjs"),
+        "--node",
+        process.execPath,
+        "--entry",
+        join(smokeRoot, "node_modules", ".bin", "claudexord"),
+        "--config-root",
+        join(home, "config"),
+      ],
+      root,
+      {
+        ...process.env,
+        HOME: home,
+        CLAUDEXOR_ROOT_MODE: "explicit",
+        CLAUDEXOR_PLUGIN_VERSION: releaseVersion,
+      },
+    );
+  } finally {
+    rmSync(smokeRoot, { recursive: true, force: true });
+  }
 }
 
 function discoverPackages() {
@@ -279,9 +339,10 @@ function verifyRegistrySignatures(packed) {
   run("npm", ["audit", "signatures"], auditRoot);
 }
 
-function run(command, args, cwd) {
+function run(command, args, cwd, env = process.env) {
   const result = spawnSync(command, args, {
     cwd,
+    env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });

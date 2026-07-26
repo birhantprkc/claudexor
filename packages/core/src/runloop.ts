@@ -48,6 +48,10 @@ export interface CliRunLoopOptions {
   label?: string;
   /** Redactor applied to stderr detail before it is surfaced. */
   redact?: (text: string) => string;
+  /** Adapter-owned translation for a recognized stderr-only nonzero exit. */
+  parseStderrFailure?: (stderr: string, sessionId: string) => HarnessEvent | null;
+  /** Stop and reap the harness immediately after a normalized fatal event. */
+  stopAfterEvent?: (event: HarnessEvent) => boolean;
   /**
    * Bidirectional session support (e.g. Claude's stream-json control
    * protocol). When set, stdin stays open, `initialStdin` is written at spawn,
@@ -100,6 +104,10 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
       inheritEnv: spec.env_inheritance,
       abortSignal,
       ...(opts.reap ? { reap: opts.reap } : {}),
+      onTerminationUnconfirmed: (info) => {
+        terminationUnconfirmed = { survivors: info.survivors, unresolved: info.unresolved };
+        sawError = true;
+      },
       ...(opts.session
         ? {
             keepStdinOpen: true,
@@ -152,10 +160,16 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
         droppedUnrecognizedEvents += 1;
         continue;
       }
+      let stop = false;
       for (const out of events) {
         if (out.type === "error") sawError = true;
         yield out;
+        if (opts.stopAfterEvent?.(out)) {
+          stop = true;
+          break;
+        }
       }
+      if (stop) break;
     }
   } catch (err) {
     sawError = true;
@@ -189,7 +203,7 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   }
   if (!sawError && !aborted && exitCode !== null && exitCode !== 0) {
     const tail = stderrTail();
-    yield {
+    yield (tail ? opts.parseStderrFailure?.(tail, spec.session_id) : null) ?? {
       type: "error",
       session_id: spec.session_id,
       ts: ts(),

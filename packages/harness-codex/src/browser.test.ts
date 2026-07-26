@@ -109,6 +109,7 @@ describe("codexBrowserArgs", () => {
           CLAUDEXOR_DELEGATION_DEPTH: "0",
           CLAUDEXOR_DELEGATION_MAX_SUBRUNS: "8",
         },
+        required: true,
       },
     ]);
     const joined = args.join(" ");
@@ -125,13 +126,21 @@ describe("codexBrowserArgs", () => {
     // One `-c` flag per env key (no merged object), asserted structurally.
     const envFlags = args.filter((a) => a.startsWith("mcp_servers.claudexor.env."));
     expect(envFlags).toHaveLength(2);
+    expect(joined).toContain("mcp_servers.claudexor.required=true");
   });
 
-  it("omits env overrides entirely for an extra MCP server with no env", () => {
+  it("omits env and required overrides for an optional extra MCP server", () => {
     const args = codexBrowserArgs(null, "auto", [
-      { name: "browserless", command: "/node", args: ["/x.js"], env: {} },
+      {
+        name: "browserless",
+        command: "/node",
+        args: ["/x.js"],
+        env: {},
+        required: false,
+      },
     ]);
     expect(args.join(" ")).not.toContain(".env");
+    expect(args.join(" ")).not.toContain("mcp_servers.browserless.required");
   });
 
   it("codexExecArgs omits browser overrides when browser is null", () => {

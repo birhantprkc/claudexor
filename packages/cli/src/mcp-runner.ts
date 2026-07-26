@@ -1,24 +1,17 @@
-import { ModeKind, CouncilProjection } from "@claudexor/schema";
+import { ModeKind } from "@claudexor/schema";
 import {
   connectDaemonIfRunning,
   daemonOutcomeSummary,
   ensureDaemon,
   enqueueAndAwait,
-  fetchApplyEligibility,
   fetchRunDetail,
-  fetchRunSpendUsd,
 } from "./daemon-run.js";
-
-/** Council membership + merge disclosure (QA-023b) from a run's detail, so the
- * MCP immediate-run result carries machine-verifiable Council evidence with no
- * local artifact read; null for solo/non-plan runs or a deferred handle. */
-async function fetchRunCouncil(addr: ControlApiAddress, runId: string): Promise<unknown> {
-  const parsed = CouncilProjection.safeParse((await fetchRunDetail(addr, runId))?.["council"]);
-  return parsed.success ? parsed.data : null;
-}
 import { primaryOutputForCli } from "./primary-output.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
-import { acpSessionQuery } from "./acp-surface-runner.js";
+import { projectImmediateRunDetail, projectRecoveryRunDetail } from "./mcp-run-projections.js";
+
+const BELT_DAEMON_LOST =
+  "the Claudexor delegation belt cannot reach its parent daemon; retry the parent run after repairing or restarting the runtime";
 
 export interface SurfaceRunnerHooks {
   onEvent?: (event: any) => void;
@@ -26,14 +19,34 @@ export interface SurfaceRunnerHooks {
   signal?: AbortSignal;
 }
 
+export interface McpSurfaceRunnerOptions {
+  /** Belt subprocesses must bind to their already-running parent daemon and
+   * never create a second authority under a scoped HOME. */
+  requireExistingDaemon?: boolean;
+  /** Belt-only lineage bound by the bridge from its injected environment.
+   * Raw tool arguments can never switch the generic MCP runner into this path. */
+  delegationParentRunId?: string | null;
+  /** ACP composition is supplied only by the ACP-aware bridge. Keeping this
+   * dependency injected prevents the packaged belt self-entry from pulling in
+   * or initializing the ACP surface. */
+  acpSessionQuery?: (
+    input: any,
+    hooks: SurfaceRunnerHooks | undefined,
+    bridges: {
+      cancel: typeof makeCancelBridge;
+      interactions: typeof makeInteractionBridge;
+    },
+  ) => Promise<unknown>;
+}
+
 /**
  * Shared MCP/ACP runner. All product modes cross the daemon's /v2 boundary;
  * interactive questions bridge through pendingInteractions and typed answers.
  */
-export function mcpSurfaceRunner() {
+export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
   return async (p: any, hooks?: SurfaceRunnerHooks) => {
     if (p?.mode === "__status" || p?.mode === "__capabilities") {
-      return catalogQuery(p.mode);
+      return catalogQuery(p.mode, options.requireExistingDaemon === true);
     }
     if (
       p?.mode === "__runs_list" ||
@@ -45,17 +58,33 @@ export function mcpSurfaceRunner() {
       p?.mode === "__run_answer" ||
       p?.mode === "__apply_check"
     ) {
-      return recoveryQuery(p.mode, typeof p?.runId === "string" ? p.runId : "", p);
+      return recoveryQuery(
+        p.mode,
+        typeof p?.runId === "string" ? p.runId : "",
+        options.delegationParentRunId
+          ? { ...p, delegatedFromRunId: options.delegationParentRunId }
+          : p,
+        {
+          beltContext: options.requireExistingDaemon === true,
+        },
+      );
     }
     if (p?.mode === "__journal_recovery") return journalRecoveryQuery(p);
     if (typeof p?.mode === "string" && p.mode.startsWith("__acp_session_")) {
-      return acpSessionQuery(p, hooks, {
+      if (!options.acpSessionQuery) {
+        throw new Error("ACP session operation reached a non-ACP surface");
+      }
+      return options.acpSessionQuery(p, hooks, {
         cancel: makeCancelBridge,
         interactions: makeInteractionBridge,
       });
     }
     const mode = ModeKind.parse(p?.mode ?? "agent");
-    const { client, addr } = await ensureDaemon();
+    const connection = options.requireExistingDaemon
+      ? await connectDaemonIfRunning()
+      : await ensureDaemon();
+    if (!connection) throw new Error(BELT_DAEMON_LOST);
+    const { client, addr } = connection;
     const repoRoot =
       typeof p?.repoPath === "string" && p.repoPath.trim() ? p.repoPath : process.cwd();
     const body: Record<string, unknown> = {
@@ -96,6 +125,12 @@ export function mcpSurfaceRunner() {
       ...(Array.isArray(p?.protectedPathApprovals)
         ? { protectedPathApprovals: p.protectedPathApprovals }
         : {}),
+      ...(options.delegationParentRunId
+        ? {
+            parentRunId: options.delegationParentRunId,
+            delegatedFromRunId: options.delegationParentRunId,
+          }
+        : {}),
     };
     const interactionBridge = hooks?.onInteraction
       ? makeInteractionBridge(addr, hooks.onInteraction)
@@ -113,6 +148,7 @@ export function mcpSurfaceRunner() {
         : undefined;
     const out = await enqueueAndAwait(client, addr, body, {
       waitForTerminal: p?.deferred !== true,
+      ...(options.delegationParentRunId ? { internalDaemonEnqueue: true } : {}),
       ...(onPollTick ? { onPollTick } : {}),
     });
     // The MCP result: the run's primary output as the summary (the daemon
@@ -129,32 +165,29 @@ export function mcpSurfaceRunner() {
     // A deferred MCP call intentionally returns while the run is still live.
     // Apply eligibility is a terminal projection, so querying it here would
     // delay the durable handle on a result that cannot be actionable yet.
-    const applyEligibility =
-      p?.deferred === true ? null : await fetchApplyEligibility(addr, out.runId);
+    const detail = p?.deferred === true ? null : await fetchRunDetail(addr, out.runId);
     // The sub-run's real settled spend rides the result so the delegation belt
     // can reconcile its budget reservation against the actual drawn amount
     // (single producer: the run-detail budget projection). Deferred calls return
     // before terminal, so spend is not yet settled — null.
-    const spendUsd = p?.deferred === true ? null : await fetchRunSpendUsd(addr, out.runId);
     // Council membership + merge disclosure (QA-023b) rides the result so an MCP
     // host that asked for `--council` can machine-verify it was really N/N and
     // who merged. Terminal projection — null on a deferred (still-live) handle.
-    const council = p?.deferred === true ? null : await fetchRunCouncil(addr, out.runId);
     return {
       runId: out.runId,
       runDir: out.runDir,
       status: out.status,
       outcomeFacts: (out as { outcomeFacts?: unknown }).outcomeFacts ?? null,
       summary,
-      applyEligibility,
-      spendUsd,
-      council,
+      ...projectImmediateRunDetail(detail),
     };
   };
 }
 
-async function catalogQuery(mode: "__status" | "__capabilities"): Promise<unknown> {
-  const { addr } = await ensureDaemon();
+async function catalogQuery(mode: "__status" | "__capabilities", beltContext = false) {
+  const connection = beltContext ? await connectDaemonIfRunning() : await ensureDaemon();
+  if (!connection) throw new Error(BELT_DAEMON_LOST);
+  const { addr } = connection;
   const path = mode === "__status" ? "/harnesses" : "/agent-capabilities";
   const response = await controlApiFetch(addr, path);
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
@@ -178,14 +211,16 @@ async function recoveryQuery(
   mode: string,
   runId: string,
   input: Record<string, unknown> = {},
+  context: { beltContext?: boolean } = {},
 ): Promise<unknown> {
   // Read-only recovery must not BOOT a daemon: with no daemon there are no
   // daemon-tracked runs to recover — say so instead of spawning one.
   const conn = await connectDaemonIfRunning();
   if (!conn) {
     return {
-      summary:
-        "the Claudexor daemon is not running — there are no live daemon-tracked runs to recover (start one with `claudexor daemon start` or run a mutating tool first)",
+      summary: context.beltContext
+        ? BELT_DAEMON_LOST
+        : "the Claudexor daemon is not running — there are no live daemon-tracked runs to recover (start one with `claudexor daemon start` or run a mutating tool first)",
     };
   }
   const { addr } = conn;
@@ -198,7 +233,9 @@ async function recoveryQuery(
       throw new Error(
         typeof body["message"] === "string"
           ? (body["message"] as string)
-          : `HTTP ${res.status} for ${path}`,
+          : typeof body["error"] === "string"
+            ? (body["error"] as string)
+            : `HTTP ${res.status} for ${path}`,
       );
     return body;
   };
@@ -251,71 +288,14 @@ async function recoveryQuery(
   if (!runId) throw new Error("runId is required");
   if (mode === "__run_inspect" || mode === "__run_status" || mode === "__run_result") {
     const detail = await get(`/runs/${encodeURIComponent(runId)}`);
-    const summary = (detail["summary"] ?? {}) as Record<string, unknown>;
-    const decision = (detail["decision"] ?? null) as Record<string, unknown> | null;
-    // ControlRunSummary carries the lifecycle in `state` (D8); `status` kept as
-    // a defensive fallback for older projections.
-    const status =
-      (typeof summary["state"] === "string" ? summary["state"] : null) ??
-      (typeof summary["status"] === "string" ? summary["status"] : null) ??
-      null;
-    // The read tools project the SAME axes GET /runs/:id owns — one shared shape
-    // (McpRunHandleResult), never a re-derivation. Only the human `summary` text
-    // differs per tool (result shows the primary output; inspect/status the
-    // final summary line).
-    const base = {
+    return projectRecoveryRunDetail(
+      mode,
       runId,
-      runDir: typeof summary["runDir"] === "string" ? summary["runDir"] : null,
-      status,
-      decisionStatus: decision ? ((decision["status"] as string | null) ?? null) : null,
-      pendingInteractions: Array.isArray(detail["pendingInteractions"])
-        ? (detail["pendingInteractions"] as unknown[]).length
-        : null,
-      outcomeFacts:
-        summary["outcomeFacts"] && typeof summary["outcomeFacts"] === "object"
-          ? summary["outcomeFacts"]
-          : null,
-      outcomeBanner: typeof detail["outcomeBanner"] === "string" ? detail["outcomeBanner"] : null,
-      applyEligibility: detail["applyEligibility"] ?? null,
-      planReadiness: detail["planReadiness"] ?? null,
-      // Council membership (QA-023b) + budget cash/valuation (QA-023c) ride the
-      // same detail every read surface projects, so an MCP host can machine-verify
-      // "Council was N/N, merged by X" and "$0 cash but $Y subscription valuation"
-      // without reading local artifacts.
-      council:
-        detail["council"] && typeof detail["council"] === "object" ? detail["council"] : null,
-      budget: detail["budget"] && typeof detail["budget"] === "object" ? detail["budget"] : null,
-    };
-    if (mode === "__run_result") {
-      const primaryOutput =
-        detail["primaryOutput"] && typeof detail["primaryOutput"] === "object"
-          ? (detail["primaryOutput"] as Record<string, unknown>)
-          : null;
-      const primaryText =
-        typeof primaryOutput?.["text"] === "string" ? primaryOutput["text"].trim() : "";
-      const presentedPrimaryText =
-        primaryText && primaryOutput?.["truncated"] === true
-          ? `${primaryText}\n\n[Inline preview bounded; full artifact: ${String(primaryOutput["path"] ?? "unknown")}]`
-          : primaryText;
-      const primaryKind =
-        typeof primaryOutput?.["kind"] === "string" ? primaryOutput["kind"] : null;
-      const terminalSummary =
-        presentedPrimaryText && primaryKind !== "patch"
-          ? presentedPrimaryText
-          : typeof detail["finalSummary"] === "string" && detail["finalSummary"]
-            ? detail["finalSummary"]
-            : primaryKind === "patch"
-              ? "patch produced (see artifact handles)"
-              : `run ${runId}: ${String(status ?? "unknown")}`;
-      return { summary: terminalSummary, ...base };
-    }
-    return {
-      summary:
-        typeof detail["finalSummary"] === "string" && detail["finalSummary"]
-          ? detail["finalSummary"]
-          : `run ${runId}: ${String(status ?? "unknown")}`,
-      ...base,
-    };
+      detail,
+      typeof input["delegatedFromRunId"] === "string"
+        ? (input["delegatedFromRunId"] as string)
+        : undefined,
+    );
   }
   if (mode === "__run_cancel") {
     const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}/control`, {

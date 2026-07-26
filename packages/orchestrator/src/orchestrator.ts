@@ -98,10 +98,19 @@ import {
 } from "@claudexor/core";
 import { assertRouteModelsAllowed } from "./modelGovernance.js";
 import { governRouteEffort } from "./effortGovernance.js";
-import { RequestRequirementsResolver } from "./requestRequirements.js";
+import { isFullAccess, RequestRequirementsResolver } from "./requestRequirements.js";
+import { DelegationBudgetAuthority } from "./delegationBudgetAuthority.js";
+import { activateDelegationParent } from "./delegation-parent-activation.js";
+import { routingFailureClassification } from "./routing-failure.js";
+export { routingFailureClassification } from "./routing-failure.js";
+import { runBounded } from "./run-bounded.js";
+import { planPrompt } from "./plan-prompt.js";
+import { resolveRunInputDefaults } from "./run-input-resolution.js";
+import { createRootLedger } from "./root-ledger.js";
 import { buildRevisePrompt } from "./revisePrompt.js";
 import {
   type AnnouncedRunContext,
+  announcedRunContext,
   cancelledResult,
   failTerminally,
   guardAnnouncedRun,
@@ -164,6 +173,7 @@ import {
   unrecoveredToolErrors,
   webUnsatisfied,
 } from "./attemptTelemetry.js";
+import { delegationBeltUnavailable } from "./delegationToolEvidence.js";
 import { dominantHarnessFailureCategory, harnessFailureNextActions } from "./harnessFailure.js";
 import {
   finalizeAttempt,
@@ -259,6 +269,8 @@ import { assertWriteIsolation } from "./write-isolation.js";
 
 export interface OrchestratorDeps {
   registry: AdapterRegistry;
+  /** Daemon-lifetime Delegate family budget authority. */
+  delegationBudgetAuthority?: DelegationBudgetAuthority;
   reviewers?: ReviewerSpec[];
   paidBudget?: PaidBudget;
   routingGoal?: RoutingGoal;
@@ -321,6 +333,9 @@ export interface RunInput {
   contextMode?: "off" | "auto";
   harnesses?: string[];
   primaryHarness?: string;
+  /** Internal provenance: only an explicit primary blocks Delegate's Any-capable
+   * single-lane preference. */
+  primaryHarnessExplicit?: boolean;
   routingGoal?: RoutingGoal;
   n?: number;
   baseRef?: string;
@@ -341,12 +356,22 @@ export interface RunInput {
   council?: boolean;
   /** agent flag (D32): the harness may spawn bounded isolated sub-runs through
    * the injected delegation belt. Requires a lane with
-   * `capability_profile.mcp_injection`; else a typed preflight refusal. */
+   * `capability_profile.mcp_injection`; known pre-start unavailability degrades
+   * to an ordinary Agent run with a durable warning. */
   delegate?: boolean;
+  /** Ordinary run lineage; not proof of belt delegation by itself. */
+  parentRunId?: string | null;
+  /** Belt-only provenance minted by the scoped belt runner. */
+  delegatedFromRunId?: string | null;
+  /** Daemon job id whose atomic admission authorized this child. */
+  delegationAdmissionId?: string | null;
+  /** Current top-level Delegate run id, bound after strategy allocation. */
+  delegationParentRunId?: string | null;
   /** The daemon-built delegation belt MCP server descriptor (carries the
    * delegation env: parent run id, depth, sub-run cap, budget snapshot). Injected
    * into agent lanes when `delegate` is on and the lane supports mcp_injection.
-   * Null when the embedder cannot build one (delegate then refuses). */
+   * Null when the embedder knows it cannot build one; the run then continues as
+   * ordinary Agent with a durable typed degradation receipt. */
   delegationBelt?: ExtraMcpServer | null;
   synthesis?: SynthesisMode;
   /** Explicit typed-argv deterministic gates from caller-provided run configuration. */
@@ -508,37 +533,6 @@ interface HarnessRouteSettings {
 }
 
 /** A routed candidate adapter plus its manifest capabilities and user settings. */
-/** The two access profiles that map to codex `danger-full-access` / an
- * unsandboxed lane — the only ones under which a full-access-requiring MCP
- * injection (the belt on codex) can reach the daemon. */
-export function isFullAccess(access: AccessProfile): boolean {
-  return access === "full" || access === "external_sandbox_full";
-}
-
-/**
- * A routing preflight refusal (`RoutingPreflightError`: quality routing with no
- * comparable user-declared tier for the intent) is a CONFIGURATION error, not a
- * harness-availability problem (A-1/D-9/#22). Classifying it as
- * `harness_unavailable` sent the operator to re-auth or wait for a harness; the
- * real fix is to configure a tier or change the routing goal. Detected by the
- * typed `code` (robust across duplicate `@claudexor/budget` package copies) so
- * EVERY strategy's routing catch (ask/agent/plan/deep-scan/council) classifies
- * it identically. Returns the failure category + matching remediation.
- */
-export function routingFailureClassification(err: unknown): {
-  category: "config_error" | "harness_unavailable";
-  nextActions?: string[];
-} {
-  const isPreflightRefusal =
-    !!err &&
-    typeof err === "object" &&
-    (err as { code?: unknown }).code === "routing_preflight_refused";
-  if (isPreflightRefusal) {
-    return { category: "config_error", nextActions: harnessFailureNextActions("config_error") };
-  }
-  return { category: "harness_unavailable" };
-}
-
 export interface RoutedAdapter {
   adapter: HarnessAdapter;
   adapterAccess: AccessProfile;
@@ -550,6 +544,8 @@ export interface RoutedAdapter {
   /** Per-lane deny-path enforcement disclosure (postdiff_only until an adapter
    * supports native pre-write deny). */
   denyRequirement: RequestRequirementResolution;
+  /** Per-lane Delegate requested/effective truth. */
+  delegationRequirement: RequestRequirementResolution;
   /** Harness-wide advertised effort ladder (empty = not tunable → the requested
    * effort is DISCLOSED as ignored); the adapter re-resolves per model in its own env. */
   effortLevels: readonly EffortHint[];
@@ -577,12 +573,12 @@ export interface RoutedAdapter {
   structuredOutputChannel: HarnessCapabilities["structured_output_channel"];
   /** Manifest `capability_profile.mcp_injection`: only such routes can receive
    * engine-injected MCP servers (browser, delegation belt). Delegate on a lane
-   * without it is a typed preflight refusal. */
+   * without it degrades to ordinary Agent with a typed receipt. */
   supportsMcpInjection: boolean;
   /** Manifest `capability_profile.mcp_injection_requires_full_access`: the
    * injected belt can only reach the daemon at full access (codex's sandbox
    * cancels it below full). A delegate lane below full access on such a harness
-   * is a typed preflight refusal, never a silently non-delegating belt. */
+   * degrades to ordinary Agent with a typed receipt. */
   mcpInjectionRequiresFullAccess: boolean;
   implementationTransport: ImplementationTransport;
   settings: HarnessRouteSettings | null;
@@ -593,25 +589,6 @@ const NO_PROJECT_ROOT = noProjectRepoRoot();
 const MAX_PARALLEL_CANDIDATES = 4;
 /** Default wait for one interactive answer before a benign decline. */
 const DEFAULT_INTERACTION_TIMEOUT_MS = 900_000;
-
-/** Run `work` over `items` with bounded concurrency, preserving item order via index. */
-async function runBounded<T>(
-  items: T[],
-  limit: number,
-  work: (item: T, index: number) => Promise<void>,
-): Promise<void> {
-  if (items.length === 0) return;
-  const concurrency = Math.max(1, Math.min(limit, items.length));
-  let next = 0;
-  const workers = Array.from({ length: concurrency }, async () => {
-    for (;;) {
-      const idx = next++;
-      if (idx >= items.length) return;
-      await work(items[idx] as T, idx);
-    }
-  });
-  await Promise.all(workers);
-}
 
 /** Result of one planner spawn (solo pool member, council draft, or the
  * council merge iteration). Bookkeeping that differs per path — artifact
@@ -683,7 +660,7 @@ export class Orchestrator {
   }
 
   async run(input: RunInput): Promise<OrchestratorResult> {
-    const resolved = this.resolveRunInput(input);
+    let resolved = this.resolveRunInput(input);
     // INV-062 at the ENGINE boundary: every surface fences prompts already,
     // but a direct embedder (or the daemon-less local REPL fallback) reaches
     // this entry without one. Prompts, per-run instructions, AND outputSchema
@@ -706,6 +683,21 @@ export class Orchestrator {
       throw new Error(`unknown mode: ${String(resolved.mode)}`);
     }
     const mode: ModeKind = parsedMode.data;
+    if (resolved.delegate === true && mode !== "agent") {
+      throw new Error(`Delegate is an agent-only strategy (got mode=${mode})`);
+    }
+    const runId = resolved.runId ?? newId("run");
+    resolved = {
+      ...resolved,
+      runId,
+      taskId: resolved.taskId ?? newId("task"),
+    };
+    if (resolved.delegate === true) {
+      resolved = {
+        ...resolved,
+        delegationParentRunId: runId,
+      };
+    }
     const projectProtectedPaths =
       mode === "agent" ? this.projectConfig(resolved.repoRoot).constraints.protected_paths : [];
     assertWriteIsolation({
@@ -782,10 +774,19 @@ export class Orchestrator {
             return this.runPlan(resolved, announce);
         }
       },
+      async ({ runId }) => {
+        const authority = this.deps.delegationBudgetAuthority;
+        if (!authority?.hasParent(runId)) return;
+        authority.beginParentClose(runId);
+        await authority.waitForChildren(runId);
+      },
       // Single per-run terminalization hook: release the routing-rationale map
       // entry on EVERY terminal (incl. a run that died before its telemetry
       // writer ran, which is the leak this closes).
-      (runId) => this.routingRationaleByRun.delete(runId),
+      (runId) => {
+        this.routingRationaleByRun.delete(runId);
+        this.deps.delegationBudgetAuthority?.releaseRun(runId);
+      },
     );
   }
 
@@ -1057,106 +1058,11 @@ export class Orchestrator {
    * expand to n. Fails loudly if nothing can perform the intent.
    */
   private resolveRunInput(input: RunInput): RunInput {
-    if (
-      input.contextMode === "off" &&
-      !(input.mode === "ask" && input.repoRoot === NO_PROJECT_ROOT)
-    ) {
-      throw new Error("contextMode 'off' is only supported for Ask without a repoRoot");
-    }
-    const cfg = this.config(input.repoRoot);
-    const configuredPool = cfg?.global.routing.eligible_harnesses;
-    const harnesses =
-      input.harnesses ?? (configuredPool && configuredPool.length > 0 ? configuredPool : undefined);
-    // GH #25 precedence: an explicit --primary-harness wins and is validated
-    // against the pool; else a single-item explicit pool infers itself as
-    // primary (shipped in #34); else the configured default primary applies.
-    const explicitPrimary = input.primaryHarness;
-    const configPrimary = cfg?.global.routing.primary_harness;
-    const primaryHarness =
-      explicitPrimary ??
-      (input.harnesses?.length === 1 ? input.harnesses[0] : undefined) ??
-      configPrimary ??
-      undefined;
-    if (
-      primaryHarness &&
-      harnesses &&
-      harnesses.length > 0 &&
-      !harnesses.includes(primaryHarness)
-    ) {
-      if (explicitPrimary) {
-        // An explicit primary must be a member of the eligible pool (authoritative).
-        throw new Error(
-          `primary harness '${explicitPrimary}' is not in the eligible harness pool (${harnesses.join(", ")}); ` +
-            `pass --primary-harness as one of [${harnesses.join(", ")}], or add '${explicitPrimary}' to --harness`,
-        );
-      }
-      // GH #25 remainder: a MULTI-harness pool whose CONFIGURED default primary
-      // is absent, with no --primary-harness pinned, is ambiguous — the engine
-      // must not silently reroute. Refuse with a structured, copy-pasteable fix
-      // naming the pool, the missing primary, and the exact flag to add.
-      throw new HarnessUnavailableError(
-        `ambiguous primary harness: the configured default primary '${primaryHarness}' is not in the selected pool [${harnesses.join(", ")}], ` +
-          `and no --primary-harness was given. Pin one explicitly, e.g. \`--primary-harness ${harnesses[0]}\` ` +
-          `(or another of [${harnesses.join(", ")}]).`,
-      );
-    }
-    if (input.web && input.externalContextPolicy && input.web !== input.externalContextPolicy) {
-      throw new Error(
-        `contradictory web policy: web='${input.web}' vs externalContextPolicy='${input.externalContextPolicy}' (pass one, or equal values)`,
-      );
-    }
-    const web = input.web ?? input.externalContextPolicy ?? "auto";
-    // INV-103: scalar `model` expands only to the resolved primary, never the pool;
-    // an explicit per-harness map wins. Unknown map keys fail loudly (INV-021).
-    const knownHarnessIds = new Set(this.deps.registry.keys());
-    for (const key of Object.keys(input.models ?? {})) {
-      if (!knownHarnessIds.has(key)) {
-        throw new Error(
-          `models map names unknown harness '${key}' (registered: ${[...knownHarnessIds].sort().join(", ")}); ` +
-            `run \`claudexor harness list --all\``,
-        );
-      }
-    }
-    const models: Record<string, string> = { ...input.models };
-    if (input.model) {
-      const scalarTarget =
-        primaryHarness ?? (harnesses && harnesses.length === 1 ? harnesses[0] : undefined);
-      if (!scalarTarget) {
-        throw new Error(
-          `a scalar model ('${input.model}') is ambiguous without a primary harness: ` +
-            `the pool is ${harnesses && harnesses.length > 0 ? `[${harnesses.join(", ")}]` : "auto-resolved"} — ` +
-            `set a primary harness, pass exactly one --harness, or use a harness-scoped model map`,
-        );
-      }
-      models[scalarTarget] ??= input.model;
-    }
-    // QA-035: FREEZE the config-derived per-harness default_model into the
-    // resolved model map at initial normalization, exactly like an explicit
-    // input. Without this the TaskContract records `routing_models: {}` and an
-    // Exact Retry re-resolves the model against CURRENT settings — silently
-    // changing the route after a settings edit. A per-turn/scalar value already
-    // set wins (??=). Only a known resolved pool can be frozen here; a pure
-    // auto pool's lanes are not yet known (documented seam).
-    const harnessCfg = cfg?.global.harnesses ?? {};
-    for (const hid of harnesses ?? []) {
-      const def = harnessCfg[hid]?.default_model;
-      if (def) models[hid] ??= def;
-    }
-    return {
-      ...input,
-      harnesses,
-      primaryHarness,
-      model: undefined,
-      models,
-      routingGoal:
-        input.routingGoal ??
-        this.deps.routingGoal ??
-        cfg?.project.budget?.routing_goal ??
-        cfg?.global.routing.goal ??
-        "auto",
-      web,
-      externalContextPolicy: web,
-    };
+    return resolveRunInputDefaults(input, {
+      config: this.config(input.repoRoot),
+      registryIds: this.deps.registry.keys(),
+      routingGoal: this.deps.routingGoal,
+    });
   }
 
   private async resolveCandidateAdapters(
@@ -1422,6 +1328,14 @@ export class Orchestrator {
             id,
             (input.denyPaths?.length ?? 0) > 0,
           ),
+          delegationRequirement: this.requestRequirements.resolveDelegation({
+            harnessId: id,
+            requested: input.delegate === true,
+            runtimeAvailable: input.delegationBelt != null,
+            manifestCapable: manifest.capability_profile.mcp_injection,
+            requiresFullAccess: manifest.capability_profile.mcp_injection_requires_full_access,
+            fullAccess: isFullAccess(requiredAccess),
+          }),
           effortLevels: manifest.capabilities.effort_levels,
           knownModels: manifest.capabilities.known_models,
           // A selected profile's credential_kind IS the route (round-18 #2);
@@ -1480,6 +1394,7 @@ export class Orchestrator {
     }
     emitPrimaryDivergence(log, input.primaryHarness, ordered, pool, dropped);
     const n = input.n ?? ordered.length;
+    const selectionOrder = ordered;
     const out: RoutedAdapter[] = [];
     if (droppedLanes.length > 0 && !allowDuplicateFill) {
       // QA-043: lanes were dropped from an AUTO best-of pool (an explicit pool
@@ -1488,12 +1403,14 @@ export class Orchestrator {
       // masks the omission. Clamp to distinct survivors and disclose below.
       // (Deep-scan sets allowDuplicateFill: its width is scout coverage, not
       // harness diversity, so a dropped lane must not cut the scout count.)
-      for (let i = 0; i < Math.min(n, ordered.length); i++) out.push(ordered[i] as RoutedAdapter);
+      for (let i = 0; i < Math.min(n, selectionOrder.length); i++)
+        out.push(selectionOrder[i] as RoutedAdapter);
     } else {
       // No lane was dropped: a pool smaller than `n` is an intentional
       // best-of-N on the available harness(es) (e.g. explicit `--harness codex
       // -n 3`), so the historical width fill is preserved.
-      for (let i = 0; i < n; i++) out.push(ordered[i % ordered.length] as RoutedAdapter);
+      for (let i = 0; i < n; i++)
+        out.push(selectionOrder[i % selectionOrder.length] as RoutedAdapter);
     }
     // Disclose an auto-pool omission / width clamp once, with the
     // requested-vs-effective route receipt (never silent — QA-043).
@@ -1508,31 +1425,24 @@ export class Orchestrator {
       input.browser === true,
       out.map((lane) => lane.browserRequirement),
     );
-    // Delegation belt (D32): agent-only, and only on a lane whose adapter can
-    // inject MCP servers. A requested delegate with NO injecting lane is a typed
-    // preflight refusal naming the harness(es) — never a silently dropped belt.
-    if (input.delegate === true && !out.some((lane) => lane.supportsMcpInjection)) {
-      const names = [...new Set(out.map((lane) => lane.adapter.id))].join(", ");
-      throw new HarnessUnavailableError(
-        `--delegate requires a harness that can host the Claudexor delegation belt (capability_profile.mcp_injection); the routed harness(es) [${names}] cannot inject MCP servers — choose claude or codex, or drop --delegate`,
-      );
-    }
-    // A belt-injecting lane may still be UNABLE to reach the daemon at its
-    // access: codex's workspace-write seatbelt cancels the belt's daemon-crossing
-    // MCP call, so codex only hosts the belt at FULL access (same as its browser
-    // MCP). If EVERY injecting lane requires full access but runs below it, the
-    // belt would be injected only to be silently cancelled by the sandbox — the
-    // exact non-delegation this guard prevents. Refuse with the real remedy.
+    // Owner decision (2026-07-26): known PRE-START belt unavailability does
+    // not discard the requested Agent work. Continue without Delegate and emit
+    // a durable typed warning. Once a descriptor is injected, typed startup
+    // failure stays terminal in attemptTelemetry (no mid-attempt downgrade).
     if (input.delegate === true) {
-      const injecting = out.filter((lane) => lane.supportsMcpInjection);
-      const canHostBelt = injecting.some(
-        (lane) => !lane.mcpInjectionRequiresFullAccess || isFullAccess(lane.adapterAccess),
-      );
-      if (!canHostBelt) {
-        const names = [...new Set(injecting.map((lane) => lane.adapter.id))].join(", ");
-        throw new HarnessUnavailableError(
-          `--delegate needs a belt-hosting lane at full access: [${names}] can inject MCP servers but sandbox-cancel the delegation belt below full access (capability_profile.mcp_injection_requires_full_access) — re-run with --access full, or route a lane (e.g. claude) that hosts the belt at workspace_write`,
-        );
+      const unavailable = out
+        .map((lane) => lane.delegationRequirement)
+        .filter((resolution) => !resolution.effective);
+      if (unavailable.length > 0) {
+        log?.emit("delegation.belt.degraded", {
+          requested: true,
+          effective: out.some((lane) => lane.delegationRequirement.effective),
+          reason: unavailable[0]?.reason ?? "runtime_unavailable",
+          lanes: unavailable.map((resolution) => ({
+            harness_id: resolution.harness_id,
+            reason: resolution.reason,
+          })),
+        });
       }
     }
     // outputSchema is MANDATORY (Quiz-6a): a selected lane that cannot
@@ -1584,6 +1494,8 @@ export class Orchestrator {
     runId?: string,
   ): RoutedAdapter[] {
     let ordered = pool;
+    let rationale: RouteRankingRationale | null = null;
+    let selectionReason: RouteRankingRationale["reason"] | null = null;
     if (pool.length > 0) {
       const routeLedger = ledger ?? new BudgetLedger();
       const config = this.config(input.repoRoot).global;
@@ -1668,14 +1580,35 @@ export class Orchestrator {
       const ranked = rankHarnesses(remaining, routeCtx)
         .map((candidate) => byId.get(candidate.harnessId))
         .filter((candidate): candidate is RoutedAdapter => Boolean(candidate));
-      // QA-034: the rationale is run evidence recorded ONCE at pool ordering,
-      // pinned to routeCtx.now so it cannot disagree with the order just taken.
-      if (runId) this.routingRationaleByRun.set(runId, explainRanking(remaining, routeCtx));
+      rationale = explainRanking(remaining, routeCtx);
       ordered = ranked;
+    }
+    if (input.delegate === true && input.primaryHarnessExplicit !== true) {
+      const delegateFirst = [
+        ...ordered.filter((lane) => lane.delegationRequirement.effective),
+        ...ordered.filter((lane) => !lane.delegationRequirement.effective),
+      ];
+      if (delegateFirst.some((lane, index) => lane !== ordered[index])) {
+        ordered = delegateFirst;
+        selectionReason = "delegate_effective_first";
+      }
     }
     if (input.primaryHarness) {
       const primary = ordered.find((r) => r.adapter.id === input.primaryHarness);
-      if (primary) ordered = [primary, ...ordered.filter((r) => r !== primary)];
+      if (primary && primary !== ordered[0]) {
+        ordered = [primary, ...ordered.filter((r) => r !== primary)];
+        selectionReason = "explicit_primary";
+      }
+    }
+    // QA-034: persist the FINAL selected order, including request constraints
+    // that intentionally override the underlying cost/quota ranking. This is
+    // what keeps route evidence aligned with the lane actually executed.
+    if (runId && rationale) {
+      this.routingRationaleByRun.set(runId, {
+        ...rationale,
+        order: ordered.map((lane) => lane.adapter.id),
+        reason: selectionReason ?? rationale.reason,
+      });
     }
     return ordered;
   }
@@ -1862,6 +1795,11 @@ export class Orchestrator {
       created_at: nowIso(),
       repo: { root: input.repoRoot, base_ref: input.baseRef ?? "HEAD", dirty_policy: "snapshot" },
       mode: { kind: mode },
+      delegation_requested: input.delegate === true,
+      run_lineage: {
+        parent_run_id: input.parentRunId ?? null,
+        delegated_from_run_id: input.delegatedFromRunId ?? null,
+      },
       user_intent: { raw: redactSecrets(input.prompt) },
       // Redacted for symmetry with user_intent.raw — a no-op on fenced input
       // (the inline-secret fence already blocked any secret-like value at every
@@ -1957,12 +1895,17 @@ export class Orchestrator {
     routed: RoutedAdapter,
     resolvedBudget: PaidBudget,
   ): ExtraMcpServer[] {
-    if (!input?.delegate || !input.delegationBelt || !routed.supportsMcpInjection) return [];
+    if (
+      !input?.delegate ||
+      !input.delegationBelt ||
+      !input.delegationParentRunId ||
+      !routed.delegationRequirement.effective
+    )
+      return [];
     // A lane that sandbox-cancels the belt below full access (codex) must NOT
-    // receive a belt it cannot use — that is the silent non-delegation. The
-    // preflight already refused a run whose ONLY injecting lanes are such lanes
-    // below full access; here we simply skip injecting into an individual lane
-    // that cannot host it, so a mixed pool keeps the belt on the lanes that can.
+    // receive a belt it cannot use. Per-lane requirement resolution records the
+    // typed degradation, while a mixed pool keeps the belt on lanes that can
+    // host it.
     if (routed.mcpInjectionRequiresFullAccess && !isFullAccess(routed.adapterAccess)) return [];
     const writingIntents: Intent[] = ["implement", "create_from_scratch", "repair"];
     if (!writingIntents.includes(intent)) return [];
@@ -1976,6 +1919,7 @@ export class Orchestrator {
         ...input.delegationBelt,
         env: {
           ...input.delegationBelt.env,
+          [DELEGATION_ENV.parentRunId]: input.delegationParentRunId,
           [DELEGATION_ENV.budget]: JSON.stringify(resolvedBudget),
         },
       },
@@ -2387,7 +2331,7 @@ export class Orchestrator {
         knobs.webPolicy === "cached" ||
         knobs.webPolicy === "live",
       effectiveWebMode ?? knobs.webPolicy,
-      [routed.browserRequirement, routed.denyRequirement],
+      [routed.browserRequirement, routed.denyRequirement, routed.delegationRequirement],
       knobs.model,
       beltServerName,
       browserServerName,
@@ -2677,6 +2621,13 @@ export class Orchestrator {
       });
     }
     const webBlocked = webUnsatisfied(telemetry);
+    // A descriptor that was injected and then reported failed is past the
+    // pre-start degradation boundary. Hard-fail this attempt; never continue as
+    // ordinary Agent or let a native vendor subagent masquerade as belt work.
+    if (delegationBeltUnavailable(telemetry)) {
+      harnessErrored = true;
+      errors.push("delegation belt failed to start after injection");
+    }
     // D-16 unified finalizer: fold the WorkReport / context signals into the
     // deliverable + work_state. A broken contract on a constrained route
     // elevates harnessErrored (never a prose success).
@@ -2936,16 +2887,13 @@ export class Orchestrator {
     safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
     log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
     const ledger = this.rootLedger(input, contract, log);
-    announce?.({
-      log,
-      store,
-      paths,
-      runId,
-      taskId,
-      mode,
-      phase: "race",
-      spend: () => ledger.spend(),
-    });
+    announce?.(
+      announcedRunContext(
+        { log, store, paths, runId, taskId, mode, phase: "race" },
+        ledger,
+        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
+      ),
+    );
     store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
     log.emit("task.contract.created", { task_contract_hash: hashJson(contract) });
 
@@ -3056,6 +3004,14 @@ export class Orchestrator {
         candidates: [],
       };
     }
+    activateDelegationParent(
+      this.deps.delegationBudgetAuthority,
+      input,
+      runId,
+      ledger,
+      adapters,
+      log,
+    );
     const reviewersOutcome = await this.resolveReviewersWithArtifacts(
       input,
       log,
@@ -3468,7 +3424,11 @@ export class Orchestrator {
             knobs.webPolicy,
             contract.external_context.web_required,
             effectiveWeb,
-            [slot.routed.browserRequirement, slot.routed.denyRequirement],
+            [
+              slot.routed.browserRequirement,
+              slot.routed.denyRequirement,
+              slot.routed.delegationRequirement,
+            ],
             knobs.model,
           ),
           infraPhase,
@@ -3524,6 +3484,34 @@ export class Orchestrator {
         ledger.spend(),
         input.signal,
         store,
+      );
+    }
+
+    const failedDelegation = runs.find((run) => delegationBeltUnavailable(run.telemetry));
+    if (failedDelegation) {
+      await disposeReviewEnvelopes();
+      this.writeRunTelemetry(
+        store,
+        paths,
+        contract,
+        runId,
+        taskId,
+        mode,
+        candidateRoster(runs),
+        null,
+      );
+      return failTerminally(
+        log,
+        store,
+        paths,
+        runId,
+        taskId,
+        mode,
+        "delegation_startup",
+        new Error(
+          `Delegate startup failed in ${failedDelegation.harnessId}; no degraded sibling may replace an injected failed belt`,
+        ),
+        ledger.spend(),
       );
     }
 
@@ -4445,15 +4433,16 @@ export class Orchestrator {
         // (so a failing test gate or no_op outcome is unchanged), just unreviewed.
         const hasDiff = run.diff.trim().length > 0;
         // Reviewer panels spend real money: reserve before, settle the observed cost.
-        const reviewLease = hasDiff
-          ? ledger?.reserve({
-              taskId: taskId ?? "task",
-              attemptId: run.attemptId,
-              intent: "review",
-              harnessId: "review-panel",
-              cost: attemptCostEvidence("review-panel", run.attemptId),
-            })
-          : undefined;
+        const reviewLease =
+          hasDiff && reviewers.length > 0
+            ? ledger?.reserve({
+                taskId: taskId ?? "task",
+                attemptId: run.attemptId,
+                intent: "review",
+                harnessId: "review-panel",
+                cost: attemptCostEvidence("review-panel", run.attemptId),
+              })
+            : undefined;
         const result =
           hasDiff && reviewers.length > 0 && (reviewLease?.granted ?? true)
             ? await this.reviewScoped({
@@ -4647,20 +4636,28 @@ export class Orchestrator {
     const execRoot = this.execRootOf(input);
     const wsm = new WorkspaceManager(execRoot);
     const readiness = new ReadinessLedger();
-    const ledger = this.rootLedger(input, contract, log);
-    store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
-    safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
-    log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
-    announce?.({
-      log,
-      store,
-      paths,
-      runId,
-      taskId,
-      mode,
-      phase: "convergence",
-      spend: () => ledger.spend(),
-    });
+    let ledger: BudgetLedger;
+    try {
+      ledger = this.rootLedger(input, contract, log);
+      store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
+      safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
+      log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
+      announce?.(
+        announcedRunContext(
+          { log, store, paths, runId, taskId, mode, phase: "convergence" },
+          ledger,
+          () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
+        ),
+      );
+    } catch (error) {
+      // A delegated child attaches its scoped financial view before the run is
+      // announced. If any fallible artifact/start callback in that narrow gap
+      // throws, the terminal net has no run context, so detach here explicitly.
+      if (input.delegatedFromRunId) {
+        this.deps.delegationBudgetAuthority?.releaseRun(runId);
+      }
+      throw error;
+    }
 
     // Live (in-place) isolation deliberately tolerates non-git stateful
     // environments; only envelope isolation needs the git boundary.
@@ -4767,6 +4764,14 @@ export class Orchestrator {
         candidates: [],
       };
     }
+    activateDelegationParent(
+      this.deps.delegationBudgetAuthority,
+      input,
+      runId,
+      ledger,
+      adapterPool,
+      log,
+    );
     // Fail fast on a provably unwinnable predicate instead of burning paid
     // rounds: the default convergence predicate requires a clean cross-family
     // review, which needs >=2 healthy reviewer provider families.
@@ -5013,13 +5018,38 @@ export class Orchestrator {
               knobs.webPolicy,
               contract.external_context.web_required,
               effectiveWeb,
-              [routed.browserRequirement, routed.denyRequirement],
+              [routed.browserRequirement, routed.denyRequirement, routed.delegationRequirement],
               knobs.model,
             ),
           };
         }
         lastRun = run;
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
+        if (delegationBeltUnavailable(run.telemetry)) {
+          this.writeRunTelemetry(
+            store,
+            paths,
+            contract,
+            runId,
+            taskId,
+            mode,
+            attemptTelemetries,
+            null,
+          );
+          return failTerminally(
+            log,
+            store,
+            paths,
+            runId,
+            taskId,
+            mode,
+            "delegation_startup",
+            new Error(
+              `Delegate startup failed in ${run.harnessId}; convergence cannot repair or continue after an injected belt fails`,
+            ),
+            ledger.spend(),
+          );
+        }
         // D-16 r8: interrupted (errored===false) would CONVERGE a partial diff
         // as clean — break BEFORE review; a harness error still gate-retries.
         if (run.outcomeClass === "interrupted") {
@@ -5609,41 +5639,6 @@ export class Orchestrator {
     };
   }
 
-  /** plan mode: multi-harness planning -> aggregate -> (optional) plan review -> plan. Read-only. */
-  /**
-   * Wrap the user's goal in an explicit "plan, do not implement" instruction.
-   * Without this the raw prompt ("make a racing game") reaches the harness with
-   * only a read-only sandbox, so the model tries to BUILD it and dumps code into
-   * the plan when writes are blocked — the v0.9 "HTML in the plan" bug. The
-   * read-only access still enforces it; this gives the model the right job.
-   */
-  private planPrompt(goal: string): string {
-    return [
-      `You are planning, NOT implementing. Explore the repository read-only and produce a plan another agent will execute later. Do not write files or output full implementations.`,
-      ``,
-      `## Goal`,
-      goal,
-      ``,
-      `## Required output (markdown)`,
-      `1. Approach — 2-3 sentences on how you'd solve this.`,
-      `2. Steps — a numbered list; each step names the file(s) it touches and what changes.`,
-      `3. Risks & edge cases.`,
-      `4. End your response with a section titled exactly:`,
-      ``,
-      `## Open Questions`,
-      ``,
-      `List every decision the user must make before implementation, one per bullet, in EXACTLY this format:`,
-      ``,
-      `- [single] <question> :: <option A> :: <option B>`,
-      `- [multi] <question> :: <option A> :: <option B>`,
-      `- [text] <question that has no good fixed options>`,
-      ``,
-      `Rules: [single] = pick exactly one; [multi] = pick one or more; [text] = free-form (no "::" options). Ground every option in THIS repository. If nothing is ambiguous, write a single bullet: - (none)`,
-      ``,
-      `Keep it concise. Reference real paths you found. Do NOT paste large code blocks; describe the change instead.`,
-    ].join("\n");
-  }
-
   /** One read-only planner spawn shared by solo fallback, Council drafts, and merge. */
   async runPlannerAttempt(args: PlannerAttemptArgs): Promise<PlannerAttemptOutcome> {
     const { input, contract, taskId, runId, log, store, paths, ledger, routed, attemptId } = args;
@@ -5936,16 +5931,13 @@ export class Orchestrator {
     safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
     log.emit("run.created", { mode: "plan", prompt: redactSecrets(input.prompt) });
     const ledger = this.rootLedger(input, contract, log);
-    announce?.({
-      log,
-      store,
-      paths,
-      runId,
-      taskId,
-      mode: "plan",
-      phase: "plan",
-      spend: () => ledger.spend(),
-    });
+    announce?.(
+      announcedRunContext(
+        { log, store, paths, runId, taskId, mode: "plan", phase: "plan" },
+        ledger,
+        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
+      ),
+    );
 
     store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
     log.emit("task.contract.created", { task_contract_hash: hashJson(contract) });
@@ -6110,7 +6102,7 @@ export class Orchestrator {
           attemptId,
           laneRun,
           fallbackHome: roHome.env,
-          promptBody: this.planPrompt(input.prompt) + contextSection,
+          promptBody: planPrompt(input.prompt) + contextSection,
           intent: "plan",
         });
         if (outcome.budgetDenied) {
@@ -6295,7 +6287,7 @@ export class Orchestrator {
           finalAttemptId,
         ),
       execRootOf: (input) => this.execRootOf(input),
-      planPrompt: (goal) => this.planPrompt(goal),
+      planPrompt,
     };
   }
 
@@ -6346,22 +6338,14 @@ export class Orchestrator {
     return inputBudget ?? this.deps.paidBudget ?? cfg.global.budget.paid_budget_per_run;
   }
 
-  private rootLedger(_input: RunInput, contract: TaskContract, log: EventLog): BudgetLedger {
-    // The root ledger discloses into THIS run's log: the ledger is the one
-    // owner of the cash fact (subscription-entitled work settles to 0 there),
-    // and the UI renders `budget.cash` verbatim — never inferring money from
-    // route labels (W4.3 sol #15).
-    const ledger = new BudgetLedger(contract.budget.paid_budget, undefined, {
-      onCashSettled: (cashSpendUsd, valuationUsd) =>
-        log.emit("budget.cash", {
-          cash_spend_usd: cashSpendUsd,
-          valuation_usd: valuationUsd,
-        }),
+  private rootLedger(input: RunInput, contract: TaskContract, log: EventLog): BudgetLedger {
+    return createRootLedger({
+      input,
+      contract,
+      log,
+      authority: this.deps.delegationBudgetAuthority,
+      quotaSnapshots: this.deps.quotaSnapshots?.() ?? [],
     });
-    for (const snapshot of this.deps.quotaSnapshots?.() ?? []) {
-      ledger.observeQuotaSnapshot(snapshot);
-    }
-    return ledger;
   }
 
   private routeBillingKnowledge(input: RunInput, harnessId: string): "metered" | "unknown" {
@@ -6469,16 +6453,13 @@ export class Orchestrator {
     safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
     log.emit("run.created", { mode: opts.mode, prompt: redactSecrets(prompt) });
     const ledger = this.rootLedger(input, contract, log);
-    announce?.({
-      log,
-      store,
-      paths,
-      runId,
-      taskId,
-      mode: opts.mode,
-      phase: "report",
-      spend: () => ledger.spend(),
-    });
+    announce?.(
+      announcedRunContext(
+        { log, store, paths, runId, taskId, mode: opts.mode, phase: "report" },
+        ledger,
+        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
+      ),
+    );
 
     store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
     log.emit("task.contract.created", { task_contract_hash: hashJson(contract) });

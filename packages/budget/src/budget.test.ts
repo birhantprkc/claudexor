@@ -273,6 +273,134 @@ describe("BudgetLedger", () => {
     expect(ledger.terminal()).toBe("cost_unverifiable");
   });
 
+  it("shares holds and unknown-paid exclusion across task-scoped child views", async () => {
+    const root = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const childA = root.scopedToTask("child-a");
+    const childB = root.scopedToTask("child-b");
+    const [first, second] = await Promise.all([
+      Promise.resolve().then(() =>
+        childA.reserve({
+          taskId: "child-a",
+          intent: "implement",
+          harnessId: "a",
+          cost: metered(0.6),
+        }),
+      ),
+      Promise.resolve().then(() =>
+        childB.reserve({
+          taskId: "child-b",
+          intent: "implement",
+          harnessId: "b",
+          cost: metered(0.6),
+        }),
+      ),
+    ]);
+    expect([first.granted, second.granted].filter(Boolean)).toHaveLength(1);
+    expect([first, second].find((result) => !result.granted)).toMatchObject({
+      denied: "estimate_headroom",
+    });
+
+    const finiteUnknown = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const unknownA = finiteUnknown.scopedToTask("unknown-a").reserve({
+      taskId: "unknown-a",
+      intent: "implement",
+      harnessId: "a",
+      cost: metered(),
+    });
+    const unknownB = finiteUnknown.scopedToTask("unknown-b").reserve({
+      taskId: "unknown-b",
+      intent: "implement",
+      harnessId: "b",
+      cost: metered(),
+    });
+    expect(unknownA.granted).toBe(true);
+    expect(unknownB).toMatchObject({ granted: false, denied: "unknown_paid_in_flight" });
+  });
+
+  it("reports aggregate root totals and task-local child totals/callbacks", () => {
+    const rootEvents: Array<[number, number]> = [];
+    const childAEvents: Array<[number, number]> = [];
+    const childBEvents: Array<[number, number]> = [];
+    const root = new BudgetLedger({ kind: "unlimited" }, undefined, {
+      onCashSettled: (cash, valuation) => rootEvents.push([cash, valuation]),
+    });
+    const childA = root.scopedToTask("child-a", (cash, valuation) =>
+      childAEvents.push([cash, valuation]),
+    );
+    const childB = root.scopedToTask("child-b", (cash, valuation) =>
+      childBEvents.push([cash, valuation]),
+    );
+    const leaseA = childA.reserve({
+      taskId: "child-a",
+      intent: "implement",
+      harnessId: "a",
+      cost: metered(0.2),
+    });
+    const leaseB = childB.reserve({
+      taskId: "child-b",
+      intent: "implement",
+      harnessId: "b",
+      cost: metered(0.3),
+    });
+    childA.settle(leaseA.lease!.lease_id, {
+      ...exactSettlement(0.2),
+      valuationUsd: 0.4,
+    });
+    childB.settle(leaseB.lease!.lease_id, {
+      ...exactSettlement(0.3),
+      valuationUsd: 0.6,
+    });
+    expect(root.spend()).toBeCloseTo(0.5, 8);
+    expect(root.valuation()).toBeCloseTo(1, 8);
+    expect(childA.spend()).toBeCloseTo(0.2, 8);
+    expect(childA.valuation()).toBeCloseTo(0.4, 8);
+    expect(childB.spend()).toBeCloseTo(0.3, 8);
+    expect(childB.valuation()).toBeCloseTo(0.6, 8);
+    expect(rootEvents).toEqual([
+      [0.2, 0.4],
+      [0.5, 1],
+    ]);
+    expect(childAEvents).toEqual([[0.2, 0.4]]);
+    expect(childBEvents).toEqual([[0.3, 0.6]]);
+  });
+
+  it("keeps non-financial signals local and fences scoped lease mutation", () => {
+    const root = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const childA = root.scopedToTask("child-a");
+    const childB = root.scopedToTask("child-b");
+    const lease = childA.reserve({
+      taskId: "child-a",
+      intent: "implement",
+      harnessId: "a",
+      cost: metered(0.2),
+    });
+    expect(() => childB.cancel(lease.lease!.lease_id)).toThrow(
+      /budget task scope child-b cannot act for child-a/,
+    );
+    expect(() =>
+      childA.reserve({ taskId: "child-b", intent: "implement", harnessId: "b" }),
+    ).toThrow(/budget task scope child-a cannot act for child-b/);
+
+    const fp = promptFingerprint("same prompt");
+    childA.recordPrompt(fp);
+    expect(childA.isLoop(fp, 1)).toBe(true);
+    expect(childB.isLoop(fp, 1)).toBe(false);
+    childA.observe({
+      harness_id: "a",
+      ts: new Date().toISOString(),
+      quality: "native",
+      kind: "rate_limited",
+    });
+    expect(childA.observationsFor("a")).toHaveLength(1);
+    expect(childB.observationsFor("a")).toHaveLength(0);
+
+    childA.releaseTask();
+    expect(root.remainingUsd()).toBe(1);
+    expect(() =>
+      childA.reserve({ taskId: "child-a", intent: "implement", harnessId: "a" }),
+    ).toThrow(/scope is released/);
+  });
+
   it("records late exact overshoot and blocks the next paid unit", () => {
     const ledger = new BudgetLedger({ kind: "finite", maxUsd: 0.1 });
     const lease = ledger.reserve({

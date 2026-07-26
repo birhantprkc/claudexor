@@ -14,6 +14,8 @@ import { appendLine, nowIso, readTextSafe, redactSecrets } from "@claudexor/util
  */
 export class EventLog {
   private nextSeq: number;
+  private deferTerminalEvents = false;
+  private deferredTerminal: { type: RunEventType; payload: Record<string, unknown> } | null = null;
 
   constructor(
     private readonly path: string,
@@ -47,8 +49,42 @@ export class EventLog {
     if (activeEventLogs.get(this.path) === this) activeEventLogs.delete(this.path);
   }
 
+  /** Hold the one terminal event while a Delegate parent drains children.
+   * Non-terminal events (notably aggregate budget.cash) continue to append and
+   * therefore remain ordered before the eventual final event. */
+  deferTerminal(): void {
+    this.deferTerminalEvents = true;
+  }
+
+  clearDeferredTerminal(): void {
+    this.deferredTerminal = null;
+  }
+
+  flushDeferredTerminal(): RunEvent | null {
+    const pending = this.deferredTerminal;
+    this.deferredTerminal = null;
+    this.deferTerminalEvents = false;
+    return pending ? this.emit(pending.type, pending.payload) : null;
+  }
+
   /** Append a typed run event. Validates against the schema before writing. */
   emit(type: RunEventType, payload: Record<string, unknown> = {}): RunEvent {
+    if (
+      this.deferTerminalEvents &&
+      (type === "run.completed" || type === "run.failed" || type === "run.blocked")
+    ) {
+      if (this.deferredTerminal) throw new Error("run terminal event was emitted more than once");
+      this.deferredTerminal = { type, payload };
+      return RunEventSchema.parse({
+        seq: this.nextSeq,
+        ts: nowIso(),
+        run_id: this.runId,
+        task_id: this.taskId,
+        ...(this.threadId ? { thread_id: this.threadId } : {}),
+        type,
+        payload: redactEventValue(payload),
+      });
+    }
     const event = RunEventSchema.parse({
       seq: this.nextSeq++,
       ts: nowIso(),

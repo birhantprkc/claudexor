@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CouncilProjection, PlanQuestion, PlanReadiness } from "./plan.js";
 import { ApplyEligibility } from "./apply-eligibility.js";
+import { MAX_DELEGATED_CHILDREN } from "./delegation.js";
 import { RequiredAction } from "./status-projection.js";
 import { DecisionRecord } from "./decision.js";
 import { WorkProduct } from "./workproduct.js";
@@ -120,6 +121,13 @@ export type ControlCandidate = z.infer<typeof ControlCandidate>;
 export const ControlRunDetail = z
   .object({
     summary: ControlRunSummary,
+    children: z
+      .array(ControlRunSummary)
+      .max(MAX_DELEGATED_CHILDREN)
+      .default([])
+      .describe(
+        "Direct Claudexor Delegate child runs, projected from persisted delegatedFromRunId lineage for reload-safe flat rows.",
+      ),
     /**
      * Server-owned outcome banner (D18): the ONE honest headline for this run,
      * derived by the single projection owner (status-projection.outcomeBanner)

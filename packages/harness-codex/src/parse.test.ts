@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { HarnessEvent } from "@claudexor/schema";
-import { parseCodexEvent, type CodexParseState } from "./parse.js";
+import { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
+import { runCliHarness, type CliRunLoopOptions } from "@claudexor/core";
+import { createCodexAdapter } from "./index.js";
+import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "./parse.js";
 
 const SAMPLE = [
   '{"type":"thread.started","thread_id":"th-1"}',
@@ -15,6 +17,136 @@ const SAMPLE = [
 ];
 
 describe("parseCodexEvent", () => {
+  it("marks configured required MCP servers ready only once Codex reaches thread.started", () => {
+    const state: CodexParseState = { requiredMcpServers: ["claudexor"] };
+    const out = parseCodexEvent(
+      { type: "thread.started", thread_id: "th-required" },
+      "s-required",
+      state,
+    );
+    expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([
+      { name: "claudexor", status: "connected" },
+    ]);
+  });
+
+  it.each(["turn.failed", "error"])(
+    "marks required MCP startup failure on %s with the exact Codex prefix",
+    (type) => {
+      const state: CodexParseState = { requiredMcpServers: ["claudexor"] };
+      const message = "required MCP servers failed to initialize: claudexor";
+      const raw = type === "turn.failed" ? { type, error: { message } } : { type, message };
+      const out = parseCodexEvent(raw, "s-required", state);
+      expect(out?.[0]?.type).toBe("error");
+      expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "failed" }]);
+    },
+  );
+
+  it("captures the real stderr-only required MCP fatal as typed startup evidence", async () => {
+    const state: CodexParseState = { requiredMcpServers: ["claudexor"] };
+    const message = "required MCP servers failed to initialize: claudexor";
+    const spec = HarnessRunSpec.parse({
+      session_id: "s-stderr-required",
+      intent: "implement",
+      prompt: "delegate",
+      cwd: process.cwd(),
+    });
+    const events: HarnessEvent[] = [];
+    for await (const event of runCliHarness({
+      bin: process.execPath,
+      args: ["-e", `process.stderr.write(${JSON.stringify(message)}); process.exit(1)`],
+      spec,
+      label: "codex",
+      parseEvent: () => null,
+      parseStderrFailure: (stderr, sessionId) => parseCodexStderrFailure(stderr, sessionId, state),
+    })) {
+      events.push(event);
+    }
+    const failure = events.find((event) => event.type === "error");
+    expect(failure?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "failed" }]);
+    expect(events.at(-1)?.type).toBe("completed");
+  });
+
+  it("wires stderr-only required MCP evidence through the Codex adapter route receipt", async () => {
+    let options: CliRunLoopOptions | undefined;
+    const adapter = createCodexAdapter({
+      detectVersion: async () => "codex-cli 0.144.1",
+      probeLogin: async () => ({ authed: true, method: "chatgpt", probeError: null }),
+      hasApiKey: () => false,
+      probeEfforts: async () => null,
+      runCliHarness: async function* (input): AsyncGenerator<HarnessEvent> {
+        options = input;
+        yield {
+          type: "completed",
+          session_id: input.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    const runSpec = HarnessRunSpec.parse({
+      session_id: "s-adapter-required",
+      intent: "implement",
+      prompt: "delegate",
+      cwd: process.cwd(),
+      extra_mcp_servers: [
+        {
+          name: "claudexor",
+          command: process.execPath,
+          args: ["belt.js"],
+          env: {},
+          required: true,
+        },
+      ],
+    });
+    for await (const _event of adapter.run(runSpec)) {
+      // drain
+    }
+    const failure = options?.parseStderrFailure?.(
+      "warning before fatal\nrequired MCP servers failed to initialize: claudexor",
+      runSpec.session_id,
+    );
+    expect(failure).toMatchObject({
+      type: "error",
+      credential_route: "vendor_native",
+      credential_source: "native_session",
+      payload: { mcp_servers: [{ name: "claudexor", status: "failed" }] },
+    });
+  });
+
+  it("does not relabel unrelated Codex errors as required MCP failures", () => {
+    const state: CodexParseState = { requiredMcpServers: ["claudexor"] };
+    const out = parseCodexEvent(
+      { type: "error", message: "optional MCP server timed out" },
+      "s-required",
+      state,
+    );
+    expect(out?.[0]?.payload?.["mcp_servers"]).toBeUndefined();
+  });
+
+  it("does not mark the Delegate belt failed when Codex names a different required MCP server", () => {
+    const state: CodexParseState = {
+      requiredMcpServers: ["claudexor", "user_docs"],
+    };
+    const out = parseCodexEvent(
+      {
+        type: "error",
+        message: "required MCP servers failed to initialize: user_docs: connection refused",
+      },
+      "s-required",
+      state,
+    );
+    expect(out?.[0]?.payload?.["mcp_servers"]).toEqual([{ name: "user_docs", status: "failed" }]);
+
+    const prefixCollision = parseCodexEvent(
+      {
+        type: "error",
+        message: "required MCP servers failed to initialize: claudexor-other",
+      },
+      "s-required",
+      state,
+    );
+    expect(prefixCollision?.[0]?.payload?.["mcp_servers"]).toBeUndefined();
+  });
+
   it("maps a realistic codex exec --json stream to normalized typed events", () => {
     const state = {};
     const events = SAMPLE.flatMap((l) => parseCodexEvent(JSON.parse(l), "s1", state) ?? []);

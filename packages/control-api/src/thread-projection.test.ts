@@ -1,6 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { ControlTurnRunCard } from "@claudexor/schema";
-import { projectSession, projectThread, projectTurn } from "./thread-projection.js";
+import { ControlRunSummary, ControlTurnRunCard } from "@claudexor/schema";
+import { projectSession, projectThread, projectTurn, turnRunCard } from "./thread-projection.js";
+
+describe("Delegate thread-card projection", () => {
+  it("carries the durable outcome and bounded child identities", () => {
+    const card = turnRunCard(
+      ControlRunSummary.parse({
+        jobId: "job-parent",
+        runId: "run-parent",
+        state: "succeeded",
+        delegation: {
+          requested: true,
+          effective: true,
+          used: true,
+          reason: "used",
+        },
+      }),
+      ["run-child-1", "run-child-2"],
+    );
+    expect(card.delegation).toMatchObject({ requested: true, effective: true, used: true });
+    expect(card.delegatedChildRunIds).toEqual(["run-child-1", "run-child-2"]);
+  });
+
+  it("defaults legacy cards to no outcome and no children", () => {
+    const card = ControlTurnRunCard.parse({ state: "succeeded" });
+    expect(card.delegation).toBeNull();
+    expect(card.delegatedChildRunIds).toEqual([]);
+  });
+});
 
 // Release wave round-15 #3: clients can SET a thread-sticky credential
 // profile and are SUBJECT to a session's profile binding (resume never

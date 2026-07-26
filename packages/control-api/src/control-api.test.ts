@@ -1895,6 +1895,87 @@ describe("DaemonControlApiServer", () => {
     );
   });
 
+  it("GET /threads/:id embeds bounded exact-lineage Delegate child ids on the parent turn", async () => {
+    const { daemon, record } = fakeDaemon();
+    const now = new Date().toISOString();
+    const children: DaemonRunRecord[] = Array.from({ length: 10 }, (_, index) => ({
+      id: `job-thread-child-${index}`,
+      runId: `run-thread-child-${index}`,
+      state: "succeeded",
+      createdAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+      params: { delegatedFromRunId: record.runId },
+    })).reverse();
+    const ordinary: DaemonRunRecord = {
+      id: "job-thread-followup",
+      runId: "run-thread-followup",
+      state: "succeeded",
+      params: { parentRunId: record.runId },
+    };
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async list() {
+        return [record, ordinary, ...children];
+      },
+    };
+    const threadObj = {
+      schema_version: 2,
+      id: "th-delegate",
+      created_at: now,
+      updated_at: now,
+      repo: { root: "/repo", base_ref: "HEAD" },
+      title: "Delegate",
+      mode: "agent",
+      workspace: { mode: "in_place" },
+      auth_preference: "auto",
+      primary_harness: null,
+      run_ids: [record.runId],
+      head_run_id: record.runId,
+      state: "active",
+    };
+    const services: DaemonControlApiOptions["services"] = {
+      threadDetail: async () => ({
+        thread: threadObj,
+        sessions: [],
+        turns: [
+          {
+            id: "tn-delegate",
+            thread_id: "th-delegate",
+            run_id: record.runId,
+            parent_run_id: null,
+            kind: "initial",
+            prompt: "delegate",
+            created_at: now,
+          },
+        ],
+      }),
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const response = await apiFetch(`${base}/threads/th-delegate`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        const responseText = await response.text();
+        expect(response.status, responseText).toBe(200);
+        const body = JSON.parse(responseText) as {
+          turns: Array<{ run: { delegatedChildRunIds: string[] } | null }>;
+        };
+        expect(body.turns[0]?.run?.delegatedChildRunIds).toEqual([
+          "run-thread-child-0",
+          "run-thread-child-1",
+          "run-thread-child-2",
+          "run-thread-child-3",
+          "run-thread-child-4",
+          "run-thread-child-5",
+          "run-thread-child-6",
+          "run-thread-child-7",
+        ]);
+      },
+      undefined,
+      services,
+    );
+  });
+
   it("POST /runs REFUSES a threadId (D10): a thread turn goes through /threads/:id/turns", async () => {
     const { daemon } = fakeDaemon();
     let enqueued = 0;
@@ -5164,6 +5245,96 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("cancels active Claudexor Delegate descendants but not ordinary parentRunId follow-ups", async () => {
+    const cancelled: string[] = [];
+    const records: DaemonRunRecord[] = [
+      { id: "job-parent", runId: "run-parent", state: "running", params: { delegate: true } },
+      {
+        id: "job-child",
+        runId: "run-child",
+        state: "running",
+        params: { parentRunId: "run-parent", delegatedFromRunId: "run-parent" },
+      },
+      {
+        id: "job-followup",
+        runId: "run-followup",
+        state: "running",
+        params: { parentRunId: "run-parent" },
+      },
+    ];
+    const daemon: DaemonFacadeClient = {
+      async enqueue() {
+        return { id: "unused", state: "queued" };
+      },
+      async status(id) {
+        return records.find((record) => record.id === id) as DaemonRunRecord;
+      },
+      async list() {
+        return records;
+      },
+      async fenceDelegationParent(runId) {
+        expect(runId).toBe("run-parent");
+        return { runId, fenced: true };
+      },
+      async cancel(id) {
+        cancelled.push(id);
+        const record = records.find((candidate) => candidate.id === id);
+        if (record) record.state = "cancelled";
+        return { id, cancelled: true };
+      },
+    };
+    await withDaemonServer(daemon, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-parent/control`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+        body: JSON.stringify({ control: { kind: "cancel" } }),
+      });
+      expect(response.status).toBe(200);
+      expect(cancelled).toEqual(["job-child", "job-parent"]);
+      expect(await response.json()).toMatchObject({ cascadeRunIds: ["run-child"] });
+    });
+  });
+
+  it("projects direct Delegate children in parent detail even beyond the newest-200 list window", async () => {
+    const { daemon, record } = fakeDaemon();
+    const fillers: DaemonRunRecord[] = Array.from({ length: 220 }, (_, index) => ({
+      id: `job-fill-${index}`,
+      runId: `run-fill-${index}`,
+      state: "succeeded",
+      params: { parentRunId: "run-unrelated" },
+    }));
+    const child: DaemonRunRecord = {
+      id: "job-child-old",
+      runId: "run-child-old",
+      state: "succeeded",
+      params: {
+        parentRunId: "run-parent-other-field",
+        delegatedFromRunId: "run-d1",
+      },
+    };
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async list() {
+        return [record, ...fillers, child];
+      },
+    };
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-d1`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        children: Array<{ runId: string; delegatedFromRunId: string | null }>;
+      };
+      expect(body.children).toEqual([
+        expect.objectContaining({
+          runId: "run-child-old",
+          delegatedFromRunId: "run-d1",
+        }),
+      ]);
+    });
+  });
+
   it("returns queued job metadata when a daemon job has not produced run artifacts yet", async () => {
     const { daemon, record } = fakeDaemon();
     record.state = "queued";
@@ -6498,6 +6669,12 @@ describe("DaemonControlApiServer", () => {
         summary: {
           mode?: string;
           prompt?: string;
+          delegation?: {
+            requested: boolean;
+            effective: boolean;
+            used: boolean;
+            reason: string;
+          } | null;
           requestRequirements?: Array<{
             harness_id: string;
             effective: boolean;
@@ -6515,9 +6692,11 @@ describe("DaemonControlApiServer", () => {
       };
       expect(body.summary.mode).toBe("agent");
       expect(body.summary.prompt).toBe("hello");
+      expect(body.summary.delegation).toBeNull();
       expect(body.summary.requestRequirements).toEqual([
         expect.objectContaining({ harness_id: "codex", effective: true, reason: "effective" }),
       ]);
+
       // summary.md lost its primary-output authority (V8/PLAN addendum 2); the
       // patch is now the primary output for this write run.
       expect(body.primaryOutput?.kind).toBe("patch");
@@ -6584,7 +6763,34 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
-  it("budget snapshot prefers the ledger's CASH disclosure over valuation observations (W4.3)", async () => {
+  it("projects a current telemetry Delegate receipt without fabricating legacy state", async () => {
+    const { daemon, record } = fakeDaemon();
+    const telemetryPath = join(record.runDir!, "final", "telemetry.yaml");
+    const telemetry = parseYaml(readFileSync(telemetryPath, "utf8")) as Record<string, unknown>;
+    telemetry["delegation"] = {
+      requested: true,
+      effective: true,
+      used: true,
+      reason: "used",
+    };
+    writeFileSync(telemetryPath, stringifyYaml(telemetry));
+    await withDaemonServer(daemon, async (base) => {
+      const detail = await apiFetch(`${base}/runs/run-d1`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(
+        ((await detail.json()) as { summary: { delegation: unknown } }).summary.delegation,
+      ).toEqual({
+        requested: true,
+        effective: true,
+        used: true,
+        reason: "used",
+        remediation: null,
+      });
+    });
+  });
+
+  it("budget snapshot projects the ledger's CASH value and estimation truth (W4.3)", async () => {
     // A decision-less subscription run (plan/ask): valuation ticks are
     // NON-ZERO while the cash truth is $0. Summing them as spend showed
     // valuation under a "real money" label (F4 review); budget.cash — the
@@ -6606,7 +6812,7 @@ describe("DaemonControlApiServer", () => {
           run_id: "run-d1",
           task_id: "task-d1",
           type: "budget.cash",
-          payload: { cash_spend_usd: 0, valuation_usd: 2.5 },
+          payload: { cash_spend_usd: 0, valuation_usd: 2.5, estimated: true },
         }),
         "",
       ].join("\n"),
@@ -6621,7 +6827,7 @@ describe("DaemonControlApiServer", () => {
       };
       expect(body.budget.spendUsd).toBe(0); // the cash truth, not the $2.50 valuation
       expect(body.budget.source).toBe("events");
-      expect(body.budget.estimated).toBe(false); // settled ledger cash is exact
+      expect(body.budget.estimated).toBe(true); // carried by the authoritative cash receipt
     });
   });
 
@@ -6912,6 +7118,7 @@ describe("DaemonControlApiServer", () => {
   it("rerun_with_feedback enqueues a follow-up run carrying the operator feedback", async () => {
     const { daemon, record } = fakeDaemon();
     record.state = "succeeded";
+    record.params = { ...(record.params as Record<string, unknown>), retryOf: "run-original" };
     writeFileSync(
       join(record.runDir as string, "arbitration", "decision.yaml"),
       "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
@@ -6943,6 +7150,7 @@ describe("DaemonControlApiServer", () => {
       expect(body.newRunId).toBeTruthy();
       expect(String(enqueued?.["prompt"])).toContain("Narrow the diff to src/auth only.");
       expect(enqueued?.["parentRunId"]).toBe("run-d1");
+      expect(enqueued).not.toHaveProperty("retryOf");
     });
   });
 
@@ -7331,6 +7539,58 @@ describe("DaemonControlApiServer", () => {
         "planRunId",
         "planRef",
         "threadId",
+      ]);
+    });
+  });
+
+  it("refuses retry-style Delegate child replays while Run Again returns an ordinary editable draft", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      parentRunId: "run-parent",
+      delegatedFromRunId: "run-parent",
+    };
+    writeFileSync(
+      join(record.runDir as string, "arbitration", "decision.yaml"),
+      "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
+    );
+    await withDaemonServer(daemon, async (base) => {
+      const retry = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "child-retry" },
+        body: "{}",
+      });
+      expect(retry.status).toBe(409);
+      await expect(retry.json()).resolves.toMatchObject({
+        code: "delegated_child_retry_unavailable",
+        retryable: false,
+      });
+
+      const decision = await apiFetch(`${base}/runs/run-d1/decision`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "child-decision" },
+        body: JSON.stringify({ action: "rerun_with_feedback", feedback: "try again" }),
+      });
+      expect(decision.status).toBe(409);
+      await expect(decision.json()).resolves.toMatchObject({
+        code: "delegated_child_rerun_unavailable",
+        retryable: false,
+      });
+
+      const runAgain = await apiFetch(`${base}/runs/run-d1/run-again`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(runAgain.status).toBe(200);
+      const draft = (await runAgain.json()) as {
+        request: Record<string, unknown>;
+        differences: Array<{ field: string }>;
+      };
+      expect(draft.request).not.toHaveProperty("parentRunId");
+      expect(draft.request).not.toHaveProperty("delegatedFromRunId");
+      expect(draft.differences.map((entry) => entry.field)).toEqual([
+        "parentRunId",
+        "delegatedFromRunId",
       ]);
     });
   });
@@ -8036,6 +8296,33 @@ describe("DaemonControlApiServer", () => {
       expect(enqueued).toBe(0);
     } finally {
       await server.stop();
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects client-forged Delegate lineage on POST /runs", async () => {
+    const { daemon } = fakeDaemon();
+    const repo = reapMk(join(tmpdir(), "claudexor-delegation-lineage-"));
+    try {
+      await withDaemonServer(daemon, async (base) => {
+        for (const field of ["parentRunId", "delegatedFromRunId"] as const) {
+          const response = await apiFetch(`${base}/runs`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}` },
+            body: JSON.stringify({
+              prompt: "x",
+              mode: "agent",
+              scope: { kind: "project", root: repo },
+              [field]: "run-parent",
+            }),
+          });
+          expect(response.status).toBe(400);
+          expect(((await response.json()) as { message: string }).message).toMatch(
+            /server-owned lineage/,
+          );
+        }
+      });
+    } finally {
       rmSync(repo, { recursive: true, force: true });
     }
   });

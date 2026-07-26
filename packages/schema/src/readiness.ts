@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AdapterStatus, ConformanceCheck, HarnessManifest } from "./harness.js";
 import { AuthSourceReadiness } from "./auth.js";
+import { DelegationCapability } from "./delegation.js";
 
 /**
  * ONE display-ready readiness check (W4.7 sol #18): the daemon normalizes raw
@@ -91,6 +92,11 @@ export const HarnessStatusDto = z
       .nullable()
       .default(null)
       .describe("Strict truth-source check of configuredModel; null when no model is configured."),
+    delegation: DelegationCapability.nullable()
+      .default(null)
+      .describe(
+        "Engine-owned Delegate capability for this harness and installed runtime; null on legacy status rows.",
+      ),
   })
   .describe(
     "Doctor-backed status row for one harness: status, intents, checks, and configured-model validity.",

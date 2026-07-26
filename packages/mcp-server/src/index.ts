@@ -300,15 +300,14 @@ function structuredRunResult(result: unknown): Record<string, unknown> {
       r["applyEligibility"] && typeof r["applyEligibility"] === "object"
         ? r["applyEligibility"]
         : null,
-    // The server-owned outcome headline (D18) and derived plan readiness (D17)
-    // ride the same structured result as the axes — null on a deferred handle
-    // (the run is still live; read them later via claudexor_run_result).
     outcomeBanner: typeof r["outcomeBanner"] === "string" ? r["outcomeBanner"] : null,
     planReadiness:
       r["planReadiness"] && typeof r["planReadiness"] === "object" ? r["planReadiness"] : null,
-    // Council membership + merge disclosure (QA-023b): the SAME facts the run
-    // detail owns, so a host can machine-verify a `--council` plan's roster.
     council: r["council"] && typeof r["council"] === "object" ? r["council"] : null,
+    parentRunId: typeof r["parentRunId"] === "string" ? r["parentRunId"] : null,
+    delegatedFromRunId:
+      typeof r["delegatedFromRunId"] === "string" ? r["delegatedFromRunId"] : null,
+    delegation: r["delegation"] && typeof r["delegation"] === "object" ? r["delegation"] : null,
   };
 }
 

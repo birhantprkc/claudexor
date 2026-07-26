@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
+import { BudgetLedger } from "@claudexor/budget";
 
 const shellGate = (command: string) => ({
   program: "sh",
@@ -31,6 +32,7 @@ import { writeEvidencePacket } from "@claudexor/context";
 import type { ReviewerSpec } from "@claudexor/review";
 import { Orchestrator } from "./orchestrator.js";
 import type { OrchestratorResult } from "./orchestrator.js";
+import { DelegationBudgetAuthority } from "./delegationBudgetAuthority.js";
 import { buildRevisePrompt } from "./revisePrompt.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -4247,6 +4249,7 @@ describe("Orchestrator", () => {
     const guard = guardAnnouncedRun as unknown as (
       signal: AbortSignal | undefined,
       body: (announce: (a: unknown) => void) => Promise<unknown>,
+      beforeTerminal?: (context: unknown) => void | Promise<void>,
       onSettled?: (runId: string) => void,
     ) => Promise<OrchestratorResult>;
     const { ArtifactStore } = await import("@claudexor/artifact-store");
@@ -4262,6 +4265,7 @@ describe("Orchestrator", () => {
         async () => {
           throw new Error("pre-announce boom");
         },
+        undefined,
         (id) => settled.push(id),
       ),
     ).rejects.toThrow("pre-announce boom");
@@ -4286,6 +4290,7 @@ describe("Orchestrator", () => {
         });
         throw new Error("mid-strategy");
       },
+      undefined,
       (id) => settled.push(id),
     );
     expect(settled).toEqual(["hook-throw"]);
@@ -4316,6 +4321,7 @@ describe("Orchestrator", () => {
           candidates: [],
         } as unknown as OrchestratorResult;
       },
+      undefined,
       (id) => settled.push(id),
     );
     expect(settled).toEqual(["hook-throw", "hook-ok"]);
@@ -9490,6 +9496,14 @@ describe("stall rotation (pacing + coverage)", () => {
 });
 
 describe("delegation belt injection (D32)", () => {
+  it.each(["ask", "plan"] as const)("refuses Delegate directly for %s mode", async (mode) => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({ registry: new Map(), reviewers: [] });
+    await expect(orch.run({ repoRoot: repo, prompt: "x", mode, delegate: true })).rejects.toThrow(
+      /agent-only strategy/,
+    );
+  });
+
   /** An implement adapter that DECLARES mcp_injection and records the last spec
    * it received, so we can assert what the engine injected. */
   function delegatingAdapter(
@@ -9497,6 +9511,8 @@ describe("delegation belt injection (D32)", () => {
     mcpInjection: boolean,
     observe?: (spec: { extra_mcp_servers?: unknown }) => void,
     requiresFullAccess = false,
+    beltStatus?: string,
+    usageCostUsd?: number,
   ): HarnessAdapter {
     return {
       id,
@@ -9524,9 +9540,32 @@ describe("delegation belt injection (D32)", () => {
       async *run(spec) {
         observe?.(spec as { extra_mcp_servers?: unknown });
         const ts = new Date().toISOString();
-        yield { type: "started", session_id: spec.session_id, ts };
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          ...(beltStatus
+            ? { payload: { mcp_servers: [{ name: "claudexor", status: beltStatus }] } }
+            : {}),
+          ...(usageCostUsd
+            ? {
+                credential_route: "managed_api_key" as const,
+                credential_source: "api_key_env" as const,
+              }
+            : {}),
+        };
         writeFileSync(join(spec.cwd, "CHANGED.txt"), "change\n");
         yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+        if (usageCostUsd) {
+          yield {
+            type: "usage",
+            session_id: spec.session_id,
+            ts,
+            credential_route: "managed_api_key",
+            credential_source: "api_key_env",
+            usage: { cost_usd: usageCostUsd },
+          };
+        }
         yield { type: "completed", session_id: spec.session_id, ts };
       },
     };
@@ -9537,7 +9576,72 @@ describe("delegation belt injection (D32)", () => {
     command: "/usr/bin/node",
     args: ["/cli", "mcp", "serve-belt"],
     env: { CLAUDEXOR_DELEGATION_DEPTH: "0" },
+    required: true,
   };
+
+  it("releases an attached child authority when convergence fails before run announcement", async () => {
+    const repo = await initRepo();
+    const authority = new DelegationBudgetAuthority();
+    authority.registerParent("run-parent", new BudgetLedger());
+    authority.noteChildAccepted("run-parent", "job-child");
+    const orch = new Orchestrator({
+      registry: new Map([["deleg", delegatingAdapter("deleg", true)]]),
+      reviewers: [],
+      delegationBudgetAuthority: authority,
+    });
+    await expect(
+      orch.run({
+        repoRoot: repo,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["deleg"],
+        attempts: 1,
+        runId: "run-child",
+        delegatedFromRunId: "run-parent",
+        delegationAdmissionId: "job-child",
+        onEvent: (event) => {
+          if (event.type === "run.created") throw new Error("event sink failed before announce");
+        },
+      }),
+    ).rejects.toThrow(/event sink failed before announce/);
+    authority.beginParentClose("run-parent");
+    await expect(authority.waitForChildren("run-parent", 20)).resolves.toBeUndefined();
+  });
+
+  it("settles a delegated child adapter's cash into its local and parent family ledgers", async () => {
+    const repo = await initRepo();
+    const authority = new DelegationBudgetAuthority();
+    const root = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    authority.registerParent("run-parent", root);
+    authority.noteChildAccepted("run-parent", "job-child");
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["deleg", delegatingAdapter("deleg", true, undefined, false, undefined, 0.2)],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: authority,
+    });
+
+    const result = await orch.run({
+      repoRoot: repo,
+      prompt: "child work",
+      mode: "agent",
+      harnesses: ["deleg"],
+      runId: "run-child",
+      delegatedFromRunId: "run-parent",
+      delegationAdmissionId: "job-child",
+      paidBudget: { kind: "finite", maxUsd: 1 },
+    });
+
+    expect(
+      result.lifecycle,
+      JSON.stringify({ facts: result.facts, summary: result.summary, runDir: result.runDir }),
+    ).toBe("succeeded");
+    expect(result.spendUsd).toBeCloseTo(0.2, 5);
+    expect(root.spend()).toBeCloseTo(0.2, 5);
+    authority.beginParentClose("run-parent");
+    await expect(authority.waitForChildren("run-parent", 20)).resolves.toBeUndefined();
+  });
 
   it("injects the belt descriptor into an agent lane whose adapter can host MCP servers, rebinding its budget to the RESOLVED cap", async () => {
     const repo = await initRepo();
@@ -9547,6 +9651,7 @@ describe("delegation belt injection (D32)", () => {
         ["deleg", delegatingAdapter("deleg", true, (s) => (injected = s.extra_mcp_servers))],
       ]),
       reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
     });
     await orch.run({
       repoRoot: repo,
@@ -9555,12 +9660,16 @@ describe("delegation belt injection (D32)", () => {
       harnesses: ["deleg"],
       delegate: true,
       delegationBelt: belt,
+      runId: "run-current-delegate",
+      parentRunId: "run-prior-thread-turn",
     });
     // The engine rebinds the belt's parent-budget env to the resolved run
     // budget (default = unlimited here), preserving the descriptor's other env.
     const list = injected as Array<{ env: Record<string, string> }>;
     expect(list).toHaveLength(1);
     expect(list[0]!.env.CLAUDEXOR_DELEGATION_DEPTH).toBe("0");
+    // The belt parent is THIS Delegate run, never its ordinary thread ancestor.
+    expect(list[0]!.env.CLAUDEXOR_DELEGATION_PARENT_RUN_ID).toBe("run-current-delegate");
     expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_BUDGET)).toEqual({ kind: "unlimited" });
   });
 
@@ -9579,6 +9688,7 @@ describe("delegation belt injection (D32)", () => {
           ["deleg", delegatingAdapter("deleg", true, (s) => (injected = s.extra_mcp_servers))],
         ]),
         reviewers: [],
+        delegationBudgetAuthority: new DelegationBudgetAuthority(),
       });
       await orch.run({
         repoRoot: repo,
@@ -9608,12 +9718,13 @@ describe("delegation belt injection (D32)", () => {
         ["deleg", delegatingAdapter("deleg", true, (s) => (injected = s.extra_mcp_servers))],
       ]),
       reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
     });
     await orch.run({ repoRoot: repo, prompt: "x", mode: "agent", harnesses: ["deleg"] });
     expect(injected).toEqual([]);
   });
 
-  it("REFUSES --delegate below full access on a harness whose belt needs full access (codex sandbox), naming the remedy", async () => {
+  it("degrades before start below full access and records a durable warning", async () => {
     const repo = await initRepo();
     let injected: unknown = "unset";
     const orch = new Orchestrator({
@@ -9624,6 +9735,7 @@ describe("delegation belt injection (D32)", () => {
         ],
       ]),
       reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
     });
     const res = await orch.run({
       repoRoot: repo,
@@ -9634,11 +9746,15 @@ describe("delegation belt injection (D32)", () => {
       delegationBelt: belt,
       // default write access (workspace_write) — below full
     });
-    expect(res.lifecycle).toBe("failed");
-    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
-    expect(failure).toMatch(/full access|mcp_injection_requires_full_access|--access full/);
+    expect(res.lifecycle).toBe("succeeded");
+    expect(readFileSync(join(res.runDir, "events.jsonl"), "utf8")).toMatch(
+      /delegation\.belt\.degraded.*access_profile_incompatible/,
+    );
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+      /reason: access_profile_incompatible/,
+    );
     // The belt was never injected into a lane that would sandbox-cancel it.
-    expect(injected).toBe("unset");
+    expect(injected).toEqual([]);
   });
 
   it("injects the belt on a full-access-requiring harness WHEN the lane runs at full access", async () => {
@@ -9652,6 +9768,7 @@ describe("delegation belt injection (D32)", () => {
         ],
       ]),
       reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
     });
     await orch.run({
       repoRoot: repo,
@@ -9668,11 +9785,12 @@ describe("delegation belt injection (D32)", () => {
     expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_BUDGET)).toEqual({ kind: "unlimited" });
   });
 
-  it("REFUSES --delegate (typed, naming the harness) on a lane that cannot inject MCP servers", async () => {
+  it("degrades before start on a non-injecting harness with durable typed cause", async () => {
     const repo = await initRepo();
     const orch = new Orchestrator({
       registry: new Map([["nocap", delegatingAdapter("nocap", false)]]),
       reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
     });
     const res = await orch.run({
       repoRoot: repo,
@@ -9682,9 +9800,244 @@ describe("delegation belt injection (D32)", () => {
       delegate: true,
       delegationBelt: belt,
     });
+    expect(res.lifecycle).toBe("succeeded");
+    expect(readFileSync(join(res.runDir, "events.jsonl"), "utf8")).toMatch(
+      /delegation\.belt\.degraded.*manifest_unsupported/,
+    );
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+      /reason: manifest_unsupported/,
+    );
+  });
+
+  it("prioritizes an effective Delegate lane for a single candidate from a mixed pool", async () => {
+    const repo = await initRepo();
+    let incapableRuns = 0;
+    let delegateRuns = 0;
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["nocap", delegatingAdapter("nocap", false, () => (incapableRuns += 1))],
+        [
+          "deleg",
+          delegatingAdapter(
+            "deleg",
+            true,
+            () => {
+              delegateRuns += 1;
+            },
+            false,
+            "connected",
+          ),
+        ],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["nocap", "deleg"],
+      n: 1,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("succeeded");
+    expect(delegateRuns).toBe(1);
+    expect(incapableRuns).toBe(0);
+    const telemetry = readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8");
+    expect(telemetry).toContain("reason: delegate_effective_first");
+    expect(telemetry).toMatch(/order:\n\s+- deleg\n\s+- nocap/);
+  });
+
+  it("persists partially degraded truth after both mixed Delegate lanes actually run", async () => {
+    const repo = await initRepo();
+    let capableRuns = 0;
+    let incapableRuns = 0;
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["nocap", delegatingAdapter("nocap", false, () => (incapableRuns += 1))],
+        ["deleg", delegatingAdapter("deleg", true, () => (capableRuns += 1), false, "connected")],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["nocap", "deleg"],
+      n: 2,
+      delegate: true,
+      delegationBelt: belt,
+    });
+
+    expect({ capableRuns, incapableRuns }).toEqual({ capableRuns: 1, incapableRuns: 1 });
+    const telemetry = new ArtifactStore(repo).readYaml<{
+      delegation: { requested: boolean; effective: boolean; used: boolean; reason: string };
+      request_requirements: Array<{
+        capability: string;
+        harness_id: string;
+        requested: boolean;
+        effective: boolean;
+        reason: string;
+      }>;
+    }>(join(res.runDir, "final", "telemetry.yaml"));
+    expect(telemetry?.delegation).toMatchObject({
+      requested: true,
+      effective: true,
+      used: false,
+      reason: "partially_degraded",
+    });
+    expect(
+      telemetry?.request_requirements.find(
+        (receipt) => receipt.capability === "delegation" && receipt.harness_id === "deleg",
+      ),
+    ).toMatchObject({ requested: true, effective: true, reason: "effective" });
+    expect(
+      telemetry?.request_requirements.find(
+        (receipt) => receipt.capability === "delegation" && receipt.harness_id === "nocap",
+      ),
+    ).toMatchObject({ requested: true, effective: false, reason: "manifest_unsupported" });
+  });
+
+  it("starts convergence on an effective Delegate lane when a mixed pool also has an incapable lane", async () => {
+    const repo = await initRepo();
+    let incapableRuns = 0;
+    let delegateRuns = 0;
+    let injected: unknown;
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["nocap", delegatingAdapter("nocap", false, () => (incapableRuns += 1))],
+        [
+          "deleg",
+          delegatingAdapter(
+            "deleg",
+            true,
+            (spec) => {
+              delegateRuns += 1;
+              injected = spec.extra_mcp_servers;
+            },
+            false,
+            "connected",
+          ),
+        ],
+      ]),
+      reviewers: reviewers(),
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["nocap", "deleg"],
+      attempts: 1,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(delegateRuns).toBe(1);
+    expect(incapableRuns).toBe(0);
+    expect(
+      (injected as Array<{ env: Record<string, string> }>)[0]!.env
+        .CLAUDEXOR_DELEGATION_PARENT_RUN_ID,
+    ).toBe(res.runId);
+  });
+
+  it("degrades before start when the installed runtime has no belt entry", async () => {
+    const repo = await initRepo();
+    let injected: unknown = "unset";
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["deleg", delegatingAdapter("deleg", true, (s) => (injected = s.extra_mcp_servers))],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      delegate: true,
+      delegationBelt: null,
+    });
+    expect(res.lifecycle).toBe("succeeded");
+    expect(injected).toEqual([]);
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+      /reason: runtime_unavailable/,
+    );
+  });
+
+  it("hard-fails when an injected belt reports startup failure", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([["deleg", delegatingAdapter("deleg", true, undefined, false, "failed")]]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      delegate: true,
+      delegationBelt: belt,
+    });
     expect(res.lifecycle).toBe("failed");
-    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
-    expect(failure).toMatch(/delegation belt|mcp_injection|nocap/);
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+      /reason: startup_failed/,
+    );
+  });
+
+  it("lets any injected belt startup failure dominate a mixed race", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["failed", delegatingAdapter("failed", true, undefined, false, "failed")],
+        ["ready", delegatingAdapter("ready", true, undefined, false, "connected")],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["failed", "ready"],
+      n: 2,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    expect(res.winner).toBeNull();
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+      /reason: startup_failed/,
+    );
+  });
+
+  it("hard-fails convergence immediately when an injected belt fails startup", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([["deleg", delegatingAdapter("deleg", true, undefined, false, "failed")]]),
+      reviewers: reviewers(),
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      attempts: 3,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+      /reason: startup_failed/,
+    );
+    const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
+    expect(events.match(/"type":"harness.started"/g)).toHaveLength(1);
+    expect(events).not.toContain('"type":"review.started"');
   });
 });
 

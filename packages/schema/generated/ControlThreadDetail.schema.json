@@ -667,6 +667,70 @@
                         ],
                         "default": null,
                         "description": "When the run finished; null while live."
+                      },
+                      "delegation": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "requested": {
+                                "type": "boolean",
+                                "default": false
+                              },
+                              "effective": {
+                                "type": "boolean",
+                                "default": false
+                              },
+                              "used": {
+                                "type": "boolean",
+                                "default": false
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "pending",
+                                  "not_requested",
+                                  "injected_unused",
+                                  "used",
+                                  "runtime_unavailable",
+                                  "manifest_unsupported",
+                                  "access_profile_incompatible",
+                                  "partially_degraded",
+                                  "startup_failed"
+                                ],
+                                "default": "not_requested"
+                              },
+                              "remediation": {
+                                "anyOf": [
+                                  {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ],
+                                "default": null
+                              }
+                            },
+                            "additionalProperties": false,
+                            "description": "Engine-owned Delegate requested/effective/used receipt; surfaces project it without parsing model output."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "description": "Durable Delegate outcome receipt; null for ordinary and legacy turns.",
+                        "default": null
+                      },
+                      "delegatedChildRunIds": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/definitions/ControlThreadDetail/properties/thread/properties/credentialProfileId/anyOf/0"
+                        },
+                        "maxItems": 8,
+                        "default": [],
+                        "description": "At most eight server-owned direct Delegate child ids for whole-thread workspace aggregation."
                       }
                     },
                     "required": [

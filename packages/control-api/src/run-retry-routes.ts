@@ -64,6 +64,15 @@ async function exactRetry(
 ): Promise<void> {
   const source = await ctx.findRun(id);
   if (!source) return ctx.json(res, 404, { error: "no such run" });
+  const sourceParams = paramsRecord(source);
+  if (typeof sourceParams["delegatedFromRunId"] === "string") {
+    return ctx.json(res, 409, {
+      error:
+        "Exact Retry is unavailable for a Delegate child after its parent authority ends; use Run Again to create an ordinary editable run",
+      code: "delegated_child_retry_unavailable",
+      retryable: false,
+    });
+  }
   if (source.state === "queued" || source.state === "running") {
     return ctx.json(res, 409, { error: `run is still ${source.state}` });
   }
@@ -174,7 +183,16 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
     // belong to the turn pipeline) — surviving here would make the draft
     // unpostable, and a replayed planRef would smuggle the frozen-plan
     // reference past the boundary (INV-081). Same set as decision-rerun.
-    const { turnId, retryOf, planRunId, planRef, threadId, ...request } = parsed;
+    const {
+      turnId,
+      retryOf,
+      planRunId,
+      planRef,
+      threadId,
+      parentRunId,
+      delegatedFromRunId,
+      ...request
+    } = parsed;
     const differences = [
       ...(turnId
         ? [{ field: "turnId", change: "omitted" as const, reason: "server-owned turn binding" }]
@@ -197,6 +215,18 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
       ...(threadId
         ? [{ field: "threadId", change: "omitted" as const, reason: "server-owned thread binding" }]
         : []),
+      ...(parentRunId
+        ? [{ field: "parentRunId", change: "omitted" as const, reason: "new ordinary run" }]
+        : []),
+      ...(delegatedFromRunId
+        ? [
+            {
+              field: "delegatedFromRunId",
+              change: "omitted" as const,
+              reason: "Delegate parent authority is not replayable",
+            },
+          ]
+        : []),
     ];
     ctx.json(
       res,
@@ -206,6 +236,12 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
   } catch (error) {
     ctx.requestError(res, error);
   }
+}
+
+function paramsRecord(rec: DaemonRunRecord): Record<string, unknown> {
+  return rec.params && typeof rec.params === "object" && !Array.isArray(rec.params)
+    ? (rec.params as Record<string, unknown>)
+    : {};
 }
 
 /** QA-035: read the model/effort the engine froze into the source run's

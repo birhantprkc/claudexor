@@ -122,6 +122,13 @@ granted a typed tool belt to spawn isolated read-only scouts and candidate
 sub-runs, with server-enforced isolation, depth, count, and budget limits —
 and no self-apply tool: the parent integrates results in its own workspace,
 and every mutation of the live tree still passes the single delivery gate.
+The grant is permission, not an obligation to create a child. Its absence or
+degradation stays visible, and only engine-recorded Claudexor lineage counts as
+a delegated child; a vendor's own internal subagent is a different mechanism,
+not evidence that the Claudexor tool belt worked. One daemon-lifetime family
+authority admits at most eight direct children, shares reservations and
+settlements, closes admission before cascade cancellation, and delays the
+parent terminal receipt until child spending can no longer arrive late.
 
 Rejected alternatives, recorded so they stay rejected: a user-facing
 "orchestrate" mode (no leading tool exposes orchestration as a mode; users

@@ -34,8 +34,22 @@ export async function rerunWithFeedback(
 ): Promise<void> {
   if (!body.feedback?.trim()) return ctx.json(res, 400, { error: "feedback is required" });
   const source = paramsRecord(rec);
+  if (typeof source["delegatedFromRunId"] === "string") {
+    return ctx.json(res, 409, {
+      error:
+        "Decision rerun is unavailable for a Delegate child after its parent authority ends; use Run Again to create an ordinary editable run",
+      code: "delegated_child_rerun_unavailable",
+      retryable: false,
+    });
+  }
   const originalPrompt = typeof source["prompt"] === "string" ? source["prompt"] : "";
-  const { turnId: _turnId, planRunId: _planRunId, planRef: _planRef, ...original } = source;
+  const {
+    turnId: _turnId,
+    planRunId: _planRunId,
+    planRef: _planRef,
+    retryOf: _retryOf,
+    ...original
+  } = source;
   let params: ControlRunStartRequest;
   try {
     params = runStart.normalizeRunStart(

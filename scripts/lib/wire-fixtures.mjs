@@ -123,6 +123,28 @@ export function buildWireFixtures() {
     },
     createdAt: NOW,
   });
+  add("thread-turn-delegation", "ControlThreadTurn", {
+    id: "tn-delegate",
+    threadId: "th-1",
+    runId: "run-delegate-parent",
+    kind: "followup",
+    prompt: "delegate this",
+    run: {
+      state: "succeeded",
+      mode: "agent",
+      result: { kind: "answer" },
+      outputReadyState: "ready",
+      delegation: {
+        requested: true,
+        effective: true,
+        used: true,
+        reason: "used",
+        remediation: null,
+      },
+      delegatedChildRunIds: ["run-child-1", "run-child-2"],
+    },
+    createdAt: NOW,
+  });
   add("thread-turn-native-resume", "ControlThreadTurn", {
     id: "tn-3",
     threadId: "th-1",
@@ -174,6 +196,32 @@ export function buildWireFixtures() {
     checks: "not_configured",
     review: "not_run",
     reason: "budget_exhausted",
+  });
+
+  // Delegate readiness/outcome are consumed directly by the Swift composer
+  // and run receipts. Pin both cross-language shapes so a reason/remediation
+  // or requested/effective/used drift cannot silently disable or mislabel the
+  // control surface.
+  add("delegation-capability-ready", "DelegationCapability", {
+    available: true,
+    reason: "ready",
+    remediation: null,
+    requiresFullAccess: true,
+  });
+  add("run-delegation-degraded", "RunDelegationInfo", {
+    requested: true,
+    effective: false,
+    used: false,
+    reason: "runtime_unavailable",
+    remediation: "Update or repair the Claudexor runtime, then retry Delegate.",
+  });
+  add("run-failure-delegation-drain-timeout", "RunFailure", {
+    phase: "terminalization",
+    category: "internal",
+    code: "delegation_child_drain_timeout",
+    safeMessage: "Timed out draining delegated children before parent terminalization.",
+    eventRefs: ["events.jsonl#delegation-child-drain"],
+    nextActions: ["Inspect child run terminals and retry the parent after recovery."],
   });
 
   add("budget-snapshot-unlimited", "ControlBudgetSnapshot", {

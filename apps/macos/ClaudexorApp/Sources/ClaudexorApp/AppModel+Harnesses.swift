@@ -44,6 +44,7 @@ extension AppModel {
                                    intents: status.enabledIntents, routableIntents: status.routableIntents,
                                    reasons: status.reasons ?? [], readiness: status.readiness,
                                    acceptsImages: acceptsImages, acceptsBrowser: acceptsBrowser,
+                                   delegation: status.delegation,
                                    effortLevels: effortLevels, modelEffortLevels: modelEffortLevels)
             }
             return true

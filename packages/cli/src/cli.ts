@@ -71,14 +71,18 @@ import {
   exitCodeForState,
   fetchApplyEligibility,
   fetchCouncil,
-  fetchOutcomeBanner,
   fetchRunDetail,
   fetchRunOutcomeFacts,
-  projectApplyEligibility,
   projectOutcomeBanner,
   projectRunOutcomeFacts,
   mergeDaemonRunOutcome,
 } from "./daemon-run.js";
+import {
+  inspectDelegationLines,
+  projectDelegation,
+  terminalDelegationLines,
+  terminalDetailFields,
+} from "./delegation-output.js";
 import { runPlanQuestionLoop } from "./plan-question-loop.js";
 import { resolveDecisionBody } from "./decision.js";
 import { primaryOutputForCli } from "./primary-output.js";
@@ -694,10 +698,7 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
       const out = mergeDaemonRunOutcome(started, final);
       const status = out.status;
       const reason = daemonOutcomeSummary({ ...started, status, error: out.error });
-      // ONE GET /runs/:id feeds all three terminal projections (INV-120/122).
       const detail = await fetchRunDetail(addr, out.runId);
-      const applyEligibility = projectApplyEligibility(detail);
-      const outcomeBanner = projectOutcomeBanner(detail);
       printJsonLine({
         frame: "run.terminal",
         runId: out.runId,
@@ -708,8 +709,7 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
         ...(out.error ? { error: out.error } : {}),
         ...daemonOutcomeProblemFields(out),
         ...(reason ? { summary: reason } : {}),
-        ...(outcomeBanner ? { outcomeBanner } : {}),
-        ...(applyEligibility ? { applyEligibility } : {}),
+        ...terminalDetailFields(detail),
       });
       return exitCodeForState(status, projectRunOutcomeFacts(detail));
     }
@@ -723,8 +723,6 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
       // re-implying eligibility from status. ONE GET /runs/:id feeds all three
       // terminal projections (INV-120/122).
       const detail = await fetchRunDetail(addr, out.runId);
-      const applyEligibility = projectApplyEligibility(detail);
-      const outcomeBanner = projectOutcomeBanner(detail);
       printJson({
         runId: out.runId,
         runDir: out.runDir,
@@ -734,8 +732,7 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
         ...(out.error ? { error: out.error } : {}),
         ...daemonOutcomeProblemFields(out),
         ...(reason ? { summary: reason } : {}),
-        ...(outcomeBanner ? { outcomeBanner } : {}),
-        ...(applyEligibility ? { applyEligibility } : {}),
+        ...terminalDetailFields(detail),
       });
       return exitCodeForState(out.status, projectRunOutcomeFacts(detail));
     }
@@ -754,8 +751,10 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
     print("");
     print(`run ${started.runId} [${publicStatus}]`);
     // Server-owned outcome headline (D18), printed verbatim above any output.
-    const terminalBanner = await fetchOutcomeBanner(addr, started.runId);
+    const terminalDetail = await fetchRunDetail(addr, started.runId);
+    const terminalBanner = projectOutcomeBanner(terminalDetail);
     if (terminalBanner) print(`  ${terminalBanner}`);
+    for (const line of terminalDelegationLines(projectDelegation(terminalDetail))) print(line);
     print(`  artifacts: ${final?.runDir ?? started.runDir}`);
     // A succeeded lifecycle exits 0 — INCLUDING a "Done · needs review" run
     // (review blocked / checks failed). The apply-eligibility verdict (state
@@ -1184,6 +1183,7 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
           `access: requested=${contract.data.access.requested_profile} effective=${contract.data.access.effective_profile}`,
         );
       }
+      for (const line of inspectDelegationLines(telemetry?.delegation ?? null)) print(line);
       if (telemetry) {
         print(
           `web: policy=${telemetry.external_context_policy} effective=${telemetry.effective_web_mode} required=${telemetry.web_required} evidence=${telemetry.web.status}`,

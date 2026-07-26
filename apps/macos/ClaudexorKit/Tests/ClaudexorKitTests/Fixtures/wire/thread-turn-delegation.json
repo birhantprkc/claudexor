@@ -1,0 +1,47 @@
+{
+  "schema": "ControlThreadTurn",
+  "value": {
+    "id": "tn-delegate",
+    "threadId": "th-1",
+    "runId": "run-delegate-parent",
+    "parentRunId": null,
+    "planRunId": null,
+    "planHash": null,
+    "planReadinessOverridden": false,
+    "kind": "followup",
+    "prompt": "delegate this",
+    "run": {
+      "state": "succeeded",
+      "mode": "agent",
+      "result": {
+        "kind": "answer",
+        "diffStat": null,
+        "blockers": 0,
+        "adopted": null,
+        "applyState": "not_applied",
+        "preTurnSha": null,
+        "postTurnSha": null,
+        "revertAnchorId": null,
+        "revertable": false
+      },
+      "outcomeFacts": null,
+      "outputReadyState": "ready",
+      "waitingOnUser": false,
+      "finishedAt": null,
+      "delegation": {
+        "requested": true,
+        "effective": true,
+        "used": true,
+        "reason": "used",
+        "remediation": null
+      },
+      "delegatedChildRunIds": [
+        "run-child-1",
+        "run-child-2"
+      ]
+    },
+    "enqueueError": null,
+    "continuity": null,
+    "createdAt": "2026-07-19T12:00:00.000Z"
+  }
+}

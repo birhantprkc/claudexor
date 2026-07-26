@@ -6,6 +6,7 @@ import {
   claudeResultMessageEvents,
   claudeTerminalContextEvent,
 } from "./context-signals.js";
+import { requiredMcpStartupReceipts } from "./required-mcp.js";
 
 type Json = any;
 
@@ -26,6 +27,7 @@ export type ClaudeEventParser = (obj: Json, sessionId: string) => HarnessEvent[]
 
 export interface ClaudeParserOptions {
   deniedTools?: Iterable<string>;
+  requiredMcpServers?: Iterable<string>;
 }
 
 /**
@@ -39,8 +41,9 @@ export interface ClaudeParserOptions {
 export function createClaudeParser(opts: ClaudeParserOptions = {}): ClaudeEventParser {
   const pendingTools = new Map<string, ToolRef>();
   const deniedTools = new Set(opts.deniedTools ?? []);
+  const requiredMcpServers = new Set(opts.requiredMcpServers ?? []);
   return (obj: Json, sessionId: string): HarnessEvent[] | null =>
-    parseClaudeEventStateful(obj, sessionId, pendingTools, deniedTools);
+    parseClaudeEventStateful(obj, sessionId, pendingTools, deniedTools, requiredMcpServers);
 }
 
 /** Stateless convenience used by tests; resolves results within a single call only. */
@@ -114,11 +117,13 @@ function parseClaudeEventStateful(
   sessionId: string,
   pendingTools: Map<string, ToolRef>,
   deniedTools = new Set<string>(),
+  requiredMcpServers = new Set<string>(),
 ): HarnessEvent[] | null {
   const ts = nowIso();
   const type = obj?.type;
 
   if (type === "system" && obj.subtype === "init") {
+    const mcp = requiredMcpStartupReceipts(obj.mcp_servers, requiredMcpServers);
     return [
       {
         type: "started",
@@ -129,10 +134,24 @@ function parseClaudeEventStateful(
         payload: {
           tools: obj.tools,
           plugins: obj.plugins,
-          mcp_servers: obj.mcp_servers,
+          mcp_servers: mcp.servers,
           ...(typeof obj.session_id === "string" ? { native_session_id: obj.session_id } : {}),
         },
       },
+      ...(mcp.failed.length > 0
+        ? [
+            {
+              type: "error" as const,
+              session_id: sessionId,
+              ts,
+              error: `Required injected MCP startup failed: ${mcp.failed.join(", ")}`,
+              payload: {
+                code: "required_mcp_startup_failed",
+                mcp_servers: mcp.failed.map((name) => ({ name, status: "failed" })),
+              },
+            },
+          ]
+        : []),
     ];
   }
 

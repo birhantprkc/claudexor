@@ -16,6 +16,7 @@ import type {
   WorkState,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
+import { delegationBeltUnavailable, isDelegationBeltTool } from "./delegationToolEvidence.js";
 import {
   type TransientFailureObservation,
   classifyCompletedCrash,
@@ -254,18 +255,6 @@ function observeBeltStartup(t: AttemptTelemetry, ev: HarnessEvent): void {
 }
 
 /**
- * The delegation belt was requested (--delegate injected it) but never became
- * operational: the harness reported the server `failed` and no belt tool ever
- * ran (QA-024). This is the false-success trap — the harness may have answered
- * from its own native subagent with no Claudexor sub-run provenance. A belt
- * that was ready-but-unused is NOT unavailable (docs leave the spawn decision to
- * the harness); only a startup failure counts.
- */
-export function delegationBeltUnavailable(t: AttemptTelemetry): boolean {
-  return t.delegationBelt.requested && t.delegationBelt.failed && !t.delegationBelt.toolEvidence;
-}
-
-/**
  * QA-040: does this tool ref belong to the engine-armed browser MCP? Adapters
  * normalize browser calls as `kind:"mcp"` (codex `browser:browser_navigate`,
  * claude `mcp__browser__browser_navigate`), so the ToolKind cannot express
@@ -304,20 +293,21 @@ function bumpWebVerification(t: AttemptTelemetry, retrieval: string | undefined)
  * matching or tool-name heuristics.
  */
 export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): void {
-  // Delegation belt readiness (QA-024): the harness's `started` frame lists its
-  // MCP servers and each one's status. When the engine injected a belt, read
-  // THAT server's status as first-class readiness truth — never prose. A
-  // `failed` belt with no later tool evidence is the false-success trap.
-  if (ev.type === "started" && t.delegationBelt.requested) {
+  // Delegation belt readiness (QA-024): normalized startup/error events carry
+  // typed MCP server statuses. Read THAT server's status as first-class truth;
+  // a failed belt must never launder into a native-subagent success.
+  if (t.delegationBelt.requested && Array.isArray(ev.payload?.["mcp_servers"])) {
     observeBeltStartup(t, ev);
   }
   // Belt tool evidence: any `mcp__<belt>__*` tool call/result proves the belt
   // was actually reachable and used (a real Claudexor sub-run path), which
   // distinguishes a used belt from one the harness silently substituted.
-  if (t.delegationBelt.requested && t.delegationBelt.serverName && ev.tool?.name) {
-    if (ev.tool.name.startsWith(`mcp__${t.delegationBelt.serverName}`)) {
-      t.delegationBelt.toolEvidence = true;
-    }
+  if (
+    t.delegationBelt.requested &&
+    t.delegationBelt.serverName &&
+    isDelegationBeltTool(ev.tool, t.delegationBelt.serverName)
+  ) {
+    t.delegationBelt.toolEvidence = true;
   }
   // Route evidence: remember the model identity the stream itself disclosed.
   if (ev.observed_model && !t.observedModel) t.observedModel = ev.observed_model;

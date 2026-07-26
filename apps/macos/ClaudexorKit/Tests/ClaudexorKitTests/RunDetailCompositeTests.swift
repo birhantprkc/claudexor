@@ -9,6 +9,23 @@ import Testing
 /// / `planQuestions`, and the `council` receipt. These pin the decode so a wire
 /// change surfaces as a failing Swift test rather than a silently dropped field.
 @Suite struct RunDetailCompositeTests {
+    @Test func harnessStatusDecodesDelegationCapabilityAndLegacyFailsClosed() throws {
+        let current = try JSONDecoder().decode(HarnessStatus.self, from: Data(#"""
+        {"id":"claude","status":"ok","delegation":{"available":false,
+         "reason":"runtime_unavailable","remediation":"Update the runtime and reconnect.",
+         "requiresFullAccess":true}}
+        """#.utf8))
+        #expect(current.delegation == HarnessDelegationCapability(
+            available: false,
+            reason: "runtime_unavailable",
+            remediation: "Update the runtime and reconnect.",
+            requiresFullAccess: true
+        ))
+        let legacy = try JSONDecoder().decode(
+            HarnessStatus.self, from: Data(#"{"id":"claude","status":"ok"}"#.utf8))
+        #expect(legacy.delegation == nil)
+    }
+
     @Test func runSummaryDecodesOutcomeFacts() throws {
         let json = #"""
         {"runId":"r1","state":"succeeded",
@@ -29,6 +46,26 @@ import Testing
         let s = try JSONDecoder().decode(
             RunSummary.self, from: Data(#"{"runId":"r1","state":"running"}"#.utf8))
         #expect(s.outcomeFacts == nil)
+    }
+
+    @Test func runSummaryDecodesDelegateOutcomeAndNarrowChildLineage() throws {
+        let json = #"""
+        {"runId":"child","state":"running","parentRunId":"parent",
+         "delegatedFromRunId":"parent",
+         "delegation":{"requested":true,"effective":true,"used":true,"reason":"used","remediation":null}}
+        """#
+        let summary = try JSONDecoder().decode(RunSummary.self, from: Data(json.utf8))
+        #expect(summary.parentRunId == "parent")
+        #expect(summary.delegatedFromRunId == "parent")
+        #expect(summary.delegation == RunDelegationInfo(
+            requested: true, effective: true, used: true, reason: "used"))
+    }
+
+    @Test func runDetailDecodesBoundedDelegateChildrenAndDefaultsLegacyEmpty() throws {
+        let current = try detail(#", "children":[{"runId":"child","state":"succeeded","parentRunId":"r1","delegatedFromRunId":"r1"}]"#)
+        #expect(current.children.map(\.runId) == ["child"])
+        #expect(current.children[0].delegatedFromRunId == "r1")
+        #expect(try detail("").children.isEmpty)
     }
 
     private func detail(_ extra: String) throws -> RunDetail {
@@ -82,5 +119,6 @@ import Testing
         #expect(d.planReadiness == nil)
         #expect(d.planQuestions.isEmpty)
         #expect(d.council == nil)
+        #expect(d.children.isEmpty)
     }
 }

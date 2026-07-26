@@ -18,6 +18,7 @@ export * from "./operation.js";
 export * from "./recovery.js";
 export * from "./surface-run-controls.js";
 export * from "./request-requirements.js";
+export * from "./delegation.js";
 export * from "./attachment.js";
 export * from "./task.js";
 export * from "./context.js";

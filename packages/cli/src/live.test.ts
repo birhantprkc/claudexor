@@ -153,6 +153,19 @@ describe("claudexor follow", () => {
 
     expect(
       formatRunEventLine({
+        type: "delegation.belt.degraded",
+        payload: { harness_id: "cursor", effective: true, reason: "manifest_unsupported" },
+      }),
+    ).toContain("another effective Delegate lane remains");
+    expect(
+      formatRunEventLine({
+        type: "delegation.belt.degraded",
+        payload: { harness_id: "cursor", effective: false, reason: "manifest_unsupported" },
+      }),
+    ).toContain("continued without Delegate");
+
+    expect(
+      formatRunEventLine({
         type: "route.pool.degraded",
         payload: {
           requested_harnesses: ["claude", "codex", "cursor"],

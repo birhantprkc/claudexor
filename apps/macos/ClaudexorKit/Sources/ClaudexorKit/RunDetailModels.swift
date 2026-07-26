@@ -137,6 +137,9 @@ public struct CandidateDiffstat: Codable, Sendable, Equatable {
 
 public struct RunDetail: Codable, Sendable, Equatable {
     public let summary: RunSummary
+    /// Direct Claudexor Delegate children. This bounded server projection keeps
+    /// child rows reload-safe after they leave the global runs page.
+    public let children: [RunSummary]
     /// Highest event seq reflected in this snapshot — subscribe to the event
     /// stream from this cursor (snapshot-then-subscribe, no gaps, no dupes).
     public let lastSeq: Int
@@ -172,7 +175,7 @@ public struct RunDetail: Codable, Sendable, Equatable {
     public let council: CouncilInfo?
 
     enum CodingKeys: String, CodingKey {
-        case summary, lastSeq, artifacts, primaryOutput, timeline, budget, finalSummary, decision, workProduct, reviewFindings, pendingInteractions, failure, candidates, planProgress, operatorDecision
+        case summary, children, lastSeq, artifacts, primaryOutput, timeline, budget, finalSummary, decision, workProduct, reviewFindings, pendingInteractions, failure, candidates, planProgress, operatorDecision
         case outcomeBanner, applyEligibility, planReadiness, planQuestions, council
     }
 
@@ -181,6 +184,7 @@ public struct RunDetail: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         summary = try c.decode(RunSummary.self, forKey: .summary)
+        children = try c.decodeIfPresent([RunSummary].self, forKey: .children) ?? []
         lastSeq = try c.decodeIfPresent(Int.self, forKey: .lastSeq) ?? 0
         artifacts = try c.decodeIfPresent([ArtifactInfo].self, forKey: .artifacts) ?? []
         primaryOutput = try c.decodeIfPresent(PrimaryOutput.self, forKey: .primaryOutput)
@@ -205,6 +209,7 @@ public struct RunDetail: Codable, Sendable, Equatable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(summary, forKey: .summary)
+        try c.encode(children, forKey: .children)
         try c.encode(lastSeq, forKey: .lastSeq)
         try c.encode(artifacts, forKey: .artifacts)
         try c.encodeIfPresent(primaryOutput, forKey: .primaryOutput)
@@ -226,4 +231,3 @@ public struct RunDetail: Codable, Sendable, Equatable {
         try c.encodeIfPresent(council, forKey: .council)
     }
 }
-

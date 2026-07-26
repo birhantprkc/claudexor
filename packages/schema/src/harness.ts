@@ -380,14 +380,14 @@ export const HarnessCapabilityProfile = z
      * (the generalized browser-MCP seam): claude via `--mcp-config` inline JSON,
      * codex via `-c mcp_servers.<name>.*` overrides. Consumers: the browser-tool
      * wiring and the delegation belt. When false, `HarnessRunSpec.extra_mcp_servers`
-     * is refused at preflight (never silently dropped) and the Agent `delegate`
-     * toggle is a typed refusal naming the harness.
+     * is refused at preflight (never silently dropped), while the Agent
+     * `delegate` toggle degrades to ordinary Agent with a durable typed receipt.
      */
     mcp_injection: z
       .boolean()
       .default(false)
       .describe(
-        "The adapter can inject engine-owned MCP servers into the harness sandbox (browser tool, delegation belt); false = extra_mcp_servers and the delegate toggle are refused.",
+        "The adapter can inject engine-owned MCP servers into the harness sandbox (browser tool, delegation belt); false = browser MCP is refused and Delegate degrades to ordinary Agent with a durable typed receipt.",
       ),
     /**
      * The injected belt can only reach the daemon (socket + control API, OUTSIDE
@@ -395,13 +395,13 @@ export const HarnessCapabilityProfile = z
      * that escalation-requiring MCP call in headless exec; only danger-full-access
      * lets it through — the browser MCP already rides this. Claude does not
      * sandbox its MCP servers (false). true => a --delegate lane below full
-     * access is a typed preflight refusal, never a silent non-delegation.
+     * access degrades to ordinary Agent with a durable typed receipt.
      */
     mcp_injection_requires_full_access: z
       .boolean()
       .default(false)
       .describe(
-        "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => --delegate below full access is refused for this harness.",
+        "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => Delegate below full access degrades to ordinary Agent with a durable typed receipt.",
       ),
   })
   .default({})
@@ -539,15 +539,7 @@ export const BrowserToolSpec = z
   );
 export type BrowserToolSpec = z.infer<typeof BrowserToolSpec>;
 
-/**
- * One extra MCP server the adapter injects into the harness sandbox (generalized
- * from the browser-MCP seam). The engine names them, supplies the exact local
- * command + args + env, and each adapter translates the list into its native
- * MCP-injection transport (claude `--mcp-config` inline JSON, codex
- * `-c mcp_servers.<name>.*` overrides). Only injected on adapters whose
- * `capability_profile.mcp_injection` is true. `name` is the server key the
- * harness exposes its tools under (`mcp__<name>__*`).
- */
+/** One engine-injected MCP server translated into each harness's native transport. */
 export const ExtraMcpServer = z
   .object({
     name: z
@@ -564,6 +556,12 @@ export const ExtraMcpServer = z
       .record(z.string(), z.string())
       .default({})
       .describe("Extra environment variables for the MCP server process."),
+    required: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Whether the harness must fail startup when this MCP server cannot initialize; omitted/false preserves optional-server behavior.",
+      ),
   })
   .describe(
     "One extra MCP server the adapter injects into the harness sandbox; translated per adapter alongside the browser one.",

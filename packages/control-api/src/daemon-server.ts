@@ -33,7 +33,8 @@ import {
   readRunEventsWithIntegrity,
   timelineEvents,
 } from "./run-timeline.js";
-import { projectSession, projectThread, projectTurn, turnRunCard } from "./thread-projection.js";
+import { projectTurnRunCards } from "./thread-projection.js";
+import { projectSession, projectThread, projectTurn } from "./thread-projection.js";
 import {
   chainThreadMutation,
   handleThreadTurnCreate,
@@ -46,6 +47,20 @@ import {
   type ThreadLifecycleRouteCtx,
 } from "./thread-lifecycle-routes.js";
 import * as runStart from "./run-start.js";
+import { cancelDelegationFamily } from "./delegation-control.js";
+import {
+  directDelegatedChildrenFromRecords,
+  delegatedDescendantsFromRecords,
+  paramsRecord,
+  type ControlOperatorDecisionRecord,
+  type DaemonFacadeClient,
+  type DaemonRunRecord,
+} from "./run-record.js";
+export {
+  type ControlOperatorDecisionRecord,
+  type DaemonFacadeClient,
+  type DaemonRunRecord,
+} from "./run-record.js";
 import { handleRunRetryRoute } from "./run-retry-routes.js";
 import {
   handleRunApplyRoutes,
@@ -137,7 +152,6 @@ import {
   ControlThreadUpdateRequest,
   ControlThreadDetail,
   ControlThreadListResponse,
-  ControlTurnRunCard,
   DecisionRecord,
   ModeKind,
   RoutingGoal,
@@ -172,56 +186,6 @@ import {
   sha256,
 } from "@claudexor/util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-export interface DaemonRunRecord {
-  id: string;
-  state: string;
-  runId?: string;
-  taskId?: string;
-  runDir?: string;
-  error?: string;
-  /** Machine-readable code of a typed pre-start refusal (e.g. the trust gate's
-   * trust_full_access_required) — surfaces key remedies on the CODE and the
-   * turn-turn route maps it to a client-actionable 4xx (W24). */
-  errorCode?: string;
-  /** HTTP status persisted from the typed throw (refusal semantics are born
-   * at the throw); the turn route serves it verbatim when 400-599. */
-  errorStatus?: number;
-  /** Retryability persisted from the typed throw. `false` marks a pre-start
-   * refusal that Exact Retry can never repair (plan_not_ready — the frozen
-   * planRef replays the same open questions, INV-081); absent = no claim. */
-  errorRetryable?: boolean;
-  params?: unknown;
-  createdAt?: string;
-  startedAt?: string;
-  finishedAt?: string;
-}
-
-export interface ControlOperatorDecisionRecord {
-  action: "accept_risk" | "override_needs_human";
-  findingIds: string[];
-  acceptedRisks: string[];
-  patchSha256: string;
-  decidedAt: string;
-}
-
-export interface DaemonFacadeClient {
-  enqueue(
-    params: unknown,
-    options?: {
-      idempotencyKey?: string;
-      clientId?: string;
-      idempotencyRequest?: unknown;
-      operation?: string;
-    },
-  ): Promise<{ id: string; state: string }>;
-  findAccepted?(
-    params: unknown,
-    options: { idempotencyKey: string; clientId?: string; operation?: string },
-  ): Promise<DaemonRunRecord | null>;
-  status(id: string): Promise<DaemonRunRecord>;
-  list(): Promise<DaemonRunRecord[]>;
-  cancel(id: string): Promise<unknown>;
-}
 
 export interface DaemonControlApiOptions {
   token: string;
@@ -842,6 +806,11 @@ export class DaemonControlApiServer {
       // Fence order: cursor FIRST, every projection (pending interactions
       // included) after it — see the detailFor doc comment.
       const lastSeq = rec.runDir ? lastSeqInFile(join(rec.runDir, "events.jsonl")) : 0;
+      const parentRunId = rec.runId ?? rec.id;
+      const children = directDelegatedChildrenFromRecords(
+        parentRunId,
+        await this.opts.daemon.list(),
+      ).map((candidate) => summarizeRun(candidate));
       return this.json(
         res,
         200,
@@ -850,6 +819,7 @@ export class DaemonControlApiServer {
           this.pendingInteractionsFor(rec),
           lastSeq,
           this.validOperatorDecisionFor(rec),
+          children,
         ),
       );
     }
@@ -985,14 +955,11 @@ export class DaemonControlApiServer {
         const runs = await this.opts.daemon.list();
         const byRun = new Map(runs.map((r) => [r.runId ?? r.id, r]));
         const thread = detail.thread as { head_run_id?: string | null };
-        const cards = new Map<string, ControlTurnRunCard>();
-        for (const turn of detail.turns as { run_id?: string | null }[]) {
-          const runId = turn.run_id ?? null;
-          if (runId && !cards.has(runId)) {
-            const rec = byRun.get(runId);
-            if (rec) cards.set(runId, turnRunCard(this.summarizeRunOrDiagnostic(rec)));
-          }
-        }
+        const cards = projectTurnRunCards(
+          detail.turns as { run_id?: string | null }[],
+          runs,
+          (record) => this.summarizeRunOrDiagnostic(record),
+        );
         const headRec = byRun.get(thread.head_run_id ?? "");
         const headNeedsHuman = headRec ? this.runNeedsAttention(headRec) : false;
         return this.json(
@@ -1614,7 +1581,22 @@ export class DaemonControlApiServer {
           error: `run is ${rec.state}; ${body.control.kind} has nothing to stop`,
         });
       }
-      await this.opts.daemon.cancel(rec.id);
+      let activeDescendants: DaemonRunRecord[];
+      try {
+        const cancelled = await cancelDelegationFamily({
+          daemon: this.opts.daemon,
+          parent: rec,
+          descendantsAfterFence: () => this.delegatedDescendants(rec.runId ?? rec.id),
+          pollMs: this.opts.pollMs,
+        });
+        activeDescendants = cancelled.descendants;
+      } catch (error) {
+        appendRunAuditEvent(rec, "control.rejected", {
+          control: body.control,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return this.requestError(res, error);
+      }
       appendRunAuditEvent(rec, "control.applied", { control: body.control });
       return this.json(
         res,
@@ -1623,7 +1605,8 @@ export class DaemonControlApiServer {
           accepted: true,
           status: "applied",
           runId: rec.runId ?? rec.id,
-          message: `${body.control.kind} requested`,
+          cascadeRunIds: activeDescendants.map((child) => child.runId ?? child.id),
+          message: `${body.control.kind} requested${activeDescendants.length ? ` for parent and ${activeDescendants.length} delegated descendant(s)` : ""}`,
         }),
       );
     }
@@ -1916,6 +1899,12 @@ export class DaemonControlApiServer {
   private async findRun(id: string): Promise<DaemonRunRecord | null> {
     const runs = await this.opts.daemon.list();
     return runs.find((r) => r.id === id || r.runId === id) ?? null;
+  }
+
+  /** Persisted Delegate-only descendant graph. `parentRunId` alone is broader
+   * thread/retry lineage and deliberately does not participate. */
+  private async delegatedDescendants(parentRunId: string): Promise<DaemonRunRecord[]> {
+    return delegatedDescendantsFromRecords(parentRunId, await this.opts.daemon.list());
   }
 
   /**
@@ -2231,12 +2220,6 @@ export class DaemonControlApiServer {
 }
 
 /* ---- Thread projections (engine snake_case -> control camelCase) ---- */
-
-function paramsRecord(rec: DaemonRunRecord): Record<string, unknown> {
-  return rec.params && typeof rec.params === "object" && !Array.isArray(rec.params)
-    ? (rec.params as Record<string, unknown>)
-    : {};
-}
 
 function projectMetadata(rec: DaemonRunRecord): {
   kind: "project" | "none";
@@ -2586,6 +2569,15 @@ function summarizeRun(
   return ControlRunSummary.parse({
     jobId: rec.id,
     runId: rec.runId ?? rec.id,
+    parentRunId:
+      (typeof p["parentRunId"] === "string" ? p["parentRunId"] : null) ??
+      task?.run_lineage.parent_run_id ??
+      null,
+    delegatedFromRunId:
+      (typeof p["delegatedFromRunId"] === "string" ? p["delegatedFromRunId"] : null) ??
+      task?.run_lineage.delegated_from_run_id ??
+      null,
+    delegation: telemetry?.delegation ?? null,
     taskId: rec.taskId,
     state: rec.state,
     runDir: rec.runDir,
@@ -2701,6 +2693,7 @@ function detailFor(
   pendingInteractions: ControlPendingInteraction[] = [],
   cursor?: number,
   operator: ControlOperatorDecisionRecord | null = null,
+  children: ControlRunSummary[] = [],
 ): ControlRunDetail {
   // Snapshot fence: capture the event cursor BEFORE building any projection.
   // The fence promise is "every event with seq <= lastSeq is reflected" — a
@@ -2729,6 +2722,7 @@ function detailFor(
   const planProjection = planProjectionFor(rec, summary.mode);
   return ControlRunDetail.parse({
     summary: { ...summary, waitingOnUser: pendingInteractions.length > 0 },
+    children,
     // Server-owned outcome headline (D18), from the single projection owner —
     // surfaces render it verbatim above model prose, never re-derive it.
     outcomeBanner: outcomeBanner(summary.outcomeFacts ?? null, {
@@ -2867,7 +2861,10 @@ function budgetSnapshot(
       const payload = eventPayload(ev);
       if (ev["type"] === "budget.cash") {
         const cash = payload["cash_spend_usd"];
-        if (typeof cash === "number" && Number.isFinite(cash)) lastCash = cash;
+        if (typeof cash === "number" && Number.isFinite(cash)) {
+          lastCash = cash;
+          estimated = payload["estimated"] === true;
+        }
         continue;
       }
       if (ev["type"] === "budget.observation" && payload["kind"] === "spend") {

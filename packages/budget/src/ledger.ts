@@ -14,6 +14,13 @@ import {
   CostEvidence as CostEvidenceSchema,
 } from "@claudexor/schema";
 import { newId, nowIso, sha256 } from "@claudexor/util";
+import {
+  newSharedFinancialState,
+  recordSharedSettlement,
+  settlementIsEstimated,
+  taskFinancialTotals,
+  type SharedFinancialState,
+} from "./shared-financial-state.js";
 
 export type CircuitTier = "ok" | "soft" | "downgrade" | "hard";
 /** Budget terminal REASON (D8 axes vocabulary): a subset of RunReason. A
@@ -66,23 +73,29 @@ export function promptFingerprint(prompt: string): string {
   return sha256(prompt.trim().replace(/\s+/g, " ").toLowerCase());
 }
 
-/** One root incremental-cash ledger. Nested work receives this same instance. */
+/**
+ * One view over a shared financial authority. The root view reports aggregate
+ * family cash/valuation; `scopedToTask` reports only that child's totals while
+ * sharing leases, holds, unknown-paid exclusion, and the hard cap. Routing
+ * observations, quota snapshots, and prompt-loop counters stay view-local.
+ */
 export class BudgetLedger {
-  private readonly leases = new Map<string, BudgetLease>();
-  private readonly holds = new Map<string, number>();
-  private readonly unknownPaidInFlight = new Set<string>();
   private readonly observations: BudgetObservation[] = [];
   private readonly quotaSnapshots = new Map<string, QuotaSnapshot>();
   private readonly promptCounts = new Map<string, number>();
-  private spendUsd = 0;
-  private valuationUsd = 0;
-  private overshot = false;
-  private unverifiable = false;
+  private readonly financial: SharedFinancialState;
+  private readonly taskScope: string | null;
+  private readonly localOnCashSettled?: (
+    cashSpendUsd: number,
+    valuationUsd: number,
+    estimated: boolean,
+  ) => void;
+  private released = false;
 
   constructor(
-    private readonly budget: PaidBudget = { kind: "unlimited" },
-    private readonly thresholds: CircuitThresholds = { soft: 0.75, downgrade: 0.9, hard: 1 },
-    private readonly deps: {
+    budget: PaidBudget = { kind: "unlimited" },
+    thresholds: CircuitThresholds = { soft: 0.75, downgrade: 0.9, hard: 1 },
+    deps: {
       /**
        * Fires after every settle with the CUMULATIVE ledger truth. The ledger
        * is the one owner of "how much real money this run has spent" —
@@ -90,38 +103,63 @@ export class BudgetLedger {
        * consumers (run events → UI) render cash without inferring from route
        * labels. Valuation rides along for telemetry, never for the cash fact.
        */
-      onCashSettled?: (cashSpendUsd: number, valuationUsd: number) => void;
+      onCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void;
     } = {},
-  ) {}
+    shared?: { financial: SharedFinancialState; taskScope: string },
+  ) {
+    this.financial =
+      shared?.financial ?? newSharedFinancialState(budget, thresholds, deps.onCashSettled);
+    this.taskScope = shared?.taskScope ?? null;
+    this.localOnCashSettled = shared ? deps.onCashSettled : undefined;
+  }
+
+  scopedToTask(
+    taskId: string,
+    onCashSettled?: (cashSpendUsd: number, valuationUsd: number, estimated: boolean) => void,
+  ): BudgetLedger {
+    if (!taskId.trim()) throw new Error("budget task scope must not be empty");
+    return new BudgetLedger(
+      this.financial.budget,
+      this.financial.thresholds,
+      { onCashSettled },
+      {
+        financial: this.financial,
+        taskScope: taskId,
+      },
+    );
+  }
 
   private outstandingHolds(): number {
     let sum = 0;
-    for (const value of this.holds.values()) sum += value;
+    for (const value of this.financial.holds.values()) sum += value;
     return sum;
   }
 
   private cap(): number | null {
-    return this.budget.kind === "finite" ? this.budget.maxUsd : null;
+    return this.financial.budget.kind === "finite" ? this.financial.budget.maxUsd : null;
   }
 
   tier(): CircuitTier {
     const cap = this.cap();
     if (cap === null) return "ok";
-    if (this.overshot) return "hard";
-    if (cap === 0) return this.spendUsd > 0 || this.outstandingHolds() > 0 ? "hard" : "ok";
-    const ratio = (this.spendUsd + this.outstandingHolds()) / cap;
-    if (ratio >= this.thresholds.hard) return "hard";
-    if (ratio >= this.thresholds.downgrade) return "downgrade";
-    if (ratio >= this.thresholds.soft) return "soft";
+    if (this.financial.overshot) return "hard";
+    if (cap === 0) return this.financial.cashUsd > 0 || this.outstandingHolds() > 0 ? "hard" : "ok";
+    const ratio = (this.financial.cashUsd + this.outstandingHolds()) / cap;
+    if (ratio >= this.financial.thresholds.hard) return "hard";
+    if (ratio >= this.financial.thresholds.downgrade) return "downgrade";
+    if (ratio >= this.financial.thresholds.soft) return "soft";
     return "ok";
   }
 
   remainingUsd(): number | null {
     const cap = this.cap();
-    return cap === null ? null : Math.max(0, cap - this.spendUsd - this.outstandingHolds());
+    return cap === null
+      ? null
+      : Math.max(0, cap - this.financial.cashUsd - this.outstandingHolds());
   }
 
   reserve(input: ReserveInput): ReserveResult {
+    this.assertTaskScope(input.taskId);
     const cost = CostEvidenceSchema.parse(input.cost ?? UNKNOWN_COST);
     const zeroCash = cost.billing === "proven_zero" || cost.billing === "subscription_entitlement";
     const cap = this.cap();
@@ -137,7 +175,7 @@ export class BudgetLedger {
       return { granted: false, tier: "hard", denied: "hard_cap", reason: "budget exhausted" };
     }
     const unknownPaid = !zeroCash && cost.knowledge === "unknown";
-    if (cap !== null && cap > 0 && unknownPaid && this.unknownPaidInFlight.size > 0) {
+    if (cap !== null && cap > 0 && unknownPaid && this.financial.unknownPaidInFlight.size > 0) {
       return {
         granted: false,
         tier: this.tier(),
@@ -167,62 +205,106 @@ export class BudgetLedger {
       created_at: nowIso(),
       state: "reserved",
     });
-    this.leases.set(lease.lease_id, lease);
-    if (estimate > 0) this.holds.set(lease.lease_id, estimate);
-    if (unknownPaid && cap !== null) this.unknownPaidInFlight.add(lease.lease_id);
+    this.financial.leases.set(lease.lease_id, lease);
+    if (estimate > 0) this.financial.holds.set(lease.lease_id, estimate);
+    if (unknownPaid && cap !== null) this.financial.unknownPaidInFlight.add(lease.lease_id);
     return { granted: true, tier: this.tier(), lease };
   }
 
   updateHold(leaseId: string, streamedUsd: number): void {
-    const lease = this.leases.get(leaseId);
+    const lease = this.leaseForMutation(leaseId, false);
     if (!lease || lease.state !== "reserved") return;
     if (lease.cost.billing === "proven_zero" || lease.cost.billing === "subscription_entitlement")
       return;
-    const current = this.holds.get(leaseId) ?? 0;
-    if (streamedUsd > current) this.holds.set(leaseId, streamedUsd);
+    const current = this.financial.holds.get(leaseId) ?? 0;
+    if (streamedUsd > current) this.financial.holds.set(leaseId, streamedUsd);
   }
 
   settle(leaseId: string, settlement: BudgetSettlement): void {
-    const lease = this.leases.get(leaseId);
-    if (!lease) throw new Error(`cannot settle unknown lease: ${leaseId}`);
+    const lease = this.leaseForMutation(leaseId, true);
     if (lease.state !== "reserved") return;
     lease.state = "settled";
-    this.holds.delete(leaseId);
-    this.unknownPaidInFlight.delete(leaseId);
+    this.financial.holds.delete(leaseId);
+    this.financial.unknownPaidInFlight.delete(leaseId);
     const zeroCash =
       lease.cost.billing === "proven_zero" || lease.cost.billing === "subscription_entitlement";
     const cashUsd = zeroCash ? 0 : Math.max(0, settlement.cashUsd ?? 0);
-    this.spendUsd += cashUsd;
-    this.valuationUsd += Math.max(
+    const valuationUsd = Math.max(
       0,
       settlement.valuationUsd ?? (zeroCash ? (settlement.cashUsd ?? 0) : 0),
     );
-    if (this.budget.kind === "finite") {
-      if (!zeroCash && settlement.knowledge === "unknown") this.unverifiable = true;
-      if (this.spendUsd > this.budget.maxUsd) this.overshot = true;
+    const taskTotals = taskFinancialTotals(this.financial, lease.task_id);
+    const settlementEstimated = settlement.knowledge !== "exact";
+    recordSharedSettlement(this.financial, taskTotals, cashUsd, valuationUsd, settlementEstimated);
+    if (this.financial.budget.kind === "finite") {
+      if (!zeroCash && settlement.knowledge === "unknown") this.financial.unverifiable = true;
+      if (this.financial.cashUsd > this.financial.budget.maxUsd) this.financial.overshot = true;
     }
-    this.deps.onCashSettled?.(this.spendUsd, this.valuationUsd);
+    this.localOnCashSettled?.(taskTotals.cashUsd, taskTotals.valuationUsd, taskTotals.estimated);
   }
-
   cancel(leaseId: string): void {
-    const lease = this.leases.get(leaseId);
+    const lease = this.leaseForMutation(leaseId, false);
     if (lease?.state === "reserved") lease.state = "cancelled";
-    this.holds.delete(leaseId);
-    this.unknownPaidInFlight.delete(leaseId);
+    this.financial.holds.delete(leaseId);
+    this.financial.unknownPaidInFlight.delete(leaseId);
   }
-
   spend(): number {
-    return this.spendUsd;
+    return this.taskScope === null
+      ? this.financial.cashUsd
+      : (this.financial.totalsByTask.get(this.taskScope)?.cashUsd ?? 0);
   }
 
   valuation(): number {
-    return this.valuationUsd;
+    return this.taskScope === null
+      ? this.financial.valuationUsd
+      : (this.financial.totalsByTask.get(this.taskScope)?.valuationUsd ?? 0);
+  }
+
+  estimated(): boolean {
+    return settlementIsEstimated(this.financial, this.taskScope);
   }
 
   terminal(): BudgetTerminal {
-    if (this.overshot) return "budget_overshoot";
-    if (this.unverifiable) return "cost_unverifiable";
+    if (this.financial.overshot) return "budget_overshoot";
+    if (this.financial.unverifiable) return "cost_unverifiable";
     return this.tier() === "hard" ? "budget_exhausted" : null;
+  }
+
+  /** Cancel every still-reserved lease owned by this scoped task and detach
+   * its callback. Used when a delegated child reaches terminal. */
+  releaseTask(): void {
+    if (this.taskScope === null || this.released) return;
+    for (const [leaseId, lease] of this.financial.leases) {
+      if (lease.task_id === this.taskScope && lease.state === "reserved") this.cancel(leaseId);
+    }
+    this.released = true;
+  }
+
+  private assertTaskScope(taskId: string): void {
+    if (this.released) {
+      throw Object.assign(new Error("budget task scope is released"), {
+        code: "delegation_budget_scope_released",
+        status: 409,
+      });
+    }
+    if (this.taskScope !== null && taskId !== this.taskScope) {
+      throw Object.assign(
+        new Error(`budget task scope ${this.taskScope} cannot act for ${taskId}`),
+        { code: "delegation_budget_scope_violation", status: 403 },
+      );
+    }
+  }
+
+  private leaseForMutation(leaseId: string, required: true): BudgetLease;
+  private leaseForMutation(leaseId: string, required: false): BudgetLease | undefined;
+  private leaseForMutation(leaseId: string, required: boolean): BudgetLease | undefined {
+    const lease = this.financial.leases.get(leaseId);
+    if (!lease) {
+      if (required) throw new Error(`cannot settle unknown lease: ${leaseId}`);
+      return undefined;
+    }
+    this.assertTaskScope(lease.task_id);
+    return lease;
   }
 
   observe(observation: BudgetObservation): void {

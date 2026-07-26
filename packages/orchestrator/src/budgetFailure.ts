@@ -15,6 +15,8 @@
 import type { RunFailureCode } from "@claudexor/schema";
 import type { BudgetTerminal } from "@claudexor/budget";
 
+type BudgetRunFailureCode = Exclude<RunFailureCode, "delegation_child_drain_timeout">;
+
 /** The typed lease-denial the ledger produces, captured at the denial site with
  * the route/slot it refused so the terminal can name them instead of null. */
 export interface BudgetDenial {
@@ -63,7 +65,7 @@ export function budgetFailureRecord(
 export interface BudgetFailureMapping {
   phase: "budget";
   category: "budget";
-  code: RunFailureCode;
+  code: BudgetRunFailureCode;
   /** The typed run outcome reason (a `RunReason` value). */
   reason: "budget_exhausted" | "budget_overshoot" | "cost_unverifiable";
   harnessId: string | null;
@@ -77,7 +79,7 @@ export interface BudgetFailureMapping {
  * "Budget" is the composer control (both surfaced without inventing a dollar
  * amount), and Exact Retry is explicitly demoted because it replays the
  * immutable cap. */
-function budgetNextActions(code: RunFailureCode): string[] {
+function budgetNextActions(code: BudgetRunFailureCode): string[] {
   switch (code) {
     case "finite_zero":
       return [
@@ -164,7 +166,7 @@ export function classifyBudgetFailure(input: {
     };
   }
   const t: Exclude<BudgetTerminal, null> = terminal ?? "budget_exhausted";
-  const code: RunFailureCode =
+  const code: BudgetRunFailureCode =
     t === "budget_overshoot"
       ? "budget_overshoot"
       : t === "cost_unverifiable"

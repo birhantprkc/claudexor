@@ -113,12 +113,10 @@ struct ThreadsScreen: View {
             access: access == .workspaceWrite ? nil : access.wire,  // workspace_write is the engine default
             web: webPolicy == "auto" ? nil : webPolicy,
             // untilClean / delegate / council are overlaid in send() from the
-            // resolved Agent/Plan strategy (resolveComposerStrategy).
+            // resolved Agent/Plan strategy (resolveComposerStrategy). Delegate
+            // is additionally masked there by requestedForWire so a stale ON
+            // value cannot cross a known-unavailable route.
             maxAttempts: maxAttempts == 3 ? nil : maxAttempts,
-            // Preserve the user's request even if the cached capability view
-            // changed after the toggle was armed. The engine owns the typed
-            // per-lane resolution/refusal; silently clearing it here would erase
-            // requested/effective evidence.
             browser: browser,
             models: composerModels,
             reviewerPanel: reviewerPanelEntries.isEmpty ? nil : reviewerPanelEntries,
@@ -620,7 +618,9 @@ struct ThreadsScreen: View {
         // Resolve the composer's intent + strategy knobs (D24/D31/D32) into the
         // effective wire mode + delegate/council/until-clean facts.
         let resolution = resolveComposerStrategy(
-            intent: composerMode, agentStrategy: agentStrategy, delegate: delegate,
+            intent: composerMode, agentStrategy: agentStrategy,
+            delegate: DelegationPresentation.requestedForWire(
+                isOn: delegate, control: delegateControlState),
             councilEnabled: councilEnabled, councilMembers: councilMembers)
         let mode = resolution.mode
         var options = currentOptions
@@ -660,4 +660,3 @@ struct ThreadsScreen: View {
         }
     }
 }
-

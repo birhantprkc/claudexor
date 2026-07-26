@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   attemptTelemetryRecord,
   createAttemptTelemetry,
-  delegationBeltUnavailable,
   observeAttemptTelemetry,
   setAttemptOutcome,
 } from "./attemptTelemetry.js";
+import { delegationBeltUnavailable, isDelegationBeltTool } from "./delegationToolEvidence.js";
 import type { HarnessEvent } from "@claudexor/schema";
+import { aggregateRunDelegation } from "./runTelemetryWriter.js";
 
 const ts = "2026-07-23T00:00:00.000Z";
 
@@ -27,7 +28,7 @@ function beltToolCall(): HarnessEvent {
     type: "tool_call",
     session_id: "s",
     ts,
-    tool: { name: "mcp__claudexor__claudexor_ask", kind: "other" },
+    tool: { name: "mcp__claudexor__claudexor_ask", kind: "mcp" },
   } as unknown as HarnessEvent;
 }
 
@@ -46,6 +47,36 @@ describe("delegation belt readiness telemetry (QA-024)", () => {
     // No belt requested when no server injected.
     const none = createAttemptTelemetry("auto", false);
     expect(none.delegationBelt.requested).toBe(false);
+  });
+
+  it("recognizes exact Claude and Codex belt tool identities without prefix collisions", () => {
+    expect(
+      isDelegationBeltTool({ name: "mcp__claudexor__claudexor_ask", kind: "mcp" }, "claudexor"),
+    ).toBe(true);
+    expect(
+      isDelegationBeltTool(
+        { name: "claudexor_ask", kind: "mcp", target: "claudexor:claudexor_ask" },
+        "claudexor",
+      ),
+    ).toBe(true);
+    expect(
+      isDelegationBeltTool(
+        { name: "mcp__claudexor_evil__claudexor_ask", kind: "mcp" },
+        "claudexor",
+      ),
+    ).toBe(false);
+    expect(
+      isDelegationBeltTool(
+        { name: "claudexor_ask", kind: "mcp", target: "claudexor_evil:claudexor_ask" },
+        "claudexor",
+      ),
+    ).toBe(false);
+    expect(
+      isDelegationBeltTool(
+        { name: "claudexor_ask", kind: "command", target: "claudexor:claudexor_ask" },
+        "claudexor",
+      ),
+    ).toBe(false);
   });
 
   it("a requested belt reported `failed` with zero tool evidence terminalizes FAILED, never silent success", () => {
@@ -71,14 +102,32 @@ describe("delegation belt readiness telemetry (QA-024)", () => {
     });
   });
 
-  it("a failed belt that STILL produced belt tool evidence is not 'unavailable' (used, even if flaky)", () => {
+  it("a failed belt remains terminal even if a tool event was observed before failure", () => {
     const t = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
     observeAttemptTelemetry(t, startedWithBelt("failed"));
     observeAttemptTelemetry(t, beltToolCall());
     expect(t.delegationBelt.toolEvidence).toBe(true);
-    expect(delegationBeltUnavailable(t)).toBe(false);
+    expect(delegationBeltUnavailable(t)).toBe(true);
     setAttemptOutcome(t, outcomeOpts);
-    expect(t.outcome?.status).toBe("success");
+    expect(t.outcome?.status).toBe("failed");
+    expect(
+      aggregateRunDelegation(true, [attemptTelemetryRecord("a-used-failed", "claude", t)]),
+    ).toMatchObject({ reason: "startup_failed", effective: true, used: true });
+  });
+
+  it("consumes stderr-only typed MCP failure evidence before any started frame", () => {
+    const telemetry = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(telemetry, {
+      type: "error",
+      session_id: "s",
+      ts,
+      error: "required MCP startup failed",
+      payload: { mcp_servers: [{ name: "claudexor", status: "failed" }] },
+    });
+    expect(delegationBeltUnavailable(telemetry)).toBe(true);
+    expect(
+      aggregateRunDelegation(true, [attemptTelemetryRecord("a-stderr", "codex", telemetry)]),
+    ).toMatchObject({ reason: "startup_failed", effective: true, used: false });
   });
 
   it("a ready-but-unused belt stays a clean success (docs leave the spawn decision to the harness)", () => {
@@ -103,5 +152,87 @@ describe("delegation belt readiness telemetry (QA-024)", () => {
     setAttemptOutcome(t, outcomeOpts);
     expect(t.outcome?.status).toBe("success");
     expect(attemptTelemetryRecord("a1", "claude", t).delegation_belt).toBeUndefined();
+  });
+
+  it("aggregates one stable run receipt without guessing native subagent prose", () => {
+    expect(aggregateRunDelegation(true, [])).toEqual({
+      requested: true,
+      effective: false,
+      used: false,
+      reason: "pending",
+      remediation: null,
+    });
+    const unused = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    expect(aggregateRunDelegation(true, [attemptTelemetryRecord("a1", "claude", unused)])).toEqual({
+      requested: true,
+      effective: true,
+      used: false,
+      reason: "injected_unused",
+      remediation: null,
+    });
+    observeAttemptTelemetry(unused, beltToolCall());
+    expect(aggregateRunDelegation(true, [attemptTelemetryRecord("a1", "claude", unused)])).toEqual({
+      requested: true,
+      effective: true,
+      used: true,
+      reason: "used",
+      remediation: null,
+    });
+
+    const degradedLane = createAttemptTelemetry("auto", false, "auto", [
+      {
+        capability: "delegation",
+        harness_id: "cursor",
+        eligible: false,
+        requested: true,
+        effective: false,
+        reason: "manifest_unsupported",
+        evidence_refs: ["manifest.capability_profile.mcp_injection"],
+      },
+    ]);
+    expect(
+      aggregateRunDelegation(true, [
+        attemptTelemetryRecord("a1", "claude", unused),
+        attemptTelemetryRecord("a-mixed", "cursor", degradedLane),
+      ]),
+    ).toEqual({
+      requested: true,
+      effective: true,
+      used: true,
+      reason: "partially_degraded",
+      remediation:
+        "One selected lane continued as ordinary Agent; inspect its Delegate requirement receipt or choose only Delegate-capable lanes.",
+    });
+
+    const failed = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(failed, startedWithBelt("failed"));
+    expect(aggregateRunDelegation(true, [attemptTelemetryRecord("a2", "claude", failed)])).toEqual({
+      requested: true,
+      effective: true,
+      used: false,
+      reason: "startup_failed",
+      remediation: "Repair the required delegation belt startup failure, then retry the run.",
+    });
+
+    const beforeInjection = createAttemptTelemetry("auto", false, "auto", [
+      {
+        capability: "delegation",
+        harness_id: "claude",
+        eligible: true,
+        requested: true,
+        effective: true,
+        reason: "effective",
+        evidence_refs: ["runtime.delegation_belt"],
+      },
+    ]);
+    expect(
+      aggregateRunDelegation(true, [attemptTelemetryRecord("a3", "claude", beforeInjection)]),
+    ).toEqual({
+      requested: true,
+      effective: false,
+      used: false,
+      reason: "pending",
+      remediation: null,
+    });
   });
 });

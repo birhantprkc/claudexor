@@ -67,6 +67,7 @@ export class CommandStore {
     idempotencyKey: string;
     clientId: string;
     operation?: string;
+    idempotencyParams?: unknown;
   }): JobRecord | null {
     validateKey(input.idempotencyKey);
     const { requestDigest, keyDigest } = digests(this.journal.options.partition, input);

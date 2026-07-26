@@ -213,9 +213,14 @@ final class AppModel {
     /// Highest sequence reflected by snapshots (distinct from the stream cursor).
     private var snapshotReplayFences: [String: Int] = [:]
     var snapshotLoadDepth: [String: Int] = [:]
-    @ObservationIgnored private var runDetailLoads: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored private var runDetailTrailing: Set<String> = []
-    @ObservationIgnored private var runDetailAcceptingTrailing: Set<String> = []
+    @ObservationIgnored var runDetailLoads: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var runDetailLoadTokens: [String: UUID] = [:]
+    @ObservationIgnored var runDetailTrailing: Set<String> = []
+    @ObservationIgnored var runDetailAcceptingTrailing: Set<String> = []
+    /// Run details already hydrated for view presentation. `ensureRunDetail`
+    /// uses this to avoid turning overlapping view tasks into serial duplicate
+    /// GETs; event milestones continue to call `loadRunDetail` directly.
+    @ObservationIgnored var hydratedRunDetails: Set<String> = []
     /// Stream envelopes deferred while a snapshot load is in flight. Hard-capped
     /// (W23): runs whose buffer overflowed are flagged here and get a FRESH
     /// snapshot instead of a replay — dropped envelopes are never reconstructed.
@@ -243,6 +248,10 @@ final class AppModel {
     /// trailing pass. Cleared/cancelled on reconnect so a stale pass never paints.
     @ObservationIgnored var runsRefreshTask: Task<Void, Never>?
     @ObservationIgnored var runsRefreshPending = false
+    @ObservationIgnored var successfulRunsRefreshes = 0
+    /// Entering a draft clears thread identity before the next selection. Keep
+    /// one bit so that next open still reconciles detail-restored off-page rows.
+    @ObservationIgnored var runListReconciliationNeeded = false
     /// TERMINAL chat transcripts per run (live transcripts stream in the run's
     /// RunLiveBox; foldLiveBox moves the final reducer here at terminal).
     var transcripts: [String: TranscriptReducer] = [:]
@@ -341,9 +350,8 @@ final class AppModel {
         cancelledRunIds.removeAll()
         transcripts.removeAll()
         liveBoxes.removeAll()
-        snapshotLoadDepth.removeAll()
-        deferredEnvelopes.removeAll()
-        deferredOverflow.removeAll()
+        retireRunDetailState(cancelInFlight: true)
+        runListReconciliationNeeded = false
         turnSubmitting = false
 
         threads.removeAll()
@@ -369,6 +377,24 @@ final class AppModel {
         storedSecrets.removeAll()
         trustEntries.removeAll()
         trustStatus = nil
+    }
+
+    /// Retire every per-run detail owner at a connection boundary. Tests may
+    /// leave the old task uncancelled to release its response after a new
+    /// same-id request and prove the client/token fences deterministically.
+    func retireRunDetailState(cancelInFlight: Bool) {
+        snapshotLoadDepth.removeAll()
+        snapshotReplayFences.removeAll()
+        hydratedRunDetails.removeAll()
+        if cancelInFlight {
+            for task in runDetailLoads.values { task.cancel() }
+        }
+        runDetailLoads.removeAll()
+        runDetailLoadTokens.removeAll()
+        runDetailTrailing.removeAll()
+        runDetailAcceptingTrailing.removeAll()
+        deferredEnvelopes.removeAll()
+        deferredOverflow.removeAll()
     }
 
     private func tryConnect() async -> Bool {
@@ -462,12 +488,18 @@ final class AppModel {
             // Merge instead of replace: a refresh must not wipe locally-hydrated
             // detail — including the Run-Detail-only satellites (crit #1). The merge
             // owner lives in AppModel+RunMerge.swift.
-            let existingById = Dictionary(uniqueKeysWithValues: liveTasks.map { ($0.id, $0) })
-            liveTasks = summaries.map { summary in
+            let existingTasks = liveTasks
+            let existingById = Dictionary(uniqueKeysWithValues: existingTasks.map { ($0.id, $0) })
+            let refreshed = summaries.map { summary in
                 Self.mergeRefreshedTask(
                     summary: summary,
                     existing: existingById[summary.runId] ?? summary.jobId.flatMap { existingById[$0] })
             }
+            let threadParents = Set(selectedThreadDetail?.turns.compactMap(\.runId) ?? [])
+            liveTasks = Self.preservingSelectedThreadFamily(
+                refreshed: refreshed,
+                existing: existingTasks,
+                parentRunIds: threadParents)
             // A 202-queued row was keyed by jobId; once the daemon surfaces the
             // runId the open detail route must follow instead of dangling.
             if case .task(let openId) = route, !liveTasks.contains(where: { $0.id == openId }) {
@@ -480,6 +512,7 @@ final class AppModel {
             for task in liveTasks where task.isLive && task.phase.isActive {
                 stream(runId: task.id)
             }
+            successfulRunsRefreshes += 1
         } catch {
             // keep last-known live tasks; connection badge reflects reality elsewhere
         }
@@ -594,91 +627,6 @@ final class AppModel {
         return await body()
     }
 
-    static func liveTask(from s: RunSummary) -> TaskRun {
-        let prompt = s.prompt ?? ""
-        let title = prompt.isEmpty ? prettyTitle(s.runId) : String(prompt.prefix(64))
-        let families = (s.harnesses ?? []).map { HarnessFamily(rawValue: $0) }
-        let projectName = s.project?.projectName ?? s.project?.root.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No project"
-        var task = TaskRun(
-            id: s.runId,
-            title: title,
-            prompt: prompt,
-            mode: RunMode(apiValue: s.mode, strategy: s.strategy),
-            phase: RunPhase(api: s.state),
-            project: projectName,
-            harnesses: families,
-            n: s.n ?? max(1, families.count),
-            createdAt: .now, updatedAt: .now,
-            spendUsd: s.spendUsd ?? 0, capUsd: s.paidBudget?.finiteMaxUsd ?? 0,
-            spendKnown: s.spendUsd != nil, capKnown: s.paidBudget?.finiteMaxUsd != nil,
-            spendEstimated: s.spendEstimated ?? false,
-            routeProof: .unverified,
-            attentionNote: nil,
-            plan: [], activity: [], candidates: [], findings: [], diff: [],
-            isLive: true
-        )
-        task.repoRoot = s.project?.root
-        task.engineError = s.failure?.safeMessage ?? s.error
-        task.runDir = s.runDir ?? s.failure?.runDir
-        task.outputReadyState = s.outputReadyState
-        // The v3 terminal-truth axes (D8/D18): the SINGLE source review/checks
-        // presentation projects from. Rides the LIST summary so a refresh keeps
-        // the honest outcome; Run Detail refines banner/applyEligibility later.
-        task.outcomeFacts = s.outcomeFacts
-        // INV-093: the LIST summary carries the terminal apply axes, so a CLI
-        // apply/revert flips applyState on refresh (no stale eligible-Apply).
-        if let result = s.result {
-            task.applyState = result.applyState
-            task.revertable = result.revertable
-            task.adopted = result.adopted == true
-        }
-        task.waitingOnUser = s.waitingOnUser ?? false
-        if let route = s.route {
-            task.observedModel = route.observedModel
-            task.routeProof = route.verified == true ? .verified : .unverified
-        }
-        // W18/W20 disclosures ride the LIST summary too — a refresh must not
-        // erase the route/mismatch badges or the failure category chip.
-        task.authRoute = s.authRoute
-        task.failureCategory = s.failure?.category
-        task.requestedAccess = s.requestedAccess
-        task.effectiveAccess = s.effectiveAccess
-        task.externalContextPolicy = s.externalContextPolicy
-        task.tests = s.tests ?? []
-        task.applyPaidBudget(s.paidBudget)
-        task.reviewerPanel = s.reviewerPanel
-        task.protectedPathApprovals = s.protectedPathApprovals
-        task.browserRequirementDetail = browserRequirementDetail(s.requestRequirements)
-        // Surfaces project engine telemetry only: when the artifact is absent
-        // (legacy / mid-run) the UI says "telemetry unavailable", never a guess.
-        if s.webEvidence?.available == false {
-            task.webEvidenceStatus = nil
-            task.webEvidenceDetail = "Web/tool telemetry unavailable for this run (predates telemetry.yaml or still running)."
-        } else {
-            task.webEvidenceStatus = s.webEvidence?.status
-            task.webEvidenceDetail = Self.webEvidenceDetail(s.webEvidence)
-        }
-        task.artifactPaths = s.failure.map { ($0.rawDetailRef.map { [$0] } ?? []) + $0.eventRefs + $0.logRefs } ?? []
-        if let failure = s.failure {
-            task.diagnosticText = failure.safeMessage
-        }
-        return task
-    }
-    private static func prettyTitle(_ id: String) -> String {
-        "Live run · " + String(id.suffix(8))
-    }
-
-    private static func webEvidenceDetail(_ evidence: WebEvidence?) -> String? {
-        guard let evidence, evidence.attempted || evidence.required else { return nil }
-        var parts = ["web \(evidence.status)"]
-        if let effective = evidence.effectiveMode, effective != evidence.mode {
-            parts.append("requested \(evidence.mode) → ran \(effective)")
-        }
-        if let tool = evidence.tool { parts.append(tool) }
-        if let target = evidence.target { parts.append(target) }
-        if let error = evidence.errorSummary { parts.append(error) }
-        return parts.joined(separator: " · ")
-    }
     // MARK: Commands
 
     func startRun(prompt: String, mode: RunMode, harnesses: [HarnessFamily], primary: HarnessFamily?,
@@ -1449,29 +1397,26 @@ final class AppModel {
         }
     }
 
-    func loadRunDetail(_ id: String) async {
-        if let inFlight = runDetailLoads[id] {
-            if runDetailAcceptingTrailing.contains(id) { runDetailTrailing.insert(id) }
-            await inFlight.value
-            return
+    func performRunDetailLoad(
+        _ id: String,
+        insertingIfMissing: Bool,
+        loadToken: UUID
+    ) async {
+        guard let requestClient = client else { return }
+        let requestGeneration = connectionGeneration
+        // A cold insert/restoration belongs to one selected thread generation.
+        // Capture that authority before the request and re-prove it after every
+        // suspension so a late response from thread A cannot repopulate rows or
+        // start child streams after the user has switched to thread B.
+        let insertionThreadFence: (id: String, generation: Int)?
+        if insertingIfMissing {
+            guard let selectedThreadId,
+                  selectedThreadAuthorizesColdRun(id) else { return }
+            insertionThreadFence = (selectedThreadId, threadLoadGeneration)
+        } else {
+            insertionThreadFence = nil
         }
-        runDetailAcceptingTrailing.insert(id)
-        let load = Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.runDetailTrailing.remove(id)
-            await self.performRunDetailLoad(id)
-            self.runDetailAcceptingTrailing.remove(id)
-            if self.runDetailTrailing.remove(id) != nil {
-                await self.performRunDetailLoad(id)
-            }
-            self.runDetailLoads[id] = nil
-        }
-        runDetailLoads[id] = load
-        await load.value
-    }
-
-    private func performRunDetailLoad(_ id: String) async {
-        guard let client, liveTasks.contains(where: { $0.id == id }) else { return }
+        guard insertingIfMissing || liveTasks.contains(where: { $0.id == id }) else { return }
         // Snapshot fence, write side: stream events arriving DURING this load
         // are deferred and re-applied after the snapshot lands. Without this,
         // the final `liveTasks[writeIdx] = task` write (built from a pre-await
@@ -1479,26 +1424,55 @@ final class AppModel {
         // their seq, so they would never be replayed.
         snapshotLoadDepth[id, default: 0] += 1
         defer {
-            snapshotLoadDepth[id, default: 1] -= 1
-            if snapshotLoadDepth[id] ?? 0 <= 0 {
-                snapshotLoadDepth[id] = nil
-                let deferred = deferredEnvelopes[id] ?? []
-                deferredEnvelopes[id] = nil
-                // Seq fence for the REPLAY too: the snapshot we just
-                // merged reflects everything <= lastSeq; re-applying a
-                // deferred envelope from that range would double-count spend
-                // and duplicate timeline rows.
-                let fence = snapshotReplayFences.removeValue(forKey: id) ?? 0
-                for env in deferred where !(env.seq > 0 && env.seq <= fence) { apply(env, to: id) }
-                if deferredOverflow.remove(id) != nil {
-                    // W23: envelopes were dropped at the cap — a replay would be
-                    // incomplete, so a FRESH snapshot supersedes them instead.
-                    Task { await self.loadRunDetail(id) }
+            // A pre-reconnect request must not decrement/replay the NEW
+            // connection's same-id snapshot state.
+            if connectionGeneration == requestGeneration,
+               runDetailLoadTokens[id] == loadToken {
+                snapshotLoadDepth[id, default: 1] -= 1
+                if snapshotLoadDepth[id] ?? 0 <= 0 {
+                    snapshotLoadDepth[id] = nil
+                    let deferred = deferredEnvelopes[id] ?? []
+                    deferredEnvelopes[id] = nil
+                    // Seq fence for the REPLAY too: the snapshot we just
+                    // merged reflects everything <= lastSeq; re-applying a
+                    // deferred envelope from that range would double-count spend
+                    // and duplicate timeline rows.
+                    let fence = snapshotReplayFences.removeValue(forKey: id) ?? 0
+                    for env in deferred where !(env.seq > 0 && env.seq <= fence) { apply(env, to: id) }
+                    if deferredOverflow.remove(id) != nil {
+                        // W23: envelopes were dropped at the cap — a replay would be
+                        // incomplete, so a FRESH snapshot supersedes them instead.
+                        Task { await self.loadRunDetail(id) }
+                    }
                 }
             }
         }
         do {
-            let detail = try await client.runDetail(runId: id)
+            let detail = try await requestClient.runDetail(runId: id)
+            guard !Task.isCancelled,
+                  connectionGeneration == requestGeneration,
+                  client === requestClient,
+                  runDetailLoadTokens[id] == loadToken else { return }
+            if let fence = insertionThreadFence {
+                guard selectedThreadId == fence.id,
+                      threadLoadGeneration == fence.generation,
+                      selectedThreadAuthorizesColdRun(id) else { return }
+            }
+            // A targeted detail response may create the missing parent row.
+            // Bind that authority to the exact run id. The one valid mismatch
+            // is an existing optimistic row keyed by jobId until list refresh
+            // remaps it; a missing alias can never authorize a foreign insert.
+            let existingBaseIdx = liveTasks.firstIndex(where: { $0.id == id })
+            let exactIdentity = detail.summary.runId == id
+            let queuedAlias = detail.summary.jobId == id && existingBaseIdx != nil
+            guard exactIdentity || queuedAlias else { return }
+            if existingBaseIdx == nil {
+                let belongsToSelectedThread = selectedThreadDetail?.turns.contains {
+                    $0.runId == id || ($0.run?.delegatedChildRunIds ?? []).contains(id)
+                } == true
+                guard exactIdentity, insertingIfMissing, belongsToSelectedThread else { return }
+                liveTasks.append(Self.liveTask(from: detail.summary))
+            }
             // Re-resolve the row BY ID after the await: refreshes/inserts may
             // have reordered liveTasks, and a stale index would merge this
             // snapshot into (and copy hydrated fields from) a DIFFERENT run.
@@ -1509,6 +1483,12 @@ final class AppModel {
             // consumed and cannot repair it. Older-than-fence responses are
             // no-ops.
             if detail.lastSeq < (snapshotReplayFences[id] ?? 0) { return }
+            let existingIds = Set(liveTasks.map(\.id))
+            let activeRestoredChildren = Self.restoredActiveChildIds(
+                detail.children, parentRunId: id, existingIds: existingIds)
+            liveTasks = Self.mergingDelegatedChildren(
+                detail.children, parentRunId: id, into: liveTasks)
+            for childRunId in activeRestoredChildren { stream(runId: childRunId) }
             // Snapshot truth and stream progress are related but distinct: the
             // resume cursor may already be newer than this response.
             snapshotReplayFences[id] = max(snapshotReplayFences[id] ?? 0, detail.lastSeq)
@@ -1517,6 +1497,9 @@ final class AppModel {
             task.phase = RunPhase(api: detail.summary.state)
             task.mode = RunMode(apiValue: detail.summary.mode, strategy: detail.summary.strategy)
             task.operatorDecisionAction = detail.operatorDecisionAction
+            task.parentRunId = detail.summary.parentRunId ?? task.parentRunId
+            task.delegatedFromRunId = detail.summary.delegatedFromRunId ?? task.delegatedFromRunId
+            task.delegation = detail.summary.delegation ?? task.delegation
             // v3 terminal-truth axes + Run Detail satellites (D8/D17/D18/D31):
             // the outcome facts, the server-owned banner rendered verbatim, the
             // single-producer apply eligibility, and plan/council projections.
@@ -1609,7 +1592,20 @@ final class AppModel {
                     task.answerText = displayedText
                 }
             } else {
-                task.answerText = await firstArtifactText(client: client, runId: id, paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md", "final/summary.md"])
+                task.answerText = await firstArtifactText(client: requestClient, runId: id, paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md", "final/summary.md"])
+            }
+            // The fallback artifact fetch above is the final suspension point
+            // in this load. A disconnect can retire the request while it is
+            // awaiting bytes, so re-validate before any new-connection state
+            // (live boxes, rows, or the hydration cache) can be mutated.
+            guard !Task.isCancelled,
+                  connectionGeneration == requestGeneration,
+                  client === requestClient,
+                  runDetailLoadTokens[id] == loadToken else { return }
+            if let fence = insertionThreadFence {
+                guard selectedThreadId == fence.id,
+                      threadLoadGeneration == fence.generation,
+                      selectedThreadAuthorizesColdRun(id) else { return }
             }
             // Diff bytes are TAB-DEMAND payload (INV-136): hydration records
             // artifact existence; TaskDetail loads/parses only when Diff opens.
@@ -1648,7 +1644,12 @@ final class AppModel {
             if let writeIdx = liveTasks.firstIndex(where: { $0.id == id }) {
                 liveTasks[writeIdx] = task
             }
+            hydratedRunDetails.insert(id)
         } catch {
+            guard !Task.isCancelled,
+                  connectionGeneration == requestGeneration,
+                  client === requestClient,
+                  runDetailLoadTokens[id] == loadToken else { return }
             if let idx = liveTasks.firstIndex(where: { $0.id == id }) {
                 liveTasks[idx].engineError = "Could not load run detail: \(error)"
                 liveTasks[idx].diagnosticText = liveTasks[idx].engineError
@@ -1667,19 +1668,6 @@ final class AppModel {
         } catch {
             return (false, false)
         }
-    }
-
-    private func firstArtifactText(client: GatewayClient, runId: String, paths: [String]) async -> String? {
-        for path in paths {
-            if let text = try? await client.artifactText(runId: runId, path: path), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let limit = 256_000
-                return text.count > limit
-                    ? String(text.prefix(limit))
-                        + "\n\n_Inline preview bounded; open \(path) for the full artifact._"
-                    : text
-            }
-        }
-        return nil
     }
 
     private static func activityEvent(from event: TimelineEvent) -> ActivityEvent {

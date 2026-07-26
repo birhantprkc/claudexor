@@ -254,12 +254,12 @@
                           "mcp_injection": {
                             "type": "boolean",
                             "default": false,
-                            "description": "The adapter can inject engine-owned MCP servers into the harness sandbox (browser tool, delegation belt); false = extra_mcp_servers and the delegate toggle are refused."
+                            "description": "The adapter can inject engine-owned MCP servers into the harness sandbox (browser tool, delegation belt); false = browser MCP is refused and Delegate degrades to ordinary Agent with a durable typed receipt."
                           },
                           "mcp_injection_requires_full_access": {
                             "type": "boolean",
                             "default": false,
-                            "description": "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => --delegate below full access is refused for this harness."
+                            "description": "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => Delegate below full access degrades to ordinary Agent with a durable typed receipt."
                           }
                         },
                         "additionalProperties": false,
@@ -721,6 +721,52 @@
                 ],
                 "default": null,
                 "description": "Strict truth-source check of configuredModel; null when no model is configured."
+              },
+              "delegation": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "available": {
+                        "type": "boolean",
+                        "description": "Whether this harness can receive the packaged delegation belt."
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "ready",
+                          "runtime_unavailable",
+                          "manifest_unsupported"
+                        ],
+                        "description": "Stable reason for the current delegation capability verdict."
+                      },
+                      "remediation": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "default": null,
+                        "description": "Concrete update/repair guidance when unavailable; null when ready."
+                      },
+                      "requiresFullAccess": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Whether this harness can reach the belt only under a full-access profile."
+                      }
+                    },
+                    "required": [
+                      "available",
+                      "reason"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Engine-owned Delegate capability projection for one harness and installed runtime."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Engine-owned Delegate capability for this harness and installed runtime; null on legacy status rows.",
+                "default": null
               }
             },
             "required": [

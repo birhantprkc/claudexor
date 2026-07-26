@@ -216,11 +216,17 @@ The belt exposes only `claudexor_ask` / `claudexor_plan` / `claudexor_run`
 PARENT integrates results in its own workspace. Policy is enforced server-side
 at the tool boundary: nesting depth is 1 (a sub-run cannot itself delegate),
 sub-runs are capped per parent (default 8), and each sub-run draws from the
-parent budget ledger's headroom. Only harnesses whose adapter declares
-`capability_profile.mcp_injection` (claude, codex) can host the belt; requesting
-`--delegate` on any other harness is a typed preflight refusal. This replaces the
-former `orchestrate` mode (retired in v3): "suggest"-style planning is ordinary
-`claudexor plan`.
+same live daemon-owned paid-budget authority as its parent. Reservations and
+settlements are enforced across the whole family; each child reports its own
+spend while the parent reports the aggregate. Only harnesses whose adapter declares
+`capability_profile.mcp_injection` (claude, codex) can host the belt. The flag is
+permission, not a requirement to create a child. Readiness and the final
+requested/effective/used outcome are engine-projected: a known pre-start
+incompatibility may continue as an ordinary Agent run only with a durable
+warning and typed remediation, while failure after belt injection is terminal. Claudexor children
+carry a typed parent link; native vendor subagents never count as belt use. This
+replaces the former `orchestrate` mode (retired in v3): "suggest"-style planning
+is ordinary `claudexor plan`.
 
 ### Council planning (`plan --council`)
 

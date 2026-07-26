@@ -177,6 +177,19 @@ export const TaskContract = z
       })
       .describe("Repository the run operates on and how a dirty tree is handled."),
     mode: z.object({ kind: ModeKind }).describe("Canonical run mode for this task."),
+    delegation_requested: z
+      .boolean()
+      .default(false)
+      .describe("Whether the caller requested the Delegate agent strategy."),
+    run_lineage: z
+      .object({
+        parent_run_id: Id.nullable().default(null),
+        delegated_from_run_id: Id.nullable().default(null),
+      })
+      .default({ parent_run_id: null, delegated_from_run_id: null })
+      .describe(
+        "Server-owned run lineage; delegated_from_run_id is present only for a Claudexor belt child.",
+      ),
     user_intent: z
       .object({
         raw: z.string().describe("The user's original prompt, verbatim."),
