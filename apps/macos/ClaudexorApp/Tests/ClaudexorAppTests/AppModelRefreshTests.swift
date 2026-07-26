@@ -1923,6 +1923,23 @@ struct AppModelRefreshTests {
         #expect(model.liveBoxes["run-cash"]?.spendUsd == 0.4)
         #expect(model.liveBoxes["run-cash"]?.spendKnown == true)
         #expect(model.liveBoxes["run-cash"]?.spendEstimated == true)
+
+        model.ingestStreamEnvelope(BusEnvelope(
+            seq: 3, kind: "budget",
+            event: .object([
+                "type": .string("budget.cash"),
+                "payload": .object([
+                    "cash_spend_usd": .number(0),
+                    "valuation_usd": .number(2),
+                    "estimated": .bool(true)
+                ])
+            ])
+        ), to: "run-cash")
+        for _ in 0..<40 where model.liveBoxes["run-cash"]?.spendUsd != 0 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(model.liveBoxes["run-cash"]?.spendUsd == 0)
+        #expect(model.liveBoxes["run-cash"]?.spendEstimated == false)
     }
 
     @Test func winnerEvidenceSeparatesSelectionFromFinalReviewTruth() throws {

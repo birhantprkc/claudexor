@@ -140,7 +140,14 @@ export async function revertWorkingTreePatch(
         if (primaryResult?.reverted === false) {
           primaryResult.cleanupError = message;
         } else if (primaryResult?.reverted === true) {
-          throw cleanupError;
+          const terminal = new WorkspaceError("transient revert scratch cleanup failed", {
+            cause: cleanupError,
+          });
+          Object.defineProperties(terminal, {
+            cleanupError: { value: cleanupError, enumerable: false },
+            rollbackReverted: { value: true, enumerable: false },
+          });
+          throw terminal;
         } else if (primaryError instanceof Error) {
           try {
             Object.defineProperty(primaryError, "cleanupError", {

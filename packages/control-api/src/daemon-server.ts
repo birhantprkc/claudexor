@@ -2174,7 +2174,9 @@ export class DaemonControlApiServer {
         ...(delegatedFromRunId.success ? { delegatedFromRunId: delegatedFromRunId.data } : {}),
         waitingOnUser,
         state: "failed",
-        error: `unprojectable job record: ${err instanceof Error ? err.message : String(err)}`,
+        error: redactSecrets(
+          `unprojectable job record: ${err instanceof Error ? err.message : String(err)}`,
+        ),
       });
     }
   }

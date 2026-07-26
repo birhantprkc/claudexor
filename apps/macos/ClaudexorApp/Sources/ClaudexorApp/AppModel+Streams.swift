@@ -483,7 +483,12 @@ extension AppModel {
                 // without route inference.
                 box.spendUsd = cash
                 box.spendKnown = true
-                box.spendEstimated = payload["estimated"]?.boolValue ?? false
+                let estimated = payload["estimated"]?.boolValue ?? false
+                let legacyExactZero = payload["valuation_knowledge"] == nil
+                    && estimated
+                    && cash == 0
+                    && (payload["valuation_usd"]?.doubleValue ?? 0) > 0
+                box.spendEstimated = estimated && !legacyExactZero
             }
             if let cap = payload["max_usd"]?.doubleValue, cap >= 0, cap != t.capUsd || !t.capKnown {
                 t.capUsd = cap

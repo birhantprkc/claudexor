@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { attemptUsageCostSettlement, BudgetLedger } from "@claudexor/budget";
 import { processAttemptUsage } from "./attemptUsage.js";
+import { AttemptPostStreamError, withAttemptFailureCost } from "./attemptUsageCost.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
 
 const usageEvent = (estimated: boolean) =>
@@ -12,6 +13,41 @@ const usageEvent = (estimated: boolean) =>
   }) as const;
 
 describe("processAttemptUsage", () => {
+  it("carries route-specific settlement when post-stream persistence throws", () => {
+    const settlement = attemptUsageCostSettlement(1, false, "a01", "claude", "local_session", {
+      cashUsd: 0.25,
+      valuationUsd: 0.75,
+      unknownUsd: 0,
+      cashKnowledge: "exact",
+      valuationKnowledge: "estimated",
+    });
+
+    const error = (() => {
+      try {
+        withAttemptFailureCost(
+          () => {
+            throw new Error("artifact persistence failed");
+          },
+          { totalUsd: 1, estimated: true, settlement },
+        );
+      } catch (caught) {
+        return caught;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(AttemptPostStreamError);
+    expect((error as AttemptPostStreamError).attemptCost).toMatchObject({
+      totalUsd: 1,
+      estimated: true,
+      settlement: {
+        cashUsd: 0.25,
+        valuationUsd: 0.75,
+        cashKnowledge: "exact",
+        valuationKnowledge: "estimated",
+      },
+    });
+  });
+
   it("splits usage by each event route when a retry changes auth", () => {
     const telemetry = createAttemptTelemetry("auto", false);
     observeAttemptTelemetry(telemetry, {

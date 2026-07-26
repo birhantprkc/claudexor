@@ -730,6 +730,9 @@ budget, runs the harness, captures diff from git, runs deterministic gates,
 reviews/revalidates findings, optionally synthesizes a new checked candidate,
 and arbitrates. `--create` runs the same envelope pipeline with the
 create-from-scratch intent (the CLI verb `claudexor create` maps here).
+An isolated candidate refused by the secret fence is excluded when another
+safe working candidate survives; an all-refused race, an in-place cleanup
+receipt, or an injected Delegate-belt failure remains terminal for the race.
 
 ### Agent --attempts / --until-clean
 

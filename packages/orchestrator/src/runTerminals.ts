@@ -372,6 +372,7 @@ export async function guardAnnouncedRun(
             : "run cancelled";
         let reconciledCancelFacts = cancelFacts;
         try {
+          reconcileDecisionBudget(context, budget);
           reconciledCancelFacts = reconcileDecisionTerminal(context, {
             facts: cancelFacts,
             why: cancelSummary,
@@ -433,6 +434,7 @@ export async function guardAnnouncedRun(
     // must not mask the original failure, so it degrades to null loudly-typed.
     const budget = settledBudgetSnapshot(a);
     const spendUsd = budget.spendUsd;
+    const delegateBarrierArmed = ownsDelegateDrain(a);
     if (signal?.aborted && terminalError === err) {
       const priorFacts = preparedResult?.facts;
       const cancelFacts = terminalOutcomeFacts(
@@ -446,6 +448,7 @@ export async function guardAnnouncedRun(
           : "run cancelled";
       let reconciledCancelFacts = cancelFacts;
       try {
+        if (delegateBarrierArmed) reconcileDecisionBudget(a, budget);
         reconciledCancelFacts = reconcileDecisionTerminal(a, {
           facts: cancelFacts,
           why: cancelSummary,
@@ -490,6 +493,7 @@ export async function guardAnnouncedRun(
     );
     let reconciledFailureFacts = pendingFacts;
     try {
+      if (delegateBarrierArmed) reconcileDecisionBudget(a, budget);
       reconciledFailureFacts = reconcileDecisionTerminal(a, {
         facts: pendingFacts,
         why: pendingSummary,

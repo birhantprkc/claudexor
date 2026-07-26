@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -50,6 +50,26 @@ afterEach(() => {
 });
 
 describe("transient Git revert cleanup", () => {
+  it("marks cleanup-only failure after a successful reverse without denying the rollback", async () => {
+    const repo = initRepo();
+    writeFileSync(join(repo, "README.md"), "candidate\n");
+    const patch = execFileSync("git", ["-C", repo, "diff", "--binary"], {
+      encoding: "utf8",
+    });
+
+    const error = await revertWorkingTreePatch(repo, patch, {
+      isolateObjectWrites: true,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(WorkspaceError);
+    expect((error as Error).message).toBe("transient revert scratch cleanup failed");
+    expect((error as Error & { rollbackReverted?: boolean }).rollbackReverted).toBe(true);
+    expect((error as Error & { cleanupError?: Error }).cleanupError?.message).toBe(
+      "revert cleanup sentinel",
+    );
+    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("base\n");
+  });
+
   it("preserves a reverse-check refusal and attaches cleanup failure separately", async () => {
     const repo = initRepo();
     writeFileSync(join(repo, "README.md"), "candidate\n");

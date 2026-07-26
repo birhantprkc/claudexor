@@ -17,6 +17,7 @@ import {
   writeCandidateAttemptArtifacts,
 } from "./candidateOutputs.js";
 import { processAttemptUsage } from "./attemptUsage.js";
+import { AttemptPostStreamError, withAttemptFailureCost } from "./attemptUsageCost.js";
 import {
   type CandidateRun,
   candidateRoster,
@@ -2666,29 +2667,44 @@ export class Orchestrator {
       aborted: signal?.aborted === true,
       authMode: telemetry.authMode,
     });
-    const producedFiles = writeCandidateAttemptArtifacts({
-      store,
-      attemptDir,
-      worktreePath: envelope.worktree_path,
-      diff,
-      persistPatch: secretDiffRefusal === undefined,
-      persistProducedMedia: secretDiffRefusal === undefined,
-      answerText,
-      record: {
-        attempt_id: attemptId,
-        harness_id: adapter.id,
-        label,
-        cost_usd: cost,
-        cost_estimated: costEstimated,
-        errored,
-        errors: errors.slice(0, 5),
-        ...telemetrySummary(telemetry),
-        outcome: telemetry.outcome,
-        ...(secretDiffRefusal ? { secret_diff_refusal: secretDiffRefusal } : {}),
-        gates: gates.map((g) => ({ id: g.id, status: g.status })),
-        branch: envelope.branch_name,
+    const producedFiles = withAttemptFailureCost(
+      () =>
+        writeCandidateAttemptArtifacts({
+          store,
+          attemptDir,
+          worktreePath: envelope.worktree_path,
+          diff,
+          persistPatch: secretDiffRefusal === undefined,
+          persistProducedMedia: secretDiffRefusal === undefined,
+          answerText,
+          record: {
+            attempt_id: attemptId,
+            harness_id: adapter.id,
+            label,
+            cost_usd: cost,
+            cost_estimated: costEstimated,
+            errored,
+            errors: errors.slice(0, 5),
+            ...telemetrySummary(telemetry),
+            outcome: telemetry.outcome,
+            ...(secretDiffRefusal ? { secret_diff_refusal: secretDiffRefusal } : {}),
+            gates: gates.map((g) => ({ id: g.id, status: g.status })),
+            branch: envelope.branch_name,
+          },
+        }),
+      {
+        totalUsd: cost,
+        estimated: costEstimated,
+        settlement: attemptUsageCostSettlement(
+          cost,
+          costEstimated,
+          attemptId,
+          adapter.id,
+          telemetry.authMode,
+          telemetry.usageCost,
+        ),
       },
-    });
+    );
     return {
       attemptId,
       harnessId: adapter.id,
@@ -3382,19 +3398,17 @@ export class Orchestrator {
         reviewEnvelopes.push(envelope);
         envelope = undefined;
       } catch (err) {
-        // Envelope creation (or another pre-stream step) failed; stream errors
-        // are absorbed inside runCandidateInEnvelope with their real cost. A
-        // post-stream throw (e.g. the secret-token assertion) carries its
-        // streamed spend on the error — settle the TRUE cost, never launder
-        // real spend down to 0.
+        const attemptCost = err instanceof AttemptPostStreamError ? err.attemptCost : null;
         const carriedCost =
-          typeof (err as { costUsd?: unknown })?.costUsd === "number"
+          attemptCost?.totalUsd ??
+          (typeof (err as { costUsd?: unknown })?.costUsd === "number"
             ? (err as { costUsd: number }).costUsd
-            : 0;
-        ledger.settle(slot.leaseId, unknownCostSettlement("post-stream-error", carriedCost));
+            : 0);
+        ledger.settle(
+          slot.leaseId,
+          attemptCost?.settlement ?? unknownCostSettlement("post-stream-error", carriedCost),
+        );
         const message = safeErrorMessage(err);
-        // envelope is still undefined when wsm.create() itself threw — that is
-        // a workspace-phase infrastructure failure, not a harness error.
         const infraPhase: "workspace" | "harness" =
           envelope === undefined ? "workspace" : "harness";
         log.emit("harness.completed", {

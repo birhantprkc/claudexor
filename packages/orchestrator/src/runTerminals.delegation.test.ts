@@ -310,8 +310,21 @@ describe("Delegate terminal drain ordering", () => {
 
   it("replaces deferred success with one typed failure when child drain times out", async () => {
     const { store, paths, log } = fixture("run-timeout");
+    const root = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const lateLease = root.reserve({
+      taskId: "task-child-settled",
+      intent: "implement",
+      harnessId: "child-settled",
+      cost: routeCostEvidence({
+        billing: "metered",
+        knowledge: "estimated",
+        source: "test",
+        provenance: ["test"],
+        estimatedUsd: 0.3,
+      }),
+    }).lease!;
     const authority = new DelegationBudgetAuthority({ cancelAdmission: () => {} });
-    authority.registerParent("run-timeout", new BudgetLedger());
+    authority.registerParent("run-timeout", root);
     authority.noteChildAccepted("run-timeout", "job-stuck");
 
     const result = await guardAnnouncedRun(
@@ -326,6 +339,10 @@ describe("Delegate terminal drain ordering", () => {
           taskId: "task-parent",
           mode: "agent",
           phase: "race",
+          spend: () => root.spend(),
+          valuation: () => root.valuation(),
+          spendEstimated: () => root.estimated(),
+          valuationKnowledge: () => root.valuationKnowledge(),
           recheckBudgetAfterBarrier: () => true,
         });
         store.writeYaml(join(paths.arbitrationDir, "decision.yaml"), {
@@ -370,6 +387,13 @@ describe("Delegate terminal drain ordering", () => {
         };
       },
       async () => {
+        root.settle(lateLease.lease_id, {
+          knowledge: "exact",
+          cashKnowledge: "exact",
+          source: "late-child-terminal",
+          provenance: ["test"],
+          cashUsd: 0.2,
+        });
         authority.beginParentClose("run-timeout");
         await authority.waitForChildren("run-timeout", 5);
       },
@@ -400,10 +424,14 @@ describe("Delegate terminal drain ordering", () => {
       .find((event) => event.type === "run.failed");
     expect(failedEvent?.payload?.["phase"]).toBe("delegation_drain");
     expect(
-      store.readYaml<{ facts: { lifecycle: string; reason: string } }>(
-        join(paths.arbitrationDir, "decision.yaml"),
-      ),
-    ).toMatchObject({ facts: { lifecycle: "failed", reason: "harness_failed" } });
+      store.readYaml<{
+        facts: { lifecycle: string; reason: string };
+        budget_summary: { spend_usd: number; cash_usd: number };
+      }>(join(paths.arbitrationDir, "decision.yaml")),
+    ).toMatchObject({
+      facts: { lifecycle: "failed", reason: "harness_failed" },
+      budget_summary: { spend_usd: 0.2, cash_usd: 0.2 },
+    });
     expect(
       store.readYaml<{ meta: Record<string, unknown> }>(join(paths.finalDir, "work_product.yaml")),
     ).toMatchObject({
@@ -431,6 +459,19 @@ describe("Delegate terminal drain ordering", () => {
     async ({ rejects, preparedFailure }) => {
       const { store, paths, log } = fixture("run-cancel-during-drain");
       const controller = new AbortController();
+      const root = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+      const lateLease = root.reserve({
+        taskId: "task-child-late",
+        intent: "implement",
+        harnessId: "child-late",
+        cost: routeCostEvidence({
+          billing: "metered",
+          knowledge: "estimated",
+          source: "test",
+          provenance: ["test"],
+          estimatedUsd: 0.3,
+        }),
+      }).lease!;
       const preparedFacts = makeOutcomeFacts("succeeded", {
         checks: "passed",
         review: "approved",
@@ -447,6 +488,10 @@ describe("Delegate terminal drain ordering", () => {
             taskId: "task-parent",
             mode: "agent",
             phase: "race",
+            spend: () => root.spend(),
+            valuation: () => root.valuation(),
+            spendEstimated: () => root.estimated(),
+            valuationKnowledge: () => root.valuationKnowledge(),
             recheckBudgetAfterBarrier: () => true,
           });
           store.writeYaml(join(paths.arbitrationDir, "decision.yaml"), {
@@ -509,6 +554,13 @@ describe("Delegate terminal drain ordering", () => {
           return prepared;
         },
         async () => {
+          root.settle(lateLease.lease_id, {
+            knowledge: "exact",
+            cashKnowledge: "exact",
+            source: "late-child-terminal",
+            provenance: ["test"],
+            cashUsd: 0.2,
+          });
           controller.abort();
           if (rejects) {
             throw Object.assign(new Error("delegation child drain timed out"), {
@@ -531,9 +583,10 @@ describe("Delegate terminal drain ordering", () => {
         },
       });
       expect(
-        store.readYaml<{ facts: Record<string, unknown> }>(
-          join(paths.arbitrationDir, "decision.yaml"),
-        ),
+        store.readYaml<{
+          facts: Record<string, unknown>;
+          budget_summary: { spend_usd: number; cash_usd: number };
+        }>(join(paths.arbitrationDir, "decision.yaml")),
       ).toMatchObject({
         facts: {
           lifecycle: "cancelled",
@@ -541,6 +594,7 @@ describe("Delegate terminal drain ordering", () => {
           checks: "passed",
           review: "approved",
         },
+        budget_summary: { spend_usd: 0.2, cash_usd: 0.2 },
       });
       expect(
         store.readYaml<{ meta: Record<string, unknown> }>(

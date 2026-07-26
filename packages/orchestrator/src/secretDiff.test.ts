@@ -80,6 +80,32 @@ describe("secret diff quarantine failure receipts", () => {
     expect(result.refusal?.detail).not.toContain(secret);
   });
 
+  it("reports completed rollback separately from unproven scratch cleanup", async () => {
+    const error = new WorkspaceError("transient revert scratch cleanup failed", {
+      cause: new Error("sensitive cleanup cause"),
+    });
+    Object.defineProperties(error, {
+      cleanupError: { value: new Error("sensitive cleanup cause"), enumerable: false },
+      rollbackReverted: { value: true, enumerable: false },
+    });
+
+    const result = await quarantineSecretDiff({
+      diff: `diff --git a/LEAK.txt b/LEAK.txt\n+sk-${"t".repeat(24)}\n`,
+      inPlace: true,
+      repo: "/tmp/project",
+      binarySecretLike: false,
+      gitBacked: true,
+      revertPatch: async () => {
+        throw error;
+      },
+    });
+
+    expect(result.refusal).toMatchObject({ disposition: "manual_cleanup" });
+    expect(result.refusal?.detail).toMatch(/bytes were rolled back.*scratch cleanup/);
+    expect(result.refusal?.detail).not.toContain("sensitive");
+    expect(result.refusal?.detail).not.toMatch(/could not be rolled back/);
+  });
+
   it("requires manual cleanup when unsafe linked media lies outside the reversible patch", async () => {
     const repo = mkdtempSync(join(tmpdir(), "claudexor-secret-outside-patch-"));
     roots.push(repo);

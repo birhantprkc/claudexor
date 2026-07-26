@@ -1,4 +1,5 @@
 import type { CostKnowledge, HarnessEvent } from "@claudexor/schema";
+import type { BudgetSettlement } from "@claudexor/budget";
 
 export interface AttemptUsageCost {
   cashUsd: number;
@@ -24,6 +25,31 @@ interface RouteKnowledgeState {
 }
 
 const routeKnowledge = new WeakMap<AttemptUsageCost, RouteKnowledgeState>();
+
+export interface AttemptFailureCost {
+  totalUsd: number;
+  estimated: boolean;
+  settlement: BudgetSettlement;
+}
+
+export class AttemptPostStreamError extends Error {
+  constructor(
+    cause: unknown,
+    readonly attemptCost: AttemptFailureCost,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "AttemptPostStreamError";
+  }
+}
+
+/** Preserve already-observed route-specific spend across fallible persistence. */
+export function withAttemptFailureCost<T>(work: () => T, attemptCost: AttemptFailureCost): T {
+  try {
+    return work();
+  } catch (error) {
+    throw new AttemptPostStreamError(error, attemptCost);
+  }
+}
 
 export function newAttemptUsageCost(): AttemptUsageCost {
   const cost: AttemptUsageCost = {

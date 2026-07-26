@@ -40,6 +40,8 @@ export async function quarantineSecretDiff(input: {
    * a successful text rollback and therefore requires truthful manual cleanup. */
   secretOutsidePatch?: boolean;
   gitBacked: boolean;
+  /** Test seam for the typed workspace rollback contract. */
+  revertPatch?: typeof revertWorkingTreePatch;
 }): Promise<{ diff: string; refusal?: SecretDiffRefusal }> {
   if (!containsSecretLikeToken(input.diff) && !input.binarySecretLike) {
     return { diff: input.diff };
@@ -66,17 +68,22 @@ export async function quarantineSecretDiff(input: {
   }
   let rollback;
   try {
-    rollback = await revertWorkingTreePatch(input.repo, input.diff, {
+    rollback = await (input.revertPatch ?? revertWorkingTreePatch)(input.repo, input.diff, {
       isolateObjectWrites: input.gitBacked,
       noIndex: !input.gitBacked,
     });
-  } catch {
+  } catch (error) {
+    const rollbackCompleted =
+      error instanceof Error &&
+      Object.prototype.hasOwnProperty.call(error, "cleanupError") &&
+      (error as Error & { rollbackReverted?: unknown }).rollbackReverted === true;
     return {
       diff: "",
       refusal: {
         disposition: "manual_cleanup",
-        detail:
-          "in-place output that could not be proven secret-safe could not be rolled back; manual cleanup required",
+        detail: rollbackCompleted
+          ? "in-place bytes were rolled back, but Claudexor scratch cleanup could not be proven; manual cleanup of Claudexor temporary state is required"
+          : "in-place output that could not be proven secret-safe could not be rolled back; manual cleanup required",
       },
     };
   }
