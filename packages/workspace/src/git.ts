@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   runCaptureRaw,
   WorkspaceError,
 } from "@claudexor/core";
+import { containsSecretLikeToken } from "@claudexor/util";
 
 /** BYTE-FAITHFUL git capture: raw buffers, never readline — CR
  * bytes in CRLF diff content survive, and no trailing newline is fabricated
@@ -217,6 +218,104 @@ export async function diffTrees(repo: string, baseSha: string, endSha: string): 
 }
 
 /**
+ * Capture the current worktree against an exact base without writing its blobs
+ * into the user's Git object database. In-place harness output is untrusted
+ * until the secret fence has inspected the resulting patch; `snapshotTree`
+ * would otherwise leave a dangling raw-secret blob even when artifact
+ * persistence later refused the patch.
+ *
+ * Git still owns filename, mode, symlink, binary, ignored-file, and untracked
+ * semantics. A scratch index plus an isolated temporary object directory holds
+ * the candidate tree only for the duration of `git diff`; the real object
+ * directory is read-only through Git's alternates mechanism.
+ */
+export interface TransientDiffCapture {
+  patch: string;
+  binarySecretLike: boolean;
+}
+
+export async function captureWorkingTreeTransient(
+  repo: string,
+  baseSha: string,
+  pathExcludes: string[] = [],
+): Promise<TransientDiffCapture> {
+  const scratchDir = mkdtempSync(join(tmpdir(), "claudexor-transient-diff-"));
+  const objectDir = join(scratchDir, "objects");
+  const indexPath = join(scratchDir, "index");
+  mkdirSync(objectDir, { recursive: true, mode: 0o700 });
+  try {
+    const actualObjects = await git(repo, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "objects",
+    ]);
+    if (actualObjects.code !== 0 || !actualObjects.stdout.trim()) {
+      throw new WorkspaceError(
+        `transient diff could not resolve Git objects: ${actualObjects.stderr.trim()}`,
+      );
+    }
+    const env = {
+      GIT_INDEX_FILE: indexPath,
+      GIT_OBJECT_DIRECTORY: objectDir,
+      // Git parses this as a path-list. C-style quoting keeps a legal `:` in a
+      // macOS path from becoming a separator (and escapes quotes/backslashes).
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(actualObjects.stdout.trim()),
+      GIT_OPTIONAL_LOCKS: "0",
+    };
+    const read = await gitEnv(repo, ["read-tree", baseSha], env);
+    if (read.code !== 0) {
+      throw new WorkspaceError(`transient diff read-tree failed: ${read.stderr.trim()}`);
+    }
+    const excludes = [`:(exclude,top)${CLAUDEXOR_ARTIFACT_DIR}`, ...pathExcludes];
+    const add = await gitEnv(repo, ["add", "-A", "--", ".", ...excludes], env);
+    if (add.code !== 0) {
+      throw new WorkspaceError(`transient diff add failed: ${add.stderr.trim()}`);
+    }
+    const writeTree = await gitEnv(repo, ["write-tree"], env);
+    if (writeTree.code !== 0 || !writeTree.stdout.trim()) {
+      throw new WorkspaceError(`transient diff write-tree failed: ${writeTree.stderr.trim()}`);
+    }
+    const diff = await gitEnv(repo, ["diff", "--binary", baseSha, writeTree.stdout.trim()], env);
+    if (diff.code !== 0) {
+      throw new WorkspaceError(`transient diff failed: ${diff.stderr.trim()}`);
+    }
+    assertNoBinaryStubs(diff.stdout, `transient git diff ${baseSha}`);
+    let binarySecretLike = false;
+    for (const file of parseUnifiedDiff(diff.stdout).files.filter((entry) => entry.binary)) {
+      const blobs = [
+        ...(!file.added && file.oldPath ? [{ tree: baseSha, path: file.oldPath }] : []),
+        ...(!file.deleted && file.newPath
+          ? [{ tree: writeTree.stdout.trim(), path: file.newPath }]
+          : []),
+      ];
+      for (const blob of blobs) {
+        const content = await gitEnv(repo, ["show", `${blob.tree}:${blob.path}`], env);
+        if (content.code !== 0 || containsSecretLikeToken(content.stdout)) {
+          binarySecretLike = true;
+          break;
+        }
+      }
+      if (binarySecretLike) break;
+    }
+    return { patch: diff.stdout, binarySecretLike };
+  } finally {
+    // Unlike ordinary best-effort scratch cleanup, this directory may contain
+    // a candidate token blob. A cleanup failure is therefore terminal and must
+    // never be hidden behind the original capture result.
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+}
+
+export async function diffWorkingTreeTransient(
+  repo: string,
+  baseSha: string,
+  pathExcludes: string[] = [],
+): Promise<string> {
+  return (await captureWorkingTreeTransient(repo, baseSha, pathExcludes)).patch;
+}
+
+/**
  * Materialize a patch against an exact base in a scratch index and return the
  * resulting tree id. The live index and worktree are never consulted or
  * changed. Commit-class delivery uses this as its expected candidate tree so a
@@ -277,82 +376,6 @@ function assertNoBinaryStubs(diff: string, label: string): void {
   }
 }
 
-/** Why a revert was refused, decided by the PRODUCER (which branch failed), not
- *  by regexing the human `reason` downstream (QA-051/W3):
- *  - `postimage_diverged`: the reverse `--check` failed because the turn-owned
- *    postimage no longer matches (files changed after the turn);
- *  - `reverse_apply_failed`: the reverse apply itself failed after a clean
- *    preflight. */
-export type RevertRefusalReason = "postimage_diverged" | "reverse_apply_failed";
-
-export interface RevertResult {
-  reverted: boolean;
-  /** Turn-added files removed to restore the pre-turn state (`.claudexor` preserved). */
-  removed: string[];
-  reason?: string;
-  /** Typed refusal class set at the point of failure; absent on success. */
-  reasonCode?: RevertRefusalReason;
-}
-
-/**
- * Server-owned in-place revert: restore the live working tree to a recorded
- * pre-turn snapshot, but ONLY when the tree still matches the recorded post-turn
- * snapshot (i.e. the user hasn't edited since) — otherwise it fails loudly and
- * touches nothing. Reverts tracked modifications/deletions AND removes files the
- * turn added; `.claudexor` (run artifacts) is always preserved.
- */
-export async function revertWorkingTreeTo(
-  repo: string,
-  preTurnSha: string,
-  expectedPostSha: string,
-): Promise<RevertResult> {
-  // Git itself produces the exact binary/mode/symlink-aware forward patch.
-  // Reverse-applying it touches only turn-owned hunks. A later edit that
-  // overlaps those hunks makes --check fail; unrelated user edits, staged state,
-  // and untracked files remain outside the mutation surface.
-  const patch = await diffTrees(repo, preTurnSha, expectedPostSha);
-  return revertWorkingTreePatch(repo, patch);
-}
-
-/** Reverse an immutable turn patch. This is the GC-independent production
- * path used by external revert anchors; the SHA-based wrapper remains useful
- * while capturing and testing snapshots. */
-export async function revertWorkingTreePatch(repo: string, patch: string): Promise<RevertResult> {
-  if (!patch.trim()) return { reverted: true, removed: [] };
-  const removed = parseUnifiedDiff(patch)
-    .files.filter((file) => file.added && file.newPath)
-    .map((file) => file.newPath as string);
-  const check = await git(
-    repo,
-    ["apply", "--check", "--reverse", "--whitespace=nowarn", "-"],
-    patch,
-  );
-  if (check.code !== 0) {
-    return {
-      reverted: false,
-      removed: [],
-      reason: `turn-owned postimage no longer matches; refusing to overwrite later user edits: ${check.stderr.trim()}`,
-      reasonCode: "postimage_diverged",
-    };
-  }
-  const before = await statusPorcelain(repo);
-  const apply = await git(repo, ["apply", "--reverse", "--whitespace=nowarn", "-"], patch);
-  if (apply.code !== 0) {
-    const after = await statusPorcelain(repo);
-    return {
-      reverted: false,
-      removed: [],
-      reason:
-        `reverse apply failed after preflight: ${apply.stderr.trim()}; ` +
-        (after === before
-          ? "tree remains at the observed pre-revert state"
-          : "target changed during revert; no destructive rollback was attempted"),
-      reasonCode: "reverse_apply_failed",
-    };
-  }
-  return { reverted: true, removed };
-}
-
 export async function worktreeAdd(
   repo: string,
   path: string,
@@ -361,6 +384,35 @@ export async function worktreeAdd(
 ): Promise<void> {
   const r = await git(repo, ["worktree", "add", "-b", branch, path, baseSha]);
   if (r.code !== 0) throw new WorkspaceError(`git worktree add failed: ${r.stderr.trim()}`);
+}
+
+/** Disposable candidate checkout with private refs/index/objects. The source
+ * repository is only an object alternate, so harness `git add`/`commit` cannot
+ * write candidate blobs or refs into the user's repository. */
+export async function isolatedCloneAdd(
+  repo: string,
+  path: string,
+  branch: string,
+  baseSha: string,
+): Promise<void> {
+  const cloned = await runCaptureRaw(
+    "git",
+    ["clone", "--shared", "--no-checkout", "--", repo, path],
+    { timeoutMs: 120_000 },
+  );
+  if (cloned.code !== 0) {
+    throw new WorkspaceError(`isolated clone failed: ${cloned.stderr.trim()}`);
+  }
+  const checkout = await git(path, ["checkout", "-b", branch, baseSha]);
+  if (checkout.code !== 0) {
+    throw new WorkspaceError(`isolated clone checkout failed: ${checkout.stderr.trim()}`);
+  }
+  const detachedRemote = await git(path, ["remote", "remove", "origin"]);
+  if (detachedRemote.code !== 0) {
+    throw new WorkspaceError(
+      `isolated clone remote removal failed: ${detachedRemote.stderr.trim()}`,
+    );
+  }
 }
 
 /** Recreate a worktree for an EXISTING branch (recovery: dir lost, branch survived). */
@@ -484,67 +536,4 @@ export async function worktreePrune(repo: string): Promise<void> {
 /** Delete a local branch (best-effort GC of per-attempt claudexor/* branches). */
 export async function branchDelete(repo: string, branch: string): Promise<void> {
   await git(repo, ["branch", "-D", branch]);
-}
-
-/**
- * Stage everything (so untracked files appear) and return the diff vs the
- * recorded BASE sha — NOT the worktree HEAD. A harness that commits inside the
- * worktree (Claude Code does this routinely) advances HEAD; diffing vs HEAD
- * would then hide the committed work and report an empty no-op diff, silently
- * losing the candidate's real output. Diffing the staged tree vs base_sha
- * captures all net change since the run started regardless of intermediate
- * commits. Git op failures throw loudly instead of masquerading as "no changes".
- */
-export async function diffStaged(
-  worktreePath: string,
-  baseSha?: string,
-  /** Additional EXACT-path pathspec excludes (e.g. the generated CLAUDE.md
-   *  bridge, excluded by the caller only when it was created THIS run and its
-   *  bytes still equal CLAUDE_BRIDGE_CONTENT). Each must already be a git
-   *  pathspec magic term like `:(exclude,top)<path>`. Applied to BOTH the scratch
-   *  `add -A` and the diff, so an excluded path is neither staged nor reported. */
-  extraExcludes: readonly string[] = [],
-): Promise<string> {
-  const target = baseSha && baseSha.length > 0 ? baseSha : "HEAD";
-  const scratchDir = mkdtempSync(join(tmpdir(), "claudexor-diff-index-"));
-  const indexPath = join(scratchDir, "index");
-  const env = { GIT_INDEX_FILE: indexPath, GIT_OPTIONAL_LOCKS: "0" };
-  try {
-    const read = await gitEnv(worktreePath, ["read-tree", target], env);
-    if (read.code !== 0) {
-      throw new WorkspaceError(
-        `git read-tree ${target} failed during diff capture: ${read.stderr.trim()}`,
-      );
-    }
-    // F4: EXCLUDE the claudexor-owned artifact dir from the candidate
-    // patch. Media a harness saves for the user (browser-MCP screenshots,
-    // declared artifacts) lives here and must never enter the candidate diff —
-    // a screenshot-only run then reads as `noChanges` and is never
-    // review-blocked. Exclusion is by EXACT owned path only (no file-type
-    // guess), so a real code change elsewhere can never be silently dropped.
-    // `extraExcludes` adds further EXACT owned paths (the generated CLAUDE.md
-    // bridge) under the same doctrine.
-    const excludeArtifacts = `:(exclude,top)${CLAUDEXOR_ARTIFACT_DIR}`;
-    const excludes = [excludeArtifacts, ...extraExcludes];
-    const add = await gitEnv(worktreePath, ["add", "-A", "--", ".", ...excludes], env);
-    if (add.code !== 0) {
-      throw new WorkspaceError(
-        `scratch git add -A failed during diff capture: ${add.stderr.trim()}`,
-      );
-    }
-    const diff = await gitEnv(
-      worktreePath,
-      ["diff", "--binary", "--cached", target, "--", ".", ...excludes],
-      env,
-    );
-    if (diff.code !== 0) {
-      throw new WorkspaceError(
-        `git diff --cached ${target} failed during diff capture: ${diff.stderr.trim()}`,
-      );
-    }
-    assertNoBinaryStubs(diff.stdout, `git diff --cached ${target}`);
-    return diff.stdout;
-  } finally {
-    rmSync(scratchDir, { recursive: true, force: true });
-  }
 }

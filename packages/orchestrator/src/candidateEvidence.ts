@@ -3,6 +3,7 @@ import type { GateResult, ReviewFinding, RunOutcomeFacts, TaskContract } from "@
 import type { CandidateEvidence } from "@claudexor/arbitration";
 import type { AttemptOutcomeClass } from "./attemptFinalize.js";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
+import type { SecretDiffRefusal } from "./secretDiff.js";
 import { toolWarnings } from "./attemptTelemetry.js";
 
 export interface CandidateRun {
@@ -21,6 +22,10 @@ export interface CandidateRun {
   errors: string[];
   telemetry: AttemptTelemetry;
   infraPhase?: "workspace" | "harness";
+  /** A secret-bearing candidate diff is never persisted. Isolated bytes are
+   * discarded with their envelope; in-place bytes are reverse-applied from the
+   * transient patch when its exact postimage still matches. */
+  secretDiffRefusal?: SecretDiffRefusal;
   /** D-16 r7: the finalizer's outcome class for THIS attempt. An `interrupted`
    * candidate (terminal context exhaustion with NO completed WorkReport) is
    * never reviewed/arbitrated/adopted as clean — it terminalizes the run

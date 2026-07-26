@@ -25,7 +25,7 @@
         },
         "base_ref": {
           "type": "string",
-          "description": "Git ref the worktree was created from."
+          "description": "Git ref the checkout was created from."
         },
         "base_sha": {
           "type": [
@@ -37,15 +37,15 @@
         },
         "worktree_path": {
           "type": "string",
-          "description": "Absolute path of the isolated git worktree."
+          "description": "Absolute path of the isolated Git checkout."
         },
         "branch_name": {
           "type": "string",
-          "description": "Branch created for the worktree."
+          "description": "Clone-local branch created for the checkout."
         },
         "home_dir": {
           "type": "string",
-          "description": "Scoped HOME directory for the harness process (kept outside the worktree)."
+          "description": "Scoped HOME directory for the harness process (kept outside the checkout)."
         },
         "harness_config_dirs": {
           "type": "object",
@@ -53,7 +53,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Scoped per-harness config directories keyed by harness id (kept outside the worktree)."
+          "description": "Scoped per-harness config directories keyed by harness id (kept outside the checkout)."
         },
         "policy_profile": {
           "type": "string",
@@ -87,7 +87,7 @@
         "created_at"
       ],
       "additionalProperties": false,
-      "description": "An isolated execution envelope: a git worktree for files plus scoped env/HOME/harness-config isolation."
+      "description": "An isolated execution envelope: a private Git checkout plus scoped env/HOME/harness-config isolation."
     }
   },
   "$schema": "http://json-schema.org/draft-07/schema#"

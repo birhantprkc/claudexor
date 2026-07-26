@@ -385,7 +385,7 @@
                     "recovered": {
                       "type": "boolean",
                       "default": false,
-                      "description": "True when a later successful result of the same tool exists in the same attempt."
+                      "description": "True when a later successful result matches this failed invocation."
                     },
                     "tool_use_id": {
                       "type": [

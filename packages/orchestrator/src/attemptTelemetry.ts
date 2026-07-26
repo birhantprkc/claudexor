@@ -2,8 +2,8 @@
  * Attempt-level telemetry: the single owner of tool-error records, web
  * evidence state, transient-failure observations, and the attempt outcome
  * truth. Adapters emit typed events; the orchestrator observes them here —
- * no regex over prose, and a tool error is "recovered" only when the SAME
- * tool later succeeds against the SAME target.
+ * no regex over prose. Recovery needs matching tool + kind + target plus matching
+ * non-null use ids when both exist; a missing id retains the tuple fallback.
  */
 import type {
   AttemptTelemetryRecord,
@@ -33,7 +33,7 @@ export interface ToolErrorRecord {
   target: string | null;
   summary: string;
   toolUseId: string | null;
-  /** True when a later successful result of the SAME tool against the SAME target exists in this attempt (INV-043). */
+  /** True when a later success matches tool + kind + target and any ids both records provide (INV-043). */
   recovered: boolean;
 }
 
@@ -90,7 +90,7 @@ export interface BrowserEvidenceState {
  * `mcp_servers[<belt>].status`); `toolEvidence` flips when any exact belt tool
  * actually runs. Startup failure lives in this state; an exact non-ok tool
  * result lives in `toolErrors` and hard-fails under INV-030 while reusing
- * INV-043's exact recovery key.
+ * INV-043's invocation-aware recovery key.
  */
 export interface DelegationBeltState {
   requested: boolean;
@@ -300,8 +300,8 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   if (t.delegationBelt.requested && Array.isArray(ev.payload?.["mcp_servers"])) {
     observeBeltStartup(t, ev);
   }
-  // Exact adapter-neutral tool evidence distinguishes the belt from a native
-  // subagent; only the same tool+kind+target success recovers its failure.
+  // Exact adapter-neutral evidence distinguishes the belt from a native subagent;
+  // recovery uses matching ids when both exist, else legacy tool+kind+target.
   const beltToolEvent =
     t.delegationBelt.requested &&
     t.delegationBelt.serverName &&
@@ -473,19 +473,19 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
     }
     return;
   }
-  // status === "ok": a later success of the SAME tool against the SAME target
-  // is the verified recovery for that call's earlier errors within this
-  // attempt (keying fix: `bash echo done` must NOT launder an earlier
-  // `bash npm test` failure — the name alone proved nothing).
+  // status === "ok": recovery needs the same tool + kind + target, plus the same
+  // non-null use id when both sides have one. A missing id retains the legacy
+  // tuple key for adapters and synthetic telemetry that cannot correlate calls.
+  const resultToolUseId = tool.use_id ?? null;
   for (const err of t.toolErrors) {
-    // INV-043: recovery must be attributable to the failed operation — same
-    // tool, same KIND, same target (a non-web tool sharing a name with a web
-    // tool must not clear its web error).
+    // INV-043: a later identical-looking invocation cannot launder an earlier
+    // error when both vendor records prove different invocation ids.
     if (
       !err.recovered &&
       err.tool === tool.name &&
       err.kind === tool.kind &&
-      err.target === (tool.target ?? null)
+      err.target === (tool.target ?? null) &&
+      (err.toolUseId === null || resultToolUseId === null || err.toolUseId === resultToolUseId)
     ) {
       err.recovered = true;
     }
@@ -498,12 +498,12 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
     // legitimate alternative-route recovery, not laundering (blocking it
     // would false-block the most common web workflow). What must NOT vanish
     // is the DISCLOSURE: `failed` clears only when the success matches the
-    // failed call's target (INV-043 keying), so telemetry.yaml keeps the
+    // failed invocation (INV-043 keying), so telemetry.yaml keeps the
     // unrecovered failure + errorSummary visible even on satisfied runs.
     t.web.satisfied = true;
-    // Derived rollup, single source of truth: the tool+target-keyed
+    // Derived rollup, single source of truth: the invocation-keyed
     // toolErrors store (the recovery loop above already marked matching
-    // errors recovered). Multiple failed targets stay disclosed until EACH
+    // errors recovered). Multiple failed invocations stay disclosed until EACH
     // recovers; a missing target never wildcards (exact null==null match).
     t.web.failed = t.toolErrors.some((e) => e.kind === "web" && !e.recovered);
     // Keep the summary in lockstep with the rollup: point at a live

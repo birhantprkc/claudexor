@@ -455,6 +455,48 @@ describe("parseClaudeEvent", () => {
     expect(() => HarnessEvent.parse(out[0])).not.toThrow();
   });
 
+  it("preserves an MCP belt isError result as exact error evidence", () => {
+    const parse = createClaudeParser();
+    parse(
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_belt",
+              name: "mcp__claudexor__claudexor_run",
+              input: { prompt: "x" },
+            },
+          ],
+        },
+      },
+      "s1",
+    );
+    const out = parse(
+      {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_belt",
+              is_error: true,
+              content: [{ type: "text", text: "delegated sub-run child-failed ended failed" }],
+            },
+          ],
+        },
+      },
+      "s1",
+    ) as HarnessEvent[];
+    expect(out[0]?.tool).toMatchObject({
+      name: "mcp__claudexor__claudexor_run",
+      kind: "mcp",
+      status: "error",
+    });
+    expect(out[0]?.tool?.error_summary).toContain("child-failed");
+  });
+
   it("keeps Claude sibling-cancelled prose as a normal error without structured signal", () => {
     const parse = createClaudeParser();
     parse(

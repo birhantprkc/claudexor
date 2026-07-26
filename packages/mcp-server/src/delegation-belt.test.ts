@@ -185,10 +185,10 @@ describe("delegation belt tool surface (D32)", () => {
     const first = run.handler({ prompt: "a" }, {});
     expect(ledger.committedUsd).toBeCloseTo(1, 5); // reservation is visible immediately
     // A concurrent draw sees the reservation and is refused (no over-draw).
-    const second = await run.handler({ prompt: "b" }, {});
-    expect(String(typeof second === "string" ? second : second.text)).toMatch(
-      /no parent budget headroom/,
-    );
+    await expect(run.handler({ prompt: "b" }, {})).rejects.toMatchObject({
+      code: "delegation_policy_denied",
+      message: expect.stringMatching(/no parent budget headroom/),
+    });
     expect(started).toBe(1); // the second never reached the runner
     // Complete the first: the reservation reconciles DOWN to the real spend.
     release();
@@ -221,6 +221,29 @@ describe("delegation belt tool surface (D32)", () => {
     expect(ledger.committedUsd).toBeCloseTo(0, 5);
   });
 
+  it.each(["failed", "cancelled", "interrupted"] as const)(
+    "reports a %s child as a typed belt failure after reconciling its spend",
+    async (status) => {
+      const ledger = newBeltLedger();
+      const tools = beltClaudexorTools(
+        async () => ({
+          runId: `sub-${status}`,
+          status,
+          summary: `child ${status}`,
+          spendUsd: 0.25,
+        }),
+        { ...unlimited, parentBudget: { kind: "finite", maxUsd: 1 } },
+        ledger,
+      );
+      const run = tools.find((tool) => tool.name === "claudexor_run")!;
+      await expect(run.handler({ prompt: "x" }, {})).rejects.toMatchObject({
+        code: "delegation_child_terminal",
+        message: expect.stringMatching(new RegExp(`sub-${status}.*${status}`)),
+      });
+      expect(ledger).toEqual({ started: 1, committedUsd: 0.25 });
+    },
+  );
+
   it("refuses further sub-runs once the count cap is hit (server-side, not trusting the harness)", async () => {
     let runs = 0;
     const runner: RunnerFn = async () => {
@@ -237,8 +260,10 @@ describe("delegation belt tool surface (D32)", () => {
     const run = tools.find((t) => t.name === "claudexor_run")!;
     await run.handler({ prompt: "a" }, {});
     await run.handler({ prompt: "b" }, {});
-    const third = await run.handler({ prompt: "c" }, {});
-    expect(String(typeof third === "string" ? third : third.text)).toMatch(/cap reached \(2\/2\)/);
+    await expect(run.handler({ prompt: "c" }, {})).rejects.toMatchObject({
+      code: "delegation_policy_denied",
+      message: expect.stringMatching(/cap reached \(2\/2\)/),
+    });
     expect(runs).toBe(2); // the third never reached the runner
   });
 
@@ -256,8 +281,10 @@ describe("delegation belt tool surface (D32)", () => {
       parentBudget: { kind: "unlimited" },
     });
     const ask = tools.find((t) => t.name === "claudexor_ask")!;
-    const out = await ask.handler({ prompt: "q" }, {});
-    expect(String(typeof out === "string" ? out : out.text)).toMatch(/limited to depth 1/);
+    await expect(ask.handler({ prompt: "q" }, {})).rejects.toMatchObject({
+      code: "delegation_policy_denied",
+      message: expect.stringMatching(/limited to depth 1/),
+    });
     expect(runs).toBe(0);
   });
 
@@ -270,10 +297,14 @@ describe("delegation belt tool surface (D32)", () => {
       },
       { ...unlimited, repoRoot: null },
     );
-    const out = await tools
-      .find((tool) => tool.name === "claudexor_run")!
-      .handler({ prompt: "must not enqueue" }, {});
-    expect(String(typeof out === "string" ? out : out.text)).toMatch(/project root/i);
+    await expect(
+      tools
+        .find((tool) => tool.name === "claudexor_run")!
+        .handler({ prompt: "must not enqueue" }, {}),
+    ).rejects.toMatchObject({
+      code: "delegation_policy_denied",
+      message: expect.stringMatching(/project root/i),
+    });
     expect(runs).toBe(0);
   });
 

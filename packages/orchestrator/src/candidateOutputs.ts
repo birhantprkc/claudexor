@@ -16,6 +16,7 @@ import type { Stats } from "node:fs";
 import { dirname, extname, join, relative as pathRelative, resolve, sep } from "node:path";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import { CLAUDEXOR_ARTIFACT_DIR, summarizeDiffPaths } from "@claudexor/core";
+import { containsSecretLikeToken } from "@claudexor/util";
 
 const RASTER_OUTPUT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -42,6 +43,20 @@ function writeNoFollow(path: string, data: string | Buffer, mode: number, replac
   } finally {
     closeSync(fd);
   }
+}
+
+function rasterBytesIfSafe(source: string, stat: Stats): Buffer | null {
+  if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES) return null;
+  const bytes = readFileSync(source);
+  return containsSecretLikeToken(bytes.toString("latin1")) ? null : bytes;
+}
+
+function copyRasterIfSafe(source: string, target: string, stat: Stats): boolean {
+  const bytes = rasterBytesIfSafe(source, stat);
+  if (!bytes) return false;
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  writeNoFollow(target, bytes, stat.mode & 0o777, false);
+  return true;
 }
 
 /** Stage large synthesis evidence in the envelope, returning an idempotent
@@ -110,11 +125,9 @@ export function persistCandidateOutputs(input: {
     // lstat (not stat): a candidate-created symlink must never make output
     // preservation copy a host file outside the envelope.
     const stat = lstatSync(source);
-    if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES || total + stat.size > MAX_TOTAL_BYTES)
-      continue;
+    if (total + stat.size > MAX_TOTAL_BYTES) continue;
     const target = join(input.attemptDir, "produced", relative);
-    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-    copyFileSync(source, target);
+    if (!copyRasterIfSafe(source, target, stat)) continue;
     total += stat.size;
     preserved.push(relative);
   }
@@ -155,19 +168,46 @@ export function collectArtifactDirMedia(input: {
         walk(abs);
         continue;
       }
-      if (!stat.isFile()) continue;
       if (!RASTER_OUTPUT_EXTENSIONS.has(extname(name).toLowerCase())) continue;
-      if (stat.size > MAX_OUTPUT_BYTES || total + stat.size > MAX_TOTAL_BYTES) continue;
+      if (total + stat.size > MAX_TOTAL_BYTES) continue;
       const rel = pathRelative(root, abs).split("\\").join("/");
       const target = join(input.attemptDir, "produced", rel);
-      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-      copyFileSync(abs, target);
+      if (!copyRasterIfSafe(abs, target, stat)) continue;
       total += stat.size;
       preserved.push(rel);
     }
   };
   walk(artifactRoot);
   return preserved;
+}
+
+export function candidateOutputsContainSecret(input: {
+  worktreePath: string;
+  changedPaths: readonly string[];
+}): boolean {
+  const root = resolve(input.worktreePath);
+  const paths = [...input.changedPaths];
+  const artifactRoot = join(root, CLAUDEXOR_ARTIFACT_DIR);
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      const stat = lstatIfPresent(path);
+      if (!stat || stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) walk(path);
+      else paths.push(pathRelative(root, path).split("\\").join("/"));
+    }
+  };
+  walk(artifactRoot);
+  for (const relative of new Set(paths)) {
+    if (!RASTER_OUTPUT_EXTENSIONS.has(extname(relative).toLowerCase())) continue;
+    const source = resolve(root, relative);
+    if (source !== root && !source.startsWith(root + sep)) continue;
+    const stat = lstatIfPresent(source);
+    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_OUTPUT_BYTES) continue;
+    if (containsSecretLikeToken(readFileSync(source).toString("latin1"))) return true;
+  }
+  return false;
 }
 
 export function rasterLinksInMarkdown(markdown: string): string[] {
@@ -189,10 +229,15 @@ export function writeCandidateAttemptArtifacts(input: {
   attemptDir: string;
   worktreePath: string;
   diff: string;
+  /** False for a secret-refused candidate: even an empty placeholder named
+   * patch.diff would falsely imply that an inspectable patch was retained. */
+  persistPatch?: boolean;
   answerText?: string;
   record: Record<string, unknown>;
 }): string[] {
-  input.store.writeText(join(input.attemptDir, "patch.diff"), input.diff);
+  if (input.persistPatch !== false) {
+    input.store.writeText(join(input.attemptDir, "patch.diff"), input.diff);
+  }
   const stats = summarizeDiffPaths(input.diff);
   const produced = [
     ...new Set([

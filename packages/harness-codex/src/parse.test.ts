@@ -246,6 +246,30 @@ describe("parseCodexEvent", () => {
     expect(() => HarnessEvent.parse(out?.[0])).not.toThrow();
   });
 
+  it("preserves a failed MCP belt call as exact error evidence", () => {
+    const out = parseCodexEvent(
+      {
+        type: "item.completed",
+        item: {
+          id: "mcp-belt-1",
+          type: "mcp_tool_call",
+          server: "claudexor",
+          tool: "claudexor_run",
+          status: "failed",
+          error: "delegated sub-run child-failed ended failed",
+        },
+      },
+      "s1",
+    );
+    expect(out?.[0]?.tool).toMatchObject({
+      name: "claudexor_run",
+      kind: "mcp",
+      target: "claudexor:claudexor_run",
+      status: "error",
+    });
+    expect(out?.[0]?.tool?.error_summary).toContain("child-failed");
+  });
+
   it("maps failed web searches to error tool_results", () => {
     const out = parseCodexEvent(
       {

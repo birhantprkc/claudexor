@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -94,6 +95,36 @@ async function initRepo(): Promise<string> {
     "init",
   ]);
   return repo;
+}
+
+function treeContainsBytes(root: string, needle: string): boolean {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      if (treeContainsBytes(path, needle)) return true;
+    } else if (entry.isFile() && readFileSync(path).includes(needle)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function gitObjectStoreContains(repo: string, needle: string): boolean {
+  const rows = execFileSync(
+    "git",
+    ["-C", repo, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"],
+    { encoding: "utf8" },
+  );
+  for (const row of rows.trim().split("\n")) {
+    const [sha, type] = row.split(" ");
+    if (type === "blob" && sha) {
+      const bytes = execFileSync("git", ["-C", repo, "cat-file", "blob", sha]);
+      if (bytes.includes(needle)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function cleanReviewer(id: string, family: ProviderFamily): ReviewerSpec {
@@ -3916,7 +3947,7 @@ describe("Orchestrator", () => {
     );
   });
 
-  it("does not block on a tool error that was later recovered by the same tool", async () => {
+  it("does not block on a tool error later recovered by the same invocation", async () => {
     const repo = await initRepo();
     const adapter = askAdapter("recovers", function* (sessionId) {
       const ts = new Date().toISOString();
@@ -3941,20 +3972,13 @@ describe("Orchestrator", () => {
         },
       };
       yield {
-        type: "tool_call",
-        session_id: sessionId,
-        ts,
-        text: "Bash",
-        tool: { name: "Bash", kind: "command", use_id: "t2", target: "pnpm test" },
-      };
-      yield {
         type: "tool_result",
         session_id: sessionId,
         ts,
         tool: {
           name: "Bash",
           kind: "command",
-          use_id: "t2",
+          use_id: "t1",
           status: "ok",
           content_summary: "all green",
         },
@@ -3973,6 +3997,9 @@ describe("Orchestrator", () => {
     expect(legacyOutcome(res)).toBe("success");
     expect(readFileSync(join(res.runDir, "final", "answer.md"), "utf8")).toContain(
       "Recovered and finished.",
+    );
+    expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toContain(
+      "unrecovered_tool_errors: 0",
     );
   });
 
@@ -9515,6 +9542,8 @@ describe("delegation belt injection (D32)", () => {
     usageCostUsd?: number,
     beltToolStatuses: Array<"ok" | "error"> = [],
     afterBeltToolResult?: () => void,
+    writeCandidate?: (cwd: string) => void,
+    responseText = "Implemented.",
   ): HarnessAdapter {
     return {
       id,
@@ -9576,8 +9605,9 @@ describe("delegation belt injection (D32)", () => {
           };
           afterBeltToolResult?.();
         }
-        writeFileSync(join(spec.cwd, "CHANGED.txt"), "change\n");
-        yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+        if (writeCandidate) writeCandidate(spec.cwd);
+        else writeFileSync(join(spec.cwd, "CHANGED.txt"), "change\n");
+        yield { type: "message", session_id: spec.session_id, ts, text: responseText };
         if (usageCostUsd) {
           yield {
             type: "usage",
@@ -10108,6 +10138,344 @@ describe("delegation belt injection (D32)", () => {
     const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
     expect(events.match(/"type":"harness.started"/g)).toHaveLength(1);
     expect(events).not.toContain('"type":"review.started"');
+  });
+
+  it.each([
+    { lane: "Delegate race", delegate: true, attempts: undefined },
+    { lane: "Delegate convergence", delegate: true, attempts: 2 },
+    { lane: "ordinary Agent", delegate: false, attempts: undefined },
+  ])(
+    "quarantines a secret-bearing in-place diff for $lane without artifacts or Git objects",
+    async ({ delegate, attempts }) => {
+      const repo = await initRepo();
+      const secret = `sk-${"a".repeat(24)}`;
+      const adapter = delegatingAdapter(
+        "deleg",
+        true,
+        undefined,
+        false,
+        delegate ? "pending" : undefined,
+        undefined,
+        delegate ? ["error"] : [],
+        undefined,
+        (cwd) => writeFileSync(join(cwd, "LEAK.txt"), `TOKEN=${secret}\n`),
+      );
+      const orch = new Orchestrator({
+        registry: new Map([["deleg", adapter]]),
+        reviewers: attempts ? reviewers() : [],
+        delegationBudgetAuthority: new DelegationBudgetAuthority(),
+      });
+      const res = await orch.run({
+        repoRoot: repo,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["deleg"],
+        inPlace: true,
+        ...(attempts ? { attempts } : {}),
+        ...(delegate ? { delegate: true, delegationBelt: belt } : {}),
+      });
+
+      expect(res.lifecycle).toBe("failed");
+      expect(existsSync(join(repo, "LEAK.txt"))).toBe(false);
+      expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+      expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
+      const workProduct = readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8");
+      expect(workProduct).toContain("secret_diff_refused: true");
+      expect(workProduct).toContain("secret_recovery: manual_cleanup");
+      expect(workProduct).toContain("adopted: true");
+      expect(workProduct).toContain("apply_state: applied_review_blocked");
+      expect(workProduct).toContain("revert_anchor_id: null");
+      const attempt = readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8");
+      expect(attempt).toContain("secret_diff_refusal:");
+      if (delegate) {
+        expect(attempt).toMatch(/delegation_belt:\n[\s\S]*tool_evidence: true/);
+        expect(attempt).toContain("unrecovered_tool_errors: 1");
+        expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
+          /delegation:\n[\s\S]*used: true/,
+        );
+      }
+      const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
+      expect(events).toContain('"type":"work_product.emitted"');
+      expect(events.indexOf('"type":"work_product.emitted"')).toBeLessThan(
+        events.indexOf('"type":"run.failed"'),
+      );
+      expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+      expect(gitObjectStoreContains(repo, secret)).toBe(false);
+      const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
+      expect(failure).toContain(
+        delegate ? "phase: delegation_runtime" : "phase: artifact_security",
+      );
+    },
+  );
+
+  it.each([false, true])(
+    "quarantines a binary secret-bearing Agent diff (inPlace=%s)",
+    async (inPlace) => {
+      const repo = await initRepo();
+      const secret = `sk-${"b".repeat(24)}`;
+      const adapter = delegatingAdapter(
+        "deleg",
+        true,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        [],
+        undefined,
+        (cwd) =>
+          writeFileSync(
+            join(cwd, "LEAK.bin"),
+            Buffer.concat([Buffer.from([0]), Buffer.from(secret), Buffer.from([0])]),
+          ),
+      );
+      const orch = new Orchestrator({
+        registry: new Map([["deleg", adapter]]),
+        reviewers: [],
+      });
+      const res = await orch.run({
+        repoRoot: repo,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["deleg"],
+        inPlace,
+      });
+
+      expect(res.lifecycle).toBe("failed");
+      expect(existsSync(join(repo, "LEAK.bin"))).toBe(false);
+      expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+      expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
+      expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+      expect(gitObjectStoreContains(repo, secret)).toBe(false);
+      expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+        "phase: artifact_security",
+      );
+      expect(existsSync(join(res.runDir, "final", "work_product.yaml"))).toBe(inPlace);
+    },
+  );
+
+  it("reports manual cleanup when an in-place Delegate stages secret bytes", async () => {
+    const repo = await initRepo();
+    const secret = `sk-${"e".repeat(24)}`;
+    const adapter = delegatingAdapter(
+      "deleg",
+      true,
+      undefined,
+      false,
+      "pending",
+      undefined,
+      ["error"],
+      undefined,
+      (cwd) => {
+        writeFileSync(join(cwd, "LEAK.txt"), `${secret}\n`);
+        execFileSync("git", ["-C", cwd, "add", "LEAK.txt"]);
+      },
+    );
+    const orch = new Orchestrator({
+      registry: new Map([["deleg", adapter]]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      inPlace: true,
+      delegate: true,
+      delegationBelt: belt,
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(existsSync(join(repo, "LEAK.txt"))).toBe(false);
+    expect(execFileSync("git", ["-C", repo, "show", ":LEAK.txt"]).toString()).toContain(secret);
+    const workProduct = readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8");
+    expect(workProduct).toContain("secret_recovery: manual_cleanup");
+    expect(workProduct).toContain("apply_state: applied_review_blocked");
+    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
+    expect(failure).toContain("Inspect and clean the in-place project state manually");
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+  });
+
+  it("exactly reverts a secret-bearing non-Git in-place convergence attempt", async () => {
+    const repo = reapMk(join(tmpdir(), "claudexor-secret-nongit-"));
+    writeFileSync(join(repo, "README.md"), "# test\n");
+    const secret = `sk-${"g".repeat(24)}`;
+    const adapter = delegatingAdapter(
+      "deleg",
+      true,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      (cwd) => writeFileSync(join(cwd, "LEAK.txt"), `${secret}\n`),
+    );
+    const orch = new Orchestrator({
+      registry: new Map([["deleg", adapter]]),
+      reviewers: reviewers(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      attempts: 2,
+      inPlace: true,
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(existsSync(join(repo, "LEAK.txt"))).toBe(false);
+    expect(existsSync(join(repo, ".git"))).toBe(false);
+    expect(readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8")).toContain(
+      "secret_recovery: reverted",
+    );
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+  });
+
+  it.each(["replace", "delete"] as const)(
+    "refuses a binary patch whose $case reverse payload contains a secret",
+    async (operation) => {
+      const repo = await initRepo();
+      const secret = `sk-${"c".repeat(24)}`;
+      const path = join(repo, "BASE.bin");
+      writeFileSync(path, Buffer.concat([Buffer.from([0]), Buffer.from(secret)]));
+      execFileSync("git", ["-C", repo, "add", "BASE.bin"]);
+      execFileSync("git", [
+        "-C",
+        repo,
+        "-c",
+        "user.email=t@t.dev",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-m",
+        "binary base",
+      ]);
+      const adapter = delegatingAdapter(
+        "deleg",
+        true,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        [],
+        undefined,
+        (cwd) => {
+          const candidate = join(cwd, "BASE.bin");
+          if (operation === "delete") unlinkSync(candidate);
+          else writeFileSync(candidate, Buffer.from([0, 1, 2, 3]));
+        },
+      );
+      const orch = new Orchestrator({ registry: new Map([["deleg", adapter]]), reviewers: [] });
+      const res = await orch.run({
+        repoRoot: repo,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["deleg"],
+      });
+
+      expect(res.lifecycle).toBe("failed");
+      expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+      expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
+      expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+    },
+  );
+
+  it.each(["owned artifact", "ignored markdown link"] as const)(
+    "refuses secret-bearing raster output from an $source",
+    async (source) => {
+      const repo = await initRepo();
+      if (source === "ignored markdown link") {
+        writeFileSync(join(repo, ".gitignore"), "preview.png\n");
+        execFileSync("git", ["-C", repo, "add", ".gitignore"]);
+        execFileSync("git", [
+          "-C",
+          repo,
+          "-c",
+          "user.email=t@t.dev",
+          "-c",
+          "user.name=Test",
+          "commit",
+          "-m",
+          "ignore preview",
+        ]);
+      }
+      const secret = `sk-${"h".repeat(24)}`;
+      const adapter = delegatingAdapter(
+        "deleg",
+        true,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        [],
+        undefined,
+        (cwd) => {
+          const path =
+            source === "owned artifact"
+              ? join(cwd, ".claudexor-artifacts", "browser", "shot.png")
+              : join(cwd, "preview.png");
+          mkdirSync(join(path, ".."), { recursive: true });
+          writeFileSync(path, Buffer.concat([Buffer.from([0]), Buffer.from(secret)]));
+        },
+        source === "ignored markdown link" ? "![preview](preview.png)" : "Implemented.",
+      );
+      const orch = new Orchestrator({ registry: new Map([["deleg", adapter]]), reviewers: [] });
+      const res = await orch.run({
+        repoRoot: repo,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["deleg"],
+      });
+
+      expect(res.lifecycle).toBe("failed");
+      expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+      expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+      expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
+    },
+  );
+
+  it("keeps harness commits inside the disposable candidate clone", async () => {
+    const repo = await initRepo();
+    const secret = `sk-${"d".repeat(24)}`;
+    const adapter = delegatingAdapter(
+      "deleg",
+      true,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      (cwd) => {
+        expect(execFileSync("git", ["-C", cwd, "remote"]).toString()).toBe("");
+        writeFileSync(join(cwd, "LEAK.txt"), `${secret}\n`);
+        execFileSync("git", ["-C", cwd, "add", "LEAK.txt"]);
+        execFileSync("git", [
+          "-C",
+          cwd,
+          "-c",
+          "user.email=t@t.dev",
+          "-c",
+          "user.name=Test",
+          "commit",
+          "-m",
+          "candidate",
+        ]);
+      },
+    );
+    const orch = new Orchestrator({ registry: new Map([["deleg", adapter]]), reviewers: [] });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(gitObjectStoreContains(repo, secret)).toBe(false);
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
   });
 
   it("keeps a failed in-place Delegate race honestly applied and revertable", async () => {

@@ -7,6 +7,7 @@ import { WorkspaceEnvelope as WorkspaceEnvelopeSchema } from "@claudexor/schema"
 import { CLAUDEXOR_ARTIFACT_DIR, runCaptureRaw, WorkspaceError } from "@claudexor/core";
 import { ensureDir, newId, nowIso, projectRuntimeDir } from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
+import { relativizePlainDiffHeaders } from "./plain-diff.js";
 import {
   CLAUDE_BRIDGE_BASENAME,
   bridgeCreatedMarkerMatches,
@@ -16,14 +17,13 @@ import {
 } from "./claude-bridge.js";
 import {
   branchDelete,
-  diffStaged,
-  diffTrees,
+  captureWorkingTreeTransient,
+  isolatedCloneAdd,
   isGitRepo,
   revParse,
   snapshotTree,
   statusPorcelain,
   stashCreate,
-  worktreeAdd,
   worktreePrune,
   worktreeRemove,
 } from "./git.js";
@@ -45,7 +45,7 @@ export interface CreateEnvelopeOptions {
 }
 
 /**
- * Manages WorkspaceEnvelopes: an isolated git worktree plus scoped HOME and
+ * Manages WorkspaceEnvelopes: an isolated Git checkout plus scoped HOME and
  * per-harness config dirs, and dirty-tree handling. Claudexor owns these
  * envelopes (it does not rely on a harness's native --worktree).
  */
@@ -152,7 +152,7 @@ export class WorkspaceManager {
       }) + "\n",
     );
 
-    // In-place mode: mutate the live repoRoot directly (no isolated worktree).
+    // In-place mode: mutate the live repoRoot directly (no isolated checkout).
     // Used for thread turns (chat-first: the next turn sees this one's work) and
     // for stateful external environments where runtime state is the deliverable.
     // For a git project we record a per-turn snapshot sha so diff() captures only
@@ -204,16 +204,14 @@ export class WorkspaceManager {
 
     const path = join(base, "tree");
     const branch = `claudexor/${opts.taskId}/${opts.attemptId}`;
-    await worktreeAdd(this.repoRoot, path, branch, baseSha);
+    await isolatedCloneAdd(this.repoRoot, path, branch, baseSha);
+    writeFileSync(join(base, "private-clone-v1"), "private Git authority\n");
 
-    // AGENTS.md bridge (INV-113): a worktree materializes only the COMMITTED
-    // tree, so the project-root bridge (an untracked file) never reaches this
+    // AGENTS.md bridge (INV-113): the checkout omits the untracked project-root bridge,
     // envelope — a Claude Code candidate here would otherwise lack CLAUDE.md.
-    // Write an envelope-local bridge into the worktree so the candidate reads the
-    // same AGENTS.md instructions. Self-fenced (acts only with a committed
-    // AGENTS.md and no CLAUDE.md), best-effort (a convenience, never a
-    // precondition), and no run event — this envelope is disposable and
-    // Claudexor-owned. `diff()` excludes the generated bridge so it never enters
+    // Write an envelope-local bridge so the candidate reads the same AGENTS.md.
+    // Self-fenced (acts only with a committed AGENTS.md and no CLAUDE.md),
+    // best-effort, and no run event. `diff()` excludes the generated bridge so it never enters
     // the candidate patch.
     // ONLY when THIS prep actually created the bridge (recorded below) does diff()
     // exclude it; a CLAUDE.md already present is never excluded (A-3 residual).
@@ -337,84 +335,23 @@ export class WorkspaceManager {
     return ensureLaneHomeEnv(this.runtimeRoot, threadId, harnessId, profileId);
   }
 
-  /**
-   * Header-only rewrite of a plain GNU `diff -ruN <baseline> <live>` document:
-   * absolute baseline/live prefixes become git-style `a/<rel>` / `b/<rel>` so
-   * repo-relative protected-path and risk globs see the SAME shape they see
-   * for git diffs. STATEFUL, mirroring the shared plain-diff parser's
-   * structural rules: only the GNU `diff …` command echo, the `--- `/`+++ `
-   * pair of a real file-header triple (`--- ` + `+++ ` + `@@` on consecutive
-   * lines), and structural `Binary files … differ` lines are rewritten.
-   * Hunk CONTENT is never touched — a removed/added content line that merely
-   * starts with `-- `/`++ ` (rendering as `--- `/`+++ ` in the diff) keeps
-   * its bytes, per the diff-fidelity contract (INV-041).
-   */
-  private static relativizePlainDiffHeadersFor(
-    text: string,
-    baselineRoot: string,
-    liveRoot: string,
-  ): string {
-    const base = baselineRoot.endsWith("/") ? baselineRoot : `${baselineRoot}/`;
-    const live = liveRoot.endsWith("/") ? liveRoot : `${liveRoot}/`;
-    const swap = (s: string): string => s.split(base).join("a/").split(live).join("b/");
-    const lines = text.split("\n");
-    // Same structural rule as the shared plain-diff parser: INSIDE a hunk the
-    // loose triple can be forged by content (a deleted `-- …` line + an added
-    // `++ …` line + the next `@@`), so a mid-hunk boundary must also carry a
-    // header witness — the GNU tab-separated timestamp (or /dev/null) on both
-    // path lines, which +/- content lines never have.
-    const headerWitness = (l: string | undefined): boolean =>
-      l !== undefined && (l.includes("\t") || l.slice(4).trim() === "/dev/null");
-    const isFileHeaderTriple = (idx: number, midHunk: boolean): boolean => {
-      const triple =
-        (lines[idx]?.startsWith("--- ") ?? false) &&
-        (lines[idx + 1]?.startsWith("+++ ") ?? false) &&
-        (lines[idx + 2]?.startsWith("@@") ?? false);
-      if (!triple) return false;
-      return midHunk ? headerWitness(lines[idx]) && headerWitness(lines[idx + 1]) : true;
-    };
-    let inHunk = false;
-    for (let i = 0; i < lines.length; i += 1) {
-      const line = lines[i] as string;
-      if (line.startsWith("diff ")) {
-        // GNU command echo between files: structural, resets hunk state.
-        inHunk = false;
-        lines[i] = swap(line);
-        continue;
-      }
-      if (isFileHeaderTriple(i, inHunk)) {
-        // Real file boundary — same rule as the shared parser (a full triple
-        // opens a file even mid-document without a `diff` echo).
-        lines[i] = swap(line);
-        lines[i + 1] = swap(lines[i + 1] as string);
-        inHunk = false;
-        i += 1; // the `+++ ` line is handled; `@@` flips state next.
-        continue;
-      }
-      if (line.startsWith("@@")) {
-        inHunk = true;
-        continue;
-      }
-      if (line.startsWith("Binary files ") && line.endsWith(" differ") && !inHunk) {
-        lines[i] = swap(line);
-      }
-    }
-    return lines.join("\n");
-  }
-
-  async diff(env: WorkspaceEnvelope): Promise<string> {
-    // In-place: there is no isolated worktree. For a git project, diff the
-    // per-turn base snapshot against a fresh end snapshot — net change of THIS
-    // turn only, untracked included, prior dirty state folded into base.
+  async captureDiff(env: WorkspaceEnvelope): Promise<{
+    diff: string;
+    binarySecretLike: boolean;
+  }> {
+    // In-place: there is no isolated worktree. Capture the candidate tree in a
+    // temporary object database so a secret refusal cannot leave its bytes as
+    // dangling objects in the user's repository. The exact per-turn base still
+    // folds prior dirty state out of this turn's diff.
     if (env.worktree_path === env.repo_root) {
       if (env.base_sha) {
-        const end = await snapshotTree(env.repo_root);
-        return diffTrees(env.repo_root, env.base_sha, end);
+        const captured = await captureWorkingTreeTransient(env.repo_root, env.base_sha);
+        return { diff: captured.patch, binarySecretLike: captured.binarySecretLike };
       }
       // Non-git fallback: diff the best-effort cpSync baseline against the live
       // tree; if no baseline was captured, return empty (reviewers read the tree).
       const baseline = join(this.envelopeBase(env.task_id, env.attempt_id), "baseline");
-      if (!existsSync(baseline)) return "";
+      if (!existsSync(baseline)) return { diff: "", binarySecretLike: false };
       try {
         const r = await runCaptureRaw(
           "diff",
@@ -439,18 +376,18 @@ export class WorkspaceManager {
         // Downstream consumers (diffstat, protected-path/risk gating) match
         // REPO-RELATIVE globs like `test/**`; absolute `/…/repo/test/x`
         // headers would silently bypass every one of them.
-        const relativized = WorkspaceManager.relativizePlainDiffHeadersFor(
-          r.stdout,
-          baseline,
-          env.repo_root,
-        );
+        const relativized = relativizePlainDiffHeaders(r.stdout, baseline, env.repo_root);
         const CAP = 200_000;
-        return relativized.length > CAP
-          ? relativized.slice(0, CAP) + "\n... [diff truncated]\n"
-          : relativized;
+        return {
+          diff:
+            relativized.length > CAP
+              ? relativized.slice(0, CAP) + "\n... [diff truncated]\n"
+              : relativized,
+          binarySecretLike: false,
+        };
       } catch {
         // best-effort: if `diff` is unavailable the loop still works (reviewers read the live tree)
-        return "";
+        return { diff: "", binarySecretLike: false };
       }
     }
     // Exclude the envelope-local generated CLAUDE.md bridge (INV-113) from the
@@ -472,7 +409,16 @@ export class WorkspaceManager {
       this.bridgeCreatedFact(env) && isGeneratedClaudeBridge(env.worktree_path)
         ? [`:(exclude,top)${CLAUDE_BRIDGE_BASENAME}`]
         : [];
-    return diffStaged(env.worktree_path, env.base_sha ?? undefined, bridgeExcludes);
+    const captured = await captureWorkingTreeTransient(
+      env.worktree_path,
+      env.base_sha ?? "HEAD",
+      bridgeExcludes,
+    );
+    return { diff: captured.patch, binarySecretLike: captured.binarySecretLike };
+  }
+
+  async diff(env: WorkspaceEnvelope): Promise<string> {
+    return (await this.captureDiff(env)).diff;
   }
 
   /** The created-this-run bridge fact for diff(): in-memory set first, else
@@ -501,19 +447,21 @@ export class WorkspaceManager {
       }
     }
     if (!inPlace) {
-      try {
-        await worktreeRemove(this.repoRoot, env.worktree_path);
-      } catch {
-        /* best-effort */
-      }
-      // Delete the per-attempt branch so re-attempts with the same ids don't
-      // collide on `worktree add -b`, and the user's repo doesn't accumulate
-      // permanent claudexor/<task>/<attempt> branches (the v0.8 leak).
-      if (env.branch_name && env.branch_name !== "inplace") {
+      const privateClone = existsSync(
+        join(this.envelopeBase(env.task_id, env.attempt_id), "private-clone-v1"),
+      );
+      if (!privateClone) {
         try {
-          await branchDelete(this.repoRoot, env.branch_name);
+          await worktreeRemove(this.repoRoot, env.worktree_path);
         } catch {
           /* best-effort */
+        }
+        if (env.branch_name && env.branch_name !== "inplace") {
+          try {
+            await branchDelete(this.repoRoot, env.branch_name);
+          } catch {
+            /* best-effort */
+          }
         }
       }
     }

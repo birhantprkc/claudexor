@@ -8,7 +8,8 @@ export function delegationBeltUnavailable(t: AttemptTelemetry): boolean {
 }
 
 /** An exact injected belt operation failed and has not recovered through the
- * same tool+kind+target success. INV-030 makes this a required-capability hard
+ * same invocation success (matching non-null use id, with tool+kind+target as
+ * the compatibility fallback). INV-030 makes this a required-capability hard
  * failure while reusing INV-043's recovery key; it does not rewrite the
  * startup-only `delegation_belt.failed` receipt or the run-level `used` fact. */
 export function delegationBeltToolFailure(t: AttemptTelemetry): boolean {

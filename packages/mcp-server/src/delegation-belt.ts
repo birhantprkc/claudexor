@@ -19,7 +19,7 @@
  * PURE functions so they are unit testable without a live daemon.
  */
 import { MAX_DELEGATED_CHILDREN, type PaidBudget } from "@claudexor/schema";
-import { DELEGATION_ENV } from "@claudexor/util";
+import { DELEGATION_ENV, redactSecrets } from "@claudexor/util";
 import type { McpTool, McpToolAnnotations, RunnerFn } from "./index.js";
 
 /** Runtime policy the belt enforces, derived from the injected delegation env. */
@@ -181,6 +181,24 @@ export function delegationEnv(opts: {
 
 const readOnly: McpToolAnnotations = { readOnlyHint: true };
 
+type BeltRunFailureCode = "delegation_policy_denied" | "delegation_child_terminal";
+
+function beltRunFailure(code: BeltRunFailureCode, message: string): Error {
+  return Object.assign(new Error(redactSecrets(message)), { code });
+}
+
+function failedChildTerminal(result: unknown): Error | null {
+  if (!result || typeof result !== "object") return null;
+  const record = result as Record<string, unknown>;
+  const status = record["status"];
+  if (status !== "failed" && status !== "cancelled" && status !== "interrupted") return null;
+  const runId = typeof record["runId"] === "string" && record["runId"] ? record["runId"] : null;
+  return beltRunFailure(
+    "delegation_child_terminal",
+    `delegated sub-run${runId ? ` ${runId}` : ""} ended ${status}${runId ? `; inspect it with claudexor_run_result` : ""}`,
+  );
+}
+
 /**
  * The scoped belt tool surface. `runner` is the SAME daemon-crossing runner the
  * public MCP surface uses (isolated envelope, no thread by construction); the
@@ -245,7 +263,7 @@ export function beltClaudexorTools(
     handler: async (args, ctx) => {
       const decision = evaluateBeltRun(policy, ledger);
       if ("refusal" in decision) {
-        return `delegation refused: ${decision.refusal}`;
+        throw beltRunFailure("delegation_policy_denied", `delegation refused: ${decision.refusal}`);
       }
       ledger.started += 1;
       // Reserve the drawn headroom into committedUsd BEFORE awaiting the run so
@@ -287,6 +305,8 @@ export function beltClaudexorTools(
           ? (result as { spendUsd: number }).spendUsd
           : 0;
       ledger.committedUsd += Math.max(0, spent);
+      const terminalFailure = failedChildTerminal(result);
+      if (terminalFailure) throw terminalFailure;
       return formatBeltResult(result);
     },
   });

@@ -164,10 +164,21 @@ invariant or owner decision before proceeding.
   If an explicitly in-place lane already wrote the live tree, the failed turn
   instead records those unavoidable bytes as `adopted:true` plus
   `applied_review_blocked`, emits the WorkProduct event before the terminal, and
-  preserves a revert anchor; it never misreports the tree as untouched. A later
-  success recovers only the same tool + kind + target; the Delegate receipt
-  remains `used:true` because it records the path, not its success. Neither
-  failure may silently degrade or be counted as a native vendor subagent.
+  preserves a revert anchor; it never misreports the tree as untouched. INV-062
+  is the narrow exception: a secret-bearing in-place diff is never persisted as
+  a patch or anchor and is immediately reverse-applied through the exact
+  postimage check. The diff owner scans immutable binary preimages and
+  postimages as well as text before deleting its private capture. A Git-backed
+  in-place refusal remains a sanitized `adopted:true`/
+  `applied_review_blocked` manual-cleanup receipt even when worktree rollback
+  succeeds, because harness-written index, ref, or object state cannot be
+  proven absent after the fact; it never claims false revertability. A later
+  success recovers only the same invocation: tool + kind
+  + target must match, and matching non-null tool-use ids are additionally
+  required when both sides carry them; the tuple remains the compatibility key
+  when either id is absent. The Delegate receipt remains `used:true` because it
+  records the path, not its success. Neither failure may silently degrade or be
+  counted as a native vendor subagent.
   Every child is bound to the original normalized user-project root rather than
   the parent's execution envelope; raw tool arguments cannot redirect it.
   Claudexor children carry server-owned Delegate lineage; model prose never
@@ -239,7 +250,9 @@ invariant or owner decision before proceeding.
   verified recovery exists, but it does not by itself discard a produced
   deliverable. Recovery must be attributable to the failed operation, not
   merely a later call of the same-named tool — the engine keys recovery by
-  tool AND target. verify: attemptTelemetry recovery-keying tests.
+  tool + kind + target and, when both records carry one, matching tool-use id;
+  the tuple remains the compatibility fallback for legacy adapter evidence.
+  verify: attemptTelemetry recovery-keying tests.
 - **INV-044** The engine separates terminal state from tool hygiene: a
   completed answer/report/patch may succeed with warnings, while failed web
   evidence, terminal harness errors, failed apply/verify steps, or required

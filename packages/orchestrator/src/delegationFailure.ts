@@ -7,6 +7,7 @@ import { createRevertAnchorOrNull, snapshotTree } from "@claudexor/workspace";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
 import type { CandidateRun } from "./candidateEvidence.js";
 import { delegationBeltToolFailure, delegationBeltUnavailable } from "./delegationToolEvidence.js";
+import { secretDiffNextActions } from "./secretDiff.js";
 
 export type DelegationFailureKind = "startup" | "runtime";
 
@@ -26,6 +27,14 @@ export function delegationFailureError(t: AttemptTelemetry): string | null {
     : kind === "startup"
       ? "delegation belt failed to start after injection"
       : null;
+}
+
+export function candidateFailureKind(
+  run: CandidateRun,
+): DelegationFailureKind | "artifact_security" | null {
+  return (
+    delegationFailureKind(run.telemetry) ?? (run.secretDiffRefusal ? "artifact_security" : null)
+  );
 }
 
 /** Build the terminal cause/provenance without duplicating the race and
@@ -59,6 +68,40 @@ export function delegationFailureTerminal(run: CandidateRun, lane: "race" | "con
   };
 }
 
+export function candidateFailureTerminal(run: CandidateRun, lane: "race" | "convergence") {
+  const delegation = delegationFailureKind(run.telemetry);
+  if (delegation) {
+    const terminal = delegationFailureTerminal(run, lane);
+    return run.secretDiffRefusal
+      ? {
+          ...terminal,
+          metadata: {
+            ...terminal.metadata,
+            nextActions: [
+              ...secretDiffNextActions(run.secretDiffRefusal),
+              ...terminal.metadata.nextActions,
+            ],
+          },
+        }
+      : terminal;
+  }
+  if (!run.secretDiffRefusal) throw new Error("candidate failure terminal requested without cause");
+  return {
+    phase: "artifact_security",
+    error: new Error(run.errors[0] ?? "candidate patch diff was refused by the secret fence"),
+    metadata: {
+      category: "harness_error" as const,
+      harnessId: run.harnessId,
+      attemptId: run.attemptId,
+      rawDetailRef: `attempts/${run.attemptId}/attempt.yaml`,
+      nextActions:
+        run.secretDiffRefusal.disposition === "manual_cleanup"
+          ? ["Remove the secret-bearing in-place bytes manually", "Retry the run"]
+          : ["Retry the run without writing secret material"],
+    },
+  };
+}
+
 /** An explicitly in-place harness may have changed the live tree before a
  * required Delegate failure becomes terminal. Persist those unavoidable bytes
  * as blocked and revertable; envelope runs stay diagnostic-only. */
@@ -76,7 +119,45 @@ export async function persistFailedInPlaceWorkProduct(input: {
   kind: "patch" | "new_repo";
   attempts?: number;
 }): Promise<void> {
-  if (!input.live || !input.run.diff.trim()) return;
+  if (!input.live || (!input.run.diff.trim() && !input.run.secretDiffRefusal)) return;
+  const secretRefusal = input.run.secretDiffRefusal;
+  if (secretRefusal) {
+    const facts = makeOutcomeFacts("failed", {
+      reason: "harness_failed",
+      noChanges: secretRefusal.disposition !== "manual_cleanup",
+    });
+    const manualCleanup = secretRefusal.disposition === "manual_cleanup";
+    input.store.writeYaml(join(input.paths.finalDir, "work_product.yaml"), {
+      id: newId("wp"),
+      kind: input.kind,
+      source_task_id: input.taskId,
+      producer_attempt_id: input.run.attemptId,
+      meta: {
+        harness_id: input.run.harnessId,
+        result_kind: "none",
+        mode: input.mode,
+        ...(input.attempts !== undefined ? { attempts: input.attempts } : {}),
+        lifecycle: facts.lifecycle,
+        outcome_facts: facts,
+        review_verified: false,
+        secret_diff_refused: true,
+        secret_recovery: secretRefusal.disposition,
+        recovery_detail: secretRefusal.detail,
+        adopted: manualCleanup,
+        apply_state: manualCleanup ? "applied_review_blocked" : "reverted",
+        pre_turn_sha: input.preTurnSha,
+        post_turn_sha: null,
+        revert_anchor_id: null,
+      },
+    });
+    input.log.emit("work_product.emitted", {
+      winner: input.run.attemptId,
+      apply_state: manualCleanup ? "applied_review_blocked" : "reverted",
+      secret_diff_refused: true,
+      manual_cleanup_required: manualCleanup,
+    });
+    return;
+  }
   if (containsSecretLikeToken(input.run.diff)) {
     throw new Error("failed in-place patch diff contains secret-like token; refusing artifact");
   }

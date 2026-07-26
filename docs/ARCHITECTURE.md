@@ -93,7 +93,14 @@ deliverable remains diagnostic and cannot be auto-adopted. If an explicitly
 in-place lane already changed the live tree, the failure first emits a durable
 `adopted:true`, `applied_review_blocked` WorkProduct with pre/post snapshots and
 a revert anchor, then emits the failed terminal; this records unavoidable live
-bytes honestly without treating them as reviewed success. In a mixed
+bytes honestly without treating them as reviewed success. A secret-bearing
+in-place diff takes the INV-062 exception before any candidate artifact or Git
+post-snapshot: the engine attempts an exact checked reverse apply from the
+transient diff after scanning immutable binary preimages/postimages and textual
+patch bytes. Git-backed in-place output remains `applied_review_blocked` plus
+manual cleanup even after a successful worktree rollback because vendor-written
+index/ref/object state cannot be disproved post hoc; the engine never persists
+the patch or anchor and never claims false revertability. In a mixed
 pool, a capable lane keeps the run `effective:true`, while any selected lane
 that continued before injection makes the run reason `partially_degraded` and
 keeps the prominent warning; per-lane requirement receipts preserve its cause.
@@ -136,8 +143,9 @@ at every wire boundary.
   are deterministic offline test fixtures (incl. `fake-implement`, which writes a
   real worktree file); they are explicit-`--harness` only and never enter
   auto/reviewer pools.
-- `packages/workspace`: git worktree envelopes and scoped harness homes/config
-  dirs for write envelopes and read-only routes via `readOnlyHomeEnv`; these keep
+- `packages/workspace`: disposable candidates use private shared-clone Git
+  authority while persistent threads use git worktrees; scoped harness homes/
+  config dirs for write envelopes and read-only routes via `readOnlyHomeEnv` keep
   relocatable, route-local state outside both the worktree and the operator's
   home. A selected native Codex route uses its Claudexor-owned file-only profile;
   native Claude also uses a Claudexor-owned config dir and exposes only the
@@ -1456,11 +1464,11 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    route reads the same instruction file Codex/Cursor/OpenCode read natively
    (Codex additionally gets `CLAUDE.md` as a project-doc fallback via config, and
    a CLAUDE.md-only project needs no write at all). The bridge is written in TWO
-   places, because an isolated envelope worktree materializes only the COMMITTED
+   places, because an isolated envelope checkout materializes only the COMMITTED
    tree and so never sees an untracked project-root bridge: (a) the PROJECT root
    (the durable, in-place/thread-visible write, announced via a typed
    `project.claude_bridge.created` run event — never silent); and (b) each
-   git-mode ENVELOPE worktree at workspace prep, so a Claude Code candidate racing
+   git-mode ENVELOPE checkout at workspace prep, so a Claude Code candidate racing
    inside an envelope reads the same instructions. The envelope write emits NO run
    event — the envelope is disposable and Claudexor-owned — and diff capture
    EXCLUDES the generated bridge from the candidate patch by exact path, gated on

@@ -2,6 +2,7 @@ import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
 import { defaultClaudexorTools, serveClaudexorMcp, type McpTool, type RunnerFn } from "./index.js";
+import { beltClaudexorTools } from "./delegation-belt.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -44,6 +45,15 @@ function wire(tools: McpTool[], opts: { version?: string } = {}) {
     await sleep(20);
   };
   return { send, initialize, responses, requests, close: () => handle.close() };
+}
+
+async function wireToolCall(tools: McpTool[], name: string, args: Record<string, unknown>) {
+  const w = wire(tools);
+  await w.initialize();
+  w.send({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
+  await sleep(120);
+  await w.close();
+  return w.responses.find((response) => response.id === 1)?.result;
 }
 
 describe("Claudexor MCP server (SDK v2)", () => {
@@ -119,6 +129,52 @@ describe("Claudexor MCP server (SDK v2)", () => {
     // Still never a raw JSON dump of the internal run object.
     expect(text).not.toContain("winner");
     expect(text).not.toContain("{");
+  });
+
+  it("marks belt policy refusals and non-success child terminals as MCP errors", async () => {
+    const policy = {
+      parentRunId: "run-parent",
+      repoRoot: "/tmp/project",
+      depth: 0,
+      maxSubRuns: 8,
+      parentBudget: { kind: "unlimited" as const },
+    };
+    const denied = await wireToolCall(
+      beltClaudexorTools(async () => ({ status: "succeeded" }), { ...policy, depth: 1 }),
+      "claudexor_run",
+      { prompt: "x" },
+    );
+    expect(denied?.isError).toBe(true);
+    expect(denied?.content?.[0]?.text).toMatch(/delegation refused.*depth 1/i);
+
+    for (const status of ["failed", "cancelled", "interrupted"] as const) {
+      const result = await wireToolCall(
+        beltClaudexorTools(async () => ({ runId: `child-${status}`, status, spendUsd: 0 }), policy),
+        "claudexor_run",
+        { prompt: "x" },
+      );
+      expect(result?.isError).toBe(true);
+      expect(result?.content?.[0]?.text).toMatch(new RegExp(`child-${status}.*${status}`, "i"));
+    }
+
+    const succeeded = await wireToolCall(
+      beltClaudexorTools(
+        async () => ({ runId: "child-ok", status: "succeeded", spendUsd: 0 }),
+        policy,
+      ),
+      "claudexor_run",
+      { prompt: "x" },
+    );
+    expect(succeeded?.isError).not.toBe(true);
+    expect(succeeded?.content?.[0]?.text).toContain("status: succeeded");
+
+    const failedRead = await wireToolCall(
+      beltClaudexorTools(async () => ({ runId: "child-failed", status: "failed" }), policy),
+      "claudexor_run_result",
+      { runId: "child-failed" },
+    );
+    expect(failedRead?.isError).not.toBe(true);
+    expect(failedRead?.content?.[0]?.text).toContain("status: failed");
   });
 
   it("no-argument tools (status/capabilities) are callable with {} — prompt is required only where the schema requires it", async () => {

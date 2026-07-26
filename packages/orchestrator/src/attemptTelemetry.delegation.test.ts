@@ -39,6 +39,7 @@ function beltToolCall(): HarnessEvent {
 function beltToolResult(
   shape: "claude" | "codex",
   status: "ok" | "error" | "cancelled" | "denied" | undefined,
+  useId?: string,
 ): HarnessEvent {
   return {
     type: "tool_result",
@@ -46,12 +47,18 @@ function beltToolResult(
     ts,
     tool:
       shape === "claude"
-        ? { name: "mcp__claudexor__claudexor_ask", kind: "mcp", status }
+        ? {
+            name: "mcp__claudexor__claudexor_ask",
+            kind: "mcp",
+            status,
+            ...(useId !== undefined ? { use_id: useId } : {}),
+          }
         : {
             name: "claudexor_ask",
             kind: "mcp",
             target: "claudexor:claudexor_ask",
             status,
+            ...(useId !== undefined ? { use_id: useId } : {}),
           },
   } as unknown as HarnessEvent;
 }
@@ -232,6 +239,34 @@ describe("delegation belt readiness telemetry (QA-024)", () => {
     expect(delegationBeltToolFailure(t)).toBe(false);
     setAttemptOutcome(t, outcomeOpts);
     expect(t.outcome?.status).toBe("success");
+  });
+
+  it.each(["claude", "codex"] as const)(
+    "does not let a later %s belt invocation recover an earlier same-target failure",
+    (shape) => {
+      const t = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+      observeAttemptTelemetry(t, beltToolResult(shape, "error", "belt-use-failed"));
+      observeAttemptTelemetry(t, beltToolResult(shape, "ok", "belt-use-later"));
+
+      expect(t.toolErrors).toMatchObject([{ toolUseId: "belt-use-failed", recovered: false }]);
+      expect(delegationBeltToolFailure(t)).toBe(true);
+
+      observeAttemptTelemetry(t, beltToolResult(shape, "ok", "belt-use-failed"));
+      expect(t.toolErrors).toMatchObject([{ toolUseId: "belt-use-failed", recovered: true }]);
+      expect(delegationBeltToolFailure(t)).toBe(false);
+    },
+  );
+
+  it("retains tuple-key recovery when either side lacks an invocation id", () => {
+    const missingOnFailure = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(missingOnFailure, beltToolResult("codex", "error"));
+    observeAttemptTelemetry(missingOnFailure, beltToolResult("codex", "ok", "new-use-id"));
+    expect(delegationBeltToolFailure(missingOnFailure)).toBe(false);
+
+    const missingOnSuccess = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(missingOnSuccess, beltToolResult("claude", "error", "old-use-id"));
+    observeAttemptTelemetry(missingOnSuccess, beltToolResult("claude", "ok"));
+    expect(delegationBeltToolFailure(missingOnSuccess)).toBe(false);
   });
 
   it("does not hard-fail prefix collisions, foreign targets, or non-MCP tools", () => {

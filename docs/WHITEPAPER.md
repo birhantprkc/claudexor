@@ -229,7 +229,7 @@ Claude Code executor reads the same guidance, Claudexor bridges it with a thin
 `AGENTS.md` and no `CLAUDE.md`. The bridge is exclusive-create and no-follow, so
 a hand-written `CLAUDE.md` is never touched, and it is written both to the
 project root (durable, announced as a run event) and into each disposable
-envelope worktree — which materializes only committed files — so a candidate
+envelope checkout — which materializes only committed files — so a candidate
 racing in isolation reads it too. The envelope copy stays out of a candidate's
 patch only while it provably remains Claudexor's own writing: the diff excludes
 it when Claudexor created it during this run AND its bytes still equal the

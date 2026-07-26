@@ -1,6 +1,11 @@
 import type { ProjectPartitions } from "@claudexor/daemon";
 import { verifyAndDeliver } from "@claudexor/delivery";
-import { advanceThreadWorktree, diffStaged, git, snapshotTree } from "@claudexor/workspace";
+import {
+  advanceThreadWorktree,
+  captureWorkingTreeTransient,
+  git,
+  snapshotTree,
+} from "@claudexor/workspace";
 import { containsSecretLikeToken } from "@claudexor/util";
 import type { ControlDeliveryResponse } from "@claudexor/schema";
 
@@ -34,7 +39,8 @@ export async function applyThreadDiff(
   }
   const projectRoot = thread.repo.root;
   const base = ws.base_sha ?? "HEAD";
-  const patch = await diffStaged(ws.worktree_path, base);
+  const captured = await captureWorkingTreeTransient(ws.worktree_path, base);
+  const patch = captured.patch;
   if (!patch.trim())
     return {
       applied: false,
@@ -43,7 +49,7 @@ export async function applyThreadDiff(
       detail: "no changes to apply",
       delivery: null,
     };
-  if (containsSecretLikeToken(patch)) {
+  if (containsSecretLikeToken(patch) || captured.binarySecretLike) {
     return {
       applied: false,
       status: "rejected",

@@ -174,6 +174,7 @@ import {
   webUnsatisfied,
 } from "./attemptTelemetry.js";
 import * as delegateFailure from "./delegationFailure.js";
+import * as secretDiff from "./secretDiff.js";
 import { dominantHarnessFailureCategory, harnessFailureNextActions } from "./harnessFailure.js";
 import {
   finalizeAttempt,
@@ -2577,21 +2578,25 @@ export class Orchestrator {
     if (webUnsatisfied(telemetry)) {
       errors.push(webEvidenceFailure(telemetry.web));
     }
-
-    const diff = await wsm.diff(envelope);
     // D-16: un-nest {work_report, output} so answer.md persists the OUTPUT, not the envelope.
     const unwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", workReportMode, {
       sideToolReport: telemetry.sideToolWorkReport ?? undefined,
     });
-    // X119: persist the VERBATIM redacted bytes; trim ONLY for the emptiness check.
     const redacted = redactSecrets(unwrapped.deliverable);
-    const answerText = redacted.trim().length > 0 ? redacted : undefined;
+    const candidateAnswer = redacted.trim().length > 0 ? redacted : undefined;
+    const { diff, refusal: secretDiffRefusal } = await secretDiff.quarantineCandidateWorkspace(
+      wsm,
+      envelope,
+      inPlaceEnvelope,
+      candidateAnswer,
+    );
+    harnessErrored = secretDiff.recordSecretDiffRefusal(secretDiffRefusal, errors, harnessErrored);
+    const answerText = secretDiffRefusal ? undefined : candidateAnswer;
     const deliverableEvidence = diff.trim().length > 0 || Boolean(answerText);
-    // Cancelled attempts skip gates entirely: the operator asked to
-    // stop NOW; running a 600s-per-gate suite after the abort delays the ack
+    // Cancelled attempts skip gates: running a 600s-per-gate suite delays the ack
     // and burns compute on a result nobody will adopt. Diff/attempt.yaml
     // still land, so partial work stays inspectable.
-    const gateSignalAborted = signal?.aborted === true;
+    const gateSignalAborted = signal?.aborted === true || secretDiffRefusal !== undefined;
     if (!gateSignalAborted) {
       log?.emit("gate.started", {
         attempt_id: attemptId,
@@ -2654,13 +2659,6 @@ export class Orchestrator {
     });
 
     const attemptDir = join(paths.attemptsDir, attemptId);
-    try {
-      assertNoSecretLikeTokens("candidate patch diff", diff);
-    } catch (err) {
-      // The stream already settled real spend; a post-stream assertion throw
-      // must carry it so the slot catch settles the TRUE cost, not 0.
-      throw Object.assign(err instanceof Error ? err : new Error(String(err)), { costUsd: cost });
-    }
     recordCleanAttemptMetrics(globalConfigDir(), adapter.id, {
       costUsd: cost,
       streamMs: attemptStreamEndedMs - attemptStartedMs,
@@ -2673,6 +2671,7 @@ export class Orchestrator {
       attemptDir,
       worktreePath: envelope.worktree_path,
       diff,
+      persistPatch: secretDiffRefusal === undefined,
       answerText,
       record: {
         attempt_id: attemptId,
@@ -2684,6 +2683,7 @@ export class Orchestrator {
         errors: errors.slice(0, 5),
         ...telemetrySummary(telemetry),
         outcome: telemetry.outcome,
+        ...(secretDiffRefusal ? { secret_diff_refusal: secretDiffRefusal } : {}),
         gates: gates.map((g) => ({ id: g.id, status: g.status })),
         branch: envelope.branch_name,
       },
@@ -2703,6 +2703,7 @@ export class Orchestrator {
       costEstimated,
       errors: errors.slice(0, 8),
       telemetry,
+      ...(secretDiffRefusal ? { secretDiffRefusal } : {}),
       outcomeClass: finalized.outcomeClass,
     };
   }
@@ -3454,7 +3455,7 @@ export class Orchestrator {
     // arbitration (as the race-adoption path does) would fold those user edits
     // into the revert target and let a later revert clobber them.
     let earlyPostTurnSha: string | null = null;
-    if (input.inPlace === true && requestedSingleCandidate) {
+    if (input.inPlace && requestedSingleCandidate && runs.every((run) => !run.secretDiffRefusal)) {
       try {
         earlyPostTurnSha = await snapshotTree(execRoot);
       } catch {
@@ -3488,11 +3489,9 @@ export class Orchestrator {
       );
     }
 
-    const failedDelegation = runs.find((run) =>
-      delegateFailure.delegationFailureKind(run.telemetry),
-    );
+    const failedDelegation = runs.find((run) => delegateFailure.candidateFailureKind(run));
     if (failedDelegation) {
-      const failure = delegateFailure.delegationFailureTerminal(failedDelegation, "race");
+      const failure = delegateFailure.candidateFailureTerminal(failedDelegation, "race");
       await disposeReviewEnvelopes();
       await delegateFailure.persistFailedInPlaceWorkProduct({
         ...{ store, log, paths, execRoot, preTurnSha, taskId, mode },
@@ -3601,7 +3600,7 @@ export class Orchestrator {
     if (workingRuns.length === 0) {
       await disposeReviewEnvelopes();
       const first = runs[0] as CandidateRun;
-      const phase = first.infraPhase ?? "harness";
+      const phase = first.secretDiffRefusal ? "artifact_security" : (first.infraPhase ?? "harness");
       const { facts, why: rootCause } = partitionCandidates(runs);
       store.writeYaml(join(paths.arbitrationDir, "decision.yaml"), {
         winner: null,
@@ -3648,8 +3647,9 @@ export class Orchestrator {
         rawDetailRef: `attempts/${first.attemptId}/attempt.yaml`,
         eventRefs: existingEventRefs,
         runDir: paths.root,
-        nextActions:
-          phase === "workspace"
+        nextActions: first.secretDiffRefusal
+          ? secretDiff.secretDiffNextActions(first.secretDiffRefusal)
+          : phase === "workspace"
             ? ["Check the project folder", "Open diagnostics", "Retry the run"]
             : harnessFailureNextActions(harnessCategory),
       });
@@ -5037,8 +5037,8 @@ export class Orchestrator {
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
         // Cancellation/deadline keeps priority over a belt failure finalized concurrently.
         if (input.signal?.aborted) break;
-        if (delegateFailure.delegationFailureKind(run.telemetry)) {
-          const failure = delegateFailure.delegationFailureTerminal(run, "convergence");
+        if (delegateFailure.candidateFailureKind(run)) {
+          const failure = delegateFailure.candidateFailureTerminal(run, "convergence");
           await delegateFailure.persistFailedInPlaceWorkProduct({
             ...{ store, log, paths, execRoot, preTurnSha, taskId, mode },
             live: input.inPlace === true,

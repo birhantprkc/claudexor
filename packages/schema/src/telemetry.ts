@@ -96,11 +96,11 @@ export const ToolErrorRecord = z
       .default(null)
       .describe("Redacted target of the tool use, when known."),
     summary: z.string().describe("Redacted error summary."),
-    /** True when a later successful result of the same tool exists in the same attempt. */
+    /** True when a later successful result is attributable to this failed invocation. */
     recovered: z
       .boolean()
       .default(false)
-      .describe("True when a later successful result of the same tool exists in the same attempt."),
+      .describe("True when a later successful result matches this failed invocation."),
     tool_use_id: z
       .string()
       .nullable()

@@ -399,3 +399,42 @@ revision/etag, already logged above), are intentionally not duplicated.
 - [F45] anthropic/claude-fable-5 | prompt_doc_sync | docs/DEVELOPMENT.md, the new sign:runtime-manifest example: the line '--in       runtime-manifest.json           # the candidate's unsigned manifest' has NO trailing backslash (and an inline comment) inside a multi-line continuation command, so the documented owner signing command breaks after the --in line when pasted — the remaining --sha256/--private-key/--authority/--out flags are lost and the signer exits with usage.
 
 - [post-3.1.0] Re-run the full post-release program audit (codex gpt-5.6-sol, deep-scan) after the claude weekly quota resets — the 2026-07-24 attempt died at the reducer stage with 96% quota used; its scout findings are ledgered as X237-X239.
+
+## 3.1.2 external-review advisories (2026-07-26)
+
+These are the WARN-or-below findings from the single frozen-candidate wave and
+the owner-requested Fable-high check. They do not expand the 3.1.2 blocker fix
+batch; exact reviewer dispositions are X303-X343 in the findings ledger.
+
+- Route bounded Delegate child summaries through the Control API's cached,
+  fail-soft projector so one corrupt legacy child cannot 500 its parent detail.
+- Remove private `paramsRecord` copies after the shared run-record owner is
+  adopted everywhere.
+- Refine Delegate-family cancellation receipts so successfully delivered but
+  still-draining cancellation is not presented as a rejected operation.
+- Require `DIFF_SHA256.txt` explicitly in frozen-packet validation and seal the
+  targeted secret-scan receipt used before review transport.
+- Keep failed in-place `new_repo` WorkProduct kind and `meta.result_kind`
+  identical, and document the exported delegation root field in the util
+  package changelog.
+- Add a recorded Codex required-MCP failure fixture with version provenance;
+  align the Swift drain-timeout fixture phase with production
+  `delegation_drain`.
+- Separate proven-zero cash estimation from subscription valuation knowledge.
+- Make deferred EventLog terminal return values explicitly provisional and
+  remove the `clearDeferredTerminal` future-misuse seam.
+- Constrain success-path decision-budget reconciliation to its intended owner
+  and preserve cancellation precedence when a strategy throw and drain-barrier
+  rejection coincide.
+- Close the delegated parent-close/start gap in race, plan, and read-only
+  report without creating an announced-but-nonterminal event.
+- Preserve the mixed-pool degradation nuance in aggregate remediation even
+  when another lane has the dominant startup-failed cause.
+- Bound macOS artifact previews by exact UTF-8 bytes, mark detail hydration only
+  after a row is actually updated, and cancel discarded eager detail requests.
+- Treat `external_sandbox_full` consistently across engine and composer,
+  consume the server-owned remediation copy, and restore queued-alias Delegate
+  children against the real parent run id.
+- Make disposable private candidate clones self-contained, or pin their source
+  snapshot for the run lifetime, so a concurrent explicit aggressive GC of the
+  source repository cannot remove an unreachable dirty-snapshot base.
