@@ -43,6 +43,9 @@ fixtures:
       final_messages: 1
       final_source: "assistant_message"
       final_is_last_message: true
+      thinking_events: 27
+      delta_messages: 0
+      tool_error_results: 0
       typed_rate_limit: false
   # Defensive shape: Ask does not normally emit createPlan, but a stale/vendor
   # frame must never outrank the final model-authored WorkReport.
