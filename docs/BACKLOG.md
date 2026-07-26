@@ -331,6 +331,11 @@ revision/etag, already logged above), are intentionally not duplicated.
 
 ### Engine
 
+- Delegate family drain: `waitForChildren` awaits the injected
+  `cancelAdmission` callback before its bounded child-settlement timeout starts.
+  The shipped daemon binding is synchronous, so this is not default-reachable;
+  a future asynchronous embedder should bound or include that callback in the
+  same deadline.
 - runRace continuation telemetry replaces the exhausted attempt in runsBySlot
   — final/telemetry.yaml attempts roster omits the superseded a01 attempt
   though its spend settled.

@@ -12,8 +12,9 @@ import {
   DecisionRecord,
   makeOutcomeFacts,
   RunFailureCode,
+  RunOutcomeFacts,
+  WorkProduct,
   type ModeKind,
-  type RunOutcomeFacts,
 } from "@claudexor/schema";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { BudgetLedger, BudgetTerminal } from "@claudexor/budget";
@@ -134,6 +135,41 @@ function reconcileDecisionBudget(
   context.store.writeYaml(path, reconciled);
 }
 
+/** Strategy success may already have materialized a WorkProduct before the
+ * Delegate family drain settles. If that drain changes the run terminal,
+ * reconcile only the terminal projection: the bytes, review result, and
+ * apply/revert state remain honest historical facts. */
+function reconcileWorkProductTerminal(context: AnnouncedRunContext, facts: RunOutcomeFacts): void {
+  const path = join(context.paths.finalDir, "work_product.yaml");
+  const current = context.store.readYaml<unknown>(path);
+  if (!current || typeof current !== "object" || Array.isArray(current)) return;
+  const record = current as Record<string, unknown>;
+  const priorMeta =
+    record["meta"] && typeof record["meta"] === "object" && !Array.isArray(record["meta"])
+      ? (record["meta"] as Record<string, unknown>)
+      : {};
+  const reconciled = {
+    ...record,
+    meta: {
+      ...priorMeta,
+      lifecycle: facts.lifecycle,
+      outcome_facts: facts,
+    },
+  };
+  WorkProduct.parse(reconciled);
+  context.store.writeYaml(path, reconciled);
+}
+
+function terminalOutcomeFacts(
+  prior: RunOutcomeFacts | undefined,
+  lifecycle: RunOutcomeFacts["lifecycle"],
+  reason: RunOutcomeFacts["reason"],
+): RunOutcomeFacts {
+  return prior
+    ? RunOutcomeFacts.parse({ ...prior, lifecycle, reason })
+    : makeOutcomeFacts(lifecycle, { reason });
+}
+
 function postDrainBudgetFailure(
   context: AnnouncedRunContext,
   terminal: Exclude<BudgetTerminal, null>,
@@ -141,8 +177,9 @@ function postDrainBudgetFailure(
   prior: OrchestratorResult,
 ): OrchestratorResult {
   const mapping = classifyBudgetFailure({ denial: null, terminal });
-  const facts = makeOutcomeFacts("failed", { reason: mapping.reason });
+  const facts = terminalOutcomeFacts(prior.facts, "failed", mapping.reason);
   reconcileDecisionBudget(context, budget, { facts, why: mapping.safeMessage });
+  reconcileWorkProductTerminal(context, facts);
   context.store.writeText(
     join(context.paths.finalDir, "summary.md"),
     `# Run ${context.runId} (${context.mode})\n\n- Lifecycle: failed (${mapping.reason})\n- Phase: budget\n\n${mapping.safeMessage}\n`,
@@ -152,6 +189,11 @@ function postDrainBudgetFailure(
     context.paths,
     budgetFailureRecord(mapping, { runDir: context.paths.root }),
   );
+  context.log.emit("output.ready", {
+    kind: "summary",
+    path: "final/summary.md",
+    state: "diagnostic",
+  });
   context.log.emit("run.failed", {
     lifecycle: "failed",
     facts,
@@ -226,6 +268,9 @@ export function cancelledResult(
   cancelSignal?: AbortSignal,
   /** Materializes the diagnostic summary the output.ready below announces. */
   store?: ArtifactStore,
+  /** A prepared result may already carry independent checks/review/work facts
+   * when cancellation wins during the Delegate terminal barrier. */
+  priorFacts?: RunOutcomeFacts,
 ): OrchestratorResult {
   if (writeTelemetry) {
     try {
@@ -263,9 +308,11 @@ export function cancelledResult(
   if (summaryWritten) {
     log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
   }
-  const cancelFacts = makeOutcomeFacts("cancelled", {
-    reason: cancelReason === "wall_clock_exceeded" ? "wall_clock_exceeded" : "user_cancelled",
-  });
+  const cancelFacts = terminalOutcomeFacts(
+    priorFacts,
+    "cancelled",
+    cancelReason === "wall_clock_exceeded" ? "wall_clock_exceeded" : "user_cancelled",
+  );
   log.emit("run.failed", {
     lifecycle: "cancelled",
     facts: cancelFacts,
@@ -308,13 +355,14 @@ export function failTerminally(
     attemptId?: string;
     rawDetailRef?: string;
     nextActions?: string[];
+    priorFacts?: RunOutcomeFacts;
   } = {},
 ): OrchestratorResult {
   const message = redactSecrets(err instanceof Error ? err.message : String(err));
   const parsedCode = RunFailureCode.safeParse(
     err && typeof err === "object" ? (err as { code?: unknown }).code : undefined,
   );
-  const failFacts = makeOutcomeFacts("failed", { reason: "harness_failed" });
+  const failFacts = terminalOutcomeFacts(failureMeta.priorFacts, "failed", "harness_failed");
   store.writeText(
     join(paths.finalDir, "summary.md"),
     `# Run ${runId} (${mode})\n\n- Lifecycle: failed\n- Phase: ${phase}\n\n${message}\n`,
@@ -375,24 +423,73 @@ export async function guardAnnouncedRun(
   onSettled?: (runId: string) => void | Promise<void>,
 ): Promise<OrchestratorResult> {
   let announced: AnnouncedRunContext | null = null;
+  let preparedResult: OrchestratorResult | null = null;
   let barrierAttempted = false;
+  let barrierFailed = false;
   const runBarrier = async (context: AnnouncedRunContext): Promise<void> => {
     if (barrierAttempted) return;
     barrierAttempted = true;
-    await beforeTerminal?.(context);
+    try {
+      await beforeTerminal?.(context);
+    } catch (error) {
+      barrierFailed = true;
+      throw error;
+    }
   };
   try {
     const result = await body((a) => {
       announced = a;
     });
+    preparedResult = result;
     const context = announced as AnnouncedRunContext | null;
     if (context) {
       await runBarrier(context);
       const budget = settledBudgetSnapshot(context);
-      const budgetTerminal =
-        context.recheckBudgetAfterBarrier?.() === true
-          ? (context.budgetTerminal?.() ?? null)
-          : null;
+      const delegateBarrierArmed = context.recheckBudgetAfterBarrier?.() === true;
+      if (delegateBarrierArmed && signal?.aborted) {
+        context.log.clearDeferredTerminal();
+        const cancelFacts = terminalOutcomeFacts(
+          result.facts,
+          "cancelled",
+          signal.reason === "wall_clock_exceeded" ? "wall_clock_exceeded" : "user_cancelled",
+        );
+        const cancelSummary =
+          signal.reason === "wall_clock_exceeded"
+            ? "run cancelled: wall-clock deadline (maxSeconds) exceeded"
+            : "run cancelled";
+        try {
+          reconcileDecisionBudget(context, budget, {
+            facts: cancelFacts,
+            why: cancelSummary,
+          });
+          reconcileWorkProductTerminal(context, cancelFacts);
+        } catch {
+          /* the cancellation terminal below remains authoritative */
+        }
+        const cancelled = cancelledResult(
+          context.log,
+          context.runId,
+          context.taskId,
+          context.mode,
+          context.paths.root,
+          result.candidates,
+          undefined,
+          budget.spendUsd,
+          signal,
+          context.store,
+          result.facts,
+        );
+        context.log.flushDeferredTerminal();
+        return {
+          ...result,
+          lifecycle: "cancelled",
+          facts: cancelled.facts,
+          summary: cancelled.summary,
+          spendUsd: cancelled.spendUsd,
+          ...(cancelled.cancelReason ? { cancelReason: cancelled.cancelReason } : {}),
+        };
+      }
+      const budgetTerminal = delegateBarrierArmed ? (context.budgetTerminal?.() ?? null) : null;
       if (budgetTerminal && result.lifecycle === "succeeded") {
         context.log.clearDeferredTerminal();
         const failed = postDrainBudgetFailure(context, budgetTerminal, budget, result);
@@ -443,24 +540,39 @@ export async function guardAnnouncedRun(
       a.log.flushDeferredTerminal();
       return result;
     }
-    const result = failTerminally(
+    const priorFacts = preparedResult?.facts;
+    const pendingFacts = terminalOutcomeFacts(priorFacts, "failed", "harness_failed");
+    const pendingSummary = redactSecrets(
+      terminalError instanceof Error ? terminalError.message : String(terminalError),
+    );
+    try {
+      reconcileDecisionBudget(a, budget, { facts: pendingFacts, why: pendingSummary });
+      reconcileWorkProductTerminal(a, pendingFacts);
+    } catch {
+      /* the failure terminal below remains authoritative */
+    }
+    const failed = failTerminally(
       a.log,
       a.store,
       a.paths,
       a.runId,
       a.taskId,
       a.mode,
-      a.phase,
+      barrierFailed ? "delegation_drain" : a.phase,
       terminalError,
       spendUsd,
+      { priorFacts },
     );
-    try {
-      reconcileDecisionBudget(a, budget, { facts: result.facts, why: result.summary });
-    } catch {
-      /* the failure terminal remains authoritative */
-    }
     a.log.flushDeferredTerminal();
-    return result;
+    return preparedResult
+      ? {
+          ...preparedResult,
+          lifecycle: "failed",
+          facts: failed.facts,
+          summary: failed.summary,
+          spendUsd: failed.spendUsd,
+        }
+      : failed;
   } finally {
     // Release per-run engine state on EVERY terminal path (normal return, failure
     // net, cancel), but only for a run that actually announced a runId.

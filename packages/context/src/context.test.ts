@@ -223,6 +223,25 @@ describe("evidence packet", () => {
     ).toThrow(/manifest digest mismatch: TESTS\.txt/);
   });
 
+  it("rejects a sealed release-review packet missing any process-law authority", () => {
+    const baseSha = "a".repeat(40);
+    const candidateSha = "b".repeat(40);
+    const candidateTree = "c".repeat(40);
+    for (const missing of ["DECISION_REGISTRY.md", "DECLINED_FINDINGS.md", "BLOCKER_FILTER.md"]) {
+      const dir = join(tmp(), `packet-missing-${missing.toLowerCase()}`);
+      writeSealedPacket(dir, { baseSha, candidateSha, candidateTree });
+      rmSync(join(dir, missing));
+      const remaining = FROZEN_REVIEW_EVIDENCE_FILES.filter((file) => file !== missing);
+      const manifest = remaining
+        .map((file) => `${digest(readFileSync(join(dir, file)))}  ${file}`)
+        .join("\n");
+      writeFileSync(join(dir, "MANIFEST.sha256"), `${manifest}\n`);
+      expect(() =>
+        verifySealedEvidencePacket({ evidenceDir: dir, candidateSha, candidateTree }),
+      ).toThrow(new RegExp(`sealed packet is missing: ${missing.replace(".", "\\.")}`));
+    }
+  });
+
   it("fails closed on manifest identity, unsealed files, traversal, and stale FREEZE", () => {
     const baseSha = "a".repeat(40);
     const candidateSha = "b".repeat(40);

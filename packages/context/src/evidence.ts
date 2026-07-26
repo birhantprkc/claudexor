@@ -56,6 +56,12 @@ export const FROZEN_REVIEW_EVIDENCE_FILES = [
   "RUNTIME.md",
   "FILES_TO_READ_WHOLE.txt",
   "RELEASE_PREFLIGHT.md",
+  // Release-review process law (docs/CHECKLISTS.md, INV-139). These are
+  // distinct authorities: tradeoffs/forbidden approaches cannot substitute
+  // for an explicit decision map, prior declines, or the blocker filter.
+  "DECISION_REGISTRY.md",
+  "DECLINED_FINDINGS.md",
+  "BLOCKER_FILTER.md",
 ] as const;
 
 export interface PacketManifestFile {

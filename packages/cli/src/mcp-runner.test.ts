@@ -270,6 +270,38 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it("maps the best-of tool's race marker to the documented default n=2", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-best-of",
+      runDir: "",
+      status: "running",
+      jobId: "job-best-of",
+    });
+    try {
+      await mcpSurfaceRunner()({
+        mode: "agent",
+        prompt: "compare",
+        race: true,
+        deferred: true,
+      });
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ n: 2 }),
+        expect.objectContaining({ waitForTerminal: false }),
+      );
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+    }
+  });
+
   it("ignores raw Delegate lineage and enables internal enqueue only from the bound belt constructor", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
