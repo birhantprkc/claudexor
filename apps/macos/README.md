@@ -114,18 +114,20 @@ Ask can run without a project and writes user-level artifacts; project-aware
 modes are gated until a project is picked in the composer's `ProjectChip` (the
 only place project selection lives — there is no Current Project setting).
 
-Run detail uses the server-projected `primaryOutput` first, then artifact
-fallbacks. Active runs default to Timeline, completed runs to Outcome, and
-failures without output to Diagnostics. Cancel uses the server control endpoint
-(`cancel` is the only control verb; the former `interrupt` alias was deleted as
-a duplicate of cancel); live input forwarding is not part of the control surface
-(the former input stub was removed as dead code), so the app shows no input UI
-for active runs.
+Each turn keeps a persistent inline receipt in the conversation. Its answer uses
+the server-projected `primaryOutput` first, then artifact fallbacks; active runs
+show live progress, completed runs show Outcome facts, and failures without
+output show Diagnostics. Selecting a receipt filters the trailing workspace to
+that run. Cancel uses the server control endpoint (`cancel` is the only control
+verb; the former `interrupt` alias was deleted as a duplicate of cancel); live
+input forwarding is not part of the control surface (the former input stub was
+removed as dead code), so the app shows no input UI for active runs.
 
-The trailing Workbench bridges two artifact planes: Run Detail reads the run's
-internal tree via the artifacts endpoints, while the Canvas gallery and
-mini-browser read the project's PRODUCED outputs via `GET /runs/:id/produced`
-(bytes/text fetched per path through the same client). The composer sends
+The trailing workspace belongs to the current thread and has three tabs:
+Changes, Artifacts, and Evidence. It aggregates the thread's runs until a receipt
+filters it. Internal run artifacts and project-produced outputs from
+`GET /runs/:id/produced` share the Artifacts gallery, including project preview;
+there is no separate Canvas plane or two-plane Workbench. The composer sends
 attachments (file picker + the `screencapture`-backed Capture button) as
 attachment DTOs on turn creation, gated by an available vision-capable route;
 the per-turn browser toggle arms the engine's agent-driven browser (offered
