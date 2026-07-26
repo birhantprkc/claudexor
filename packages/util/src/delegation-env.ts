@@ -6,6 +6,7 @@
  * higher-layer `@claudexor/mcp-server` just for these names. */
 export const DELEGATION_ENV = {
   parentRunId: "CLAUDEXOR_DELEGATION_PARENT_RUN_ID",
+  repoRoot: "CLAUDEXOR_DELEGATION_REPO_ROOT",
   depth: "CLAUDEXOR_DELEGATION_DEPTH",
   maxSubRuns: "CLAUDEXOR_DELEGATION_MAX_SUBRUNS",
   budget: "CLAUDEXOR_DELEGATION_BUDGET",

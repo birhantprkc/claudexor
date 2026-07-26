@@ -1,4 +1,16 @@
-/** Project Claude's init snapshot onto fail-closed receipts for required servers. */
+const READY_STATUSES = new Set(["connected", "ready", "ok"]);
+const PENDING_STATUSES = new Set(["pending", "connecting", "starting"]);
+
+/**
+ * Project Claude's init snapshot onto fail-closed receipts for required servers.
+ *
+ * Claude Code starts inline MCP servers asynchronously and can emit its init
+ * frame while a healthy stdio server is still `pending`. That is positive
+ * startup-in-progress evidence, not a terminal failure. Preserve it so the
+ * connection can finish; an absent server or any non-ready, non-pending status
+ * remains a hard startup failure, and a later attempted-tool failure remains a
+ * hard harness failure through the ordinary tool-result path.
+ */
 export function requiredMcpStartupReceipts(
   raw: unknown,
   required: ReadonlySet<string>,
@@ -18,7 +30,7 @@ export function requiredMcpStartupReceipts(
       typeof (entry as { status?: unknown }).status === "string"
         ? (entry as { status: string }).status.toLowerCase()
         : "";
-    if (["connected", "ready", "ok"].includes(status)) continue;
+    if (READY_STATUSES.has(status) || PENDING_STATUSES.has(status)) continue;
     failed.push(name);
     const failedReceipt = {
       ...(entry && typeof entry === "object" ? entry : {}),

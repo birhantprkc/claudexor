@@ -118,6 +118,16 @@ fixtures:
     cli_version: "2.1.165"
     recorded_at: "2026-07-23"
     sanitized: "ids, environment fingerprint"
+  # LIVE. A Delegate-enabled interactive native-session run with the exact injected
+  # `claudexor` stdio server. Claude Code emits init before the asynchronous MCP
+  # handshake finishes, so the server is truthfully `pending`; it connected
+  # ~244 ms later in the same run. This pins the vendor status that must remain
+  # provisional rather than being rewritten to terminal failure.
+  signals/required-mcp-pending.jsonl:
+    source: recorded
+    cli_version: "2.1.165"
+    recorded_at: "2026-07-26"
+    sanitized: "ids, environment fingerprint"
   # LIVE. Oversized single prompt (~504274 tokens) to a 200000-window model.
   # The terminal shape D-16 maps for Claude context exhaustion:
   #   result frame: subtype:"success", is_error:true, api_error_status:400,

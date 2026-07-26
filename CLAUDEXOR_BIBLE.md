@@ -156,8 +156,20 @@ invariant or owner decision before proceeding.
   codex) can host the belt, and the engine projects belt readiness instead of a
   surface guessing it. A known failure BEFORE injection may continue as an
   ordinary Agent run only with durable requested/effective/used/reason/remediation
-  facts and a visible warning. Once a ready belt was injected, startup failure is terminal:
-  it can never silently degrade or be counted as a native vendor subagent.
+  facts and a visible warning. Once the belt descriptor was injected, an
+  explicit startup failure is terminal. An unrecovered non-ok result from an
+  exact injected belt operation is also terminal for the Agent outcome: this is
+  the required-capability exception to INV-043. An envelope deliverable stays
+  available only as diagnostic evidence and cannot succeed or be auto-adopted.
+  If an explicitly in-place lane already wrote the live tree, the failed turn
+  instead records those unavoidable bytes as `adopted:true` plus
+  `applied_review_blocked`, emits the WorkProduct event before the terminal, and
+  preserves a revert anchor; it never misreports the tree as untouched. A later
+  success recovers only the same tool + kind + target; the Delegate receipt
+  remains `used:true` because it records the path, not its success. Neither
+  failure may silently degrade or be counted as a native vendor subagent.
+  Every child is bound to the original normalized user-project root rather than
+  the parent's execution envelope; raw tool arguments cannot redirect it.
   Claudexor children carry server-owned Delegate lineage; model prose never
   establishes provenance. verify: `ModeKind` in schema; docs-truth mode-id
   check; delegation capability/outcome/lineage + failed-start tests; canary

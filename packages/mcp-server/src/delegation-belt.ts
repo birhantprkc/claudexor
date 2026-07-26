@@ -27,6 +27,10 @@ export interface DelegationPolicy {
   /** Current top-level Delegate run. This is not the parent's own thread/retry
    * ancestor; every belt child persists this exact id as its delegation parent. */
   parentRunId: string | null;
+  /** Original user project root. The parent harness itself runs in a
+   * Claudexor-owned envelope, which must never be re-registered as a project;
+   * every child instead starts a fresh envelope from this root. */
+  repoRoot: string | null;
   /** This belt's nesting depth. A top-level delegate run injects depth 0; a
    * belt observing depth>0 refuses every sub-run (belt-and-suspenders — the
    * sub-runs a belt spawns are delegate-less and carry no belt of their own). */
@@ -110,6 +114,9 @@ export function evaluateBeltRun(
   if (!policy.parentRunId) {
     return { refusal: "delegation parent run id is missing; refusing untraceable sub-run" };
   }
+  if (!policy.repoRoot) {
+    return { refusal: "delegation project root is missing; refusing an unscoped sub-run" };
+  }
   const depthRefusal = delegationDepthRefusal(policy.depth);
   if (depthRefusal) return { refusal: depthRefusal };
   const countRefusal = subRunCountRefusal(ledger.started, policy.maxSubRuns);
@@ -143,6 +150,11 @@ export function readDelegationPolicy(env: NodeJS.ProcessEnv): DelegationPolicy {
       env[DELEGATION_ENV.parentRunId]!.trim().length > 0
         ? env[DELEGATION_ENV.parentRunId]!.trim()
         : null,
+    repoRoot:
+      typeof env[DELEGATION_ENV.repoRoot] === "string" &&
+      env[DELEGATION_ENV.repoRoot]!.trim().length > 0
+        ? env[DELEGATION_ENV.repoRoot]!.trim()
+        : null,
     // Absent depth => 1 (fail closed: refuse), present + finite => the value.
     depth: Number.isFinite(depthRaw) ? depthRaw : 1,
     maxSubRuns: Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : DEFAULT_MAX_SUBRUNS,
@@ -153,12 +165,14 @@ export function readDelegationPolicy(env: NodeJS.ProcessEnv): DelegationPolicy {
 /** Build the delegation env map for one parent run (daemon-side producer). */
 export function delegationEnv(opts: {
   parentRunId: string;
+  repoRoot: string;
   depth: number;
   maxSubRuns: number;
   parentBudget: PaidBudget;
 }): Record<string, string> {
   return {
     [DELEGATION_ENV.parentRunId]: opts.parentRunId,
+    [DELEGATION_ENV.repoRoot]: opts.repoRoot,
     [DELEGATION_ENV.depth]: String(opts.depth),
     [DELEGATION_ENV.maxSubRuns]: String(opts.maxSubRuns),
     [DELEGATION_ENV.budget]: JSON.stringify(opts.parentBudget),
@@ -255,6 +269,7 @@ export function beltClaudexorTools(
             delegate: false,
             parentRunId: policy.parentRunId,
             delegatedFromRunId: policy.parentRunId,
+            repoPath: policy.repoRoot,
             paidBudget: decision.budget,
           },
           ctx.signal ? { signal: ctx.signal } : {},

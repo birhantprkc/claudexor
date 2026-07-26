@@ -129,6 +129,14 @@ not evidence that the Claudexor tool belt worked. One daemon-lifetime family
 authority admits at most eight direct children, shares reservations and
 settlements, closes admission before cascade cancellation, and delays the
 parent terminal receipt until child spending can no longer arrive late.
+Because this belt is an explicitly required capability after injection, an
+unrecovered exact belt-operation failure cannot be hidden by a parent
+deliverable or native subagent; only a matching operation success recovers it.
+Children are pinned by the engine to the original user project rather than the
+parent's temporary envelope, so model-supplied paths cannot change that trust
+boundary. An envelope result from a failed operation remains diagnostic; an
+explicitly in-place run that already wrote live bytes records them as applied
+but review-blocked and revertable before it reports failure.
 
 Rejected alternatives, recorded so they stay rejected: a user-facing
 "orchestrate" mode (no leading tool exposes orchestration as a mode; users

@@ -291,19 +291,31 @@ describe("mcp daemon body mapping", () => {
         mode: "agent",
         prompt: "raw",
         deferred: true,
+        repoPath: "/forged/raw-project",
         parentRunId: "forged",
         delegatedFromRunId: "forged",
       });
       await mcpSurfaceRunner({
         requireExistingDaemon: true,
         delegationParentRunId: "run-parent",
-      })({ mode: "agent", prompt: "bound", deferred: true, delegatedFromRunId: "forged" });
+        delegationRepoRoot: "/bound/original-project",
+      })({
+        mode: "agent",
+        prompt: "bound",
+        deferred: true,
+        repoPath: "/forged/parent-envelope",
+        delegatedFromRunId: "forged",
+      });
       expect(calls[0]!.body).not.toHaveProperty("parentRunId");
       expect(calls[0]!.body).not.toHaveProperty("delegatedFromRunId");
       expect(calls[0]!.options).not.toHaveProperty("internalDaemonEnqueue");
+      expect(calls[0]!.body).toMatchObject({
+        scope: { kind: "project", root: "/forged/raw-project" },
+      });
       expect(calls[1]!.body).toMatchObject({
         parentRunId: "run-parent",
         delegatedFromRunId: "run-parent",
+        scope: { kind: "project", root: "/bound/original-project" },
       });
       expect(calls[1]!.options).toMatchObject({ internalDaemonEnqueue: true });
     } finally {

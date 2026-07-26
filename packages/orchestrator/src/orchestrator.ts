@@ -173,7 +173,7 @@ import {
   unrecoveredToolErrors,
   webUnsatisfied,
 } from "./attemptTelemetry.js";
-import { delegationBeltUnavailable } from "./delegationToolEvidence.js";
+import { delegationBeltToolFailure, delegationBeltUnavailable } from "./delegationToolEvidence.js";
 import { dominantHarnessFailureCategory, harnessFailureNextActions } from "./harnessFailure.js";
 import {
   finalizeAttempt,
@@ -530,6 +530,71 @@ interface HarnessRouteSettings {
   toolsAllow: string[];
   toolsDeny: string[];
   fallbackModel: string | null;
+}
+
+/**
+ * An in-place harness may have mutated the live tree before a required
+ * Delegate failure becomes terminal. Preserve that already-applied work as a
+ * blocked, revertable product before the early failure return; envelope runs
+ * stay diagnostic-only and never call this path.
+ */
+async function persistFailedInPlaceWorkProduct(input: {
+  live: boolean;
+  run: CandidateRun;
+  store: ArtifactStore;
+  log: EventLog;
+  paths: ReturnType<ArtifactStore["runPaths"]>;
+  execRoot: string;
+  preTurnSha: string | null;
+  postTurnSha?: string | null;
+  taskId: string;
+  mode: ModeKind;
+  kind: "patch" | "new_repo";
+  attempts?: number;
+}): Promise<void> {
+  if (!input.live || !input.run.diff.trim()) return;
+  assertNoSecretLikeTokens("failed in-place patch diff", input.run.diff);
+  let postTurnSha = input.postTurnSha;
+  if (postTurnSha === undefined) {
+    try {
+      postTurnSha = await snapshotTree(input.execRoot);
+    } catch {
+      postTurnSha = null;
+    }
+  }
+  const revertAnchorId = await createRevertAnchorOrNull(
+    input.execRoot,
+    input.preTurnSha,
+    postTurnSha,
+  );
+  const patchSha256 = sha256(input.run.diff);
+  const facts = makeOutcomeFacts("failed", { reason: "harness_failed", noChanges: false });
+  input.store.writeText(join(input.paths.finalDir, "patch.diff"), input.run.diff);
+  input.store.writeYaml(join(input.paths.finalDir, "work_product.yaml"), {
+    id: newId("wp"),
+    kind: input.kind,
+    source_task_id: input.taskId,
+    producer_attempt_id: input.run.attemptId,
+    meta: {
+      harness_id: input.run.harnessId,
+      result_kind: "patch",
+      mode: input.mode,
+      ...(input.attempts !== undefined ? { attempts: input.attempts } : {}),
+      lifecycle: facts.lifecycle,
+      outcome_facts: facts,
+      review_verified: false,
+      patch_sha256: patchSha256,
+      adopted: true,
+      apply_state: "applied_review_blocked",
+      pre_turn_sha: input.preTurnSha,
+      post_turn_sha: postTurnSha,
+      revert_anchor_id: revertAnchorId,
+    },
+  });
+  input.log.emit("work_product.emitted", {
+    winner: input.run.attemptId,
+    apply_state: "applied_review_blocked",
+  });
 }
 
 /** A routed candidate adapter plus its manifest capabilities and user settings. */
@@ -1920,6 +1985,7 @@ export class Orchestrator {
         env: {
           ...input.delegationBelt.env,
           [DELEGATION_ENV.parentRunId]: input.delegationParentRunId,
+          [DELEGATION_ENV.repoRoot]: input.repoRoot,
           [DELEGATION_ENV.budget]: JSON.stringify(resolvedBudget),
         },
       },
@@ -2414,10 +2480,9 @@ export class Orchestrator {
             if (inPlaceEnvelope) observeNativeSessionEvent(runInput, adapter.id, safeEv);
             observeAuthSwitch(log, adapter.id, attemptId, safeEv);
             observeAttemptTelemetry(telemetry, safeEv);
-            // QA-024: the injected delegation belt's MCP server reported `failed`
-            // to start. Disclose it ONCE as a typed run event the moment the
-            // `started` frame reveals it — the harness is about to run without
-            // `mcp__<belt>__*` tools and may degrade to its own native subagent.
+            // QA-024: the injected delegation belt's MCP server reported a
+            // terminal startup failure. Disclose it ONCE while live; recoverable
+            // exact tool-result failures are evaluated at attempt finalization.
             // The terminal outcome axis (delegationBeltUnavailable) reflects it
             // too; this event makes the failure visible while the run is live.
             if (
@@ -2624,9 +2689,13 @@ export class Orchestrator {
     // A descriptor that was injected and then reported failed is past the
     // pre-start degradation boundary. Hard-fail this attempt; never continue as
     // ordinary Agent or let a native vendor subagent masquerade as belt work.
-    if (delegationBeltUnavailable(telemetry)) {
+    if (delegationBeltUnavailable(telemetry) || delegationBeltToolFailure(telemetry)) {
       harnessErrored = true;
-      errors.push("delegation belt failed to start after injection");
+      errors.push(
+        delegationBeltToolFailure(telemetry)
+          ? "delegation belt tool failed after injection"
+          : "delegation belt failed to start after injection",
+      );
     }
     // D-16 unified finalizer: fold the WorkReport / context signals into the
     // deliverable + work_state. A broken contract on a constrained route
@@ -3487,9 +3556,25 @@ export class Orchestrator {
       );
     }
 
-    const failedDelegation = runs.find((run) => delegationBeltUnavailable(run.telemetry));
+    const failedDelegation = runs.find(
+      (run) => delegationBeltUnavailable(run.telemetry) || delegationBeltToolFailure(run.telemetry),
+    );
     if (failedDelegation) {
+      const toolFailure = delegationBeltToolFailure(failedDelegation.telemetry);
       await disposeReviewEnvelopes();
+      await persistFailedInPlaceWorkProduct({
+        live: input.inPlace === true && failedDelegation.reviewCwd === execRoot,
+        run: failedDelegation,
+        store,
+        log,
+        paths,
+        execRoot,
+        preTurnSha,
+        postTurnSha: earlyPostTurnSha,
+        taskId,
+        mode,
+        kind: input.create === true ? "new_repo" : "patch",
+      });
       this.writeRunTelemetry(
         store,
         paths,
@@ -3507,11 +3592,25 @@ export class Orchestrator {
         runId,
         taskId,
         mode,
-        "delegation_startup",
+        toolFailure ? "delegation_runtime" : "delegation_startup",
         new Error(
-          `Delegate startup failed in ${failedDelegation.harnessId}; no degraded sibling may replace an injected failed belt`,
+          toolFailure
+            ? `Delegate belt tool failed in ${failedDelegation.harnessId}; no deliverable or native fallback may replace the failed injected operation`
+            : `Delegate startup failed in ${failedDelegation.harnessId}; no degraded sibling may replace an injected failed belt`,
         ),
         ledger.spend(),
+        {
+          category: "harness_error",
+          harnessId: failedDelegation.harnessId,
+          attemptId: failedDelegation.attemptId,
+          rawDetailRef: `attempts/${failedDelegation.attemptId}/attempt.yaml`,
+          nextActions: [
+            `Inspect attempts/${failedDelegation.attemptId}/attempt.yaml`,
+            toolFailure
+              ? "Repair the failed Delegate belt operation, then retry the run"
+              : "Repair the required Delegate belt startup, then retry the run",
+          ],
+        },
       );
     }
 
@@ -5025,7 +5124,26 @@ export class Orchestrator {
         }
         lastRun = run;
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
-        if (delegationBeltUnavailable(run.telemetry)) {
+        // Cancellation/deadline remains the highest-priority terminal fact. It
+        // may arrive while the attempt is finalizing its diff/gates after a belt
+        // error; let the existing convergence cancellation finalizer preserve
+        // the exact abort reason instead of overwriting it with Delegate failure.
+        if (input.signal?.aborted) break;
+        if (delegationBeltUnavailable(run.telemetry) || delegationBeltToolFailure(run.telemetry)) {
+          const toolFailure = delegationBeltToolFailure(run.telemetry);
+          await persistFailedInPlaceWorkProduct({
+            live: input.inPlace === true,
+            run,
+            store,
+            log,
+            paths,
+            execRoot,
+            preTurnSha,
+            taskId,
+            mode,
+            kind: input.create === true ? "new_repo" : "patch",
+            attempts: attempt,
+          });
           this.writeRunTelemetry(
             store,
             paths,
@@ -5043,11 +5161,25 @@ export class Orchestrator {
             runId,
             taskId,
             mode,
-            "delegation_startup",
+            toolFailure ? "delegation_runtime" : "delegation_startup",
             new Error(
-              `Delegate startup failed in ${run.harnessId}; convergence cannot repair or continue after an injected belt fails`,
+              toolFailure
+                ? `Delegate belt tool failed in ${run.harnessId}; convergence cannot review, repair, or continue after an unrecovered injected operation fails`
+                : `Delegate startup failed in ${run.harnessId}; convergence cannot repair or continue after an injected belt fails`,
             ),
             ledger.spend(),
+            {
+              category: "harness_error",
+              harnessId: run.harnessId,
+              attemptId: run.attemptId,
+              rawDetailRef: `attempts/${run.attemptId}/attempt.yaml`,
+              nextActions: [
+                `Inspect attempts/${run.attemptId}/attempt.yaml`,
+                toolFailure
+                  ? "Repair the failed Delegate belt operation, then retry the run"
+                  : "Repair the required Delegate belt startup, then retry the run",
+              ],
+            },
           );
         }
         // D-16 r8: interrupted (errored===false) would CONVERGE a partial diff

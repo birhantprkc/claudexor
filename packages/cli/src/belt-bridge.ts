@@ -20,6 +20,7 @@ export async function serveBeltBridge(): Promise<number> {
       mcpSurfaceRunner({
         requireExistingDaemon: true,
         delegationParentRunId: policy.parentRunId,
+        delegationRepoRoot: policy.repoRoot,
       }),
       policy,
     ),

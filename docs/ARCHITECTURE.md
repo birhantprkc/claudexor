@@ -85,12 +85,24 @@ record `delegation {requested,effective,used,reason,remediation}`; the field is
 nullable when reading legacy artifacts that predate this receipt. A known pre-injection
 runtime, manifest, or access incompatibility may continue as an ordinary Agent
 run with `effective:false` and a durable warning. An MCP startup failure AFTER
-the descriptor was injected is terminal and never silently degrades. In a mixed
+the descriptor was injected is terminal and never silently degrades. An
+unrecovered non-ok result from an exact injected belt tool likewise hard-fails
+the Agent outcome; the Delegate receipt still says `used:true` because it records
+which path ran, not whether that operation succeeded. An isolated-envelope
+deliverable remains diagnostic and cannot be auto-adopted. If an explicitly
+in-place lane already changed the live tree, the failure first emits a durable
+`adopted:true`, `applied_review_blocked` WorkProduct with pre/post snapshots and
+a revert anchor, then emits the failed terminal; this records unavoidable live
+bytes honestly without treating them as reviewed success. In a mixed
 pool, a capable lane keeps the run `effective:true`, while any selected lane
 that continued before injection makes the run reason `partially_degraded` and
 keeps the prominent warning; per-lane requirement receipts preserve its cause.
 
-Every belt child receives the real top-level `parentRunId` plus
+Every belt child is scoped to the normalized original user-project root bound
+by the engine. It never inherits the parent harness's isolated envelope as its
+project, and a raw tool `repoPath` cannot redirect that server-owned boundary.
+The descriptor starts with an empty fail-closed placeholder and the orchestrator
+rebinds the exact root before injection. Every child also receives the real top-level `parentRunId` plus
 `delegatedFromRunId`; only the latter establishes Delegate provenance. Parent
 cancellation cascades to those children, and retry/run-again creates a fresh
 top-level family rather than inheriting Delegate lineage or admission state.

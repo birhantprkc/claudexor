@@ -288,9 +288,9 @@ export function cancelledResult(
 }
 
 /**
- * Terminal safety net for an unexpected throw in a post-announce phase.
- * Every run must end with failure.yaml + summary + a terminal run.failed
- * event.
+ * Shared post-announce failure terminal. Unexpected throws use its internal
+ * defaults; known callers may supply narrow typed provenance. Every run ends
+ * with failure.yaml + summary + a terminal run.failed event.
  */
 export function failTerminally(
   log: EventLog,
@@ -302,6 +302,13 @@ export function failTerminally(
   phase: string,
   err: unknown,
   spendUsd?: number | null,
+  failureMeta: {
+    category?: "harness_error" | "internal";
+    harnessId?: string;
+    attemptId?: string;
+    rawDetailRef?: string;
+    nextActions?: string[];
+  } = {},
 ): OrchestratorResult {
   const message = redactSecrets(err instanceof Error ? err.message : String(err));
   const parsedCode = RunFailureCode.safeParse(
@@ -314,11 +321,14 @@ export function failTerminally(
   );
   writeFailure(store, paths, {
     phase,
-    category: "internal",
+    category: failureMeta.category ?? "internal",
     code: parsedCode.success ? parsedCode.data : null,
+    harnessId: failureMeta.harnessId,
+    attemptId: failureMeta.attemptId,
     safeMessage: message,
+    rawDetailRef: failureMeta.rawDetailRef,
     runDir: paths.root,
-    nextActions: ["Open diagnostics", "Retry the run"],
+    nextActions: failureMeta.nextActions ?? ["Open diagnostics", "Retry the run"],
   });
   log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
   log.emit("run.failed", {

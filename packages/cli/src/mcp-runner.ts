@@ -26,6 +26,9 @@ export interface McpSurfaceRunnerOptions {
   /** Belt-only lineage bound by the bridge from its injected environment.
    * Raw tool arguments can never switch the generic MCP runner into this path. */
   delegationParentRunId?: string | null;
+  /** Belt-only original project root, bound by the engine descriptor. Raw tool
+   * arguments cannot redirect a child into the parent envelope or another repo. */
+  delegationRepoRoot?: string | null;
   /** ACP composition is supplied only by the ACP-aware bridge. Keeping this
    * dependency injected prevents the packaged belt self-entry from pulling in
    * or initializing the ACP surface. */
@@ -86,7 +89,8 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
     if (!connection) throw new Error(BELT_DAEMON_LOST);
     const { client, addr } = connection;
     const repoRoot =
-      typeof p?.repoPath === "string" && p.repoPath.trim() ? p.repoPath : process.cwd();
+      options.delegationRepoRoot ??
+      (typeof p?.repoPath === "string" && p.repoPath.trim() ? p.repoPath : process.cwd());
     const body: Record<string, unknown> = {
       prompt: String(p?.prompt ?? ""),
       mode,

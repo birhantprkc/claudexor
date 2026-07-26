@@ -9504,8 +9504,8 @@ describe("delegation belt injection (D32)", () => {
     );
   });
 
-  /** An implement adapter that DECLARES mcp_injection and records the last spec
-   * it received, so we can assert what the engine injected. */
+  /** A writing adapter that DECLARES mcp_injection and records the last spec it
+   * received, so implement and create paths can assert what the engine injected. */
   function delegatingAdapter(
     id: string,
     mcpInjection: boolean,
@@ -9513,6 +9513,8 @@ describe("delegation belt injection (D32)", () => {
     requiresFullAccess = false,
     beltStatus?: string,
     usageCostUsd?: number,
+    beltToolStatuses: Array<"ok" | "error"> = [],
+    afterBeltToolResult?: () => void,
   ): HarnessAdapter {
     return {
       id,
@@ -9522,7 +9524,7 @@ describe("delegation belt injection (D32)", () => {
           display_name: id,
           kind: "local_cli",
           provider_family: "anthropic",
-          capabilities: { implement: true },
+          capabilities: { implement: true, create_from_scratch: true },
           capability_profile: {
             mcp_injection: mcpInjection,
             mcp_injection_requires_full_access: requiresFullAccess,
@@ -9534,7 +9536,7 @@ describe("delegation belt injection (D32)", () => {
         return ConformanceReport.parse({
           harness_id: id,
           status: "ok",
-          enabled_intents: ["implement"],
+          enabled_intents: ["implement", "create_from_scratch"],
         });
       },
       async *run(spec) {
@@ -9554,6 +9556,26 @@ describe("delegation belt injection (D32)", () => {
               }
             : {}),
         };
+        for (const status of beltToolStatuses) {
+          yield {
+            type: "tool_call",
+            session_id: spec.session_id,
+            ts,
+            tool: { name: "mcp__claudexor__claudexor_ask", kind: "mcp" },
+          };
+          yield {
+            type: "tool_result",
+            session_id: spec.session_id,
+            ts,
+            tool: {
+              name: "mcp__claudexor__claudexor_ask",
+              kind: "mcp",
+              status,
+              ...(status === "error" ? { error_summary: "delegated child failed" } : {}),
+            },
+          };
+          afterBeltToolResult?.();
+        }
         writeFileSync(join(spec.cwd, "CHANGED.txt"), "change\n");
         yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
         if (usageCostUsd) {
@@ -9670,6 +9692,9 @@ describe("delegation belt injection (D32)", () => {
     expect(list[0]!.env.CLAUDEXOR_DELEGATION_DEPTH).toBe("0");
     // The belt parent is THIS Delegate run, never its ordinary thread ancestor.
     expect(list[0]!.env.CLAUDEXOR_DELEGATION_PARENT_RUN_ID).toBe("run-current-delegate");
+    // Children are pinned to the original user project, never the executing
+    // parent envelope and never a raw path proposed by the harness.
+    expect(list[0]!.env.CLAUDEXOR_DELEGATION_REPO_ROOT).toBe(repo);
     expect(JSON.parse(list[0]!.env.CLAUDEXOR_DELEGATION_BUDGET)).toEqual({ kind: "unlimited" });
   });
 
@@ -9986,6 +10011,245 @@ describe("delegation belt injection (D32)", () => {
     expect(res.lifecycle).toBe("failed");
     expect(readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8")).toMatch(
       /reason: startup_failed/,
+    );
+  });
+
+  it("hard-fails a delivered Agent on an unrecovered exact belt tool error", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "deleg",
+          delegatingAdapter("deleg", true, undefined, false, "pending", undefined, ["error"]),
+        ],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    const telemetry = readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8");
+    expect(telemetry).toMatch(/delegation:\n[\s\S]*used: true[\s\S]*reason: used/);
+    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
+    expect(failure).toContain("phase: delegation_runtime");
+    expect(failure).toContain("category: harness_error");
+    expect(failure).toContain("harnessId: deleg");
+    expect(failure).toContain("attemptId: a01");
+    expect(failure).toContain("rawDetailRef: attempts/a01/attempt.yaml");
+    expect(failure).toContain("Delegate belt tool failed in deleg");
+    expect(telemetry).toMatch(/outcome:\n[\s\S]*status: failed/);
+    expect(readFileSync(join(res.runDir, "events.jsonl"), "utf8")).not.toContain(
+      '"type":"review.started"',
+    );
+  });
+
+  it("allows the same exact belt operation to recover before Agent finalization", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "deleg",
+          delegatingAdapter("deleg", true, undefined, false, "pending", undefined, ["error", "ok"]),
+        ],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("succeeded");
+    const telemetry = readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8");
+    expect(telemetry).toMatch(/delegation:\n[\s\S]*used: true[\s\S]*reason: used/);
+    expect(telemetry).toMatch(/unrecovered_tool_errors: 0/);
+  });
+
+  it("hard-fails convergence before review after an unrecovered belt tool error", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "deleg",
+          delegatingAdapter("deleg", true, undefined, false, "pending", undefined, ["error"]),
+        ],
+      ]),
+      reviewers: reviewers(),
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      attempts: 3,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
+    expect(failure).toContain("phase: delegation_runtime");
+    expect(failure).toContain("category: harness_error");
+    expect(failure).toContain("harnessId: deleg");
+    expect(failure).toContain("attemptId: a01");
+    expect(failure).toContain("rawDetailRef: attempts/a01/attempt.yaml");
+    expect(res.summary).toContain("convergence cannot review, repair, or continue");
+    const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
+    expect(events.match(/"type":"harness.started"/g)).toHaveLength(1);
+    expect(events).not.toContain('"type":"review.started"');
+  });
+
+  it("keeps a failed in-place Delegate race honestly applied and revertable", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "deleg",
+          delegatingAdapter("deleg", true, undefined, false, "pending", undefined, ["error"]),
+        ],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      inPlace: true,
+      create: true,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    expect(existsSync(join(repo, "CHANGED.txt"))).toBe(true);
+    const wp = readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8");
+    expect(wp).toContain("kind: new_repo");
+    expect(wp).toContain("adopted: true");
+    expect(wp).toContain("apply_state: applied_review_blocked");
+    expect(wp).toMatch(/pre_turn_sha: ['"]?[0-9a-f]{6,}/);
+    expect(wp).toMatch(/post_turn_sha: ['"]?[0-9a-f]{6,}/);
+    const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
+    expect(events.indexOf('"type":"work_product.emitted"')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('"type":"work_product.emitted"')).toBeLessThan(
+      events.indexOf('"type":"run.failed"'),
+    );
+    const anchorId = wp.match(/revert_anchor_id:\s+['"]?(sha256:[0-9a-f]{64})/)?.[1];
+    expect(anchorId).toBeDefined();
+    const { revertInPlaceFromAnchor } = await import("@claudexor/delivery");
+    expect(await revertInPlaceFromAnchor(repo, anchorId!)).toMatchObject({ reverted: true });
+    expect(existsSync(join(repo, "CHANGED.txt"))).toBe(false);
+  });
+
+  it("keeps a failed in-place Delegate convergence honestly applied and revertable", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "deleg",
+          delegatingAdapter("deleg", true, undefined, false, "pending", undefined, ["error"]),
+        ],
+      ]),
+      reviewers: reviewers(),
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      attempts: 3,
+      inPlace: true,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    expect(existsSync(join(repo, "CHANGED.txt"))).toBe(true);
+    const wp = readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8");
+    expect(wp).toContain("adopted: true");
+    expect(wp).toContain("apply_state: applied_review_blocked");
+    expect(wp).toContain("attempts: 1");
+    const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
+    expect(events.indexOf('"type":"work_product.emitted"')).toBeGreaterThanOrEqual(0);
+    expect(events.indexOf('"type":"work_product.emitted"')).toBeLessThan(
+      events.indexOf('"type":"run.failed"'),
+    );
+    const anchorId = wp.match(/revert_anchor_id:\s+['"]?(sha256:[0-9a-f]{64})/)?.[1];
+    expect(anchorId).toBeDefined();
+    const { revertInPlaceFromAnchor } = await import("@claudexor/delivery");
+    expect(await revertInPlaceFromAnchor(repo, anchorId!)).toMatchObject({ reverted: true });
+    expect(existsSync(join(repo, "CHANGED.txt"))).toBe(false);
+  });
+
+  it("lets cancellation win when it arrives while a belt failure is finalizing", async () => {
+    const repo = await initRepo();
+    const abort = new AbortController();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "deleg",
+          delegatingAdapter("deleg", true, undefined, false, "pending", undefined, ["error"], () =>
+            abort.abort("wall_clock_exceeded"),
+          ),
+        ],
+      ]),
+      reviewers: reviewers(),
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      attempts: 3,
+      delegate: true,
+      delegationBelt: belt,
+      signal: abort.signal,
+    });
+    expect(res.lifecycle).toBe("cancelled");
+    expect(res.facts.reason).toBe("wall_clock_exceeded");
+    expect(readFileSync(join(res.runDir, "events.jsonl"), "utf8")).not.toContain(
+      '"phase":"delegation_runtime"',
+    );
+  });
+
+  it("lets an unrecovered belt tool failure dominate a healthy mixed-race sibling", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "failed",
+          delegatingAdapter("failed", true, undefined, false, "pending", undefined, ["error"]),
+        ],
+        ["healthy", delegatingAdapter("healthy", true, undefined, false, "connected")],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["failed", "healthy"],
+      n: 2,
+      delegate: true,
+      delegationBelt: belt,
+    });
+    expect(res.lifecycle).toBe("failed");
+    expect(res.winner).toBeNull();
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "phase: delegation_runtime",
     );
   });
 

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { HarnessEvent } from "@claudexor/schema";
@@ -35,6 +36,19 @@ function parseFixture(name: string): HarnessEvent[] {
 }
 
 describe("claude D-16 signal fixtures", () => {
+  it("required-mcp-pending: preserves the live async startup status without a fatal", () => {
+    const parser = createClaudeParser({ requiredMcpServers: ["claudexor"] });
+    const raw = JSON.parse(
+      readFileSync(join(SIGNALS, "required-mcp-pending.jsonl"), "utf8").trim(),
+    );
+    const events = parser(raw, "sig") ?? [];
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("started");
+    expect(events[0]?.payload?.["mcp_servers"]).toEqual([{ name: "claudexor", status: "pending" }]);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(() => HarnessEvent.parse(events[0])).not.toThrow();
+  });
+
   it("terminal-prompt-too-long: capacity_exhausted (prompt_too_long), no final answer", () => {
     const events = parseFixture("terminal-prompt-too-long.jsonl");
     const ctx = events.filter((e) => e.type === "context");

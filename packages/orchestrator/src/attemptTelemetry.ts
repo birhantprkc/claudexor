@@ -16,7 +16,11 @@ import type {
   WorkState,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
-import { delegationBeltUnavailable, isDelegationBeltTool } from "./delegationToolEvidence.js";
+import {
+  delegationBeltToolFailure,
+  delegationBeltUnavailable,
+  isDelegationBeltTool,
+} from "./delegationToolEvidence.js";
 import {
   type TransientFailureObservation,
   classifyCompletedCrash,
@@ -87,9 +91,11 @@ export interface BrowserEvidenceState {
  * Delegation-belt runtime readiness for one attempt (QA-024). `requested` is
  * set at attempt creation when a belt MCP server was injected into the spec;
  * `ready`/`failed` are filled from the harness's `started` event (its
- * `mcp_servers[<belt>].status`); `toolEvidence` flips when any `mcp__<belt>__*`
- * tool actually runs. A requested belt that reports `failed` with no tool
- * evidence is the false-success trap the outcome axis must catch.
+ * `mcp_servers[<belt>].status`); `toolEvidence` flips when any exact belt tool
+ * actually runs. Startup failure lives in this state; an exact non-ok tool
+ * result lives in `toolErrors` and independently hard-fails the outcome under
+ * INV-030's required-capability exception, while reusing INV-043's exact
+ * recovery key.
  */
 export interface DelegationBeltState {
   requested: boolean;
@@ -299,14 +305,18 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   if (t.delegationBelt.requested && Array.isArray(ev.payload?.["mcp_servers"])) {
     observeBeltStartup(t, ev);
   }
-  // Belt tool evidence: any `mcp__<belt>__*` tool call/result proves the belt
-  // was actually reachable and used (a real Claudexor sub-run path), which
-  // distinguishes a used belt from one the harness silently substituted.
-  if (
+  // Belt tool evidence: an exact adapter-neutral belt tool call/result proves
+  // the injected path was used (a real Claudexor sub-run path), which
+  // distinguishes it from a native vendor subagent. Once an attempted belt
+  // tool returns anything except ok, its exact tool+kind+target error remains
+  // a hard belt failure until the SAME operation later succeeds (INV-030's
+  // required-capability exception, using INV-043's recovery key).
+  // A deliverable, foreign tool, or native fallback cannot launder it.
+  const beltToolEvent =
     t.delegationBelt.requested &&
     t.delegationBelt.serverName &&
-    isDelegationBeltTool(ev.tool, t.delegationBelt.serverName)
-  ) {
+    isDelegationBeltTool(ev.tool, t.delegationBelt.serverName);
+  if (beltToolEvent) {
     t.delegationBelt.toolEvidence = true;
   }
   // Route evidence: remember the model identity the stream itself disclosed.
@@ -412,9 +422,29 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   if (tool.status === undefined) {
     // A result without a status must never silently count as ok.
     t.statuslessResults += 1;
+    if (beltToolEvent) {
+      t.toolErrors.push({
+        tool: tool.name,
+        kind: tool.kind,
+        target: tool.target ?? null,
+        summary: "required delegation belt tool result omitted status",
+        toolUseId: tool.use_id ?? null,
+        recovered: false,
+      });
+    }
     return;
   }
   if (tool.status === "cancelled" || tool.status === "denied") {
+    if (beltToolEvent) {
+      t.toolErrors.push({
+        tool: tool.name,
+        kind: tool.kind,
+        target: tool.target ?? null,
+        summary: `required delegation belt tool result marked ${tool.status}`,
+        toolUseId: tool.use_id ?? null,
+        recovered: false,
+      });
+    }
     if (tool.kind === "web") {
       t.web.attempted = true;
       t.web.tool = tool.name;
@@ -565,15 +595,10 @@ export function setAttemptOutcome(
 ): void {
   const warnings = toolWarnings(t).length;
   const contractFailed = !opts.deliverablePresent || opts.gatesPassed === false;
-  // QA-024: a requested belt that failed to start with no tool evidence is an
-  // explicitly-requested capability that never became operational — treated
-  // like an unsatisfied hard requirement (never a silent clean success). It
-  // rides the same axis order as web: it can only ELEVATE severity, never mask
-  // a harder failure. NOTE (D-16 seam): this producer maps belt-unavailable to
-  // `failed`; a future finalizer that prefers a softer disclosure would flip
-  // this to `success_with_warnings` — the typed telemetry fact
-  // (delegation_belt.*) is what a consumer reads either way.
-  const beltUnavailable = delegationBeltUnavailable(t);
+  // INV-030: after injection, startup failure or an unrecovered exact belt
+  // operation is an unsatisfied required capability. It can only ELEVATE
+  // severity, never soften into a warning or mask a harder terminal fact.
+  const beltUnavailable = delegationBeltUnavailable(t) || delegationBeltToolFailure(t);
   const status: AttemptOutcomeStatus = opts.webRequiredUnsatisfied
     ? "blocked"
     : opts.harnessErrored || contractFailed || beltUnavailable

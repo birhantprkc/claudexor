@@ -5,7 +5,11 @@ import {
   observeAttemptTelemetry,
   setAttemptOutcome,
 } from "./attemptTelemetry.js";
-import { delegationBeltUnavailable, isDelegationBeltTool } from "./delegationToolEvidence.js";
+import {
+  delegationBeltToolFailure,
+  delegationBeltUnavailable,
+  isDelegationBeltTool,
+} from "./delegationToolEvidence.js";
 import type { HarnessEvent } from "@claudexor/schema";
 import { aggregateRunDelegation } from "./runTelemetryWriter.js";
 
@@ -29,6 +33,26 @@ function beltToolCall(): HarnessEvent {
     session_id: "s",
     ts,
     tool: { name: "mcp__claudexor__claudexor_ask", kind: "mcp" },
+  } as unknown as HarnessEvent;
+}
+
+function beltToolResult(
+  shape: "claude" | "codex",
+  status: "ok" | "error" | "cancelled" | "denied" | undefined,
+): HarnessEvent {
+  return {
+    type: "tool_result",
+    session_id: "s",
+    ts,
+    tool:
+      shape === "claude"
+        ? { name: "mcp__claudexor__claudexor_ask", kind: "mcp", status }
+        : {
+            name: "claudexor_ask",
+            kind: "mcp",
+            target: "claudexor:claudexor_ask",
+            status,
+          },
   } as unknown as HarnessEvent;
 }
 
@@ -141,6 +165,105 @@ describe("delegation belt readiness telemetry (QA-024)", () => {
     // The evidence record is still emitted (ready/unused is durable truth).
     const rec = attemptTelemetryRecord("a1", "claude", t);
     expect(rec.delegation_belt?.ready).toBe(true);
+  });
+
+  it("a pending belt remains provisional and can become used without false failure", () => {
+    const t = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(t, startedWithBelt("pending"));
+    expect(t.delegationBelt).toMatchObject({ ready: false, failed: false, toolEvidence: false });
+    expect(delegationBeltUnavailable(t)).toBe(false);
+    setAttemptOutcome(t, outcomeOpts);
+    expect(t.outcome?.status).toBe("success");
+    expect(
+      aggregateRunDelegation(true, [attemptTelemetryRecord("a-pending", "claude", t)]),
+    ).toMatchObject({
+      reason: "injected_unused",
+      used: false,
+    });
+
+    observeAttemptTelemetry(t, beltToolResult("claude", "ok"));
+    expect(t.delegationBelt).toMatchObject({ ready: false, failed: false, toolEvidence: true });
+    expect(
+      aggregateRunDelegation(true, [attemptTelemetryRecord("a-used", "claude", t)]),
+    ).toMatchObject({
+      reason: "used",
+      used: true,
+    });
+  });
+
+  it.each([
+    ["claude", "error"],
+    ["claude", "cancelled"],
+    ["claude", "denied"],
+    ["claude", undefined],
+    ["codex", "error"],
+  ] as const)("hard-fails an exact %s belt tool result with status %s", (shape, status) => {
+    const t = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(t, startedWithBelt("pending"));
+    observeAttemptTelemetry(t, beltToolResult(shape, status));
+    expect(t.delegationBelt).toMatchObject({ failed: false, toolEvidence: true });
+    expect(delegationBeltUnavailable(t)).toBe(false);
+    expect(delegationBeltToolFailure(t)).toBe(true);
+    setAttemptOutcome(t, outcomeOpts);
+    expect(t.outcome?.status).toBe("failed");
+    expect(
+      aggregateRunDelegation(true, [attemptTelemetryRecord("a-failed", shape, t)]),
+    ).toMatchObject({
+      reason: "used",
+      used: true,
+    });
+  });
+
+  it("recovers only after the same belt tool, kind, and target succeeds", () => {
+    const t = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    observeAttemptTelemetry(t, beltToolResult("codex", "error"));
+    observeAttemptTelemetry(t, {
+      ...beltToolResult("codex", "ok"),
+      tool: {
+        name: "claudexor_ask",
+        kind: "mcp",
+        target: "claudexor:claudexor_plan",
+        status: "ok",
+      },
+    } as HarnessEvent);
+    expect(delegationBeltToolFailure(t)).toBe(true);
+
+    observeAttemptTelemetry(t, beltToolResult("codex", "ok"));
+    expect(delegationBeltToolFailure(t)).toBe(false);
+    setAttemptOutcome(t, outcomeOpts);
+    expect(t.outcome?.status).toBe("success");
+  });
+
+  it("does not hard-fail prefix collisions, foreign targets, or non-MCP tools", () => {
+    const t = createAttemptTelemetry("auto", false, "auto", [], null, "claudexor");
+    const foreign: HarnessEvent[] = [
+      {
+        ...beltToolResult("claude", "error"),
+        tool: { name: "mcp__claudexor_evil__claudexor_ask", kind: "mcp", status: "error" },
+      } as HarnessEvent,
+      {
+        ...beltToolResult("codex", "error"),
+        tool: {
+          name: "claudexor_ask",
+          kind: "mcp",
+          target: "claudexor_evil:claudexor_ask",
+          status: "error",
+        },
+      } as HarnessEvent,
+      {
+        ...beltToolResult("codex", "error"),
+        tool: {
+          name: "claudexor_ask",
+          kind: "command",
+          target: "claudexor:claudexor_ask",
+          status: "error",
+        },
+      } as HarnessEvent,
+    ];
+    for (const event of foreign) observeAttemptTelemetry(t, event);
+    expect(t.delegationBelt).toMatchObject({ failed: false, toolEvidence: false });
+    expect(delegationBeltUnavailable(t)).toBe(false);
+    expect(delegationBeltToolFailure(t)).toBe(false);
   });
 
   it("a non-delegate attempt records no belt evidence at all", () => {

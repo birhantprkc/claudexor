@@ -83,6 +83,9 @@ export function buildDelegationBeltDescriptor(
       ...discoveryEnv,
       ...delegationEnv({
         parentRunId: "",
+        // Rebound by the orchestrator from the normalized run input before the
+        // descriptor reaches any lane; empty fails closed at the tool boundary.
+        repoRoot: "",
         depth: 0,
         maxSubRuns: DEFAULT_MAX_SUBRUNS,
         parentBudget: paidBudget ?? { kind: "unlimited" },

@@ -570,6 +570,80 @@ describe("Claude transport-aware source selection", () => {
     }
   });
 
+  it("lets an asynchronously pending required MCP server finish startup", async () => {
+    let cliOptions: CliRunLoopOptions | undefined;
+    const adapter = createClaudeAdapter({
+      detectVersion: async () => "2.1.165",
+      probeReadonlyProfile: readonlySupported,
+      probeAuthStatus: async () => nativeProbe,
+      anthropicApiKey: () => null,
+      claudeOAuthToken: () => null,
+      probeEffortLevels: async () => ({ levels: [], live: true }),
+      runCliHarness: async function* (options: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
+        cliOptions = options;
+        yield {
+          type: "completed",
+          session_id: options.spec.session_id,
+          ts: "2026-01-01T00:00:00.000Z",
+        };
+      },
+    });
+    for await (const _event of adapter.run(
+      spec({
+        extra_mcp_servers: [
+          {
+            name: "claudexor",
+            command: process.execPath,
+            args: ["belt.js"],
+            env: {},
+            required: true,
+          },
+        ],
+      }),
+    )) {
+      // drain
+    }
+    const pending = cliOptions?.parseEvent?.(
+      {
+        type: "system",
+        subtype: "init",
+        mcp_servers: [{ name: "claudexor", status: "pending" }],
+      },
+      "s-required",
+    );
+    expect(pending).toHaveLength(1);
+    expect(pending?.[0]?.payload?.["mcp_servers"]).toEqual([
+      { name: "claudexor", status: "pending" },
+    ]);
+    expect(pending?.some((event) => event.type === "error")).toBe(false);
+    expect(pending?.some((event) => cliOptions?.stopAfterEvent?.(event))).toBe(false);
+
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-required-mcp-pending-"));
+    const marker = join(dir, "late-write.txt");
+    try {
+      if (!cliOptions) throw new Error("CLI options were not captured");
+      const events: HarnessEvent[] = [];
+      const script = [
+        `console.log(JSON.stringify({type:"system",subtype:"init",mcp_servers:[{name:"claudexor",status:"pending"}]}))`,
+        `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "late"), 100)`,
+        `setTimeout(() => process.exit(0), 150)`,
+      ].join(";");
+      for await (const event of runCliHarness({
+        ...cliOptions,
+        bin: process.execPath,
+        args: ["-e", script],
+        spec: { ...cliOptions.spec, cwd: dir },
+        env: {},
+      })) {
+        events.push(event);
+      }
+      expect(events.map((event) => event.type)).toEqual(["started", "completed"]);
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("selects the OAuth-token subscription source only after native is unavailable", async () => {
     let cliOptions: CliRunLoopOptions | undefined;
     const adapter = createClaudeAdapter({

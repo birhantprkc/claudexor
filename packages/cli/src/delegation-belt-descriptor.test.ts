@@ -41,6 +41,7 @@ describe("delegation belt descriptor — exact daemon self-entry", () => {
       expect(descriptor.command).toBe(process.execPath);
       expect(descriptor.args).toEqual([resolve(daemonEntry), "mcp", "serve-belt"]);
       expect(descriptor.env.CLAUDEXOR_DELEGATION_DEPTH).toBe("0");
+      expect(descriptor.env.CLAUDEXOR_DELEGATION_REPO_ROOT).toBe("");
       expect(descriptor.env.CLAUDEXOR_DELEGATION_BUDGET).toContain("unlimited");
       expect(descriptor.env.CLAUDEXOR_CONFIG_DIR).toBe("/real/root");
       expect(descriptor.env.CLAUDEXOR_DAEMON_SOCK).toBe("/real/root/daemon/x.sock");

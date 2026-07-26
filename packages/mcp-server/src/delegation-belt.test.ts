@@ -16,6 +16,7 @@ import type { RunnerFn } from "./index.js";
 
 const unlimited: DelegationPolicy = {
   parentRunId: "run-parent",
+  repoRoot: "/tmp/project",
   depth: 0,
   maxSubRuns: DEFAULT_MAX_SUBRUNS,
   parentBudget: { kind: "unlimited" },
@@ -60,6 +61,7 @@ describe("delegation belt policy (D32)", () => {
     expect(grant).toEqual({ budget: { kind: "unlimited" } });
     // Depth wins.
     expect(evaluateBeltRun({ ...unlimited, depth: 1 }, ledger)).toHaveProperty("refusal");
+    expect(evaluateBeltRun({ ...unlimited, repoRoot: null }, ledger)).toHaveProperty("refusal");
     // Count wins.
     expect(
       evaluateBeltRun(unlimited, { started: DEFAULT_MAX_SUBRUNS, committedUsd: 0 }),
@@ -76,18 +78,21 @@ describe("delegation belt policy (D32)", () => {
   it("reads the delegation policy from env and FAILS CLOSED on missing/garbage", () => {
     const env = delegationEnv({
       parentRunId: "run-1",
+      repoRoot: "/tmp/project",
       depth: 0,
       maxSubRuns: 3,
       parentBudget: { kind: "finite", maxUsd: 2 },
     });
     const policy = readDelegationPolicy(env);
     expect(policy.parentRunId).toBe("run-1");
+    expect(policy.repoRoot).toBe("/tmp/project");
     expect(policy.depth).toBe(0);
     expect(policy.maxSubRuns).toBe(3);
     expect(policy.parentBudget).toEqual({ kind: "finite", maxUsd: 2 });
     // Missing env => fail closed: depth 1 (refuse), finite(0) budget (refuse).
     const empty = readDelegationPolicy({});
     expect(empty.parentRunId).toBeNull();
+    expect(empty.repoRoot).toBeNull();
     expect(empty.depth).toBe(1);
     expect(empty.maxSubRuns).toBe(DEFAULT_MAX_SUBRUNS);
     expect(empty.parentBudget).toEqual({ kind: "finite", maxUsd: 0 });
@@ -125,6 +130,7 @@ describe("delegation belt tool surface (D32)", () => {
       runner,
       {
         parentRunId: "run-parent",
+        repoRoot: "/tmp/project",
         depth: 0,
         maxSubRuns: 8,
         parentBudget: { kind: "finite", maxUsd: 1 },
@@ -140,6 +146,7 @@ describe("delegation belt tool surface (D32)", () => {
       mode: "agent",
       delegate: false,
       parentRunId: "run-parent",
+      repoPath: "/tmp/project",
       delegatedFromRunId: "run-parent",
       prompt: "fix the bug",
       paidBudget: { kind: "finite", maxUsd: 1 },
@@ -166,6 +173,7 @@ describe("delegation belt tool surface (D32)", () => {
       runner,
       {
         parentRunId: "run-parent",
+        repoRoot: "/tmp/project",
         depth: 0,
         maxSubRuns: 8,
         parentBudget: { kind: "finite", maxUsd: 1 },
@@ -200,6 +208,7 @@ describe("delegation belt tool surface (D32)", () => {
       runner,
       {
         parentRunId: "run-parent",
+        repoRoot: "/tmp/project",
         depth: 0,
         maxSubRuns: 8,
         parentBudget: { kind: "finite", maxUsd: 1 },
@@ -220,6 +229,7 @@ describe("delegation belt tool surface (D32)", () => {
     };
     const tools = beltClaudexorTools(runner, {
       parentRunId: "run-parent",
+      repoRoot: "/tmp/project",
       depth: 0,
       maxSubRuns: 2,
       parentBudget: { kind: "unlimited" },
@@ -240,6 +250,7 @@ describe("delegation belt tool surface (D32)", () => {
     };
     const tools = beltClaudexorTools(runner, {
       parentRunId: "run-parent",
+      repoRoot: "/tmp/project",
       depth: 1,
       maxSubRuns: 8,
       parentBudget: { kind: "unlimited" },
@@ -247,6 +258,22 @@ describe("delegation belt tool surface (D32)", () => {
     const ask = tools.find((t) => t.name === "claudexor_ask")!;
     const out = await ask.handler({ prompt: "q" }, {});
     expect(String(typeof out === "string" ? out : out.text)).toMatch(/limited to depth 1/);
+    expect(runs).toBe(0);
+  });
+
+  it("refuses before enqueue when the engine did not bind an original project root", async () => {
+    let runs = 0;
+    const tools = beltClaudexorTools(
+      async () => {
+        runs += 1;
+        return {};
+      },
+      { ...unlimited, repoRoot: null },
+    );
+    const out = await tools
+      .find((tool) => tool.name === "claudexor_run")!
+      .handler({ prompt: "must not enqueue" }, {});
+    expect(String(typeof out === "string" ? out : out.text)).toMatch(/project root/i);
     expect(runs).toBe(0);
   });
 
@@ -261,6 +288,7 @@ describe("delegation belt tool surface (D32)", () => {
     };
     const tools = beltClaudexorTools(runner, {
       parentRunId: "run-parent",
+      repoRoot: "/tmp/project",
       depth: 1,
       maxSubRuns: 0,
       parentBudget: { kind: "finite", maxUsd: 0 },
@@ -281,6 +309,7 @@ describe("delegation belt tool surface (D32)", () => {
       },
       {
         parentRunId: null,
+        repoRoot: null,
         depth: 1,
         maxSubRuns: 8,
         parentBudget: { kind: "finite", maxUsd: 0 },
