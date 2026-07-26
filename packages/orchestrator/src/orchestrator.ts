@@ -17,7 +17,7 @@ import {
   writeCandidateAttemptArtifacts,
 } from "./candidateOutputs.js";
 import { processAttemptUsage } from "./attemptUsage.js";
-import { attemptFailureCost, withAttemptFailureCost } from "./attemptUsageCost.js";
+import * as AC from "./attemptUsageCost.js";
 import {
   type CandidateRun,
   candidateRoster,
@@ -2666,7 +2666,7 @@ export class Orchestrator {
       aborted: signal?.aborted === true,
       authMode: telemetry.authMode,
     });
-    const producedFiles = withAttemptFailureCost(
+    const producedFiles = AC.withAttemptFailureCost(
       () =>
         writeCandidateAttemptArtifacts({
           store,
@@ -3377,7 +3377,7 @@ export class Orchestrator {
               } catch (err) {
                 ledger.settle(
                   contLeaseId,
-                  attemptFailureCost(err, "continuation-error", 0).settlement,
+                  AC.attemptFailureCost(err, "continuation-error", 0).settlement,
                 );
                 log.emit("harness.completed", {
                   harness_id: adapter.id,
@@ -3400,8 +3400,7 @@ export class Orchestrator {
         reviewEnvelopes.push(envelope);
         envelope = undefined;
       } catch (err) {
-        const failureCost = attemptFailureCost(err, "post-stream-error", 0);
-        const carriedCost = failureCost.totalUsd;
+        const failureCost = AC.attemptFailureCost(err, "post-stream-error", 0);
         ledger.settle(slot.leaseId, failureCost.settlement);
         const message = safeErrorMessage(err);
         const infraPhase: "workspace" | "harness" =
@@ -3413,16 +3412,10 @@ export class Orchestrator {
           error: message,
           phase: infraPhase,
         });
-        // Minimal attempt record so failure.yaml's rawDetailRef never dangles.
-        store.writeYaml(join(paths.attemptsDir, slot.attemptId, "attempt.yaml"), {
-          attempt_id: slot.attemptId,
-          harness_id: adapter.id,
-          cost_usd: carriedCost,
-          cost_estimated: failureCost.estimated,
-          errored: true,
-          phase: infraPhase,
-          errors: [message],
-        });
+        store.writeYaml(
+          join(paths.attemptsDir, slot.attemptId, "attempt.yaml"),
+          AC.attemptFailureRecord(slot.attemptId, adapter.id, failureCost, infraPhase, message),
+        );
         runsBySlot[slotIdx] = {
           attemptId: slot.attemptId,
           harnessId: adapter.id,
@@ -3904,7 +3897,7 @@ export class Orchestrator {
         } catch (err) {
           ledger.settle(
             lease.lease?.lease_id ?? "",
-            attemptFailureCost(err, "synthesis-error").settlement,
+            AC.attemptFailureCost(err, "synthesis-error").settlement,
           );
           log.emit("harness.completed", {
             attempt_id: "synth",
@@ -5008,7 +5001,7 @@ export class Orchestrator {
         } catch (err) {
           // Setup failures remain unknown; post-stream persistence failures
           // carry their route-specific settlement from runCandidateInEnvelope.
-          const failureCost = attemptFailureCost(err, "attempt-error");
+          const failureCost = AC.attemptFailureCost(err, "attempt-error");
           const message = safeErrorMessage(err);
           ledger.settle(lease.lease?.lease_id ?? "", failureCost.settlement);
           log.emit("harness.completed", {
@@ -5017,17 +5010,10 @@ export class Orchestrator {
             status: "failed",
             error: message,
           });
-          // Match race durability: later failure/raw-detail projections may
-          // reference this attempt even though artifact persistence itself failed.
-          store.writeYaml(join(paths.attemptsDir, attemptId, "attempt.yaml"), {
-            attempt_id: attemptId,
-            harness_id: adapter.id,
-            cost_usd: failureCost.totalUsd,
-            cost_estimated: failureCost.estimated,
-            errored: true,
-            phase: "harness",
-            errors: [message],
-          });
+          store.writeYaml(
+            join(paths.attemptsDir, attemptId, "attempt.yaml"),
+            AC.attemptFailureRecord(attemptId, adapter.id, failureCost, "harness", message),
+          );
           run = {
             attemptId,
             harnessId: adapter.id,

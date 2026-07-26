@@ -73,6 +73,25 @@ export function attemptFailureCost(
   };
 }
 
+/** One durable failure shape for race and convergence artifact fallbacks. */
+export function attemptFailureRecord(
+  attemptId: string,
+  harnessId: string,
+  cost: AttemptFailureCost,
+  phase: "workspace" | "harness",
+  message: string,
+): Record<string, unknown> {
+  return {
+    attempt_id: attemptId,
+    harness_id: harnessId,
+    cost_usd: cost.totalUsd,
+    cost_estimated: cost.estimated,
+    errored: true,
+    phase,
+    errors: [message],
+  };
+}
+
 export function newAttemptUsageCost(): AttemptUsageCost {
   const cost: AttemptUsageCost = {
     cashUsd: 0,

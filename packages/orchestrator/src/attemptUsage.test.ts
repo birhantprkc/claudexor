@@ -4,6 +4,7 @@ import { processAttemptUsage } from "./attemptUsage.js";
 import {
   AttemptPostStreamError,
   attemptFailureCost,
+  attemptFailureRecord,
   withAttemptFailureCost,
 } from "./attemptUsageCost.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
@@ -75,6 +76,23 @@ describe("processAttemptUsage", () => {
       totalUsd: 0,
       estimated: false,
       settlement: { knowledge: "unknown", source: "post-stream-error" },
+    });
+    expect(
+      attemptFailureRecord(
+        "a01",
+        "claude",
+        attemptFailureCost({ costUsd: 0.4 }, "post-stream-error"),
+        "harness",
+        "redacted failure",
+      ),
+    ).toEqual({
+      attempt_id: "a01",
+      harness_id: "claude",
+      cost_usd: 0.4,
+      cost_estimated: true,
+      errored: true,
+      phase: "harness",
+      errors: ["redacted failure"],
     });
   });
 
