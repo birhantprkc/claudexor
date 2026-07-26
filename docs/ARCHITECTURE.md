@@ -1218,6 +1218,14 @@ decline (`interaction.timeout`) — the model continues with stated assumptions
 and the run never hangs forever. Declined/timed-out interactive flow-control
 tools are benign timeline events, never blocking tool errors.
 
+Delegate children use this same interaction contract. A parent/list child
+summary may carry `waitingOnUser:true`, but it does not own the question body;
+the macOS client therefore performs a coalesced fresh child-detail read even
+when that child had been hydrated earlier, renders the answer against the child
+run id, and exposes a truthful retry if the detail read fails. Answer delivery
+remains the same journal-first child endpoint above; no parent-side proxy or
+app-local interaction state is introduced.
+
 `/v2/setup/jobs` (create / status / snapshot / events / cancel / reconcile / extend)
 is the native-login setup surface for Codex, Claude, and Cursor. Readiness and
 secret writes remain in their existing doctor/auth-readiness and secret services;

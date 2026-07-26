@@ -901,7 +901,11 @@ views in the shared design-system files; screens compose them.
   run-summary state, never a toast. A mixed pool keeps `effective:true` for its
   capable lane but renders “one lane continued without Delegate” from the typed
   `partially_degraded` receipt. Failure after belt injection remains a normal
-  terminal failure. Real Claudexor children render as ordinary flat run
+  terminal failure. The run-filtered workspace always exposes the exact
+  engine-owned `requested`, `effective`, `used`, and `reason` fields as compact
+  wrapping facts, including the healthy and injected-but-unused paths; amber is
+  reserved for the same unavailable/partial cases as the persistent warning.
+  Real Claudexor children render as ordinary flat run
   rows directly after their parent, with one quiet `Delegated` badge and a
   clickable `Parent · <short id>` link. Admission uses only the server's narrow
   `delegatedFromRunId`; `parentRunId` alone, model text, and vendor-native
@@ -913,6 +917,11 @@ views in the shared design-system files; screens compose them.
   corresponding child summaries, so reopening an older thread restores flat
   rows even after they leave the bounded global runs page; Changes and Evidence
   hydrate a missing projected child only when that tab or disclosure needs it.
+  A child carrying the `waitingOnUser` overlay force-refreshes its own detail
+  even if an earlier snapshot is cached, then renders the ordinary inline
+  `InteractionCard` under the flat row. A failed detail load replaces the
+  spinner with the concrete error and Retry; it never leaves an unanswerable
+  question or a permanent loading state.
 - **Run route disclosure (run-filtered workspace header).** The finished run's header shows
   the auth route ACTUALLY taken (Subscription / API key, from the engine's
   route receipt; hover reveals requested preference, source, and the typed

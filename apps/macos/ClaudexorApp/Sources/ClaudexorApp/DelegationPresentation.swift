@@ -20,6 +20,14 @@ enum DelegationPresentation {
         let parentRunId: String
     }
 
+    struct RunReceipt: Equatable {
+        let requested: String
+        let effective: String
+        let used: String
+        let reason: String
+        let detail: String
+    }
+
     /// Final UI-to-wire fence. A previously-on switch cannot smuggle a stale
     /// request after the selected route becomes known-unavailable.
     static func requestedForWire(isOn: Bool, control: ControlState) -> Bool {
@@ -111,11 +119,8 @@ enum DelegationPresentation {
     /// Delegate is permission and the agent may legitimately create no child.
     static func warning(_ facts: RunDelegationInfo?, phase: RunPhase) -> Warning? {
         guard let facts, facts.requested else { return nil }
+        guard warningShaped(facts) else { return nil }
         let partial = facts.effective && facts.reason == "partially_degraded"
-        let unavailable = !facts.effective &&
-            ["runtime_unavailable", "manifest_unsupported", "access_profile_incompatible"]
-                .contains(facts.reason)
-        guard partial || unavailable else { return nil }
         return Warning(
             title: partial
                 ? (phase == .succeeded
@@ -129,6 +134,54 @@ enum DelegationPresentation {
             detail: facts.remediation?.trimmingCharacters(in: .whitespacesAndNewlines)
                 .nilIfEmpty ?? degradedExplanation(reason: facts.reason)
         )
+    }
+
+    /// One classification owner shared by the durable warning and run facts.
+    /// Pending startup and a failed parent lifecycle already have their own
+    /// presentation; only a genuine unavailable/partial route is warning-shaped.
+    static func warningShaped(_ facts: RunDelegationInfo) -> Bool {
+        let partial = facts.effective && facts.reason == "partially_degraded"
+        let unavailable = !facts.effective &&
+            ["runtime_unavailable", "manifest_unsupported", "access_profile_incompatible"]
+                .contains(facts.reason)
+        return facts.requested && (partial || unavailable)
+    }
+
+    /// Exact engine-owned Delegate facts for the ordinary run-detail surface.
+    /// Healthy and injected-but-unused runs need a durable receipt too; warnings
+    /// remain reserved for the degraded cases above.
+    static func runReceipt(_ facts: RunDelegationInfo?) -> RunReceipt? {
+        guard let facts, facts.requested else { return nil }
+        let remediation = facts.remediation?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+        return RunReceipt(
+            requested: "Delegate · requested=\(facts.requested)",
+            effective: "effective=\(facts.effective)",
+            used: "used=\(facts.used)",
+            reason: "reason=\(facts.reason)",
+            detail: remediation ?? "Engine-owned Delegate receipt for this run."
+        )
+    }
+
+    static func shouldHydrateChildInteractions(
+        waitingOnUser: Bool,
+        pendingInteractionCount: Int
+    ) -> Bool {
+        waitingOnUser && pendingInteractionCount == 0
+    }
+
+    static func childInteractionLoadFailure(
+        waitingOnUser: Bool,
+        pendingInteractionCount: Int,
+        engineError: String?
+    ) -> String? {
+        guard shouldHydrateChildInteractions(
+            waitingOnUser: waitingOnUser,
+            pendingInteractionCount: pendingInteractionCount
+        ), let engineError,
+           engineError.hasPrefix("Could not load run detail:") else { return nil }
+        return engineError
     }
 
     private static func degradedExplanation(reason: String) -> String {
@@ -174,6 +227,17 @@ private extension String {
 }
 
 extension AppModel {
+    /// Parent/list summaries carry the waiting overlay but not the interaction
+    /// payload. Force one coalesced detail refresh even when this child was
+    /// hydrated earlier, then stop once the question payload is present.
+    func hydrateDelegatedChildInteractions(_ child: TaskRun) async {
+        guard DelegationPresentation.shouldHydrateChildInteractions(
+            waitingOnUser: child.waitingOnUser,
+            pendingInteractionCount: child.pendingInteractions.count
+        ) else { return }
+        await loadRunDetail(child.id)
+    }
+
     /// Flat rows for real Claudexor children of one parent. Current turn cards
     /// provide canonical server chronology; exact-lineage tasks absent from the
     /// projection append as a legacy/restoration fallback.

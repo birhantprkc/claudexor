@@ -1,3 +1,7 @@
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 /**
  * Side-effect-free dispatch for the daemon executable's alternate belt role.
  * Kept outside claudexord.ts so the daemon owner remains below its readability
@@ -37,9 +41,13 @@ export function runIfDirectEntry(
   argv: readonly string[] = process.argv,
 ): void {
   try {
-    if (typeof argv[1] === "string" && moduleUrl === pathToFileURL(argv[1]).href) entry();
+    if (
+      typeof argv[1] === "string" &&
+      realpathSync.native(resolve(argv[1])) === realpathSync.native(fileURLToPath(moduleUrl))
+    ) {
+      entry();
+    }
   } catch {
     // A malformed executable path is not direct-entry proof.
   }
 }
-import { pathToFileURL } from "node:url";

@@ -1136,6 +1136,106 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func waitingDelegateChildRefreshesPastHydrationCacheAndStopsWhenLoaded() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        var child = TaskRun(
+            id: "run-waiting-child", title: "Child", prompt: "", mode: .ask, phase: .running,
+            project: "Project", harnesses: [.codex], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .verified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: [])
+        child.delegatedFromRunId = "run-parent"
+        child.waitingOnUser = true
+        model.liveTasks = [child]
+        // The exact stale-cache scenario: this child was hydrated before the
+        // parent/list overlay announced waitingOnUser without the question body.
+        model.hydratedRunDetails.insert(child.id)
+
+        nonisolated(unsafe) var detailCalls = 0
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-waiting-child" else {
+                throw AppRefreshTestError.badRequest
+            }
+            detailCalls += 1
+            let json = #"{"summary":{"runId":"run-waiting-child","state":"running","mode":"ask","waitingOnUser":true,"delegatedFromRunId":"run-parent"},"primaryOutput":{"kind":"answer","path":"final/answer.md","text":"Waiting","bytes":7,"truncated":false},"pendingInteractions":[{"interactionId":"int-child","runId":"run-waiting-child","attemptId":"a1","harnessId":"codex","sourceTool":"request_user_input","questions":[{"id":"q1","question":"Continue?","header":"Choice","options":[{"label":"Yes","description":null}],"multi_select":false}],"requestedAt":"2026-07-26T00:00:00Z","timeoutAt":null}],"lastSeq":4}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        await model.hydrateDelegatedChildInteractions(child)
+
+        let hydrated = try #require(model.task(child.id))
+        #expect(detailCalls == 1)
+        #expect(hydrated.pendingInteractions.map(\.interactionId) == ["int-child"])
+        #expect(hydrated.waitingOnUser)
+
+        // The rendered row's next task pass receives the refreshed value and
+        // must not issue another detail request once the question is present.
+        await model.hydrateDelegatedChildInteractions(hydrated)
+        #expect(detailCalls == 1)
+    }
+
+    @MainActor
+    @Test func waitingDelegateChildRetryRecoversAfterDetailFailure() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        var child = TaskRun(
+            id: "run-retry-child", title: "Child", prompt: "", mode: .ask, phase: .running,
+            project: "Project", harnesses: [.codex], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .verified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: [])
+        child.delegatedFromRunId = "run-parent"
+        child.waitingOnUser = true
+        model.liveTasks = [child]
+
+        nonisolated(unsafe) var detailCalls = 0
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/runs/run-retry-child" else {
+                throw AppRefreshTestError.badRequest
+            }
+            detailCalls += 1
+            if detailCalls == 1 {
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 503,
+                    httpVersion: "HTTP/1.1", headerFields: nil)!
+                return (response, Data(#"{"error":"temporarily unavailable"}"#.utf8))
+            }
+            let json = #"{"summary":{"runId":"run-retry-child","state":"running","mode":"ask","waitingOnUser":true,"delegatedFromRunId":"run-parent"},"primaryOutput":{"kind":"answer","path":"final/answer.md","text":"Waiting","bytes":7,"truncated":false},"pendingInteractions":[{"interactionId":"int-retry","runId":"run-retry-child","attemptId":"a1","harnessId":"codex","sourceTool":"request_user_input","questions":[{"id":"q1","question":"Continue?","options":[],"multi_select":false}],"requestedAt":"2026-07-26T00:00:00Z","timeoutAt":null}],"lastSeq":5}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        await model.hydrateDelegatedChildInteractions(child)
+        let failed = try #require(model.task(child.id))
+        #expect(detailCalls == 1)
+        #expect(failed.engineError?.hasPrefix("Could not load run detail:") == true)
+        #expect(failed.pendingInteractions.isEmpty)
+        #expect(DelegationPresentation.childInteractionLoadFailure(
+            waitingOnUser: failed.waitingOnUser,
+            pendingInteractionCount: failed.pendingInteractions.count,
+            engineError: failed.engineError) != nil)
+
+        // This is the Retry button's exact action.
+        await model.hydrateDelegatedChildInteractions(failed)
+        let recovered = try #require(model.task(child.id))
+        #expect(detailCalls == 2)
+        #expect(recovered.engineError == nil)
+        #expect(recovered.pendingInteractions.map(\.interactionId) == ["int-retry"])
+    }
+
+    @MainActor
     @Test func overlappingViewHydrationUsesOneRunDetailRequest() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

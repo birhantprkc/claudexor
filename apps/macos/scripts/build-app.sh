@@ -398,6 +398,18 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
     --sign "$SIGN_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
 
+  # Execute the signed nested Node + exact packaged daemon entry before paying
+  # the notarization round trip. Canonical direct-entry comparison makes this
+  # work through macOS /tmp -> /private/tmp and /var -> /private/var aliases.
+  SIGNED_PROBE="$("$APP/Contents/Resources/node" "$ENGINE_JS" --probe)"
+  "$APP/Contents/Resources/node" -e '
+    const probe = JSON.parse(process.argv[1]);
+    if (probe.version !== process.argv[2] || probe.buildSha !== process.argv[3]) {
+      throw new Error(`signed app probe mismatch: ${JSON.stringify(probe)}`);
+    }
+  ' "$SIGNED_PROBE" "$VERSION" "$BUILD_SHA"
+  echo "    signed packaged daemon probe passed"
+
   if [ -n "${NOTARY_PROFILE:-}" ]; then
     echo "==> Notarizing via profile: $NOTARY_PROFILE"
     ZIP="$DIST/Claudexor.zip"

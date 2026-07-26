@@ -5,6 +5,7 @@
 ### Patch Changes
 
 - Restore Delegate in packaged installs through the exact daemon self-entry; enforce required MCP startup, bounded shared parent/child budget and cancellation authority, typed lineage and degradation receipts, and durable CLI/macOS projections across reload and reconnect.
+- Make delegated child questions answerable in the macOS conversation, show the exact requested/effective/used/reason receipt and lineage in run details, and keep the packaged daemon entry executable through canonical macOS temporary-path aliases used by candidate verification.
 - Updated dependencies
   - @claudexor/control-api@3.1.2
   - @claudexor/core@3.1.2

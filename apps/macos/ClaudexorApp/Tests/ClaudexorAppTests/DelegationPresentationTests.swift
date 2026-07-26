@@ -103,6 +103,81 @@ import Foundation
         let pending = RunDelegationInfo(
             requested: true, effective: false, used: false, reason: "pending")
         #expect(DelegationPresentation.warning(pending, phase: .running) == nil)
+        #expect(!DelegationPresentation.warningShaped(pending))
+        #expect(DelegationPresentation.warningShaped(RunDelegationInfo(
+            requested: true, effective: false, used: false, reason: "runtime_unavailable"
+        )))
+        #expect(!DelegationPresentation.warningShaped(startupFailure))
+        let receipt = try? #require(DelegationPresentation.runReceipt(unused))
+        #expect(receipt?.requested == "Delegate · requested=true")
+        #expect(receipt?.effective == "effective=true")
+        #expect(receipt?.used == "used=false")
+        #expect(receipt?.reason == "reason=injected_unused")
+        #expect(DelegationPresentation.runReceipt(RunDelegationInfo(
+            requested: false, effective: false, used: false, reason: "not_requested"
+        )) == nil)
+    }
+
+    @Test func waitingChildHydratesAndRendersItsAnswerSurface() throws {
+        #expect(DelegationPresentation.shouldHydrateChildInteractions(
+            waitingOnUser: true, pendingInteractionCount: 0))
+        #expect(!DelegationPresentation.shouldHydrateChildInteractions(
+            waitingOnUser: true, pendingInteractionCount: 1))
+        #expect(!DelegationPresentation.shouldHydrateChildInteractions(
+            waitingOnUser: false, pendingInteractionCount: 0))
+        let loadFailure = "Could not load run detail: transport unavailable"
+        #expect(DelegationPresentation.childInteractionLoadFailure(
+            waitingOnUser: true, pendingInteractionCount: 0,
+            engineError: loadFailure) == loadFailure)
+        #expect(DelegationPresentation.childInteractionLoadFailure(
+            waitingOnUser: true, pendingInteractionCount: 1,
+            engineError: loadFailure) == nil)
+
+        let appRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: appRoot.appendingPathComponent(
+                "Sources/ClaudexorApp/DelegationRows.swift"),
+            encoding: .utf8)
+        let row = try #require(source.components(separatedBy: "struct DelegatedRunRow").last)
+        #expect(row.contains("await model.hydrateDelegatedChildInteractions(child)"))
+        #expect(row.contains("ForEach(child.pendingInteractions)"))
+        #expect(row.contains("InteractionCard(runId: child.id, interaction: pending)"))
+        #expect(row.contains("Button(\"Retry\")"))
+    }
+
+    @Test func runDetailsExposeExactDelegateReceiptAndChildLineage() throws {
+        var parent = try task(#"{"runId":"parent","state":"succeeded"}"#)
+        parent.delegation = RunDelegationInfo(
+            requested: true, effective: true, used: true, reason: "used")
+        let parentFacts = RunFacts.headerDetails(parent)
+            .filter { $0.id.hasPrefix("delegation_") }
+        #expect(parentFacts.map(\.id) == [
+            "delegation_requested", "delegation_effective",
+            "delegation_used", "delegation_reason",
+        ])
+        #expect(parentFacts.map(\.text) == [
+            "Delegate · requested=true", "effective=true", "used=true", "reason=used",
+        ])
+
+        parent.delegation = RunDelegationInfo(
+            requested: true, effective: false, used: false, reason: "pending")
+        #expect(RunFacts.headerDetails(parent)
+            .filter { $0.id.hasPrefix("delegation_") }
+            .allSatisfy { $0.tone == .neutral })
+        parent.delegation = RunDelegationInfo(
+            requested: true, effective: false, used: false, reason: "runtime_unavailable")
+        #expect(RunFacts.headerDetails(parent)
+            .filter { $0.id.hasPrefix("delegation_") }
+            .allSatisfy { $0.tone == .warning })
+
+        let child = try task(#"{"runId":"child","state":"succeeded","delegatedFromRunId":"parent-12345678"}"#)
+        let lineage = try #require(
+            RunFacts.headerDetails(child).first { $0.id == "delegated_child" })
+        #expect(lineage.text == "Delegated · Parent · 12345678")
+        #expect(lineage.help?.contains("parent-12345678") == true)
     }
 
     @Test func mixedPoolKeepsAProminentPartialDelegateWarning() throws {

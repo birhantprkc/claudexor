@@ -247,6 +247,15 @@ pnpm test
   recovery, and duplicate-create suppression without logout or credential reads.
 - Packaged app/ZIP/DMG and the npm CLI package contain the setup-login runner;
   the bundle boot smoke starts both the daemon and helper with bundled Node.
+- The signed candidate executes the exact packaged daemon `--probe` with its
+  bundled Node before notarization and again after ZIP extraction; direct-entry
+  proof must survive canonical macOS `/tmp`/`/var` path aliases and still reject
+  a different existing file with the same basename.
+- When Delegate surfaces change, exact-candidate UI acceptance proves the
+  healthy `requested/effective/used/reason` receipt, child/parent lineage, and a
+  `waitingOnUser` child answered from its inline card. Detail failure must show
+  its cause plus Retry instead of an endless spinner. Run this in the isolated
+  macOS VM with real HID clicks and screenshot evidence, not UI automation alone.
 - Review gate: the Release review protocol (see the section below) — one
   sealed-packet wave (critic subagents + exact triad + scope reviewer), one
   adjudication, one batched fix commit, one confirmation wave on the delta.

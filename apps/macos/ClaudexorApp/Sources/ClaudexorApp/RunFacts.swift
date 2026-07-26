@@ -134,11 +134,26 @@ enum RunFacts {
         var facts: [Fact] = []
         facts.append(Fact(id: "mode", text: task.mode.label, glyph: task.mode.glyph,
                           tone: .neutral, help: nil))
+        if let delegation = task.delegation,
+           let receipt = DelegationPresentation.runReceipt(delegation) {
+            let delegationTone: OutcomePresentation.Tone =
+                DelegationPresentation.warningShaped(delegation) ? .warning : .neutral
+            facts.append(contentsOf: [
+                Fact(id: "delegation_requested", text: receipt.requested,
+                     glyph: "arrow.triangle.branch", tone: delegationTone, help: receipt.detail),
+                Fact(id: "delegation_effective", text: receipt.effective,
+                     glyph: "checkmark.circle", tone: delegationTone, help: receipt.detail),
+                Fact(id: "delegation_used", text: receipt.used,
+                     glyph: "wrench.and.screwdriver", tone: delegationTone, help: receipt.detail),
+                Fact(id: "delegation_reason", text: receipt.reason,
+                     glyph: "info.circle", tone: delegationTone, help: receipt.detail),
+            ])
+        }
         if let child = DelegationPresentation.childReceipt(
             delegatedFromRunId: task.delegatedFromRunId) {
             facts.append(Fact(
                 id: "delegated_child",
-                text: child.badge,
+                text: "\(child.badge) · \(child.parentLabel)",
                 glyph: "arrow.turn.down.right",
                 tone: .neutral,
                 help: "Claudexor child run delegated by \(child.parentRunId)."

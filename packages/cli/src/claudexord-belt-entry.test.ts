@@ -1,9 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
-import { isBeltServeInvocation } from "./claudexord-entry.js";
+import { isBeltServeInvocation, runIfDirectEntry } from "./claudexord-entry.js";
 
 const reapDirs: string[] = [];
 afterAll(() => {
@@ -16,6 +25,46 @@ describe("claudexord belt self-entry", () => {
     expect(isBeltServeInvocation([])).toBe(false);
     expect(isBeltServeInvocation(["mcp", "serve"])).toBe(false);
     expect(isBeltServeInvocation(["--probe", "mcp", "serve-belt"])).toBe(false);
+  });
+
+  it("dispatches through a filesystem alias to the same packaged entry", () => {
+    const root = mkdtempSync(join(realpathSync("/tmp"), "cx-entry-alias-"));
+    reapDirs.push(root);
+    const realDir = join(root, "real");
+    const aliasDir = join(root, "alias");
+    mkdirSync(realDir);
+    symlinkSync(realDir, aliasDir);
+    const entryPath = join(realDir, "claudexord.bundle.cjs");
+    writeFileSync(entryPath, "// entry\n");
+    let calls = 0;
+    runIfDirectEntry(
+      pathToFileURL(entryPath).href,
+      () => {
+        calls += 1;
+      },
+      [process.execPath, join(aliasDir, "claudexord.bundle.cjs")],
+    );
+    expect(calls).toBe(1);
+
+    const foreignDir = join(root, "foreign");
+    mkdirSync(foreignDir);
+    const foreignPath = join(foreignDir, "claudexord.bundle.cjs");
+    writeFileSync(foreignPath, "// foreign\n");
+    runIfDirectEntry(
+      pathToFileURL(entryPath).href,
+      () => {
+        calls += 1;
+      },
+      [process.execPath, foreignPath],
+    );
+    runIfDirectEntry(
+      pathToFileURL(entryPath).href,
+      () => {
+        calls += 1;
+      },
+      [process.execPath, join(aliasDir, "missing.cjs")],
+    );
+    expect(calls).toBe(1);
   });
 
   it("serves from the built entry and roundtrips its packaged parent daemon", () => {

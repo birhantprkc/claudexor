@@ -44,44 +44,82 @@ struct DelegatedRunRow: View {
 
     var body: some View {
         if let receipt {
-            HStack(spacing: Theme.Spacing.sm) {
-                Button { model.openRun(child.id) } label: {
-                    HStack(spacing: Theme.Spacing.sm) {
-                        statusGlyph
-                        Text(child.title)
-                            .font(.caption).lineLimit(1).truncationMode(.tail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text(receipt.badge)
-                            .font(.caption2.weight(.semibold))
-                            .lineLimit(1).fixedSize(horizontal: true, vertical: false)
-                            .padding(.horizontal, Theme.Spacing.xs).padding(.vertical, 1)
-                            .background(Theme.accent.opacity(0.12), in: Capsule())
-                            .foregroundStyle(Theme.accent)
-                            .accessibilityLabel("Delegated Claudexor run")
-                        Text(child.phase.label)
-                            .font(.caption2).foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .frame(width: DelegatedRunRowLayout.phaseWidth, alignment: .trailing)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                HStack(spacing: Theme.Spacing.sm) {
+                    Button { model.openRun(child.id) } label: {
+                        HStack(spacing: Theme.Spacing.sm) {
+                            statusGlyph
+                            Text(child.title)
+                                .font(.caption).lineLimit(1).truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(receipt.badge)
+                                .font(.caption2.weight(.semibold))
+                                .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, Theme.Spacing.xs).padding(.vertical, 1)
+                                .background(Theme.accent.opacity(0.12), in: Capsule())
+                                .foregroundStyle(Theme.accent)
+                                .accessibilityLabel("Delegated Claudexor run")
+                            Text(child.phase.label)
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .frame(width: DelegatedRunRowLayout.phaseWidth, alignment: .trailing)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .help("Open delegated run \(child.id) in the thread workspace")
+                    .help("Open delegated run \(child.id) in the thread workspace")
 
-                Button(receipt.parentLabel) { model.openRun(receipt.parentRunId) }
-                    .buttonStyle(.borderless)
-                    .font(.caption2)
-                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
-                    .help("Open parent run \(receipt.parentRunId)")
-                    .accessibilityLabel("Open parent run")
-                    .accessibilityValue(receipt.parentRunId)
+                    Button(receipt.parentLabel) { model.openRun(receipt.parentRunId) }
+                        .buttonStyle(.borderless)
+                        .font(.caption2)
+                        .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                        .help("Open parent run \(receipt.parentRunId)")
+                        .accessibilityLabel("Open parent run")
+                        .accessibilityValue(receipt.parentRunId)
+                }
+                .padding(.horizontal, Theme.Spacing.sm)
+                .padding(.vertical, Theme.Spacing.xs)
+                .cardSurface(hover: true)
+
+                if child.waitingOnUser && child.pendingInteractions.isEmpty {
+                    if let failure = DelegationPresentation.childInteractionLoadFailure(
+                        waitingOnUser: child.waitingOnUser,
+                        pendingInteractionCount: child.pendingInteractions.count,
+                        engineError: child.engineError
+                    ) {
+                        HStack(spacing: Theme.Spacing.sm) {
+                            Label(failure, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(Theme.status(.negative))
+                                .lineLimit(2)
+                                .help(failure)
+                            Spacer()
+                            Button("Retry") {
+                                Task { await model.hydrateDelegatedChildInteractions(child) }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    } else {
+                        ProgressView("Loading delegated question…")
+                            .controlSize(.small)
+                            .font(.caption)
+                    }
+                }
+                ForEach(child.pendingInteractions) { pending in
+                    InteractionCard(runId: child.id, interaction: pending)
+                }
             }
-            .padding(.horizontal, Theme.Spacing.sm)
-            .padding(.vertical, Theme.Spacing.xs)
-            .cardSurface(hover: true)
+            .task(id: interactionLoadKey) {
+                await model.hydrateDelegatedChildInteractions(child)
+            }
         }
+    }
+
+    private var interactionLoadKey: String {
+        "delegated-interactions:\(child.id):\(child.waitingOnUser):\(child.pendingInteractions.count)"
     }
 
     @ViewBuilder private var statusGlyph: some View {
