@@ -17,6 +17,9 @@ Release history for Claudexor. The current version is declared in the root
   vendor subagents for Claudexor children. Child questions stay answerable
   inline through their canonical run id, and signed candidate probes tolerate
   macOS canonical temporary-path aliases without weakening the entry fence.
+  Cursor Plan uses the native read-only Ask final-message channel so its
+  model-authored WorkReport cannot be lost behind the native `createPlan`
+  terminal tool.
 
 - **v3.1.1** (2026-07-25) — patch release: engine honesty, per-model effort
   ladders, and control-plane fixes on top of v3.1.0. Engine: a DELIVERED plan

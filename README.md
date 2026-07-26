@@ -233,8 +233,9 @@ is ordinary `claudexor plan`.
 ### Council planning (`plan --council`)
 
 `--council` (plan-only) runs the Council plan strategy: N harnesses each draft a
-plan in parallel (round 1, native plan mode, read-only, each in its own lane on a
-thread turn), the drafts land as file-backed run artifacts
+plan in parallel (round 1, harness-native read-only planner transport, each in
+its own lane on a thread turn; Cursor uses native Ask so its final WorkReport
+remains available), the drafts land as file-backed run artifacts
 (`council/draft-<harness>.md`), and then the PRIMARY runs one merge iteration that
 POINTS at the draft files by absolute path (never embedding their full text) and
 synthesizes ONE unified plan. The tagged `## Open Questions` parser runs on the

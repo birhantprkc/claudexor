@@ -117,6 +117,7 @@ export function createCursorParser(
   credentialRoute?: CredentialRoute,
   credentialSource?: AuthSourceKind,
   planMode = false,
+  nativePlanMode = planMode,
 ): CursorEventParser {
   const state: CursorParserState = {
     pending: new Map(),
@@ -124,7 +125,15 @@ export function createCursorParser(
     fallbackPlan: null,
   };
   return (obj: Json, sessionId: string): HarnessEvent[] | null =>
-    parseCursorEventStateful(obj, sessionId, state, credentialRoute, credentialSource, planMode);
+    parseCursorEventStateful(
+      obj,
+      sessionId,
+      state,
+      credentialRoute,
+      credentialSource,
+      planMode,
+      nativePlanMode,
+    );
 }
 
 /** Stateless convenience used by tests; resolves results within one call only. */
@@ -143,6 +152,7 @@ function parseCursorEventStateful(
   credentialRoute?: CredentialRoute,
   credentialSource?: AuthSourceKind,
   planMode = false,
+  nativePlanMode = planMode,
 ): HarnessEvent[] | null {
   const ts = nowIso();
   const type = obj?.type;
@@ -304,7 +314,7 @@ function parseCursorEventStateful(
     // resort, the assembled assistant text) so a completed plan run is not
     // discarded — with stamped provenance so the answer never masquerades as a
     // vendor-written plan file. A valid URI is left unchanged.
-    if (variant === "createPlan" && status === "ok") {
+    if (nativePlanMode && variant === "createPlan" && status === "ok") {
       const planUri =
         result && typeof result === "object" && typeof result.planUri === "string"
           ? result.planUri.trim()

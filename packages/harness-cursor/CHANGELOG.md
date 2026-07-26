@@ -4,6 +4,9 @@
 
 ### Patch Changes
 
+- Cursor Plan intent now uses Cursor's native read-only Ask transport so the
+  mandatory model-authored WorkReport remains in the final-message channel
+  instead of being lost behind the native `createPlan` terminal tool.
 - Updated dependencies
   - @claudexor/core@3.1.2
   - @claudexor/schema@3.1.2

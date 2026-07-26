@@ -1045,8 +1045,9 @@ is always supplied on the current run.
 
 Planning is solo by default. The **Council** plan strategy (`plan --council`,
 optionally `--n 2..4`) turns it into a multi-harness draft-then-merge: round 1
-runs N members as parallel planner attempts (each the SAME native-plan-mode
-read-only spawn the solo loop drives, in its own lane on a thread turn), whose
+runs N members as parallel planner attempts (each the SAME vendor-native
+read-only planner spawn the solo loop drives, in its own lane on a thread turn;
+Cursor uses native read-only Ask so the final-message WorkReport remains available), whose
 drafts land as file-backed artifacts (`council/draft-<harness>.md`). The primary
 then runs ONE merge iteration (intent `synthesize`) whose prompt POINTS at the
 draft files by absolute path — like the frozen-plan brief, full text never rides

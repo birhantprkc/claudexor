@@ -102,11 +102,14 @@ The canonical intent and strategy enumeration is an operational contract
 (schema + `docs/ARCHITECTURE.md`), deliberately small, and old spellings
 hard-error rather than alias.
 
-Planning is conversational. Claudexor rides each vendor's native plan mode —
-they all converge on the same shape: research read-only, ask clarifying
-questions, propose, refine — and surfaces the questions as typed cards the
-user can answer; each answer round continues the planner's own lane
-natively. A plan that still has open questions is not implementable; a plan
+Planning is conversational. Claudexor rides each vendor's native read-only
+planning surface. Cursor uses its read-only Ask transport because native Plan
+terminates through a tool schema that cannot carry Claudexor's mandatory final
+WorkReport; the plan intent still comes from Claudexor's planning prompt. The
+lanes converge on the same shape: research read-only, ask clarifying questions,
+propose, refine — and surface the questions as typed cards the user can answer;
+each answer round continues the planner's own lane natively. A plan that still
+has open questions is not implementable; a plan
 whose questions are resolved freezes on implement into a content-hashed
 contract file delivered to the executor as a file it can re-read at any
 time, not as prompt text pasted into the conversation.

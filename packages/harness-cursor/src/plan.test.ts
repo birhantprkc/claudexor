@@ -99,4 +99,38 @@ describe("cursor plan-mode createPlan recovery (Defect 1)", () => {
     ].flatMap((e) => e ?? []);
     expect(events.some(isErrorResult)).toBe(true);
   });
+
+  it("read-only Ask transport never lets createPlan fallback replace the final WorkReport", () => {
+    const parse = createCursorParser("vendor_native", "native_session", true, false);
+    const envelope =
+      '```json\n{"work_report":{"state":"completed","required_inputs":[]},"output":"PLAN_OK"}\n```';
+    const frames = [
+      {
+        type: "tool_call",
+        subtype: "started",
+        call_id: "p1",
+        tool_call: { createPlanToolCall: { args: { plan: "STALE_NATIVE_PLAN" } } },
+      },
+      {
+        type: "tool_call",
+        subtype: "completed",
+        call_id: "p1",
+        tool_call: {
+          createPlanToolCall: {
+            args: { plan: "STALE_NATIVE_PLAN" },
+            result: { success: {}, planUri: "" },
+          },
+        },
+      },
+      { type: "assistant", message: { content: [{ text: envelope }] } },
+      { type: "result", subtype: "success" },
+    ];
+    const events = frames.flatMap((frame) => parse(frame, "ses-ask-plan") ?? []);
+    const final = finalMessage(events);
+    expect(final?.text).toBe(envelope);
+    expect(final?.text).not.toContain("STALE_NATIVE_PLAN");
+    expect(final?.payload?.["final_source"]).toBe("assistant_message");
+    expect(final?.payload?.["plan_recovered"]).toBeUndefined();
+    expect(events.some((event) => event.payload?.["plan_uri_fallback"] === true)).toBe(false);
+  });
 });
