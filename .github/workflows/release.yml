@@ -130,6 +130,10 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
+      - name: Pin release Node runtime
+        shell: bash
+        run: echo "CLAUDEXOR_NODE_BIN=$(node -p 'process.execPath')" >> "$GITHUB_ENV"
+
       - name: Require and import Apple release credentials
         if: needs.prepare.outputs.mode == 'candidate'
         shell: bash
@@ -165,7 +169,6 @@ jobs:
           echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
           echo "NOTARY_PROFILE=claudexor-notary" >> "$GITHUB_ENV"
           echo "NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
-          echo "CLAUDEXOR_NODE_BIN=$(node -p 'process.execPath')" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -218,6 +221,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          PREPARED_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
           app="apps/macos/dist/Claudexor.app"
@@ -240,8 +244,17 @@ jobs:
           xcrun stapler validate "$zipstage/Claudexor.app"
           spctl --assess --type execute --verbose=2 "$zipstage/Claudexor.app"
           test -x "$zipstage/Claudexor.app/Contents/Resources/node"
+          test -s "$zipstage/Claudexor.app/Contents/Resources/claudexord.bundle.cjs"
           test -s "$zipstage/Claudexor.app/Contents/Resources/setup-login-runner.cjs"
           test -s "$zipstage/Claudexor.app/Contents/Resources/browser-mcp-runtime/dist/browser-mcp-launcher.js"
+          probe="$("$zipstage/Claudexor.app/Contents/Resources/node" \
+            "$zipstage/Claudexor.app/Contents/Resources/claudexord.bundle.cjs" --probe)"
+          node -e '
+            const probe = JSON.parse(process.argv[1]);
+            if (probe.version !== process.argv[2] || probe.buildSha !== process.argv[3]) {
+              throw new Error(`candidate app probe mismatch: ${JSON.stringify(probe)}`);
+            }
+          ' "$probe" "$VERSION" "$PREPARED_SHA"
 
       - name: Promote the exact candidate release artifact (publish, A-5)
         if: needs.prepare.outputs.mode == 'publish'
@@ -408,7 +421,8 @@ jobs:
           else
             cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"
             cp "apps/macos/dist/Claudexor-$VERSION.zip" "$assets/"
-            pnpm licenses list --prod --json | node scripts/generate-release-sbom.mjs \
+            GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json | \
+              GITHUB_SHA="$PREPARED_SHA" node scripts/generate-release-sbom.mjs \
               --app-bundle apps/macos/dist/Claudexor.app \
               > "$assets/Claudexor-$VERSION.spdx.json"
           fi

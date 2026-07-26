@@ -126,6 +126,13 @@ for (const [label, broken] of [
     ),
   ],
   [
+    "unconditional release Node pin",
+    packageMacosJob.replace(
+      "- name: Pin release Node runtime\n        shell: bash",
+      "- name: Pin release Node runtime\n        if: needs.prepare.outputs.mode == 'candidate'\n        shell: bash",
+    ),
+  ],
+  [
     "candidate-only build guard",
     packageMacosJob.replace(
       "- name: Build signed DMG and ZIP\n        if: needs.prepare.outputs.mode == 'candidate'",
@@ -158,6 +165,14 @@ for (const [label, broken] of [
     packageMacosJob.replace(
       'cp "candidate-assets/Claudexor-$VERSION.spdx.json" "$assets/"',
       'cp "apps/macos/dist/Claudexor-$VERSION.spdx.json" "$assets/"',
+    ),
+  ],
+  [
+    "candidate SBOM prepared-SHA binding",
+    replaceLastOccurrence(
+      packageMacosJob,
+      'GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json',
+      "pnpm licenses list --prod --json",
     ),
   ],
   [
@@ -394,11 +409,16 @@ function jobBody(workflow, name) {
 
 function exactCandidateAppPromotionErrors(job) {
   const findings = [];
+  const candidateVerifyStep = stepBody(job, "Verify signed and notarized artifacts");
   const verifyStep = stepBody(job, "Verify promoted candidate app artifacts (publish, A-5)");
   const assembleStep = stepBody(job, "Assemble checksums, SBOM and review evidence");
   const requirePattern = (label, pattern, scope = job) => {
     if (!pattern.test(scope)) findings.push(`release.yml: ${label}`);
   };
+  requirePattern(
+    "release Node runtime must be pinned unconditionally",
+    /- name: Pin release Node runtime\n\s+shell: bash\n\s+run: echo "CLAUDEXOR_NODE_BIN=\$\(node -p 'process\.execPath'\)" >> "\$GITHUB_ENV"/,
+  );
   requirePattern(
     "app signing credential import must be candidate-only",
     /- name: Require and import Apple release credentials\n\s+if: needs\.prepare\.outputs\.mode == 'candidate'/,
@@ -410,6 +430,11 @@ function exactCandidateAppPromotionErrors(job) {
   requirePattern(
     "fresh app verification must be candidate-only",
     /- name: Verify signed and notarized artifacts\n\s+if: needs\.prepare\.outputs\.mode == 'candidate'/,
+  );
+  requirePattern(
+    "candidate ZIP app must probe the exact daemon version and build SHA before upload",
+    /PREPARED_SHA:[\s\S]*?ditto -x -k "\$zip"[\s\S]*?claudexord\.bundle\.cjs" --probe[\s\S]*?probe\.version !== process\.argv\[2\][\s\S]*?probe\.buildSha !== process\.argv\[3\][\s\S]*?"\$probe" "\$VERSION" "\$PREPARED_SHA"/,
+    candidateVerifyStep,
   );
   requirePattern(
     "candidate run must bind the release workflow, exact SHA, and successful conclusion",
@@ -453,6 +478,11 @@ function exactCandidateAppPromotionErrors(job) {
     /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then[\s\S]*?cp "candidate-assets\/Claudexor-\$VERSION\.dmg" "\$assets\/"[\s\S]*?cp "candidate-assets\/Claudexor-\$VERSION\.zip" "\$assets\/"[\s\S]*?cp "candidate-assets\/Claudexor-\$VERSION\.spdx\.json" "\$assets\/"[\s\S]*?cmp "candidate-assets\/Claudexor-\$VERSION\.dmg" "\$assets\/Claudexor-\$VERSION\.dmg"[\s\S]*?cmp "candidate-assets\/Claudexor-\$VERSION\.zip" "\$assets\/Claudexor-\$VERSION\.zip"[\s\S]*?cmp "candidate-assets\/Claudexor-\$VERSION\.spdx\.json" "\$assets\/Claudexor-\$VERSION\.spdx\.json"/,
     assembleStep,
   );
+  requirePattern(
+    "candidate SBOM must bind both license input and document namespace to the prepared SHA",
+    /else[\s\S]*?GITHUB_SHA="\$PREPARED_SHA" pnpm licenses list --prod --json \|[\s\S]*?GITHUB_SHA="\$PREPARED_SHA" node scripts\/generate-release-sbom\.mjs[\s\S]*?--app-bundle apps\/macos\/dist\/Claudexor\.app/,
+    assembleStep,
+  );
   const publishArmStart = assembleStep.indexOf('if [ "$RELEASE_MODE_INPUT" = publish ]; then');
   const publishArmEnd = assembleStep.indexOf("\n          else", publishArmStart);
   const publishArm =
@@ -478,4 +508,11 @@ function stepBody(job, name) {
   const rest = job.slice(start + marker.length);
   const next = rest.search(/^      - name: /m);
   return next < 0 ? job.slice(start) : job.slice(start, start + marker.length + next);
+}
+
+function replaceLastOccurrence(text, needle, replacement) {
+  const index = text.lastIndexOf(needle);
+  return index < 0
+    ? text
+    : `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
 }

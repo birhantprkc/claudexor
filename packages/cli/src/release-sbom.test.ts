@@ -79,18 +79,30 @@ describe("release SPDX SBOM", () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  it("emits byte-identical output when license groups arrive in a different order", () => {
+    const fixture = appFixture();
+    try {
+      const reordered = { MIT: licenses.MIT, "Apache-2.0": licenses["Apache-2.0"] };
+      expect(generateRaw(fixture.app, reordered)).toBe(generateRaw(fixture.app, licenses));
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
 });
 
 function generate(app: string) {
-  return JSON.parse(
-    execFileSync(process.execPath, [generator, "--app-bundle", app], {
-      cwd: resolve("."),
-      encoding: "utf8",
-      env: { ...process.env, GITHUB_SHA: "a".repeat(40) },
-      input: JSON.stringify(licenses),
-      stdio: ["pipe", "pipe", "pipe"],
-    }),
-  );
+  return JSON.parse(generateRaw(app, licenses));
+}
+
+function generateRaw(app: string, licenseInput: typeof licenses): string {
+  return execFileSync(process.execPath, [generator, "--app-bundle", app], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_SHA: "a".repeat(40) },
+    input: JSON.stringify(licenseInput),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
 }
 
 function appFixture(packagedBrowserVersion = browserVersion) {
