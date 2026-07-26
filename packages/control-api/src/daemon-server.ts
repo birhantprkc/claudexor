@@ -810,7 +810,7 @@ export class DaemonControlApiServer {
       const children = directDelegatedChildrenFromRecords(
         parentRunId,
         await this.opts.daemon.list(),
-      ).map((candidate) => summarizeRun(candidate));
+      ).map((candidate) => this.summarizeRunOrDiagnostic(candidate));
       return this.json(
         res,
         200,

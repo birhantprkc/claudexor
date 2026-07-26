@@ -893,7 +893,7 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
-    @Test func detailAcceptsExistingOptimisticJobIdAlias() async {
+    @Test func detailAcceptsExistingOptimisticJobIdAliasAndRestoresChildrenAgainstRealRunId() async {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -913,14 +913,23 @@ struct AppModelRefreshTests {
             guard request.url?.path == "/v2/runs/job-queued" else {
                 throw AppRefreshTestError.badRequest
             }
-            let json = #"{"summary":{"jobId":"job-queued","runId":"run-real","state":"succeeded","mode":"agent"},"lastSeq":3}"#
+            let json = #"{"summary":{"jobId":"job-queued","runId":"run-real","state":"succeeded","mode":"agent"},"children":[{"runId":"run-child","state":"succeeded","mode":"ask","parentRunId":"run-real","delegatedFromRunId":"run-real"}],"lastSeq":3}"#
             return (appResponse(for: request), Data(json.utf8))
         }
 
         await model.loadRunDetail("job-queued")
 
-        #expect(model.liveTasks.map(\.id) == ["job-queued"])
+        #expect(model.liveTasks.map(\.id) == ["job-queued", "run-child"])
         #expect(model.liveTasks.first?.phase == .succeeded)
+        #expect(model.liveTasks.last?.delegatedFromRunId == "run-real")
+    }
+
+    @Test func utf8ArtifactPreviewBoundsBytesWithoutSplittingAScalar() {
+        let source = "abc🙂def"
+        let bounded = AppModel.boundedUTF8Prefix(source, maxBytes: 6)
+        #expect(bounded == "abc")
+        #expect(bounded.utf8.count <= 6)
+        #expect(AppModel.boundedUTF8Prefix("abcdef", maxBytes: 4) == "abcd")
     }
 
     @MainActor
@@ -1231,6 +1240,50 @@ struct AppModelRefreshTests {
 
         #expect(model.liveTasks.isEmpty)
         #expect(!model.hydratedRunDetails.contains("run-stale-artifact"))
+    }
+
+    @MainActor
+    @Test func detailRemovedDuringArtifactFallbackIsNotMarkedHydrated() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-removed", title: "Run", prompt: "", mode: .agent, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        let artifactStarted = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/runs/run-removed":
+                return (appResponse(for: request), Data(
+                    #"{"summary":{"runId":"run-removed","state":"succeeded","mode":"agent"},"lastSeq":4}"#.utf8))
+            case "/v2/runs/run-removed/artifacts/final/answer.md":
+                artifactStarted.increment()
+                Thread.sleep(forTimeInterval: 0.15)
+                return (appResponse(for: request), Data("answer".utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let load = Task { await model.loadRunDetail("run-removed") }
+        for _ in 0..<100 where artifactStarted.count == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(artifactStarted.count == 1)
+        model.liveTasks.removeAll()
+        await load.value
+
+        #expect(model.liveTasks.isEmpty)
+        #expect(!model.hydratedRunDetails.contains("run-removed"))
     }
 
     @MainActor

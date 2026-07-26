@@ -63,12 +63,26 @@ extension AppModel {
             if let text = try? await client.artifactText(runId: runId, path: path),
                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let limit = 256_000
-                return text.count > limit
-                    ? String(text.prefix(limit))
+                return text.utf8.count > limit
+                    ? Self.boundedUTF8Prefix(text, maxBytes: limit)
                         + "\n\n_Inline preview bounded; open \(path) for the full artifact._"
                     : text
             }
         }
         return nil
+    }
+
+    /// Keep a valid String prefix within an exact UTF-8 byte ceiling. Cutting
+    /// through a multibyte scalar backs up to its start instead of inserting a
+    /// replacement character that could exceed the byte bound.
+    nonisolated static func boundedUTF8Prefix(_ text: String, maxBytes: Int) -> String {
+        guard maxBytes > 0 else { return "" }
+        guard text.utf8.count > maxBytes else { return text }
+        var data = Data(text.utf8.prefix(maxBytes))
+        while !data.isEmpty {
+            if let prefix = String(data: data, encoding: .utf8) { return prefix }
+            data.removeLast()
+        }
+        return ""
     }
 }

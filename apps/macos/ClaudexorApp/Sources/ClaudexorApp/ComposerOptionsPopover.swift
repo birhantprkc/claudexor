@@ -15,7 +15,7 @@ extension ThreadsScreen {
         let families = primaryFamily.map { [$0] } ?? effectiveIncludedFamilies
         return DelegationPresentation.control(
             capabilities: families.map { model.harnessInfo(for: $0)?.delegation },
-            hasFullAccess: access == .full
+            hasFullAccess: access.satisfiesFullAccessRequirement
         )
     }
 

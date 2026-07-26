@@ -1484,10 +1484,11 @@ final class AppModel {
             // no-ops.
             if detail.lastSeq < (snapshotReplayFences[id] ?? 0) { return }
             let existingIds = Set(liveTasks.map(\.id))
+            let resolvedParentRunId = detail.summary.runId
             let activeRestoredChildren = Self.restoredActiveChildIds(
-                detail.children, parentRunId: id, existingIds: existingIds)
+                detail.children, parentRunId: resolvedParentRunId, existingIds: existingIds)
             liveTasks = Self.mergingDelegatedChildren(
-                detail.children, parentRunId: id, into: liveTasks)
+                detail.children, parentRunId: resolvedParentRunId, into: liveTasks)
             for childRunId in activeRestoredChildren { stream(runId: childRunId) }
             // Snapshot truth and stream progress are related but distinct: the
             // resume cursor may already be newer than this response.
@@ -1643,8 +1644,8 @@ final class AppModel {
             // inserted or removed rows during the awaits above.
             if let writeIdx = liveTasks.firstIndex(where: { $0.id == id }) {
                 liveTasks[writeIdx] = task
+                hydratedRunDetails.insert(id)
             }
-            hydratedRunDetails.insert(id)
         } catch {
             guard !Task.isCancelled,
                   connectionGeneration == requestGeneration,

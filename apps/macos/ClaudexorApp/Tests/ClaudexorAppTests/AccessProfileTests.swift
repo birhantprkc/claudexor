@@ -30,6 +30,13 @@ import Testing
         #expect(!AccessProfile.composerCases.contains(.inheritNative))
     }
 
+    @Test func externalSandboxFullSatisfiesHarnessFullAccessWithoutBecomingComposerChoice() {
+        #expect(AccessProfile.full.satisfiesFullAccessRequirement)
+        #expect(AccessProfile.externalSandboxFull.satisfiesFullAccessRequirement)
+        #expect(!AccessProfile.workspaceWrite.satisfiesFullAccessRequirement)
+        #expect(!AccessProfile.inheritNative.satisfiesFullAccessRequirement)
+    }
+
     @Test func harnessAndAccessGlyphsAreValidSFSymbols() {
         var names = AccessProfile.allCases.map(\.glyph)
         // Vendor iconography now lives in HarnessIcon; its ONE generic fallback

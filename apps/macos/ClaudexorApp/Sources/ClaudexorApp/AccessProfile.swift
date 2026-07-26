@@ -16,6 +16,12 @@ enum AccessProfile: String, CaseIterable, Identifiable {
     /// (external-sandbox-full, inherit-native) are engine/CLI-only — present in
     /// the enum for lossless decode, never offered as a composer choice.
     static let composerCases: [AccessProfile] = [.readOnly, .workspaceWrite, .full]
+    /// Access profiles that satisfy an engine-declared unrestricted-access
+    /// requirement. External sandboxes are unrestricted inside their own
+    /// boundary without becoming a persistent host trust grant.
+    var satisfiesFullAccessRequirement: Bool {
+        self == .full || self == .externalSandboxFull
+    }
     var label: String {
         switch self {
         case .readOnly: return "Read-only"

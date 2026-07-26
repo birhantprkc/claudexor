@@ -5335,6 +5335,78 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("projects parent-detail children through the cached live fail-soft owner", async () => {
+    const { daemon, record } = fakeDaemon();
+    const waitingChild: DaemonRunRecord = {
+      id: "job-child-waiting",
+      runId: "run-child-waiting",
+      state: "running",
+      params: { delegatedFromRunId: "run-d1" },
+    };
+    const corruptChild = {
+      id: "job-child-corrupt",
+      runId: "run-child-corrupt",
+      state: "foreign-state",
+      params: { delegatedFromRunId: "run-d1" },
+    } as unknown as DaemonRunRecord;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async list() {
+        return [record, waitingChild, corruptChild];
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const response = await apiFetch(`${base}/runs/run-d1`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as {
+          children: Array<{
+            runId: string;
+            state: string;
+            waitingOnUser?: boolean;
+            error?: string | null;
+          }>;
+        };
+        expect(body.children).toHaveLength(2);
+        expect(body.children).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              runId: "run-child-waiting",
+              state: "running",
+              waitingOnUser: true,
+            }),
+            expect.objectContaining({
+              runId: "run-child-corrupt",
+              state: "failed",
+              error: expect.stringContaining("unprojectable job record"),
+            }),
+          ]),
+        );
+      },
+      undefined,
+      {
+        pendingInteractions: (runId) =>
+          runId === "run-child-waiting"
+            ? [
+                {
+                  interactionId: "int-child",
+                  runId,
+                  attemptId: "a01",
+                  harnessId: "claude",
+                  sourceTool: "AskUserQuestion",
+                  questions: [],
+                  requestedAt: "t",
+                  timeoutAt: null,
+                },
+              ]
+            : [],
+      },
+    );
+  });
+
   it("returns queued job metadata when a daemon job has not produced run artifacts yet", async () => {
     const { daemon, record } = fakeDaemon();
     record.state = "queued";
