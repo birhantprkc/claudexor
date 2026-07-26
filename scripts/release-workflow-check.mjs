@@ -46,12 +46,25 @@ const prepareJob = jobBody(release, "prepare");
 const packageMacosJob = jobBody(release, "package-macos");
 const publishNpmJob = jobBody(release, "publish-npm");
 const publishReleaseJob = jobBody(release, "publish-release");
+const staleAttestationSchemaPattern = /schema-v[23]/;
+const exactPromotionPairedNeedles = [
+  [
+    "SBOM license-input prepared-SHA binding",
+    'GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json',
+  ],
+  [
+    "SBOM generator prepared-SHA binding",
+    'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-release-sbom.mjs',
+  ],
+  ["daemon version probe comparison", "probe.version !== process.argv[2]"],
+  ["daemon build-SHA probe comparison", "probe.buildSha !== process.argv[3]"],
+];
 for (const [label, pattern] of [
   ["workflow has candidate mode", /candidate/],
   ["workflow has publish mode", /publish/],
   ["review attestation is verified", /verify-release-input\.mjs/],
   [
-    // validateReleaseAttestation rejects any non-v3 attestation, so the
+    // validateReleaseAttestation rejects any non-v4 attestation, so the
     // workflow_dispatch input must document the schema owners actually sign.
     "attestation input is documented as a schema-v4 owner-review attestation",
     /review_attestation_b64:\s*\n\s*description:[^\n]*schema-v4 owner-review attestation/,
@@ -117,7 +130,7 @@ for (const [label, pattern] of [
   if (!pattern.test(release)) errors.push(`release.yml: ${label}`);
 }
 errors.push(...exactCandidateAppPromotionErrors(packageMacosJob));
-for (const [label, broken] of [
+const exactPromotionMutationCases = [
   [
     "candidate-only signing guard",
     packageMacosJob.replace(
@@ -168,19 +181,38 @@ for (const [label, broken] of [
     ),
   ],
   [
-    "candidate SBOM prepared-SHA binding",
+    "candidate SBOM license-input prepared-SHA binding",
     replaceLastOccurrence(
       packageMacosJob,
       'GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json',
       "pnpm licenses list --prod --json",
     ),
+    "candidate SBOM must bind both license input and document namespace to the prepared SHA",
   ],
   [
-    "promoted SBOM prepared-SHA binding",
+    "promoted SBOM license-input prepared-SHA binding",
     packageMacosJob.replace(
       'GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json',
       "pnpm licenses list --prod --json",
     ),
+    "candidate SBOM must be regenerated from the promoted app and compared",
+  ],
+  [
+    "candidate SBOM generator prepared-SHA binding",
+    replaceLastOccurrence(
+      packageMacosJob,
+      'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-release-sbom.mjs',
+      "node scripts/generate-release-sbom.mjs",
+    ),
+    "candidate SBOM must bind both license input and document namespace to the prepared SHA",
+  ],
+  [
+    "promoted SBOM generator prepared-SHA binding",
+    packageMacosJob.replace(
+      'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-release-sbom.mjs',
+      "node scripts/generate-release-sbom.mjs",
+    ),
+    "candidate SBOM must be regenerated from the promoted app and compared",
   ],
   [
     "candidate run SHA binding",
@@ -200,18 +232,22 @@ for (const [label, broken] of [
   [
     "candidate daemon version probe",
     packageMacosJob.replace("probe.version !== process.argv[2]", "false"),
+    "candidate ZIP app must probe the exact daemon version and build SHA before upload",
   ],
   [
     "candidate daemon build-SHA probe",
     packageMacosJob.replace("probe.buildSha !== process.argv[3]", "false"),
+    "candidate ZIP app must probe the exact daemon version and build SHA before upload",
   ],
   [
     "promoted daemon version probe",
     replaceLastOccurrence(packageMacosJob, "probe.version !== process.argv[2]", "false"),
+    "candidate ZIP app must verify signature, version, and exact daemon build SHA",
   ],
   [
     "promoted daemon build-SHA probe",
     replaceLastOccurrence(packageMacosJob, "probe.buildSha !== process.argv[3]", "false"),
+    "candidate ZIP app must verify signature, version, and exact daemon build SHA",
   ],
   [
     "isolated belt smoke HOME",
@@ -227,9 +263,27 @@ for (const [label, broken] of [
       'cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"',
     )}\n# cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"`,
   ],
-]) {
-  if (exactCandidateAppPromotionErrors(broken).length === 0) {
-    errors.push(`release-workflow-check self-test: failed to reject missing ${label}`);
+];
+for (const [label, needle] of exactPromotionPairedNeedles) {
+  exactPromotionMutationCases.push([
+    `${label} occurrence cardinality`,
+    `${packageMacosJob}\n# ${needle}`,
+    `${label} must occur exactly twice`,
+  ]);
+}
+for (const [label, broken, expectedFinding] of exactPromotionMutationCases) {
+  const findings = exactCandidateAppPromotionErrors(broken);
+  if (
+    findings.length === 0 ||
+    (expectedFinding !== undefined &&
+      !findings.some((finding) => finding.includes(expectedFinding)))
+  ) {
+    errors.push(`release-workflow-check self-test: failed to reject ${label}`);
+  }
+}
+for (const staleVersion of ["schema-v2", "schema-v3"]) {
+  if (!staleAttestationSchemaPattern.test(staleVersion)) {
+    errors.push(`release-workflow-check self-test: failed to reject ${staleVersion}`);
   }
 }
 if (!/^\s+ref:\s*\$\{\{\s*github\.sha\s*\}\}\s*$/m.test(prepareJob)) {
@@ -338,7 +392,7 @@ for (const [label, pattern] of [
   ["runtime package downloads are forbidden", /\bnpx\b|@latest/],
   ["tag-push publication is forbidden", /^\s*push:\s*\n\s*tags:/m],
   // The attestation is schema v4; stale v2/v3 wording must never return.
-  ["stale schema-v2 attestation wording is forbidden", /schema-v2/],
+  ["stale schema-v2/v3 attestation wording is forbidden", staleAttestationSchemaPattern],
 ]) {
   if (pattern.test(release)) errors.push(`release.yml: ${label}`);
 }
@@ -430,6 +484,14 @@ function exactCandidateAppPromotionErrors(job) {
   const requirePattern = (label, pattern, scope = job) => {
     if (!pattern.test(scope)) findings.push(`release.yml: ${label}`);
   };
+  for (const [label, needle] of exactPromotionPairedNeedles) {
+    const count = job.split(needle).length - 1;
+    if (count !== 2) {
+      findings.push(
+        `release.yml: ${label} must occur exactly twice for candidate/promoted mutation targeting (got ${count})`,
+      );
+    }
+  }
   requirePattern(
     "release Node runtime must be pinned unconditionally",
     /- name: Pin release Node runtime\n\s+shell: bash\n\s+run: echo "CLAUDEXOR_NODE_BIN=\$\(node -p 'process\.execPath'\)" >> "\$GITHUB_ENV"/,
