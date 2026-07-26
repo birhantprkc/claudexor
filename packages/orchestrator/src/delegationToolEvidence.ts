@@ -29,6 +29,23 @@ export function delegationBeltToolFailure(t: AttemptTelemetry): boolean {
   );
 }
 
+/** Record a non-error terminal shape that is nevertheless failure for the
+ * required belt. The caller has already proven this is the exact belt tool. */
+export function recordDelegationBeltResultFailure(
+  t: AttemptTelemetry,
+  tool: NonNullable<HarnessEvent["tool"]>,
+  summary: string,
+): void {
+  t.toolErrors.push({
+    tool: tool.name,
+    kind: tool.kind,
+    target: tool.target ?? null,
+    summary,
+    toolUseId: tool.use_id ?? null,
+    recovered: false,
+  });
+}
+
 /** Exact adapter-neutral belt evidence. Claude namespaces the normalized tool
  * name as `mcp__server__tool`; Codex keeps the native tool name and records the
  * server boundary in `target` as `server:tool`. Delimiters are mandatory so a

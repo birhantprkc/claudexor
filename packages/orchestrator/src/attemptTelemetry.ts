@@ -16,11 +16,7 @@ import type {
   WorkState,
 } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
-import {
-  delegationBeltToolFailure,
-  delegationBeltUnavailable,
-  isDelegationBeltTool,
-} from "./delegationToolEvidence.js";
+import * as belt from "./delegationToolEvidence.js";
 import {
   type TransientFailureObservation,
   classifyCompletedCrash,
@@ -93,9 +89,8 @@ export interface BrowserEvidenceState {
  * `ready`/`failed` are filled from the harness's `started` event (its
  * `mcp_servers[<belt>].status`); `toolEvidence` flips when any exact belt tool
  * actually runs. Startup failure lives in this state; an exact non-ok tool
- * result lives in `toolErrors` and independently hard-fails the outcome under
- * INV-030's required-capability exception, while reusing INV-043's exact
- * recovery key.
+ * result lives in `toolErrors` and hard-fails under INV-030 while reusing
+ * INV-043's exact recovery key.
  */
 export interface DelegationBeltState {
   requested: boolean;
@@ -305,17 +300,12 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   if (t.delegationBelt.requested && Array.isArray(ev.payload?.["mcp_servers"])) {
     observeBeltStartup(t, ev);
   }
-  // Belt tool evidence: an exact adapter-neutral belt tool call/result proves
-  // the injected path was used (a real Claudexor sub-run path), which
-  // distinguishes it from a native vendor subagent. Once an attempted belt
-  // tool returns anything except ok, its exact tool+kind+target error remains
-  // a hard belt failure until the SAME operation later succeeds (INV-030's
-  // required-capability exception, using INV-043's recovery key).
-  // A deliverable, foreign tool, or native fallback cannot launder it.
+  // Exact adapter-neutral tool evidence distinguishes the belt from a native
+  // subagent; only the same tool+kind+target success recovers its failure.
   const beltToolEvent =
     t.delegationBelt.requested &&
     t.delegationBelt.serverName &&
-    isDelegationBeltTool(ev.tool, t.delegationBelt.serverName);
+    belt.isDelegationBeltTool(ev.tool, t.delegationBelt.serverName);
   if (beltToolEvent) {
     t.delegationBelt.toolEvidence = true;
   }
@@ -422,29 +412,21 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   if (tool.status === undefined) {
     // A result without a status must never silently count as ok.
     t.statuslessResults += 1;
-    if (beltToolEvent) {
-      t.toolErrors.push({
-        tool: tool.name,
-        kind: tool.kind,
-        target: tool.target ?? null,
-        summary: "required delegation belt tool result omitted status",
-        toolUseId: tool.use_id ?? null,
-        recovered: false,
-      });
-    }
+    if (beltToolEvent)
+      belt.recordDelegationBeltResultFailure(
+        t,
+        tool,
+        "required delegation belt tool result omitted status",
+      );
     return;
   }
   if (tool.status === "cancelled" || tool.status === "denied") {
-    if (beltToolEvent) {
-      t.toolErrors.push({
-        tool: tool.name,
-        kind: tool.kind,
-        target: tool.target ?? null,
-        summary: `required delegation belt tool result marked ${tool.status}`,
-        toolUseId: tool.use_id ?? null,
-        recovered: false,
-      });
-    }
+    if (beltToolEvent)
+      belt.recordDelegationBeltResultFailure(
+        t,
+        tool,
+        `required delegation belt tool result marked ${tool.status}`,
+      );
     if (tool.kind === "web") {
       t.web.attempted = true;
       t.web.tool = tool.name;
@@ -598,7 +580,7 @@ export function setAttemptOutcome(
   // INV-030: after injection, startup failure or an unrecovered exact belt
   // operation is an unsatisfied required capability. It can only ELEVATE
   // severity, never soften into a warning or mask a harder terminal fact.
-  const beltUnavailable = delegationBeltUnavailable(t) || delegationBeltToolFailure(t);
+  const beltUnavailable = belt.delegationBeltUnavailable(t) || belt.delegationBeltToolFailure(t);
   const status: AttemptOutcomeStatus = opts.webRequiredUnsatisfied
     ? "blocked"
     : opts.harnessErrored || contractFailed || beltUnavailable
@@ -675,7 +657,7 @@ export function telemetrySummary(t: AttemptTelemetry): Record<string, unknown> {
             ready: t.delegationBelt.ready,
             failed: t.delegationBelt.failed,
             tool_evidence: t.delegationBelt.toolEvidence,
-            unavailable: delegationBeltUnavailable(t),
+            unavailable: belt.delegationBeltUnavailable(t),
           },
         }
       : {}),
@@ -748,7 +730,7 @@ export function attemptTelemetryRecord(
       gates_passed: t.outcome?.gatesPassed ?? null,
       harness_errored: t.outcome?.harnessErrored ?? false,
       web_required_unsatisfied: t.outcome?.webRequiredUnsatisfied ?? false,
-      delegation_belt_unavailable: delegationBeltUnavailable(t),
+      delegation_belt_unavailable: belt.delegationBeltUnavailable(t),
       tool_warnings_count: t.outcome?.toolWarningsCount ?? warnings.length,
       status: t.outcome?.status ?? (warnings.length > 0 ? "success_with_warnings" : "success"),
       ...(t.outcome?.workState ? { work_state: t.outcome.workState } : {}),
