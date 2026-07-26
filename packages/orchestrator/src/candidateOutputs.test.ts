@@ -57,6 +57,7 @@ describe("candidate produced-output persistence", () => {
     expect(existsSync(join(attemptDir, "produced", ".claudexor-artifacts", "evil.png"))).toBe(
       false,
     );
+    expect(candidateOutputsContainSecret({ worktreePath: worktree, changedPaths: [] })).toBe(false);
   });
 
   it("returns nothing when there is no artifact dir (F4)", () => {
@@ -92,6 +93,56 @@ describe("candidate produced-output persistence", () => {
     } finally {
       chmodSync(path, 0o600);
     }
+  });
+
+  it("treats an unreadable artifact directory as an unprovable secret risk", () => {
+    const worktree = root("claudexor-art-unreadable-dir-");
+    const artifactDir = join(worktree, ".claudexor-artifacts");
+    mkdirSync(artifactDir);
+    writeFileSync(join(artifactDir, "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    chmodSync(artifactDir, 0o000);
+    try {
+      expect(candidateOutputsContainSecret({ worktreePath: worktree, changedPaths: [] })).toBe(
+        true,
+      );
+    } finally {
+      chmodSync(artifactDir, 0o700);
+    }
+  });
+
+  it("rejects raster paths through a symlinked parent directory", () => {
+    const worktree = root("claudexor-art-linked-parent-");
+    const attemptDir = root("claudexor-art-linked-parent-attempt-");
+    const outside = root("claudexor-art-linked-parent-outside-");
+    writeFileSync(join(outside, "private.png"), Buffer.from("outside-private-bytes"));
+    symlinkSync(outside, join(worktree, "screens"));
+
+    expect(
+      candidateOutputsContainSecret({
+        worktreePath: worktree,
+        changedPaths: ["screens/private.png"],
+      }),
+    ).toBe(true);
+    expect(
+      persistCandidateOutputs({
+        worktreePath: worktree,
+        attemptDir,
+        changedPaths: ["screens/private.png"],
+      }),
+    ).toEqual([]);
+    expect(existsSync(join(attemptDir, "produced"))).toBe(false);
+  });
+
+  it("rejects a symlinked claudexor artifact root", () => {
+    const worktree = root("claudexor-art-linked-root-");
+    const attemptDir = root("claudexor-art-linked-root-attempt-");
+    const outside = root("claudexor-art-linked-root-outside-");
+    writeFileSync(join(outside, "private.png"), Buffer.from("outside-private-bytes"));
+    symlinkSync(outside, join(worktree, ".claudexor-artifacts"));
+
+    expect(candidateOutputsContainSecret({ worktreePath: worktree, changedPaths: [] })).toBe(true);
+    expect(collectArtifactDirMedia({ worktreePath: worktree, attemptDir })).toEqual([]);
+    expect(existsSync(join(attemptDir, "produced"))).toBe(false);
   });
 
   it("keeps giant candidate diffs out of the argv prompt without truncation", () => {
