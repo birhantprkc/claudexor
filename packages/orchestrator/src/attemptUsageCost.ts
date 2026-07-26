@@ -66,7 +66,7 @@ export function attemptFailureCost(
       : fallbackCashUsd;
   return {
     totalUsd: carriedCashUsd ?? 0,
-    estimated: true,
+    estimated: false,
     settlement: unknownCostSettlement(fallbackSource, carriedCashUsd),
   };
 }

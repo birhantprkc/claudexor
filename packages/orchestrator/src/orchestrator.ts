@@ -5007,10 +5007,8 @@ export class Orchestrator {
         } catch (err) {
           // Setup failures remain unknown; post-stream persistence failures
           // carry their route-specific settlement from runCandidateInEnvelope.
-          ledger.settle(
-            lease.lease?.lease_id ?? "",
-            attemptFailureCost(err, "attempt-error").settlement,
-          );
+          const failureCost = attemptFailureCost(err, "attempt-error");
+          ledger.settle(lease.lease?.lease_id ?? "", failureCost.settlement);
           log.emit("harness.completed", {
             harness_id: adapter.id,
             attempt_id: attemptId,
@@ -5023,9 +5021,9 @@ export class Orchestrator {
             label: `Attempt ${attempt}`,
             diff: "",
             gates: [],
-            cost: 0,
+            cost: failureCost.totalUsd,
             errored: true,
-            costEstimated: false,
+            costEstimated: failureCost.estimated,
             errors: [safeErrorMessage(err)],
             telemetry: createAttemptTelemetry(
               knobs.webPolicy,
