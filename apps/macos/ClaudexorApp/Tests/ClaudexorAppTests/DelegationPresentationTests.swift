@@ -139,7 +139,9 @@ import Foundation
                 "Sources/ClaudexorApp/DelegationRows.swift"),
             encoding: .utf8)
         let row = try #require(source.components(separatedBy: "struct DelegatedRunRow").last)
-        #expect(row.contains(".frame(maxWidth: .infinity, alignment: .leading)"))
+        let afterTitle = try #require(row.components(separatedBy: "Text(child.title)").last)
+        let titleCell = try #require(afterTitle.components(separatedBy: "Text(receipt.badge)").first)
+        #expect(titleCell.contains(".frame(maxWidth: .infinity, alignment: .leading)"))
         #expect(row.contains(".frame(width: DelegatedRunRowLayout.phaseWidth, alignment: .trailing)"))
         #expect(!row.contains("Spacer(minLength: 0)"))
     }

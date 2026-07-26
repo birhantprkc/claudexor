@@ -125,9 +125,10 @@ removed as dead code), so the app shows no input UI for active runs.
 
 The trailing workspace belongs to the current thread and has three tabs:
 Changes, Artifacts, and Evidence. It aggregates the thread's runs until a receipt
-filters it. Internal run artifacts and project-produced outputs from
-`GET /runs/:id/produced` share the Artifacts gallery, including project preview;
-there is no separate Canvas plane or two-plane Workbench. The composer sends
+filters it. Project-produced outputs from `GET /runs/:id/produced` fill the
+Artifacts gallery, including project preview; internal run-tree artifacts stay
+with diagnostics under Evidence. There is no separate Canvas plane or two-plane
+Workbench. The composer sends
 attachments (file picker + the `screencapture`-backed Capture button) as
 attachment DTOs on turn creation, gated by an available vision-capable route;
 the per-turn browser toggle arms the engine's agent-driven browser (offered
