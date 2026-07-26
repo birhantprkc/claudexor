@@ -8,12 +8,17 @@
  * forever.
  */
 import { join } from "node:path";
-import { DecisionRecord, RunFailureCode, RunOutcomeFacts, type ModeKind } from "@claudexor/schema";
+import { RunFailureCode, RunOutcomeFacts, type ModeKind } from "@claudexor/schema";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { BudgetLedger, BudgetTerminal } from "@claudexor/budget";
 import type { EventLog } from "@claudexor/event-log";
 import { redactSecrets } from "@claudexor/util";
 import { budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
+import {
+  reconcileDecisionBudget,
+  settledBudgetSnapshot,
+  type SettledBudgetSnapshot,
+} from "./decisionBudget.js";
 import { reconcileDecisionTerminal } from "./decisionTerminalReconciliation.js";
 import type { OrchestratorResult } from "./orchestrator.js";
 import {
@@ -67,42 +72,6 @@ export function announcedRunContext(
   };
 }
 
-interface SettledBudgetSnapshot {
-  spendUsd: number | null;
-  valuationUsd: number | null;
-  estimated: boolean;
-  valuationKnowledge: "exact" | "estimated" | "unknown";
-}
-
-function settledBudgetSnapshot(context: AnnouncedRunContext): SettledBudgetSnapshot {
-  const read = (value: (() => number) | undefined): number | null => {
-    try {
-      const result = value?.();
-      return typeof result === "number" && Number.isFinite(result) ? result : null;
-    } catch {
-      return null;
-    }
-  };
-  let estimated = false;
-  let valuationKnowledge: "exact" | "estimated" | "unknown" = "unknown";
-  try {
-    estimated = context.spendEstimated?.() === true;
-  } catch {
-    estimated = true;
-  }
-  try {
-    valuationKnowledge = context.valuationKnowledge?.() ?? "unknown";
-  } catch {
-    valuationKnowledge = "unknown";
-  }
-  return {
-    spendUsd: read(context.spend),
-    valuationUsd: read(context.valuation),
-    estimated,
-    valuationKnowledge,
-  };
-}
-
 function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
   try {
     return context.recheckBudgetAfterBarrier?.() === true;
@@ -112,48 +81,6 @@ function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
     // of touching an ordinary Agent's already-terminal artifacts.
     return false;
   }
-}
-
-/** A Delegate family may settle child cash during the terminal barrier, after
- * strategy arbitration wrote decision.yaml. Reconcile that existing artifact
- * in place so its self-contained budget and optional terminal facts match the
- * drained ledger. Runs without a decision artifact are intentionally no-ops. */
-function reconcileDecisionBudget(
-  context: AnnouncedRunContext,
-  budget: SettledBudgetSnapshot,
-  terminal?: { facts: RunOutcomeFacts; why: string },
-): void {
-  const path = join(context.paths.arbitrationDir, "decision.yaml");
-  const current = context.store.readYaml<unknown>(path);
-  if (!current || typeof current !== "object" || Array.isArray(current)) return;
-  const record = current as Record<string, unknown>;
-  const priorBudget =
-    record["budget_summary"] && typeof record["budget_summary"] === "object"
-      ? (record["budget_summary"] as Record<string, unknown>)
-      : {};
-  const reconciled = {
-    ...record,
-    ...(terminal
-      ? {
-          facts: terminal.facts,
-          why_winner: terminal.why,
-          apply_recommendation: "continue",
-        }
-      : {}),
-    budget_summary: {
-      ...priorBudget,
-      spend_usd: budget.spendUsd,
-      cash_usd: budget.spendUsd,
-      valuation_usd: budget.valuationUsd,
-      estimated: budget.estimated,
-      valuation_knowledge: budget.valuationKnowledge,
-    },
-  };
-  // Validate the canonical decision fields, but write the reconciled original
-  // object so forward-compatible extension receipts (for example
-  // delivery_receipt) are not stripped by Zod's default object projection.
-  DecisionRecord.parse(reconciled);
-  context.store.writeYaml(path, reconciled);
 }
 
 function postDrainBudgetFailure(
