@@ -405,7 +405,7 @@ revision/etag, already logged above), are intentionally not duplicated.
 These are the WARN-or-below findings from the frozen-candidate, Fable-high,
 synthesis, and exact-SHA confirmation waves. They do not expand the 3.1.2
 blocker fix batch; represented dispositions are X303-X343, X360, X367-X377,
-and X382-X393 in the findings ledger.
+and X382-X410 in the findings ledger.
 
 - Route bounded Delegate child summaries through the Control API's cached,
   fail-soft projector so one corrupt legacy child cannot 500 its parent detail.
@@ -474,3 +474,15 @@ and X382-X393 in the findings ledger.
   text and normalize the indented INV-062 paragraph.
 - Convert explicit in-place capture/rollback exceptions into sanitized
   `manual_cleanup` WorkProduct receipts while retaining the primary cause.
+- Deduplicate candidate media paths shared by answer markdown and the owned
+  artifact directory before exclusive persistence.
+- Use no-index-aware reverse-failure copy so an ordinary apply error does not
+  imply that a concurrent writer changed the target.
+- Make Git binary-object scanning use the same byte-faithful convention as the
+  plain-diff binary scanner.
+- Include README in the Pages metadata-check trigger and `site/llms.txt` in the
+  legacy-origin coverage set.
+- Remove the dead `canvas#field` selector left by the ambient-background site
+  redesign.
+- Reconcile the process-local Delegate count reservation when a runner throws
+  before creating a child, and give count-cap refusal its own accurate remedy.
