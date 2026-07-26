@@ -2,14 +2,23 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import {
+  streamExpectationViolations,
+  validateTypedStream,
+  type FixtureStreamExpectations,
+} from "@claudexor/core";
 import { HarnessEvent } from "@claudexor/schema";
+import { parse as parseYaml } from "yaml";
 import { createCursorParser } from "./parse.js";
 
 const PLAN_FIXTURES = fileURLToPath(new URL("../fixtures/plan", import.meta.url));
+const fixtureManifest = parseYaml(
+  readFileSync(fileURLToPath(new URL("../fixtures/manifest.yaml", import.meta.url)), "utf8"),
+) as { fixtures: Record<string, { expectations?: FixtureStreamExpectations }> };
 
 /** Replay a plan-mode fixture through the stateful cursor parser. */
-function replayPlan(fixture: string): HarnessEvent[] {
-  const parse = createCursorParser("vendor_native", "native_session", true);
+function replayPlan(fixture: string, nativePlanMode = true): HarnessEvent[] {
+  const parse = createCursorParser("vendor_native", "native_session", true, nativePlanMode);
   return readFileSync(join(PLAN_FIXTURES, fixture), "utf8")
     .split("\n")
     .filter(Boolean)
@@ -101,36 +110,35 @@ describe("cursor plan-mode createPlan recovery (Defect 1)", () => {
   });
 
   it("read-only Ask transport never lets createPlan fallback replace the final WorkReport", () => {
-    const parse = createCursorParser("vendor_native", "native_session", true, false);
     const envelope =
       '```json\n{"work_report":{"state":"completed","required_inputs":[]},"output":"PLAN_OK"}\n```';
-    const frames = [
-      {
-        type: "tool_call",
-        subtype: "started",
-        call_id: "p1",
-        tool_call: { createPlanToolCall: { args: { plan: "STALE_NATIVE_PLAN" } } },
-      },
-      {
-        type: "tool_call",
-        subtype: "completed",
-        call_id: "p1",
-        tool_call: {
-          createPlanToolCall: {
-            args: { plan: "STALE_NATIVE_PLAN" },
-            result: { success: {}, planUri: "" },
-          },
-        },
-      },
-      { type: "assistant", message: { content: [{ text: envelope }] } },
-      { type: "result", subtype: "success" },
-    ];
-    const events = frames.flatMap((frame) => parse(frame, "ses-ask-plan") ?? []);
+    const events = replayPlan("plan-ask-createplan-precedence.jsonl", false);
     const final = finalMessage(events);
     expect(final?.text).toBe(envelope);
     expect(final?.text).not.toContain("STALE_NATIVE_PLAN");
     expect(final?.payload?.["final_source"]).toBe("assistant_message");
     expect(final?.payload?.["plan_recovered"]).toBeUndefined();
+    expect(events.some((event) => event.payload?.["plan_uri_fallback"] === true)).toBe(false);
+  });
+
+  it("replays the recorded native Ask WorkReport stream with conformance parity", () => {
+    const fixture = "plan-ask-workreport-recorded.jsonl";
+    const events = replayPlan(fixture, false);
+    for (const event of events) expect(() => HarnessEvent.parse(event)).not.toThrow();
+
+    const expectations = fixtureManifest.fixtures[`plan/${fixture}`]?.expectations;
+    expect(expectations).toBeTruthy();
+    expect(streamExpectationViolations(events, expectations!)).toEqual([]);
+    const stats = validateTypedStream(events);
+    expect(stats.started).toBeGreaterThan(0);
+    expect(stats.toolCalls).toBeGreaterThan(0);
+    expect(stats.toolResults).toBeGreaterThan(0);
+    expect(stats.statuslessToolResults).toBe(0);
+    expect(stats.usageEvents).toBeGreaterThan(0);
+
+    const final = finalMessage(events);
+    expect(final?.text).toContain('"output":"PLAN_FIXTURE_OK"');
+    expect(final?.payload?.["final_source"]).toBe("assistant_message");
     expect(events.some((event) => event.payload?.["plan_uri_fallback"] === true)).toBe(false);
   });
 });

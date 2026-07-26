@@ -1,7 +1,6 @@
-# Fixture provenance manifest. SYNTHETIC-ONLY today: no recorded
-# real cursor-agent stream exists yet (the CLI is doctor-unavailable on the
-# recording machine); record one when a live route is available and stamp its
-# version here. The freshness gate discloses this gap on every run.
+# Fixture provenance manifest. Recorded streams are sanitized: request/session
+# ids, timestamps, paths, model narration, and tool payload contents are replaced
+# with neutral placeholders while frame types, shapes, and ordering stay intact.
 #
 # `expectations` (W3.8) are the STREAM SEMANTICS the conformance test asserts
 # through core streamExpectationViolations. Cursor has no typed rate-limit
@@ -34,4 +33,18 @@ fixtures:
   plan/plan-valid-uri.jsonl:
     source: synthetic
   plan/plan-no-plan.jsonl:
+    source: synthetic
+  plan/plan-ask-workreport-recorded.jsonl:
+    source: recorded
+    cli_version: "2026.07.23-e383d2b"
+    recorded_at: "2026-07-26"
+    sanitized: "ids, timestamps, paths, narration, tool payload contents"
+    expectations:
+      final_messages: 1
+      final_source: "assistant_message"
+      final_is_last_message: true
+      typed_rate_limit: false
+  # Defensive shape: Ask does not normally emit createPlan, but a stale/vendor
+  # frame must never outrank the final model-authored WorkReport.
+  plan/plan-ask-createplan-precedence.jsonl:
     source: synthetic
