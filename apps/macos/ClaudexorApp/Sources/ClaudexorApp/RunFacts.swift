@@ -128,8 +128,8 @@ enum RunFacts {
 
     /// The DETAILS facts: real evidence that does not belong in the primary
     /// row — provenance, mode, model mismatch, access, output state,
-    /// web evidence, browser requirement. Rendered by the header's Details
-    /// disclosure; empty entries are simply absent (honest degradation).
+    /// web evidence, browser requirement. Rendered in the run-filtered
+    /// workspace facts row; empty entries are simply absent (honest degradation).
     static func headerDetails(_ task: TaskRun) -> [Fact] {
         var facts: [Fact] = []
         facts.append(Fact(id: "mode", text: task.mode.label, glyph: task.mode.glyph,
