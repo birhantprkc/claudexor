@@ -4,6 +4,7 @@ import {
   constants,
   copyFileSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -45,18 +46,38 @@ function writeNoFollow(path: string, data: string | Buffer, mode: number, replac
   }
 }
 
-function rasterBytesIfSafe(source: string, stat: Stats): Buffer | null {
-  if (!stat.isFile() || stat.size > MAX_OUTPUT_BYTES) return null;
-  const bytes = readFileSync(source);
-  return containsSecretLikeToken(bytes.toString("latin1")) ? null : bytes;
+function rasterBytesIfSafe(
+  source: string,
+  maxBytes = MAX_OUTPUT_BYTES,
+): {
+  bytes: Buffer;
+  mode: number;
+} | null {
+  let fd: number;
+  try {
+    fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ELOOP") return null;
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const bytes = readFileSync(fd);
+    if (bytes.length > maxBytes || containsSecretLikeToken(bytes.toString("latin1"))) return null;
+    return { bytes, mode: stat.mode & 0o777 };
+  } finally {
+    closeSync(fd);
+  }
 }
 
-function copyRasterIfSafe(source: string, target: string, stat: Stats): boolean {
-  const bytes = rasterBytesIfSafe(source, stat);
-  if (!bytes) return false;
+function copyRasterIfSafe(source: string, target: string, maxBytes: number): number | null {
+  const safe = rasterBytesIfSafe(source, maxBytes);
+  if (!safe) return null;
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-  writeNoFollow(target, bytes, stat.mode & 0o777, false);
-  return true;
+  writeNoFollow(target, safe.bytes, safe.mode, false);
+  return safe.bytes.length;
 }
 
 /** Stage large synthesis evidence in the envelope, returning an idempotent
@@ -121,14 +142,14 @@ export function persistCandidateOutputs(input: {
     if (!RASTER_OUTPUT_EXTENSIONS.has(extname(relative).toLowerCase())) continue;
     const source = resolve(root, relative);
     if (source !== root && !source.startsWith(root + sep)) continue;
-    if (!existsSync(source)) continue;
-    // lstat (not stat): a candidate-created symlink must never make output
-    // preservation copy a host file outside the envelope.
-    const stat = lstatSync(source);
-    if (total + stat.size > MAX_TOTAL_BYTES) continue;
     const target = join(input.attemptDir, "produced", relative);
-    if (!copyRasterIfSafe(source, target, stat)) continue;
-    total += stat.size;
+    const copied = copyRasterIfSafe(
+      source,
+      target,
+      Math.min(MAX_OUTPUT_BYTES, MAX_TOTAL_BYTES - total),
+    );
+    if (copied === null) continue;
+    total += copied;
     preserved.push(relative);
   }
   return preserved;
@@ -169,11 +190,15 @@ export function collectArtifactDirMedia(input: {
         continue;
       }
       if (!RASTER_OUTPUT_EXTENSIONS.has(extname(name).toLowerCase())) continue;
-      if (total + stat.size > MAX_TOTAL_BYTES) continue;
       const rel = pathRelative(root, abs).split("\\").join("/");
       const target = join(input.attemptDir, "produced", rel);
-      if (!copyRasterIfSafe(abs, target, stat)) continue;
-      total += stat.size;
+      const copied = copyRasterIfSafe(
+        abs,
+        target,
+        Math.min(MAX_OUTPUT_BYTES, MAX_TOTAL_BYTES - total),
+      );
+      if (copied === null) continue;
+      total += copied;
       preserved.push(rel);
     }
   };
@@ -204,8 +229,9 @@ export function candidateOutputsContainSecret(input: {
     const source = resolve(root, relative);
     if (source !== root && !source.startsWith(root + sep)) continue;
     const stat = lstatIfPresent(source);
-    if (!stat || stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_OUTPUT_BYTES) continue;
-    if (containsSecretLikeToken(readFileSync(source).toString("latin1"))) return true;
+    if (!stat || stat.isSymbolicLink()) continue;
+    const safe = rasterBytesIfSafe(source);
+    if (!safe && stat.isFile() && stat.size <= MAX_OUTPUT_BYTES) return true;
   }
   return false;
 }

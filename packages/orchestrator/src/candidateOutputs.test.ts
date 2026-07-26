@@ -64,6 +64,21 @@ describe("candidate produced-output persistence", () => {
     expect(collectArtifactDirMedia({ worktreePath: worktree, attemptDir })).toEqual([]);
   });
 
+  it("does not persist a raster larger than the per-file byte ceiling", () => {
+    const worktree = root("claudexor-art-large-");
+    const attemptDir = root("claudexor-art-large-attempt-");
+    mkdirSync(join(worktree, ".claudexor-artifacts"), { recursive: true });
+    writeFileSync(
+      join(worktree, ".claudexor-artifacts", "large.png"),
+      Buffer.alloc(16 * 1024 * 1024 + 1),
+    );
+
+    expect(collectArtifactDirMedia({ worktreePath: worktree, attemptDir })).toEqual([]);
+    expect(existsSync(join(attemptDir, "produced", ".claudexor-artifacts", "large.png"))).toBe(
+      false,
+    );
+  });
+
   it("keeps giant candidate diffs out of the argv prompt without truncation", () => {
     const huge = "diff-line\n".repeat(100_000);
     const packet = buildFileBackedSynthesisInput({

@@ -562,6 +562,23 @@ describe("WorkspaceManager", () => {
     expect(existsSync(join(projectRuntimeDir(dir), "workspaces", "t-ip", "converge"))).toBe(false);
   });
 
+  it("flags a secret-bearing binary postimage in a non-git in-place directory", async () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-inplace-binary-"));
+    writeFileSync(join(dir, "README.md"), "plain folder\n");
+    const mgr = new WorkspaceManager(dir);
+    const env = await mgr.create({ taskId: "t-bin", attemptId: "a01", inPlace: true });
+    writeFileSync(
+      join(dir, "LEAK.bin"),
+      Buffer.concat([Buffer.from([0]), Buffer.from(`sk-${"z".repeat(24)}`)]),
+    );
+
+    const captured = await mgr.captureDiff(env);
+
+    expect(captured.diff).toContain("Binary files");
+    expect(captured.binarySecretLike).toBe(true);
+    await mgr.dispose(env);
+  });
+
   it("in-place non-git: header relativization never rewrites hunk CONTENT that looks like a header (INV-041)", async () => {
     const dir = reapMk(join(tmpdir(), "claudexor-inplace-fidelity-"));
     // Content lines that RENDER as `--- `/`+++ ` in a unified diff: a removed

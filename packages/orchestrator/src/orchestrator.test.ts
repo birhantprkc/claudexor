@@ -10333,6 +10333,48 @@ describe("delegation belt injection (D32)", () => {
     expect(treeContainsBytes(res.runDir, secret)).toBe(false);
   });
 
+  it("refuses a secret-bearing non-Git binary output without persisting it", async () => {
+    const repo = reapMk(join(tmpdir(), "claudexor-secret-nongit-binary-"));
+    writeFileSync(join(repo, "README.md"), "# test\n");
+    const secret = `sk-${"i".repeat(24)}`;
+    const adapter = delegatingAdapter(
+      "deleg",
+      true,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      (cwd) =>
+        writeFileSync(
+          join(cwd, "LEAK.bin"),
+          Buffer.concat([Buffer.from([0]), Buffer.from(secret), Buffer.from([0])]),
+        ),
+    );
+    const orch = new Orchestrator({
+      registry: new Map([["deleg", adapter]]),
+      reviewers: reviewers(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["deleg"],
+      attempts: 2,
+      inPlace: true,
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(existsSync(join(repo, "LEAK.bin"))).toBe(true);
+    expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+    expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
+    expect(readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8")).toContain(
+      "secret_recovery: manual_cleanup",
+    );
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+  });
+
   it.each(["replace", "delete"] as const)(
     "refuses a binary patch whose $case reverse payload contains a secret",
     async (operation) => {

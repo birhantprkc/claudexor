@@ -96,8 +96,9 @@ a revert anchor, then emits the failed terminal; this records unavoidable live
 bytes honestly without treating them as reviewed success. A secret-bearing
 in-place diff takes the INV-062 exception before any candidate artifact or Git
 post-snapshot: the engine attempts an exact checked reverse apply from the
-transient diff after scanning immutable binary preimages/postimages and textual
-patch bytes. Git-backed in-place output remains `applied_review_blocked` plus
+  transient diff after scanning immutable binary preimages/postimages and textual
+  patch bytes. Non-Git binary stubs are scanned from a bounded no-follow live
+  descriptor and fail closed. Git-backed in-place output remains `applied_review_blocked` plus
 manual cleanup even after a successful worktree rollback because vendor-written
 index/ref/object state cannot be disproved post hoc; the engine never persists
 the patch or anchor and never claims false revertability. In a mixed

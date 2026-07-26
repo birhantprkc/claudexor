@@ -168,7 +168,9 @@ invariant or owner decision before proceeding.
   is the narrow exception: a secret-bearing in-place diff is never persisted as
   a patch or anchor and is immediately reverse-applied through the exact
   postimage check. The diff owner scans immutable binary preimages and
-  postimages as well as text before deleting its private capture. A Git-backed
+  postimages as well as text before deleting its private capture; non-Git
+  binary stubs scan the live postimage through a bounded no-follow descriptor
+  and fail closed when it cannot be proven safe. A Git-backed
   in-place refusal remains a sanitized `adopted:true`/
   `applied_review_blocked` manual-cleanup receipt even when worktree rollback
   succeeds, because harness-written index, ref, or object state cannot be

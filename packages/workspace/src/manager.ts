@@ -7,7 +7,7 @@ import { WorkspaceEnvelope as WorkspaceEnvelopeSchema } from "@claudexor/schema"
 import { CLAUDEXOR_ARTIFACT_DIR, runCaptureRaw, WorkspaceError } from "@claudexor/core";
 import { ensureDir, newId, nowIso, projectRuntimeDir } from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
-import { relativizePlainDiffHeaders } from "./plain-diff.js";
+import { plainDiffBinarySecretLike, relativizePlainDiffHeaders } from "./plain-diff.js";
 import {
   CLAUDE_BRIDGE_BASENAME,
   bridgeCreatedMarkerMatches,
@@ -383,7 +383,7 @@ export class WorkspaceManager {
             relativized.length > CAP
               ? relativized.slice(0, CAP) + "\n... [diff truncated]\n"
               : relativized,
-          binarySecretLike: false,
+          binarySecretLike: plainDiffBinarySecretLike(relativized, env.repo_root),
         };
       } catch {
         // best-effort: if `diff` is unavailable the loop still works (reviewers read the live tree)

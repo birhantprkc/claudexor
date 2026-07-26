@@ -1,4 +1,9 @@
-import { existsSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import { parseUnifiedDiff } from "@claudexor/core";
+import { containsSecretLikeToken } from "@claudexor/util";
+
+const MAX_BINARY_SECRET_SCAN_BYTES = 32 * 1024 * 1024;
 
 /** Rewrite only structural GNU/BSD `diff -ruN` headers to git-style paths.
  * Missing-side headers become `/dev/null`, making added/deleted files exactly
@@ -50,4 +55,34 @@ export function relativizePlainDiffHeaders(
     }
   }
   return lines.join("\n");
+}
+
+/** `diff -ruN` carries no binary payload, so inspect each live binary
+ * postimage directly. Oversized, non-regular, or unreadable bytes fail closed. */
+export function plainDiffBinarySecretLike(text: string, liveRoot: string): boolean {
+  const root = resolve(liveRoot);
+  for (const file of parseUnifiedDiff(text).files) {
+    if (!file.binaryStub || file.deleted || !file.newPath) continue;
+    const source = resolve(root, file.newPath);
+    if (source !== root && !source.startsWith(root + sep)) return true;
+    let fd: number;
+    try {
+      fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return true;
+    }
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > MAX_BINARY_SECRET_SCAN_BYTES) return true;
+      const bytes = readFileSync(fd);
+      if (bytes.length > MAX_BINARY_SECRET_SCAN_BYTES) return true;
+      if (containsSecretLikeToken(bytes.toString("latin1"))) return true;
+    } catch {
+      return true;
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return false;
 }
