@@ -402,9 +402,10 @@ revision/etag, already logged above), are intentionally not duplicated.
 
 ## 3.1.2 external-review advisories (2026-07-26)
 
-These are the WARN-or-below findings from the single frozen-candidate wave and
-the owner-requested Fable-high check. They do not expand the 3.1.2 blocker fix
-batch; exact reviewer dispositions are X303-X343 in the findings ledger.
+These are the WARN-or-below findings from the frozen-candidate, Fable-high,
+synthesis, and exact-SHA confirmation waves. They do not expand the 3.1.2
+blocker fix batch; represented dispositions are X303-X343, X360, X367-X377,
+and X382-X393 in the findings ledger.
 
 - Route bounded Delegate child summaries through the Control API's cached,
   fail-soft projector so one corrupt legacy child cannot 500 its parent detail.
@@ -454,3 +455,22 @@ batch; exact reviewer dispositions are X303-X343 in the findings ledger.
 - Decouple `RunDelegationInfo` schema validity from exact remediation prose, or
   normalize the canonical copy at the projection boundary for future mixed
   versions.
+- Align the public in-place rollback prose and non-Git architecture fallback
+  with the truthful `manual_cleanup` receipt used when exact capture/reversal
+  cannot be proven.
+- Decide whether one secret-refused disposable candidate should dominate an
+  otherwise healthy best-of race, then pin the mixed-candidate outcome.
+- Couple raster detection and persistence to one parent-directory authority so
+  a concurrent component swap cannot change the bytes or path after approval.
+- Generate complete package changelog notes for the workspace, orchestrator,
+  and MCP public surfaces changed in the Delegate recovery.
+- Derive non-Git missing-side headers from immutable capture evidence rather
+  than rechecking live path existence after `diff` completes.
+- Scan the full non-Git text diff for secret-like output before applying the
+  200,000-character presentation bound, with beyond/straddling-boundary tests.
+- Reuse the shared candidate-output refusal copy in thread delivery so binary
+  refusals do not claim that the textual patch contained the token.
+- Finish the legacy-worktree wording migration across Bible and architecture
+  text and normalize the indented INV-062 paragraph.
+- Convert explicit in-place capture/rollback exceptions into sanitized
+  `manual_cleanup` WorkProduct receipts while retaining the primary cause.
