@@ -312,7 +312,16 @@ export async function captureWorkingTreeTransient(
     } catch (cleanupError) {
       // A cleanup failure is terminal on its own, but must not erase the typed
       // capture error that explains the primary failure.
-      if (primaryError === undefined) throw cleanupError;
+      if (primaryError === undefined) {
+        const terminal = new WorkspaceError("transient diff scratch cleanup failed", {
+          cause: cleanupError,
+        });
+        Object.defineProperty(terminal, "cleanupError", {
+          value: cleanupError,
+          enumerable: false,
+        });
+        throw terminal;
+      }
       if (primaryError instanceof Error) {
         try {
           Object.defineProperty(primaryError, "cleanupError", {

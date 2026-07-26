@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { WorkspaceError } from "@claudexor/core";
 import type { WorkspaceEnvelope } from "@claudexor/schema";
 import type { WorkspaceManager } from "@claudexor/workspace";
 
@@ -42,8 +43,12 @@ describe("secret diff quarantine failure receipts", () => {
   );
 
   it("requires manual cleanup when isolated capture scratch cleanup is unproven", async () => {
-    const error = Object.assign(new Error("sensitive primary capture error"), {
-      cleanupError: new Error("sensitive cleanup error"),
+    const error = new WorkspaceError("transient diff scratch cleanup failed", {
+      cause: new Error("sensitive cleanup error"),
+    });
+    Object.defineProperty(error, "cleanupError", {
+      value: new Error("sensitive cleanup error"),
+      enumerable: false,
     });
     const wsm = {
       captureDiff: async () => {

@@ -69,8 +69,11 @@ describe("transient Git capture cleanup", () => {
   it("keeps a cleanup-only failure terminal", async () => {
     const { repo, base } = initRepo();
 
-    await expect(captureWorkingTreeTransient(repo, base)).rejects.toThrow(
-      /scratch cleanup sentinel/,
+    const error = await captureWorkingTreeTransient(repo, base).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WorkspaceError);
+    expect((error as Error).message).toBe("transient diff scratch cleanup failed");
+    expect((error as Error & { cleanupError?: Error }).cleanupError?.message).toBe(
+      "scratch cleanup sentinel",
     );
   });
 });
