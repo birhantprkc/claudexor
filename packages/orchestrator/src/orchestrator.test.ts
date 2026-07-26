@@ -854,9 +854,9 @@ describe("Orchestrator", () => {
     });
 
     expectBudgetSplit(res.runDir, 0.25, 0.75);
-    expect(readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8")).toContain(
-      "cost_usd: 1",
-    );
+    const attempt = readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8");
+    expect(attempt).toContain("cost_usd: 1");
+    expect(attempt).toContain("cost_estimated: true");
   }, 30_000);
 
   it("preserves mixed-route settlement when synthesis persistence fails", async () => {
