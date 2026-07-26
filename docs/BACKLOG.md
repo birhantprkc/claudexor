@@ -470,3 +470,13 @@ authoritative for each exact disposition.
   by workspace capture and revert logic.
 - Resolve the duplicated historical X227 ledger identifier while preserving
   both original wave references and dispositions.
+- Distinguish a belt runner throw before daemon child creation from a response
+  failure after the server-owned child exists before releasing the local count
+  slot; the daemon family authority remains the hard eight-child owner.
+- Extract one small route-certainty interval primitive shared by candidate and
+  reviewer accounting after 3.1.2, without changing the current fail-closed
+  semantics.
+- Restore complete historical X194 and X200 finding summaries in the ledger
+  and backlog from retained reports.
+- Add explicit finite-cap route-disclosure pins for every optional adapter lane
+  so route-silent streams remain an intentional typed refusal.
