@@ -663,6 +663,89 @@ describe("Orchestrator", () => {
     expect(existsSync(join(res.runDir, "final", "work_product.yaml"))).toBe(true);
   });
 
+  it("takes decision cash certainty from the ledger on race, convergence, and no-work paths", async () => {
+    const nativeEstimated = (id: string): HarnessAdapter => {
+      const base = diffImplementer(id);
+      return {
+        ...base,
+        async *run(spec) {
+          for await (const event of base.run(spec)) {
+            yield {
+              ...event,
+              credential_route: "vendor_native" as const,
+              ...(event.usage ? { usage: { ...event.usage, estimated: true } } : {}),
+            };
+          }
+        },
+      };
+    };
+    const assertExactCashDecision = (runDir: string) => {
+      const decision = readFileSync(join(runDir, "arbitration", "decision.yaml"), "utf8");
+      expect(decision).toMatch(/estimated: false/);
+      expect(decision).toMatch(/valuation_knowledge: estimated/);
+    };
+
+    const raceRepo = await initRepo();
+    const race = await new Orchestrator({
+      registry: new Map([["native", nativeEstimated("native")]]),
+      reviewers: reviewers(),
+    }).run({
+      repoRoot: raceRepo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: ["native"],
+      n: 2,
+    });
+    assertExactCashDecision(race.runDir);
+
+    const convergenceRepo = await initRepo();
+    const convergence = await new Orchestrator({
+      registry: new Map([["native", nativeEstimated("native")]]),
+      reviewers: reviewers(),
+    }).run({
+      repoRoot: convergenceRepo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: ["native"],
+      attempts: 2,
+    });
+    assertExactCashDecision(convergence.runDir);
+
+    const failedPaid: HarnessAdapter = {
+      ...realLikeAdapter("paid-failure"),
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          credential_route: "managed_api_key",
+        };
+        yield {
+          type: "usage",
+          session_id: spec.session_id,
+          ts,
+          credential_route: "managed_api_key",
+          usage: { cost_usd: 0.02, estimated: true },
+        };
+        yield { type: "error", session_id: spec.session_id, ts, error: "failed after usage" };
+      },
+    };
+    const noWorkRepo = await initRepo();
+    const noWork = await new Orchestrator({
+      registry: new Map([[failedPaid.id, failedPaid]]),
+      reviewers: [],
+    }).run({
+      repoRoot: noWorkRepo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: [failedPaid.id],
+    });
+    expect(readFileSync(join(noWork.runDir, "arbitration", "decision.yaml"), "utf8")).toMatch(
+      /estimated: true/,
+    );
+  }, 30_000);
+
   it("D-16 r7: a context-exhausted candidate (partial diff, no completed report) terminalizes interrupted and is NEVER adopted", async () => {
     // The D-16 work-state veto hole: finalizeAttempt returns outcomeClass
     // "interrupted" for a capacity-exhausted attempt with a partial diff and no

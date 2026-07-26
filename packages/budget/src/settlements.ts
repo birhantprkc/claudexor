@@ -21,19 +21,22 @@ export function usageCostSettlement(
 export function reviewUsageCostSettlement(
   cashUsd: number,
   valuationUsd: number,
-  estimated: boolean,
+  knowledge: { cash: CostKnowledge; valuation: CostKnowledge },
   provenance: string[],
   unknownUsd = 0,
 ): BudgetSettlement {
   const observed = cashUsd > 0 || valuationUsd > 0 || unknownUsd > 0;
   const normalizedValuation = Math.max(0, valuationUsd);
+  const aggregateKnowledge = mergeKnowledge([
+    knowledge.cash,
+    ...(normalizedValuation > 0 || unknownUsd > 0 ? [knowledge.valuation] : []),
+  ]);
   return {
-    knowledge: observed && unknownUsd === 0 ? measuredKnowledge(estimated) : "unknown",
-    cashKnowledge:
-      unknownUsd > 0 ? "unknown" : cashUsd > 0 ? measuredKnowledge(estimated) : "exact",
+    knowledge: unknownUsd > 0 ? "unknown" : aggregateKnowledge,
+    cashKnowledge: unknownUsd > 0 ? "unknown" : knowledge.cash,
     ...(normalizedValuation > 0 || unknownUsd > 0
       ? {
-          valuationKnowledge: unknownUsd > 0 ? ("unknown" as const) : measuredKnowledge(estimated),
+          valuationKnowledge: unknownUsd > 0 ? ("unknown" as const) : knowledge.valuation,
         }
       : {}),
     source: observed ? "review-usage" : "review-usage-missing",
@@ -41,6 +44,11 @@ export function reviewUsageCostSettlement(
     cashUsd: Math.max(0, cashUsd),
     ...(normalizedValuation > 0 ? { valuationUsd: normalizedValuation } : {}),
   };
+}
+
+function mergeKnowledge(values: readonly CostKnowledge[]): CostKnowledge {
+  if (values.includes("unknown")) return "unknown";
+  return values.includes("estimated") ? "estimated" : "exact";
 }
 
 export function attemptUsageCostSettlement(

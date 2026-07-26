@@ -36,6 +36,7 @@ export interface AnnouncedRunContext {
   spend?: () => number;
   valuation?: () => number;
   spendEstimated?: () => boolean;
+  valuationKnowledge?: () => "exact" | "estimated" | "unknown";
   /** Re-evaluated after Delegate child drain. A child settlement can make the
    * shared family overshoot or become unverifiable after strategy synthesis. */
   budgetTerminal?: () => BudgetTerminal;
@@ -60,6 +61,7 @@ export function announcedRunContext(
     spend: () => ledger.spend(),
     valuation: () => ledger.valuation(),
     spendEstimated: () => ledger.estimated(),
+    valuationKnowledge: () => ledger.valuationKnowledge(),
     budgetTerminal: () => ledger.terminal(),
     recheckBudgetAfterBarrier: hasDelegateAuthority,
   };
@@ -69,6 +71,7 @@ interface SettledBudgetSnapshot {
   spendUsd: number | null;
   valuationUsd: number | null;
   estimated: boolean;
+  valuationKnowledge: "exact" | "estimated" | "unknown";
 }
 
 function settledBudgetSnapshot(context: AnnouncedRunContext): SettledBudgetSnapshot {
@@ -81,15 +84,22 @@ function settledBudgetSnapshot(context: AnnouncedRunContext): SettledBudgetSnaps
     }
   };
   let estimated = false;
+  let valuationKnowledge: "exact" | "estimated" | "unknown" = "unknown";
   try {
     estimated = context.spendEstimated?.() === true;
   } catch {
     estimated = true;
   }
+  try {
+    valuationKnowledge = context.valuationKnowledge?.() ?? "unknown";
+  } catch {
+    valuationKnowledge = "unknown";
+  }
   return {
     spendUsd: read(context.spend),
     valuationUsd: read(context.valuation),
     estimated,
+    valuationKnowledge,
   };
 }
 
@@ -136,6 +146,7 @@ function reconcileDecisionBudget(
       cash_usd: budget.spendUsd,
       valuation_usd: budget.valuationUsd,
       estimated: budget.estimated,
+      valuation_knowledge: budget.valuationKnowledge,
     },
   };
   // Validate the canonical decision fields, but write the reconciled original

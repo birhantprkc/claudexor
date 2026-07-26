@@ -253,7 +253,9 @@ describe("BudgetLedger", () => {
     });
     ledger.settle(
       lease.lease!.lease_id,
-      reviewUsageCostSettlement(0.25, 0.75, true, ["review:panel"]),
+      reviewUsageCostSettlement(0.25, 0.75, { cash: "exact", valuation: "estimated" }, [
+        "review:panel",
+      ]),
     );
     expect(ledger.spend()).toBe(0.25);
     expect(ledger.valuation()).toBe(0.75);
@@ -268,7 +270,9 @@ describe("BudgetLedger", () => {
     }).lease!;
     subscription.settle(
       subscriptionLease.lease_id,
-      reviewUsageCostSettlement(0, 0.75, true, ["review:subscription"]),
+      reviewUsageCostSettlement(0, 0.75, { cash: "exact", valuation: "estimated" }, [
+        "review:subscription",
+      ]),
     );
     expect(subscription.spend()).toBe(0);
     expect(subscription.estimated()).toBe(false);
@@ -281,11 +285,33 @@ describe("BudgetLedger", () => {
       intent: "review",
       harnessId: "review-panel",
     }).lease!;
-    api.settle(apiLease.lease_id, reviewUsageCostSettlement(0.25, 0, false, ["review:api"]));
+    api.settle(
+      apiLease.lease_id,
+      reviewUsageCostSettlement(0.25, 0, { cash: "exact", valuation: "unknown" }, ["review:api"]),
+    );
     expect(api.spend()).toBe(0.25);
     expect(api.estimated()).toBe(false);
     expect(api.valuation()).toBe(0);
     expect(api.valuationKnowledge()).toBe("unknown");
+  });
+
+  it("fails a finite review closed when a paid route reports no cash usage", () => {
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const lease = ledger.reserve({
+      taskId: "missing-paid-review-usage",
+      intent: "review",
+      harnessId: "review-panel",
+    }).lease!;
+    ledger.settle(
+      lease.lease_id,
+      reviewUsageCostSettlement(0, 0, { cash: "unknown", valuation: "unknown" }, [
+        "review:api-without-usage",
+      ]),
+    );
+
+    expect(ledger.spend()).toBe(0);
+    expect(ledger.estimated()).toBe(true);
+    expect(ledger.terminal()).toBe("cost_unverifiable");
   });
 
   it("keeps mixed-route cash exact when only the subscription valuation is estimated", async () => {

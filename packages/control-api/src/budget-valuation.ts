@@ -52,3 +52,53 @@ export function budgetValuationFromEvents(events: Record<string, unknown>[]): {
   }
   return { valuationUsd, valuationKnowledge };
 }
+
+export function normalizeLegacyBudgetComponents(
+  budget: {
+    estimated?: boolean;
+    spend_usd?: number | null;
+    valuation_usd?: number | null;
+    valuation_knowledge?: "exact" | "estimated" | "unknown";
+  } | null,
+  events: Record<string, unknown>[],
+  folded: ReturnType<typeof budgetValuationFromEvents>,
+): typeof folded & { cashEstimated: boolean } {
+  let cashEstimated = budget?.estimated ?? false;
+  let { valuationUsd, valuationKnowledge } = folded;
+  const knowledge = budget?.valuation_knowledge;
+  const valuation = budget?.valuation_usd;
+  const componentAwareEvent = events.some((event) => {
+    if (event["type"] !== "budget.cash") return false;
+    const value = eventPayload(event)["valuation_knowledge"];
+    return value === "exact" || value === "estimated" || value === "unknown";
+  });
+  if (knowledge && typeof valuation === "number" && Number.isFinite(valuation)) {
+    valuationKnowledge = knowledge;
+    valuationUsd = knowledge === "unknown" ? null : valuation;
+  } else if (valuationUsd === null && typeof valuation === "number" && valuation > 0) {
+    valuationUsd = valuation;
+    valuationKnowledge = "estimated";
+  }
+  if (
+    knowledge === undefined &&
+    !componentAwareEvent &&
+    cashEstimated &&
+    budget?.spend_usd === 0 &&
+    typeof valuation === "number" &&
+    valuation > 0
+  ) {
+    cashEstimated = false;
+  }
+  return { valuationUsd, valuationKnowledge, cashEstimated };
+}
+
+export function cashEstimatedFromLedgerEvent(payload: Record<string, unknown>): boolean {
+  const estimated = payload["estimated"] === true;
+  const legacyExactZero =
+    payload["valuation_knowledge"] === undefined &&
+    estimated &&
+    payload["cash_spend_usd"] === 0 &&
+    typeof payload["valuation_usd"] === "number" &&
+    payload["valuation_usd"] > 0;
+  return estimated && !legacyExactZero;
+}

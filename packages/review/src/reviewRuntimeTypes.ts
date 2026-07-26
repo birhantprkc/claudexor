@@ -1,6 +1,7 @@
 import {
   FallbackReason,
   type CredentialRoute,
+  type CostKnowledge,
   type EffortHint,
   type HarnessEvent,
   type ProviderFamily,
@@ -42,6 +43,8 @@ export interface ReviewerOutput {
   cashUsd: number;
   valuationUsd: number;
   unknownUsd: number;
+  cashKnowledge: CostKnowledge;
+  valuationKnowledge: CostKnowledge;
 }
 
 export interface ReviewerArtifactContext {
@@ -102,7 +105,9 @@ export interface ReviewCandidateResult {
   reviewSpendUsd: number;
   reviewSpendEstimated: boolean;
   reviewCashUsd: number;
+  reviewCashKnowledge: CostKnowledge;
   reviewValuationUsd: number;
+  reviewValuationKnowledge: CostKnowledge;
   reviewUnknownUsd: number;
 }
 
@@ -112,18 +117,32 @@ export function summarizeReviewerSpend(
   valuation: readonly number[],
   unknown: readonly number[],
   estimated: readonly boolean[],
+  cashKnowledge: readonly CostKnowledge[],
+  valuationKnowledge: readonly CostKnowledge[],
 ): {
   reviewSpendUsd: number;
   reviewSpendEstimated: boolean;
   reviewCashUsd: number;
+  reviewCashKnowledge: CostKnowledge;
   reviewValuationUsd: number;
+  reviewValuationKnowledge: CostKnowledge;
   reviewUnknownUsd: number;
 } {
+  const relevantValuationKnowledge = valuationKnowledge.filter(
+    (_, index) => (valuation[index] ?? 0) > 0 || (unknown[index] ?? 0) > 0,
+  );
   return {
     reviewSpendUsd: spend.reduce((sum, value) => sum + value, 0),
     reviewSpendEstimated: estimated.some(Boolean),
     reviewCashUsd: cash.reduce((sum, value) => sum + value, 0),
+    reviewCashKnowledge: mergeKnowledge(cashKnowledge),
     reviewValuationUsd: valuation.reduce((sum, value) => sum + value, 0),
+    reviewValuationKnowledge: mergeKnowledge(relevantValuationKnowledge),
     reviewUnknownUsd: unknown.reduce((sum, value) => sum + value, 0),
   };
+}
+
+function mergeKnowledge(values: readonly CostKnowledge[]): CostKnowledge {
+  if (values.length === 0 || values.includes("unknown")) return "unknown";
+  return values.includes("estimated") ? "estimated" : "exact";
 }

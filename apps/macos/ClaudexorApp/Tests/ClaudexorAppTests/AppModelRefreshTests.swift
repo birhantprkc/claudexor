@@ -526,8 +526,11 @@ struct AppModelRefreshTests {
         #expect(CashSpend.label(1.234) == "$1.23")
         #expect(CashSpend.label(0.0043) == "$0.0043")
         #expect(CashSpend.label(0.01) == "$0.01")
-        // A legacy estimate hedges in EVERY surface (never plain dollars).
+        // Estimated API cash hedges in EVERY surface (never plain dollars).
         #expect(CashSpend.label(1.234, estimated: true) == "~$1.23")
+        #expect(CashSpend.help(estimated: true).contains("API key"))
+        #expect(CashSpend.help(estimated: true).contains("Subscription valuation is tracked separately"))
+        #expect(!CashSpend.help(estimated: true).contains("predating"))
     }
 
     /// Per-turn auth route honesty (sol review #1): "Thread default" (empty)

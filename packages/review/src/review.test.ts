@@ -876,14 +876,102 @@ describe("reviewEngine", () => {
       diff: "diff --git a/a b/a\n",
       ...makeReviewWorkspace(),
       reviewers: [
-        costReviewer("native", "anthropic", "vendor_native", 0.75),
+        {
+          ...costReviewer("native", "anthropic", "vendor_native", 0.75),
+          adapter: {
+            ...costReviewer("native", "anthropic", "vendor_native", 0.75).adapter,
+            async *run(spec) {
+              const ts = new Date().toISOString();
+              yield {
+                type: "started" as const,
+                session_id: spec.session_id,
+                ts,
+                observed_model: "native-model",
+                credential_route: "vendor_native" as const,
+              };
+              yield {
+                type: "usage" as const,
+                session_id: spec.session_id,
+                ts,
+                credential_route: "vendor_native" as const,
+                usage: { cost_usd: 0.75, estimated: true },
+              };
+              yield {
+                type: "message" as const,
+                session_id: spec.session_id,
+                ts,
+                credential_route: "vendor_native" as const,
+                text: "```json\n[]\n```",
+              };
+            },
+          },
+        },
         costReviewer("api", "openai", "managed_api_key", 0.25),
       ],
     });
     expect(result.reviewSpendUsd).toBe(1);
     expect(result.reviewCashUsd).toBe(0.25);
+    expect(result.reviewCashKnowledge).toBe("exact");
     expect(result.reviewValuationUsd).toBe(0.75);
+    expect(result.reviewValuationKnowledge).toBe("estimated");
     expect(result.reviewUnknownUsd).toBe(0);
+  });
+
+  it("keeps proven native zero cash exact without usage and paid or undisclosed routes unknown", async () => {
+    const noUsageReviewer = (
+      id: string,
+      route?: "vendor_native" | "managed_api_key",
+    ): ReviewerSpec => ({
+      providerFamily: "openai",
+      adapter: {
+        id,
+        async discover() {
+          throw new Error("not used");
+        },
+        async doctor() {
+          throw new Error("not used");
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          yield {
+            type: "started" as const,
+            session_id: spec.session_id,
+            ts,
+            observed_model: `${id}-model`,
+            ...(route ? { credential_route: route } : {}),
+          };
+          yield {
+            type: "message" as const,
+            session_id: spec.session_id,
+            ts,
+            ...(route ? { credential_route: route } : {}),
+            text: "```json\n[]\n```",
+          };
+          yield { type: "completed" as const, session_id: spec.session_id, ts };
+        },
+      },
+    });
+    const run = (reviewer: ReviewerSpec) =>
+      reviewCandidate({
+        candidateLabel: "Candidate",
+        diff: "diff --git a/a b/a\n",
+        ...makeReviewWorkspace(),
+        reviewers: [reviewer],
+      });
+
+    await expect(run(noUsageReviewer("native-zero", "vendor_native"))).resolves.toMatchObject({
+      reviewCashUsd: 0,
+      reviewCashKnowledge: "exact",
+      reviewValuationKnowledge: "unknown",
+    });
+    await expect(run(noUsageReviewer("api-missing", "managed_api_key"))).resolves.toMatchObject({
+      reviewCashUsd: 0,
+      reviewCashKnowledge: "unknown",
+    });
+    await expect(run(noUsageReviewer("route-missing"))).resolves.toMatchObject({
+      reviewCashUsd: 0,
+      reviewCashKnowledge: "unknown",
+    });
   });
 
   it("classifies each reviewer retry usage by that try's credential route", async () => {

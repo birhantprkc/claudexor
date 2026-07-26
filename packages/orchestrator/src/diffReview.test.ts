@@ -209,7 +209,9 @@ describe("frozen diff review", () => {
         reviewSpendUsd: 0,
         reviewSpendEstimated: false,
         reviewCashUsd: 0,
+        reviewCashKnowledge: "unknown",
         reviewValuationUsd: 0,
+        reviewValuationKnowledge: "unknown",
         reviewUnknownUsd: 0,
       };
     };

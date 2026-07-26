@@ -23,7 +23,11 @@ import { safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
 import { streamRunEvents } from "./run-events-stream.js";
 import { boundedArtifactText, outputReadyState, primaryOutput } from "./primary-output.js";
-import { budgetValuationFromEvents } from "./budget-valuation.js";
+import {
+  budgetValuationFromEvents,
+  cashEstimatedFromLedgerEvent,
+  normalizeLegacyBudgetComponents,
+} from "./budget-valuation.js";
 import {
   type RunEventsIntegrity,
   controlWebEvidence,
@@ -2806,7 +2810,13 @@ function budgetSnapshot(
     spendUsd === null ? "unknown" : "decision";
   // Subscription VALUATION (QA-023c/QA-017b) beside cash — computed by the pure
   // event fold so an UNKNOWN valuation stays null, never a fabricated $0.
-  const { valuationUsd, valuationKnowledge } = budgetValuationFromEvents(evs);
+  const normalized = normalizeLegacyBudgetComponents(
+    decision?.budget_summary ?? null,
+    evs,
+    budgetValuationFromEvents(evs),
+  );
+  let { valuationUsd, valuationKnowledge } = normalized;
+  estimated = normalized.cashEstimated;
   if (spendUsd === null) {
     // The CASH truth for a decision-less run (plan/ask/explore — they never
     // write a decision record) is the ledger's own `budget.cash` disclosure:
@@ -2829,7 +2839,7 @@ function budgetSnapshot(
         const cash = payload["cash_spend_usd"];
         if (typeof cash === "number" && Number.isFinite(cash)) {
           lastCash = cash;
-          estimated = payload["estimated"] === true;
+          estimated = cashEstimatedFromLedgerEvent(payload);
         }
         continue;
       }

@@ -42,11 +42,9 @@ import type {
   ReviewerWorkspace,
 } from "./reviewRuntimeTypes.js";
 export type { ReviewCandidateResult, ReviewerProgressEvent } from "./reviewRuntimeTypes.js";
-import {
-  reviewerAuthMode,
-  reviewerAuthSwitchFromEvent,
-  summarizeReviewerSpend,
-} from "./reviewRuntimeTypes.js";
+import { reviewerAuthMode, reviewerAuthSwitchFromEvent } from "./reviewRuntimeTypes.js";
+import { ReviewerCostKnowledge } from "./reviewerCostKnowledge.js";
+import { ReviewerSpendAccumulator, type PartialReviewerSpend } from "./reviewerSpendAccumulator.js";
 
 export interface ReviewerSpec {
   adapter: HarnessAdapter;
@@ -164,11 +162,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     }),
   );
   const healthyReviewerIndexes = new Set<number>();
-  const reviewSpendByReviewer = input.reviewers.map(() => 0);
-  const reviewSpendEstimatedByReviewer = input.reviewers.map(() => false);
-  const reviewCashByReviewer = input.reviewers.map(() => 0);
-  const reviewValuationByReviewer = input.reviewers.map(() => 0);
-  const reviewUnknownByReviewer = input.reviewers.map(() => 0);
+  const reviewerSpend = new ReviewerSpendAccumulator(input.reviewers.length);
   const reviewerTimeoutMs = input.reviewerTimeoutMs ?? DEFAULT_REVIEWER_TIMEOUT_MS;
   const reviewWaveId =
     input.env?.["CLAUDEXOR_REVIEW_WAVE_ID"] ?? process.env["CLAUDEXOR_REVIEW_WAVE_ID"] ?? null;
@@ -353,37 +347,22 @@ ${runtimePrompt}
       streamObservedModel = out.observedModel;
       routeModel = out.observedModel;
       routeSource = out.observedSource;
-      reviewSpendByReviewer[index] = out.costUsd;
-      reviewSpendEstimatedByReviewer[index] = out.costEstimated;
-      reviewCashByReviewer[index] = out.cashUsd;
-      reviewValuationByReviewer[index] = out.valuationUsd;
-      reviewUnknownByReviewer[index] = out.unknownUsd;
+      reviewerSpend.record(index, out);
       if (!routeModel && reviewer.requestedModel) {
         routeModel = reviewer.requestedModel;
         routeSource = "metadata";
       }
     } catch (err) {
       reviewerError = redactSecrets(err instanceof Error ? err.message : String(err));
-      const partial = err as {
-        partialCostUsd?: number;
-        partialCostEstimated?: boolean;
+      const partial = err as PartialReviewerSpend & {
         partialObservedModel?: string;
         partialObservedSource?: RouteProof["observed"]["evidence_source"];
-        partialCashUsd?: number;
-        partialValuationUsd?: number;
-        partialUnknownUsd?: number;
         partialText?: string;
       };
       if (typeof partial?.partialText === "string" && partial.partialText.trim() !== "") {
         text = partial.partialText;
       }
-      if (partial && typeof partial.partialCostUsd === "number" && partial.partialCostUsd > 0) {
-        reviewSpendByReviewer[index] = partial.partialCostUsd;
-        reviewSpendEstimatedByReviewer[index] = partial.partialCostEstimated === true;
-        reviewCashByReviewer[index] = partial.partialCashUsd ?? 0;
-        reviewValuationByReviewer[index] = partial.partialValuationUsd ?? 0;
-        reviewUnknownByReviewer[index] = partial.partialUnknownUsd ?? 0;
-      }
+      reviewerSpend.recordPartial(index, partial);
       if (partial?.partialObservedModel) {
         streamObservedModel = partial.partialObservedModel;
         routeModel = partial.partialObservedModel;
@@ -516,13 +495,7 @@ ${runtimePrompt}
       healthyProviders,
       crossFamilyVerified: observedFamilies.length >= 2,
       distinctProviders: observedFamilies,
-      ...summarizeReviewerSpend(
-        reviewSpendByReviewer,
-        reviewCashByReviewer,
-        reviewValuationByReviewer,
-        reviewUnknownByReviewer,
-        reviewSpendEstimatedByReviewer,
-      ),
+      ...reviewerSpend.summary(),
     };
   } finally {
     await cleanupTemporaryReviewerWorkspaceBaseDir(reviewerWorkspaceBaseDir, artifactsBaseDir);
@@ -571,11 +544,14 @@ async function collectReviewerOutput(
   let cashUsd = 0;
   let valuationUsd = 0;
   let unknownUsd = 0;
+  const costKnowledge = new ReviewerCostKnowledge();
   let partialText = "";
   const isCancelled = () =>
     cancelledBySignal || signal?.aborted === true || controller.signal.aborted;
 
   const consumeOnce = async (nativeTry: number): Promise<ReviewerOutput> => {
+    currentAuthMode = null;
+    costKnowledge.startAttempt();
     const iter = (reviewer.adapter.review ?? reviewer.adapter.run).call(reviewer.adapter, runSpec);
     currentIter = iter;
     let text = "";
@@ -605,6 +581,7 @@ async function collectReviewerOutput(
       }
       const disclosedAuthMode = reviewerAuthMode(ev.credential_route);
       if (disclosedAuthMode) currentAuthMode = disclosedAuthMode;
+      costKnowledge.observeEvent(currentAuthMode);
       if (!observedAuthMode) {
         observedAuthMode = disclosedAuthMode;
         if (observedAuthMode) updateReviewerMetadata(artifact, { auth_mode: observedAuthMode });
@@ -617,12 +594,22 @@ async function collectReviewerOutput(
           at: firstEventTime,
         });
       }
-      if (ev.type === "usage" && ev.usage?.cost_usd) {
+      if (
+        ev.type === "usage" &&
+        typeof ev.usage?.cost_usd === "number" &&
+        Number.isFinite(ev.usage.cost_usd) &&
+        ev.usage.cost_usd >= 0
+      ) {
         costUsd += ev.usage.cost_usd;
         if (ev.usage.estimated) costEstimated = true;
-        if (currentAuthMode === "local_session") valuationUsd += ev.usage.cost_usd;
-        else if (currentAuthMode === "api_key") cashUsd += ev.usage.cost_usd;
-        else unknownUsd += ev.usage.cost_usd;
+        costKnowledge.observeUsage(currentAuthMode, ev.usage.estimated === true);
+        if (currentAuthMode === "local_session") {
+          valuationUsd += ev.usage.cost_usd;
+        } else if (currentAuthMode === "api_key") {
+          cashUsd += ev.usage.cost_usd;
+        } else {
+          unknownUsd += ev.usage.cost_usd;
+        }
         updateReviewerMetadata(artifact, {
           cost_usd: costUsd,
           cost_estimated: costEstimated,
@@ -686,6 +673,7 @@ async function collectReviewerOutput(
         session_id: newId("ses"),
         extra: { ...runSpec.extra, abortSignal: controller.signal },
       });
+      costKnowledge.finishAttempt();
       return consumeOnce(nativeTry + 1);
     }
     if (sawError && !timedOut) {
@@ -711,6 +699,8 @@ async function collectReviewerOutput(
         observed_source: attemptObservedSource,
       });
     }
+    const knowledge = costKnowledge.snapshot();
+    costKnowledge.finishAttempt();
     return {
       text,
       observedModel: attemptObservedModel,
@@ -720,6 +710,7 @@ async function collectReviewerOutput(
       cashUsd,
       valuationUsd,
       unknownUsd,
+      ...knowledge,
     };
   };
   const consume = consumeOnce(0);
@@ -732,6 +723,7 @@ async function collectReviewerOutput(
       cancelledBySignal = true;
       controller.abort();
       void (currentIter as unknown as AsyncIterator<unknown> | null)?.return?.();
+      const knowledge = costKnowledge.snapshot();
       reject(
         Object.assign(new Error("Reviewer cancelled"), {
           partialCostUsd: costUsd,
@@ -739,6 +731,8 @@ async function collectReviewerOutput(
           partialCashUsd: cashUsd,
           partialValuationUsd: valuationUsd,
           partialUnknownUsd: unknownUsd,
+          partialCashKnowledge: knowledge.cashKnowledge,
+          partialValuationKnowledge: knowledge.valuationKnowledge,
           partialObservedModel: observedModel,
           partialObservedSource: observedSource,
           partialText,
@@ -776,6 +770,7 @@ async function collectReviewerOutput(
           observed_source: observedSource,
           message: `Reviewer timed out after ${timeoutMs}ms`,
         });
+        const knowledge = costKnowledge.snapshot();
         reject(
           Object.assign(new Error(`Reviewer timed out after ${timeoutMs}ms`), {
             partialCostUsd: costUsd,
@@ -783,6 +778,8 @@ async function collectReviewerOutput(
             partialCashUsd: cashUsd,
             partialValuationUsd: valuationUsd,
             partialUnknownUsd: unknownUsd,
+            partialCashKnowledge: knowledge.cashKnowledge,
+            partialValuationKnowledge: knowledge.valuationKnowledge,
             partialObservedModel: observedModel,
             partialObservedSource: observedSource,
             partialText,
@@ -817,12 +814,15 @@ async function collectReviewerOutput(
       });
     }
     if (err && typeof err === "object") {
+      const knowledge = costKnowledge.snapshot();
       Object.assign(err as Record<string, unknown>, {
         partialCostUsd: costUsd,
         partialCostEstimated: costEstimated,
         partialCashUsd: cashUsd,
         partialValuationUsd: valuationUsd,
         partialUnknownUsd: unknownUsd,
+        partialCashKnowledge: knowledge.cashKnowledge,
+        partialValuationKnowledge: knowledge.valuationKnowledge,
         partialObservedModel: observedModel,
         partialObservedSource: observedSource,
         partialText,

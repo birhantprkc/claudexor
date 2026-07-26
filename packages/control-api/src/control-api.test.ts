@@ -6918,6 +6918,86 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("normalizes legacy combined cash/valuation certainty without rewriting history", async () => {
+    const legacyEvent = fakeDaemon();
+    rmSync(join(legacyEvent.record.runDir as string, "arbitration", "decision.yaml"), {
+      force: true,
+    });
+    appendFileSync(
+      join(legacyEvent.record.runDir as string, "events.jsonl"),
+      `${JSON.stringify({
+        ts: new Date().toISOString(),
+        run_id: "run-d1",
+        task_id: "task-d1",
+        type: "budget.cash",
+        payload: {
+          cash_spend_usd: 0,
+          valuation_usd: 1.75,
+          estimated: true,
+          // Pre-component event: deliberately no valuation_knowledge.
+        },
+      })}\n`,
+    );
+    await withDaemonServer(legacyEvent.daemon, async (base) => {
+      const detail = await apiFetch(`${base}/runs/run-d1`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const body = (await detail.json()) as {
+        budget: {
+          spendUsd: number | null;
+          estimated: boolean;
+          valuationUsd: number | null;
+          valuationKnowledge: string;
+        };
+      };
+      expect(body.budget).toMatchObject({
+        spendUsd: 0,
+        estimated: false,
+        valuationUsd: 1.75,
+        valuationKnowledge: "estimated",
+      });
+    });
+
+    const legacyDecision = fakeDaemon();
+    writeFileSync(
+      join(legacyDecision.record.runDir as string, "arbitration", "decision.yaml"),
+      [
+        "winner: a01",
+        "facts:",
+        "  lifecycle: succeeded",
+        "  review: approved",
+        "  checks: passed",
+        "  noChanges: false",
+        "  reason: null",
+        "budget_summary:",
+        "  spend_usd: 0",
+        "  cash_usd: 0",
+        "  valuation_usd: 2.25",
+        "  estimated: true",
+        "",
+      ].join("\n"),
+    );
+    await withDaemonServer(legacyDecision.daemon, async (base) => {
+      const detail = await apiFetch(`${base}/runs/run-d1`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const body = (await detail.json()) as {
+        budget: {
+          spendUsd: number | null;
+          estimated: boolean;
+          valuationUsd: number | null;
+          valuationKnowledge: string;
+        };
+      };
+      expect(body.budget).toMatchObject({
+        spendUsd: 0,
+        estimated: false,
+        valuationUsd: 2.25,
+        valuationKnowledge: "estimated",
+      });
+    });
+  });
+
   it("carries the server-owned outcome banner on the run detail (D18)", async () => {
     // fakeDaemon builds a succeeded run with a clean decision (review approved,
     // checks passed) + a patch work product that has NOT been applied.

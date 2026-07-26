@@ -107,6 +107,7 @@ import { runBounded } from "./run-bounded.js";
 import { planPrompt } from "./plan-prompt.js";
 import { resolveRunInputDefaults } from "./run-input-resolution.js";
 import { createRootLedger } from "./root-ledger.js";
+import { arbitrationBudgetOptions, decisionBudgetSummary } from "./decisionBudget.js";
 import { buildRevisePrompt } from "./revisePrompt.js";
 import {
   type AnnouncedRunContext,
@@ -3545,12 +3546,7 @@ export class Orchestrator {
         why_winner: why,
         evidence_facts: ["no candidates were produced"],
         apply_recommendation: "continue",
-        budget_summary: {
-          spend_usd: ledger.spend(),
-          estimated: false,
-          cash_usd: ledger.spend(),
-          valuation_usd: ledger.valuation(),
-        },
+        budget_summary: decisionBudgetSummary(ledger),
       });
       store.writeText(
         join(paths.finalDir, "summary.md"),
@@ -3610,12 +3606,7 @@ export class Orchestrator {
           (r) => `${r.attemptId} produced no work: ${r.errors[0] ?? "unknown"}`,
         ),
         apply_recommendation: "continue",
-        budget_summary: {
-          spend_usd: ledger.spend(),
-          estimated: false,
-          cash_usd: ledger.spend(),
-          valuation_usd: ledger.valuation(),
-        },
+        budget_summary: decisionBudgetSummary(ledger),
       });
       this.writeRunTelemetry(
         store,
@@ -3939,14 +3930,7 @@ export class Orchestrator {
 
     let result: ReturnType<typeof arbitrate>;
     try {
-      result = arbitrate(evidences, {
-        spendUsd: ledger.spend(),
-        estimatedSpend: runs.some((r) => r.costEstimated),
-        // QA-010b: carry the settled cash + subscription-valuation totals
-        // (reviewer panel included) onto the decision record.
-        cashUsd: ledger.spend(),
-        valuationUsd: ledger.valuation(),
-      });
+      result = arbitrate(evidences, arbitrationBudgetOptions(ledger));
     } catch (err) {
       // Arbitration throws end terminally with artifacts, never as an orphan.
       return failTerminally(
@@ -4478,7 +4462,9 @@ export class Orchestrator {
                 reviewSpendUsd: 0,
                 reviewSpendEstimated: false,
                 reviewCashUsd: 0,
+                reviewCashKnowledge: "unknown" as const,
                 reviewValuationUsd: 0,
+                reviewValuationKnowledge: "unknown" as const,
                 reviewUnknownUsd: 0,
               };
         if (reviewLease?.granted) {
@@ -4487,7 +4473,10 @@ export class Orchestrator {
             reviewUsageCostSettlement(
               result.reviewCashUsd,
               result.reviewValuationUsd,
-              result.reviewSpendEstimated,
+              {
+                cash: result.reviewCashKnowledge,
+                valuation: result.reviewValuationKnowledge,
+              },
               [`attempt:${run.attemptId}`, "review:panel"],
               result.reviewUnknownUsd,
             ),
@@ -4866,7 +4855,6 @@ export class Orchestrator {
       telemetry: AttemptTelemetry;
     }[] = [];
     let lastDiffStable = true;
-    let reviewSpendEstimated = false;
 
     try {
       // The contract's ENGINE-COMPUTED effective profile drives the envelope and
@@ -5138,7 +5126,9 @@ export class Orchestrator {
                       reviewSpendUsd: 0,
                       reviewSpendEstimated: false,
                       reviewCashUsd: 0,
+                      reviewCashKnowledge: "unknown" as const,
                       reviewValuationUsd: 0,
+                      reviewValuationKnowledge: "unknown" as const,
                       reviewUnknownUsd: 0,
                     };
               if (reviewLease?.granted) {
@@ -5147,7 +5137,10 @@ export class Orchestrator {
                   reviewUsageCostSettlement(
                     reviewResult.reviewCashUsd,
                     reviewResult.reviewValuationUsd,
-                    reviewResult.reviewSpendEstimated,
+                    {
+                      cash: reviewResult.reviewCashKnowledge,
+                      valuation: reviewResult.reviewValuationKnowledge,
+                    },
                     [`attempt:${attemptId}`, "review:panel"],
                     reviewResult.reviewUnknownUsd,
                   ),
@@ -5163,7 +5156,6 @@ export class Orchestrator {
                     unknown_usd: reviewResult.reviewUnknownUsd,
                     estimated: reviewResult.reviewSpendEstimated === true,
                   });
-                  if (reviewResult.reviewSpendEstimated === true) reviewSpendEstimated = true;
                 }
               } else if (reviewLease && !reviewLease.granted) {
                 log.emit("budget.lease.created", {
@@ -5392,13 +5384,7 @@ export class Orchestrator {
             actualReviewVerified,
           ),
         ],
-        {
-          spendUsd: ledger.spend(),
-          estimatedSpend: lastRun.costEstimated || reviewSpendEstimated,
-          // QA-010b: settled cash + valuation (reviewer panel included).
-          cashUsd: ledger.spend(),
-          valuationUsd: ledger.valuation(),
-        },
+        arbitrationBudgetOptions(ledger),
       );
       decision = arb.decision;
       store.writeYaml(join(paths.arbitrationDir, "decision.yaml"), decision);

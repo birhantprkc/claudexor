@@ -273,6 +273,12 @@ export const DecisionRecord = z
           .describe(
             "Settled subscription-equivalent valuation in USD (includes the reviewer panel); null when unknown.",
           ),
+        valuation_knowledge: z
+          .enum(["exact", "estimated", "unknown"])
+          .optional()
+          .describe(
+            "Certainty of valuation_usd, independent from the settled-cash estimated flag. Absent only on legacy decisions.",
+          ),
       })
       .default({ spend_usd: null, estimated: false, cash_usd: null, valuation_usd: null })
       .describe("Settled spend for the run; estimates are disclosed, never presented as exact."),

@@ -241,6 +241,7 @@ export function arbitrate(
      * the cash figure). */
     cashUsd?: number | null;
     valuationUsd?: number | null;
+    valuationKnowledge?: "exact" | "estimated" | "unknown";
   } = {},
 ): ArbitrationResult {
   if (candidates.length === 0) {
@@ -416,6 +417,7 @@ export function arbitrate(
       estimated: opts.estimatedSpend ?? false,
       cash_usd: opts.cashUsd ?? null,
       valuation_usd: opts.valuationUsd ?? null,
+      ...(opts.valuationKnowledge ? { valuation_knowledge: opts.valuationKnowledge } : {}),
     },
     apply_recommendation: applyable
       ? noChanges

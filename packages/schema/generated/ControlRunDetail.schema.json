@@ -1774,6 +1774,15 @@
                       ],
                       "default": null,
                       "description": "Settled subscription-equivalent valuation in USD (includes the reviewer panel); null when unknown."
+                    },
+                    "valuation_knowledge": {
+                      "type": "string",
+                      "enum": [
+                        "exact",
+                        "estimated",
+                        "unknown"
+                      ],
+                      "description": "Certainty of valuation_usd, independent from the settled-cash estimated flag. Absent only on legacy decisions."
                     }
                   },
                   "additionalProperties": false,
