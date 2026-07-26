@@ -19,6 +19,7 @@ import {
   panelLockText,
   blockerContractGaps,
   releaseReviewDecision,
+  reviewDecisionLivenessFloors,
   releaseAttestationSigningBytes,
   livenessFloorMs,
   reviewerLiveness,
@@ -292,12 +293,13 @@ describe("release review fail-closed contract", () => {
     const triad = liveTriad(findings).map((actor) => ({ ...actor, duration_ms: 20_740 }));
     const scope = { ...liveScope(), metadata: { duration_ms: 20_740 } };
     expect(releaseReviewDecision({ triadActors: triad, scope }).passed).toBe(false);
+    const mediumFloors = reviewDecisionLivenessFloors(505_000, 536_000);
+    expect(mediumFloors).toEqual({ minPlausibleMs: 20_000, scopeMinPlausibleMs: 20_000 });
     expect(
       releaseReviewDecision({
         triadActors: triad,
         scope,
-        minPlausibleMs: livenessFloorMs(505_000),
-        scopeMinPlausibleMs: livenessFloorMs(536_000),
+        ...mediumFloors,
       }).passed,
     ).toBe(true);
     expect(
@@ -305,7 +307,18 @@ describe("release review fail-closed contract", () => {
         triadActors: triad,
         scope,
         minPlausibleMs: livenessFloorMs(505_000),
-        scopeMinPlausibleMs: livenessFloorMs(1_200_000),
+      }).passed,
+    ).toBe(false);
+    const largeScopeFloors = reviewDecisionLivenessFloors(505_000, 1_200_000);
+    expect(largeScopeFloors).toEqual({
+      minPlausibleMs: 20_000,
+      scopeMinPlausibleMs: 30_000,
+    });
+    expect(
+      releaseReviewDecision({
+        triadActors: triad,
+        scope,
+        ...largeScopeFloors,
       }).passed,
     ).toBe(false);
   });

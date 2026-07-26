@@ -83,6 +83,7 @@ import {
   pathIsWithin,
   panelLockText,
   releaseReviewDecision,
+  reviewDecisionLivenessFloors,
   validateChecklistResponse,
   validateFrozenReviewBinding,
   validateNewReviewOutput,
@@ -1207,8 +1208,7 @@ async function main() {
   const decision = releaseReviewDecision({
     triadActors: actorRecords,
     scope,
-    minPlausibleMs: livenessFloorMs(triadPrompt.length),
-    scopeMinPlausibleMs: livenessFloorMs(scopePrompt.length),
+    ...reviewDecisionLivenessFloors(triadPrompt.length, scopePrompt.length),
   });
   const summary = {
     reviewRunId,

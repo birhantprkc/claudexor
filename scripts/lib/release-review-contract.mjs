@@ -846,6 +846,13 @@ export function livenessFloorMs(promptChars) {
   return 10_000;
 }
 
+export function reviewDecisionLivenessFloors(triadPromptChars, scopePromptChars) {
+  return {
+    minPlausibleMs: livenessFloorMs(triadPromptChars),
+    scopeMinPlausibleMs: livenessFloorMs(scopePromptChars),
+  };
+}
+
 export function reviewerLiveness(actor, minPlausibleMs = REVIEWER_MIN_PLAUSIBLE_MS) {
   if (actor?.status !== "responded") {
     return { live: false, reason: `status is ${actor?.status ?? "(missing)"}` };
@@ -869,12 +876,7 @@ export function reviewerLiveness(actor, minPlausibleMs = REVIEWER_MIN_PLAUSIBLE_
  * liveness"; the transport gets one same-SHA retry before a slot is final).
  * `responsiveTriad` stays as accounting, but partial panels never pass.
  */
-export function releaseReviewDecision({
-  triadActors,
-  scope,
-  minPlausibleMs,
-  scopeMinPlausibleMs = minPlausibleMs,
-}) {
+export function releaseReviewDecision({ triadActors, scope, minPlausibleMs, scopeMinPlausibleMs }) {
   const reasons = [];
   const liveTriad = [];
   for (const actor of triadActors) {

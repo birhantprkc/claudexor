@@ -136,6 +136,10 @@ export function reviewerLiveness(
   actor: ReviewerSlotRecord | null | undefined,
   minPlausibleMs?: number,
 ): { live: boolean; reason: string | null };
+export function reviewDecisionLivenessFloors(
+  triadPromptChars: number,
+  scopePromptChars: number,
+): { minPlausibleMs: number; scopeMinPlausibleMs: number };
 export function releaseReviewDecision(input: {
   triadActors: ReviewerSlotRecord[];
   scope: (ReviewerSlotRecord & { metadata?: { duration_ms?: number } }) | null;
