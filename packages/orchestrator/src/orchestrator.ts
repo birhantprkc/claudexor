@@ -5005,8 +5005,8 @@ export class Orchestrator {
             ...telemetrySummary(run.telemetry),
           });
         } catch (err) {
-          // Envelope/setup failure before the stream; stream errors are absorbed
-          // inside runCandidateInEnvelope with their real accumulated cost.
+          // Setup failures remain unknown; post-stream persistence failures
+          // carry their route-specific settlement from runCandidateInEnvelope.
           ledger.settle(
             lease.lease?.lease_id ?? "",
             attemptFailureCost(err, "attempt-error").settlement,

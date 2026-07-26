@@ -65,6 +65,10 @@ describe("processAttemptUsage", () => {
       totalUsd: 0.4,
       settlement: { knowledge: "unknown", source: "post-stream-error", cashUsd: 0.4 },
     });
+    expect(attemptFailureCost({ costUsd: Number.NaN }, "post-stream-error")).toMatchObject({
+      totalUsd: 0,
+      settlement: { knowledge: "unknown", source: "post-stream-error" },
+    });
   });
 
   it("splits usage by each event route when a retry changes auth", () => {

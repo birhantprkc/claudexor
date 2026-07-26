@@ -59,7 +59,9 @@ export function attemptFailureCost(
 ): AttemptFailureCost {
   if (error instanceof AttemptPostStreamError) return error.attemptCost;
   const carriedCashUsd =
-    typeof (error as { costUsd?: unknown })?.costUsd === "number"
+    typeof (error as { costUsd?: unknown })?.costUsd === "number" &&
+    Number.isFinite((error as { costUsd: number }).costUsd) &&
+    (error as { costUsd: number }).costUsd >= 0
       ? (error as { costUsd: number }).costUsd
       : fallbackCashUsd;
   return {

@@ -838,6 +838,27 @@ describe("Orchestrator", () => {
     expectBudgetSplit(res.runDir, 0.5, 1.5);
   }, 30_000);
 
+  it("preserves mixed-route settlement when race persistence fails", async () => {
+    const repo = await initRepo();
+    const adapter = mixedRoutePersistenceAdapter("mixed-race", repo, (call) =>
+      call === 1 ? "a01" : null,
+    );
+    const res = await new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: [adapter.id],
+    });
+
+    expectBudgetSplit(res.runDir, 0.25, 0.75);
+    expect(readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8")).toContain(
+      "cost_usd: 1",
+    );
+  }, 30_000);
+
   it("preserves mixed-route settlement when synthesis persistence fails", async () => {
     const repo = await initRepo();
     const adapter = mixedRoutePersistenceAdapter("mixed-synthesis", repo, (_call, intent) =>
