@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { BudgetLedger, routeCostEvidence } from "@claudexor/budget";
 import { EventLog } from "@claudexor/event-log";
 import { makeOutcomeFacts } from "@claudexor/schema";
 import { DelegationBudgetAuthority } from "./delegationBudgetAuthority.js";
-import { guardAnnouncedRun } from "./runTerminals.js";
+import { failTerminally, guardAnnouncedRun } from "./runTerminals.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -422,124 +422,161 @@ describe("Delegate terminal drain ordering", () => {
     });
   });
 
-  it("lets cancellation win after the Delegate drain while preserving produced-work facts", async () => {
-    const { store, paths, log } = fixture("run-cancel-during-drain");
-    const controller = new AbortController();
-    const preparedFacts = makeOutcomeFacts("succeeded", {
-      checks: "passed",
-      review: "approved",
-    });
-    const result = await guardAnnouncedRun(
-      controller.signal,
-      async (announce) => {
-        log.emit("run.created", { mode: "agent", prompt: "x" });
-        announce({
-          log,
-          store,
-          paths,
-          runId: "run-cancel-during-drain",
-          taskId: "task-parent",
-          mode: "agent",
-          phase: "race",
-          recheckBudgetAfterBarrier: () => true,
-        });
-        store.writeYaml(join(paths.arbitrationDir, "decision.yaml"), {
-          winner: "a01",
-          facts: preparedFacts,
-          why_winner: "prepared before drain",
-          budget_summary: {
-            spend_usd: 0,
-            cash_usd: 0,
-            valuation_usd: 0,
-            estimated: false,
-          },
-        });
-        store.writeYaml(join(paths.finalDir, "work_product.yaml"), {
-          id: "wp-cancel-during-drain",
-          kind: "patch",
-          source_task_id: "task-parent",
-          meta: {
-            lifecycle: "succeeded",
-            outcome_facts: preparedFacts,
-            review_verified: true,
-            apply_state: "applied",
-            extension_receipt: "preserved",
-          },
-        });
-        log.deferTerminal();
-        log.emit("run.completed", { lifecycle: "succeeded" });
-        return {
-          runId: "run-cancel-during-drain",
-          taskId: "task-parent",
-          mode: "agent",
-          lifecycle: "succeeded",
-          facts: preparedFacts,
-          winner: "a01",
-          runDir: paths.root,
-          summary: "done",
-          candidates: [{ attemptId: "a01", harnessId: "claude", status: "success" }],
-          reviewVerified: true,
-        };
-      },
-      async () => {
-        controller.abort();
-      },
-    );
+  it.each([
+    { drain: "resolves after prepared success", rejects: false, preparedFailure: false },
+    { drain: "times out after prepared success", rejects: true, preparedFailure: false },
+    { drain: "resolves after prepared failure", rejects: false, preparedFailure: true },
+  ])(
+    "lets cancellation win when the Delegate drain $drain while preserving produced-work facts",
+    async ({ rejects, preparedFailure }) => {
+      const { store, paths, log } = fixture("run-cancel-during-drain");
+      const controller = new AbortController();
+      const preparedFacts = makeOutcomeFacts("succeeded", {
+        checks: "passed",
+        review: "approved",
+      });
+      const result = await guardAnnouncedRun(
+        controller.signal,
+        async (announce) => {
+          log.emit("run.created", { mode: "agent", prompt: "x" });
+          announce({
+            log,
+            store,
+            paths,
+            runId: "run-cancel-during-drain",
+            taskId: "task-parent",
+            mode: "agent",
+            phase: "race",
+            recheckBudgetAfterBarrier: () => true,
+          });
+          store.writeYaml(join(paths.arbitrationDir, "decision.yaml"), {
+            winner: "a01",
+            facts: preparedFacts,
+            why_winner: "prepared before drain",
+            budget_summary: {
+              spend_usd: 0,
+              cash_usd: 0,
+              valuation_usd: 0,
+              estimated: false,
+            },
+          });
+          store.writeYaml(join(paths.finalDir, "work_product.yaml"), {
+            id: "wp-cancel-during-drain",
+            kind: "patch",
+            source_task_id: "task-parent",
+            meta: {
+              lifecycle: "succeeded",
+              outcome_facts: preparedFacts,
+              review_verified: true,
+              apply_state: "applied",
+              extension_receipt: "preserved",
+            },
+          });
+          log.deferTerminal();
+          const prepared = {
+            runId: "run-cancel-during-drain",
+            taskId: "task-parent",
+            mode: "agent" as const,
+            lifecycle: "succeeded" as const,
+            facts: preparedFacts,
+            winner: "a01",
+            runDir: paths.root,
+            summary: "done",
+            candidates: [{ attemptId: "a01", harnessId: "claude", status: "success" }],
+            reviewVerified: true,
+          };
+          if (preparedFailure) {
+            const failed = failTerminally(
+              log,
+              store,
+              paths,
+              prepared.runId,
+              prepared.taskId,
+              prepared.mode,
+              "delegation_runtime",
+              new Error("belt failed"),
+              undefined,
+              { priorFacts: preparedFacts },
+            );
+            return {
+              ...prepared,
+              ...failed,
+              winner: prepared.winner,
+              candidates: prepared.candidates,
+            };
+          }
+          log.emit("run.completed", { lifecycle: "succeeded" });
+          return prepared;
+        },
+        async () => {
+          controller.abort();
+          if (rejects) {
+            throw Object.assign(new Error("delegation child drain timed out"), {
+              code: "delegation_child_drain_timeout",
+            });
+          }
+        },
+      );
 
-    expect(result).toMatchObject({
-      lifecycle: "cancelled",
-      winner: "a01",
-      reviewVerified: true,
-      candidates: [{ attemptId: "a01", harnessId: "claude", status: "success" }],
-      facts: {
+      expect(result).toMatchObject({
         lifecycle: "cancelled",
-        reason: "user_cancelled",
-        checks: "passed",
-        review: "approved",
-      },
-    });
-    expect(
-      store.readYaml<{ facts: Record<string, unknown> }>(
-        join(paths.arbitrationDir, "decision.yaml"),
-      ),
-    ).toMatchObject({
-      facts: {
-        lifecycle: "cancelled",
-        reason: "user_cancelled",
-        checks: "passed",
-        review: "approved",
-      },
-    });
-    expect(
-      store.readYaml<{ meta: Record<string, unknown> }>(join(paths.finalDir, "work_product.yaml")),
-    ).toMatchObject({
-      meta: {
-        lifecycle: "cancelled",
-        outcome_facts: {
+        winner: "a01",
+        reviewVerified: true,
+        candidates: [{ attemptId: "a01", harnessId: "claude", status: "success" }],
+        facts: {
           lifecycle: "cancelled",
           reason: "user_cancelled",
           checks: "passed",
           review: "approved",
         },
-        review_verified: true,
-        apply_state: "applied",
-        extension_receipt: "preserved",
-      },
-    });
-    const events = readFileSync(paths.eventsPath, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { type: string; payload?: Record<string, unknown> });
-    expect(events.map((event) => event.type)).toEqual([
-      "run.created",
-      "output.ready",
-      "run.failed",
-    ]);
-    expect(events.at(-1)?.payload).toMatchObject({
-      lifecycle: "cancelled",
-      reason: "user_cancelled",
-    });
-  });
+      });
+      expect(
+        store.readYaml<{ facts: Record<string, unknown> }>(
+          join(paths.arbitrationDir, "decision.yaml"),
+        ),
+      ).toMatchObject({
+        facts: {
+          lifecycle: "cancelled",
+          reason: "user_cancelled",
+          checks: "passed",
+          review: "approved",
+        },
+      });
+      expect(
+        store.readYaml<{ meta: Record<string, unknown> }>(
+          join(paths.finalDir, "work_product.yaml"),
+        ),
+      ).toMatchObject({
+        meta: {
+          lifecycle: "cancelled",
+          outcome_facts: {
+            lifecycle: "cancelled",
+            reason: "user_cancelled",
+            checks: "passed",
+            review: "approved",
+          },
+          review_verified: true,
+          apply_state: "applied",
+          extension_receipt: "preserved",
+        },
+      });
+      const events = readFileSync(paths.eventsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; payload?: Record<string, unknown> });
+      expect(events.map((event) => event.type)).toEqual([
+        "run.created",
+        ...(preparedFailure ? ["output.ready"] : []),
+        "output.ready",
+        "run.failed",
+      ]);
+      expect(events.at(-1)?.payload).toMatchObject({
+        lifecycle: "cancelled",
+        reason: "user_cancelled",
+      });
+      expect(existsSync(join(paths.finalDir, "failure.yaml"))).toBe(false);
+    },
+  );
 
   it("leaves ordinary terminal ordering unchanged when no Delegate barrier is armed", async () => {
     const { store, paths, log } = fixture("run-ordinary");

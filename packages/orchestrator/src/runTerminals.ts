@@ -8,20 +8,18 @@
  * forever.
  */
 import { join } from "node:path";
-import {
-  DecisionRecord,
-  makeOutcomeFacts,
-  RunFailureCode,
-  RunOutcomeFacts,
-  WorkProduct,
-  type ModeKind,
-} from "@claudexor/schema";
+import { DecisionRecord, RunFailureCode, RunOutcomeFacts, type ModeKind } from "@claudexor/schema";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { BudgetLedger, BudgetTerminal } from "@claudexor/budget";
 import type { EventLog } from "@claudexor/event-log";
 import { redactSecrets } from "@claudexor/util";
 import { budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import type { OrchestratorResult } from "./orchestrator.js";
+import {
+  clearFailureArtifact,
+  reconcileWorkProductTerminal,
+  terminalOutcomeFacts,
+} from "./terminalOutcome.js";
 
 export interface AnnouncedRunContext {
   log: EventLog;
@@ -133,41 +131,6 @@ function reconcileDecisionBudget(
   // delivery_receipt) are not stripped by Zod's default object projection.
   DecisionRecord.parse(reconciled);
   context.store.writeYaml(path, reconciled);
-}
-
-/** Strategy success may already have materialized a WorkProduct before the
- * Delegate family drain settles. If that drain changes the run terminal,
- * reconcile only the terminal projection: the bytes, review result, and
- * apply/revert state remain honest historical facts. */
-function reconcileWorkProductTerminal(context: AnnouncedRunContext, facts: RunOutcomeFacts): void {
-  const path = join(context.paths.finalDir, "work_product.yaml");
-  const current = context.store.readYaml<unknown>(path);
-  if (!current || typeof current !== "object" || Array.isArray(current)) return;
-  const record = current as Record<string, unknown>;
-  const priorMeta =
-    record["meta"] && typeof record["meta"] === "object" && !Array.isArray(record["meta"])
-      ? (record["meta"] as Record<string, unknown>)
-      : {};
-  const reconciled = {
-    ...record,
-    meta: {
-      ...priorMeta,
-      lifecycle: facts.lifecycle,
-      outcome_facts: facts,
-    },
-  };
-  WorkProduct.parse(reconciled);
-  context.store.writeYaml(path, reconciled);
-}
-
-function terminalOutcomeFacts(
-  prior: RunOutcomeFacts | undefined,
-  lifecycle: RunOutcomeFacts["lifecycle"],
-  reason: RunOutcomeFacts["reason"],
-): RunOutcomeFacts {
-  return prior
-    ? RunOutcomeFacts.parse({ ...prior, lifecycle, reason })
-    : makeOutcomeFacts(lifecycle, { reason });
 }
 
 function postDrainBudgetFailure(
@@ -463,6 +426,7 @@ export async function guardAnnouncedRun(
             why: cancelSummary,
           });
           reconcileWorkProductTerminal(context, cancelFacts);
+          clearFailureArtifact(context);
         } catch {
           /* the cancellation terminal below remains authoritative */
         }
@@ -518,27 +482,49 @@ export async function guardAnnouncedRun(
     const budget = settledBudgetSnapshot(a);
     const spendUsd = budget.spendUsd;
     if (signal?.aborted && terminalError === err) {
-      const result = cancelledResult(
+      const priorFacts = preparedResult?.facts;
+      const cancelFacts = terminalOutcomeFacts(
+        priorFacts,
+        "cancelled",
+        signal.reason === "wall_clock_exceeded" ? "wall_clock_exceeded" : "user_cancelled",
+      );
+      const cancelSummary =
+        signal.reason === "wall_clock_exceeded"
+          ? "run cancelled: wall-clock deadline (maxSeconds) exceeded"
+          : "run cancelled";
+      try {
+        reconcileDecisionBudget(a, budget, { facts: cancelFacts, why: cancelSummary });
+        reconcileWorkProductTerminal(a, cancelFacts);
+        clearFailureArtifact(a);
+      } catch {
+        /* the cancellation terminal below remains authoritative */
+      }
+      const cancelled = cancelledResult(
         a.log,
         a.runId,
         a.taskId,
         a.mode,
         a.paths.root,
-        [],
+        preparedResult?.candidates ?? [],
         undefined,
         spendUsd,
         // A wall-clock abort surfaced as a throw must keep its reason and
         // materialize the diagnostic summary, exactly like the checkpoint paths.
         signal,
         a.store,
+        priorFacts,
       );
-      try {
-        reconcileDecisionBudget(a, budget, { facts: result.facts, why: result.summary });
-      } catch {
-        /* the cancellation terminal remains authoritative */
-      }
       a.log.flushDeferredTerminal();
-      return result;
+      return preparedResult
+        ? {
+            ...preparedResult,
+            lifecycle: "cancelled",
+            facts: cancelled.facts,
+            summary: cancelled.summary,
+            spendUsd: cancelled.spendUsd,
+            ...(cancelled.cancelReason ? { cancelReason: cancelled.cancelReason } : {}),
+          }
+        : cancelled;
     }
     const priorFacts = preparedResult?.facts;
     const pendingFacts = terminalOutcomeFacts(priorFacts, "failed", "harness_failed");
