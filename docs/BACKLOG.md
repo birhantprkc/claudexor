@@ -404,8 +404,9 @@ revision/etag, already logged above), are intentionally not duplicated.
 
 These are the WARN-or-below findings from the frozen-candidate, Fable-high,
 synthesis, and exact-SHA confirmation waves. They do not expand the 3.1.2
-blocker fix batch; represented dispositions are X303-X343, X360, X367-X377,
-and X382-X410 in the findings ledger.
+blocker fix batch. Related ledger context spans X303-X343, X360, X367-X377,
+and X382-X423; those ranges also contain fixed and declined records, so the
+ledger row itself is authoritative for each exact disposition.
 
 - Route bounded Delegate child summaries through the Control API's cached,
   fail-soft projector so one corrupt legacy child cannot 500 its parent detail.
@@ -486,3 +487,20 @@ and X382-X410 in the findings ledger.
   redesign.
 - Reconcile the process-local Delegate count reservation when a runner throws
   before creating a child, and give count-cap refusal its own accurate remedy.
+- Extend the site metadata checker to prove referenced local assets and anchors,
+  sweep every crawler surface, and preserve compatibility anchors for published
+  deep links.
+- Validate and clamp manually injected Delegate policy JSON before deriving
+  local budget, depth, or child-count refusals.
+- Replace JSON alternates quoting with Git-compatible C-style path quoting for
+  legal control-character repository paths.
+- Preserve both the primary capture/revert error and a scratch-cleanup error,
+  then record enough private-residue detail for deterministic cleanup.
+- Remove the network map's composite image role so assistive technology can
+  reach every substantive harness/capability description.
+- Move durable secret-refusal WorkProduct, attempt, and event fields under one
+  schema-owned receipt contract.
+- Exclude `.claudexor-artifacts` from non-Git in-place diff capture with the
+  same F4/noChanges semantics as Git-mode capture.
+- Consolidate the duplicated environment-scoped Git invocation helper shared
+  by workspace capture and revert logic.
