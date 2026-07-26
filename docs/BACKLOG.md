@@ -483,8 +483,8 @@ ledger row itself is authoritative for each exact disposition.
   plain-diff binary scanner.
 - Include README in the Pages metadata-check trigger and `site/llms.txt` in the
   legacy-origin coverage set.
-- Remove the dead `canvas#field` selector left by the ambient-background site
-  redesign.
+- Remove dead presentational rules left by the site redesign, including
+  `canvas#field` and the unused nav/vendor selectors.
 - Reconcile the process-local Delegate count reservation when a runner throws
   before creating a child, and give count-cap refusal its own accurate remedy.
 - Extend the site metadata checker to prove referenced local assets and anchors,
@@ -504,3 +504,5 @@ ledger row itself is authoritative for each exact disposition.
   same F4/noChanges semantics as Git-mode capture.
 - Consolidate the duplicated environment-scoped Git invocation helper shared
   by workspace capture and revert logic.
+- Resolve the duplicated historical X227 ledger identifier while preserving
+  both original wave references and dispositions.
