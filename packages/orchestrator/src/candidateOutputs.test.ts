@@ -79,6 +79,7 @@ describe("candidate produced-output persistence", () => {
     expect(existsSync(join(attemptDir, "produced", ".claudexor-artifacts", "large.png"))).toBe(
       false,
     );
+    expect(candidateOutputsContainSecret({ worktreePath: worktree, changedPaths: [] })).toBe(true);
   });
 
   it("treats an unreadable raster as an unprovable secret risk", () => {
@@ -251,6 +252,89 @@ describe("candidate produced-output persistence", () => {
     expect(produced).toEqual(["screenshots/ignored.png"]);
     expect(existsSync(join(attemptDir, "produced", "screenshots", "ignored.png"))).toBe(true);
     expect(writes[0]?.["produced_files"]).toEqual(["screenshots/ignored.png"]);
+  });
+
+  it("copies an owned raster linked from markdown exactly once", () => {
+    const worktree = root("claudexor-linked-owned-tree-");
+    const attemptDir = root("claudexor-linked-owned-attempt-");
+    const relative = ".claudexor-artifacts/browser/shot.png";
+    mkdirSync(join(worktree, ".claudexor-artifacts", "browser"), { recursive: true });
+    writeFileSync(join(worktree, relative), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const produced = writeCandidateAttemptArtifacts({
+      store: {
+        writeText: () => undefined,
+        writeYaml: () => undefined,
+      } as never,
+      attemptDir,
+      worktreePath: worktree,
+      diff: "",
+      answerText: `![shot](./${relative})`,
+      record: { attempt_id: "a01" },
+    });
+
+    expect(produced).toEqual([relative]);
+    expect(readFileSync(join(attemptDir, "produced", relative))).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+  });
+
+  it("deduplicates a markdown case alias before writing on case-insensitive filesystems", () => {
+    const worktree = root("claudexor-case-alias-tree-");
+    const attemptDir = root("claudexor-case-alias-attempt-");
+    const relative = ".claudexor-artifacts/browser/shot.png";
+    const alias = ".claudexor-artifacts/browser/SHOT.png";
+    mkdirSync(join(worktree, ".claudexor-artifacts", "browser"), { recursive: true });
+    writeFileSync(join(worktree, relative), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    // Linux CI commonly uses a case-sensitive filesystem; the production
+    // regression is macOS/APFS-specific and is exercised wherever the alias
+    // resolves to the owned file.
+    if (!existsSync(join(worktree, alias))) return;
+    const produced = writeCandidateAttemptArtifacts({
+      store: {
+        writeText: () => undefined,
+        writeYaml: () => undefined,
+      } as never,
+      attemptDir,
+      worktreePath: worktree,
+      diff: "",
+      answerText: `![shot](${alias})`,
+      record: { attempt_id: "a01" },
+    });
+
+    expect(produced).toEqual([alias]);
+    expect(readFileSync(join(attemptDir, "produced", alias))).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+  });
+
+  it("enforces one combined byte ceiling across linked and owned rasters", () => {
+    const worktree = root("claudexor-combined-cap-tree-");
+    const attemptDir = root("claudexor-combined-cap-attempt-");
+    mkdirSync(join(worktree, "linked"), { recursive: true });
+    mkdirSync(join(worktree, ".claudexor-artifacts"), { recursive: true });
+    const bytes = Buffer.alloc(12 * 1024 * 1024);
+    writeFileSync(join(worktree, "linked", "first.png"), bytes);
+    writeFileSync(join(worktree, ".claudexor-artifacts", "second.png"), bytes);
+    writeFileSync(join(worktree, ".claudexor-artifacts", "third.png"), bytes);
+
+    const produced = writeCandidateAttemptArtifacts({
+      store: {
+        writeText: () => undefined,
+        writeYaml: () => undefined,
+      } as never,
+      attemptDir,
+      worktreePath: worktree,
+      diff: "",
+      answerText: "![first](linked/first.png)",
+      record: { attempt_id: "a01" },
+    });
+
+    expect(produced).toEqual(["linked/first.png", ".claudexor-artifacts/second.png"]);
+    expect(existsSync(join(attemptDir, "produced", ".claudexor-artifacts", "third.png"))).toBe(
+      false,
+    );
   });
 
   it("persists no produced media for a secret-refused candidate", () => {

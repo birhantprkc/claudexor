@@ -32,7 +32,10 @@ describe("delegation belt policy (D32)", () => {
   it("caps the sub-run count per parent", () => {
     expect(subRunCountRefusal(0, 8)).toBeNull();
     expect(subRunCountRefusal(7, 8)).toBeNull();
-    expect(subRunCountRefusal(8, 8)).toMatch(/cap reached \(8\/8\)/);
+    const refusal = subRunCountRefusal(8, 8);
+    expect(refusal).toMatch(/cap reached \(8\/8\)/);
+    expect(refusal).not.toMatch(/budget|raise/i);
+    expect(refusal).toMatch(/start a new parent run/);
     expect(subRunCountRefusal(9, 8)).not.toBeNull();
   });
 
@@ -201,8 +204,11 @@ describe("delegation belt tool surface (D32)", () => {
 
   it("releases the reservation when a sub-run throws (headroom is not stranded)", async () => {
     const ledger = newBeltLedger();
+    let calls = 0;
     const runner: RunnerFn = async () => {
-      throw new Error("sub-run blew up");
+      calls += 1;
+      if (calls === 1) throw new Error("sub-run blew up");
+      return { runId: "sub-retry", status: "succeeded", spendUsd: 0 };
     };
     const tools = beltClaudexorTools(
       runner,
@@ -210,15 +216,19 @@ describe("delegation belt tool surface (D32)", () => {
         parentRunId: "run-parent",
         repoRoot: "/tmp/project",
         depth: 0,
-        maxSubRuns: 8,
+        maxSubRuns: 1,
         parentBudget: { kind: "finite", maxUsd: 1 },
       },
       ledger,
     );
     const run = tools.find((t) => t.name === "claudexor_run")!;
     await expect(run.handler({ prompt: "a" }, {})).rejects.toThrow("blew up");
-    // The reservation was released on the throw — headroom is fully available.
+    // Neither headroom nor the started-child slot is stranded by a runner that
+    // throws before it returns a child terminal.
     expect(ledger.committedUsd).toBeCloseTo(0, 5);
+    expect(ledger.started).toBe(0);
+    await expect(run.handler({ prompt: "retry" }, {})).resolves.toBeDefined();
+    expect(ledger.started).toBe(1);
   });
 
   it.each(["failed", "cancelled", "interrupted"] as const)(

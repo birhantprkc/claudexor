@@ -579,6 +579,22 @@ describe("WorkspaceManager", () => {
     await mgr.dispose(env);
   });
 
+  it("scans the full non-git text diff for secrets before projecting it to 200k", async () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-inplace-long-secret-"));
+    writeFileSync(join(dir, "README.md"), "plain folder\n");
+    const mgr = new WorkspaceManager(dir);
+    const env = await mgr.create({ taskId: "t-long", attemptId: "a01", inPlace: true });
+    const secret = `sk-${"v".repeat(24)}`;
+    writeFileSync(join(dir, "LONG.txt"), `${"safe line\n".repeat(25_000)}${secret}\n`);
+
+    const captured = await mgr.captureDiff(env);
+
+    expect(captured.diff).toContain("[diff truncated]");
+    expect(captured.diff).not.toContain(secret);
+    expect(captured.binarySecretLike).toBe(true);
+    await mgr.dispose(env);
+  });
+
   it("fails closed when non-git diff cannot read a binary postimage", async () => {
     const dir = reapMk(join(tmpdir(), "claudexor-inplace-unreadable-"));
     writeFileSync(join(dir, "README.md"), "plain folder\n");

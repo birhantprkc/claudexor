@@ -37,6 +37,16 @@ export function candidateFailureKind(
   );
 }
 
+/** Race-level precedence: an unrecovered injected-belt failure dominates all
+ * siblings; a safely discarded isolated secret candidate is merely ineligible,
+ * while an in-place refusal remains terminal because cleanup may be required. */
+export function dominantRaceCandidateFailure(runs: CandidateRun[]): CandidateRun | undefined {
+  return (
+    runs.find((run) => delegationFailureKind(run.telemetry)) ??
+    runs.find((run) => run.secretDiffRefusal && run.secretDiffRefusal.disposition !== "discarded")
+  );
+}
+
 /** Build the terminal cause/provenance without duplicating the race and
  * convergence messages or raw-attempt links. */
 export function delegationFailureTerminal(run: CandidateRun, lane: "race" | "convergence") {

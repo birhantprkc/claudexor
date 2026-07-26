@@ -41,7 +41,11 @@ export interface CandidateRun {
  * be reviewed/arbitrated/adopted?", shared by the race, convergence, and
  * synthesis lanes (D-16 r8) so no sibling path re-derives the veto. */
 export function isWorkingCandidate(run: CandidateRun): boolean {
-  return run.outcomeClass !== "interrupted" && (!run.errored || run.diff.length > 0);
+  return (
+    !run.secretDiffRefusal &&
+    run.outcomeClass !== "interrupted" &&
+    (!run.errored || run.diff.length > 0)
+  );
 }
 
 /**

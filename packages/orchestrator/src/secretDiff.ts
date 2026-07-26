@@ -15,7 +15,7 @@ export function recordSecretDiffRefusal(
   existingError: boolean,
 ): boolean {
   if (!refusal) return existingError;
-  errors.push("candidate output contains secret-like token; refusing artifact persistence");
+  errors.push("candidate output could not be proven secret-safe; refusing artifact persistence");
   return true;
 }
 
@@ -44,7 +44,8 @@ export async function quarantineSecretDiff(input: {
       diff: "",
       refusal: {
         disposition: "discarded",
-        detail: "secret-bearing isolated bytes were discarded with the candidate envelope",
+        detail:
+          "isolated candidate bytes that could not be proven secret-safe were discarded with the candidate envelope",
       },
     };
   }
@@ -54,21 +55,34 @@ export async function quarantineSecretDiff(input: {
       refusal: {
         disposition: "manual_cleanup",
         detail:
-          "candidate output could not be captured as an exact reversible patch; manual cleanup required",
+          "candidate output could not be proven secret-safe or captured as an exact reversible patch; manual cleanup required",
       },
     };
   }
-  const rollback = await revertWorkingTreePatch(input.repo, input.diff, {
-    isolateObjectWrites: input.gitBacked,
-    noIndex: !input.gitBacked,
-  });
+  let rollback;
+  try {
+    rollback = await revertWorkingTreePatch(input.repo, input.diff, {
+      isolateObjectWrites: input.gitBacked,
+      noIndex: !input.gitBacked,
+    });
+  } catch {
+    return {
+      diff: "",
+      refusal: {
+        disposition: "manual_cleanup",
+        detail:
+          "in-place output that could not be proven secret-safe could not be rolled back; manual cleanup required",
+      },
+    };
+  }
   const manuallyClean = !rollback.reverted || input.gitBacked;
   return {
     diff: "",
     refusal: !manuallyClean
       ? {
           disposition: "reverted",
-          detail: "secret-bearing in-place bytes were removed by an exact checked rollback",
+          detail:
+            "in-place bytes that could not be proven secret-safe were removed by an exact checked rollback",
         }
       : {
           disposition: "manual_cleanup",
@@ -88,7 +102,20 @@ export async function quarantineCandidateWorkspace(
   inPlace: boolean,
   answerText?: string,
 ): ReturnType<typeof quarantineSecretDiff> {
-  const captured = await wsm.captureDiff(envelope);
+  let captured;
+  try {
+    captured = await wsm.captureDiff(envelope);
+  } catch {
+    return {
+      diff: "",
+      refusal: {
+        disposition: inPlace ? "manual_cleanup" : "discarded",
+        detail: inPlace
+          ? "candidate output could not be captured safely; manual cleanup required"
+          : "uncaptured isolated candidate output was discarded with the candidate envelope",
+      },
+    };
+  }
   const mediaSecretLike = candidateOutputsContainSecret({
     worktreePath: envelope.worktree_path,
     changedPaths: [

@@ -55,7 +55,7 @@ export function delegationDepthRefusal(depth: number): string | null {
 /** Count-cap guard. `started` = sub-runs already started this belt session. */
 export function subRunCountRefusal(started: number, maxSubRuns: number): string | null {
   return started >= maxSubRuns
-    ? `delegation sub-run cap reached (${started}/${maxSubRuns}); integrate the results you have or raise the parent's budget`
+    ? `delegation sub-run cap reached (${started}/${maxSubRuns}); integrate the results you have or start a new parent run`
     : null;
 }
 
@@ -292,6 +292,11 @@ export function beltClaudexorTools(
           },
           ctx.signal ? { signal: ctx.signal } : {},
         );
+      } catch (error) {
+        // A runner that throws never started a usable delegated child, so it
+        // must not permanently consume this belt session's count slot.
+        ledger.started = Math.max(0, ledger.started - 1);
+        throw error;
       } finally {
         // Release the reservation; a throwing sub-run frees its headroom.
         ledger.committedUsd -= reservedUsd;

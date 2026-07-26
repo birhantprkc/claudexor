@@ -44,6 +44,23 @@ describe("partitionCandidates (D-16 veto owner)", () => {
     ]);
     expect(working).toEqual([clean]);
   });
+
+  it("a safely discarded secret candidate never joins the working set beside a clean sibling", () => {
+    const clean = candidate({ attemptId: "a2", diff: "diff --git a/y b/y\n+2\n" });
+    const { working } = partitionCandidates([
+      candidate({
+        diff: "",
+        errored: true,
+        secretDiffRefusal: {
+          disposition: "discarded",
+          detail:
+            "isolated candidate bytes that could not be proven secret-safe were discarded with the candidate envelope",
+        },
+      }),
+      clean,
+    ]);
+    expect(working).toEqual([clean]);
+  });
 });
 
 describe("convergenceOutcomeFacts precedence", () => {

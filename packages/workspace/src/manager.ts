@@ -5,7 +5,13 @@ import { join, sep } from "node:path";
 import type { AccessProfile, DirtyPolicy, WorkspaceEnvelope } from "@claudexor/schema";
 import { WorkspaceEnvelope as WorkspaceEnvelopeSchema } from "@claudexor/schema";
 import { CLAUDEXOR_ARTIFACT_DIR, runCaptureRaw, WorkspaceError } from "@claudexor/core";
-import { ensureDir, newId, nowIso, projectRuntimeDir } from "@claudexor/util";
+import {
+  containsSecretLikeToken,
+  ensureDir,
+  newId,
+  nowIso,
+  projectRuntimeDir,
+} from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
 import { plainDiffBinarySecretLike, relativizePlainDiffHeaders } from "./plain-diff.js";
 import {
@@ -387,7 +393,12 @@ export class WorkspaceManager {
             relativized.length > CAP
               ? relativized.slice(0, CAP) + "\n... [diff truncated]\n"
               : relativized,
-          binarySecretLike: plainDiffBinarySecretLike(relativized, env.repo_root),
+          // Inspect the complete captured text before projecting it into the
+          // bounded artifact. A token beyond the 200k display cap must still
+          // trip the secret fence.
+          binarySecretLike:
+            containsSecretLikeToken(relativized) ||
+            plainDiffBinarySecretLike(relativized, env.repo_root),
         };
       } catch {
         return { diff: "", binarySecretLike: true };

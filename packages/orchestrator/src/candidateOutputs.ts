@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  realpathSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -212,15 +213,32 @@ export function persistCandidateOutputs(input: {
   const root = resolve(input.worktreePath);
   let total = 0;
   const preserved: string[] = [];
+  const candidates = new Map<string, { relative: string; source: string }>();
 
   for (const raw of input.changedPaths) {
-    const relative = raw.split("\\").join("/");
-    if (!RASTER_OUTPUT_EXTENSIONS.has(extname(relative).toLowerCase())) continue;
-    const status = candidatePathStatus(root, relative);
+    if (!RASTER_OUTPUT_EXTENSIONS.has(extname(raw).toLowerCase())) continue;
+    const status = candidatePathStatus(root, raw);
     if (status.kind !== "safe" || !status.stat.isFile()) continue;
+    const relative = pathRelative(root, status.path).split("\\").join("/");
+    let identity: string;
+    try {
+      // realpath returns the filesystem's canonical spelling, so case and
+      // Unicode-normalization aliases on macOS collapse before any O_EXCL
+      // destination write. The already-verified lexical path remains the
+      // source used by the no-follow copy fence.
+      identity = realpathSync.native(status.path);
+    } catch {
+      continue;
+    }
+    if (!candidates.has(identity)) {
+      candidates.set(identity, { relative, source: status.path });
+    }
+  }
+
+  for (const { relative, source } of candidates.values()) {
     const target = join(input.attemptDir, "produced", relative);
     const copied = copyRasterIfSafe(
-      status.path,
+      source,
       target,
       Math.min(MAX_OUTPUT_BYTES, MAX_TOTAL_BYTES - total),
     );
@@ -277,7 +295,7 @@ export function candidateOutputsContainSecret(input: {
     if (status.kind === "missing") continue;
     if (status.kind !== "safe" || !status.stat.isFile()) return true;
     const safe = rasterBytesIfSafe(status.path);
-    if (!safe && status.stat.size <= MAX_OUTPUT_BYTES) return true;
+    if (!safe) return true;
   }
   return false;
 }
@@ -314,26 +332,22 @@ export function writeCandidateAttemptArtifacts(input: {
     input.store.writeText(join(input.attemptDir, "patch.diff"), input.diff);
   }
   const stats = summarizeDiffPaths(input.diff);
+  // Build one candidate path set before the first filesystem write. A raster
+  // may be both linked from markdown and discovered under the owned artifact
+  // directory; copying each source in a separate pass would race itself on the
+  // O_EXCL destination and would incorrectly grant each pass its own byte cap.
   const produced =
     input.persistProducedMedia === false
       ? []
-      : [
-          ...new Set([
-            ...persistCandidateOutputs({
-              worktreePath: input.worktreePath,
-              attemptDir: input.attemptDir,
-              changedPaths: [
-                ...new Set([...stats.paths, ...rasterLinksInMarkdown(input.answerText ?? "")]),
-              ],
-            }),
-            // F4: media in the claudexor-owned artifact dir is excluded from the diff,
-            // so it is never in `stats.paths` — collect it into the gallery here.
-            ...collectArtifactDirMedia({
-              worktreePath: input.worktreePath,
-              attemptDir: input.attemptDir,
-            }),
-          ]),
-        ];
+      : persistCandidateOutputs({
+          worktreePath: input.worktreePath,
+          attemptDir: input.attemptDir,
+          changedPaths: [
+            ...stats.paths,
+            ...rasterLinksInMarkdown(input.answerText ?? ""),
+            ...artifactMediaPaths(resolve(input.worktreePath)).paths,
+          ],
+        });
   input.store.writeYaml(join(input.attemptDir, "attempt.yaml"), {
     ...input.record,
     diffstat: {

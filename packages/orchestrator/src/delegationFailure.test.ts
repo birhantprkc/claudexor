@@ -29,7 +29,7 @@ describe("secret-refused in-place receipt", () => {
       cost: 0,
       errored: true,
       costEstimated: false,
-      errors: ["candidate output contains secret-like token; refusing artifact persistence"],
+      errors: ["candidate output could not be proven secret-safe; refusing artifact persistence"],
       telemetry: createAttemptTelemetry("auto", false),
       secretDiffRefusal: {
         disposition: "manual_cleanup",

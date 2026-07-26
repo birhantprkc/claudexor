@@ -243,6 +243,7 @@ export async function captureWorkingTreeTransient(
   const objectDir = join(scratchDir, "objects");
   const indexPath = join(scratchDir, "index");
   mkdirSync(objectDir, { recursive: true, mode: 0o700 });
+  let primaryError: unknown;
   try {
     const actualObjects = await git(repo, [
       "rev-parse",
@@ -299,11 +300,30 @@ export async function captureWorkingTreeTransient(
       if (binarySecretLike) break;
     }
     return { patch: diff.stdout, binarySecretLike };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
     // Unlike ordinary best-effort scratch cleanup, this directory may contain
     // a candidate token blob. A cleanup failure is therefore terminal and must
     // never be hidden behind the original capture result.
-    rmSync(scratchDir, { recursive: true, force: true });
+    try {
+      rmSync(scratchDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      // A cleanup failure is terminal on its own, but must not erase the typed
+      // capture error that explains the primary failure.
+      if (primaryError === undefined) throw cleanupError;
+      if (primaryError instanceof Error) {
+        try {
+          Object.defineProperty(primaryError, "cleanupError", {
+            value: cleanupError,
+            enumerable: false,
+          });
+        } catch {
+          // Even a frozen/non-extensible typed error remains the primary cause.
+        }
+      }
+    }
   }
 }
 

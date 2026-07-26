@@ -3489,7 +3489,7 @@ export class Orchestrator {
       );
     }
 
-    const failedDelegation = runs.find((run) => delegateFailure.candidateFailureKind(run));
+    const failedDelegation = delegateFailure.dominantRaceCandidateFailure(runs);
     if (failedDelegation) {
       const failure = delegateFailure.candidateFailureTerminal(failedDelegation, "race");
       await disposeReviewEnvelopes();

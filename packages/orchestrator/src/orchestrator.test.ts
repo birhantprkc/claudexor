@@ -2340,7 +2340,7 @@ describe("Orchestrator", () => {
     // working candidates the run fails with the ROOT CAUSE (no corpse review,
     // no empty final patch pretending to be a work product).
     expect(legacyOutcome(res)).toBe("failed");
-    expect(res.summary).toContain("secret-like token");
+    expect(res.summary).toContain("could not be proven secret-safe");
     expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
     expect(existsSync(join(res.runDir, "attempts", "a01", "patch.diff"))).toBe(false);
     const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
@@ -10574,6 +10574,141 @@ describe("delegation belt injection (D32)", () => {
     expect(existsSync(join(res.runDir, "attempts", "a01", "produced"))).toBe(false);
   });
 
+  it.each(["oversized", "unreadable"] as const)(
+    "emits a truthful manual-cleanup receipt for an $state in-place raster",
+    async (state) => {
+      const repo = reapMk(join(tmpdir(), `claudexor-raster-${state}-`));
+      writeFileSync(join(repo, "README.md"), "# test\n");
+      const raster = join(repo, ".claudexor-artifacts", "preview.png");
+      const adapter = delegatingAdapter(
+        "raster",
+        true,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        [],
+        undefined,
+        (cwd) => {
+          const output = join(cwd, ".claudexor-artifacts", "preview.png");
+          mkdirSync(join(output, ".."), { recursive: true });
+          writeFileSync(
+            output,
+            state === "oversized"
+              ? Buffer.alloc(16 * 1024 * 1024 + 1)
+              : Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+          );
+          if (state === "unreadable") chmodSync(output, 0o000);
+        },
+      );
+      const orch = new Orchestrator({
+        registry: new Map([["raster", adapter]]),
+        reviewers: reviewers(),
+      });
+
+      const res = await orch.run({
+        repoRoot: repo,
+        prompt: "x",
+        mode: "agent",
+        harnesses: ["raster"],
+        attempts: 2,
+        inPlace: true,
+      });
+
+      expect(res.lifecycle).toBe("failed");
+      expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
+      expect(readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8")).toContain(
+        "secret_recovery: manual_cleanup",
+      );
+      const refusalSurface = [
+        res.summary,
+        readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8"),
+        readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8"),
+      ].join("\n");
+      expect(refusalSurface).toContain("could not be proven secret-safe");
+      expect(refusalSurface).not.toContain("contains secret-like token");
+      if (state === "unreadable" && existsSync(raster)) chmodSync(raster, 0o600);
+    },
+  );
+
+  it("excludes a discarded secret candidate so its clean best-of sibling can win", async () => {
+    const repo = await initRepo();
+    const secret = `sk-${"q".repeat(24)}`;
+    const leaky = delegatingAdapter(
+      "leaky",
+      true,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      (cwd) => writeFileSync(join(cwd, "LEAK.txt"), `${secret}\n`),
+    );
+    const clean = delegatingAdapter(
+      "clean",
+      true,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      (cwd) => writeFileSync(join(cwd, "CLEAN.txt"), "clean candidate\n"),
+    );
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["leaky", leaky],
+        ["clean", clean],
+      ]),
+      reviewers: reviewers(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["leaky", "clean"],
+      n: 2,
+    });
+
+    expect(res.lifecycle).toBe("succeeded");
+    expect(res.candidates.find((candidate) => candidate.attemptId === res.winner)?.harnessId).toBe(
+      "clean",
+    );
+    expect(readFileSync(join(res.runDir, "final", "patch.diff"), "utf8")).toContain("CLEAN.txt");
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+  });
+
+  it("keeps an all-secret best-of race as an artifact-security hard failure", async () => {
+    const repo = await initRepo();
+    const secret = `sk-${"s".repeat(24)}`;
+    const leaky = (id: string) =>
+      delegatingAdapter(id, true, undefined, false, undefined, undefined, [], undefined, (cwd) =>
+        writeFileSync(join(cwd, `${id}.txt`), `${secret}\n`),
+      );
+    const orch = new Orchestrator({
+      registry: new Map([
+        ["leaky-a", leaky("leaky-a")],
+        ["leaky-b", leaky("leaky-b")],
+      ]),
+      reviewers: reviewers(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["leaky-a", "leaky-b"],
+      n: 2,
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(res.winner).toBeNull();
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "phase: artifact_security",
+    );
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
+  });
+
   it("keeps harness commits inside the disposable candidate clone", async () => {
     const repo = await initRepo();
     const secret = `sk-${"d".repeat(24)}`;
@@ -10757,6 +10892,50 @@ describe("delegation belt injection (D32)", () => {
     expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
       "phase: delegation_runtime",
     );
+  });
+
+  it("lets an unrecovered belt failure dominate a discarded secret sibling", async () => {
+    const repo = await initRepo();
+    const secret = `sk-${"t".repeat(24)}`;
+    const orch = new Orchestrator({
+      registry: new Map([
+        [
+          "failed",
+          delegatingAdapter("failed", true, undefined, false, "pending", undefined, ["error"]),
+        ],
+        [
+          "leaky",
+          delegatingAdapter(
+            "leaky",
+            true,
+            undefined,
+            false,
+            "connected",
+            undefined,
+            [],
+            undefined,
+            (cwd) => writeFileSync(join(cwd, "LEAK.txt"), `${secret}\n`),
+          ),
+        ],
+      ]),
+      reviewers: [],
+      delegationBudgetAuthority: new DelegationBudgetAuthority(),
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "x",
+      mode: "agent",
+      harnesses: ["failed", "leaky"],
+      n: 2,
+      delegate: true,
+      delegationBelt: belt,
+    });
+
+    expect(res.lifecycle).toBe("failed");
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "phase: delegation_runtime",
+    );
+    expect(treeContainsBytes(res.runDir, secret)).toBe(false);
   });
 
   it("lets any injected belt startup failure dominate a mixed race", async () => {
