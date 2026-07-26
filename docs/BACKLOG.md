@@ -405,8 +405,9 @@ revision/etag, already logged above), are intentionally not duplicated.
 These are the WARN-or-below findings from the frozen-candidate, Fable-high,
 synthesis, and exact-SHA confirmation waves. They do not expand the 3.1.2
 blocker fix batch. Related ledger context spans X303-X343, X360, X367-X377,
-and X382-X423; those ranges also contain fixed and declined records, so the
-ledger row itself is authoritative for each exact disposition.
+and X382 onward through the latest row associated with this section. Those
+ranges also contain fixed and declined records, so the ledger row itself is
+authoritative for each exact disposition.
 
 - Route bounded Delegate child summaries through the Control API's cached,
   fail-soft projector so one corrupt legacy child cannot 500 its parent detail.
