@@ -1,5 +1,5 @@
 import type { CostKnowledge, HarnessEvent } from "@claudexor/schema";
-import type { BudgetSettlement } from "@claudexor/budget";
+import { unknownCostSettlement, type BudgetSettlement } from "@claudexor/budget";
 
 export interface AttemptUsageCost {
   cashUsd: number;
@@ -49,6 +49,24 @@ export function withAttemptFailureCost<T>(work: () => T, attemptCost: AttemptFai
   } catch (error) {
     throw new AttemptPostStreamError(error, attemptCost);
   }
+}
+
+/** Settle every lease owner from the same post-stream error truth. */
+export function attemptFailureCost(
+  error: unknown,
+  fallbackSource: string,
+  fallbackCashUsd?: number,
+): AttemptFailureCost {
+  if (error instanceof AttemptPostStreamError) return error.attemptCost;
+  const carriedCashUsd =
+    typeof (error as { costUsd?: unknown })?.costUsd === "number"
+      ? (error as { costUsd: number }).costUsd
+      : fallbackCashUsd;
+  return {
+    totalUsd: carriedCashUsd ?? 0,
+    estimated: true,
+    settlement: unknownCostSettlement(fallbackSource, carriedCashUsd),
+  };
 }
 
 export function newAttemptUsageCost(): AttemptUsageCost {

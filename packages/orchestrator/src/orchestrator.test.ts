@@ -323,6 +323,79 @@ function diffImplementer(
   };
 }
 
+function blockAttemptPatchPersistence(repo: string, attemptId: string): void {
+  const runsDir = join(projectRuntimeDir(repo), "runs");
+  const runId = readdirSync(runsDir)[0];
+  if (!runId) throw new Error("fixture run directory was not created");
+  mkdirSync(join(runsDir, runId, "attempts", attemptId, "patch.diff"), { recursive: true });
+}
+
+function mixedRoutePersistenceAdapter(
+  id: string,
+  repo: string,
+  block: (call: number, intent: string) => string | null,
+): HarnessAdapter {
+  const base = diffImplementer(id);
+  let calls = 0;
+  return {
+    ...base,
+    async *run(spec) {
+      calls += 1;
+      const ts = new Date().toISOString();
+      yield {
+        type: "started",
+        session_id: spec.session_id,
+        ts,
+        credential_route: "vendor_native",
+      };
+      writeFileSync(join(spec.cwd, "CHANGED.txt"), `change from ${spec.intent}\n`);
+      yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+      yield {
+        type: "usage",
+        session_id: spec.session_id,
+        ts,
+        credential_route: "vendor_native",
+        usage: { cost_usd: 0.75, estimated: true },
+      };
+      yield {
+        type: "usage",
+        session_id: spec.session_id,
+        ts,
+        credential_route: "managed_api_key",
+        usage: { cost_usd: 0.25 },
+      };
+      const blockedAttempt = block(calls, spec.intent);
+      if (blockedAttempt) blockAttemptPatchPersistence(repo, blockedAttempt);
+      yield { type: "completed", session_id: spec.session_id, ts };
+    },
+  };
+}
+
+function expectBudgetSplit(runDir: string, cash: number, valuation: number): void {
+  const events = readFileSync(join(runDir, "events.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          type: string;
+          payload: { cash_spend_usd?: number; valuation_usd?: number };
+        },
+    );
+  const cashEvents = events.filter(
+    (event) => event.type === "budget.cash" && typeof event.payload.cash_spend_usd === "number",
+  );
+  expect(
+    cashEvents.some(
+      (event) =>
+        (event.payload.cash_spend_usd ?? Number.NaN) >= cash &&
+        (event.payload.cash_spend_usd ?? Number.NaN) < cash + 0.01 &&
+        Math.abs((event.payload.valuation_usd ?? Number.NaN) - valuation) < 0.000_001,
+    ),
+    JSON.stringify(events.filter((event) => event.type.startsWith("budget."))),
+  ).toBe(true);
+}
+
 function rawPatchImplementer(
   id: string,
   observeAccess?: (access: AccessProfile) => void,
@@ -744,6 +817,95 @@ describe("Orchestrator", () => {
     expect(readFileSync(join(noWork.runDir, "arbitration", "decision.yaml"), "utf8")).toMatch(
       /estimated: true/,
     );
+  }, 30_000);
+
+  it("preserves mixed-route settlement when convergence persistence fails", async () => {
+    const repo = await initRepo();
+    const adapter = mixedRoutePersistenceAdapter("mixed-convergence", repo, (call) =>
+      call === 1 ? "a01" : null,
+    );
+    const res = await new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: reviewers(),
+    }).run({
+      repoRoot: repo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: [adapter.id],
+      attempts: 2,
+    });
+
+    expectBudgetSplit(res.runDir, 0.5, 1.5);
+  }, 30_000);
+
+  it("preserves mixed-route settlement when synthesis persistence fails", async () => {
+    const repo = await initRepo();
+    const adapter = mixedRoutePersistenceAdapter("mixed-synthesis", repo, (_call, intent) =>
+      intent === "synthesize" ? "synth" : null,
+    );
+    const res = await new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: [adapter.id],
+      n: 2,
+      synthesis: "always",
+    });
+
+    expectBudgetSplit(res.runDir, 0.75, 2.25);
+  }, 30_000);
+
+  it("preserves mixed-route settlement when continuation persistence fails", async () => {
+    const repo = await initRepo();
+    const base = createFakeHarness("fake-context-then-complete");
+    let calls = 0;
+    const adapter: HarnessAdapter = {
+      ...base,
+      async *run(spec) {
+        calls += 1;
+        const continuation = calls === 2;
+        for await (const event of base.run(spec)) {
+          if (event.type === "usage") continue;
+          if (event.type === "started") {
+            yield { ...event, credential_route: "vendor_native" as const };
+            continue;
+          }
+          if (event.type === "completed") {
+            const ts = new Date().toISOString();
+            yield {
+              type: "usage",
+              session_id: spec.session_id,
+              ts,
+              credential_route: "vendor_native" as const,
+              usage: { cost_usd: 0.75, estimated: true },
+            };
+            yield {
+              type: "usage",
+              session_id: spec.session_id,
+              ts,
+              credential_route: "managed_api_key" as const,
+              usage: { cost_usd: 0.25 },
+            };
+            if (continuation) blockAttemptPatchPersistence(repo, "a01c");
+          }
+          yield event;
+        }
+      },
+    };
+    const res = await new Orchestrator({
+      registry: new Map([[adapter.id, adapter]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "do it",
+      mode: "agent",
+      harnesses: [adapter.id],
+    });
+
+    expectBudgetSplit(res.runDir, 0.5, 1.5);
   }, 30_000);
 
   it("D-16 r7: a context-exhausted candidate (partial diff, no completed report) terminalizes interrupted and is NEVER adopted", async () => {

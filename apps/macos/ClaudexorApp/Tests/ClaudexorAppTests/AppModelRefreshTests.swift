@@ -1940,6 +1940,26 @@ struct AppModelRefreshTests {
         }
         #expect(model.liveBoxes["run-cash"]?.spendUsd == 0)
         #expect(model.liveBoxes["run-cash"]?.spendEstimated == false)
+
+        model.ingestStreamEnvelope(BusEnvelope(
+            seq: 4, kind: "budget",
+            event: .object([
+                "type": .string("budget.cash"),
+                "payload": .object([
+                    "cash_spend_usd": .number(0),
+                    "valuation_usd": .number(2),
+                    "estimated": .bool(true),
+                    "valuation_knowledge": .string("estimated")
+                ])
+            ])
+        ), to: "run-cash")
+        for _ in 0..<40 where model.liveBoxes["run-cash"]?.spendEstimated != true {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        // Current component-aware events are not legacy: preserve the engine's
+        // explicit cash-estimated bit even when the cumulative cash value is 0.
+        #expect(model.liveBoxes["run-cash"]?.spendUsd == 0)
+        #expect(model.liveBoxes["run-cash"]?.spendEstimated == true)
     }
 
     @Test func winnerEvidenceSeparatesSelectionFromFinalReviewTruth() throws {

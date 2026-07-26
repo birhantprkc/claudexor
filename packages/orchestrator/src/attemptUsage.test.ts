@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { attemptUsageCostSettlement, BudgetLedger } from "@claudexor/budget";
 import { processAttemptUsage } from "./attemptUsage.js";
-import { AttemptPostStreamError, withAttemptFailureCost } from "./attemptUsageCost.js";
+import {
+  AttemptPostStreamError,
+  attemptFailureCost,
+  withAttemptFailureCost,
+} from "./attemptUsageCost.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
 
 const usageEvent = (estimated: boolean) =>
@@ -45,6 +49,21 @@ describe("processAttemptUsage", () => {
         cashKnowledge: "exact",
         valuationKnowledge: "estimated",
       },
+    });
+
+    for (const source of ["attempt-error", "continuation-error", "synthesis-error"]) {
+      expect(attemptFailureCost(error, source).settlement).toBe(settlement);
+    }
+  });
+
+  it("keeps ordinary pre-stream failure fallbacks unknown", () => {
+    expect(attemptFailureCost(new Error("setup failed"), "attempt-error")).toMatchObject({
+      totalUsd: 0,
+      settlement: { knowledge: "unknown", source: "attempt-error" },
+    });
+    expect(attemptFailureCost({ costUsd: 0.4 }, "post-stream-error", 0)).toMatchObject({
+      totalUsd: 0.4,
+      settlement: { knowledge: "unknown", source: "post-stream-error", cashUsd: 0.4 },
     });
   });
 

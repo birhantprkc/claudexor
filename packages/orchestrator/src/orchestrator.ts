@@ -17,7 +17,7 @@ import {
   writeCandidateAttemptArtifacts,
 } from "./candidateOutputs.js";
 import { processAttemptUsage } from "./attemptUsage.js";
-import { AttemptPostStreamError, withAttemptFailureCost } from "./attemptUsageCost.js";
+import { attemptFailureCost, withAttemptFailureCost } from "./attemptUsageCost.js";
 import {
   type CandidateRun,
   candidateRoster,
@@ -248,7 +248,6 @@ import {
   explainRanking,
   loadHarnessMetrics,
   promptFingerprint,
-  unknownCostSettlement,
   rankHarnesses,
   reviewUsageCostSettlement,
 } from "@claudexor/budget";
@@ -3376,7 +3375,10 @@ export class Orchestrator {
                 // actually completes cleanly (never over a torn-off/aborted stream).
                 if (!contRun.errored && !input.signal?.aborted) effectiveRun = contRun;
               } catch (err) {
-                ledger.settle(contLeaseId, unknownCostSettlement("continuation-error", 0));
+                ledger.settle(
+                  contLeaseId,
+                  attemptFailureCost(err, "continuation-error", 0).settlement,
+                );
                 log.emit("harness.completed", {
                   harness_id: adapter.id,
                   attempt_id: contAttemptId,
@@ -3398,16 +3400,9 @@ export class Orchestrator {
         reviewEnvelopes.push(envelope);
         envelope = undefined;
       } catch (err) {
-        const attemptCost = err instanceof AttemptPostStreamError ? err.attemptCost : null;
-        const carriedCost =
-          attemptCost?.totalUsd ??
-          (typeof (err as { costUsd?: unknown })?.costUsd === "number"
-            ? (err as { costUsd: number }).costUsd
-            : 0);
-        ledger.settle(
-          slot.leaseId,
-          attemptCost?.settlement ?? unknownCostSettlement("post-stream-error", carriedCost),
-        );
+        const failureCost = attemptFailureCost(err, "post-stream-error", 0);
+        const carriedCost = failureCost.totalUsd;
+        ledger.settle(slot.leaseId, failureCost.settlement);
         const message = safeErrorMessage(err);
         const infraPhase: "workspace" | "harness" =
           envelope === undefined ? "workspace" : "harness";
@@ -3906,7 +3901,10 @@ export class Orchestrator {
             await disposeReviewEnvelopes();
           }
         } catch (err) {
-          ledger.settle(lease.lease?.lease_id ?? "", unknownCostSettlement("synthesis-error"));
+          ledger.settle(
+            lease.lease?.lease_id ?? "",
+            attemptFailureCost(err, "synthesis-error").settlement,
+          );
           log.emit("harness.completed", {
             attempt_id: "synth",
             status: "failed",
@@ -5009,7 +5007,10 @@ export class Orchestrator {
         } catch (err) {
           // Envelope/setup failure before the stream; stream errors are absorbed
           // inside runCandidateInEnvelope with their real accumulated cost.
-          ledger.settle(lease.lease?.lease_id ?? "", unknownCostSettlement("attempt-error"));
+          ledger.settle(
+            lease.lease?.lease_id ?? "",
+            attemptFailureCost(err, "attempt-error").settlement,
+          );
           log.emit("harness.completed", {
             harness_id: adapter.id,
             attempt_id: attemptId,
