@@ -12,6 +12,10 @@ import ClaudexorKit
 /// `models` map that rides the turn; the pool is never poisoned by one
 /// vendor's model id.
 struct ComposerModelsSection: View {
+    /// Keep every closed picker inside the 380pt options popover even when a
+    /// vendor catalog contains very long labels (Cursor currently does).
+    static let modelPickerWidth: CGFloat = 180
+
     let families: [HarnessFamily]
     let primary: HarnessFamily?
     /// Effective per-turn credential route (W20): the server filters
@@ -122,7 +126,7 @@ struct ComposerModelsSection: View {
                 }
             }
             .labelsHidden()
-            .fixedSize()
+            .frame(width: Self.modelPickerWidth, alignment: .leading)
             .help(pickerHelp(family, catalog, hiddenOnRoute: catalog.models.count - visible.count))
         } else if catalogs[key] != nil {
             // A LOADED catalog that cannot enumerate (source: none) — the
