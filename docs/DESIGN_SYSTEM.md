@@ -919,9 +919,10 @@ views in the shared design-system files; screens compose them.
   hydrate a missing projected child only when that tab or disclosure needs it.
   A child carrying the `waitingOnUser` overlay force-refreshes its own detail
   even if an earlier snapshot is cached, then renders the ordinary inline
-  `InteractionCard` under the flat row. A failed detail load replaces the
-  spinner with the concrete error and Retry; it never leaves an unanswerable
-  question or a permanent loading state.
+  `InteractionCard` under the flat row and submits through the interaction's
+  canonical child run id. A failed detail load replaces the spinner with the
+  concrete error and Retry; it never leaves an unanswerable question or a
+  permanent loading state.
 - **Run route disclosure (run-filtered workspace header).** The finished run's header shows
   the auth route ACTUALLY taken (Subscription / API key, from the engine's
   route receipt; hover reveals requested preference, source, and the typed

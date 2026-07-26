@@ -1236,6 +1236,50 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func interactionAnswerUsesCanonicalPendingRunIdAcrossQueuedAlias() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        var child = TaskRun(
+            id: "job-child", resolvedRunId: "run-child", title: "Child", prompt: "",
+            mode: .ask, phase: .running, project: "Project", harnesses: [.codex], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .verified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: [])
+        child.waitingOnUser = true
+        child.pendingInteractions = [PendingInteraction(
+            interactionId: "int-child", runId: "run-child", attemptId: "a1",
+            harnessId: "codex", sourceTool: "request_user_input", questions: [],
+            requestedAt: "2026-07-26T00:00:00Z", timeoutAt: nil)]
+        model.liveTasks = [child]
+
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.httpMethod == "POST",
+                  request.url?.path == "/v2/runs/run-child/interactions/int-child/answer" else {
+                throw AppRefreshTestError.badRequest
+            }
+            return (appResponse(for: request), Data(
+                #"{"accepted":true,"status":"accepted","message":null}"#.utf8))
+        }
+
+        let failure = await model.answerInteraction(
+            runId: child.pendingInteractions[0].runId,
+            interactionId: "int-child",
+            answers: [InteractionAnswerPayload(
+                questionId: "q1", selectedLabels: ["Yes"], freeText: nil)])
+
+        #expect(failure == nil)
+        let updated = try #require(model.task("job-child"))
+        #expect(updated.pendingInteractions.isEmpty)
+        #expect(!updated.waitingOnUser)
+    }
+
+    @MainActor
     @Test func overlappingViewHydrationUsesOneRunDetailRequest() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

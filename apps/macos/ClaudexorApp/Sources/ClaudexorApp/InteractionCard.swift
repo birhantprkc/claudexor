@@ -6,7 +6,6 @@ import SwiftUI
 /// surface. One card per pending interaction, shown on every tab of the run.
 struct InteractionCard: View {
     @Environment(AppModel.self) private var model
-    let runId: String
     let interaction: PendingInteraction
 
     @State private var selections: [String: Set<String>] = [:]
@@ -125,7 +124,10 @@ struct InteractionCard: View {
         sending = true
         errorMessage = nil
         Task {
-            let failure = await model.answerInteraction(runId: runId, interactionId: interaction.interactionId, answers: answers)
+            let failure = await model.answerInteraction(
+                runId: interaction.runId,
+                interactionId: interaction.interactionId,
+                answers: answers)
             sending = false
             errorMessage = failure
         }

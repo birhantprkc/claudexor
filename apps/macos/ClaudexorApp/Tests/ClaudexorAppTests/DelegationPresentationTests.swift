@@ -144,8 +144,15 @@ import Foundation
         let row = try #require(source.components(separatedBy: "struct DelegatedRunRow").last)
         #expect(row.contains("await model.hydrateDelegatedChildInteractions(child)"))
         #expect(row.contains("ForEach(child.pendingInteractions)"))
-        #expect(row.contains("InteractionCard(runId: child.id, interaction: pending)"))
+        #expect(row.contains("InteractionCard(interaction: pending)"))
         #expect(row.contains("Button(\"Retry\")"))
+
+        let interactionCard = try String(
+            contentsOf: appRoot.appendingPathComponent(
+                "Sources/ClaudexorApp/InteractionCard.swift"),
+            encoding: .utf8)
+        #expect(!interactionCard.contains("let runId: String"))
+        #expect(interactionCard.contains("runId: interaction.runId"))
     }
 
     @Test func runDetailsExposeExactDelegateReceiptAndChildLineage() throws {

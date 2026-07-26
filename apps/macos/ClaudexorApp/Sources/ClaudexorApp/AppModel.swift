@@ -1386,7 +1386,9 @@ final class AppModel {
             guard response.accepted else {
                 return response.message ?? "Answer was not accepted (\(response.status))."
             }
-            if let idx = liveTasks.firstIndex(where: { $0.id == runId }) {
+            if let idx = liveTasks.firstIndex(where: {
+                $0.id == runId || $0.resolvedRunId == runId
+            }) {
                 liveTasks[idx].pendingInteractions.removeAll { $0.interactionId == interactionId }
                 liveTasks[idx].waitingOnUser = !liveTasks[idx].pendingInteractions.isEmpty
                 liveTasks[idx].updatedAt = .now

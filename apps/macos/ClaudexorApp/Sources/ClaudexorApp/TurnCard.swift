@@ -130,7 +130,7 @@ struct TurnCard: View {
                 // .answerInteraction with no UI caller — this restores it so a
                 // pending interaction is always answerable in default config.
                 ForEach(run.pendingInteractions) { pending in
-                    InteractionCard(runId: runId, interaction: pending)
+                    InteractionCard(interaction: pending)
                 }
                 // D17: a plan that came back needs_answers surfaces its open
                 // questions inline; answering submits a follow-up plan turn.

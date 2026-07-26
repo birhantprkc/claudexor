@@ -14,7 +14,9 @@ Release history for Claudexor. The current version is declared in the root
   spend can no longer escape the parent's terminal decision. Control API, CLI,
   and macOS preserve typed Delegate lineage, degradation warnings, failure
   reasons, child ordering, and reconnect/reload truth without confusing native
-  vendor subagents for Claudexor children.
+  vendor subagents for Claudexor children. Child questions stay answerable
+  inline through their canonical run id, and signed candidate probes tolerate
+  macOS canonical temporary-path aliases without weakening the entry fence.
 
 - **v3.1.1** (2026-07-25) — patch release: engine honesty, per-model effort
   ladders, and control-plane fixes on top of v3.1.0. Engine: a DELIVERED plan

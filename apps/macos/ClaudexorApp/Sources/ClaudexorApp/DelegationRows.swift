@@ -109,7 +109,7 @@ struct DelegatedRunRow: View {
                     }
                 }
                 ForEach(child.pendingInteractions) { pending in
-                    InteractionCard(runId: child.id, interaction: pending)
+                    InteractionCard(interaction: pending)
                 }
             }
             .task(id: interactionLoadKey) {
