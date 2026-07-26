@@ -349,9 +349,10 @@ export class WorkspaceManager {
         return { diff: captured.patch, binarySecretLike: captured.binarySecretLike };
       }
       // Non-git fallback: diff the best-effort cpSync baseline against the live
-      // tree; if no baseline was captured, return empty (reviewers read the tree).
+      // tree. Missing or failed capture is an uncaptured binary risk, never a
+      // safe no-change result.
       const baseline = join(this.envelopeBase(env.task_id, env.attempt_id), "baseline");
-      if (!existsSync(baseline)) return { diff: "", binarySecretLike: false };
+      if (!existsSync(baseline)) return { diff: "", binarySecretLike: true };
       try {
         const r = await runCaptureRaw(
           "diff",
@@ -372,6 +373,9 @@ export class WorkspaceManager {
           ],
           { timeoutMs: 120_000 },
         );
+        if (r.code !== 0 && r.code !== 1) {
+          return { diff: "", binarySecretLike: true };
+        }
         // Relativize the header paths to the git-style a/<rel> b/<rel> shape.
         // Downstream consumers (diffstat, protected-path/risk gating) match
         // REPO-RELATIVE globs like `test/**`; absolute `/…/repo/test/x`
@@ -386,8 +390,7 @@ export class WorkspaceManager {
           binarySecretLike: plainDiffBinarySecretLike(relativized, env.repo_root),
         };
       } catch {
-        // best-effort: if `diff` is unavailable the loop still works (reviewers read the live tree)
-        return { diff: "", binarySecretLike: false };
+        return { diff: "", binarySecretLike: true };
       }
     }
     // Exclude the envelope-local generated CLAUDE.md bridge (INV-113) from the

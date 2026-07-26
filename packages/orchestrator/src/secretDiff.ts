@@ -48,6 +48,16 @@ export async function quarantineSecretDiff(input: {
       },
     };
   }
+  if (input.binarySecretLike && !input.diff.trim()) {
+    return {
+      diff: "",
+      refusal: {
+        disposition: "manual_cleanup",
+        detail:
+          "candidate output could not be captured as an exact reversible patch; manual cleanup required",
+      },
+    };
+  }
   const rollback = await revertWorkingTreePatch(input.repo, input.diff, {
     isolateObjectWrites: input.gitBacked,
     noIndex: !input.gitBacked,

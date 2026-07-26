@@ -579,6 +579,23 @@ describe("WorkspaceManager", () => {
     await mgr.dispose(env);
   });
 
+  it("fails closed when non-git diff cannot read a binary postimage", async () => {
+    const dir = reapMk(join(tmpdir(), "claudexor-inplace-unreadable-"));
+    writeFileSync(join(dir, "README.md"), "plain folder\n");
+    const mgr = new WorkspaceManager(dir);
+    const env = await mgr.create({ taskId: "t-unreadable", attemptId: "a01", inPlace: true });
+    const leak = join(dir, "LEAK.bin");
+    writeFileSync(leak, Buffer.concat([Buffer.from([0]), Buffer.from(`sk-${"u".repeat(24)}`)]));
+    chmodSync(leak, 0o000);
+    try {
+      const captured = await mgr.captureDiff(env);
+      expect(captured).toEqual({ diff: "", binarySecretLike: true });
+    } finally {
+      chmodSync(leak, 0o600);
+      await mgr.dispose(env);
+    }
+  });
+
   it("in-place non-git: header relativization never rewrites hunk CONTENT that looks like a header (INV-041)", async () => {
     const dir = reapMk(join(tmpdir(), "claudexor-inplace-fidelity-"));
     // Content lines that RENDER as `--- `/`+++ ` in a unified diff: a removed
