@@ -1,8 +1,10 @@
+import { realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { summarizeDiffPaths } from "@claudexor/core";
 import type { WorkspaceEnvelope } from "@claudexor/schema";
 import { revertWorkingTreePatch, type WorkspaceManager } from "@claudexor/workspace";
 import { containsSecretLikeToken, redactSecrets } from "@claudexor/util";
-import { candidateOutputsContainSecret, rasterLinksInMarkdown } from "./candidateOutputs.js";
+import { candidateOutputSecretRisk, rasterLinksInMarkdown } from "./candidateOutputs.js";
 
 export interface SecretDiffRefusal {
   disposition: "discarded" | "reverted" | "manual_cleanup";
@@ -34,6 +36,9 @@ export async function quarantineSecretDiff(input: {
   inPlace: boolean;
   repo: string;
   binarySecretLike: boolean;
+  /** Secret-risk media that is not represented by `diff` cannot be removed by
+   * a successful text rollback and therefore requires truthful manual cleanup. */
+  secretOutsidePatch?: boolean;
   gitBacked: boolean;
 }): Promise<{ diff: string; refusal?: SecretDiffRefusal }> {
   if (!containsSecretLikeToken(input.diff) && !input.binarySecretLike) {
@@ -75,7 +80,7 @@ export async function quarantineSecretDiff(input: {
       },
     };
   }
-  const manuallyClean = !rollback.reverted || input.gitBacked;
+  const manuallyClean = !rollback.reverted || input.gitBacked || input.secretOutsidePatch === true;
   return {
     diff: "",
     refusal: !manuallyClean
@@ -116,18 +121,36 @@ export async function quarantineCandidateWorkspace(
       },
     };
   }
-  const mediaSecretLike = candidateOutputsContainSecret({
+  const diffPaths = summarizeDiffPaths(captured.diff).paths;
+  const linkedPaths = rasterLinksInMarkdown(answerText ?? "");
+  const mediaRisk = candidateOutputSecretRisk({
     worktreePath: envelope.worktree_path,
-    changedPaths: [
-      ...summarizeDiffPaths(captured.diff).paths,
-      ...rasterLinksInMarkdown(answerText ?? ""),
-    ],
+    changedPaths: [...diffPaths, ...linkedPaths],
   });
+  const diffIdentities = new Set(
+    diffPaths.map((path) => candidatePathIdentity(envelope.worktree_path, path)),
+  );
+  const secretOutsidePatch =
+    mediaRisk.artifactDirectoryUnsafe ||
+    mediaRisk.riskyPaths.some(
+      (path) => !diffIdentities.has(candidatePathIdentity(envelope.worktree_path, path)),
+    );
   return quarantineSecretDiff({
     diff: captured.diff,
-    binarySecretLike: captured.binarySecretLike || mediaSecretLike,
+    binarySecretLike: captured.binarySecretLike || mediaRisk.risky,
+    secretOutsidePatch,
     repo: envelope.worktree_path,
     inPlace,
     gitBacked: Boolean(envelope.base_sha),
   });
+}
+
+function candidatePathIdentity(root: string, raw: string): string {
+  const absolute = resolve(root, raw);
+  if (absolute !== resolve(root) && !absolute.startsWith(resolve(root) + sep)) return absolute;
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
 }

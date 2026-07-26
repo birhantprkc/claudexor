@@ -285,19 +285,33 @@ export function candidateOutputsContainSecret(input: {
   worktreePath: string;
   changedPaths: readonly string[];
 }): boolean {
+  return candidateOutputSecretRisk(input).risky;
+}
+
+export function candidateOutputSecretRisk(input: {
+  worktreePath: string;
+  changedPaths: readonly string[];
+}): { risky: boolean; riskyPaths: string[]; artifactDirectoryUnsafe: boolean } {
   const root = resolve(input.worktreePath);
   const artifactMedia = artifactMediaPaths(root);
-  if (artifactMedia.unsafe) return true;
+  const riskyPaths: string[] = [];
   const paths = [...input.changedPaths, ...artifactMedia.paths];
   for (const relative of new Set(paths)) {
     if (!RASTER_OUTPUT_EXTENSIONS.has(extname(relative).toLowerCase())) continue;
     const status = candidatePathStatus(root, relative);
     if (status.kind === "missing") continue;
-    if (status.kind !== "safe" || !status.stat.isFile()) return true;
+    if (status.kind !== "safe" || !status.stat.isFile()) {
+      riskyPaths.push(relative);
+      continue;
+    }
     const safe = rasterBytesIfSafe(status.path);
-    if (!safe) return true;
+    if (!safe) riskyPaths.push(relative);
   }
-  return false;
+  return {
+    risky: artifactMedia.unsafe || riskyPaths.length > 0,
+    riskyPaths,
+    artifactDirectoryUnsafe: artifactMedia.unsafe,
+  };
 }
 
 export function rasterLinksInMarkdown(markdown: string): string[] {

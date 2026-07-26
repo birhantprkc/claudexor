@@ -15,6 +15,8 @@ export interface RevertResult {
   reason?: string;
   /** Typed refusal class set at the point of failure; absent on success. */
   reasonCode?: RevertRefusalReason;
+  /** Scratch cleanup failed after the primary rollback result was known. */
+  cleanupError?: string;
 }
 
 export interface RevertPatchOptions {
@@ -63,43 +65,45 @@ export async function revertWorkingTreePatch(
     .map((file) => file.newPath as string);
   let scratchDir: string | null = null;
   let isolatedEnv: Record<string, string> | null = null;
-  if (options.isolateObjectWrites) {
-    scratchDir = mkdtempSync(join(tmpdir(), "claudexor-transient-revert-"));
-    const objectDir = join(scratchDir, "objects");
-    mkdirSync(objectDir, { recursive: true, mode: 0o700 });
-    const actualObjects = await git(repo, [
-      "rev-parse",
-      "--path-format=absolute",
-      "--git-path",
-      "objects",
-    ]);
-    if (actualObjects.code !== 0 || !actualObjects.stdout.trim()) {
-      rmSync(scratchDir, { recursive: true, force: true });
-      throw new WorkspaceError(
-        `transient revert could not resolve Git objects: ${actualObjects.stderr.trim()}`,
-      );
-    }
-    isolatedEnv = {
-      GIT_OBJECT_DIRECTORY: objectDir,
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(actualObjects.stdout.trim()),
-      GIT_OPTIONAL_LOCKS: "0",
-    };
-  }
-  const runApply = (args: string[], input: string) =>
-    isolatedEnv ? gitEnv(repo, args, isolatedEnv, input) : git(repo, args, input);
+  let primaryError: unknown;
+  let primaryResult: RevertResult | undefined;
   try {
+    if (options.isolateObjectWrites) {
+      scratchDir = mkdtempSync(join(tmpdir(), "claudexor-transient-revert-"));
+      const objectDir = join(scratchDir, "objects");
+      mkdirSync(objectDir, { recursive: true, mode: 0o700 });
+      const actualObjects = await git(repo, [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "objects",
+      ]);
+      if (actualObjects.code !== 0 || !actualObjects.stdout.trim()) {
+        throw new WorkspaceError(
+          `transient revert could not resolve Git objects: ${actualObjects.stderr.trim()}`,
+        );
+      }
+      isolatedEnv = {
+        GIT_OBJECT_DIRECTORY: objectDir,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: JSON.stringify(actualObjects.stdout.trim()),
+        GIT_OPTIONAL_LOCKS: "0",
+      };
+    }
+    const runApply = (args: string[], input: string) =>
+      isolatedEnv ? gitEnv(repo, args, isolatedEnv, input) : git(repo, args, input);
     const mode = options.noIndex ? ["--no-index"] : [];
     const check = await runApply(
       ["apply", ...mode, "--check", "--reverse", "--whitespace=nowarn", "-"],
       patch,
     );
     if (check.code !== 0) {
-      return {
+      primaryResult = {
         reverted: false,
         removed: [],
         reason: `turn-owned postimage no longer matches; refusing to overwrite later user edits: ${check.stderr.trim()}`,
         reasonCode: "postimage_diverged",
       };
+      return primaryResult;
     }
     const before = options.noIndex ? null : await statusPorcelain(repo);
     const apply = await runApply(
@@ -108,7 +112,7 @@ export async function revertWorkingTreePatch(
     );
     if (apply.code !== 0) {
       const after = options.noIndex ? null : await statusPorcelain(repo);
-      return {
+      primaryResult = {
         reverted: false,
         removed: [],
         reason:
@@ -118,9 +122,36 @@ export async function revertWorkingTreePatch(
             : "target changed during revert; no destructive rollback was attempted"),
         reasonCode: "reverse_apply_failed",
       };
+      return primaryResult;
     }
-    return { reverted: true, removed };
+    primaryResult = { reverted: true, removed };
+    return primaryResult;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
+    if (scratchDir) {
+      try {
+        rmSync(scratchDir, { recursive: true, force: true });
+      } catch (cleanupError) {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        if (primaryResult?.reverted === false) {
+          primaryResult.cleanupError = message;
+        } else if (primaryResult?.reverted === true) {
+          throw cleanupError;
+        } else if (primaryError instanceof Error) {
+          try {
+            Object.defineProperty(primaryError, "cleanupError", {
+              value: cleanupError,
+              enumerable: false,
+            });
+          } catch {
+            // A frozen typed error still remains the primary failure.
+          }
+        } else {
+          throw cleanupError;
+        }
+      }
+    }
   }
 }
