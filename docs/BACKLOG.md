@@ -409,8 +409,6 @@ and X382 onward through the latest row associated with this section. Those
 ranges also contain fixed and declined records, so the ledger row itself is
 authoritative for each exact disposition.
 
-- Route bounded Delegate child summaries through the Control API's cached,
-  fail-soft projector so one corrupt legacy child cannot 500 its parent detail.
 - Remove private `paramsRecord` copies after the shared run-record owner is
   adopted everywhere.
 - Refine Delegate-family cancellation receipts so successfully delivered but
@@ -423,61 +421,32 @@ authoritative for each exact disposition.
 - Add a recorded Codex required-MCP failure fixture with version provenance;
   align the Swift drain-timeout fixture phase with production
   `delegation_drain`.
-- Separate proven-zero cash estimation from subscription valuation knowledge.
 - Make deferred EventLog terminal return values explicitly provisional and
   remove the `clearDeferredTerminal` future-misuse seam.
-- Constrain success-path decision-budget reconciliation to its intended owner
-  and preserve cancellation precedence when a strategy throw and drain-barrier
+- Preserve cancellation precedence when a strategy throw and drain-barrier
   rejection coincide.
 - Close the delegated parent-close/start gap in race, plan, and read-only
   report without creating an announced-but-nonterminal event.
 - Preserve the mixed-pool degradation nuance in aggregate remediation even
   when another lane has the dominant startup-failed cause.
-- Bound macOS artifact previews by exact UTF-8 bytes, mark detail hydration only
-  after a row is actually updated, and cancel discarded eager detail requests.
-- Treat `external_sandbox_full` consistently across engine and composer,
-  consume the server-owned remediation copy, and restore queued-alias Delegate
-  children against the real parent run id.
+- Cancel discarded eager macOS detail requests.
+- Consume the server-owned remediation copy in the macOS Delegate projection.
 - Make disposable private candidate clones self-contained, or pin their source
   snapshot for the run lifetime, so a concurrent explicit aggressive GC of the
   source repository cannot remove an unreachable dirty-snapshot base.
-- When parent detail projects Delegate children, reuse the fail-soft cached live
-  summary owner and include the journal-backed `waitingOnUser` overlay.
 - Return typed MCP `isError:true` for malformed/manual unscoped belt status and
   result reads, matching run-producing policy refusals.
 - Generate a distinct review-packet change-to-decision/invariant registry and
   warn if it is byte-identical to the accepted plan.
-- Clarify that Delegate bootstrap values seed a conservative process-local
-  refusal ledger while daemon family accounting remains the authoritative cap.
-- Preserve the primary typed capture/revert error when scratch cleanup also
-  fails, while still surfacing the cleanup failure as attached evidence.
-- Keep explicit in-place media refusal receipts manual when the flagged raster
-  lies outside the reversible patch, including pre-existing Markdown links and
-  files above the raster persistence ceiling.
 - Decouple `RunDelegationInfo` schema validity from exact remediation prose, or
   normalize the canonical copy at the projection boundary for future mixed
   versions.
-- Align the public in-place rollback prose and non-Git architecture fallback
-  with the truthful `manual_cleanup` receipt used when exact capture/reversal
-  cannot be proven.
-- Decide whether one secret-refused disposable candidate should dominate an
-  otherwise healthy best-of race, then pin the mixed-candidate outcome.
 - Couple raster detection and persistence to one parent-directory authority so
   a concurrent component swap cannot change the bytes or path after approval.
 - Generate complete package changelog notes for the workspace, orchestrator,
   and MCP public surfaces changed in the Delegate recovery.
 - Derive non-Git missing-side headers from immutable capture evidence rather
   than rechecking live path existence after `diff` completes.
-- Scan the full non-Git text diff for secret-like output before applying the
-  200,000-character presentation bound, with beyond/straddling-boundary tests.
-- Reuse the shared candidate-output refusal copy in thread delivery so binary
-  refusals do not claim that the textual patch contained the token.
-- Finish the legacy-worktree wording migration across Bible and architecture
-  text and normalize the indented INV-062 paragraph.
-- Convert explicit in-place capture/rollback exceptions into sanitized
-  `manual_cleanup` WorkProduct receipts while retaining the primary cause.
-- Deduplicate candidate media paths shared by answer markdown and the owned
-  artifact directory before exclusive persistence.
 - Use no-index-aware reverse-failure copy so an ordinary apply error does not
   imply that a concurrent writer changed the target.
 - Make Git binary-object scanning use the same byte-faithful convention as the
@@ -486,8 +455,6 @@ authoritative for each exact disposition.
   legacy-origin coverage set.
 - Remove dead presentational rules left by the site redesign, including
   `canvas#field` and the unused nav/vendor selectors.
-- Reconcile the process-local Delegate count reservation when a runner throws
-  before creating a child, and give count-cap refusal its own accurate remedy.
 - Extend the site metadata checker to prove referenced local assets and anchors,
   sweep every crawler surface, and preserve compatibility anchors for published
   deep links.
@@ -495,8 +462,6 @@ authoritative for each exact disposition.
   local budget, depth, or child-count refusals.
 - Replace JSON alternates quoting with Git-compatible C-style path quoting for
   legal control-character repository paths.
-- Preserve both the primary capture/revert error and a scratch-cleanup error,
-  then record enough private-residue detail for deterministic cleanup.
 - Remove the network map's composite image role so assistive technology can
   reach every substantive harness/capability description.
 - Move durable secret-refusal WorkProduct, attempt, and event fields under one

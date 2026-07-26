@@ -394,7 +394,7 @@ state is separate from output readiness (`outputReadyState`), so a finished
 answer with warnings stays usable while failed required evidence blocks.
 Paid budgets are explicit (`--max-usd N`; zero is a real zero-cash cap) and
 unknown cost is never reported as `$0` — a finite run can end
-`cost_unverifiable` or `exhausted_overshoot`. Deterministic gates use exact
+`cost_unverifiable` or `budget_overshoot`. Deterministic gates use exact
 argv (`--test '["pnpm","test"]'`), and externally-granted test commands are
 invalidated when the config, argv, executable, script bytes, project, or
 access profile changes. The full semantics live in

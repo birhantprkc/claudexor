@@ -1538,7 +1538,7 @@ route; a native→API-key retry cannot hide later metered spend under the first
 native route, and an undisclosed route remains cost-unverifiable. `finite(0)` admits
 only proven-zero or subscription-entitlement work; a positive finite cap permits
 at most one unknown-cost paid unit in flight. A later exact charge above the cap
-is retained and ends `exhausted_overshoot`; permanently unknown cost ends
+is retained and ends `budget_overshoot`; permanently unknown cost ends
 `cost_unverifiable` rather than fabricating `$0`. Parallel race waves reserve a
 per-candidate estimate floor (`budget.estimate_usd_floor`, default $0.05) after
 the first slot, so concurrent estimated work counts against headroom before
@@ -2083,10 +2083,11 @@ code touching one of these areas must honor it or change it explicitly here.
   enforcement applies only to explicit `cached`/`live` policies (the WHITEPAPER
   documents the rationale).
 - READ-ONLY flows on non-git folders get a best-effort copied baseline for
-  diffing (write modes auto-initialize git per INV-075); if the
-  baseline copy or the `diff` tool fails, the run's diff is empty and
-  reviewers read the live tree (diff output capped at 200 kB with an in-band
-  truncation marker).
+  diffing (write modes auto-initialize git per INV-075). If exact capture or
+  reversal cannot be proven for an explicit in-place run, Claudexor fails
+  closed with a sanitized `manual_cleanup` receipt; it never substitutes an
+  empty diff and asks reviewers to trust the live tree. Presentation remains
+  capped at 200 kB only after the full text diff has crossed the secret fence.
 - Isolated-thread worktrees are pinned by persistent `claudexor/thread-*`
   branches. Journal SHA is a checked cache; successful apply advances the
   branch, and explicit trash/restore/purge owns its retention lifecycle.
