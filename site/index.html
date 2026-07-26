@@ -1112,7 +1112,7 @@
           size();
           addEventListener("resize", size);
           function draw(now) {
-            requestAnimationFrame(draw);
+            if (!REDUCED) requestAnimationFrame(draw);
             if (now - last < 48) return;
             last = now;
             t += 2.3;
@@ -1207,7 +1207,7 @@
 
         /* ---- rotating aside ---- */
         const el = document.getElementById("aside");
-        if (el) {
+        if (el && !REDUCED) {
           const L = [
             "Your five-hour window resets at <i>14:02</i>. Your deadline does not.",
             "Rate limits are code review with worse timing.",
