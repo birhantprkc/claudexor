@@ -4,7 +4,7 @@ import ClaudexorKit
 /// THE owner of run FACTS and their formatting (W4.5 sol #16): every text,
 /// glyph, tone, and help string a surface shows about a run's route, apply
 /// state, output, web evidence, or budget is produced here exactly once.
-/// Surfaces (TurnCard, Run Detail header) COMPOSE their own layouts from
+/// Surfaces (TurnCard, run-filtered workspace facts row) COMPOSE their layouts from
 /// these facts — layout stays per-surface, the facts never fork. The terminal
 /// outcome LINE stays composed by `OutcomePresentation` (F2 W21), which
 /// consumes the same single apply-state mapper below.
@@ -87,10 +87,10 @@ enum RunFacts {
                     requested: task.n, delivered: task.candidates.count)
     }
 
-    // MARK: Header composition (Run Detail)
+    // MARK: Workspace facts composition
 
-    /// The PRIMARY header facts (W4.5: 3-4 facts — route, apply, attention).
-    /// Everything else belongs in Details.
+    /// The PRIMARY workspace facts (W4.5: 3-4 facts — route, apply, attention).
+    /// Supporting facts follow in the same run-filtered facts row.
     static func headerPrimary(_ task: TaskRun) -> [Fact] {
         var facts: [Fact] = []
         if let route = task.authRoute, let effective = route.effective, effective != "unknown" {
