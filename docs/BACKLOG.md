@@ -438,3 +438,19 @@ batch; exact reviewer dispositions are X303-X343 in the findings ledger.
 - Make disposable private candidate clones self-contained, or pin their source
   snapshot for the run lifetime, so a concurrent explicit aggressive GC of the
   source repository cannot remove an unreachable dirty-snapshot base.
+- When parent detail projects Delegate children, reuse the fail-soft cached live
+  summary owner and include the journal-backed `waitingOnUser` overlay.
+- Return typed MCP `isError:true` for malformed/manual unscoped belt status and
+  result reads, matching run-producing policy refusals.
+- Generate a distinct review-packet change-to-decision/invariant registry and
+  warn if it is byte-identical to the accepted plan.
+- Clarify that Delegate bootstrap values seed a conservative process-local
+  refusal ledger while daemon family accounting remains the authoritative cap.
+- Preserve the primary typed capture/revert error when scratch cleanup also
+  fails, while still surfacing the cleanup failure as attached evidence.
+- Keep explicit in-place media refusal receipts manual when the flagged raster
+  lies outside the reversible patch, including pre-existing Markdown links and
+  files above the raster persistence ceiling.
+- Decouple `RunDelegationInfo` schema validity from exact remediation prose, or
+  normalize the canonical copy at the projection boundary for future mixed
+  versions.
