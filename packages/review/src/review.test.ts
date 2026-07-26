@@ -972,6 +972,28 @@ describe("reviewEngine", () => {
       reviewCashUsd: 0,
       reviewCashKnowledge: "unknown",
     });
+
+    const failedNative = noUsageReviewer("native-failed", "vendor_native");
+    failedNative.adapter.run = async function* (spec) {
+      const ts = new Date().toISOString();
+      yield {
+        type: "started" as const,
+        session_id: spec.session_id,
+        ts,
+        credential_route: "vendor_native" as const,
+      };
+      yield {
+        type: "error" as const,
+        session_id: spec.session_id,
+        ts,
+        credential_route: "vendor_native" as const,
+        error: "native reviewer failed after route proof",
+      };
+    };
+    await expect(run(failedNative)).resolves.toMatchObject({
+      reviewCashUsd: 0,
+      reviewCashKnowledge: "exact",
+    });
   });
 
   it("classifies each reviewer retry usage by that try's credential route", async () => {

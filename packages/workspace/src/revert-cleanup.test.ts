@@ -82,4 +82,17 @@ describe("transient Git revert cleanup", () => {
       "revert cleanup sentinel",
     );
   });
+
+  it("does not call a no-index reverse-check failure concurrent user divergence", async () => {
+    const repo = initRepo();
+    const result = await revertWorkingTreePatch(
+      repo,
+      "Binary files a/preview.png and b/preview.png differ\n",
+      { noIndex: true },
+    );
+
+    expect(result).toMatchObject({ reverted: false, reasonCode: "reverse_apply_failed" });
+    expect(result.reason).toMatch(/could not be proven reversible/);
+    expect(result.reason).not.toMatch(/later user edits|postimage/);
+  });
 });

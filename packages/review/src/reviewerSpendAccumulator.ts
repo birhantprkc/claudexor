@@ -46,8 +46,14 @@ export class ReviewerSpendAccumulator {
   }
 
   recordPartial(index: number, output: PartialReviewerSpend): void {
-    if (!(typeof output.partialCostUsd === "number" && output.partialCostUsd > 0)) return;
-    this.spend[index] = output.partialCostUsd;
+    const hasCost =
+      typeof output.partialCostUsd === "number" &&
+      Number.isFinite(output.partialCostUsd) &&
+      output.partialCostUsd >= 0;
+    const hasComponentKnowledge =
+      output.partialCashKnowledge !== undefined || output.partialValuationKnowledge !== undefined;
+    if (!hasCost && !hasComponentKnowledge) return;
+    this.spend[index] = hasCost ? (output.partialCostUsd ?? 0) : 0;
     this.estimated[index] = output.partialCostEstimated === true;
     this.cash[index] = output.partialCashUsd ?? 0;
     this.cashKnowledge[index] = output.partialCashKnowledge ?? "unknown";

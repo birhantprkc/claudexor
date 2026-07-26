@@ -514,6 +514,9 @@ struct DiffFile: Identifiable, Hashable {
 // MARK: - Task (a run)
 struct TaskRun: Identifiable, Hashable {
     let id: String
+    /// Canonical server run id after an optimistic queued job-id alias binds.
+    /// `id` stays stable for SwiftUI identity during the in-flight detail load.
+    var resolvedRunId: String? = nil
     var title: String
     var prompt: String
     var mode: RunMode

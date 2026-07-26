@@ -925,8 +925,11 @@ struct AppModelRefreshTests {
         await model.loadRunDetail("job-queued")
 
         #expect(model.liveTasks.map(\.id) == ["job-queued", "run-child"])
-        #expect(model.liveTasks.first?.phase == .succeeded)
+        let parent = try! #require(model.liveTasks.first)
+        #expect(parent.phase == .succeeded)
+        #expect(parent.resolvedRunId == "run-real")
         #expect(model.liveTasks.last?.delegatedFromRunId == "run-real")
+        #expect(model.delegatedChildren(of: parent).map(\.id) == ["run-child"])
     }
 
     @Test func utf8ArtifactPreviewBoundsBytesWithoutSplittingAScalar() {

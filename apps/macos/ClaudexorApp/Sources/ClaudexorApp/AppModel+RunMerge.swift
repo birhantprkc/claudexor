@@ -35,6 +35,7 @@ extension AppModel {
         // Preserve the last engine-owned projection across a skewed/older
         // summary rather than making a durable warning or child link flicker.
         task.parentRunId = task.parentRunId ?? existing.parentRunId
+        task.resolvedRunId = task.resolvedRunId ?? existing.resolvedRunId
         task.delegatedFromRunId = task.delegatedFromRunId ?? existing.delegatedFromRunId
         task.delegation = task.delegation ?? existing.delegation
         // Detail-only truth the list summary NEVER carries (crit #1): the summary

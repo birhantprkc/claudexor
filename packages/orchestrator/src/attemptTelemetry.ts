@@ -17,7 +17,7 @@ import type {
 } from "@claudexor/schema";
 import {
   newAttemptUsageCost,
-  recordAttemptUsageCost,
+  observeAttemptUsageEvent,
   type AttemptUsageCost,
 } from "./attemptUsageCost.js";
 import { redactSecrets } from "@claudexor/util";
@@ -322,21 +322,7 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
     if (ev.credential_route === "vendor_native") t.authMode = "local_session";
     else if (ev.credential_route === "managed_api_key") t.authMode = "api_key";
   }
-  if (ev.credential_route === "vendor_native") t.currentAuthMode = "local_session";
-  else if (ev.credential_route === "managed_api_key") t.currentAuthMode = "api_key";
-  if (ev.type === "message" && ev.payload?.["auth_switched"] === true) {
-    if (ev.payload["to_auth_mode"] === "subscription") t.currentAuthMode = "local_session";
-    if (ev.payload["to_auth_mode"] === "api_key") t.currentAuthMode = "api_key";
-  }
-  if (ev.usage?.cost_usd) {
-    const usageMode =
-      ev.credential_route === "vendor_native"
-        ? "local_session"
-        : ev.credential_route === "managed_api_key"
-          ? "api_key"
-          : t.currentAuthMode;
-    recordAttemptUsageCost(t.usageCost, usageMode, ev.usage.cost_usd, ev.usage.estimated === true);
-  }
+  t.currentAuthMode = observeAttemptUsageEvent(t.usageCost, ev, t.currentAuthMode);
   // First-wins like the route: the source is decided once before spawn.
   if (!t.authSource && ev.credential_source) t.authSource = ev.credential_source;
   // LAST-wins (unlike the route): W5.4 failover rotates the profile between

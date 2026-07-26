@@ -28,6 +28,7 @@ extension AppModel {
             plan: [], activity: [], candidates: [], findings: [], diff: [],
             isLive: true
         )
+        task.resolvedRunId = summary.runId
         task.repoRoot = summary.project?.root
         task.engineError = summary.failure?.safeMessage ?? summary.error
         task.runDir = summary.runDir ?? summary.failure?.runDir

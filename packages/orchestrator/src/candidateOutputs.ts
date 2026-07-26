@@ -291,10 +291,16 @@ export function candidateOutputsContainSecret(input: {
 export function candidateOutputSecretRisk(input: {
   worktreePath: string;
   changedPaths: readonly string[];
-}): { risky: boolean; riskyPaths: string[]; artifactDirectoryUnsafe: boolean } {
+}): {
+  risky: boolean;
+  riskyPaths: string[];
+  nonReversiblePaths: string[];
+  artifactDirectoryUnsafe: boolean;
+} {
   const root = resolve(input.worktreePath);
   const artifactMedia = artifactMediaPaths(root);
   const riskyPaths: string[] = [];
+  const nonReversiblePaths: string[] = [];
   const paths = [...input.changedPaths, ...artifactMedia.paths];
   for (const relative of new Set(paths)) {
     if (!RASTER_OUTPUT_EXTENSIONS.has(extname(relative).toLowerCase())) continue;
@@ -302,6 +308,10 @@ export function candidateOutputSecretRisk(input: {
     if (status.kind === "missing") continue;
     if (status.kind !== "safe" || !status.stat.isFile()) {
       riskyPaths.push(relative);
+      // A text patch can represent the symlink or special-file directory
+      // entry, but rollback cannot prove anything about bytes reached through
+      // that entry. Never collapse it to a followed realpath identity.
+      nonReversiblePaths.push(relative);
       continue;
     }
     const safe = rasterBytesIfSafe(status.path);
@@ -310,6 +320,7 @@ export function candidateOutputSecretRisk(input: {
   return {
     risky: artifactMedia.unsafe || riskyPaths.length > 0,
     riskyPaths,
+    nonReversiblePaths,
     artifactDirectoryUnsafe: artifactMedia.unsafe,
   };
 }

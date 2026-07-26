@@ -100,8 +100,10 @@ export async function revertWorkingTreePatch(
       primaryResult = {
         reverted: false,
         removed: [],
-        reason: `turn-owned postimage no longer matches; refusing to overwrite later user edits: ${check.stderr.trim()}`,
-        reasonCode: "postimage_diverged",
+        reason: options.noIndex
+          ? `exact no-index reverse check failed; candidate output could not be proven reversible: ${check.stderr.trim()}`
+          : `turn-owned postimage no longer matches; refusing to overwrite later user edits: ${check.stderr.trim()}`,
+        reasonCode: options.noIndex ? "reverse_apply_failed" : "postimage_diverged",
       };
       return primaryResult;
     }

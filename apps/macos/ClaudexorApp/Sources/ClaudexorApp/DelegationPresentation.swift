@@ -192,4 +192,13 @@ extension AppModel {
         ordered.append(contentsOf: exact.filter { seen.insert($0.id).inserted })
         return ordered
     }
+
+    func delegatedChildren(
+        of parent: TaskRun,
+        projectedIds: [String] = []
+    ) -> [TaskRun] {
+        delegatedChildren(
+            of: parent.resolvedRunId ?? parent.id,
+            projectedIds: projectedIds)
+    }
 }

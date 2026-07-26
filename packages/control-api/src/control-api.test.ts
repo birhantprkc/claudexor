@@ -5383,6 +5383,7 @@ describe("DaemonControlApiServer", () => {
               runId: "run-child-corrupt",
               state: "failed",
               delegatedFromRunId: "run-d1",
+              waitingOnUser: true,
               error: expect.stringContaining("unprojectable job record"),
             }),
           ]),
@@ -5391,7 +5392,7 @@ describe("DaemonControlApiServer", () => {
       undefined,
       {
         pendingInteractions: (runId) =>
-          runId === "run-child-waiting"
+          runId === "run-child-waiting" || runId === "run-child-corrupt"
             ? [
                 {
                   interactionId: "int-child",

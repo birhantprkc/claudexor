@@ -2161,10 +2161,18 @@ export class DaemonControlApiServer {
       return this.summarizeRunLive(rec);
     } catch (err) {
       const delegatedFromRunId = Id.safeParse(paramsRecord(rec)["delegatedFromRunId"]);
+      let waitingOnUser = false;
+      try {
+        waitingOnUser = this.pendingInteractionsFor(rec).length > 0;
+      } catch {
+        // The diagnostic row remains fail-soft even when interaction state is
+        // also corrupt; false is the only safe fallback without evidence.
+      }
       return ControlRunSummary.parse({
         jobId: rec.id,
         runId: rec.runId ?? rec.id,
         ...(delegatedFromRunId.success ? { delegatedFromRunId: delegatedFromRunId.data } : {}),
+        waitingOnUser,
         state: "failed",
         error: `unprojectable job record: ${err instanceof Error ? err.message : String(err)}`,
       });

@@ -109,7 +109,7 @@ struct TurnCard: View {
                 // server-owned `delegatedFromRunId` field is the only admission
                 // rule; native vendor subagents never appear in this list.
                 ForEach(model.delegatedChildren(
-                    of: run.id,
+                    of: run,
                     projectedIds: turn.run?.delegatedChildRunIds ?? []
                 )) { child in
                     DelegatedRunRow(child: child)

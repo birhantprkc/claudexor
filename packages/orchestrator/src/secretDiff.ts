@@ -23,7 +23,7 @@ export function recordSecretDiffRefusal(
 
 export function secretDiffNextActions(refusal: SecretDiffRefusal): string[] {
   return refusal.disposition === "manual_cleanup"
-    ? ["Inspect and clean the in-place project state manually", "Retry the run"]
+    ? ["Inspect and clean the state named in the recovery receipt", "Retry the run"]
     : ["Retry the run without writing secret material"];
 }
 
@@ -92,10 +92,12 @@ export async function quarantineSecretDiff(input: {
       : {
           disposition: "manual_cleanup",
           detail: redactSecrets(
-            rollback.reverted && input.gitBacked
-              ? "worktree bytes were removed; inspect Git index, refs, and objects for harness-written secret state"
-              : (rollback.reason ??
-                  "secret-bearing in-place bytes changed before rollback; manual cleanup required"),
+            rollback.reverted && input.secretOutsidePatch
+              ? `the exact reversible patch was removed, but candidate media outside that patch could not be proven removed; manual cleanup required${input.gitBacked ? "; inspect Git index, refs, and objects too" : ""}`
+              : rollback.reverted && input.gitBacked
+                ? "worktree bytes were removed; inspect Git index, refs, and objects for harness-written secret state"
+                : (rollback.reason ??
+                  "candidate output could not be proven removed; manual cleanup required"),
           ),
         },
   };
@@ -110,14 +112,18 @@ export async function quarantineCandidateWorkspace(
   let captured;
   try {
     captured = await wsm.captureDiff(envelope);
-  } catch {
+  } catch (error) {
+    const scratchCleanupUnproven =
+      error instanceof Error && Object.prototype.hasOwnProperty.call(error, "cleanupError");
     return {
       diff: "",
       refusal: {
-        disposition: inPlace ? "manual_cleanup" : "discarded",
-        detail: inPlace
-          ? "candidate output could not be captured safely; manual cleanup required"
-          : "uncaptured isolated candidate output was discarded with the candidate envelope",
+        disposition: inPlace || scratchCleanupUnproven ? "manual_cleanup" : "discarded",
+        detail: scratchCleanupUnproven
+          ? "candidate output capture failed and private scratch cleanup could not be proven; manual cleanup of Claudexor temporary state is required"
+          : inPlace
+            ? "candidate output could not be captured safely; manual cleanup required"
+            : "uncaptured isolated candidate output was discarded with the candidate envelope",
       },
     };
   }
@@ -132,6 +138,7 @@ export async function quarantineCandidateWorkspace(
   );
   const secretOutsidePatch =
     mediaRisk.artifactDirectoryUnsafe ||
+    mediaRisk.nonReversiblePaths.length > 0 ||
     mediaRisk.riskyPaths.some(
       (path) => !diffIdentities.has(candidatePathIdentity(envelope.worktree_path, path)),
     );

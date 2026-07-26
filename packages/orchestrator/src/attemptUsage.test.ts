@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { attemptUsageCostSettlement, BudgetLedger } from "@claudexor/budget";
 import { processAttemptUsage } from "./attemptUsage.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
 
@@ -32,6 +33,55 @@ describe("processAttemptUsage", () => {
       cashEstimated: false,
       valuationEstimated: true,
     });
+  });
+
+  it("fails cash certainty closed when a native attempt switches to API without usage", () => {
+    const telemetry = createAttemptTelemetry("auto", false);
+    const ts = new Date().toISOString();
+    observeAttemptTelemetry(telemetry, {
+      type: "started",
+      session_id: "s",
+      ts,
+      credential_route: "vendor_native",
+    });
+    observeAttemptTelemetry(telemetry, {
+      type: "usage",
+      session_id: "s",
+      ts,
+      credential_route: "vendor_native",
+      usage: { cost_usd: 0.75, estimated: true },
+    });
+    observeAttemptTelemetry(telemetry, {
+      type: "message",
+      session_id: "s",
+      ts,
+      text: "switching route",
+      payload: { auth_switched: true, to_auth_mode: "api_key" },
+    });
+    observeAttemptTelemetry(telemetry, { type: "completed", session_id: "s", ts });
+
+    expect(telemetry.usageCost.cashKnowledge).toBe("unknown");
+    expect(telemetry.usageCost.valuationKnowledge).toBe("estimated");
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const lease = ledger.reserve({
+      taskId: "mixed-no-api-usage",
+      intent: "implement",
+      harnessId: "claude",
+    }).lease!;
+    ledger.settle(
+      lease.lease_id,
+      attemptUsageCostSettlement(
+        0.75,
+        true,
+        "a01",
+        "claude",
+        telemetry.authMode,
+        telemetry.usageCost,
+      ),
+    );
+    expect(ledger.spend()).toBe(0);
+    expect(ledger.valuation()).toBe(0.75);
+    expect(ledger.terminal()).toBe("cost_unverifiable");
   });
 
   it("never trips the cash guard for exact or estimated native subscription valuation", () => {

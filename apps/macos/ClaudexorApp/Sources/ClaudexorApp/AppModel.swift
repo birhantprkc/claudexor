@@ -1495,6 +1495,7 @@ final class AppModel {
             snapshotReplayFences[id] = max(snapshotReplayFences[id] ?? 0, detail.lastSeq)
             lastEventIds[id] = max(lastEventIds[id] ?? 0, detail.lastSeq)
             var task = liveTasks[baseIdx]
+            task.resolvedRunId = detail.summary.runId
             task.phase = RunPhase(api: detail.summary.state)
             task.mode = RunMode(apiValue: detail.summary.mode, strategy: detail.summary.strategy)
             task.operatorDecisionAction = detail.operatorDecisionAction

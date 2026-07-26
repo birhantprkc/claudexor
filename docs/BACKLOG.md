@@ -447,8 +447,6 @@ authoritative for each exact disposition.
   and MCP public surfaces changed in the Delegate recovery.
 - Derive non-Git missing-side headers from immutable capture evidence rather
   than rechecking live path existence after `diff` completes.
-- Use no-index-aware reverse-failure copy so an ordinary apply error does not
-  imply that a concurrent writer changed the target.
 - Make Git binary-object scanning use the same byte-faithful convention as the
   plain-diff binary scanner.
 - Include README in the Pages metadata-check trigger and `site/llms.txt` in the

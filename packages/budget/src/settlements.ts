@@ -63,26 +63,33 @@ export function attemptUsageCostSettlement(
     unknownUsd: number;
     cashEstimated?: boolean;
     valuationEstimated?: boolean;
+    cashKnowledge?: CostKnowledge;
+    valuationKnowledge?: CostKnowledge;
   },
 ): BudgetSettlement {
   if (split) {
     const observed = split.cashUsd + split.valuationUsd + split.unknownUsd;
-    if (observed > 0) {
+    const componentEvidence =
+      split.cashKnowledge !== undefined || split.valuationKnowledge !== undefined;
+    if (observed > 0 || componentEvidence) {
       const normalizedValuation = Math.max(0, split.valuationUsd);
+      const cashKnowledge =
+        split.unknownUsd > 0
+          ? "unknown"
+          : (split.cashKnowledge ?? measuredKnowledge(split.cashEstimated === true));
+      const valuationKnowledge =
+        split.unknownUsd > 0
+          ? "unknown"
+          : (split.valuationKnowledge ?? measuredKnowledge(split.valuationEstimated === true));
       return {
-        knowledge: split.unknownUsd > 0 ? "unknown" : measuredKnowledge(estimated),
-        cashKnowledge:
-          split.unknownUsd > 0 ? "unknown" : split.cashEstimated === true ? "estimated" : "exact",
-        ...(normalizedValuation > 0 || split.unknownUsd > 0
-          ? {
-              valuationKnowledge:
-                split.unknownUsd > 0
-                  ? ("unknown" as const)
-                  : measuredKnowledge(split.valuationEstimated === true),
-            }
-          : {}),
-        source: "harness-usage-by-route",
-        provenance: [`attempt:${attemptId}`, `harness:${harnessId}`, "route:per-usage-event"],
+        knowledge: mergeKnowledge([
+          cashKnowledge,
+          ...(normalizedValuation > 0 || split.unknownUsd > 0 ? [valuationKnowledge] : []),
+        ]),
+        cashKnowledge,
+        ...(normalizedValuation > 0 || split.unknownUsd > 0 ? { valuationKnowledge } : {}),
+        source: observed > 0 ? "harness-usage-by-route" : "harness-route-usage-missing",
+        provenance: [`attempt:${attemptId}`, `harness:${harnessId}`, "route:stream-evidence"],
         cashUsd: split.cashUsd,
         ...(normalizedValuation > 0 ? { valuationUsd: normalizedValuation } : {}),
       };

@@ -4722,7 +4722,7 @@ describe("Orchestrator", () => {
           text: "Subscription scout analysis.",
           credential_route: "vendor_native",
         };
-        yield { type: "completed", session_id: sessionId, ts };
+        yield { type: "completed", session_id: sessionId, ts, credential_route: "vendor_native" };
       });
     const registry = new Map<string, HarnessAdapter>([["sub-scout", subScout("sub-scout")]]);
     const orch = new Orchestrator({
@@ -4759,7 +4759,7 @@ describe("Orchestrator", () => {
           text: "Subscription scout analysis.",
           credential_route: "vendor_native",
         };
-        yield { type: "completed", session_id: sessionId, ts };
+        yield { type: "completed", session_id: sessionId, ts, credential_route: "vendor_native" };
       });
     const registry = new Map<string, HarnessAdapter>([["sub-scout", subScout("sub-scout")]]);
     const orch = new Orchestrator({
@@ -10376,7 +10376,7 @@ describe("delegation belt injection (D32)", () => {
     expect(workProduct).toContain("secret_recovery: manual_cleanup");
     expect(workProduct).toContain("apply_state: applied_review_blocked");
     const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
-    expect(failure).toContain("Inspect and clean the in-place project state manually");
+    expect(failure).toContain("Inspect and clean the state named in the recovery receipt");
     expect(treeContainsBytes(res.runDir, secret)).toBe(false);
   });
 
@@ -10700,9 +10700,14 @@ describe("delegation belt injection (D32)", () => {
 
       expect(res.lifecycle).toBe("failed");
       expect(existsSync(join(res.runDir, "final", "patch.diff"))).toBe(false);
-      expect(readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8")).toContain(
-        "secret_recovery: manual_cleanup",
+      const workProduct = readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8");
+      expect(workProduct).toContain("secret_recovery: manual_cleanup");
+      expect(workProduct.replace(/\s+/g, " ")).toContain(
+        state === "oversized"
+          ? "could not be proven reversible"
+          : "could not be proven secret-safe or captured as an exact reversible patch",
       );
+      expect(workProduct).not.toContain("later user edits");
       const refusalSurface = [
         res.summary,
         readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8"),
