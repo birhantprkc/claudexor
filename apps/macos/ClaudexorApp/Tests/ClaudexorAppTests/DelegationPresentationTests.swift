@@ -128,6 +128,22 @@ import Foundation
         #expect(DelegationPresentation.childReceipt(delegatedFromRunId: nil) == nil)
     }
 
+    @Test func delegatedRowPinsFlexibleTitleBetweenFixedTrailingClusters() throws {
+        #expect(DelegatedRunRowLayout.phaseWidth > 0)
+        let appRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: appRoot.appendingPathComponent(
+                "Sources/ClaudexorApp/DelegationRows.swift"),
+            encoding: .utf8)
+        let row = try #require(source.components(separatedBy: "struct DelegatedRunRow").last)
+        #expect(row.contains(".frame(maxWidth: .infinity, alignment: .leading)"))
+        #expect(row.contains(".frame(width: DelegatedRunRowLayout.phaseWidth, alignment: .trailing)"))
+        #expect(!row.contains("Spacer(minLength: 0)"))
+    }
+
     @Test func workspaceKeepsDelegatedChildrenFlatAndExcludesOrdinaryLineage() throws {
         let delegated = try task(#"{"runId":"child","state":"running","parentRunId":"parent","delegatedFromRunId":"parent"}"#)
         let ordinaryFollowUp = try task(#"{"runId":"follow-up","state":"succeeded","parentRunId":"parent"}"#)

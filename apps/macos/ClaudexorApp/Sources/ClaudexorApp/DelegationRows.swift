@@ -30,6 +30,10 @@ struct DelegationWarningRow: View {
 
 /// A real Claudexor delegated child shown as one ordinary flat run row. The
 /// provenance badge and parent link come only from `delegatedFromRunId`.
+enum DelegatedRunRowLayout {
+    static let phaseWidth: CGFloat = 72
+}
+
 struct DelegatedRunRow: View {
     @Environment(AppModel.self) private var model
     let child: TaskRun
@@ -44,7 +48,9 @@ struct DelegatedRunRow: View {
                 Button { model.openRun(child.id) } label: {
                     HStack(spacing: Theme.Spacing.sm) {
                         statusGlyph
-                        Text(child.title).font(.caption).lineLimit(1).truncationMode(.tail)
+                        Text(child.title)
+                            .font(.caption).lineLimit(1).truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         Text(receipt.badge)
                             .font(.caption2.weight(.semibold))
                             .lineLimit(1).fixedSize(horizontal: true, vertical: false)
@@ -52,12 +58,16 @@ struct DelegatedRunRow: View {
                             .background(Theme.accent.opacity(0.12), in: Capsule())
                             .foregroundStyle(Theme.accent)
                             .accessibilityLabel("Delegated Claudexor run")
-                        Text(child.phase.label).font(.caption2).foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
+                        Text(child.phase.label)
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .frame(width: DelegatedRunRowLayout.phaseWidth, alignment: .trailing)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .help("Open delegated run \(child.id) in the thread workspace")
 
                 Button(receipt.parentLabel) { model.openRun(receipt.parentRunId) }
