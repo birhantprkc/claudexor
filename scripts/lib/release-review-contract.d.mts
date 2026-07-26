@@ -140,6 +140,7 @@ export function releaseReviewDecision(input: {
   triadActors: ReviewerSlotRecord[];
   scope: (ReviewerSlotRecord & { metadata?: { duration_ms?: number } }) | null;
   minPlausibleMs?: number;
+  scopeMinPlausibleMs?: number;
 }): {
   passed: boolean;
   responsiveTriad: number;

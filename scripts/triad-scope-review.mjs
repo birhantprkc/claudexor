@@ -1204,7 +1204,12 @@ async function main() {
     writeFileSync(join(outDir, "scope.metadata.json"), JSON.stringify(scopeMeta, null, 2) + "\n");
   }
 
-  const decision = releaseReviewDecision({ triadActors: actorRecords, scope });
+  const decision = releaseReviewDecision({
+    triadActors: actorRecords,
+    scope,
+    minPlausibleMs: livenessFloorMs(triadPrompt.length),
+    scopeMinPlausibleMs: livenessFloorMs(scopePrompt.length),
+  });
   const summary = {
     reviewRunId,
     reviewWaveId,

@@ -287,6 +287,29 @@ describe("release review fail-closed contract", () => {
     ).toBe(false);
   });
 
+  it("uses the submitted prompt floors consistently in the final panel decision", () => {
+    const findings = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
+    const triad = liveTriad(findings).map((actor) => ({ ...actor, duration_ms: 20_740 }));
+    const scope = { ...liveScope(), metadata: { duration_ms: 20_740 } };
+    expect(releaseReviewDecision({ triadActors: triad, scope }).passed).toBe(false);
+    expect(
+      releaseReviewDecision({
+        triadActors: triad,
+        scope,
+        minPlausibleMs: livenessFloorMs(505_000),
+        scopeMinPlausibleMs: livenessFloorMs(536_000),
+      }).passed,
+    ).toBe(true);
+    expect(
+      releaseReviewDecision({
+        triadActors: triad,
+        scope,
+        minPlausibleMs: livenessFloorMs(505_000),
+        scopeMinPlausibleMs: livenessFloorMs(1_200_000),
+      }).passed,
+    ).toBe(false);
+  });
+
   it("treats an implausibly fast slot as failed — the liveness floor", () => {
     expect(reviewerLiveness({ status: "responded", duration_ms: 120_000 }).live).toBe(true);
     expect(reviewerLiveness({ status: "responded", duration_ms: 900 }).live).toBe(false);

@@ -869,7 +869,12 @@ export function reviewerLiveness(actor, minPlausibleMs = REVIEWER_MIN_PLAUSIBLE_
  * liveness"; the transport gets one same-SHA retry before a slot is final).
  * `responsiveTriad` stays as accounting, but partial panels never pass.
  */
-export function releaseReviewDecision({ triadActors, scope, minPlausibleMs }) {
+export function releaseReviewDecision({
+  triadActors,
+  scope,
+  minPlausibleMs,
+  scopeMinPlausibleMs = minPlausibleMs,
+}) {
   const reasons = [];
   const liveTriad = [];
   for (const actor of triadActors) {
@@ -890,7 +895,7 @@ export function releaseReviewDecision({ triadActors, scope, minPlausibleMs }) {
   } else {
     const liveness = reviewerLiveness(
       { ...scope, duration_ms: scope.metadata?.duration_ms ?? scope.duration_ms },
-      minPlausibleMs,
+      scopeMinPlausibleMs,
     );
     if (!liveness.live) reasons.push(`scope reviewer is not live: ${liveness.reason}`);
   }
