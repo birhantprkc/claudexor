@@ -176,6 +176,13 @@ for (const [label, broken] of [
     ),
   ],
   [
+    "promoted SBOM prepared-SHA binding",
+    packageMacosJob.replace(
+      'GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json',
+      "pnpm licenses list --prod --json",
+    ),
+  ],
+  [
     "candidate run SHA binding",
     packageMacosJob.replace('test "$run_sha" = "$PREPARED_SHA"', 'test -n "$run_sha"'),
   ],
@@ -197,6 +204,14 @@ for (const [label, broken] of [
   [
     "candidate daemon build-SHA probe",
     packageMacosJob.replace("probe.buildSha !== process.argv[3]", "false"),
+  ],
+  [
+    "promoted daemon version probe",
+    replaceLastOccurrence(packageMacosJob, "probe.version !== process.argv[2]", "false"),
+  ],
+  [
+    "promoted daemon build-SHA probe",
+    replaceLastOccurrence(packageMacosJob, "probe.buildSha !== process.argv[3]", "false"),
   ],
   [
     "isolated belt smoke HOME",
@@ -470,7 +485,7 @@ function exactCandidateAppPromotionErrors(job) {
   );
   requirePattern(
     "candidate SBOM must be regenerated from the promoted app and compared",
-    /generate-release-sbom\.mjs[\s\S]*?--app-bundle "\$promoted_app\/Claudexor\.app"[\s\S]*?cmp "\$candidate_sbom" "\$RUNNER_TEMP\/promoted-candidate\.spdx\.json"/,
+    /GITHUB_SHA="\$PREPARED_SHA" pnpm licenses list --prod --json \|[\s\S]*?GITHUB_SHA="\$PREPARED_SHA" node scripts\/generate-release-sbom\.mjs[\s\S]*?--app-bundle "\$promoted_app\/Claudexor\.app"[\s\S]*?cmp "\$candidate_sbom" "\$RUNNER_TEMP\/promoted-candidate\.spdx\.json"/,
     verifyStep,
   );
   requirePattern(
