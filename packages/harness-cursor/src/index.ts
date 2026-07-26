@@ -713,11 +713,8 @@ async function* runCursor(
     return;
   }
   const args = ["-p", "--output-format", "stream-json", ...accessArgs(spec.access)];
-  // Cursor's native `--mode plan` terminates through createPlan, whose fixed
-  // vendor schema has no place for Claudexor's mandatory model-authored
-  // WorkReport. Use Cursor's other explicit read-only mode for plan-intent
-  // lanes: the plan prompt still asks for the plan, while `--mode ask` keeps the
-  // final-message channel available for the validated WorkReport fence (D-16).
+  // Native Plan's createPlan schema cannot carry D-16 WorkReport; native read-only
+  // Ask preserves prompt-owned plan intent and the model-authored final report.
   if (spec.intent === "plan") args.push("--mode", "ask");
   // W-C4 live deltas (engine-gated; the parser applies the documented taxonomy).
   if (spec.stream_deltas) args.push("--stream-partial-output");
