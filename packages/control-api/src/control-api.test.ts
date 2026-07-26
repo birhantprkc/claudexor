@@ -5366,6 +5366,7 @@ describe("DaemonControlApiServer", () => {
           children: Array<{
             runId: string;
             state: string;
+            delegatedFromRunId: string | null;
             waitingOnUser?: boolean;
             error?: string | null;
           }>;
@@ -5381,6 +5382,7 @@ describe("DaemonControlApiServer", () => {
             expect.objectContaining({
               runId: "run-child-corrupt",
               state: "failed",
+              delegatedFromRunId: "run-d1",
               error: expect.stringContaining("unprojectable job record"),
             }),
           ]),

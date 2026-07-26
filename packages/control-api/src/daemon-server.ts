@@ -154,6 +154,7 @@ import {
   ControlThreadDetail,
   ControlThreadListResponse,
   DecisionRecord,
+  Id,
   ModeKind,
   RoutingGoal,
   ReviewFinding,
@@ -2155,9 +2156,11 @@ export class DaemonControlApiServer {
     try {
       return this.summarizeRunLive(rec);
     } catch (err) {
+      const delegatedFromRunId = Id.safeParse(paramsRecord(rec)["delegatedFromRunId"]);
       return ControlRunSummary.parse({
         jobId: rec.id,
         runId: rec.runId ?? rec.id,
+        ...(delegatedFromRunId.success ? { delegatedFromRunId: delegatedFromRunId.data } : {}),
         state: "failed",
         error: `unprojectable job record: ${err instanceof Error ? err.message : String(err)}`,
       });

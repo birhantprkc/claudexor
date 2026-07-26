@@ -188,6 +188,22 @@ import Foundation
         #expect(merged[0].answerText == "Hydrated answer")
     }
 
+    @Test func diagnosticChildKeepsPersistedLineageInParentProjection() throws {
+        let diagnostic = try JSONDecoder().decode(
+            RunSummary.self,
+            from: Data(#"{"runId":"child-corrupt","state":"failed","delegatedFromRunId":"parent","error":"unprojectable job record: corrupt legacy state"}"#.utf8)
+        )
+        let merged = AppModel.mergingDelegatedChildren(
+            [diagnostic], parentRunId: "parent", into: [])
+
+        #expect(merged.map(\.id) == ["child-corrupt"])
+        #expect(merged[0].delegatedFromRunId == "parent")
+        #expect(merged[0].engineError?.contains("unprojectable job record") == true)
+        #expect(DelegationPresentation.childReceipt(
+            delegatedFromRunId: merged[0].delegatedFromRunId
+        )?.parentRunId == "parent")
+    }
+
     @Test func queuedChildAliasDoesNotDuplicateAfterRealRunIdBinds() throws {
         let queued = try task(#"{"jobId":"job-child","runId":"job-child","state":"queued","delegatedFromRunId":"parent"}"#)
         let bound = try JSONDecoder().decode(

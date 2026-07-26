@@ -654,13 +654,14 @@ describe("Delegate terminal drain ordering", () => {
     expect(types).toEqual(["run.created", "run.completed"]);
   });
 
-  it("leaves an ordinary decision untouched when the ordinary run fails", async () => {
+  it("reconciles only terminal truth when an ordinary run fails after a valid decision", async () => {
     const { store, paths, log } = fixture("run-ordinary-failed-decision");
     const decisionPath = join(paths.arbitrationDir, "decision.yaml");
     store.writeYaml(decisionPath, {
       winner: "a01",
-      facts: makeOutcomeFacts("succeeded"),
+      facts: makeOutcomeFacts("succeeded", { checks: "passed", review: "approved" }),
       why_winner: "owned by the ordinary strategy",
+      why_not_others: { a02: "lower score" },
       budget_summary: {
         spend_usd: 0.1,
         cash_usd: 0.1,
@@ -668,8 +669,6 @@ describe("Delegate terminal drain ordering", () => {
         estimated: false,
       },
     });
-    const originalDecision = readFileSync(decisionPath, "utf8");
-
     const result = await guardAnnouncedRun(undefined, async (announce) => {
       log.emit("run.created", { mode: "agent", prompt: "x" });
       announce({
@@ -686,8 +685,97 @@ describe("Delegate terminal drain ordering", () => {
       throw new Error("ordinary harness failed");
     });
 
-    expect(result.lifecycle).toBe("failed");
-    expect(readFileSync(decisionPath, "utf8")).toBe(originalDecision);
+    expect(result).toMatchObject({
+      lifecycle: "failed",
+      facts: {
+        lifecycle: "failed",
+        reason: "harness_failed",
+        checks: "passed",
+        review: "approved",
+      },
+    });
+    expect(store.readYaml<Record<string, unknown>>(decisionPath)).toMatchObject({
+      winner: "a01",
+      facts: {
+        lifecycle: "failed",
+        reason: "harness_failed",
+        checks: "passed",
+        review: "approved",
+      },
+      why_winner: "ordinary harness failed",
+      why_not_others: { a02: "lower score" },
+      budget_summary: {
+        spend_usd: 0.1,
+        cash_usd: 0.1,
+        valuation_usd: 0,
+        estimated: false,
+      },
+    });
+    const types = readFileSync(paths.eventsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types).toEqual(["run.created", "output.ready", "run.failed"]);
+  });
+
+  it("reconciles only terminal truth when an ordinary run is cancelled after a valid decision", async () => {
+    const { store, paths, log } = fixture("run-ordinary-cancelled-decision");
+    const decisionPath = join(paths.arbitrationDir, "decision.yaml");
+    store.writeYaml(decisionPath, {
+      winner: "a01",
+      facts: makeOutcomeFacts("succeeded", { checks: "passed", review: "approved" }),
+      why_winner: "owned by the ordinary strategy",
+      budget_summary: {
+        spend_usd: 0.1,
+        cash_usd: 0.1,
+        valuation_usd: 0,
+        estimated: false,
+      },
+    });
+    const controller = new AbortController();
+
+    const result = await guardAnnouncedRun(controller.signal, async (announce) => {
+      log.emit("run.created", { mode: "agent", prompt: "x" });
+      announce({
+        log,
+        store,
+        paths,
+        runId: "run-ordinary-cancelled-decision",
+        taskId: "task-parent",
+        mode: "agent",
+        phase: "harness",
+        spend: () => 0.2,
+        recheckBudgetAfterBarrier: () => false,
+      });
+      controller.abort();
+      throw new Error("ordinary harness observed cancellation");
+    });
+
+    expect(result).toMatchObject({
+      lifecycle: "cancelled",
+      facts: {
+        lifecycle: "cancelled",
+        reason: "user_cancelled",
+        checks: "passed",
+        review: "approved",
+      },
+    });
+    expect(store.readYaml<Record<string, unknown>>(decisionPath)).toMatchObject({
+      winner: "a01",
+      facts: {
+        lifecycle: "cancelled",
+        reason: "user_cancelled",
+        checks: "passed",
+        review: "approved",
+      },
+      why_winner: "run cancelled",
+      budget_summary: {
+        spend_usd: 0.1,
+        cash_usd: 0.1,
+        valuation_usd: 0,
+        estimated: false,
+      },
+    });
     const types = readFileSync(paths.eventsPath, "utf8")
       .trim()
       .split("\n")
