@@ -66,7 +66,9 @@ export function attemptFailureCost(
       : fallbackCashUsd;
   return {
     totalUsd: carriedCashUsd ?? 0,
-    estimated: false,
+    // An ordinary zero-cost setup failure keeps the legacy exact-zero card.
+    // A positive scalar with UNKNOWN settlement knowledge must never look exact.
+    estimated: (carriedCashUsd ?? 0) > 0,
     settlement: unknownCostSettlement(fallbackSource, carriedCashUsd),
   };
 }

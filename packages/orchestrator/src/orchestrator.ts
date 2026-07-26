@@ -5009,12 +5009,24 @@ export class Orchestrator {
           // Setup failures remain unknown; post-stream persistence failures
           // carry their route-specific settlement from runCandidateInEnvelope.
           const failureCost = attemptFailureCost(err, "attempt-error");
+          const message = safeErrorMessage(err);
           ledger.settle(lease.lease?.lease_id ?? "", failureCost.settlement);
           log.emit("harness.completed", {
             harness_id: adapter.id,
             attempt_id: attemptId,
             status: "failed",
-            error: safeErrorMessage(err),
+            error: message,
+          });
+          // Match race durability: later failure/raw-detail projections may
+          // reference this attempt even though artifact persistence itself failed.
+          store.writeYaml(join(paths.attemptsDir, attemptId, "attempt.yaml"), {
+            attempt_id: attemptId,
+            harness_id: adapter.id,
+            cost_usd: failureCost.totalUsd,
+            cost_estimated: failureCost.estimated,
+            errored: true,
+            phase: "harness",
+            errors: [message],
           });
           run = {
             attemptId,
@@ -5025,7 +5037,7 @@ export class Orchestrator {
             cost: failureCost.totalUsd,
             errored: true,
             costEstimated: failureCost.estimated,
-            errors: [safeErrorMessage(err)],
+            errors: [message],
             telemetry: createAttemptTelemetry(
               knobs.webPolicy,
               contract.external_context.web_required,

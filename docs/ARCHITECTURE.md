@@ -1914,7 +1914,10 @@ fields equal the candidate's unsigned manifest — so the shipped closure is
 byte-for-byte the reviewed one. A wrong or expired (14-day retention)
 `candidate_run_id` fails the download. `scripts/release-workflow-check.mjs`
 enforces this wiring; the two authority files (review vs runtime-update) can
-never be the same key.
+never be the same key. The same A-5 boundary covers the release application:
+publish verifies and promotes the candidate DMG, ZIP, and SBOM byte-for-byte;
+only the signed runtime manifest, review attestation, and final checksum set are
+created by the publish run.
 
 **Install flow.** One click (bottom-left chip → Install) runs
 `RuntimeInstallCoordinator` (`apps/macos/ClaudexorApp`): verify monotonic →

@@ -111,6 +111,9 @@ The workflow has two explicit manual modes. `candidate` accepts only a full
 40-character commit SHA and builds/signs/notarizes/attests without publishing.
 After review, `publish` accepts only an annotated stable tag on the exact
 `origin/main` commit plus a base64 signed review attestation. The workflow
+promotes the candidate run's DMG, ZIP, and SBOM byte-for-byte instead of
+rebuilding the app; publish generates only the signed runtime manifest, review
+attestation, and final checksum set around those accepted bytes. It then
 verifies its Ed25519 signature against the pinned public release-review key
 before reading any review claims, then recomputes the commit tree and
 validates the attestation's payload for its schema: schemaVersion 4 (the

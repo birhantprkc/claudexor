@@ -43,6 +43,7 @@ for (const file of files) {
 const release = readFileSync(".github/workflows/release.yml", "utf8");
 const publishMcp = readFileSync(".github/workflows/publish-mcp.yml", "utf8");
 const prepareJob = jobBody(release, "prepare");
+const packageMacosJob = jobBody(release, "package-macos");
 const publishNpmJob = jobBody(release, "publish-npm");
 const publishReleaseJob = jobBody(release, "publish-release");
 for (const [label, pattern] of [
@@ -105,8 +106,8 @@ for (const [label, pattern] of [
     /download-artifact@[0-9a-f]{40}[\s\S]*?run-id:\s*\$\{\{\s*needs\.prepare\.outputs\.candidate_run_id\s*\}\}/,
   ],
   [
-    "publish verifies the promoted candidate closure provenance",
-    /gh attestation verify "candidate-assets\/claudexor-runtime-\$VERSION\.tar\.gz"/,
+    "publish verifies every promoted candidate asset provenance",
+    /for file in candidate-assets\/\*; do[\s\S]*?gh attestation verify "\$file"/,
   ],
   [
     "publish promotes the candidate closure bytes rather than rebuilding",
@@ -114,6 +115,92 @@ for (const [label, pattern] of [
   ],
 ]) {
   if (!pattern.test(release)) errors.push(`release.yml: ${label}`);
+}
+errors.push(...exactCandidateAppPromotionErrors(packageMacosJob));
+for (const [label, broken] of [
+  [
+    "candidate-only signing guard",
+    packageMacosJob.replace(
+      "- name: Require and import Apple release credentials\n        if: needs.prepare.outputs.mode == 'candidate'",
+      "- name: Require and import Apple release credentials\n        if: always()",
+    ),
+  ],
+  [
+    "candidate-only build guard",
+    packageMacosJob.replace(
+      "- name: Build signed DMG and ZIP\n        if: needs.prepare.outputs.mode == 'candidate'",
+      "- name: Build signed DMG and ZIP\n        if: always()",
+    ),
+  ],
+  [
+    "candidate-only fresh verification guard",
+    packageMacosJob.replace(
+      "- name: Verify signed and notarized artifacts\n        if: needs.prepare.outputs.mode == 'candidate'",
+      "- name: Verify signed and notarized artifacts\n        if: always()",
+    ),
+  ],
+  [
+    "candidate DMG source",
+    packageMacosJob.replace(
+      'cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"',
+      'cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"',
+    ),
+  ],
+  [
+    "candidate ZIP source",
+    packageMacosJob.replace(
+      'cp "candidate-assets/Claudexor-$VERSION.zip" "$assets/"',
+      'cp "apps/macos/dist/Claudexor-$VERSION.zip" "$assets/"',
+    ),
+  ],
+  [
+    "candidate SBOM source",
+    packageMacosJob.replace(
+      'cp "candidate-assets/Claudexor-$VERSION.spdx.json" "$assets/"',
+      'cp "apps/macos/dist/Claudexor-$VERSION.spdx.json" "$assets/"',
+    ),
+  ],
+  [
+    "candidate run SHA binding",
+    packageMacosJob.replace('test "$run_sha" = "$PREPARED_SHA"', 'test -n "$run_sha"'),
+  ],
+  [
+    "candidate provenance source binding",
+    `${packageMacosJob.replace('--source-digest "$PREPARED_SHA"', "--source-digest unknown")}\n# --source-digest "$PREPARED_SHA"`,
+  ],
+  [
+    "provenance-before-checksum order",
+    packageMacosJob.replace(
+      "for file in candidate-assets/*; do",
+      "(cd candidate-assets && shasum -a 256 -c SHA256SUMS)\n          for file in candidate-assets/*; do",
+    ),
+  ],
+  [
+    "candidate daemon version probe",
+    packageMacosJob.replace("probe.version !== process.argv[2]", "false"),
+  ],
+  [
+    "candidate daemon build-SHA probe",
+    packageMacosJob.replace("probe.buildSha !== process.argv[3]", "false"),
+  ],
+  [
+    "isolated belt smoke HOME",
+    packageMacosJob.replace(
+      'HOME="$promoted_belt_home" node scripts/smoke-delegation-belt-entry.mjs',
+      "node scripts/smoke-delegation-belt-entry.mjs",
+    ),
+  ],
+  [
+    "publish assembly step scoping",
+    `${packageMacosJob.replace(
+      'cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"',
+      'cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"',
+    )}\n# cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"`,
+  ],
+]) {
+  if (exactCandidateAppPromotionErrors(broken).length === 0) {
+    errors.push(`release-workflow-check self-test: failed to reject missing ${label}`);
+  }
 }
 if (!/^\s+ref:\s*\$\{\{\s*github\.sha\s*\}\}\s*$/m.test(prepareJob)) {
   errors.push(
@@ -303,4 +390,92 @@ function jobBody(workflow, name) {
   }
   const next = workflow.slice(start + 2).search(/^  [a-z0-9-]+:\n/m);
   return next < 0 ? workflow.slice(start) : workflow.slice(start, start + 2 + next);
+}
+
+function exactCandidateAppPromotionErrors(job) {
+  const findings = [];
+  const verifyStep = stepBody(job, "Verify promoted candidate app artifacts (publish, A-5)");
+  const assembleStep = stepBody(job, "Assemble checksums, SBOM and review evidence");
+  const requirePattern = (label, pattern, scope = job) => {
+    if (!pattern.test(scope)) findings.push(`release.yml: ${label}`);
+  };
+  requirePattern(
+    "app signing credential import must be candidate-only",
+    /- name: Require and import Apple release credentials\n\s+if: needs\.prepare\.outputs\.mode == 'candidate'/,
+  );
+  requirePattern(
+    "signed app build must be candidate-only",
+    /- name: Build signed DMG and ZIP\n\s+if: needs\.prepare\.outputs\.mode == 'candidate'[\s\S]*?apps\/macos\/scripts\/build-app\.sh/,
+  );
+  requirePattern(
+    "fresh app verification must be candidate-only",
+    /- name: Verify signed and notarized artifacts\n\s+if: needs\.prepare\.outputs\.mode == 'candidate'/,
+  );
+  requirePattern(
+    "candidate run must bind the release workflow, exact SHA, and successful conclusion",
+    /test "\$run_path" = "\.github\/workflows\/release\.yml"[\s\S]*?test "\$run_sha" = "\$PREPARED_SHA"[\s\S]*?test "\$run_conclusion" = success/,
+    verifyStep,
+  );
+  requirePattern(
+    "candidate provenance must bind signer workflow and source digest",
+    /gh attestation verify "\$file"[\s\S]*?--signer-workflow "\$GITHUB_REPOSITORY\/\.github\/workflows\/release\.yml"[\s\S]*?--source-digest "\$PREPARED_SHA"/,
+    verifyStep,
+  );
+  requirePattern(
+    "candidate file set must be exact and regular before promotion",
+    /unexpected candidate asset set[\s\S]*?stat\.isFile\(\)[\s\S]*?stat\.isSymbolicLink\(\)[\s\S]*?stat\.size === 0/,
+    verifyStep,
+  );
+  const attestation = verifyStep.indexOf('gh attestation verify "$file"');
+  const checksum = verifyStep.indexOf("shasum -a 256 -c SHA256SUMS");
+  if (!(attestation >= 0 && attestation < checksum)) {
+    findings.push(
+      "release.yml: provenance must be verified before candidate SHA256SUMS is trusted",
+    );
+  }
+  requirePattern(
+    "candidate ZIP app must verify signature, version, and exact daemon build SHA",
+    /ditto -x -k "\$candidate_zip"[\s\S]*?codesign --verify --strict[\s\S]*?PlistBuddy[\s\S]*?test "\$app_version" = "\$VERSION"[\s\S]*?claudexord\.bundle\.cjs" --probe[\s\S]*?probe\.version !== process\.argv\[2\][\s\S]*?probe\.buildSha !== process\.argv\[3\]/,
+    verifyStep,
+  );
+  requirePattern(
+    "candidate app must pass packaged belt smoke",
+    /promoted_belt_home="\$RUNNER_TEMP\/promoted-belt-home"[\s\S]*?HOME="\$promoted_belt_home" node scripts\/smoke-delegation-belt-entry\.mjs[\s\S]*?--entry "\$promoted_app\/Claudexor\.app\/Contents\/Resources\/claudexord\.bundle\.cjs"[\s\S]*?--config-root "\$promoted_belt_home\/config"/,
+    verifyStep,
+  );
+  requirePattern(
+    "candidate SBOM must be regenerated from the promoted app and compared",
+    /generate-release-sbom\.mjs[\s\S]*?--app-bundle "\$promoted_app\/Claudexor\.app"[\s\S]*?cmp "\$candidate_sbom" "\$RUNNER_TEMP\/promoted-candidate\.spdx\.json"/,
+    verifyStep,
+  );
+  requirePattern(
+    "publish assembly must copy and compare exact candidate DMG, ZIP, and SBOM",
+    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then[\s\S]*?cp "candidate-assets\/Claudexor-\$VERSION\.dmg" "\$assets\/"[\s\S]*?cp "candidate-assets\/Claudexor-\$VERSION\.zip" "\$assets\/"[\s\S]*?cp "candidate-assets\/Claudexor-\$VERSION\.spdx\.json" "\$assets\/"[\s\S]*?cmp "candidate-assets\/Claudexor-\$VERSION\.dmg" "\$assets\/Claudexor-\$VERSION\.dmg"[\s\S]*?cmp "candidate-assets\/Claudexor-\$VERSION\.zip" "\$assets\/Claudexor-\$VERSION\.zip"[\s\S]*?cmp "candidate-assets\/Claudexor-\$VERSION\.spdx\.json" "\$assets\/Claudexor-\$VERSION\.spdx\.json"/,
+    assembleStep,
+  );
+  const publishArmStart = assembleStep.indexOf('if [ "$RELEASE_MODE_INPUT" = publish ]; then');
+  const publishArmEnd = assembleStep.indexOf("\n          else", publishArmStart);
+  const publishArm =
+    publishArmStart >= 0 && publishArmEnd > publishArmStart
+      ? assembleStep.slice(publishArmStart, publishArmEnd)
+      : "";
+  if (/apps\/macos\/dist\//.test(publishArm)) {
+    findings.push("release.yml: publish app assembly must not read fresh app build outputs");
+  }
+  const download = job.indexOf("Promote the exact candidate release artifact");
+  const verify = job.indexOf("Verify promoted candidate app artifacts");
+  const assemble = job.indexOf("Assemble checksums, SBOM and review evidence");
+  if (!(download >= 0 && download < verify && verify < assemble)) {
+    findings.push("release.yml: candidate download, verification, and assembly order is invalid");
+  }
+  return findings;
+}
+
+function stepBody(job, name) {
+  const marker = `      - name: ${name}\n`;
+  const start = job.indexOf(marker);
+  if (start < 0) return "";
+  const rest = job.slice(start + marker.length);
+  const next = rest.search(/^      - name: /m);
+  return next < 0 ? job.slice(start) : job.slice(start, start + marker.length + next);
 }

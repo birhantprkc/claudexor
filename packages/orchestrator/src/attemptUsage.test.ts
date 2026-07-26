@@ -63,10 +63,17 @@ describe("processAttemptUsage", () => {
     });
     expect(attemptFailureCost({ costUsd: 0.4 }, "post-stream-error", 0)).toMatchObject({
       totalUsd: 0.4,
+      estimated: true,
       settlement: { knowledge: "unknown", source: "post-stream-error", cashUsd: 0.4 },
+    });
+    expect(attemptFailureCost({ costUsd: 0 }, "post-stream-error")).toMatchObject({
+      totalUsd: 0,
+      estimated: false,
+      settlement: { knowledge: "unknown", source: "post-stream-error", cashUsd: 0 },
     });
     expect(attemptFailureCost({ costUsd: Number.NaN }, "post-stream-error")).toMatchObject({
       totalUsd: 0,
+      estimated: false,
       settlement: { knowledge: "unknown", source: "post-stream-error" },
     });
   });

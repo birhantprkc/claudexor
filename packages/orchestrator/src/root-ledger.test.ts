@@ -134,5 +134,10 @@ describe("root ledger cash and valuation disclosure", () => {
         valuation_knowledge: "unknown",
       },
     ]);
+    for (const event of [...events(parentLog.path), ...events(childLog.path)]) {
+      const payload = event["payload"] as Record<string, unknown>;
+      expect(event["type"]).toBe("budget.cash");
+      expect(["exact", "estimated", "unknown"]).toContain(payload["valuation_knowledge"]);
+    }
   });
 });

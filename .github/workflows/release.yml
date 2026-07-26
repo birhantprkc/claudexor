@@ -131,6 +131,7 @@ jobs:
           cache: pnpm
 
       - name: Require and import Apple release credentials
+        if: needs.prepare.outputs.mode == 'candidate'
         shell: bash
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
@@ -204,6 +205,7 @@ jobs:
           node scripts/verify-version-parity.mjs "$VERSION"
 
       - name: Build signed DMG and ZIP
+        if: needs.prepare.outputs.mode == 'candidate'
         env:
           CLAUDEXOR_VERSION: ${{ needs.prepare.outputs.version }}
           CLAUDEXOR_BUILD: ${{ github.run_number }}
@@ -212,6 +214,7 @@ jobs:
         run: apps/macos/scripts/build-app.sh
 
       - name: Verify signed and notarized artifacts
+        if: needs.prepare.outputs.mode == 'candidate'
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -248,6 +251,102 @@ jobs:
           path: candidate-assets
           run-id: ${{ needs.prepare.outputs.candidate_run_id }}
           github-token: ${{ github.token }}
+
+      - name: Verify promoted candidate app artifacts (publish, A-5)
+        if: needs.prepare.outputs.mode == 'publish'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PREPARED_SHA: ${{ needs.prepare.outputs.sha }}
+          CANDIDATE_RUN_ID: ${{ needs.prepare.outputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          run_meta="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
+            --jq '[.path, .head_sha, .conclusion] | @tsv')"
+          IFS=$'\t' read -r run_path run_sha run_conclusion <<< "$run_meta"
+          test "$run_path" = ".github/workflows/release.yml" || {
+            echo "::error::candidate_run_id belongs to $run_path, not the release workflow"
+            exit 1
+          }
+          test "$run_sha" = "$PREPARED_SHA" || {
+            echo "::error::candidate run SHA $run_sha does not match prepared SHA $PREPARED_SHA"
+            exit 1
+          }
+          test "$run_conclusion" = success || {
+            echo "::error::candidate run conclusion is $run_conclusion, not success"
+            exit 1
+          }
+          candidate_dmg="candidate-assets/Claudexor-$VERSION.dmg"
+          candidate_zip="candidate-assets/Claudexor-$VERSION.zip"
+          candidate_sbom="candidate-assets/Claudexor-$VERSION.spdx.json"
+          node - "$VERSION" <<'NODE'
+          const { lstatSync, readdirSync } = require("node:fs");
+          const version = process.argv[2];
+          const expected = [
+            `Claudexor-${version}.dmg`,
+            `Claudexor-${version}.spdx.json`,
+            `Claudexor-${version}.zip`,
+            "SHA256SUMS",
+            `claudexor-runtime-${version}.tar.gz`,
+            "runtime-manifest.json",
+          ].sort();
+          const actual = readdirSync("candidate-assets").sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new Error(`unexpected candidate asset set: ${actual.join(", ")}`);
+          }
+          for (const name of actual) {
+            const stat = lstatSync(`candidate-assets/${name}`);
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) {
+              throw new Error(`candidate asset is not a nonempty regular file: ${name}`);
+            }
+          }
+          NODE
+          for file in candidate-assets/*; do
+            gh attestation verify "$file" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$PREPARED_SHA"
+          done
+          (cd candidate-assets && shasum -a 256 -c SHA256SUMS)
+          codesign --verify --verbose=2 "$candidate_dmg"
+          xcrun stapler validate "$candidate_dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$candidate_dmg"
+          promoted_app="$RUNNER_TEMP/promoted-candidate-app"
+          mkdir -p "$promoted_app"
+          /usr/bin/ditto -x -k "$candidate_zip" "$promoted_app"
+          codesign --verify --strict --verbose=2 "$promoted_app/Claudexor.app"
+          xcrun stapler validate "$promoted_app/Claudexor.app"
+          spctl --assess --type execute --verbose=2 "$promoted_app/Claudexor.app"
+          test -x "$promoted_app/Claudexor.app/Contents/Resources/node"
+          test -s "$promoted_app/Claudexor.app/Contents/Resources/claudexord.bundle.cjs"
+          test -s "$promoted_app/Claudexor.app/Contents/Resources/setup-login-runner.cjs"
+          test -s "$promoted_app/Claudexor.app/Contents/Resources/browser-mcp-runtime/dist/browser-mcp-launcher.js"
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "$promoted_app/Claudexor.app/Contents/Info.plist")"
+          test "$app_version" = "$VERSION" || {
+            echo "::error::promoted app version $app_version does not match $VERSION"
+            exit 1
+          }
+          probe="$("$promoted_app/Claudexor.app/Contents/Resources/node" \
+            "$promoted_app/Claudexor.app/Contents/Resources/claudexord.bundle.cjs" --probe)"
+          node -e '
+            const probe = JSON.parse(process.argv[1]);
+            if (probe.version !== process.argv[2] || probe.buildSha !== process.argv[3]) {
+              throw new Error(`promoted app probe mismatch: ${JSON.stringify(probe)}`);
+            }
+          ' "$probe" "$VERSION" "$PREPARED_SHA"
+          promoted_belt_home="$RUNNER_TEMP/promoted-belt-home"
+          mkdir -p "$promoted_belt_home"
+          HOME="$promoted_belt_home" node scripts/smoke-delegation-belt-entry.mjs \
+            --node "$promoted_app/Claudexor.app/Contents/Resources/node" \
+            --entry "$promoted_app/Claudexor.app/Contents/Resources/claudexord.bundle.cjs" \
+            --config-root "$promoted_belt_home/config"
+          GITHUB_SHA="$PREPARED_SHA" pnpm licenses list --prod --json | \
+            GITHUB_SHA="$PREPARED_SHA" node scripts/generate-release-sbom.mjs \
+            --app-bundle "$promoted_app/Claudexor.app" \
+            > "$RUNNER_TEMP/promoted-candidate.spdx.json"
+          cmp "$candidate_sbom" "$RUNNER_TEMP/promoted-candidate.spdx.json"
 
       - name: Build (candidate) or promote (publish) the engine runtime closure
         shell: bash
@@ -288,18 +387,6 @@ jobs:
           actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
           test "$declared" = "$actual" || { echo "::error::runtime manifest sha256 does not match the tarball"; exit 1; }
 
-      - name: Verify promoted candidate closure provenance (publish, A-5)
-        if: needs.prepare.outputs.mode == 'publish'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          # The promoted closure bytes must carry the CANDIDATE run's build
-          # provenance (digest-keyed, repo-scoped) before they are trusted.
-          gh attestation verify "candidate-assets/claudexor-runtime-$VERSION.tar.gz" \
-            --repo "$GITHUB_REPOSITORY"
-
       - name: Assemble checksums, SBOM and review evidence
         shell: bash
         env:
@@ -309,8 +396,22 @@ jobs:
           set -euo pipefail
           assets="$RUNNER_TEMP/release-assets"
           mkdir -p "$assets"
-          cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"
-          cp "apps/macos/dist/Claudexor-$VERSION.zip" "$assets/"
+          if [ "$RELEASE_MODE_INPUT" = publish ]; then
+            # A-5/D312-15: publish the exact signed/notarized app bytes accepted
+            # from the candidate run. No publish-run app build is authoritative.
+            cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"
+            cp "candidate-assets/Claudexor-$VERSION.zip" "$assets/"
+            cp "candidate-assets/Claudexor-$VERSION.spdx.json" "$assets/"
+            cmp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/Claudexor-$VERSION.dmg"
+            cmp "candidate-assets/Claudexor-$VERSION.zip" "$assets/Claudexor-$VERSION.zip"
+            cmp "candidate-assets/Claudexor-$VERSION.spdx.json" "$assets/Claudexor-$VERSION.spdx.json"
+          else
+            cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"
+            cp "apps/macos/dist/Claudexor-$VERSION.zip" "$assets/"
+            pnpm licenses list --prod --json | node scripts/generate-release-sbom.mjs \
+              --app-bundle apps/macos/dist/Claudexor.app \
+              > "$assets/Claudexor-$VERSION.spdx.json"
+          fi
           cp "$RUNNER_TEMP/runtime-closure/claudexor-runtime-$VERSION.tar.gz" "$assets/"
           # D-2/A-5: candidate ships the UNSIGNED manifest (owner signs it
           # offline); publish ships only the OWNER-SIGNED manifest after
@@ -330,9 +431,6 @@ jobs:
           else
             cp "$RUNNER_TEMP/runtime-closure/runtime-manifest.json" "$assets/"
           fi
-          pnpm licenses list --prod --json | node scripts/generate-release-sbom.mjs \
-            --app-bundle apps/macos/dist/Claudexor.app \
-            > "$assets/Claudexor-$VERSION.spdx.json"
           if [ "$RELEASE_MODE_INPUT" = publish ]; then
             cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"
           fi

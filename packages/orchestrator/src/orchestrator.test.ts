@@ -836,6 +836,11 @@ describe("Orchestrator", () => {
     });
 
     expectBudgetSplit(res.runDir, 0.5, 1.5);
+    const attempt = readFileSync(join(res.runDir, "attempts", "a01", "attempt.yaml"), "utf8");
+    expect(attempt).toContain("cost_usd: 1");
+    expect(attempt).toContain("cost_estimated: true");
+    expect(attempt).toContain("errored: true");
+    expect(attempt).toContain("phase: harness");
   }, 30_000);
 
   it("preserves mixed-route settlement when race persistence fails", async () => {
