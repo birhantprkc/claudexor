@@ -3,6 +3,19 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.1.2** (2026-07-26) — Delegate recovery patch. Packaged macOS and npm
+  installs now expose the six-tool delegation belt through the exact daemon
+  self-entry instead of failing because a neighboring `cli.js` is absent.
+  Claude Code and Codex treat the injected MCP server as required: a known
+  pre-start incompatibility continues as ordinary Agent only with a durable,
+  visible requested/effective/used/reason/remediation receipt, while failure
+  after injection is terminal. Parent and child runs share one daemon-owned
+  budget, depth/count admission, cancellation, and drain barrier; late child
+  spend can no longer escape the parent's terminal decision. Control API, CLI,
+  and macOS preserve typed Delegate lineage, degradation warnings, failure
+  reasons, child ordering, and reconnect/reload truth without confusing native
+  vendor subagents for Claudexor children.
+
 - **v3.1.1** (2026-07-25) — patch release: engine honesty, per-model effort
   ladders, and control-plane fixes on top of v3.1.0. Engine: a DELIVERED plan
   now survives an unrecovered tool error — the planner no longer escalates a

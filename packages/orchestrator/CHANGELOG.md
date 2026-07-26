@@ -1,5 +1,27 @@
 # @claudexor/orchestrator
 
+## 3.1.2
+
+### Patch Changes
+
+- Restore Delegate in packaged installs through the exact daemon self-entry; enforce required MCP startup, bounded shared parent/child budget and cancellation authority, typed lineage and degradation receipts, and durable CLI/macOS projections across reload and reconnect.
+- Updated dependencies
+  - @claudexor/budget@3.1.2
+  - @claudexor/core@3.1.2
+  - @claudexor/event-log@3.1.2
+  - @claudexor/schema@3.1.2
+  - @claudexor/context@3.1.2
+  - @claudexor/delivery@3.1.2
+  - @claudexor/gateway@3.1.2
+  - @claudexor/review@3.1.2
+  - @claudexor/workspace@3.1.2
+  - @claudexor/arbitration@3.1.2
+  - @claudexor/config@3.1.2
+  - @claudexor/policy@3.1.2
+  - @claudexor/synthesis@3.1.2
+  - @claudexor/artifact-store@3.1.2
+  - @claudexor/util@3.1.2
+
 ## 3.1.1
 
 ### Patch Changes

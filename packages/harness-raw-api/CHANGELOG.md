@@ -1,5 +1,15 @@
 # @claudexor/harness-raw-api
 
+## 3.1.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/core@3.1.2
+  - @claudexor/schema@3.1.2
+  - @claudexor/secrets@3.1.2
+  - @claudexor/util@3.1.2
+
 ## 3.1.1
 
 ### Patch Changes

@@ -1,5 +1,34 @@
 # @claudexor/cli
 
+## 3.1.2
+
+### Patch Changes
+
+- Restore Delegate in packaged installs through the exact daemon self-entry; enforce required MCP startup, bounded shared parent/child budget and cancellation authority, typed lineage and degradation receipts, and durable CLI/macOS projections across reload and reconnect.
+- Updated dependencies
+  - @claudexor/control-api@3.1.2
+  - @claudexor/core@3.1.2
+  - @claudexor/daemon@3.1.2
+  - @claudexor/harness-claude@3.1.2
+  - @claudexor/harness-codex@3.1.2
+  - @claudexor/mcp-server@3.1.2
+  - @claudexor/orchestrator@3.1.2
+  - @claudexor/schema@3.1.2
+  - @claudexor/delivery@3.1.2
+  - @claudexor/gateway@3.1.2
+  - @claudexor/harness-cursor@3.1.2
+  - @claudexor/harness-fake@3.1.2
+  - @claudexor/harness-opencode@3.1.2
+  - @claudexor/harness-raw-api@3.1.2
+  - @claudexor/review@3.1.2
+  - @claudexor/workspace@3.1.2
+  - @claudexor/acp-server@3.1.2
+  - @claudexor/config@3.1.2
+  - @claudexor/artifact-store@3.1.2
+  - @claudexor/journal@3.1.2
+  - @claudexor/secrets@3.1.2
+  - @claudexor/util@3.1.2
+
 ## 3.1.1
 
 ### Patch Changes
