@@ -282,7 +282,8 @@ for (const [label, broken, expectedFinding] of exactPromotionMutationCases) {
   }
 }
 for (const staleVersion of ["schema-v2", "schema-v3"]) {
-  if (!staleAttestationSchemaPattern.test(staleVersion)) {
+  const expected = "release.yml: stale schema-v2/v3 attestation wording is forbidden";
+  if (!staleAttestationFindings(`${release}\n# ${staleVersion}`).includes(expected)) {
     errors.push(`release-workflow-check self-test: failed to reject ${staleVersion}`);
   }
 }
@@ -391,11 +392,10 @@ for (const [label, pattern] of [
   ["unsigned release fallback is forbidden", /continue-on-error:\s*true/],
   ["runtime package downloads are forbidden", /\bnpx\b|@latest/],
   ["tag-push publication is forbidden", /^\s*push:\s*\n\s*tags:/m],
-  // The attestation is schema v4; stale v2/v3 wording must never return.
-  ["stale schema-v2/v3 attestation wording is forbidden", staleAttestationSchemaPattern],
 ]) {
   if (pattern.test(release)) errors.push(`release.yml: ${label}`);
 }
+errors.push(...staleAttestationFindings(release));
 
 for (const [label, pattern] of [
   ["manual tag input is required", /workflow_dispatch:[\s\S]*?tag:[\s\S]*?required:\s*true/],
@@ -592,4 +592,11 @@ function replaceLastOccurrence(text, needle, replacement) {
   return index < 0
     ? text
     : `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
+}
+
+function staleAttestationFindings(workflow) {
+  // The attestation is schema v4; stale v2/v3 wording must never return.
+  return staleAttestationSchemaPattern.test(workflow)
+    ? ["release.yml: stale schema-v2/v3 attestation wording is forbidden"]
+    : [];
 }
