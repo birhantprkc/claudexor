@@ -6,24 +6,54 @@
     <meta name="theme-color" content="#050709" />
     <meta
       name="description"
-      content="Claudexor keeps one coding thread moving across multiple Claude Code and Codex subscriptions, then routes work through Claude Code, Codex, Cursor, and OpenCode."
+      content="Claudexor keeps coding work moving across Claude Code, Codex, Cursor, and OpenCode, with quota-aware subscription routing and one auditable thread."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Claudexor — multi-subscription, multi-harness coding" />
+    <meta property="og:title" content="Claudexor — keep coding across agents and subscriptions" />
     <meta
       property="og:description"
-      content="Quota-aware subscription rotation and one coding thread across Claude Code, Codex, Cursor, and OpenCode."
+      content="Connect the coding agents you already use, route around subscription limits, and keep the work in one auditable thread."
     />
-    <meta property="og:url" content="https://razzant.github.io/claudexor/" />
+    <meta property="og:url" content="https://claudexor.ai/" />
+    <meta property="og:image" content="https://claudexor.ai/assets/social-preview-v2.png" />
     <meta
-      property="og:image"
-      content="https://razzant.github.io/claudexor/assets/social-preview.png"
+      property="og:image:alt"
+      content="Claudexor connects Claude Code, Codex, Cursor, and OpenCode in one project thread."
     />
     <meta name="twitter:card" content="summary_large_image" />
-    <link rel="canonical" href="https://razzant.github.io/claudexor/" />
+    <meta name="twitter:title" content="Claudexor — keep coding across agents and subscriptions" />
+    <meta
+      name="twitter:description"
+      content="Connect the coding agents you already use, route around subscription limits, and keep the work in one auditable thread."
+    />
+    <meta name="twitter:image" content="https://claudexor.ai/assets/social-preview-v2.png" />
+    <link rel="canonical" href="https://claudexor.ai/" />
     <link rel="icon" type="image/png" href="./assets/favicon.png" />
     <link rel="apple-touch-icon" href="./assets/apple-touch-icon.png" />
-    <title>Claudexor — multi-subscription, multi-harness coding</title>
+    <title>Claudexor — keep coding across agents and subscriptions</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Claudexor",
+        "url": "https://claudexor.ai/",
+        "description": "A local-first control plane for coding work across Claude Code, Codex, Cursor, and OpenCode, with quota-aware subscription routing and one auditable thread.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "isAccessibleForFree": true,
+        "offers": {
+          "@type": "Offer",
+          "price": 0,
+          "priceCurrency": "USD"
+        },
+        "downloadUrl": "https://github.com/razzant/claudexor/releases/latest",
+        "image": "https://claudexor.ai/assets/social-preview-v2.png",
+        "sameAs": [
+          "https://github.com/razzant/claudexor",
+          "https://www.npmjs.com/package/claudexor"
+        ]
+      }
+    </script>
     <script>
       document.documentElement.classList.add("js");
     </script>
@@ -703,6 +733,774 @@
         font-family: var(--data);
       }
 
+      /* Refined landing shell: calm high-resolution light, readable navigation,
+   and a product-first connected-harness map. */
+      :root {
+        --w: 1180px;
+        --header-h: 76px;
+      }
+      body {
+        background:
+          radial-gradient(ellipse 80% 54% at 50% -8%, rgba(91, 154, 205, 0.1), transparent 68%),
+          linear-gradient(180deg, #070b10 0%, #050709 72%);
+        font-size: 16px;
+      }
+      .ambient {
+        position: fixed;
+        inset: -24%;
+        z-index: 0;
+        pointer-events: none;
+        overflow: hidden;
+        filter: saturate(122%);
+        opacity: 1;
+        will-change: transform;
+        transform: translate3d(0, 0, 0) scale(1.08);
+      }
+      .ambient::before,
+      .ambient::after {
+        content: "";
+        position: absolute;
+        border-radius: 43% 57% 61% 39% / 48% 42% 58% 52%;
+        filter: blur(82px);
+        will-change: transform;
+        transform: translate3d(0, 0, 0);
+      }
+      .ambient::before {
+        width: 66vw;
+        height: 52vw;
+        min-width: 700px;
+        min-height: 560px;
+        left: -4%;
+        top: -8%;
+        background: radial-gradient(
+          ellipse at 46% 45%,
+          rgba(77, 142, 194, 0.38) 0%,
+          rgba(42, 91, 129, 0.19) 36%,
+          transparent 72%
+        );
+        animation: ambient-drift-a 22s ease-in-out infinite;
+      }
+      .ambient::after {
+        width: 54vw;
+        height: 62vw;
+        min-width: 620px;
+        min-height: 720px;
+        right: -2%;
+        top: 2%;
+        background: radial-gradient(
+          ellipse at 52% 46%,
+          rgba(130, 188, 231, 0.26) 0%,
+          rgba(42, 85, 121, 0.14) 38%,
+          transparent 72%
+        );
+        animation: ambient-drift-b 29s ease-in-out infinite;
+      }
+      .ambient span {
+        position: absolute;
+        width: 44vw;
+        height: 34vw;
+        min-width: 520px;
+        min-height: 420px;
+        left: 29%;
+        bottom: -5%;
+        border-radius: 59% 41% 46% 54% / 44% 62% 38% 56%;
+        filter: blur(104px);
+        will-change: transform;
+        background: radial-gradient(
+          ellipse,
+          rgba(91, 151, 197, 0.19),
+          rgba(25, 57, 82, 0.08) 48%,
+          transparent 72%
+        );
+        animation: ambient-drift-c 25s ease-in-out infinite;
+      }
+      @keyframes ambient-drift-a {
+        0%,
+        100% {
+          transform: translate3d(-5vw, -3vh, 0) rotate(-4deg) scale(0.97);
+        }
+        45% {
+          transform: translate3d(14vw, 10vh, 0) rotate(7deg) scale(1.1);
+        }
+        72% {
+          transform: translate3d(6vw, 16vh, 0) rotate(2deg) scale(1.03);
+        }
+      }
+      @keyframes ambient-drift-b {
+        0%,
+        100% {
+          transform: translate3d(8vw, -5vh, 0) rotate(5deg) scale(1.06);
+        }
+        42% {
+          transform: translate3d(-13vw, 12vh, 0) rotate(-9deg) scale(0.94);
+        }
+        76% {
+          transform: translate3d(-4vw, -2vh, 0) rotate(-2deg) scale(1.02);
+        }
+      }
+      @keyframes ambient-drift-c {
+        0%,
+        100% {
+          transform: translate3d(-8vw, 8vh, 0) rotate(-6deg) scale(0.94);
+        }
+        50% {
+          transform: translate3d(11vw, -16vh, 0) rotate(11deg) scale(1.13);
+        }
+      }
+      .veil {
+        background:
+          linear-gradient(
+            180deg,
+            rgba(5, 7, 9, 0.03),
+            rgba(5, 7, 9, 0.18) 50%,
+            rgba(5, 7, 9, 0.72) 100%
+          ),
+          radial-gradient(
+            ellipse 110% 80% at 50% 10%,
+            transparent 28%,
+            rgba(5, 7, 9, 0.4) 78%,
+            rgba(5, 7, 9, 0.84) 100%
+          );
+      }
+
+      .g {
+        background:
+          linear-gradient(
+            168deg,
+            rgba(190, 215, 240, 0.13),
+            rgba(190, 215, 240, 0.025) 42%,
+            rgba(190, 215, 240, 0.07)
+          ),
+          rgba(7, 12, 18, 0.36);
+        backdrop-filter: blur(28px) saturate(165%);
+        -webkit-backdrop-filter: blur(28px) saturate(165%);
+      }
+      .card.g::after,
+      .chip.g::after {
+        left: -46%;
+        right: auto;
+        width: 44%;
+        opacity: 0.72;
+        animation: glass-sweep 8.5s ease-in-out infinite;
+      }
+      @keyframes glass-sweep {
+        0%,
+        28% {
+          transform: translateX(0);
+          opacity: 0;
+        }
+        50% {
+          opacity: 0.8;
+        }
+        72%,
+        100% {
+          transform: translateX(335%);
+          opacity: 0;
+        }
+      }
+      .flat {
+        background: rgba(9, 14, 21, 0.38);
+        backdrop-filter: blur(16px) saturate(140%);
+        -webkit-backdrop-filter: blur(16px) saturate(140%);
+      }
+
+      .site-header {
+        position: fixed;
+        inset: 0 0 auto;
+        z-index: 40;
+        height: var(--header-h);
+        background: linear-gradient(180deg, rgba(6, 10, 15, 0.62), rgba(6, 10, 15, 0.26));
+        border-bottom: 1px solid rgba(186, 216, 248, 0.11);
+        backdrop-filter: blur(24px) saturate(155%);
+        -webkit-backdrop-filter: blur(24px) saturate(155%);
+      }
+      .site-header::after {
+        content: "";
+        position: absolute;
+        inset: auto 0 -1px;
+        height: 1px;
+        background: linear-gradient(
+          90deg,
+          transparent 5%,
+          rgba(142, 196, 237, 0.26) 48%,
+          transparent 94%
+        );
+      }
+      .site-header nav.nav-inner {
+        position: relative;
+        inset: auto;
+        left: auto;
+        top: auto;
+        transform: none;
+        width: auto;
+        max-width: var(--w);
+        height: 100%;
+        margin: 0 auto;
+        padding: 0 24px;
+        border-radius: 0;
+        display: flex;
+        align-items: center;
+        gap: 28px;
+        background: none;
+        box-shadow: none;
+        overflow: visible;
+        font-family: var(--sans);
+        font-size: 13px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        color: var(--ice);
+        text-decoration: none;
+        min-width: max-content;
+      }
+      .site-header nav.nav-inner .brand {
+        padding: 0;
+        border-radius: 0;
+      }
+      .brand img {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        box-shadow: 0 8px 26px rgba(89, 151, 201, 0.2);
+      }
+      .brand-copy {
+        display: grid;
+        line-height: 1.15;
+      }
+      .brand-copy strong {
+        font-size: 15px;
+        letter-spacing: -0.01em;
+      }
+      .brand-copy small {
+        margin-top: 4px;
+        color: var(--ice-3);
+        font-family: var(--data);
+        font-size: 9.5px;
+        letter-spacing: 0.015em;
+      }
+      .nav-links {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        margin-left: auto;
+      }
+      .site-header nav.nav-inner a.nav-link {
+        position: relative;
+        color: var(--ice-2);
+        padding: 10px 11px;
+        border-radius: 8px;
+        text-decoration: none;
+        transition:
+          color 0.2s,
+          background 0.2s;
+      }
+      .site-header nav.nav-inner a.nav-link:hover {
+        color: var(--ice);
+        background: rgba(190, 220, 250, 0.055);
+      }
+      .site-header nav.nav-inner a.nav-link:focus-visible,
+      .nav-actions a:focus-visible {
+        outline: 2px solid var(--glint);
+        outline-offset: 3px;
+      }
+      .nav-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .site-header nav.nav-inner .nav-source {
+        color: var(--ice-2);
+        padding: 9px 10px;
+        text-decoration: none;
+      }
+      .site-header nav.nav-inner .nav-download {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        color: #07111b;
+        padding: 10px 15px;
+        border-radius: 10px;
+        text-decoration: none;
+        font-weight: 650;
+        background: linear-gradient(180deg, #eaf5ff, #b9d6ed);
+        box-shadow:
+          inset 0 1px 0 #fff,
+          0 9px 28px rgba(96, 160, 211, 0.16);
+      }
+      .nav-download::after {
+        content: "↓";
+        font-family: var(--data);
+        font-size: 12px;
+      }
+
+      .hero {
+        padding-top: calc(var(--header-h) + 76px);
+      }
+      .hero h1 {
+        font-size: clamp(42px, 5.6vw, 70px);
+        max-width: 13ch;
+      }
+      .hero .lead {
+        max-width: 54ch;
+      }
+      .stage {
+        height: 540px;
+        animation: stage-float 6.4s ease-in-out infinite;
+      }
+      .deck {
+        transition: transform 0.18s ease-out;
+      }
+      @keyframes stage-float {
+        0%,
+        100% {
+          translate: 0 -5px;
+        }
+        50% {
+          translate: 0 9px;
+        }
+      }
+      .chip {
+        animation: chip-float 7.2s ease-in-out infinite;
+      }
+      .chip:nth-child(3) {
+        animation-delay: -2.4s;
+      }
+      .chip:nth-child(4) {
+        animation-delay: -4.8s;
+      }
+      @keyframes chip-float {
+        0%,
+        100% {
+          translate: 0 -4px;
+        }
+        50% {
+          translate: 0 8px;
+        }
+      }
+
+      .network-section {
+        padding: 112px 0 102px;
+        border-top: 1px solid var(--rule);
+      }
+      .network-heading {
+        text-align: center;
+        margin: 0 auto 42px;
+      }
+      .network-heading .kick {
+        justify-content: center;
+      }
+      .network-heading .kick::before,
+      .network-heading .kick::after {
+        content: "";
+        width: 44px;
+        height: 1px;
+        background: var(--rule-2);
+      }
+      .network-heading .kick::after {
+        display: block;
+      }
+      .network-heading h2 {
+        max-width: 19ch;
+        margin: 0 auto 16px;
+        font-size: clamp(32px, 4vw, 48px);
+      }
+      .network-heading .lead {
+        max-width: 66ch;
+        margin: 0 auto;
+      }
+      .network-map {
+        position: relative;
+        min-height: 590px;
+        overflow: hidden;
+        border-radius: 28px;
+        background:
+          radial-gradient(circle at 50% 50%, rgba(112, 177, 226, 0.18), transparent 31%),
+          linear-gradient(145deg, rgba(17, 27, 39, 0.52), rgba(7, 11, 17, 0.25));
+        backdrop-filter: blur(18px) saturate(140%);
+        -webkit-backdrop-filter: blur(18px) saturate(140%);
+        box-shadow:
+          inset 0 0 0 1px rgba(186, 216, 248, 0.15),
+          inset 0 1px 0 rgba(224, 241, 255, 0.19),
+          0 44px 100px -62px #000;
+      }
+      .network-map::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        opacity: 0.3;
+        background-image:
+          linear-gradient(rgba(186, 216, 248, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(186, 216, 248, 0.04) 1px, transparent 1px);
+        background-size: 48px 48px;
+        mask-image: radial-gradient(circle at center, #000, transparent 76%);
+      }
+      .network-map::after {
+        content: "";
+        position: absolute;
+        z-index: 0;
+        width: 420px;
+        height: 300px;
+        left: calc(50% - 210px);
+        top: calc(50% - 150px);
+        border-radius: 50%;
+        background: radial-gradient(ellipse, rgba(116, 183, 231, 0.18), transparent 68%);
+        filter: blur(38px);
+        animation: network-aura 9s ease-in-out infinite;
+      }
+      @keyframes network-aura {
+        0%,
+        100% {
+          transform: translate3d(-70px, -34px, 0) scale(0.86);
+        }
+        50% {
+          transform: translate3d(72px, 42px, 0) scale(1.18);
+        }
+      }
+      .network-grid {
+        position: absolute;
+        z-index: 1;
+        inset: 46px 58px;
+        display: grid;
+        grid-template-columns: 1fr 220px 1fr;
+        grid-template-rows: 1fr 190px 1fr;
+        align-items: center;
+        justify-items: center;
+      }
+      .route {
+        position: absolute;
+        z-index: 0;
+        left: 50%;
+        top: 50%;
+        width: 37%;
+        height: 1px;
+        transform-origin: left center;
+        background: linear-gradient(90deg, rgba(139, 198, 243, 0.65), rgba(139, 198, 243, 0.08));
+      }
+      .route::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: -2px;
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #d7eeff;
+        box-shadow: 0 0 16px rgba(154, 211, 255, 0.9);
+        animation: route-signal 4.8s ease-in-out infinite;
+      }
+      .route-a {
+        transform: rotate(-151deg);
+      }
+      .route-b {
+        transform: rotate(-29deg);
+      }
+      .route-c {
+        transform: rotate(151deg);
+      }
+      .route-d {
+        transform: rotate(29deg);
+      }
+      .route-b::after {
+        animation-delay: -1.7s;
+      }
+      .route-c::after {
+        animation-delay: -3.4s;
+      }
+      .route-d::after {
+        animation-delay: -5.1s;
+      }
+      @keyframes route-signal {
+        0% {
+          left: 0;
+          opacity: 0;
+          transform: scale(0.65);
+        }
+        18% {
+          opacity: 1;
+        }
+        82% {
+          opacity: 1;
+        }
+        100% {
+          left: calc(100% - 5px);
+          opacity: 0;
+          transform: scale(1.2);
+        }
+      }
+      .harness-node {
+        position: relative;
+        z-index: 2;
+        width: min(248px, 94%);
+        min-height: 104px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 18px 20px;
+        border-radius: 20px;
+        background: rgba(8, 13, 20, 0.54);
+        backdrop-filter: blur(20px) saturate(145%);
+        -webkit-backdrop-filter: blur(20px) saturate(145%);
+        box-shadow:
+          inset 0 0 0 1px rgba(186, 216, 248, 0.12),
+          inset 0 1px 0 rgba(225, 241, 255, 0.16),
+          0 24px 58px -34px #000;
+        transition:
+          transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1),
+          border-color 0.35s;
+      }
+      .harness-node:hover {
+        transform: translateY(-5px);
+      }
+      .harness-node {
+        animation: node-drift 7.4s ease-in-out infinite;
+      }
+      .node-codex {
+        animation-delay: -1.8s;
+      }
+      .node-cursor {
+        animation-delay: -3.7s;
+      }
+      .node-opencode {
+        animation-delay: -5.5s;
+      }
+      @keyframes node-drift {
+        0%,
+        100% {
+          translate: 0 -4px;
+        }
+        50% {
+          translate: 0 8px;
+        }
+      }
+      .harness-node img {
+        width: 52px;
+        height: 52px;
+        border-radius: 13px;
+        flex: none;
+        image-rendering: auto;
+      }
+      .harness-node strong {
+        display: block;
+        color: var(--ice);
+        font-size: 17px;
+        line-height: 1.2;
+        margin-bottom: 6px;
+      }
+      .harness-node small {
+        display: block;
+        color: var(--ice-3);
+        font-family: var(--data);
+        font-size: 10.5px;
+        line-height: 1.45;
+      }
+      .node-claude {
+        grid-area: 1/1;
+      }
+      .node-codex {
+        grid-area: 1/3;
+      }
+      .node-cursor {
+        grid-area: 3/1;
+      }
+      .node-opencode {
+        grid-area: 3/3;
+      }
+      .network-core {
+        position: relative;
+        z-index: 3;
+        grid-area: 2/2;
+        width: 190px;
+        height: 190px;
+        border-radius: 38px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        background:
+          linear-gradient(150deg, rgba(184, 218, 244, 0.19), rgba(30, 62, 86, 0.15)),
+          rgba(7, 12, 18, 0.67);
+        backdrop-filter: blur(24px) saturate(155%);
+        -webkit-backdrop-filter: blur(24px) saturate(155%);
+        box-shadow:
+          inset 0 0 0 1px rgba(189, 224, 251, 0.3),
+          inset 0 1px 0 rgba(238, 248, 255, 0.42),
+          0 0 84px rgba(79, 143, 193, 0.22);
+        animation: core-breathe 5.6s ease-in-out infinite;
+      }
+      @keyframes core-breathe {
+        50% {
+          box-shadow:
+            inset 0 0 0 1px rgba(189, 224, 251, 0.42),
+            inset 0 1px 0 rgba(238, 248, 255, 0.5),
+            0 0 132px rgba(79, 143, 193, 0.4);
+          transform: translateY(-7px) scale(1.025);
+        }
+      }
+      .network-core img {
+        width: 66px;
+        height: 66px;
+        border-radius: 18px;
+        margin-bottom: 12px;
+        box-shadow: 0 14px 34px rgba(79, 143, 193, 0.26);
+      }
+      .network-core strong {
+        font-size: 17px;
+        line-height: 1.1;
+      }
+      .network-core small {
+        margin-top: 7px;
+        max-width: 14ch;
+        color: var(--ice-3);
+        font-family: var(--data);
+        font-size: 10px;
+        line-height: 1.45;
+      }
+      .network-facts {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-top: 14px;
+      }
+      .network-fact {
+        padding: 17px 18px;
+        border-radius: 14px;
+        background: rgba(9, 14, 21, 0.38);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        box-shadow: inset 0 0 0 1px rgba(186, 216, 248, 0.1);
+      }
+      .network-fact b {
+        display: block;
+        color: var(--ice);
+        font-size: 13px;
+        margin-bottom: 4px;
+      }
+      .network-fact span {
+        color: var(--ice-3);
+        font-size: 12px;
+      }
+
+      @media (max-width: 920px) {
+        .brand-copy small {
+          display: none;
+        }
+        .nav-links {
+          display: none;
+        }
+        .nav-actions {
+          margin-left: auto;
+        }
+        .hero {
+          padding-top: calc(var(--header-h) + 54px);
+        }
+      }
+      @media (max-width: 760px) {
+        :root {
+          --header-h: 66px;
+        }
+        .site-header nav.nav-inner {
+          padding: 0 16px;
+          gap: 14px;
+        }
+        .brand img {
+          width: 32px;
+          height: 32px;
+        }
+        .nav-source {
+          display: none;
+        }
+        .site-header nav.nav-inner .nav-download {
+          padding: 9px 12px;
+        }
+        .col {
+          padding: 0 18px;
+        }
+        .hero {
+          padding-top: 104px;
+        }
+        .hero h1 {
+          max-width: 15ch;
+        }
+        .stage {
+          height: 410px;
+        }
+        .network-section {
+          padding: 84px 0;
+        }
+        .network-map {
+          min-height: 640px;
+          border-radius: 22px;
+        }
+        .network-grid {
+          inset: 24px;
+          grid-template-columns: 1fr 1fr;
+          grid-template-rows: 180px repeat(2, 1fr);
+          gap: 14px;
+        }
+        .route {
+          display: none;
+        }
+        .network-core {
+          grid-area: 1/1/2/3;
+          width: 164px;
+          height: 164px;
+          border-radius: 32px;
+        }
+        .network-core img {
+          width: 54px;
+          height: 54px;
+        }
+        .harness-node {
+          width: 100%;
+          min-height: 132px;
+          padding: 16px;
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 11px;
+        }
+        .harness-node img {
+          width: 42px;
+          height: 42px;
+        }
+        .harness-node strong {
+          font-size: 15px;
+        }
+        .node-claude {
+          grid-area: 2/1;
+        }
+        .node-codex {
+          grid-area: 2/2;
+        }
+        .node-cursor {
+          grid-area: 3/1;
+        }
+        .node-opencode {
+          grid-area: 3/2;
+        }
+        .network-facts {
+          grid-template-columns: 1fr;
+        }
+        .network-heading {
+          text-align: left;
+        }
+        .network-heading .kick {
+          justify-content: flex-start;
+        }
+        .network-heading .kick::before {
+          display: none;
+        }
+        .network-heading h2 {
+          margin-left: 0;
+        }
+        .network-heading .lead {
+          margin-left: 0;
+        }
+      }
+
       @media (prefers-reduced-motion: reduce) {
         * {
           animation: none !important;
@@ -717,17 +1515,31 @@
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <canvas id="field" aria-hidden="true"></canvas>
+    <div class="ambient" aria-hidden="true"><span></span></div>
     <div class="veil"></div>
 
-    <nav class="g">
-      <span class="id"><b>Claudexor</b><span>3.1</span></span>
-      <a class="opt" href="#pool">pool</a>
-      <a class="opt" href="#flow">flow</a>
-      <a class="opt" href="#edges">edges</a>
-      <a href="#install">install</a>
-      <a class="dl" href="https://github.com/razzant/claudexor/releases/latest">Download</a>
-    </nav>
+    <header class="site-header">
+      <nav class="nav-inner" aria-label="Primary navigation">
+        <a class="brand" href="#main" aria-label="Claudexor home">
+          <img src="./assets/claudexor-app.png" alt="" />
+          <span class="brand-copy"
+            ><strong>Claudexor</strong><small>Coding agents, one control plane</small></span
+          >
+        </a>
+        <div class="nav-links">
+          <a class="nav-link" href="#subscriptions">Subscriptions</a>
+          <a class="nav-link" href="#network">Connected agents</a>
+          <a class="nav-link" href="#workflow">How it works</a>
+          <a class="nav-link" href="#trust">Limits &amp; privacy</a>
+        </div>
+        <div class="nav-actions">
+          <a class="nav-source" href="https://github.com/razzant/claudexor">GitHub</a>
+          <a class="nav-download" href="https://github.com/razzant/claudexor/releases/latest"
+            >Get Claudexor</a
+          >
+        </div>
+      </nav>
+    </header>
 
     <div class="shell">
       <main class="col" id="main">
@@ -738,9 +1550,9 @@
                 <p class="kick">local-first control plane</p>
                 <h1>Keep coding when a subscription <em>hits its limit.</em></h1>
                 <p class="lead">
-                  One thread that moves across Claude Code, Codex, Cursor and OpenCode. Register
-                  every subscription you pay for; Claudexor reads real quota, rotates on typed
-                  limits only, and carries bounded context into the next lane.
+                  Connect the accounts and coding agents you already use. Claudexor reads real quota
+                  for supported subscriptions, switches on confirmed limits when you enable
+                  rotation, and keeps every run in one auditable thread.
                 </p>
                 <div class="acts">
                   <a class="btn p" href="https://github.com/razzant/claudexor/releases/latest"
@@ -762,11 +1574,11 @@
                     class="card g router"
                     style="transform: translate(-50%, -50%) translateZ(70px)"
                   >
-                    <div class="hdr"><b>Quota router</b><span>local</span></div>
+                    <div class="hdr"><b>Subscription routing</b><span>on your Mac</span></div>
                     <div class="row dead">
                       <img class="mk" src="./assets/vendor/claude-code.png" alt="" />
                       <div class="nm">
-                        <b>claude · primary</b><small>limit reached · resets 14:02</small>
+                        <b>Claude Code · personal</b><small>limit reached · resets 14:02</small>
                         <div class="track"><i data-w="100" style="--wv: 100%"></i></div>
                       </div>
                       <span class="pct">100%</span>
@@ -774,7 +1586,7 @@
                     <div class="row on">
                       <img class="mk" src="./assets/vendor/claude-code.png" alt="" />
                       <div class="nm">
-                        <b>claude · work</b><small>routing here</small>
+                        <b>Claude Code · work</b><small>next ready account</small>
                         <div class="track"><i data-w="31" style="--wv: 31%"></i></div>
                       </div>
                       <span class="pct">31%</span>
@@ -782,7 +1594,7 @@
                     <div class="row">
                       <img class="mk" src="./assets/vendor/codex.png" alt="" />
                       <div class="nm">
-                        <b>codex · personal</b><small>ready</small>
+                        <b>Codex · personal</b><small>ready</small>
                         <div class="track"><i data-w="18" style="--wv: 18%"></i></div>
                       </div>
                       <span class="pct">18%</span>
@@ -792,7 +1604,7 @@
                     class="chip g"
                     style="left: -2%; top: 12%; transform: translateZ(190px); width: 210px"
                   >
-                    <b>Continuation packet</b><small>3 turns · plan pointer · anchor</small>
+                    <b>Thread context</b><small>carried into the next run</small>
                   </div>
                   <div
                     class="chip g"
@@ -818,29 +1630,81 @@
           </div>
         </div>
 
-        <div class="plane">
+        <div class="plane" id="network">
           <div class="z">
-            <p class="vlabel">orchestrates the agents you already pay for</p>
-            <div class="vendors">
-              <div class="v flat">
-                <img src="./assets/vendor/claude-code.png" alt="" />Claude Code
+            <section class="network-section">
+              <div class="network-heading">
+                <p class="kick">your coding stack, connected</p>
+                <h2>One project thread across every agent.</h2>
+                <p class="lead">
+                  Claudexor connects the tools you already use, routes each run to a ready harness,
+                  and brings the result back into one inspectable history.
+                </p>
               </div>
-              <div class="v flat"><img src="./assets/vendor/codex.png" alt="" />Codex</div>
-              <div class="v flat"><img src="./assets/vendor/cursor.png" alt="" />Cursor</div>
-              <div class="v flat"><img src="./assets/vendor/opencode.png" alt="" />OpenCode</div>
-            </div>
+              <div
+                class="network-map"
+                role="img"
+                aria-label="Claude Code, Codex, Cursor, and OpenCode connected through Claudexor"
+              >
+                <div class="network-grid">
+                  <span class="route route-a" aria-hidden="true"></span>
+                  <span class="route route-b" aria-hidden="true"></span>
+                  <span class="route route-c" aria-hidden="true"></span>
+                  <span class="route route-d" aria-hidden="true"></span>
+                  <div class="harness-node node-claude">
+                    <img src="./assets/vendor/claude-code.png" alt="" /><span
+                      ><strong>Claude Code</strong
+                      ><small>Native CLI + subscription profiles</small></span
+                    >
+                  </div>
+                  <div class="harness-node node-codex">
+                    <img src="./assets/vendor/codex.png" alt="" /><span
+                      ><strong>Codex</strong><small>Native CLI + subscription profiles</small></span
+                    >
+                  </div>
+                  <div class="harness-node node-cursor">
+                    <img src="./assets/vendor/cursor.png" alt="" /><span
+                      ><strong>Cursor</strong><small>Editor-native coding harness</small></span
+                    >
+                  </div>
+                  <div class="harness-node node-opencode">
+                    <img src="./assets/vendor/opencode.png" alt="" /><span
+                      ><strong>OpenCode</strong><small>Open multi-provider harness</small></span
+                    >
+                  </div>
+                  <div class="network-core">
+                    <img src="./assets/claudexor-app.png" alt="" /><strong>Claudexor</strong
+                    ><small>routes work · carries context · records proof</small>
+                  </div>
+                </div>
+              </div>
+              <div class="network-facts">
+                <div class="network-fact">
+                  <b>One task history</b
+                  ><span>Plans, runs, reviews, and results stay connected.</span>
+                </div>
+                <div class="network-fact">
+                  <b>Ready-agent routing</b
+                  ><span>Choose manually or route from live readiness and quota.</span>
+                </div>
+                <div class="network-fact">
+                  <b>Cross-family verification</b
+                  ><span>Review work with a different model family before delivery.</span>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
 
-        <div class="plane" id="pool">
+        <div class="plane" id="subscriptions">
           <div class="z">
             <section>
               <p class="kick">quota-aware rotation</p>
-              <h2>Your subscriptions become a pool, not a pile of logins.</h2>
+              <h2>Use the headroom you already pay for.</h2>
               <p class="lead">
-                Every Claude and Codex profile keeps its own isolated vendor login. Claudexor reads
-                the live subscription windows, routes toward headroom, and rotates only on a typed
-                limit — never on an ordinary network error.
+                Add separate Claude Code and Codex profiles without mixing credentials. Claudexor
+                shows live subscription windows and, when you enable rotation, moves work only after
+                a confirmed limit — never an ordinary network error.
               </p>
               <div class="split">
                 <figure class="flat" style="overflow: hidden">
@@ -881,7 +1745,7 @@
           </div>
         </div>
 
-        <div class="plane" id="flow">
+        <div class="plane" id="workflow">
           <div class="z">
             <section>
               <p class="kick">cross-harness orchestration</p>
@@ -938,7 +1802,7 @@
           </div>
         </div>
 
-        <div class="plane" id="edges">
+        <div class="plane" id="trust">
           <div class="z">
             <section>
               <p class="kick">exact boundaries</p>
@@ -955,9 +1819,8 @@
                   <div>
                     <dt>where every harness participates</dt>
                     <dd>
-                      Claude Code, Codex, Cursor and OpenCode can join the same thread wherever
-                      doctor has enabled the requested role; unavailable roles stay disabled with
-                      the reason attached.
+                      Claude Code, Codex, Cursor and OpenCode can all plan, implement, review, or
+                      continue the same thread.
                     </dd>
                   </div>
                   <div>
@@ -1003,7 +1866,7 @@
                   <pre><span class="p">$</span> npm install -g claudexor
 <span class="p">$</span> claudexor doctor
 
-<span class="c"># ask, race, inspect, apply</span>
+<span class="c"># ask, compare, inspect, apply</span>
 <span class="p">$</span> claudexor ask <span class="s">"map this repo"</span>
 <span class="p">$</span> claudexor best-of <span class="s">"fix add()"</span> --n 3
 <span class="p">$</span> claudexor apply &lt;run_id&gt; --dry-run</pre>
@@ -1039,143 +1902,88 @@
     </div>
 
     <script>
-      /* cold-common.js — shared engine for the E-series (cold glacier family).
-   field canvas + depth camera + meter fills + rotating aside. All optional:
-   each block no-ops if its element is absent. */
+      /* Small progressive enhancements. The ambient field is CSS-rendered at the
+   browser's native resolution; JavaScript is reserved for content feedback. */
       (function () {
         const REDUCED = matchMedia("(prefers-reduced-motion:reduce)").matches;
 
-        /* ---- steel/ice field (hue 200-225 only) ---- */
-        const cv = document.getElementById("field");
-        if (cv) {
-          const x = cv.getContext("2d");
-          let W,
-            H,
-            t = 0,
-            last = 0;
-          const blobs = [
-            {
-              h: "#22384c",
-              r: 0.58,
-              sx: 0.00012,
-              sy: 0.00016,
-              ax: 0.28,
-              ay: 0.2,
-              ox: 0.32,
-              oy: 0.26,
+        /* ---- ambient camera: self-moving light plus pointer and scroll parallax ---- */
+        const ambient = document.querySelector(".ambient");
+        if (ambient && !REDUCED) {
+          let targetX = 0,
+            targetY = 0,
+            currentX = 0,
+            currentY = 0,
+            targetScroll = 0,
+            currentScroll = 0,
+            lastAmbient = 0;
+          addEventListener(
+            "pointermove",
+            (e) => {
+              targetX = (e.clientX / innerWidth - 0.5) * 64;
+              targetY = (e.clientY / innerHeight - 0.5) * 44;
             },
-            {
-              h: "#0a1420",
-              r: 0.64,
-              sx: 0.00008,
-              sy: 0.00011,
-              ax: 0.24,
-              ay: 0.18,
-              ox: 0.74,
-              oy: 0.54,
+            { passive: true },
+          );
+          addEventListener("pointerleave", () => {
+            targetX = 0;
+            targetY = 0;
+          });
+          addEventListener(
+            "scroll",
+            () => {
+              targetScroll = Math.max(-72, -scrollY * 0.024);
             },
-            {
-              h: "#37648a",
-              r: 0.34,
-              sx: 0.00018,
-              sy: 0.0001,
-              ax: 0.22,
-              ay: 0.24,
-              ox: 0.58,
-              oy: 0.12,
-            },
-            {
-              h: "#14232f",
-              r: 0.5,
-              sx: 0.0001,
-              sy: 0.00015,
-              ax: 0.26,
-              ay: 0.16,
-              ox: 0.12,
-              oy: 0.78,
-            },
-            {
-              h: "#7fb2d8",
-              r: 0.12,
-              sx: 0.00023,
-              sy: 0.0002,
-              ax: 0.18,
-              ay: 0.2,
-              ox: 0.86,
-              oy: 0.18,
-            },
-          ];
-          const size = () => {
-            W = cv.width = Math.max(48, Math.floor(innerWidth / 9));
-            H = cv.height = Math.max(32, Math.floor(innerHeight / 9));
-          };
-          size();
-          addEventListener("resize", size);
-          function draw(now) {
-            if (!REDUCED) requestAnimationFrame(draw);
-            if (now - last < 48) return;
-            last = now;
-            t += 2.3;
-            x.globalCompositeOperation = "source-over";
-            x.fillStyle = getComputedStyle(document.body).backgroundColor;
-            x.fillRect(0, 0, W, H);
-            x.globalCompositeOperation = "lighter";
-            for (const b of blobs) {
-              const cx = (b.ox + Math.sin(t * b.sx * 60) * b.ax) * W,
-                cy = (b.oy + Math.cos(t * b.sy * 60) * b.ay) * H;
-              const r = b.r * Math.min(W, H) * (1 + 0.06 * Math.sin(t * 0.005));
-              const g = x.createRadialGradient(cx, cy, 0, cx, cy, r);
-              g.addColorStop(0, b.h + "e2");
-              g.addColorStop(0.44, b.h + "56");
-              g.addColorStop(1, b.h + "00");
-              x.fillStyle = g;
-              x.beginPath();
-              x.arc(cx, cy, r, 0, 6.2832);
-              x.fill();
-            }
-          }
-          REDUCED ? draw(1e9) : requestAnimationFrame(draw);
+            { passive: true },
+          );
+          (function ambientFrame(now) {
+            requestAnimationFrame(ambientFrame);
+            if (now - lastAmbient < 32) return;
+            lastAmbient = now;
+            currentX += (targetX - currentX) * 0.055;
+            currentY += (targetY - currentY) * 0.055;
+            currentScroll += (targetScroll - currentScroll) * 0.04;
+            ambient.style.transform = `translate3d(${currentX.toFixed(1)}px,${(currentY + currentScroll).toFixed(1)}px,0) scale(1.08)`;
+          })(0);
         }
 
-        /* ---- depth camera (dead zone keeps the read line at Z=0) ---- */
+        /* ---- depth camera: sections move through a shared three-dimensional field ---- */
         const planes = [...document.querySelectorAll(".plane")]
           .map((p) => ({ p, z: p.querySelector(".z") }))
           .filter((o) => o.z);
         if (planes.length && !REDUCED) {
           let queued = false;
-          function frame() {
+          function depthFrame() {
             queued = false;
             const vh = innerHeight,
               mid = vh / 2;
             for (const { p, z } of planes) {
               const r = p.getBoundingClientRect();
-              if (r.bottom < -vh * 0.6 || r.top > vh * 1.6) {
+              if (r.bottom < -vh * 0.7 || r.top > vh * 1.7) {
                 z.style.setProperty("--o", "1");
                 continue;
               }
-              const k = Math.max(-1.25, Math.min(1.25, (r.top + r.height / 2 - mid) / vh));
-              const DZ = 0.24,
-                a = Math.max(0, (Math.abs(k) - DZ) / (1 - DZ)),
-                sg = Math.sign(k);
-              z.style.setProperty("--z", (-a * 280).toFixed(1) + "px");
-              z.style.setProperty("--rx", (sg * a * 2.8).toFixed(2) + "deg");
-              z.style.setProperty("--o", Math.max(0, 1 - a * 0.8).toFixed(3));
+              const k = Math.max(-1.2, Math.min(1.2, (r.top + r.height / 2 - mid) / vh));
+              const dead = 0.25,
+                amount = Math.max(0, (Math.abs(k) - dead) / (1 - dead)),
+                sign = Math.sign(k);
+              z.style.setProperty("--z", (-amount * 215).toFixed(1) + "px");
+              z.style.setProperty("--rx", (sign * amount * 2.45).toFixed(2) + "deg");
+              z.style.setProperty("--o", Math.max(0.67, 1 - amount * 0.33).toFixed(3));
             }
-            if (cv)
-              cv.style.transform = `translate3d(0,${(-scrollY * 0.05).toFixed(1)}px,0) scale(1.12)`;
           }
           addEventListener(
             "scroll",
             () => {
               if (!queued) {
                 queued = true;
-                requestAnimationFrame(frame);
+                requestAnimationFrame(depthFrame);
               }
             },
             { passive: true },
           );
-          addEventListener("resize", frame);
-          frame();
+          addEventListener("resize", depthFrame);
+          depthFrame();
         }
 
         /* ---- meter fills: any [data-w] bar inside an observed .router/.meters block ---- */
@@ -1233,7 +2041,7 @@
       })();
     </script>
     <script>
-      /* deck tilt — the aurora signature, unchanged */
+      /* Responsive glass deck with a pronounced but controlled depth response. */
       (function () {
         const REDUCED = matchMedia("(prefers-reduced-motion:reduce)").matches;
         if (REDUCED) return;
@@ -1263,10 +2071,10 @@
           requestAnimationFrame(loop);
           if (!vis || now - last < 32) return;
           last = now;
-          idle += 0.024;
-          cx += (tx + Math.sin(idle) * 0.34 - cx) * 0.09;
-          cy += (ty + Math.cos(idle * 0.8) * 0.22 - cy) * 0.09;
-          deck.style.transform = `rotateY(${(cx * 14).toFixed(2)}deg) rotateX(${(-cy * 10).toFixed(2)}deg) translateZ(-20px)`;
+          idle += 0.02;
+          cx += (tx + Math.sin(idle) * 0.23 - cx) * 0.075;
+          cy += (ty + Math.cos(idle * 0.8) * 0.16 - cy) * 0.075;
+          deck.style.transform = `rotateY(${(cx * 13).toFixed(2)}deg) rotateX(${(-cy * 9).toFixed(2)}deg) translateZ(-18px)`;
         })(0);
       })();
     </script>

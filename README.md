@@ -8,6 +8,8 @@
 [![latest release](https://img.shields.io/github/v/release/razzant/claudexor?label=release)](https://github.com/razzant/claudexor/releases/latest)
 [![license](https://img.shields.io/github/license/razzant/claudexor)](LICENSE)
 
+[Website](https://claudexor.ai/)
+
 Claudexor is a local-first control plane for the AI coding agents you already
 pay for. It runs Codex CLI, Claude Code, Cursor CLI, OpenCode, and raw API
 adapters behind one typed interface: a chat of turns where read-only questions
