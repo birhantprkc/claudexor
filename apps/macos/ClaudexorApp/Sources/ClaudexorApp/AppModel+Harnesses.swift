@@ -9,48 +9,71 @@ import ClaudexorKit
 // module internals only where the extension boundary required it.
 
 extension AppModel {
-    func refreshHarnesses(fresh: Bool = false) async -> Bool {
-        guard let client else { return false }
+    @discardableResult
+    func refreshHarnesses(
+        fresh: Bool = false,
+        locationID requestedLocationID: ExecutionLocationID? = nil
+    ) async -> Bool {
+        let locationID = requestedLocationID ?? activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return false }
         do {
-            liveHarnesses = try await client.listHarnesses(fresh: fresh).map { status in
-                let family = HarnessFamily(rawValue: status.id)
-                let health = HarnessHealth(rawValue: status.status) ?? .unavailable
-                let version = status.manifest?["version"]?.stringValue ?? status.manifest?["adapter_version"]?.stringValue ?? "unknown"
-                let auth = Self.harnessReadinessText(status: status, health: health)
-                let acceptsImages = Self.acceptsImages(manifest: status.manifest)
-                let acceptsBrowser = status.manifest?["capabilities"]?["browser_tool"]?.boolValue ?? false
-                let effortLevels: [String] = {
-                    // Schema truth: HarnessCapabilities.effort_levels lives under
-                    // manifest.capabilities (the old capability_profile path was
-                    // never populated — the ladder read empty for EVERY harness).
-                    guard case .array(let values) = status.manifest?["capabilities"]?["effort_levels"] else { return [] }
-                    return values.compactMap(\.stringValue)
-                }()
-                let modelEffortLevels: [String: [String]] = {
-                    // Per-model narrowing (`model_effort_levels`): each entry's
-                    // `levels` array rides in the vendor's own order.
-                    guard case .object(let entries) = status.manifest?["capabilities"]?["model_effort_levels"] else { return [:] }
-                    return entries.compactMapValues { entry in
-                        guard case .array(let values) = entry["levels"] else { return nil }
-                        let levels = values.compactMap(\.stringValue)
-                        return levels.isEmpty ? nil : levels
-                    }
-                }()
-                // The configured-model verdict is a typed `configured_model`
-                // readiness row (daemon-normalized) — the ONE owner; no
-                // separate string projection here (F4 review lane 2 #2).
-                return HarnessInfo(family: family, health: health, version: version, auth: auth,
-                                   authSources: status.authSources,
-                                   intents: status.enabledIntents, routableIntents: status.routableIntents,
-                                   reasons: status.reasons ?? [], readiness: status.readiness,
-                                   acceptsImages: acceptsImages, acceptsBrowser: acceptsBrowser,
-                                   delegation: status.delegation,
-                                   effortLevels: effortLevels, modelEffortLevels: modelEffortLevels)
+            let mapped = Self.mapHarnessStatuses(
+                try await requestClient.listHarnesses(fresh: fresh))
+            if locationID == .local {
+                liveHarnesses = mapped
+            } else {
+                remoteHarnesses[locationID] = mapped
             }
             return true
         } catch {
             // Keep last-known harness rows.
             return false
+        }
+    }
+
+    static func mapHarnessStatuses(_ statuses: [HarnessStatus]) -> [HarnessInfo] {
+        statuses.map { status in
+            let family = HarnessFamily(rawValue: status.id)
+            let health = HarnessHealth(rawValue: status.status) ?? .unavailable
+            let version =
+                status.manifest?["version"]?.stringValue
+                ?? status.manifest?["adapter_version"]?.stringValue ?? "unknown"
+            let auth = Self.harnessReadinessText(status: status, health: health)
+            let acceptsImages = Self.acceptsImages(manifest: status.manifest)
+            let acceptsBrowser =
+                status.manifest?["capabilities"]?["browser_tool"]?.boolValue ?? false
+            let effortLevels: [String] = {
+                // Schema truth: HarnessCapabilities.effort_levels lives under
+                // manifest.capabilities.
+                guard
+                    case .array(let values) =
+                        status.manifest?["capabilities"]?["effort_levels"]
+                else { return [] }
+                return values.compactMap(\.stringValue)
+            }()
+            let modelEffortLevels: [String: [String]] = {
+                guard
+                    case .object(let entries) =
+                        status.manifest?["capabilities"]?["model_effort_levels"]
+                else { return [:] }
+                return entries.compactMapValues { entry in
+                    guard case .array(let values) = entry["levels"] else {
+                        return nil
+                    }
+                    let levels = values.compactMap(\.stringValue)
+                    return levels.isEmpty ? nil : levels
+                }
+            }()
+            return HarnessInfo(
+                family: family, health: health, version: version, auth: auth,
+                authSources: status.authSources,
+                intents: status.enabledIntents,
+                routableIntents: status.routableIntents,
+                reasons: status.reasons ?? [], readiness: status.readiness,
+                acceptsImages: acceptsImages, acceptsBrowser: acceptsBrowser,
+                delegation: status.delegation,
+                effortLevels: effortLevels,
+                modelEffortLevels: modelEffortLevels)
         }
     }
 
@@ -66,22 +89,39 @@ extension AppModel {
 
     @discardableResult
     func refreshAuthReadiness(for family: HarnessFamily, request: AuthReadinessRefreshRequest) async -> Bool {
-        guard let client else { return false }
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return false }
         do {
-            let response = try await client.refreshAuthReadiness(harnessId: family.rawValue, request: request)
+            let response = try await requestClient.refreshAuthReadiness(
+                harnessId: family.rawValue, request: request)
             let source = HarnessAuthSource(
                 source: response.readiness.source.rawValue,
                 availability: response.readiness.availability.rawValue,
                 verification: response.readiness.verification.rawValue,
                 detail: response.readiness.detail
             )
-            exactAuthSources[family, default: [:]][response.requestedSource] = source
-            if let index = liveHarnesses.firstIndex(where: { $0.family == family }) {
-                if let sourceIndex = liveHarnesses[index].authSources.firstIndex(where: { $0.source == source.source }) {
-                    liveHarnesses[index].authSources[sourceIndex] = source
+            if locationID == .local {
+                exactAuthSources[family, default: [:]][response.requestedSource] = source
+            } else {
+                remoteExactAuthSources[locationID, default: [:]][family, default: [:]][
+                    response.requestedSource] = source
+            }
+            var rows = locationID == .local
+                ? liveHarnesses
+                : (remoteHarnesses[locationID] ?? [])
+            if let index = rows.firstIndex(where: { $0.family == family }) {
+                if let sourceIndex = rows[index].authSources.firstIndex(where: {
+                    $0.source == source.source
+                }) {
+                    rows[index].authSources[sourceIndex] = source
                 } else {
-                    liveHarnesses[index].authSources.append(source)
+                    rows[index].authSources.append(source)
                 }
+            }
+            if locationID == .local {
+                liveHarnesses = rows
+            } else {
+                remoteHarnesses[locationID] = rows
             }
             return true
         } catch {
@@ -90,7 +130,10 @@ extension AppModel {
     }
 
     func authSource(for family: HarnessFamily, source: AuthSourceKind) -> HarnessAuthSource? {
-        exactAuthSources[family]?[source]
+        let exact = activeExecutionLocation == .local
+            ? exactAuthSources[family]?[source]
+            : remoteExactAuthSources[activeExecutionLocation]?[family]?[source]
+        return exact
             ?? harnessInfo(for: family)?.authSources.first { $0.source == source.rawValue }
     }
 

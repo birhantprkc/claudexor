@@ -861,6 +861,42 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func remoteStreamRefreshKeepsVisibleConversationUntilReplacementArrives() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let requestClient = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        )
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let locationID = ExecutionLocationID.remote(UUID())
+        model.remoteClients[locationID] = requestClient
+
+        let oldThread = try JSONDecoder().decode(
+            ThreadSummary.self,
+            from: Data(#"{"id":"remote-thread","title":"Visible","repoRoot":"/tmp/project","mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":[],"headRunId":null,"needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:00Z"}"#.utf8))
+        model.selectedExecutionLocation = locationID
+        model.selectedThreadId = oldThread.id
+        model.selectedThreadDetail = ThreadDetailResponse(
+            thread: oldThread, sessions: [], turns: [])
+
+        AppRequestStubURLProtocol.handler = { request in
+            Thread.sleep(forTimeInterval: 0.15)
+            let json = #"{"thread":{"id":"remote-thread","title":"Refreshed","repoRoot":"/tmp/project","mode":null,"workspaceMode":"in_place","authPreference":null,"primaryHarness":null,"eligibleHarnesses":[],"state":"active","trashedAt":null,"purgeAfter":null,"runIds":[],"headRunId":null,"needsHuman":false,"createdAt":"2026-07-15T00:00:00Z","updatedAt":"2026-07-15T00:00:01Z"},"sessions":[],"turns":[]}"#
+            return (appResponse(for: request), Data(json.utf8))
+        }
+
+        let refresh = Task {
+            await model.refreshOpenThread(locationID: locationID, id: oldThread.id)
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(model.selectedThreadDetail?.thread.title == "Visible")
+        await refresh.value
+        #expect(model.selectedThreadDetail?.thread.title == "Refreshed")
+    }
+
+    @MainActor
     @Test func detailRefreshesDelegateLineageAndTerminalFacts() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

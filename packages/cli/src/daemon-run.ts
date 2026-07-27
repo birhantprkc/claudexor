@@ -73,7 +73,9 @@ export async function ensureDaemon(
   const ok = await daemonReachable(client);
   if (!ok) {
     // Auto-start the daemon entry (the same one `claudexor daemon start` spawns).
-    const daemonScript = fileURLToPath(new URL("./claudexord.js", import.meta.url));
+    const daemonScript =
+      process.env["CLAUDEXOR_DAEMON_ENTRY"] ??
+      fileURLToPath(new URL("./claudexord.js", import.meta.url));
     if (!existsSync(daemonScript)) {
       throw new Error(
         `cannot auto-start the daemon: entry not found at ${daemonScript} (run \`pnpm build\`)`,

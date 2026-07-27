@@ -1,11 +1,20 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const generator = resolve("scripts/generate-release-sbom.mjs");
+const remoteGenerator = resolve("scripts/generate-remote-runtime-sbom.mjs");
 const nodeVersion = readFileSync(resolve(".node-version"), "utf8").trim();
 // The product version comes from the root SSOT — asserting a literal here
 // broke on every release bump without guarding anything.
@@ -100,6 +109,59 @@ describe("release SPDX SBOM", () => {
   });
 });
 
+describe("remote runtime SPDX SBOM", () => {
+  it("inventories every target, bundled Node runtime, and production npm dependency", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "claudexor-remote-sbom-"));
+    const licensesPath = join(fixture, "licenses.json");
+    writeFileSync(licensesPath, JSON.stringify(licenses));
+    const targets = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+    for (const target of targets) {
+      const name = `claudexor-remote-runtime-${rootVersion}-${target}.tar.gz`;
+      const contents = `archive:${target}`;
+      writeFileSync(join(fixture, name), contents);
+      writeFileSync(
+        join(fixture, `${name.slice(0, -".tar.gz".length)}.json`),
+        JSON.stringify({
+          archiveName: name,
+          target,
+          nodeVersion,
+          sha256: createHash("sha256").update(contents).digest("hex"),
+        }),
+      );
+    }
+    try {
+      const document = JSON.parse(
+        execFileSync(process.execPath, [remoteGenerator, fixture, rootVersion, licensesPath], {
+          cwd: resolve("."),
+          encoding: "utf8",
+          env: { ...process.env, GITHUB_SHA: "b".repeat(40) },
+        }),
+      );
+      expect(document.files).toHaveLength(4);
+      expect(
+        document.packages.filter((pkg: any) => pkg.name.startsWith("Claudexor remote runtime (")),
+      ).toHaveLength(4);
+      expect(
+        document.packages.filter((pkg: any) => pkg.name.startsWith("Node.js runtime (")),
+      ).toHaveLength(4);
+      expect(
+        document.packages.find((pkg: any) => pkg.name === "example-prod-dependency"),
+      ).toMatchObject({ versionInfo: "1.2.3", licenseDeclared: "MIT" });
+      const containedIds = new Set(
+        document.relationships
+          .filter((relationship: any) => relationship.relationshipType === "CONTAINS")
+          .map((relationship: any) => relationship.relatedSpdxElement),
+      );
+      for (const dependencyName of ["@playwright/mcp", "example-prod-dependency"]) {
+        const dependency = document.packages.find((pkg: any) => pkg.name === dependencyName);
+        expect(containedIds.has(dependency.SPDXID), dependencyName).toBe(true);
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+});
+
 function generate(app: string) {
   return JSON.parse(generateRaw(app, licenses));
 }
@@ -137,9 +199,17 @@ function appFixture(packagedBrowserVersion = browserVersion) {
   };
   for (const [name, path] of Object.entries(files)) {
     mkdirSync(dirname(path), { recursive: true });
+    if (name === "Node.js runtime") continue;
     writeFileSync(path, contents[name as keyof typeof contents]);
   }
-  chmodSync(files["Node.js runtime"], 0o755);
+  // On recent macOS versions an ad-hoc executable created inside a `.app`
+  // fixture can be killed by code-signing enforcement before `/bin/sh` runs.
+  // Keep the executable fixture outside the bundle and expose it through the
+  // exact packaged path; hashing and execution still follow the same bytes.
+  const fixtureNode = join(root, "node-fixture");
+  writeFileSync(fixtureNode, contents["Node.js runtime"]);
+  chmodSync(fixtureNode, 0o755);
+  symlinkSync(fixtureNode, files["Node.js runtime"]);
   writeFileSync(
     join(dirname(files["@playwright/mcp"]), "package.json"),
     JSON.stringify({ name: "@playwright/mcp", version: packagedBrowserVersion }),

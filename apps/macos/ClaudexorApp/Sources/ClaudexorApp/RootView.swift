@@ -21,7 +21,10 @@ struct RootView: View {
             GlassBackground()
                 .ignoresSafeArea()
             Group {
-                if model.health == .connected {
+                if model.health == .connected
+                    || !model.remoteConnections.isEmpty
+                    || !model.remoteThreadCache.isEmpty
+                {
                     ThreadsScreen()
                 } else {
                     ContentUnavailableView(
@@ -64,6 +67,21 @@ struct RootView: View {
         }
         .sheet(item: $model.authSheetTarget) { target in
             AuthSheet(family: target.family, profileId: target.profileId).environment(model)
+        }
+        .sheet(item: $model.remoteDirectoryBrowser) { request in
+            RemoteDirectoryBrowser(request: request).environment(model)
+        }
+        .sheet(item: $model.remoteTerminalSheet) { request in
+            RemoteTerminalSheet(request: request) {
+                model.remoteTerminalSheet = nil
+            }
+            .environment(model)
+        }
+        .sheet(item: $model.remoteDeviceLogin) { request in
+            RemoteDeviceLoginSheet(request: request).environment(model)
+        }
+        .sheet(item: $model.remotePreview) { request in
+            RemotePreviewSheet(request: request).environment(model)
         }
         .sheet(isPresented: Binding(
             get: { model.needsOnboarding(userDismissed: onboardingDismissed) },

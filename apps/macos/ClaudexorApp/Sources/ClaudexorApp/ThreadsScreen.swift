@@ -68,16 +68,6 @@ struct ThreadsScreen: View {
 
     var poolFamilies: [HarnessFamily] { model.selectableHarnesses.filter { $0 != .fake && $0 != .raw } }
 
-    /// Project-aware intents need a project scope. A selected thread uses its own
-    /// repo; in the DRAFT state (no thread selected yet) the first turn will be
-    /// created on the Current Project, so the project intents are available too.
-    var threadHasProject: Bool {
-        if let id = model.selectedThreadId, let t = model.threads.first(where: { $0.id == id }) {
-            return t.repoRoot?.isEmpty == false
-        }
-        return !model.normalizedProjectRoot.isEmpty
-    }
-
     /// The harness that will answer in chat (sticky thread primary > global default).
     var primaryFamily: HarnessFamily? {
         model.effectivePrimaryHarness.flatMap { HarnessFamily(rawValue: $0) }
@@ -171,28 +161,9 @@ struct ThreadsScreen: View {
         return ComposerOptionParser.parseNonnegativeFiniteDouble(t) == nil
     }
 
-    private var reviewerPanelTokens: [String] {
-        ComposerOptionParser.splitOptionTokens(reviewerPanelText)
-    }
-
-    private var reviewerPanelEntries: [ReviewerPanelEntry] {
-        let efforts = Set(model.liveHarnesses.flatMap(\.effortLevels))
-        return reviewerPanelTokens.compactMap {
-            ComposerOptionParser.parseReviewerPanelEntry($0, effortLevels: efforts)
-        }
-    }
-
     var reviewerPanelInvalid: Bool {
         let tokens = reviewerPanelTokens
         return !tokens.isEmpty && tokens.count != reviewerPanelEntries.count
-    }
-
-    private var protectedApprovalTokens: [String] {
-        ComposerOptionParser.splitOptionTokens(protectedApprovalsText)
-    }
-
-    private var protectedPathApprovals: [ProtectedPathApproval] {
-        protectedApprovalTokens.compactMap(ComposerOptionParser.parseProtectedPathApproval)
     }
 
     var protectedApprovalsInvalid: Bool {
@@ -240,7 +211,14 @@ struct ThreadsScreen: View {
                 .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.leading, sidebarGap)
         }
-        .task { await model.refreshThreads(); await model.refreshQuota(); await model.refreshTrust() }
+        .task {
+            await model.refreshThreads()
+            await model.refreshQuota()
+            await model.refreshTrust()
+            for connection in model.remoteConnections where connection.enabled {
+                await model.connectRemote(connection.id, allowInteraction: false)
+            }
+        }
         .navigationTitle(navTitle)
         .navigationSubtitle(navSubtitle)
     }
@@ -289,7 +267,7 @@ struct ThreadsScreen: View {
 
             projectProblemsBanner
 
-            if model.threads.isEmpty {
+            if model.locatedThreads.isEmpty {
                 ContentUnavailableView(
                     "No threads yet",
                     systemImage: "bubble.left.and.text.bubble.right",
@@ -297,13 +275,22 @@ struct ThreadsScreen: View {
                 )
                 .frame(maxHeight: .infinity)
             } else {
-                List(model.threads, selection: Binding(
-                    get: { model.selectedThreadId },
-                    set: { id in
-                        if let id { Task { await model.openThread(id) } }
+                List(model.locatedThreads, selection: Binding(
+                    get: { model.selectedLocatedThreadID },
+                    set: { locatedID in
+                        guard let locatedID,
+                              let located = model.locatedThreads.first(where: {
+                                  $0.id == locatedID
+                              })
+                        else { return }
+                        Task {
+                            await model.openThread(
+                                locationID: located.locationID,
+                                id: located.thread.id)
+                        }
                     }
-                )) { thread in
-                    threadRow(thread).tag(thread.id)
+                )) { located in
+                    threadRow(located).tag(located.id)
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)   // let the Liquid Glass panel show through
@@ -314,12 +301,18 @@ struct ThreadsScreen: View {
         .padding(.top, Theme.Spacing.xs)
         .sheet(isPresented: Binding(
             get: { renameTargetId != nil },
-            set: { if !$0 { renameTargetId = nil } }
+            set: {
+                if !$0 {
+                    renameTargetId = nil
+                    renameTargetLocation = nil
+                }
+            }
         )) { renameSheet }
     }
 
     @State var renameDraft = ""
     @State var renameTargetId: String?
+    @State var renameTargetLocation: ExecutionLocationID?
 
 
     // MARK: Conversation pane
@@ -402,8 +395,15 @@ struct ThreadsScreen: View {
                         bound: model.selectedThreadId != nil,
                         hasProject: threadHasProject,
                         recent: model.recentProjects,
+                        remoteConnections: model.remoteConnections,
                         onPick: { model.pickProject($0) },
                         onBrowse: { model.browseProject() },
+                        onPickRemote: {
+                            model.selectRemoteProject(connectionID: $0, path: $1)
+                        },
+                        onBrowseRemote: {
+                            model.showRemoteDirectoryBrowser(connectionID: $0)
+                        },
                         onNoProject: { model.clearProject() })
             if threadHasProject {
                 HarnessAccountChip(
@@ -455,7 +455,9 @@ struct ThreadsScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { if !threadHasProject { composerMode = .ask } }
-        .onChange(of: model.selectedThreadId) {
+        .onChange(
+            of: "\(model.activeExecutionLocation.rawValue)|\(model.selectedThreadId ?? "draft")|\(model.normalizedProjectRoot)"
+        ) {
             // QA-007: a FRESH draft seeds intent from the project default — Agent
             // for a project, Ask for none — so a stale Ask/Plan from the previous
             // thread never leaks onto a new project draft. Selecting an EXISTING
@@ -562,17 +564,6 @@ struct ThreadsScreen: View {
             .conversationMeasure()   // F10: composer shares the feed's readable column
             .padding(Theme.Spacing.md)
         }
-    }
-
-    /// The composer's project-folder name shown on the chip: an open thread shows
-    /// its bound repo; a draft shows the Current Project (or a "Choose project" CTA).
-    private var projectChipName: String {
-        if model.selectedThreadId != nil, let t = model.currentThread {
-            return t.repoRoot.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No project"
-        }
-        return model.normalizedProjectRoot.isEmpty
-            ? "Choose project"
-            : URL(fileURLWithPath: model.normalizedProjectRoot).lastPathComponent
     }
 
     /// Inline guidance on the controls row: the no-project gate (only Ask works

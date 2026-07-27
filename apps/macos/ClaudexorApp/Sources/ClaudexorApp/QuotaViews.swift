@@ -13,7 +13,7 @@ struct QuotaDetailView: View {
     @Environment(AppModel.self) private var model
 
     private var groups: [QuotaPresentation.Group] {
-        QuotaPresentation.groups(from: model.quotaResponse?.snapshots ?? [])
+        QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
     }
 
     var body: some View {
@@ -27,7 +27,7 @@ struct QuotaDetailView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-                if model.health != .connected {
+                if model.gateway(for: model.activeExecutionLocation) == nil {
                     ContentUnavailableView("Engine offline", systemImage: "wifi.slash")
                 } else if !groups.isEmpty {
                     ForEach(groups) { group in

@@ -9,6 +9,8 @@ import {
 } from "@claudexor/schema";
 import { engineBuildIdentity } from "@claudexor/util";
 import { pathnameDecodes, queryParam, resumeHeader } from "./operation-parameters.js";
+import { REMOTE_OPERATION_DRAFTS } from "./remote-operation-descriptors.js";
+import type { OperationDraft } from "./operation-draft.js";
 
 export type ControlProtocolBoundary =
   | { kind: "route"; path: string }
@@ -107,25 +109,7 @@ export async function resolveControlProtocol(input: {
   return { kind: "route", path: input.requestPath.slice(3) };
 }
 
-type Draft = Omit<
-  ControlOperationDescriptor,
-  | "id"
-  | "applicability"
-  | "idempotency"
-  | "completion"
-  | "errorSchema"
-  | "summary"
-  | "auth"
-  | "parameters"
-> &
-  Partial<
-    Pick<
-      ControlOperationDescriptor,
-      "applicability" | "idempotency" | "completion" | "summary" | "parameters"
-    >
-  >;
-
-function descriptor(input: Draft): ControlOperationDescriptor {
+function descriptor(input: OperationDraft): ControlOperationDescriptor {
   // Resource-family classification (QA-054): an operation is grouped under the
   // resource plane it acts on. Collection/create routes inherit their family
   // even without an instance id (GET/POST /v2/projects are project-applicable,
@@ -251,12 +235,12 @@ const OPERATION_SUMMARIES: Record<string, string> = {
 };
 
 const j = (
-  method: Draft["method"],
+  method: OperationDraft["method"],
   path: string,
-  mutability: Draft["mutability"],
+  mutability: OperationDraft["mutability"],
   requestSchema: string | null = null,
   responseSchema: string | null = null,
-  extra: Partial<Draft> = {},
+  extra: Partial<OperationDraft> = {},
 ): ControlOperationDescriptor =>
   descriptor({
     method,
@@ -347,6 +331,7 @@ const operations: ControlOperationDescriptor[] = [
     ],
   }),
   j("GET", "/v2/projects", "read_only", null, "ControlProjectListResponse"),
+  ...REMOTE_OPERATION_DRAFTS.map(descriptor),
   j("POST", "/v2/projects", "mutating", "ControlProjectRegisterRequest", "ControlProject", {
     idempotency: "key_required",
   }),

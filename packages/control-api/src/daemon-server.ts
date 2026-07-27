@@ -76,7 +76,9 @@ import {
 import { rerunWithFeedback } from "./decision-rerun.js";
 export { normalizeRunStartRequest } from "./run-start.js";
 import { candidatesFor } from "./candidates.js";
-import { handleProjectRoute } from "./project-routes.js";
+import { handleProjectRoute, type ProjectRouteServices } from "./project-routes.js";
+import { writeBinaryResponse } from "./binary-response.js";
+export { inlineContentDisposition } from "./binary-response.js";
 import { handleRecoveryRoute } from "./recovery-routes.js";
 import { handleJournalEventRoute } from "./journal-event-routes.js";
 import { handleMaintenanceRoute, type MaintenanceRouteServices } from "./maintenance-routes.js";
@@ -185,6 +187,7 @@ import {
   TestCommandInvocation,
   WorkProduct,
 } from "@claudexor/schema";
+
 import { resolveControlProtocol } from "./operation-catalog.js";
 import {
   assertNoInlineSecretValues,
@@ -208,15 +211,8 @@ export interface DaemonControlApiOptions {
   bus?: { subscribe(listener: (event: { run_id: string }) => void): () => void };
   services?: DeliveryCommandServices &
     Partial<ResourceRouteServices> &
-    Partial<MaintenanceRouteServices> & {
-      listProjects?: () => Promise<{ projects: unknown[] }>;
-      registerProject?: (input: {
-        root: string;
-        idempotencyKey: string;
-        clientId: string;
-      }) => Promise<unknown>;
-      relinkProject?: (id: string, root: string) => Promise<unknown>;
-      removeProject?: (id: string) => Promise<unknown>;
+    Partial<MaintenanceRouteServices> &
+    Partial<ProjectRouteServices> & {
       harnesses?: (input?: {
         fresh?: boolean;
         includeFakes?: boolean;
@@ -762,6 +758,7 @@ export class DaemonControlApiServer {
           readBody: (request) => this.readBody(request),
           json: (response, status, body) => this.json(response, status, body),
           requestError: (response, error) => this.requestError(response, error),
+          binary: writeBinaryResponse,
         },
         method,
         path,

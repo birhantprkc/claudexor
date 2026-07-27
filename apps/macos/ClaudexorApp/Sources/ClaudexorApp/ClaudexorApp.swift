@@ -11,7 +11,10 @@ struct ClaudexorApp: App {
             RootView()
                 .environment(model)
                 .preferredColorScheme(model.appearance.colorScheme)
-                .task { await model.connect() }
+                .task {
+                    delegate.model = model
+                    await model.connect()
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
@@ -86,6 +89,9 @@ enum AboutPanel {
 /// so its window may not appear. Force `.regular` + activate on launch. (Harmless for
 /// the notarized .app bundle, essential for `swift run` dev/CI.)
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    @MainActor weak var model: AppModel?
+    private var terminationPending = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -117,6 +123,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationPending, let model else { return .terminateNow }
+        terminationPending = true
+        Task {
+            await model.shutdownRemoteConnections()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
 
     /// Resolve the dev icon by plain file path — bypassing Bundle(url:) entirely, so a
     /// quarantined or otherwise unloadable resource bundle can never crash launch.

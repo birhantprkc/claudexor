@@ -95,11 +95,12 @@ import {
   type PluginTarget,
   type PluginVerb,
 } from "./plugins.js";
-import { buildRegistry } from "./registry.js";
 import { settingsCommand } from "./settings-command.js";
 import { quotaCommand } from "./quota-command.js";
 import { trustCommand } from "./trust-command.js";
 import { projectCommand } from "./project-command.js";
+import { remoteCommand, setupCommand } from "./remote-command.js";
+import { harnessCommand } from "./harness-installer.js";
 import { runRepl } from "./repl.js";
 import {
   parseProtectedPathApprovalFlags,
@@ -990,6 +991,12 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
     case "project":
       return projectCommand(args, json);
 
+    case "remote":
+      return remoteCommand(args, json);
+
+    case "setup":
+      return setupCommand(args, json);
+
     case "agent": {
       const modeStr = flagStr(args, "mode");
       if (modeStr !== undefined) {
@@ -1380,18 +1387,8 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
       }
     }
 
-    case "harness": {
-      const sub = args._[1];
-      if (sub === "list") {
-        // Fakes are test fixtures, not real harnesses; `--all` reveals them.
-        const includeFakes = flagBool(args, "all");
-        const ids = [...buildRegistry({ includeFakes }).keys()];
-        if (json) printJson({ harnesses: ids });
-        else ids.forEach((id) => print(id));
-        return 0;
-      }
-      return printUsageError(json, "usage: claudexor harness list [--all]");
-    }
+    case "harness":
+      return harnessCommand(args, json);
 
     case "capabilities": {
       // The derived AgentCapabilityCatalog — same composer as the daemon's

@@ -5,7 +5,7 @@ import ClaudexorKit
 // MARK: - Settings
 
 struct SettingsScreen: View {
-    @Environment(AppModel.self) private var model
+    @Environment(AppModel.self) var model
     @State private var routingGoal = "auto"
     @State private var paidFallback = "when_unavailable"
     @State private var primaryHarness = "__none"
@@ -21,7 +21,7 @@ struct SettingsScreen: View {
     /// Configured quality-tier count across intents (server truth; no UI tier
     /// editor — D-22 backlog).
     private var qualityTierCount: Int {
-        model.settingsSnapshot?.routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0
+        model.activeSettingsSnapshot?.routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0
     }
     /// GH #22 pre-guard: Quality routing with ZERO configured tiers can never
     /// route — the engine refuses every quality run at preflight ("quality
@@ -37,6 +37,7 @@ struct SettingsScreen: View {
     }
 
     var body: some View {
+        @Bindable var model = model
         TabView {
             settingsTab { generalGroup; advancedGroup }
                 .tabItem { Label("General", systemImage: "gearshape") }
@@ -44,6 +45,8 @@ struct SettingsScreen: View {
                 .tabItem { Label("Routing", systemImage: "point.3.connected.trianglepath.dotted") }
             settingsTab { harnessDoctorGroup; perHarnessGroup }
                 .tabItem { Label("Harnesses", systemImage: "cpu") }
+            settingsTab { ConnectionsSettingsView() }
+                .tabItem { Label("Connections", systemImage: "network") }
             settingsTab { budgetGroup; interactiveGroup }
                 .tabItem { Label("Budget", systemImage: "dollarsign.circle") }
             settingsTab { secretsGroup; TrustSettingsSection() }
@@ -54,7 +57,7 @@ struct SettingsScreen: View {
         .frame(minWidth: 720, minHeight: 600)
         .task { await refreshAll() }
         .onAppear { syncFromModel() }
-        .onChange(of: model.settingsSnapshot) { _, _ in syncFromModel() }
+        .onChange(of: model.activeSettingsSnapshot) { _, _ in syncFromModel() }
         .onChange(of: routingGoal) { _, _ in markEngineDraftsEdited() }
         .onChange(of: paidFallback) { _, _ in markEngineDraftsEdited() }
         .onChange(of: primaryHarness) { _, _ in markEngineDraftsEdited() }
@@ -64,6 +67,12 @@ struct SettingsScreen: View {
         .onChange(of: maxUsdPerRun) { _, _ in markEngineDraftsEdited() }
         .onChange(of: budgetUnlimited) { _, _ in markEngineDraftsEdited() }
         .onChange(of: interactionTimeoutMinutes) { _, _ in markEngineDraftsEdited() }
+        .sheet(item: $model.settingsRemoteTerminalSheet) { request in
+            RemoteTerminalSheet(request: request) {
+                model.settingsRemoteTerminalSheet = nil
+            }
+            .environment(model)
+        }
     }
 
     private var draftSnapshot: [String] {
@@ -139,7 +148,7 @@ struct SettingsScreen: View {
                     .help("Controls whether routing may leave subscription or proven-zero routes.")
                     KeyValueRow(
                         key: "Quality tiers",
-                        value: "\(model.settingsSnapshot?.routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0) configured"
+                        value: "\(model.activeSettingsSnapshot?.routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0) configured"
                     )
                     Picker("Primary harness", selection: $primaryHarness) {
                         Text("None").tag("__none")
@@ -204,10 +213,10 @@ struct SettingsScreen: View {
         settingsGroup("Secrets", "key") {
                     Text("Secret values live in the v2 0600 file store. Run params and artifacts store refs/metadata only.")
                         .font(.caption).foregroundStyle(.secondary)
-                    KeyValueRow(key: "Secret backend", value: model.secretBackend)
-                    if !model.storedSecrets.isEmpty {
+                    KeyValueRow(key: "Secret backend", value: model.activeSecretBackend)
+                    if !model.activeStoredSecrets.isEmpty {
                         FlowLayout(spacing: Theme.Spacing.xs) {
-                            ForEach(model.storedSecrets) { secret in
+                            ForEach(model.activeStoredSecrets) { secret in
                                 Text("\(secret.name) · \(secret.backend)")
                                     .font(.caption2)
                                     .padding(.horizontal, Theme.Spacing.sm).padding(.vertical, 2)
@@ -234,7 +243,7 @@ struct SettingsScreen: View {
                         .font(.caption).foregroundStyle(.secondary)
                     ForEach(model.selectableHarnesses.filter { $0 != .raw }) { family in
                         HarnessDefaultsRow(family: family,
-                                           settings: model.settingsSnapshot?.harnesses?[family.rawValue])
+                                           settings: model.activeSettingsSnapshot?.harnesses?[family.rawValue])
                     }
                 }
     }
@@ -303,7 +312,7 @@ struct SettingsScreen: View {
                     aboutLinkRow("X", AboutInfo.twitterLabel, AboutInfo.twitterURL)
                     aboutLinkRow("Repository", AboutInfo.repoLabel, AboutInfo.repoURL)
                     KeyValueRow(key: "Review protocol", value: "Inline per-turn review; server-owned decision/apply endpoints")
-                    if let runtime = model.settingsSnapshot?.runtime {
+                    if let runtime = model.activeSettingsSnapshot?.runtime {
                         KeyValueRow(key: "Reviewer timeout", value: "\(max(1, runtime.reviewerTimeoutMs / 60_000)) min")
                         KeyValueRow(key: "Reviewer retries", value: "\(runtime.transientRetry.maxRetries)")
                     }
@@ -338,25 +347,6 @@ struct SettingsScreen: View {
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).stroke(Theme.separator, lineWidth: 1))
     }
 
-    /// W4.7-UI: the ONE readiness card; Settings passes ITS actions as a slot.
-    private func nativeAuthRow(_ family: HarnessFamily) -> some View {
-        let presentation = HarnessReadinessPresentation.from(
-            family: family, info: model.harnessInfo(for: family))
-        return HarnessReadinessCard(presentation: presentation) {
-            Button { model.authSheetTarget = AuthSheetTarget(family: family) } label: {
-                Label(presentation.available ? "Manage" : "Setup",
-                      systemImage: presentation.available ? "slider.horizontal.3" : "person.crop.circle.badge.checkmark")
-            }
-            .buttonStyle(.bordered).tint(Theme.accent)
-            .help(presentation.available ? "Open \(family.label) auth details and fallback key management." : "Open setup/auth actions for \(family.label).")
-            Button { Task { await model.refreshHarnesses(fresh: true) } } label: {
-                Label("Recheck", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.bordered)
-            .help("Refresh install/auth/capability status after setup.")
-        }
-    }
-
     private func refreshAll() async {
         await model.refreshSettings()
         await model.refreshQuota()
@@ -367,7 +357,7 @@ struct SettingsScreen: View {
     }
 
     private func syncFromModel() {
-        guard let s = model.settingsSnapshot, !engineDraftsDirty else { return }
+        guard let s = model.activeSettingsSnapshot, !engineDraftsDirty else { return }
         routingGoal = s.routing.goal
         paidFallback = s.routing.paidFallback
         primaryHarness = s.routing.primaryHarness ?? "__none"

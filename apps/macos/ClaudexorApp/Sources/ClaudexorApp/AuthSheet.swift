@@ -40,7 +40,7 @@ struct AuthSheet: View {
     /// for a profile-targeted sheet; the default store's readiness is not it.
     private var profileStatus: CredentialProfileEntry.Status? {
         guard let profileId else { return nil }
-        return model.credentialProfiles.first {
+        return model.activeCredentialProfiles.first {
             $0.profile.harnessId == family.setupHarnessId && $0.profile.profileId == profileId
         }?.status
     }
@@ -64,7 +64,7 @@ struct AuthSheet: View {
             || job?.blocksReplacement == true
     }
     private var secretWriteDisabled: Bool {
-        model.client == nil || actionInFlight
+        model.gateway(for: model.activeExecutionLocation) == nil || actionInFlight
             || secretValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     private var closeRequiresConfirmation: Bool {
@@ -195,7 +195,7 @@ struct AuthSheet: View {
     /// Display name of the target profile (INV-135), or nil for the default login.
     private var profileDisplayName: String? {
         guard let profileId else { return nil }
-        let entry = model.credentialProfiles.first {
+        let entry = model.activeCredentialProfiles.first {
             $0.profile.profileId == profileId && $0.profile.harnessId == family.setupHarnessId
         }
         return entry?.profile.displayName ?? profileId
@@ -323,7 +323,7 @@ struct AuthSheet: View {
             healthOk: isReady,
             nativeSupported: nativeHarness != nil,
             nativeReady: targetVerified,
-            keyStored: secretName.map { name in model.storedSecrets.contains { $0.name == name } } ?? false,
+            keyStored: secretName.map { name in model.activeStoredSecrets.contains { $0.name == name } } ?? false,
             streamLost: lifecycle.connection == .streamLost,
             jobActive: hasActiveJob,
             blocksReplacement: job?.blocksReplacement == true
@@ -343,7 +343,7 @@ struct AuthSheet: View {
     }
 
     private func observeLifecycle() async {
-        guard let client = model.client else {
+        guard let client = model.gateway(for: model.activeExecutionLocation) else {
             status = "Engine offline: reconnect before starting \(family.label) setup."
             return
         }

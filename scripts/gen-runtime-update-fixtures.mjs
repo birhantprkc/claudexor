@@ -17,11 +17,21 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { signRuntimeManifest, runtimeArchiveName } from "./lib/runtime-manifest-contract.mjs";
+import {
+  REMOTE_RUNTIME_TARGETS,
+  remoteRuntimeArchiveName,
+  remoteRuntimeArchiveUrl,
+  signRemoteRuntimeManifest,
+} from "./lib/remote-runtime-manifest-contract.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(
   repoRoot,
   "apps/macos/ClaudexorKit/Tests/ClaudexorKitTests/Fixtures/runtime-update",
+);
+const remoteOutDir = join(
+  repoRoot,
+  "apps/macos/ClaudexorKit/Tests/ClaudexorKitTests/Fixtures/remote-runtime-update",
 );
 
 // A FIXED, non-production test keypair. Publishing the private half is safe: it
@@ -55,27 +65,62 @@ const files = {
   "authority.json": `${JSON.stringify(TEST_AUTHORITY, null, 2)}\n`,
   "valid-manifest.json": `${JSON.stringify(signed, null, 2)}\n`,
 };
+const remoteSigned = signRemoteRuntimeManifest(
+  {
+    version,
+    buildSha: unsigned.buildSha,
+    minAppVersion: unsigned.minAppVersion,
+    notes: "remote-runtime cross-language test vector — never shipped",
+    assets: REMOTE_RUNTIME_TARGETS.map((target) => {
+      const [platform, arch] = target.split("-");
+      return {
+        target,
+        platform,
+        arch,
+        nodeVersion: "24.16.0",
+        archiveName: remoteRuntimeArchiveName(version, target),
+        archiveUrl: remoteRuntimeArchiveUrl(version, target),
+        sha256: target.includes("arm64") ? "b".repeat(64) : "a".repeat(64),
+      };
+    }),
+  },
+  TEST_PRIVATE_KEY_PEM,
+  TEST_AUTHORITY,
+);
+const remoteFiles = {
+  "authority.json": `${JSON.stringify(TEST_AUTHORITY, null, 2)}\n`,
+  "valid-manifest.json": `${JSON.stringify(remoteSigned, null, 2)}\n`,
+};
 
 const check = process.argv.includes("--check");
 let drift = 0;
-mkdirSync(outDir, { recursive: true });
-for (const [name, body] of Object.entries(files)) {
-  const file = join(outDir, name);
-  if (check) {
-    const existing = existsSync(file) ? readFileSync(file, "utf8") : null;
-    if (existing !== body) {
-      console.error(
-        `runtime-update fixture drift: ${name} (regenerate: pnpm fixtures:runtime-update)`,
-      );
-      drift += 1;
+for (const [directory, rows] of [
+  [outDir, files],
+  [remoteOutDir, remoteFiles],
+]) {
+  mkdirSync(directory, { recursive: true });
+  for (const [name, body] of Object.entries(rows)) {
+    const file = join(directory, name);
+    if (check) {
+      const existing = existsSync(file) ? readFileSync(file, "utf8") : null;
+      if (existing !== body) {
+        console.error(
+          `runtime-update fixture drift: ${file} (regenerate: pnpm fixtures:runtime-update)`,
+        );
+        drift += 1;
+      }
+    } else {
+      writeFileSync(file, body);
     }
-  } else {
-    writeFileSync(file, body);
   }
 }
 if (check) {
   if (drift > 0) process.exit(1);
-  console.log(`runtime-update fixtures fresh (${Object.keys(files).length})`);
+  console.log(
+    `runtime-update fixtures fresh (${Object.keys(files).length + Object.keys(remoteFiles).length})`,
+  );
 } else {
-  console.log(`wrote ${Object.keys(files).length} runtime-update fixtures to ${outDir}`);
+  console.log(
+    `wrote ${Object.keys(files).length + Object.keys(remoteFiles).length} runtime-update fixtures`,
+  );
 }

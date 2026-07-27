@@ -40,6 +40,7 @@
     "fixtures:runtime-update": "node scripts/gen-runtime-update-fixtures.mjs",
     "fixtures:runtime-update:check": "node scripts/gen-runtime-update-fixtures.mjs --check",
     "sign:runtime-manifest": "node scripts/sign-runtime-manifest.mjs",
+    "sign:remote-runtime-manifest": "node scripts/sign-remote-runtime-manifest.mjs",
     "inv:check": "node scripts/inv-verify-link-check.mjs"
   },
   "devDependencies": {

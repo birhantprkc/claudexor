@@ -29,7 +29,7 @@ extension ThreadsScreen {
         // Empty = "Thread default" — no override, the sticky preference governs.
         let preference = !authRoutePreference.isEmpty
             ? authRoutePreference
-            : (model.currentThread?.authPreference ?? model.settingsSnapshot?.routing.authPreference)
+            : (model.currentThread?.authPreference ?? model.activeSettingsSnapshot?.routing.authPreference)
         return modelsRouteParam(forAuthPreference: preference)
     }
 

@@ -11,6 +11,34 @@ import {
 import { controlServices } from "./control-services.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
 
+vi.mock("./registry.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./registry.js")>();
+  return {
+    ...original,
+    buildRegistry: (options?: Parameters<typeof original.buildRegistry>[0]) => {
+      const registry = original.buildRegistry(options);
+      for (const [id, adapter] of registry) {
+        if (!adapter.probeCredentialProfile) continue;
+        registry.set(id, {
+          ...adapter,
+          probeCredentialProfile: async (profile) => ({
+            profile_id: profile.profile_id,
+            harness_id: profile.harness_id,
+            availability: "unknown",
+            verification: "not_run",
+            detail: "live profile probe disabled in projection unit test",
+            last_verified_at: null,
+          }),
+        });
+      }
+      return registry;
+    },
+    buildGateway: () => ({
+      statusAll: async () => [],
+    }),
+  };
+});
+
 // PATCH /credential-profiles/:harness/:id (the Enabled toggle of the accounts
 // symmetry, INV-135) + the per-harness accounts-authority projection served on
 // the listing so no surface re-derives Active/native truth.
@@ -37,15 +65,22 @@ function services() {
 describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection", () => {
   let dir: string;
   let prev: string | undefined;
+  let prevPath: string | undefined;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "claudexor-profile-update-"));
     prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    prevPath = process.env.PATH;
     process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    // These are projection tests, not live harness integration tests. Keep
+    // them hermetic even when the developer machine has vendor CLIs installed.
+    process.env.PATH = dir;
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
   afterEach(() => {
     if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
     else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
     vi.restoreAllMocks();
     rmSync(dir, { recursive: true, force: true });
   });

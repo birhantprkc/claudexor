@@ -823,6 +823,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/credential-profiles`
 - `DELETE /v2/credential-profiles/:harness/:profileId`
 - `PATCH /v2/credential-profiles/:harness/:profileId`
+- `GET /v2/filesystem/directories`
 - `GET /v2/global/events`
 - `POST /v2/handshake`
 - `GET /v2/harnesses`
@@ -834,6 +835,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/projects`
 - `DELETE /v2/projects/:id`
 - `GET /v2/projects/:id/events`
+- `GET /v2/projects/:id/file`
 - `GET /v2/projects/:id/outputs`
 - `GET /v2/projects/:id/outputs/<path>`
 - `POST /v2/projects/:id/relink`
@@ -1951,6 +1953,53 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   An armed-but-unused browser (generic `web_search` satisfied instead) is
   disclosed as an unused-browser flag on that receipt — disclosure only, never a
   run failure.
+
+### Remote SSH execution
+
+The macOS app can bind a thread to a remote execution location. A location is
+either `local` or a stable app-owned connection UUID backed by one concrete
+alias from `~/.ssh/config`; a materialized thread is permanently identified in
+the UI by `(locationId, threadId)` and keeps the project root chosen when it was
+created. Choosing another host or folder starts a new draft—it never migrates a
+thread or worktree between daemons.
+
+The app delegates transport and authentication to `/usr/bin/ssh`. It parses
+concrete `Host` entries (following `Include`), asks `ssh -G` for the effective
+configuration, and creates an app-owned ControlMaster per connected host.
+Batch-mode connection is attempted first. Host-key confirmation, passwords and
+MFA run only in an ephemeral SwiftTerm PTY backed by the same system SSH
+binary. Terminal output, SSH input, bearer tokens and vendor credentials are
+never persisted.
+
+Each host runs the complete Claudexor engine next to its repository and harness
+CLIs. A signed `remote-runtime-manifest.json` binds the version, build SHA,
+protocol major, minimum app version and SHA-256 for four archives:
+`linux-x64`, `linux-arm64`, `darwin-x64`, and `darwin-arm64`. Each archive
+contains the release-built CLI/daemon/setup/browser closure and the exact Node
+version pinned by `.node-version`; official Node archive digests are pinned in
+`scripts/remote-node-sha256.json`. The app verifies Ed25519 and archive SHA-256,
+uploads through SSH, probes a staging directory, and atomically switches
+`~/.claudexor/remote/current`, retaining `last-known-good` for rollback. No
+remote installation uses `sudo`. A newer compatible runtime is never
+downgraded; an incompatible older runtime is updated before use.
+
+`claudexor remote bootstrap --json` starts or discovers the remote daemon and
+returns its loopback endpoint. The daemon remains bound to `127.0.0.1`; the app
+opens a local SSH forward and keeps the bearer token only in the in-memory
+`GatewayClient` for that location. Every thread/run/settings/setup request and
+both global/run SSE streams use that owning client. The unified sidebar stores
+only location-tagged thread summaries with a last-sync timestamp under
+`~/Library/Application Support/Claudexor/` (mode `0600`); transcripts and
+artifacts are fetched after reconnect.
+
+Remote project browsing uses the home-contained directory endpoint. Remote
+file links use the registered-project-scoped, size-capped file endpoint.
+Shells, daemon-log tails and `client_pty` setup attachment use the system SSH
+PTY; Codex device login stays a typed setup-job UI. Preview creates a
+short-lived forward from an ephemeral local port to the requested remote
+loopback port and closes it with the preview. On app termination all
+ControlMasters and forwards close, while the remote daemon and durable jobs
+continue.
 
 ### Engine runtime updater (M7, D22/D23)
 

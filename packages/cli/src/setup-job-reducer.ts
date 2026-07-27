@@ -49,6 +49,7 @@ const IMMUTABLE_FIELDS = [
   "jobId",
   "harness",
   "action",
+  "transport",
   "createdAt",
   "guideUrl",
 ] as const satisfies readonly (keyof ControlSetupJob)[];

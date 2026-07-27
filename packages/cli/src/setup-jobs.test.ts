@@ -432,6 +432,40 @@ describe("setup jobs", () => {
     expect(job.command).toContain("codex");
   });
 
+  it("keeps an unattached client_pty job alive past the runner launcher timeout", async () => {
+    let nowMs = Date.parse("2026-07-25T00:00:00.000Z");
+    const manager = createSetupJobManager({
+      rootDir: join(root, "client-pty-awaiting-attach"),
+      platform: "linux",
+      runnerPath: resolveSetupLoginRunnerPath(),
+      now: () => new Date(nowMs),
+      launcherTimeoutMs: 10_000,
+      loginTimeoutMs: 15 * 60_000,
+      monitorPollMs: 2,
+    });
+    await manager.start();
+    const job = manager.create({ ...LOGIN_REQUEST, transport: "client_pty" });
+    expect(job).toMatchObject({
+      transport: "client_pty",
+      state: "waiting_for_input",
+      phase: "launching",
+    });
+    const manifest = readLoginManifest(manager._store.paths(job.jobId).manifest);
+    expect(manifest.permitDeadlineAt).toBe(job.deadlineAt);
+
+    nowMs += 11_000;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(manager.status({ jobId: job.jobId })).toMatchObject({
+      state: "waiting_for_input",
+      phase: "launching",
+    });
+    expect(Date.parse(manifest.permitDeadlineAt)).toBeGreaterThan(nowMs);
+
+    nowMs = Date.parse(job.deadlineAt!) + 1;
+    expect(await waitForTerminal(manager, job.jobId)).toBe("timed_out");
+    await manager.shutdown();
+  });
+
   it("fences late opener callbacks and journal writes once shutdown begins", async () => {
     const opener = fakeOpener();
     const manager = createSetupJobManager({

@@ -56,6 +56,30 @@ export type ControlProjectRegisterRequest = z.infer<typeof ControlProjectRegiste
 export const ControlProjectRelinkRequest = z.object({ root: z.string().min(1) }).strict();
 export type ControlProjectRelinkRequest = z.infer<typeof ControlProjectRelinkRequest>;
 
+export const ControlDirectoryEntry = z
+  .object({
+    name: z.string().min(1),
+    path: z.string().min(1),
+    kind: z.enum(["directory", "file"]),
+    readable: z.boolean(),
+  })
+  .strict();
+export type ControlDirectoryEntry = z.infer<typeof ControlDirectoryEntry>;
+
+export const ControlDirectoryListing = z
+  .object({
+    path: z.string().min(1),
+    home: z.string().min(1),
+    parent: z.string().min(1).nullable(),
+    entries: z.array(ControlDirectoryEntry).max(1_000),
+    truncated: z
+      .boolean()
+      .describe("True when more actionable entries existed than the bounded response contains."),
+  })
+  .strict()
+  .describe("A home-contained server directory listing for the remote project picker.");
+export type ControlDirectoryListing = z.infer<typeof ControlDirectoryListing>;
+
 /**
  * Receipt for DELETE /v2/projects/:id (QA-049). Removing a durable project
  * retires the global-registry entry and ARCHIVES the project's journal

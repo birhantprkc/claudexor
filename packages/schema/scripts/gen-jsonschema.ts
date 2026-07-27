@@ -132,6 +132,8 @@ import {
   ControlProjectRegisterRequest,
   ControlProjectRelinkRequest,
   ControlProjectRemoveReceipt,
+  ControlDirectoryEntry,
+  ControlDirectoryListing,
 } from "../src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -267,6 +269,8 @@ const schemas = {
   ControlProjectRegisterRequest,
   ControlProjectRelinkRequest,
   ControlProjectRemoveReceipt,
+  ControlDirectoryEntry,
+  ControlDirectoryListing,
 } as const;
 
 /**

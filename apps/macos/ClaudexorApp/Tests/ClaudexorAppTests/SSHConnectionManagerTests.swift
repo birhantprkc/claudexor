@@ -1,0 +1,143 @@
+import ClaudexorKit
+import Darwin
+import Foundation
+import Testing
+@testable import ClaudexorApp
+
+@Suite struct SSHConnectionManagerTests {
+    @Test func defaultControlSocketPathFitsDarwinLimit() async throws {
+        let manager = SSHConnectionManager()
+        let factory = try await manager.factory(for: RemoteConnection(sshAlias: "example"))
+        #expect(factory.controlPath.hasPrefix("/tmp/cx-\(getuid())-"))
+        #expect(factory.controlPath.utf8.count <= 103)
+        await manager.shutdown()
+        #expect(!FileManager.default.fileExists(
+            atPath: URL(fileURLWithPath: factory.controlPath).deletingLastPathComponent().path))
+    }
+
+    @Test func refusesASymlinkedControlSocketRoot() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claudexor-ssh-root-\(UUID().uuidString)")
+        let target = temporary.appendingPathComponent("target")
+        let link = temporary.appendingPathComponent("link")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let manager = SSHConnectionManager(socketRoot: link)
+        do {
+            _ = try await manager.factory(for: RemoteConnection(sshAlias: "example"))
+            Issue.record("a symlinked SSH socket root must be refused")
+        } catch let error as SSHConnectionError {
+            #expect(error.localizedDescription.contains("private app-owned"))
+        }
+    }
+
+    @Test func cancellingAProcessTaskTerminatesTheChildPromptly() async throws {
+        let manager = SSHConnectionManager()
+        let invocation = SSHInvocation(
+            executable: "/bin/sh",
+            arguments: ["-c", "trap 'exit 0' TERM; while :; do sleep 1; done"])
+        let started = ContinuousClock.now
+        let task = Task {
+            try await manager.runForTesting(invocation)
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("cancelled SSH process unexpectedly succeeded")
+        } catch is CancellationError {
+            #expect(ContinuousClock.now - started < .seconds(3))
+        }
+        await manager.shutdown()
+    }
+
+    @Test func drainsLargeStdoutAndStderrWithoutWaitingForProcessExitFirst() async throws {
+        let manager = SSHConnectionManager()
+        let invocation = SSHInvocation(
+            executable: "/bin/sh",
+            arguments: [
+                "-c",
+                "/usr/bin/yes x | /usr/bin/head -c 200000; " +
+                    "/usr/bin/yes y | /usr/bin/head -c 200000 >&2",
+            ])
+        let result = try await manager.runForTesting(invocation)
+        #expect(result.status == 0)
+        #expect(result.stdout.count == 200_000)
+        #expect(result.stderr.count == 200_000)
+        await manager.shutdown()
+    }
+
+    @Test func writesLargeStdinWhileDrainingChildOutput() async throws {
+        let manager = SSHConnectionManager()
+        let invocation = SSHInvocation(
+            executable: "/bin/sh",
+            arguments: ["-c", "/usr/bin/tee /dev/stderr >/dev/null"])
+        let input = Data(repeating: 0x78, count: 2_000_000)
+
+        let result = try await manager.runForTesting(invocation, stdin: input)
+
+        #expect(result.status == 0)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr == input)
+        await manager.shutdown()
+    }
+
+    @Test func earlyChildExitDoesNotHangLargeStdinWrite() async throws {
+        let manager = SSHConnectionManager()
+        let invocation = SSHInvocation(
+            executable: "/bin/sh",
+            arguments: ["-c", "exit 0"])
+        let started = ContinuousClock.now
+
+        do {
+            _ = try await manager.runForTesting(
+                invocation, stdin: Data(repeating: 0x78, count: 2_000_000))
+            Issue.record("an incomplete stdin write unexpectedly succeeded")
+        } catch let error as SSHConnectionError {
+            #expect(error.localizedDescription.contains("could not finish sending"))
+        }
+        #expect(ContinuousClock.now - started < .seconds(3))
+        await manager.shutdown()
+    }
+
+    @Test func repeatedlyWaitsForShortLivedChildrenWithoutMissingTermination() async throws {
+        let manager = SSHConnectionManager()
+        let invocation = SSHInvocation(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf ready"])
+        let started = ContinuousClock.now
+
+        for _ in 0 ..< 50 {
+            let result = try await manager.runForTesting(invocation)
+            #expect(result.status == 0)
+            #expect(result.stdout == Data("ready".utf8))
+        }
+
+        #expect(ContinuousClock.now - started < .seconds(5))
+        await manager.shutdown()
+    }
+
+    @Test func batchFailureClassificationOnlyPromptsForUserInput() {
+        #expect(sshBatchFailureNeedsInteraction(
+            "user@example: Permission denied (publickey,password,keyboard-interactive)."))
+        #expect(sshBatchFailureNeedsInteraction(
+            "Host key verification failed."))
+        #expect(sshBatchFailureNeedsInteraction(
+            "Enter passphrase for key '/Users/me/.ssh/id_ed25519':"))
+
+        #expect(!sshBatchFailureNeedsInteraction(
+            "unix_listener: path \"/var/folders/long/socket\" too long for Unix domain socket"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "unix_listener: cannot bind to path /tmp/cx/master: Permission denied"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "ssh: Could not resolve hostname example: nodename nor servname provided"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "ssh: connect to host example port 22: Connection refused"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "@@@@@@@@@ REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@@@@@@\n"
+                + "Host key verification failed."))
+        #expect(!sshBatchFailureNeedsInteraction(""))
+    }
+}

@@ -10,11 +10,15 @@ let package = Package(
     platforms: [.macOS(.v26)],
     dependencies: [
         .package(path: "../ClaudexorKit"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.15.0"),
     ],
     targets: [
         .executableTarget(
             name: "ClaudexorApp",
-            dependencies: [.product(name: "ClaudexorKit", package: "ClaudexorKit")],
+            dependencies: [
+                .product(name: "ClaudexorKit", package: "ClaudexorKit"),
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ],
             resources: [.process("Resources")],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

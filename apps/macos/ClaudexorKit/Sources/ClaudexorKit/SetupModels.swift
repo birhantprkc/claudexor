@@ -8,6 +8,11 @@ public enum SetupJobAction: String, Codable, Sendable, CaseIterable {
     case login
 }
 
+public enum SetupJobTransport: String, Codable, Sendable, CaseIterable {
+    case daemon
+    case clientPty = "client_pty"
+}
+
 public enum AuthRequest: String, Codable, Sendable {
     case subscription
     case apiKey = "api_key"
@@ -25,17 +30,22 @@ public struct SetupJobCreateRequest: Codable, Sendable, Equatable {
     /// D-17 codex-only login flow selection. Emitted ONLY when set so a default
     /// login keeps the exact legacy body (absent = app-server device-code).
     public let loginFlow: SetupCodexLoginFlow?
+    public let transport: SetupJobTransport
 
     public init(harness: SetupHarness, action: SetupJobAction, profileId: String? = nil,
-                loginFlow: SetupCodexLoginFlow? = nil) {
+                loginFlow: SetupCodexLoginFlow? = nil,
+                transport: SetupJobTransport = .daemon) {
         self.harness = harness
         self.action = action
         self.authRequest = .subscription
         self.profileId = profileId
         self.loginFlow = loginFlow
+        self.transport = transport
     }
 
-    enum CodingKeys: String, CodingKey { case harness, action, authRequest, profileId, loginFlow }
+    enum CodingKeys: String, CodingKey {
+        case harness, action, authRequest, profileId, loginFlow, transport
+    }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -44,6 +54,7 @@ public struct SetupJobCreateRequest: Codable, Sendable, Equatable {
         try container.encode(authRequest, forKey: .authRequest)
         try container.encodeIfPresent(profileId, forKey: .profileId)
         try container.encodeIfPresent(loginFlow, forKey: .loginFlow)
+        if transport != .daemon { try container.encode(transport, forKey: .transport) }
     }
 }
 
@@ -146,6 +157,7 @@ public struct SetupJob: Codable, Sendable, Equatable {
     public let jobId: String
     public let harness: SetupHarness
     public let action: SetupJobAction
+    public let transport: SetupJobTransport
     /// Target credential profile (INV-135). The server always reports it — null
     /// for a default-store login, the profile id for a profile login.
     public let profileId: String?
@@ -166,7 +178,7 @@ public struct SetupJob: Codable, Sendable, Equatable {
     public let terminationReconciliation: SetupTerminationReconciliation?
 
     enum CodingKeys: String, CodingKey, CaseIterable, StrictCodingKey {
-        case jobId, harness, action, profileId, state, phase, deadlineAt, outcome, command, guideUrl
+        case jobId, harness, action, transport, profileId, state, phase, deadlineAt, outcome, command, guideUrl
         case message, createdAt, startedAt, finishedAt, authCapability, execution, authorization, nativeCommand
         case terminationReconciliation
     }
@@ -180,10 +192,12 @@ public struct SetupJob: Codable, Sendable, Equatable {
                 authorization: SetupCommandAuthorization? = nil,
                 nativeCommand: SetupNativeCommandReceipt? = nil,
                 terminationReconciliation: SetupTerminationReconciliation? = nil,
-                profileId: String? = nil) {
+                profileId: String? = nil,
+                transport: SetupJobTransport = .daemon) {
         self.jobId = jobId
         self.harness = harness
         self.action = action
+        self.transport = transport
         self.profileId = profileId
         self.state = state
         self.phase = phase
@@ -208,6 +222,8 @@ public struct SetupJob: Codable, Sendable, Equatable {
         jobId = try container.decode(String.self, forKey: .jobId)
         harness = try container.decode(SetupHarness.self, forKey: .harness)
         action = try container.decode(SetupJobAction.self, forKey: .action)
+        transport = try container.decodeIfPresent(SetupJobTransport.self, forKey: .transport)
+            ?? .daemon
         // Present + nullable on the wire (null = default store); tolerate its
         // absence so an older daemon's job still decodes as the default account.
         profileId = container.contains(.profileId)
@@ -236,6 +252,7 @@ public struct SetupJob: Codable, Sendable, Equatable {
         try container.encode(jobId, forKey: .jobId)
         try container.encode(harness, forKey: .harness)
         try container.encode(action, forKey: .action)
+        try container.encode(transport, forKey: .transport)
         try container.encodeIfPresent(profileId, forKey: .profileId)
         try container.encode(state, forKey: .state)
         try container.encode(phase, forKey: .phase)

@@ -75,6 +75,28 @@
     },
     {
       "method": "GET",
+      "path": "/v2/filesystem/directories",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "List a directory contained by the server user's home.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [
+        {
+          "name": "path",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": null,
+          "description": "Absolute directory under the server user's home; omit to start at HOME."
+        }
+      ],
+      "response_schema": "ControlDirectoryListing",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
       "path": "/v2/global/events",
       "mutating": false,
       "applicability": "global",
@@ -267,6 +289,28 @@
           "enum": null,
           "schema_ref": null,
           "description": "Resume cursor sent on reconnect: an opaque, partition- and epoch-scoped project journal cursor; a stale or foreign cursor is refused so the client can resnapshot. Omit to snapshot-then-subscribe from the beginning."
+        }
+      ],
+      "response_schema": null,
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/projects/:id/file",
+      "mutating": false,
+      "applicability": "project",
+      "summary": "Fetch one bounded file contained by a registered project.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [
+        {
+          "name": "path",
+          "in": "query",
+          "required": true,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": null,
+          "description": "Relative path contained by the registered project."
         }
       ],
       "response_schema": null,

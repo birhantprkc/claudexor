@@ -32,15 +32,22 @@ extension AppModel {
 
     func refreshSettings() async {
         let epoch = settingsEpoch
+        let locationID = activeExecutionLocation
         await enqueueSettingsOperation { [weak self] in
-            guard let self, self.settingsEpoch == epoch, let client = self.client else { return }
+            guard let self, self.settingsEpoch == epoch,
+                  let requestClient = self.gateway(for: locationID)
+            else { return }
             do {
-                let answer = try await client.settings()
+                let answer = try await requestClient.settings()
                 // Re-check AFTER the await (X24): enterHardOffline may have
                 // reset the projection while the request was in flight; a late
                 // answer must not repopulate the cleared state.
                 guard self.settingsEpoch == epoch else { return }
-                self.settingsSnapshot = answer
+                if locationID == .local {
+                    self.settingsSnapshot = answer
+                } else {
+                    self.remoteSettingsSnapshots[locationID] = answer
+                }
             } catch {
                 guard self.settingsEpoch == epoch else { return }
                 self.settingsStatus = "Could not load settings: \(error)"
@@ -50,20 +57,25 @@ extension AppModel {
 
     func saveSettings(_ patch: SettingsUpdateRequest) async -> Bool {
         let epoch = settingsEpoch
+        let locationID = activeExecutionLocation
         return await enqueueSettingsOperation { [weak self] in
             guard let self, self.settingsEpoch == epoch else { return false }
-            guard let client = self.client else {
+            guard let requestClient = self.gateway(for: locationID) else {
                 self.settingsStatus = "Engine offline: reconnect before saving settings."
                 return false
             }
             do {
-                let answer = try await client.updateSettings(patch)
+                let answer = try await requestClient.updateSettings(patch)
                 // Re-check AFTER the await (X24): a response landing past an
                 // enterHardOffline reset must not write into the cleared state.
                 guard self.settingsEpoch == epoch else { return false }
-                self.settingsSnapshot = answer
+                if locationID == .local {
+                    self.settingsSnapshot = answer
+                } else {
+                    self.remoteSettingsSnapshots[locationID] = answer
+                }
                 self.settingsStatus = "Saved engine defaults."
-                await self.refreshHarnesses()
+                await self.refreshHarnesses(locationID: locationID)
                 return true
             } catch {
                 guard self.settingsEpoch == epoch else { return false }

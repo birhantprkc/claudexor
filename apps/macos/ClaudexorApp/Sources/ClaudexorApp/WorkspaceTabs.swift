@@ -2,22 +2,23 @@ import Foundation
 
 // MARK: - Thread workspace tabs (D42)
 //
-// The right panel is the THREAD WORKSPACE, not a per-run inspector: exactly
-// THREE tabs aggregated across the current thread — Changes / Artifacts /
-// Evidence. Activity is no longer a tab: a run's live activity is INLINE in its
-// chat receipt now (D42). This is the PURE selection logic behind the tab bar so
-// the default + no-auto-jump-after-manual-selection guard are unit-testable
-// without standing up a SwiftUI View. `ThreadWorkspacePanel` renders these; the
-// state machine lives here.
+// The right panel is the THREAD WORKSPACE, not a per-run inspector: Changes /
+// Artifacts / Evidence on every thread, plus Terminal for remote threads.
+// Activity is no longer a tab: a run's live activity is INLINE in its chat
+// receipt now (D42). This is the PURE selection logic behind the tab bar so the
+// default + no-auto-jump-after-manual-selection guard are unit-testable without
+// standing up a SwiftUI View. `ThreadWorkspacePanel` renders these; the state
+// machine lives here.
 
 enum WorkspaceTab: String, CaseIterable, Identifiable, Equatable {
-    case changes, artifacts, evidence
+    case changes, artifacts, evidence, terminal
     var id: String { rawValue }
     var label: String {
         switch self {
         case .changes: return "Changes"
         case .artifacts: return "Artifacts"
         case .evidence: return "Evidence"
+        case .terminal: return "Terminal"
         }
     }
     var glyph: String {
@@ -25,6 +26,7 @@ enum WorkspaceTab: String, CaseIterable, Identifiable, Equatable {
         case .changes: return "plusminus.circle"
         case .artifacts: return "photo.on.rectangle.angled"
         case .evidence: return "stethoscope"
+        case .terminal: return "terminal"
         }
     }
 }
@@ -41,6 +43,16 @@ struct WorkspaceTabInputs: Equatable {
 }
 
 enum WorkspaceTabPolicy {
+    /// A tab may be location-specific (Terminal exists only for remote
+    /// threads). Never carry an unavailable selection into a newly selected
+    /// located thread, where it would render a blank panel.
+    static func validated(
+        current: WorkspaceTab,
+        available: [WorkspaceTab]
+    ) -> WorkspaceTab {
+        available.contains(current) ? current : (available.first ?? .changes)
+    }
+
     /// The default tab for the panel's current state:
     /// - a selected receipt that failed with no output → Evidence (diagnostics
     ///   are the deliverable)

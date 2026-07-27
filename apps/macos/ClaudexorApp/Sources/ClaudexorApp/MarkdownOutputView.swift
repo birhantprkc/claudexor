@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Block-aware markdown rendering: headings, paragraphs, list items, fenced
 /// code, and GFM pipe tables render as separate views. `AttributedString(markdown:)`
@@ -8,6 +9,7 @@ import SwiftUI
 /// Shared by the run-detail answer view and the chat transcript (a turn's assistant
 /// message renders markdown, not flat text — the v0.10 chat regression fix).
 struct MarkdownOutputView: View {
+    @Environment(AppModel.self) private var model
     let markdown: String
     /// Roots (thread repoRoot / run dir) whose images may render INLINE and
     /// whose file links may open (F2.5 W-C7). Empty = no local-file access:
@@ -36,7 +38,11 @@ struct MarkdownOutputView: View {
                 case .paragraph:
                     inline(block.text, font: bodyFont)
                 case .image(let alt, let target):
-                    ScopedInlineImage(target: target, alt: alt, roots: fileScopeRoots)
+                    if model.selectedExecutionLocation == .local {
+                        ScopedInlineImage(target: target, alt: alt, roots: fileScopeRoots)
+                    } else {
+                        RemoteScopedProjectImage(target: target, alt: alt)
+                    }
                 case .list:
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                         ForEach(Array(block.text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, item in
@@ -77,6 +83,18 @@ struct MarkdownOutputView: View {
         .environment(\.openURL, OpenURLAction { url in
             guard url.isFileURL || url.scheme == nil else { return .systemAction }
             let raw = url.isFileURL ? url.path : url.absoluteString
+            if model.selectedExecutionLocation != .local {
+                if model.remoteProjectFileReference(target: raw) != nil {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(raw, forType: .string)
+                    linkRefusal =
+                        "Remote path copied. Files stay on the server; images and gallery artifacts load through the scoped SSH tunnel."
+                } else {
+                    linkRefusal = "Remote link not opened: outside this thread's project scope."
+                    NSSound.beep()
+                }
+                return .handled
+            }
             switch ScopedInlineImage.openDecision(raw, roots: fileScopeRoots) {
             case .open(let path):
                 NSWorkspace.shared.open(URL(fileURLWithPath: path))

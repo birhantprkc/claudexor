@@ -61,7 +61,33 @@ describe("native-login setup boundary", () => {
           action: "login",
           authRequest: "subscription",
         }),
-      ).toEqual({ harness, action: "login", authRequest: "subscription" });
+      ).toEqual({
+        harness,
+        action: "login",
+        authRequest: "subscription",
+        transport: "daemon",
+      });
+    }
+
+    expect(
+      ControlSetupJobCreateRequest.parse({
+        harness: "codex",
+        action: "login",
+        authRequest: "subscription",
+        loginFlow: "browser_redirect",
+        transport: "client_pty",
+      }).transport,
+    ).toBe("client_pty");
+    for (const loginFlow of [undefined, "device_auth", "browser_callback"] as const) {
+      expect(() =>
+        ControlSetupJobCreateRequest.parse({
+          harness: "codex",
+          action: "login",
+          authRequest: "subscription",
+          ...(loginFlow ? { loginFlow } : {}),
+          transport: "client_pty",
+        }),
+      ).toThrow(/client_pty requires loginFlow browser_redirect/);
     }
 
     for (const request of [

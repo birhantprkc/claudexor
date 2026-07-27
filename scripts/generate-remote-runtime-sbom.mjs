@@ -1,0 +1,220 @@
+#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+
+const directory = resolve(process.argv[2] ?? "");
+const version = process.argv[3] ?? "";
+const licensesPath = process.argv[4];
+if (!directory || !/^\d+\.\d+\.\d+$/.test(version)) {
+  throw new Error(
+    "usage: generate-remote-runtime-sbom.mjs ASSET_DIR VERSION [PRODUCTION_LICENSES_JSON]",
+  );
+}
+
+const licenses = licensesPath
+  ? readJson(resolve(licensesPath))
+  : JSON.parse(
+      execFileSync("pnpm", ["licenses", "list", "--prod", "--json"], {
+        cwd: resolve("."),
+        encoding: "utf8",
+      }),
+    );
+const dependencies = licensedPackages(licenses);
+const archives = readdirSync(directory)
+  .filter((name) => name.endsWith(".tar.gz"))
+  .sort()
+  .map((name, index) => {
+    const metadataName = `${basename(name, ".tar.gz")}.json`;
+    const metadata = readJson(join(directory, metadataName));
+    const digest = sha256(join(directory, name));
+    if (
+      metadata.archiveName !== name ||
+      typeof metadata.target !== "string" ||
+      typeof metadata.nodeVersion !== "string" ||
+      metadata.sha256 !== digest
+    ) {
+      throw new Error(`remote runtime SBOM metadata does not match ${name}`);
+    }
+    return {
+      name,
+      index,
+      target: metadata.target,
+      nodeVersion: metadata.nodeVersion,
+      digest,
+    };
+  });
+if (archives.length !== 4) throw new Error("remote runtime SBOM requires exactly four archives");
+if (new Set(archives.map((archive) => archive.target)).size !== archives.length) {
+  throw new Error("remote runtime SBOM requires four distinct runtime targets");
+}
+
+const product = {
+  SPDXID: spdxId("Claudexor-remote-runtime", version),
+  name: "Claudexor remote runtime distribution",
+  versionInfo: version,
+  downloadLocation: "NOASSERTION",
+  filesAnalyzed: false,
+  licenseConcluded: "MIT",
+  licenseDeclared: "MIT",
+  copyrightText: "NOASSERTION",
+  primaryPackagePurpose: "APPLICATION",
+  externalRefs: [
+    {
+      referenceCategory: "PACKAGE-MANAGER",
+      referenceType: "purl",
+      referenceLocator: `pkg:github/razzant/claudexor@${encodeURIComponent(version)}`,
+    },
+  ],
+};
+const targetPackages = archives.map((archive) => ({
+  SPDXID: spdxId(`Claudexor-remote-runtime-${archive.target}`, version),
+  name: `Claudexor remote runtime (${archive.target})`,
+  versionInfo: version,
+  downloadLocation: "NOASSERTION",
+  filesAnalyzed: false,
+  licenseConcluded: "MIT",
+  licenseDeclared: "MIT",
+  copyrightText: "NOASSERTION",
+  primaryPackagePurpose: "APPLICATION",
+  packageFileName: archive.name,
+  checksums: [{ algorithm: "SHA256", checksumValue: archive.digest }],
+  externalRefs: [
+    {
+      referenceCategory: "PACKAGE-MANAGER",
+      referenceType: "purl",
+      referenceLocator: `pkg:generic/claudexor-remote-runtime@${encodeURIComponent(version)}?target=${encodeURIComponent(archive.target)}`,
+    },
+  ],
+}));
+const nodePackages = archives.map((archive) => {
+  const [os, architecture] = archive.target.split("-");
+  return {
+    SPDXID: spdxId(`Node.js-runtime-${archive.target}`, archive.nodeVersion),
+    name: `Node.js runtime (${archive.target})`,
+    versionInfo: archive.nodeVersion,
+    downloadLocation: `https://nodejs.org/dist/v${archive.nodeVersion}/`,
+    filesAnalyzed: false,
+    licenseConcluded: "MIT",
+    licenseDeclared: "MIT",
+    copyrightText: "NOASSERTION",
+    primaryPackagePurpose: "APPLICATION",
+    externalRefs: [
+      {
+        referenceCategory: "PACKAGE-MANAGER",
+        referenceType: "purl",
+        referenceLocator: `pkg:generic/node@${encodeURIComponent(archive.nodeVersion)}?os=${encodeURIComponent(os ?? "")}&arch=${encodeURIComponent(architecture ?? "")}`,
+      },
+    ],
+    comment: `Digest-pinned Node distribution packaged inside ${archive.name}.`,
+  };
+});
+
+const files = archives.map((archive) => ({
+  SPDXID: `SPDXRef-RemoteRuntimeArchive-${archive.index + 1}`,
+  fileName: archive.name,
+  checksums: [{ algorithm: "SHA256", checksumValue: archive.digest }],
+}));
+const relationships = [
+  {
+    spdxElementId: "SPDXRef-DOCUMENT",
+    relationshipType: "DESCRIBES",
+    relatedSpdxElement: product.SPDXID,
+  },
+  ...targetPackages.map((targetPackage) => ({
+    spdxElementId: product.SPDXID,
+    relationshipType: "CONTAINS",
+    relatedSpdxElement: targetPackage.SPDXID,
+  })),
+  ...targetPackages.flatMap((targetPackage, index) => [
+    {
+      spdxElementId: targetPackage.SPDXID,
+      relationshipType: "CONTAINS",
+      relatedSpdxElement: `SPDXRef-RemoteRuntimeArchive-${index + 1}`,
+    },
+    {
+      spdxElementId: targetPackage.SPDXID,
+      relationshipType: "CONTAINS",
+      relatedSpdxElement: nodePackages[index].SPDXID,
+    },
+    ...dependencies.map((dependency) => ({
+      spdxElementId: targetPackage.SPDXID,
+      relationshipType: "CONTAINS",
+      relatedSpdxElement: dependency.SPDXID,
+    })),
+  ]),
+];
+const packages = [product, ...targetPackages, ...nodePackages, ...dependencies].sort(
+  (left, right) =>
+    left.name.localeCompare(right.name) || left.versionInfo.localeCompare(right.versionInfo),
+);
+const created = execFileSync("git", ["show", "-s", "--format=%cI", "HEAD"], {
+  encoding: "utf8",
+}).trim();
+const sha = process.env.GITHUB_SHA ?? "local";
+
+process.stdout.write(
+  `${JSON.stringify(
+    {
+      spdxVersion: "SPDX-2.3",
+      dataLicense: "CC0-1.0",
+      SPDXID: "SPDXRef-DOCUMENT",
+      name: `Claudexor remote runtimes ${version}`,
+      documentNamespace: `https://github.com/razzant/claudexor/sbom/remote-runtime/${sha}`,
+      creationInfo: {
+        created,
+        creators: ["Tool: scripts/generate-remote-runtime-sbom.mjs"],
+      },
+      packages,
+      files,
+      relationships,
+    },
+    null,
+    2,
+  )}\n`,
+);
+
+function licensedPackages(groups) {
+  const packagesById = new Map();
+  for (const [license, entries] of Object.entries(groups)) {
+    for (const entry of entries) {
+      for (const dependencyVersion of entry.versions ?? []) {
+        const pkg = {
+          SPDXID: spdxId(entry.name, dependencyVersion),
+          name: entry.name,
+          versionInfo: dependencyVersion,
+          downloadLocation: "NOASSERTION",
+          filesAnalyzed: false,
+          licenseConcluded: "NOASSERTION",
+          licenseDeclared: entry.license || license || "NOASSERTION",
+          copyrightText: "NOASSERTION",
+          externalRefs: [
+            {
+              referenceCategory: "PACKAGE-MANAGER",
+              referenceType: "purl",
+              referenceLocator: `pkg:npm/${encodeURIComponent(entry.name)}@${encodeURIComponent(dependencyVersion)}`,
+            },
+          ],
+        };
+        packagesById.set(pkg.SPDXID, pkg);
+      }
+    }
+  }
+  return [...packagesById.values()].sort(
+    (left, right) =>
+      left.name.localeCompare(right.name) || left.versionInfo.localeCompare(right.versionInfo),
+  );
+}
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function readJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function spdxId(name, componentVersion) {
+  return `SPDXRef-Package-${name}-${componentVersion}`.replace(/[^A-Za-z0-9.-]/g, "-");
+}

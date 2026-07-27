@@ -1,6 +1,8 @@
 import { z } from "zod/v3";
 import { AuthCapabilityLifecycle } from "./auth.js";
 import { Id } from "./primitives.js";
+import * as SetupTransport from "./setup-transport.js";
+export * from "./setup-transport.js";
 
 const SetupTimestamp = z.string().datetime({ offset: true });
 const Sha256Hex = z.string().regex(/^[a-f0-9]{64}$/);
@@ -154,11 +156,6 @@ export const ControlHarnessSetupHarness = z
   .describe("Harness ids with a managed native-login flow.");
 export type ControlHarnessSetupHarness = z.infer<typeof ControlHarnessSetupHarness>;
 
-export const ControlSetupJobAction = z
-  .literal("login")
-  .describe("The daemon-managed native-login action.");
-export type ControlSetupJobAction = z.infer<typeof ControlSetupJobAction>;
-
 export const ControlSetupJobState = z
   .enum([
     "queued",
@@ -238,7 +235,7 @@ export type SetupTerminationReconciliation = z.infer<typeof SetupTerminationReco
 export const ControlSetupJobCreateRequest = z
   .object({
     harness: ControlHarnessSetupHarness,
-    action: ControlSetupJobAction,
+    action: SetupTransport.ControlSetupJobAction,
     authRequest: z.literal("subscription"),
     /** Target a REGISTERED config-dir credential profile (INV-135): the
      * vendor login runs scoped to the profile's own dir and verification
@@ -264,6 +261,7 @@ export const ControlSetupJobCreateRequest = z
       .describe(
         "Codex-only: device_auth (default; app-server device-code, isolated browser window), browser_callback (app-server browser-callback opt-in), or browser_redirect (legacy Terminal localhost callback / fallback).",
       ),
+    transport: SetupTransport.ControlSetupJobTransportField,
   })
   .strict()
   .superRefine((value, context) => {
@@ -274,6 +272,7 @@ export const ControlSetupJobCreateRequest = z
         message: "loginFlow selection exists only for the codex harness",
       });
     }
+    SetupTransport.validateSetupTransport(value, context);
   })
   .describe("Request body to create an exact-subscription native-login job.");
 export type ControlSetupJobCreateRequest = z.infer<typeof ControlSetupJobCreateRequest>;
@@ -282,7 +281,8 @@ export const ControlSetupJob = z
   .object({
     jobId: Id.describe("Setup job id."),
     harness: ControlHarnessSetupHarness,
-    action: ControlSetupJobAction,
+    action: SetupTransport.ControlSetupJobAction,
+    transport: SetupTransport.ControlSetupJobTransport.default("daemon"),
     /** Credential profile this login job targets; null = the default session. */
     profileId: z
       .string()
@@ -451,7 +451,7 @@ export type SetupDeviceCodeDisclosure = z.infer<typeof SetupDeviceCodeDisclosure
 export const ControlSetupJobListFilter = z
   .object({
     harness: ControlHarnessSetupHarness.optional(),
-    action: ControlSetupJobAction.optional(),
+    action: SetupTransport.ControlSetupJobAction.optional(),
     active: z.boolean().optional(),
     limit: z.number().int().positive().max(500).optional(),
   })

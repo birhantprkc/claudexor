@@ -11,6 +11,7 @@ import ClaudexorKit
 // instead, never twice (D42).
 
 struct WorkspaceChangesView: View {
+    let locationID: ExecutionLocationID
     let threadId: String
     let isolated: Bool
     let runIds: [String]
@@ -31,7 +32,10 @@ struct WorkspaceChangesView: View {
                     systemImage: "plusminus.circle")
             } else {
                 ForEach(runIds, id: \.self) { runId in
-                    RunDiffSection(runId: runId, showActions: filtered)
+                    RunDiffSection(
+                        locationID: locationID,
+                        runId: runId,
+                        showActions: filtered)
                 }
             }
         }
@@ -44,6 +48,7 @@ struct WorkspaceChangesView: View {
 /// Apply / Revert (item f).
 struct RunDiffSection: View {
     @Environment(AppModel.self) private var model
+    let locationID: ExecutionLocationID
     let runId: String
     /// True when this is the single selected receipt (show apply/revert).
     let showActions: Bool
@@ -53,7 +58,7 @@ struct RunDiffSection: View {
     @State private var applied = false
     @State private var reverting = false
 
-    private var run: TaskRun? { model.task(runId) }
+    private var run: TaskRun? { model.task(runId, at: locationID) }
 
     /// A decision-flow run applies from its CHAT RECEIPT (decide → apply inline),
     /// never here — so the workspace never duplicates its apply (D42).
@@ -84,11 +89,20 @@ struct RunDiffSection: View {
         // stream `running → unknown` leaves BOTH non-terminal, so keying on
         // terminality alone never re-runs the loader and strands the slot in
         // `.loading` (an indefinite bare spinner with no reason, no Retry).
-        .task(id: Self.diffLoadKey(runId: runId, hasPatchArtifact: run?.hasPatchArtifact == true,
+        .task(id: Self.diffLoadKey(
+            locationID: locationID,
+            runId: runId,
+            hasPatchArtifact: run?.hasPatchArtifact == true,
                                    phase: run?.phase)) { await loadDiff() }
         // A scoped run needs its detail (eligibility/revertable) to gate apply.
         .task(id: showActions ? runId : "") {
-            if showActions, let run, run.applyEligibility == nil || run.isLive { await model.ensureRunDetail(runId) }
+            if showActions, let run, run.applyEligibility == nil || run.isLive {
+                if locationID == .local {
+                    await model.ensureRunDetail(runId)
+                } else {
+                    await model.loadRunDetail(runId, locationID: locationID)
+                }
+            }
         }
     }
 
@@ -165,7 +179,10 @@ struct RunDiffSection: View {
 
     private func apply(mode: String) {
         Task {
-            actionError = await model.applyRun(runId: runId, mode: mode)
+            actionError = await model.applyRun(
+                runId: runId,
+                mode: mode,
+                locationID: locationID)
             if actionError == nil { applied = true }
         }
     }
@@ -173,7 +190,9 @@ struct RunDiffSection: View {
     private func revert() {
         reverting = true
         Task {
-            let outcome = await model.revertRun(runId: runId)
+            let outcome = await model.revertRun(
+                runId: runId,
+                locationID: locationID)
             reverting = false
             switch outcome {
             case .reverted: actionError = nil; applied = false
@@ -183,12 +202,14 @@ struct RunDiffSection: View {
     }
 
     private func loadDiff() async {
-        let id = PayloadIdentity(runId: runId, plane: .diff)
+        let id = PayloadIdentity(
+            runId: "\(locationID.rawValue)|\(runId)",
+            plane: .diff)
         diffSlot.begin(id)
-        if model.task(runId) == nil {
+        if locationID == .local, model.task(runId, at: locationID) == nil {
             await model.ensureRunDetail(runId, insertingIfMissing: true)
         }
-        let run = model.task(runId)
+        let run = model.task(runId, at: locationID)
         switch Self.diffLoadStep(runExists: run != nil, diffIsEmpty: run?.diff.isEmpty ?? true,
                                  phase: run?.phase, hasPatchArtifact: run?.hasPatchArtifact == true) {
         case .noRun:
@@ -215,8 +236,11 @@ struct RunDiffSection: View {
                 "Lost the engine connection before this run's changes were captured — retry to reload.")),
                 for: id)
         case .fetch:
-            switch await model.loadRunDiff(runId) {
-            case .loaded: diffSlot.commit(.loaded(model.task(runId)?.diff ?? []), for: id)
+            switch await model.loadRunDiff(runId, locationID: locationID) {
+            case .loaded:
+                diffSlot.commit(
+                    .loaded(model.task(runId, at: locationID)?.diff ?? []),
+                    for: id)
             case .unavailable, .empty: diffSlot.commit(.empty, for: id)
             case .failed(let message): diffSlot.commit(.failed(.transport(message)), for: id)
             }
@@ -227,8 +251,13 @@ struct RunDiffSection: View {
     /// `phase` (not just terminality): `running` and `unknown` are BOTH
     /// non-terminal, so a lost-stream `running → unknown` regression would never
     /// change a terminality-only key and the loader would never re-run.
-    static func diffLoadKey(runId: String, hasPatchArtifact: Bool, phase: RunPhase?) -> String {
-        "\(runId):\(hasPatchArtifact):\(phase?.rawValue ?? "nil")"
+    static func diffLoadKey(
+        locationID: ExecutionLocationID = .local,
+        runId: String,
+        hasPatchArtifact: Bool,
+        phase: RunPhase?
+    ) -> String {
+        "\(locationID.rawValue):\(runId):\(hasPatchArtifact):\(phase?.rawValue ?? "nil")"
     }
 
     /// The pure pre-fetch decision the diff loader makes (unit-tested). Ordered so

@@ -124,7 +124,8 @@ public actor SetupLifecycleController {
     }
 
     public func start(harness: String, action: String, profileId: String? = nil,
-                      loginFlow: SetupCodexLoginFlow? = nil) async {
+                      loginFlow: SetupCodexLoginFlow? = nil,
+                      transport: SetupJobTransport = .daemon) async {
         guard let typedHarness = SetupHarness(rawValue: harness),
               let typedAction = SetupJobAction(rawValue: action) else {
             publish(job: current.job, connection: .streamLost, reconnectAttempt: 0,
@@ -138,7 +139,8 @@ public actor SetupLifecycleController {
         do {
             let job = try await gateway.createSetupJob(
                 SetupJobCreateRequest(harness: typedHarness, action: typedAction,
-                                      profileId: profileId, loginFlow: loginFlow))
+                                      profileId: profileId, loginFlow: loginFlow,
+                                      transport: transport))
             guard generation == requestGeneration, !Task.isCancelled else { return }
             adoptAndObserve(job)
         } catch let GatewayError.http(status, body) where status == 409 {

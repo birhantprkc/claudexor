@@ -9,16 +9,9 @@ import ClaudexorKit
 /// everything else opens externally. Reuses the binary-aware
 /// `GET /runs/:id/artifacts(/:path)` control-API path. Technical artifacts
 /// (events.jsonl, context/, attempts/) stay in Diagnostics, not the gallery.
-/// One artifact tagged with the run that produced it — so a gallery aggregated
-/// across a thread's runs still fetches each file's bytes from the right run.
-struct RunArtifact: Identifiable, Equatable, Sendable {
-    let runId: String
-    let art: ArtifactInfo
-    var id: String { "\(runId)|\(art.path)" }
-}
-
 struct ArtifactGalleryView: View {
     @Environment(AppModel.self) private var model
+    let locationID: ExecutionLocationID
     /// The runs whose artifacts are aggregated (D42): one run for the run-filtered
     /// view, the whole thread's runs for the aggregated Artifacts tab.
     let runIds: [String]
@@ -40,12 +33,22 @@ struct ArtifactGalleryView: View {
     @State private var refreshFailed = false
 
     /// Single-run gallery (the run's own tree, or its produced outputs).
-    init(runId: String, produced: Bool = false) {
+    init(
+        locationID: ExecutionLocationID = .local,
+        runId: String,
+        produced: Bool = false
+    ) {
+        self.locationID = locationID
         self.runIds = [runId]
         self.produced = produced
     }
     /// Thread-aggregated gallery across a run list (D42).
-    init(runIds: [String], produced: Bool = false) {
+    init(
+        locationID: ExecutionLocationID = .local,
+        runIds: [String],
+        produced: Bool = false
+    ) {
+        self.locationID = locationID
         self.runIds = runIds
         self.produced = produced
     }
@@ -54,7 +57,9 @@ struct ArtifactGalleryView: View {
     /// The aggregated identity: the whole ordered run set is the key, so adding a
     /// run or switching threads resets the slot (no stale bytes across sets).
     private var identity: PayloadIdentity {
-        PayloadIdentity(runId: runIds.joined(separator: "|"), plane: plane)
+        PayloadIdentity(
+            runId: "\(locationID.rawValue)|\(runIds.joined(separator: "|"))",
+            plane: plane)
     }
 
     /// Filter the loaded list for display; the raw slot value is the fetch truth.
@@ -90,7 +95,7 @@ struct ArtifactGalleryView: View {
         var seen = Set<String>()
         var out: [String] = []
         for runId in runIds {
-            guard let run = model.task(runId) else { continue }
+            guard let run = model.task(runId, at: locationID) else { continue }
             for path in Self.runImagePaths(diffPaths: run.diff.map(\.path), repoRoot: run.repoRoot)
             where seen.insert(path).inserted { out.append(path) }
         }
@@ -99,7 +104,7 @@ struct ArtifactGalleryView: View {
 
     /// The repo roots across the run set (for the scoped inline image gate).
     private var changedImageRoots: [String] {
-        runIds.compactMap { model.task($0)?.repoRoot }
+        runIds.compactMap { model.task($0, at: locationID)?.repoRoot }
     }
 
     /// Pure derivation (unit-tested): diff-relative paths -> absolute image
@@ -213,7 +218,11 @@ struct ArtifactGalleryView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: Theme.Spacing.md)],
                       alignment: .leading, spacing: Theme.Spacing.md) {
                 ForEach(imageArtifacts) { item in
-                    ArtifactImageCard(runId: item.runId, art: item.art, produced: produced)
+                    ArtifactImageCard(
+                        locationID: locationID,
+                        runId: item.runId,
+                        art: item.art,
+                        produced: produced)
                 }
             }
         }
@@ -226,7 +235,11 @@ struct ArtifactGalleryView: View {
                 .font(.caption.weight(.medium)).foregroundStyle(.secondary)
             LazyVStack(spacing: Theme.Spacing.xxs) {
                 ForEach(documentArtifacts) { item in
-                    ArtifactRow(runId: item.runId, art: item.art, produced: produced)
+                    ArtifactRow(
+                        locationID: locationID,
+                        runId: item.runId,
+                        art: item.art,
+                        produced: produced)
                 }
             }
         }
@@ -243,7 +256,10 @@ struct ArtifactGalleryView: View {
         // gateway client — a thread-aggregated gallery otherwise SERIALIZED N
         // produced-endpoint round-trips. Results are reassembled in runIds order
         // and de-duplicated by (runId, path), so the list stays deterministic.
-        let byRun = await Self.fetchListings(runIds: runIds, produced: produced, client: model.client)
+        let byRun = await Self.fetchListings(
+            runIds: runIds,
+            produced: produced,
+            client: model.gateway(for: locationID))
         let (combined, failed) = Self.aggregate(runIds: runIds, byRun: byRun)
         // Identity-guarded: a value only counts as "already shown" when it belongs
         // to THIS still-current identity (a raced newer `begin` reset the slot).
@@ -273,66 +289,13 @@ struct ArtifactGalleryView: View {
         }
     }
 
-    /// The pure retain-vs-disclose decision (unit-tested), preserving the exact
-    /// original branch semantics: fail only when nothing is shown AND the refresh
-    /// errored; keep+disclose a nonempty snapshot on an empty refresh; otherwise
-    /// commit the fresh aggregate.
-    static func loadDecision(
-        combinedIsEmpty: Bool, failed: [String], existingNonEmpty: Bool
-    ) -> GalleryLoadDecision {
-        if combinedIsEmpty && !failed.isEmpty && !existingNonEmpty { return .fail }
-        if combinedIsEmpty && existingNonEmpty { return .keepStale(failed: failed) }
-        return .commit(failed: failed)
-    }
-
-    /// Pure aggregation (unit-tested): reassemble the per-run listings in runIds
-    /// order, de-duplicated by (runId, path), and report which runs' listings
-    /// FAILED (a nil entry) so the caller discloses a partial result — one run's
-    /// outputs are never silently omitted from the aggregated view.
-    static func aggregate(
-        runIds: [String], byRun: [String: [ArtifactInfo]?]
-    ) -> (combined: [RunArtifact], failed: [String]) {
-        var combined: [RunArtifact] = []
-        var seen = Set<String>()
-        var failed: [String] = []
-        for runId in runIds {
-            guard let list = byRun[runId] ?? nil else { failed.append(runId); continue }
-            for art in list where seen.insert("\(runId)|\(art.path)").inserted {
-                combined.append(RunArtifact(runId: runId, art: art))
-            }
-        }
-        return (combined, failed)
-    }
-
-    /// Fetch every run's artifact listing CONCURRENTLY over the Sendable client
-    /// (a nil client or a per-run transport failure yields nil for that run,
-    /// matching the AppModel accessors' `try?` semantics). `nonisolated` so only
-    /// Sendable values (the client, run ids, the flag) cross into the child
-    /// tasks — no MainActor state is captured.
-    nonisolated private static func fetchListings(
-        runIds: [String], produced: Bool, client: GatewayClient?
-    ) async -> [String: [ArtifactInfo]?] {
-        guard let client else { return [:] }
-        return await withTaskGroup(of: (String, [ArtifactInfo]?).self) { group in
-            for runId in runIds {
-                group.addTask {
-                    let list = produced
-                        ? try? await client.listProducedFiles(runId: runId)
-                        : try? await client.listRunArtifacts(runId: runId)
-                    return (runId, list)
-                }
-            }
-            var out: [String: [ArtifactInfo]?] = [:]
-            for await (runId, list) in group { out[runId] = list }
-            return out
-        }
-    }
 }
 
 // MARK: - Image card (large thumbnail)
 
 private struct ArtifactImageCard: View {
     @Environment(AppModel.self) private var model
+    let locationID: ExecutionLocationID
     let runId: String
     let art: ArtifactInfo
     var produced: Bool = false
@@ -341,14 +304,26 @@ private struct ArtifactImageCard: View {
     @State private var imageSlot = PayloadSlot<DecodedImage>()
 
     private var identity: PayloadIdentity {
-        PayloadIdentity(runId: runId, plane: produced ? .produced : .run, path: art.path)
+        PayloadIdentity(
+            runId: "\(locationID.rawValue)|\(runId)",
+            plane: produced ? .produced : .run,
+            path: art.path)
     }
     private var image: NSImage? { imageSlot.state.value?.image }
     private var imageLoadFailed: Bool { if case .failed = imageSlot.state { return true }; return false }
     private var fileName: String { (art.path as NSString).lastPathComponent }
 
     var body: some View {
-        Button { Task { await openArtifactExternally(model: model, runId: runId, path: art.path, produced: produced) } } label: {
+        Button {
+            Task {
+                await openArtifactExternally(
+                    model: model,
+                    locationID: locationID,
+                    runId: runId,
+                    path: art.path,
+                    produced: produced)
+            }
+        } label: {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 preview
                 Text(fileName).font(.caption).lineLimit(1).truncationMode(.middle)
@@ -391,8 +366,10 @@ private struct ArtifactImageCard: View {
         imageSlot.begin(id)
         guard imageSlot.state.value == nil else { return }
         let data = produced
-            ? await model.producedBytes(runId: runId, path: art.path)
-            : await model.artifactBytes(runId: runId, path: art.path)
+            ? await model.producedBytes(
+                runId: runId, path: art.path, locationID: locationID)
+            : await model.artifactBytes(
+                runId: runId, path: art.path, locationID: locationID)
         guard let data else {
             imageSlot.commit(.failed(.offline), for: id)
             return
@@ -400,7 +377,8 @@ private struct ArtifactImageCard: View {
         // W3.7: the SAME bounded decode as inline chat previews, OFF the main
         // actor — a gallery of full-resolution screenshots must not full-decode
         // in `body`'s task.
-        let key = "\(runId)|\(produced ? "produced" : "run")|\(art.path)"
+        let key =
+            "\(locationID.rawValue)|\(runId)|\(produced ? "produced" : "run")|\(art.path)"
         let decoded = await Task.detached(priority: .userInitiated) {
             DecodedImage(image: ScopedInlineImage.boundedPreview(data: data, cacheKey: key))
         }.value
@@ -416,6 +394,7 @@ private struct ArtifactImageCard: View {
 
 private struct ArtifactRow: View {
     @Environment(AppModel.self) private var model
+    let locationID: ExecutionLocationID
     let runId: String
     let art: ArtifactInfo
     var produced: Bool = false
@@ -432,7 +411,10 @@ private struct ArtifactRow: View {
     private var category: ArtifactCategory { ArtifactCategory.of(mime: art.mime, path: art.path) }
     private var isText: Bool { category == .text }
     private var identity: PayloadIdentity {
-        PayloadIdentity(runId: runId, plane: produced ? .produced : .run, path: art.path)
+        PayloadIdentity(
+            runId: "\(locationID.rawValue)|\(runId)",
+            plane: produced ? .produced : .run,
+            path: art.path)
     }
     private var fileName: String { (art.path as NSString).lastPathComponent }
 
@@ -504,7 +486,14 @@ private struct ArtifactRow: View {
         if isText {
             showViewer = true                       // opens INSTANTLY; content streams in
         } else {
-            Task { await openArtifactExternally(model: model, runId: runId, path: art.path, produced: produced) }
+            Task {
+                await openArtifactExternally(
+                    model: model,
+                    locationID: locationID,
+                    runId: runId,
+                    path: art.path,
+                    produced: produced)
+            }
         }
     }
 
@@ -553,8 +542,10 @@ private struct ArtifactRow: View {
         // QA-067: typed outcome so a 409 sensitive-file refusal renders as its
         // typed reason (not a generic offline blob or a perpetual spinner).
         let outcome = produced
-            ? await model.producedTextOutcome(runId: runId, path: art.path)
-            : await model.artifactTextOutcome(runId: runId, path: art.path)
+            ? await model.producedTextOutcome(
+                runId: runId, path: art.path, locationID: locationID)
+            : await model.artifactTextOutcome(
+                runId: runId, path: art.path, locationID: locationID)
         switch outcome {
         case .success(let content):
             textSlot.commit(content.isEmpty ? .empty : .loaded(content), for: id)

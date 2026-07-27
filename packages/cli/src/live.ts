@@ -346,6 +346,7 @@ export function controlApiFetch(
  * package constant. Null when the daemon did not report a well-formed version. */
 export interface EngineIdentity {
   engineVersion: string | null;
+  engineBuildSha: string | null;
 }
 
 export async function handshakeControlApi(
@@ -370,8 +371,9 @@ export async function handshakeControlApi(
   // dedup state is needed. The validated version is ALSO returned so callers
   // (release check) can adopt the running engine's identity (QA-033a).
   try {
-    const body = (await response.json()) as { engine?: { version?: string } };
+    const body = (await response.json()) as { engine?: { version?: string; sha?: string } };
     const raw = body.engine?.version;
+    const rawSha = body.engine?.sha;
     // Same echo hygiene as the plugin-skew check: never print an arbitrary
     // response-sourced string into the terminal.
     const daemonVersion = raw && /^[\w.+-]{1,32}$/.test(raw) ? raw : undefined;
@@ -381,10 +383,14 @@ export async function handshakeControlApi(
           `run \`claudexor daemon stop\` and rerun the command so a matching daemon starts\n`,
       );
     }
-    return { engineVersion: daemonVersion ?? null };
+    const daemonBuildSha =
+      rawSha === "unknown" || (typeof rawSha === "string" && /^[0-9a-f]{40}$/.test(rawSha))
+        ? rawSha
+        : null;
+    return { engineVersion: daemonVersion ?? null, engineBuildSha: daemonBuildSha };
   } catch {
     // Identity is advisory; a body parse failure never fails the handshake.
-    return { engineVersion: null };
+    return { engineVersion: null, engineBuildSha: null };
   }
 }
 

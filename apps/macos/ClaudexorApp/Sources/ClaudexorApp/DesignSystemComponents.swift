@@ -1,4 +1,5 @@
 import SwiftUI
+import ClaudexorKit
 
 /// Reusable design-system components (v0.10 UI redesign). Screens compose these
 /// instead of re-implementing inline — so spacing, focus, glass, and accessibility
@@ -92,8 +93,11 @@ struct ProjectChip: View {
     let bound: Bool
     let hasProject: Bool
     let recent: [String]
+    let remoteConnections: [RemoteConnection]
     let onPick: (String) -> Void
     let onBrowse: () -> Void
+    let onPickRemote: (UUID, String) -> Void
+    let onBrowseRemote: (UUID) -> Void
     /// Explicit transition back to no-project Ask (QA-006). Keeps this the ONE
     /// owner-locked project surface (INV-101); the destination Ask-only state
     /// already works — this is the missing way INTO it after a project was used.
@@ -128,7 +132,35 @@ struct ProjectChip: View {
                 }
                 Divider()
             }
-            Button { onBrowse() } label: { Label("Browse…", systemImage: "folder.badge.plus") }
+            if !remoteConnections.isEmpty {
+                Section("Remote") {
+                    ForEach(remoteConnections) { connection in
+                        Menu(connection.displayName) {
+                            ForEach(connection.savedProjects, id: \.self) { path in
+                                Button {
+                                    onPickRemote(connection.id, path)
+                                } label: {
+                                    Label(
+                                        URL(fileURLWithPath: path).lastPathComponent,
+                                        systemImage: "folder")
+                                }
+                            }
+                            if !connection.savedProjects.isEmpty { Divider() }
+                            Button {
+                                onBrowseRemote(connection.id)
+                            } label: {
+                                Label(
+                                    "Browse on \(connection.displayName)…",
+                                    systemImage: "network")
+                            }
+                        }
+                    }
+                }
+                Divider()
+            }
+            Button { onBrowse() } label: {
+                Label("Browse This Mac…", systemImage: "folder.badge.plus")
+            }
         }
     }
 }

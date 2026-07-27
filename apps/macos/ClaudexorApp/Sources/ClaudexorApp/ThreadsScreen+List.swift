@@ -23,14 +23,22 @@ enum ThreadRowStatus: Equatable {
 extension ThreadsScreen {
     /// True when this thread's head run is actively working (per-thread, not the
     /// global submit gate) — drives the running badge.
-    func threadRunning(_ thread: ThreadSummary) -> Bool {
-        thread.headRunId.flatMap { model.task($0)?.phase.isActive } ?? false
+    func threadRunning(_ located: LocatedThread) -> Bool {
+        let tasks = located.locationID == .local
+            ? model.liveTasks
+            : (model.remoteTasks[located.locationID] ?? [])
+        return located.thread.headRunId.flatMap { runID in
+            tasks.first { $0.id == runID }?.phase.isActive
+        } ?? false
     }
 
     /// The at-a-glance status badge for a thread row (item 4).
     @ViewBuilder
-    func threadStatusBadge(_ thread: ThreadSummary) -> some View {
-        switch ThreadRowStatus.of(running: threadRunning(thread), needsHuman: thread.needsHuman) {
+    func threadStatusBadge(_ located: LocatedThread) -> some View {
+        switch ThreadRowStatus.of(
+            running: threadRunning(located),
+            needsHuman: located.thread.needsHuman)
+        {
         case .running:
             ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 12, height: 12)
                 .help("A turn is running in this thread")
@@ -87,22 +95,41 @@ extension ThreadsScreen {
     }
 
     func submitRename() {
-        guard let id = renameTargetId else { return }
+        guard let id = renameTargetId, let locationID = renameTargetLocation else { return }
         let title = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
         renameTargetId = nil
-        Task { await model.renameThread(id, title: title) }
+        renameTargetLocation = nil
+        Task { await model.renameThread(locationID: locationID, id: id, title: title) }
     }
 
-    func threadRow(_ thread: ThreadSummary) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
+    func threadRow(_ located: LocatedThread) -> some View {
+        let thread = located.thread
+        return VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
             HStack(spacing: Theme.Spacing.xs) {
                 Text(thread.title ?? "Untitled thread").font(.body).lineLimit(1)
                 // Compact status badge so "one card per thread" reads state at a
                 // glance: running spinner / needs-decision dot / idle (D42 item 4).
-                threadStatusBadge(thread)
+                threadStatusBadge(located)
+                if let connection = model.remoteConnection(for: located.locationID) {
+                    Text(connection.displayName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(connection.status == .connected
+                            ? Theme.status(.positive) : .secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            (connection.status == .connected
+                                ? Theme.status(.positive) : Color.secondary)
+                                .opacity(0.12),
+                            in: Capsule())
+                        .help(connection.status == .connected
+                            ? "Connected remote host"
+                            : "Remote host is offline; this is a cached summary")
+                }
             }
-            Text(threadSubtitle(thread)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text(threadSubtitle(located))
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
         // rename/archive ride the existing PATCH /threads/:id (server-owned
         // title/state); the row finally exposes the affordance.
@@ -110,13 +137,24 @@ extension ThreadsScreen {
             Button("Rename…") {
                 renameDraft = thread.title ?? ""
                 renameTargetId = thread.id
+                renameTargetLocation = located.locationID
             }
             // ThreadState is active|closed (server enum) — "closed" is the
             // archived state; Reopen PATCHes back to "active".
             if thread.state != "closed" {
-                Button("Archive") { Task { await model.archiveThread(thread.id) } }
+                Button("Archive") {
+                    Task {
+                        await model.archiveThread(
+                            locationID: located.locationID, id: thread.id)
+                    }
+                }
             } else {
-                Button("Reopen") { Task { await model.reopenThread(thread.id) } }
+                Button("Reopen") {
+                    Task {
+                        await model.reopenThread(
+                            locationID: located.locationID, id: thread.id)
+                    }
+                }
             }
         }
         .padding(.vertical, Theme.Spacing.xxs)
@@ -125,5 +163,13 @@ extension ThreadsScreen {
     func threadSubtitle(_ thread: ThreadSummary) -> String {
         let project = thread.repoRoot.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "No project"
         return "\(project) · \(thread.runIds.count) turn\(thread.runIds.count == 1 ? "" : "s")"
+    }
+
+    func threadSubtitle(_ located: LocatedThread) -> String {
+        let base = threadSubtitle(located.thread)
+        guard located.locationID != .local,
+              let cached = model.remoteThreadCache.first(where: { $0.id == located.id })
+        else { return base }
+        return "\(base) · synced \(cached.syncedAt.formatted(date: .omitted, time: .shortened))"
     }
 }

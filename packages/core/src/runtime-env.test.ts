@@ -36,7 +36,7 @@ describe("resolveHarnessBinary", () => {
     return p;
   }
 
-  it("resolves through the SAME normalized PATH the spawn layer composes (managed shim dir wins)", () => {
+  it("resolves through the SAME normalized PATH the spawn layer composes", () => {
     // The live incident this guards: ~/.claudexor/node/bin/<bin> (first
     // preferred entry) shadowing a newer install later on PATH — doctor must
     // report the shim path that harness children will actually execute.
@@ -47,9 +47,23 @@ describe("resolveHarnessBinary", () => {
     fakeBin(laterDir, "codex-x");
     const env = { HOME: home, PATH: laterDir } as NodeJS.ProcessEnv;
     // Pin a non-launchable runner so the QA-022 managed-runner prepend is
-    // suppressed and this case keeps asserting shim resolution order.
+    // suppressed and this case keeps asserting local shim resolution order.
     expect(normalizedHarnessPath(env, "/no/such/node").split(delimiter)[0]).toBe(shimDir);
     expect(resolveHarnessBinary("codex-x", env)).toBe(shim);
+  });
+
+  it("prefers an app-owned remote vendor install over an older user-local CLI", () => {
+    const home = join(root, "remote-home");
+    const vendorDir = join(home, ".claudexor", "remote", "vendor", "bin");
+    const localDir = join(home, ".local", "bin");
+    const installed = fakeBin(vendorDir, "codex");
+    fakeBin(localDir, "codex");
+    const env = {
+      HOME: home,
+      PATH: localDir,
+      CLAUDEXOR_REMOTE_RUNTIME: "1",
+    } as NodeJS.ProcessEnv;
+    expect(resolveHarnessBinary("codex", env, "/no/such/node")).toBe(installed);
   });
 
   it("falls back to inherited PATH entries and returns null when absent", () => {

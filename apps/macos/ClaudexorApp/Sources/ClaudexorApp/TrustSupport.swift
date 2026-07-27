@@ -11,10 +11,16 @@ import ClaudexorKit
 
 extension AppModel {
     /// Load the per-repo user-level trust files (Settings trust section).
-    func refreshTrust() async {
-        guard let client else { return }
+    func refreshTrust(locationID requestedLocation: ExecutionLocationID? = nil) async {
+        let locationID = requestedLocation ?? activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return }
         do {
-            trustEntries = try await client.trustList().entries
+            let entries = try await requestClient.trustList().entries
+            if locationID == .local {
+                trustEntries = entries
+            } else {
+                remoteTrustEntries[locationID] = entries
+            }
             trustStatus = nil
         } catch {
             trustStatus = userMessage(for: error)
@@ -24,7 +30,7 @@ extension AppModel {
     /// True when the repo already carries the persistent full-access grant —
     /// drives the composer's up-front grant CTA (W19).
     func fullAccessGranted(repoRoot: String) -> Bool {
-        trustEntries.first { $0.repoRoot == repoRoot }?.allowFullAccess == true
+        activeTrustEntries.first { $0.repoRoot == repoRoot }?.allowFullAccess == true
     }
 
     /// The composer's write-scope BASELINE for a thread with no sticky access
@@ -37,9 +43,9 @@ extension AppModel {
     /// The engine still owns the trust gate at run time; this is display+seed
     /// fidelity only.
     var composerAccessDefault: AccessProfile {
-        let root = selectedThreadId.flatMap(threadRepoRoot) ?? projectRoot
+        let root = selectedThreadId.flatMap(threadRepoRoot) ?? normalizedProjectRoot
         guard !root.isEmpty,
-              let wire = trustEntries.first(where: { $0.repoRoot == root })?.accessDefault,
+              let wire = activeTrustEntries.first(where: { $0.repoRoot == root })?.accessDefault,
               let profile = AccessProfile(wire: wire)
         else { return .workspaceWrite }
         return profile
@@ -49,20 +55,22 @@ extension AppModel {
     /// write). Returns true on success; the entries list is refreshed either way.
     @discardableResult
     func setTrust(repoRoot: String, allowFullAccess: Bool) async -> Bool {
-        guard let client else {
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
             trustStatus = "Engine offline — reconnect before changing trust."
             return false
         }
         do {
-            _ = try await client.updateTrust(repoRoot: repoRoot, allowFullAccess: allowFullAccess)
-            await refreshTrust()
+            _ = try await requestClient.updateTrust(
+                repoRoot: repoRoot, allowFullAccess: allowFullAccess)
+            await refreshTrust(locationID: locationID)
             return true
         } catch {
             // Refresh the list, then RESTORE the failure message: refreshTrust
             // clears trustStatus on success, which would silently swallow the
             // grant/revoke error the user needs to see.
             let message = userMessage(for: error)
-            await refreshTrust()
+            await refreshTrust(locationID: locationID)
             trustStatus = message
             return false
         }
@@ -73,37 +81,53 @@ extension AppModel {
     /// wiring: refresh, reload the thread, and stream the started run.
     @discardableResult
     func retryTurn(threadId: String, turnId: String) async -> Bool {
+        let locationID = selectedExecutionLocation
         guard !isThreadBusy(threadId) else {
             threadStatus = "Wait for the running turn to finish, or Stop it, before retrying."
             return false
         }
         return await withTurnSubmission {
-            await retryTurnCore(threadId: threadId, turnId: turnId)
+            await retryTurnCore(
+                locationID: locationID, threadId: threadId, turnId: turnId)
         }
     }
 
     /// The retry body WITHOUT the busy guard/bracket — composed by retryTurn
     /// and grantFullAccessAndRetry, which own their own busy bracketing.
-    private func retryTurnCore(threadId: String, turnId: String) async -> Bool {
-        guard let client else {
+    private func retryTurnCore(
+        locationID: ExecutionLocationID,
+        threadId: String,
+        turnId: String
+    ) async -> Bool {
+        guard let requestClient = gateway(for: locationID) else {
             threadStatus = "Engine offline — reconnect before retrying."
             return false
         }
         let result: RunStartResult
         do {
-            result = try await client.retryTurn(threadId: threadId, turnId: turnId)
+            result = try await requestClient.retryTurn(
+                threadId: threadId, turnId: turnId)
         } catch {
             threadStatus = userMessage(for: error)
             // The retry itself may have been refused AGAIN (fresh enqueue_error
             // persisted server-side) — reload so the card shows the new reason.
-            await openThread(threadId)
+            await openThread(locationID: locationID, id: threadId)
             return false
         }
         threadStatus = nil
-        await refreshRuns()
-        await openThread(threadId)
+        if locationID == .local {
+            await refreshRuns()
+        } else {
+            await refreshRemoteThreads(locationID)
+        }
+        await openThread(locationID: locationID, id: threadId)
         if case .started(let info) = result {
-            stream(runId: info.runId)
+            if locationID == .local {
+                stream(runId: info.runId)
+            } else {
+                streamRemoteRun(
+                    locationID: locationID, runID: info.runId, threadID: threadId)
+            }
         }
         return true
     }
@@ -116,7 +140,8 @@ extension AppModel {
     /// trust write would advance the thread tail and 409 the promised retry.
     @discardableResult
     func grantFullAccessAndRetry(threadId: String, turnId: String, repoRoot: String) async -> Bool {
-        guard let client else {
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
             threadStatus = "Engine offline — reconnect before granting access."
             return false
         }
@@ -126,15 +151,17 @@ extension AppModel {
         }
         return await withTurnSubmission {
             do {
-                _ = try await client.updateTrust(repoRoot: repoRoot, allowFullAccess: true)
+                _ = try await requestClient.updateTrust(
+                    repoRoot: repoRoot, allowFullAccess: true)
             } catch {
                 threadStatus = userMessage(for: error)
                 return false
             }
             // Keep the Settings trust list truthful if it is already open: the
             // one-click grant is the same write the Settings section audits.
-            await refreshTrust()
-            return await retryTurnCore(threadId: threadId, turnId: turnId)
+            await refreshTrust(locationID: locationID)
+            return await retryTurnCore(
+                locationID: locationID, threadId: threadId, turnId: turnId)
         }
     }
 }
@@ -156,7 +183,7 @@ struct TrustSettingsSection: View {
                 Label(status, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
-            let fullAccess = model.trustEntries.filter(\.allowFullAccess)
+            let fullAccess = model.activeTrustEntries.filter(\.allowFullAccess)
             if fullAccess.isEmpty {
                 Text("No projects have full access.")
                     .font(.caption).foregroundStyle(.tertiary)

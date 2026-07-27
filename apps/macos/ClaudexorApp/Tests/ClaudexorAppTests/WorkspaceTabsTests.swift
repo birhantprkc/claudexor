@@ -1,8 +1,8 @@
 import Testing
 @testable import ClaudexorApp
 
-/// D42 thread-workspace tabs (Changes / Artifacts / Evidence) + the default +
-/// no-auto-jump-after-manual-selection guard.
+/// Thread-workspace tabs (Changes / Artifacts / Evidence / remote Terminal) +
+/// the default + no-auto-jump-after-manual-selection guard.
 @Suite struct WorkspaceTabsTests {
     @Test func evidenceHydrationIsIdentityKeyedAndFailedLoadsRemainRetryable() {
         #expect(RunEvidenceSection.needsDetailLoad(
@@ -17,8 +17,8 @@ import Testing
         WorkspaceTabInputs(runSelected: runSelected, selectedRunFailedNoOutput: failedNoOutput)
     }
 
-    @Test func exactlyThreeTabs() {
-        #expect(WorkspaceTab.allCases == [.changes, .artifacts, .evidence])
+    @Test func exactlyFourTabsIncludingRemoteTerminal() {
+        #expect(WorkspaceTab.allCases == [.changes, .artifacts, .evidence, .terminal])
     }
 
     @Test func wholeThreadDefaultsToChanges() {
@@ -57,5 +57,14 @@ import Testing
             current: .changes, userSelected: false,
             inputs: inputs(runSelected: true, failedNoOutput: true))
         #expect(failed == .evidence)
+    }
+
+    @Test func remoteOnlyTerminalResetsWhenLocalThreadIsSelected() {
+        #expect(WorkspaceTabPolicy.validated(
+            current: .terminal,
+            available: [.changes, .artifacts, .evidence]) == .changes)
+        #expect(WorkspaceTabPolicy.validated(
+            current: .terminal,
+            available: [.changes, .artifacts, .evidence, .terminal]) == .terminal)
     }
 }

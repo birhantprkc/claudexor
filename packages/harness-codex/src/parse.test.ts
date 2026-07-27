@@ -154,6 +154,7 @@ describe("parseCodexEvent", () => {
 
     const types = events.map((e) => e.type);
     expect(types).toContain("started");
+    expect(types.filter((type) => type === "started")).toHaveLength(1);
     expect(types).toContain("tool_call");
     expect(types).toContain("tool_result");
     expect(types).toContain("file_change");
@@ -320,6 +321,14 @@ describe("parseCodexEvent", () => {
       parseCodexEvent({ type: "item.started", item: { type: "agent_message" } }, "s1"),
     ).toBeNull();
     expect(parseCodexEvent({ type: "something.new" }, "s1")).toBeNull();
+  });
+
+  it("uses turn.started only as a fallback when thread.started is absent", () => {
+    const state: CodexParseState = {};
+    expect(parseCodexEvent({ type: "turn.started", turn_id: "t1" }, "s1", state)).toEqual([
+      expect.objectContaining({ type: "started", session_id: "s1" }),
+    ]);
+    expect(parseCodexEvent({ type: "turn.started", turn_id: "t2" }, "s1", state)).toEqual([]);
   });
 
   it("resolves a started web_search query from action when the top-level query is empty", () => {

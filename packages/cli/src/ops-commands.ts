@@ -106,7 +106,9 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
         /* not reachable — start a fresh daemon below */
       }
     }
-    const daemonScript = fileURLToPath(new URL("./claudexord.js", import.meta.url));
+    const daemonScript =
+      process.env["CLAUDEXOR_DAEMON_ENTRY"] ??
+      fileURLToPath(new URL("./claudexord.js", import.meta.url));
     // Startup stderr goes to the daemon log (append), not the void — a crash
     // before the daemon's own logging starts must leave evidence for
     // `claudexor daemon logs`.

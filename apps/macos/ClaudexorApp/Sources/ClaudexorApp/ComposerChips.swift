@@ -28,7 +28,7 @@ struct HarnessAccountChip: View {
     }
     private var profiles: [CredentialProfileEntry] {
         guard let current else { return [] }
-        return model.credentialProfiles.filter { $0.profile.harnessId == current.rawValue }
+        return model.activeCredentialProfiles.filter { $0.profile.harnessId == current.rawValue }
     }
 
     var body: some View {

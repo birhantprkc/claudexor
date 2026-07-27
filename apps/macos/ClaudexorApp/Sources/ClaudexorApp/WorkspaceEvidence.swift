@@ -9,15 +9,22 @@ import ClaudexorKit
 // section (collapsed → the heavy artifact/diagnostics content is lazy).
 
 struct WorkspaceEvidenceView: View {
+    let locationID: ExecutionLocationID
     let runIds: [String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             if runIds.count == 1, let runId = runIds.first {
-                RunEvidenceSection(runId: runId, expandedByDefault: true)
+                RunEvidenceSection(
+                    locationID: locationID,
+                    runId: runId,
+                    expandedByDefault: true)
             } else {
                 ForEach(runIds, id: \.self) { runId in
-                    RunEvidenceSection(runId: runId, expandedByDefault: false)
+                    RunEvidenceSection(
+                        locationID: locationID,
+                        runId: runId,
+                        expandedByDefault: false)
                 }
             }
         }
@@ -29,17 +36,20 @@ struct WorkspaceEvidenceView: View {
 /// the diagnostics blob is present (RunEvidenceView reads `diagnosticText`).
 struct RunEvidenceSection: View {
     @Environment(AppModel.self) private var model
+    let locationID: ExecutionLocationID
     let runId: String
     let expandedByDefault: Bool
     @State private var expanded = false
     @State private var loadedRunId: String?
 
-    private var run: TaskRun? { model.task(runId) }
+    private var run: TaskRun? { model.task(runId, at: locationID) }
 
     var body: some View {
         if expandedByDefault {
             content
-                .task(id: runId) { await loadDetailOnce() }
+                .task(id: "\(locationID.rawValue)|\(runId)") {
+                    await loadDetailOnce()
+                }
         } else {
             DisclosureGroup(isExpanded: $expanded) {
                 if expanded { content }
@@ -60,7 +70,7 @@ struct RunEvidenceSection: View {
 
     @ViewBuilder private var content: some View {
         if let run {
-            RunEvidenceView(task: run)
+            RunEvidenceView(locationID: locationID, task: run)
         } else {
             Text("This run is no longer available.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -68,6 +78,14 @@ struct RunEvidenceSection: View {
     }
 
     private func loadDetailOnce() async {
+        if locationID != .local {
+            guard loadedRunId != runId,
+                  model.task(runId, at: locationID) != nil
+            else { return }
+            await model.loadRunDetail(runId, locationID: locationID)
+            loadedRunId = runId
+            return
+        }
         guard Self.needsDetailLoad(
             runId: runId,
             loadedRunId: loadedRunId,

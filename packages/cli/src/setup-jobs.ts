@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
@@ -19,7 +19,6 @@ import {
   SetupNativeCommandReceipt,
   type ControlSetupJob,
   type ControlSetupJobListFilter,
-  type SetupDeviceCodeDisclosure,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
 import * as NativeLogin from "./native-login.js";
@@ -42,7 +41,6 @@ import {
   captureExecutableEvidence,
   commandDigest,
   readLoginManifest,
-  readRunnerDeviceCode,
   readRunnerResult,
   readRunnerState,
   sealLoginManifest,
@@ -53,6 +51,15 @@ import {
   type SetupLoginRunnerState,
 } from "./setup-login-protocol.js";
 import { SetupSupervisor } from "./setup-supervisor.js";
+import {
+  awaitingSetupUserMessage,
+  clientPtyWaitingPatch,
+  isDeviceCodeSetupJob,
+  projectSetupDeviceCode,
+  removeSetupDeviceCodeSidecar,
+  setupLoginDeadlines,
+  setupTransportConflict,
+} from "./setup-client-pty.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
@@ -160,53 +167,9 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         detached: true,
         stdio: "ignore",
       }));
-  function iso(): string {
-    return now().toISOString();
-  }
-  /** A device-code (app-server) login is identified by its authorized argv —
-   * the sealed manifest args carry `app-server` for that flow only. */
-  function isDeviceCodeJob(job: ControlSetupJob): boolean {
-    return job.authorization?.args.includes("app-server") ?? false;
-  }
-  function awaitingUserMessage(job: ControlSetupJob): string {
-    return isDeviceCodeJob(job)
-      ? `Complete ${job.harness} sign-in: open the URL and enter the one-time code shown in Claudexor.`
-      : `Complete ${job.harness} native login in Terminal.`;
-  }
-  /** The transient device-code disclosure the runner wrote, projected at READ
-   * time onto a snapshot/event. Never journaled: only surfaced while the login
-   * is genuinely awaiting the user (the sidecar is removed on terminalization).
-   * The one-time userCode rides this projection only (INV-062 / D-17). */
-  function projectDeviceCode(job: ControlSetupJob): SetupDeviceCodeDisclosure | undefined {
-    if (!ACTIVE_SETUP_STATES.has(job.state) || job.phase !== "awaiting_user") return undefined;
-    if (!isDeviceCodeJob(job) || !job.authorization) return undefined;
-    let sidecar: ReturnType<typeof readRunnerDeviceCode>;
-    try {
-      sidecar = readRunnerDeviceCode(store.paths(job.jobId).runnerDeviceCode);
-    } catch {
-      return undefined;
-    }
-    if (
-      !sidecar ||
-      sidecar.jobId !== job.jobId ||
-      sidecar.executionId !== job.authorization.executionId
-    )
-      return undefined;
-    return {
-      flow: sidecar.flow,
-      verificationUrl: sidecar.verificationUrl,
-      userCode: sidecar.userCode,
-    };
-  }
-  /** Remove the transient device-code sidecar once a login is terminal so the
-   * one-time code stops being projected. Best-effort; the journal is authority. */
-  function removeDeviceCodeSidecar(jobId: string): void {
-    try {
-      rmSync(store.paths(jobId).runnerDeviceCode, { force: true });
-    } catch {
-      /* best-effort; the code is invalid once terminal regardless */
-    }
-  }
+  const iso = () => now().toISOString();
+  const projectDeviceCode = (job: ControlSetupJob) =>
+    projectSetupDeviceCode(job, store.paths(job.jobId).runnerDeviceCode);
   function update(
     jobId: string,
     patch: Partial<ControlSetupJob>,
@@ -249,7 +212,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     });
     // The transient device-code disclosure is invalid once terminal — drop the
     // sidecar so its one-time code stops being projected (INV-062 / D-17).
-    removeDeviceCodeSidecar(jobId);
+    removeSetupDeviceCodeSidecar(store.paths(jobId).runnerDeviceCode);
     logAfterMutation(jobId, message);
     return done;
   }
@@ -678,7 +641,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     if (job.phase === "launching") {
       update(jobId, {
         phase: "awaiting_user",
-        message: awaitingUserMessage(job),
+        message: awaitingSetupUserMessage(job),
       });
     }
     // Armed for launching AND already-awaiting_user adoption (a successor
@@ -753,7 +716,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     // itself (the `--device-auth` Terminal flow or the app-server device-code
     // flow, whose argv carries `app-server`).
     const deviceAuthRemedy =
-      job.authorization?.args.includes("--device-auth") || isDeviceCodeJob(job)
+      job.authorization?.args.includes("--device-auth") || isDeviceCodeSetupJob(job)
         ? " If the sign-in page rejected your one-time code, enable ChatGPT → Settings → Security → " +
           '"Allow device code login" and retry, or use `claudexor auth login codex --browser-redirect`.'
         : "";
@@ -878,7 +841,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   const armedDisclosureWatchers = new Set<string>();
   function armDeviceCodeDisclosureWatcher(jobId: string): void {
     const job = store.status(jobId);
-    if (!isDeviceCodeJob(job)) return;
+    if (!isDeviceCodeSetupJob(job)) return;
     // Idempotent: create, permit-flip, and reconcile-adopt may each arm.
     if (armedDisclosureWatchers.has(jobId)) return;
     armedDisclosureWatchers.add(jobId);
@@ -909,7 +872,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     if (current.phase === "launching") {
       update(jobId, {
         phase: "awaiting_user",
-        message: awaitingUserMessage(current),
+        message: awaitingSetupUserMessage(current),
       });
       armDeviceCodeDisclosureWatcher(jobId);
     }
@@ -930,6 +893,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       await observeAndPermit(jobId, state);
     } else if (
       !state &&
+      job.transport !== "client_pty" &&
       job.phase === "launching" &&
       job.startedAt &&
       now().getTime() - Date.parse(job.startedAt) >= launcherTimeoutMs
@@ -1094,7 +1058,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     // The device-code flow is driven by the daemon-hosted app-server runner and
     // needs no Terminal, so it is not macOS-gated. The legacy Terminal handoff
     // stays macOS-only.
-    if (!deviceCode && platform !== "darwin") {
+    if (!deviceCode && job.transport !== "client_pty" && platform !== "darwin") {
       return finish(
         job.jobId,
         "failed",
@@ -1109,6 +1073,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const executionId = randomUUID();
       const executable = captureExecutableEvidence(spec.binary);
       const authorizedCommandDigest = commandDigest(executable, spec.args);
+      const { loginDeadlineAt, permitDeadlineAt } = setupLoginDeadlines(
+        now(),
+        loginTimeoutMs,
+        launcherTimeoutMs,
+        job.transport,
+      );
       const manifest = sealLoginManifest({
         version: SETUP_LOGIN_PROTOCOL_VERSION,
         jobId: job.jobId,
@@ -1134,7 +1104,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         statePath: paths.runnerState,
         resultPath: paths.runnerResult,
         permitPath: paths.runnerPermit,
-        permitDeadlineAt: new Date(now().getTime() + launcherTimeoutMs).toISOString(),
+        permitDeadlineAt,
         executable,
         commandDigest: authorizedCommandDigest,
       });
@@ -1147,7 +1117,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         const waiting = update(job.jobId, {
           state: "waiting_for_input",
           phase: "launching",
-          deadlineAt: new Date(now().getTime() + loginTimeoutMs).toISOString(),
+          deadlineAt: loginDeadlineAt,
           startedAt: iso(),
           command: spec.displayCommand,
           authorization: {
@@ -1185,6 +1155,27 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         runner.unref();
         return waiting;
       }
+      if (job.transport === "client_pty") {
+        const authorization = {
+          executionId,
+          executable,
+          args: [...spec.args],
+          commandDigest: authorizedCommandDigest,
+          manifestDigest: manifest.manifestDigest,
+        };
+        const waiting = update(
+          job.jobId,
+          clientPtyWaitingPatch({
+            job,
+            deadlineAt: loginDeadlineAt,
+            startedAt: iso(),
+            command: spec.displayCommand,
+            authorization,
+          }),
+        );
+        log(job.jobId, `client_pty attach prepared: ${paths.manifest}`);
+        return waiting;
+      }
       // External-risk disclosure (v3.0.3, Bible): a browser-based OpenAI
       // sign-in completed in a browser holding ANOTHER account's session can
       // revoke sibling sessions (incl. the ChatGPT desktop app) server-side.
@@ -1199,7 +1190,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const waiting = update(job.jobId, {
         state: "waiting_for_input",
         phase: "launching",
-        deadlineAt: new Date(now().getTime() + loginTimeoutMs).toISOString(),
+        deadlineAt: loginDeadlineAt,
         startedAt: iso(),
         command: spec.displayCommand,
         authorization: {
@@ -1306,6 +1297,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         // --browser-redirect request must never be silently answered with the
         // active device-auth job.
         if ((active.profileId ?? null) === (profileBinding?.profileId ?? null)) {
+          const transportConflict = setupTransportConflict(active, request.transport);
+          if (transportConflict) {
+            throw Object.assign(new Error(transportConflict), { status: 409 });
+          }
           // The meaningful flow distinction for codex is the legacy Terminal
           // localhost-redirect ("login" with no app-server / --device-auth argv)
           // vs the app-server device-code / browser-callback flows. A mismatch
@@ -1368,6 +1363,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           jobId,
           harness,
           action,
+          transport: request.transport,
           state: "queued",
           phase: "preparing",
           command: null,

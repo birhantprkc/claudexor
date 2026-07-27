@@ -1,0 +1,36 @@
+{
+  "$ref": "#/definitions/ControlDirectoryEntry",
+  "definitions": {
+    "ControlDirectoryEntry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "directory",
+            "file"
+          ]
+        },
+        "readable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "kind",
+        "readable"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

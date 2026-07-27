@@ -444,7 +444,12 @@ describe("Control API schemas", () => {
       action: "login",
       authRequest: "subscription",
     });
-    expect(jobReq).toEqual({ harness: "cursor", action: "login", authRequest: "subscription" });
+    expect(jobReq).toEqual({
+      harness: "cursor",
+      action: "login",
+      authRequest: "subscription",
+      transport: "daemon",
+    });
     expect(() =>
       ControlSetupJobCreateRequest.parse({ harness: "codex", action: "login" }),
     ).toThrow();

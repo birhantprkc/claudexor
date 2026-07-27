@@ -1,0 +1,77 @@
+{
+  "$ref": "#/definitions/ControlDirectoryListing",
+  "definitions": {
+    "ControlDirectoryListing": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "home": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "directory",
+                  "file"
+                ]
+              },
+              "readable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "path",
+              "kind",
+              "readable"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1000
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when more actionable entries existed than the bounded response contains."
+        }
+      },
+      "required": [
+        "path",
+        "home",
+        "parent",
+        "entries",
+        "truncated"
+      ],
+      "additionalProperties": false,
+      "description": "A home-contained server directory listing for the remote project picker."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

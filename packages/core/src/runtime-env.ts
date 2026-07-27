@@ -74,6 +74,13 @@ export function normalizedHarnessPath(
   const runnerDir = managedRunnerNodeDir(execPath, platform);
   const preferred = [
     ...(runnerDir ? [runnerDir] : []),
+    // SSH harness installers deliberately write here. Keep this app-owned
+    // prefix ahead of legacy ~/.local or managed-node shims so a successful
+    // remote install cannot remain shadowed by an older vendor CLI. The remote
+    // wrapper sets the marker; local runtimes never probe this remote-only path.
+    ...(source.CLAUDEXOR_REMOTE_RUNTIME === "1"
+      ? [join(home, ".claudexor", "remote", "vendor", "bin")]
+      : []),
     join(home, ".claudexor", "node", "bin"),
     join(home, ".local", "bin"),
     join(home, ".npm-global", "bin"),

@@ -10,6 +10,9 @@
 #   # unsigned local bundle + ZIP:
 #   apps/macos/scripts/build-app.sh
 #
+#   # unsigned local bundle with four signed development SSH runtimes:
+#   CLAUDEXOR_DEV_REMOTE_RUNTIME=1 apps/macos/scripts/build-app.sh
+#
 #   # unsigned local bundle + ZIP + DMG:
 #   MAKE_DMG=1 apps/macos/scripts/build-app.sh
 #
@@ -49,6 +52,11 @@ BUILD="${CLAUDEXOR_BUILD:-$(date +%Y%m%d%H%M)}"
 # closures carry an identical stamp — export it for any child closure build.
 BUILD_SHA="${CLAUDEXOR_BUILD_SHA:-$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)}"
 export CLAUDEXOR_BUILD_SHA="$BUILD_SHA"
+DEV_REMOTE_RUNTIME="${CLAUDEXOR_DEV_REMOTE_RUNTIME:-0}"
+if [ "$DEV_REMOTE_RUNTIME" = "1" ] && [ -n "${SIGN_IDENTITY:-}" ]; then
+  echo "ERROR: CLAUDEXOR_DEV_REMOTE_RUNTIME is for unsigned local bundles only" >&2
+  exit 1
+fi
 
 # On macOS, Homebrew's ad-hoc-signed Node can be killed by the OS code-signing
 # monitor during bundling. Prefer a notarized Node under ~/.claudexor/node/bin
@@ -59,7 +67,11 @@ if [ -d "$HOME/.claudexor/node/bin" ]; then
 fi
 
 echo "==> Building release binary (Swift)"
-( cd "$APP_PKG" && swift build -c release )
+SWIFT_BUILD_ARGS=(-c release)
+if [ "$DEV_REMOTE_RUNTIME" = "1" ]; then
+  SWIFT_BUILD_ARGS+=(-Xswiftc -DCLAUDEXOR_DEV_REMOTE_RUNTIME)
+fi
+( cd "$APP_PKG" && swift build "${SWIFT_BUILD_ARGS[@]}" )
 BIN="$APP_PKG/.build/release/ClaudexorApp"
 [ -x "$BIN" ] || { echo "ERROR: release binary not found at $BIN" >&2; exit 1; }
 
@@ -149,6 +161,7 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   REPO_ROOT="$(cd "$MACOS_DIR/../.." && pwd)"
   ENGINE_JS="$APP/Contents/Resources/claudexord.bundle.cjs"
+  CLI_JS="$APP/Contents/Resources/claudexor.bundle.cjs"
   # esbuild emits CommonJS for the self-contained helper. Keep the .cjs
   # suffix explicit so Node does not inherit the repository's type=module
   # package scope during local/package smoke runs.
@@ -175,6 +188,18 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
     echo "    claudexord.bundle.cjs $(wc -c < "$ENGINE_JS" | tr -d ' ') bytes"
   else
     echo "ERROR: esbuild bundle failed; cannot build self-contained app" >&2
+    exit 1
+  fi
+  echo "==> Bundling claudexor CLI for remote runtimes"
+  if ( cd "$REPO_ROOT" && pnpm exec esbuild packages/cli/dist/cli.js \
+        --bundle --platform=node --format=cjs --target=node22 \
+        --banner:js="const CLAUDEXOR_BUNDLE_URL = require('node:url').pathToFileURL(__filename).href;" \
+        --define:import.meta.url=CLAUDEXOR_BUNDLE_URL \
+        --define:process.env.CLAUDEXOR_BUILD_SHA="\"$BUILD_SHA\"" \
+        --outfile="$CLI_JS" >/dev/null ); then
+    echo "    claudexor.bundle.cjs $(wc -c < "$CLI_JS" | tr -d ' ') bytes"
+  else
+    echo "ERROR: CLI bundle failed; remote runtimes would be incomplete" >&2
     exit 1
   fi
   echo "==> Bundling native-login runner"
@@ -229,7 +254,18 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   mkdir -p "$(dirname "$PROCESS_IDENTITY_HELPER")"
   cp "$REPO_ROOT/packages/core/dist/native/claudexor-process-identity" "$PROCESS_IDENTITY_HELPER"
   chmod 755 "$PROCESS_IDENTITY_HELPER"
-  if ! "$PROCESS_IDENTITY_HELPER" --pid $$ | grep -Eq '^claudexor-process-identity-v2[[:space:]]'; then
+  # macOS can briefly reject the first launch of a freshly copied ad-hoc-signed
+  # Mach-O while its code-signing monitor registers the new file. Keep the
+  # probe strict, but tolerate that bounded local race.
+  PROCESS_IDENTITY_PROBE_OK=0
+  for _ in 1 2 3; do
+    if "$PROCESS_IDENTITY_HELPER" --pid $$ | grep -Eq '^claudexor-process-identity-v2[[:space:]]'; then
+      PROCESS_IDENTITY_PROBE_OK=1
+      break
+    fi
+    sleep 0.2
+  done
+  if [ "$PROCESS_IDENTITY_PROBE_OK" -ne 1 ]; then
     echo "ERROR: bundled process-identity helper failed its offline probe" >&2
     exit 1
   fi
@@ -367,6 +403,21 @@ if [ "${CLAUDEXOR_NO_ENGINE_BUNDLE:-0}" != "1" ]; then
   else
     echo "ERROR: runtime closure cannot be built from the packaged app layout (D-2)" >&2
     exit 1
+  fi
+
+  if [ "$DEV_REMOTE_RUNTIME" = "1" ]; then
+    echo "==> Building signed development SSH runtimes (four targets)"
+    DEV_REMOTE_DIR="$APP/Contents/Resources/remote-runtime-dev"
+    node "$REPO_ROOT/scripts/build-dev-remote-runtime-bundle.mjs" \
+      --version "$VERSION" \
+      --build-sha "$BUILD_SHA" \
+      --resources "$APP/Contents/Resources" \
+      --out "$DEV_REMOTE_DIR"
+    [ -f "$DEV_REMOTE_DIR/authority.json" ] \
+      || { echo "ERROR: development remote runtime authority is missing" >&2; exit 1; }
+    [ -f "$DEV_REMOTE_DIR/remote-runtime-manifest.json" ] \
+      || { echo "ERROR: development remote runtime manifest is missing" >&2; exit 1; }
+    echo "    bundled development SSH runtimes ($(du -sh "$DEV_REMOTE_DIR" | cut -f1 | tr -d ' '))"
   fi
 fi
 

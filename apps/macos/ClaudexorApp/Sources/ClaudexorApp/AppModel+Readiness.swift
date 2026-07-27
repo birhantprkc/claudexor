@@ -40,7 +40,7 @@ extension AppModel {
         }
         // Engine-level per-harness settings gate routing; the composer must
         // mirror that truth instead of offering a chip the engine will reject.
-        if settingsSnapshot?.harnesses?[family.rawValue]?.enabled == false {
+        if activeSettingsSnapshot?.harnesses?[family.rawValue]?.enabled == false {
             return HarnessAvailability(family: family, available: false,
                                        reason: "\(family.label) is disabled in Settings (Per-Harness Defaults).",
                                        intent: intent, info: info)

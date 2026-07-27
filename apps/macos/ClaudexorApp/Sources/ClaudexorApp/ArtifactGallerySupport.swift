@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ClaudexorKit
 
 // Support types for the artifacts gallery, split out of ArtifactGalleryView.swift
 // so the view file stays under the readability cap. These are pure/standalone
@@ -70,10 +71,16 @@ enum GalleryLoadDecision: Equatable {
 /// TRACKED handoff root (`ExternalArtifactHandoff`) so a bounded-age startup
 /// sweep can reclaim it — the write-side hardening is unchanged.
 @MainActor
-func openArtifactExternally(model: AppModel, runId: String, path: String, produced: Bool) async {
+func openArtifactExternally(
+    model: AppModel,
+    locationID: ExecutionLocationID,
+    runId: String,
+    path: String,
+    produced: Bool
+) async {
     let data = produced
-        ? await model.producedBytes(runId: runId, path: path)
-        : await model.artifactBytes(runId: runId, path: path)
+        ? await model.producedBytes(runId: runId, path: path, locationID: locationID)
+        : await model.artifactBytes(runId: runId, path: path, locationID: locationID)
     guard let data else { return }
     do {
         let url = try ExternalArtifactHandoff.standard()

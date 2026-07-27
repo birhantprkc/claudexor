@@ -181,7 +181,7 @@ struct AccountsTriggerRow: View {
     /// quiet row — it must not compete with the thread list.
     private var trigger: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            if model.health != .connected {
+            if model.gateway(for: model.activeExecutionLocation) == nil {
                 Image(systemName: "wifi.slash").font(.callout).foregroundStyle(.secondary)
             } else {
                 Circle()
@@ -221,9 +221,22 @@ struct AccountsPopover: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 AccountsSurface(family: nil) { row in
-                    // Routed model-level so the AuthSheet survives this popover
-                    // dismissing.
-                    model.authSheetTarget = AuthSheetTarget(family: row.family, profileId: row.profileId, autoStartLogin: true)
+                    if let connectionID = model.activeExecutionLocation.remoteConnectionID,
+                       let harness = SetupHarness(rawValue: row.family.setupHarnessId)
+                    {
+                        Task {
+                            await model.startRemoteLogin(
+                                connectionID: connectionID,
+                                harness: harness,
+                                profileID: row.profileId)
+                        }
+                    } else {
+                        // Routed model-level so the AuthSheet survives this
+                        // popover dismissing.
+                        model.authSheetTarget = AuthSheetTarget(
+                            family: row.family, profileId: row.profileId,
+                            autoStartLogin: true)
+                    }
                     isPresented = false
                 }
                 autoBalanceToggle
@@ -501,7 +514,7 @@ struct AccountsSurface: View {
         addError = nil
         defer { adding = false }
         let display = addDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let existing = Set(model.credentialProfiles
+        let existing = Set(model.activeCredentialProfiles
             .filter { $0.profile.harnessId == harness }
             .map(\.profile.profileId))
         let id = AccountsPresentation.generatedProfileId(displayName: display, existing: existing)

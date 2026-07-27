@@ -16,6 +16,54 @@ extension View {
 // screen stays under the readability ratchet. Same views, same behavior — the
 // empty-conversation placeholder and the native-session footer.
 extension ThreadsScreen {
+    /// Project-aware intents need a project scope. A selected thread uses its own
+    /// repo; a draft binds its first turn to the current project.
+    var threadHasProject: Bool {
+        if model.selectedThreadId != nil {
+            return model.currentThread?.repoRoot?.isEmpty == false
+        }
+        return !model.normalizedProjectRoot.isEmpty
+    }
+
+    var reviewerPanelTokens: [String] {
+        ComposerOptionParser.splitOptionTokens(reviewerPanelText)
+    }
+
+    var reviewerPanelEntries: [ReviewerPanelEntry] {
+        let efforts = Set(model.harnesses.flatMap(\.effortLevels))
+        return reviewerPanelTokens.compactMap {
+            ComposerOptionParser.parseReviewerPanelEntry($0, effortLevels: efforts)
+        }
+    }
+
+    var protectedApprovalTokens: [String] {
+        ComposerOptionParser.splitOptionTokens(protectedApprovalsText)
+    }
+
+    var protectedPathApprovals: [ProtectedPathApproval] {
+        protectedApprovalTokens.compactMap(
+            ComposerOptionParser.parseProtectedPathApproval)
+    }
+
+    /// Folder label for either the immutable selected thread location or the draft.
+    var projectChipName: String {
+        if model.selectedThreadId != nil, let thread = model.currentThread {
+            let folder =
+                thread.repoRoot.map { URL(fileURLWithPath: $0).lastPathComponent }
+                ?? "No project"
+            if let remote = model.selectedRemoteConnection {
+                return "\(remote.displayName) · \(folder)"
+            }
+            return folder
+        }
+        guard !model.normalizedProjectRoot.isEmpty else { return "Choose project" }
+        let folder = URL(fileURLWithPath: model.normalizedProjectRoot).lastPathComponent
+        if let connection = model.remoteConnection(for: model.draftExecutionLocation) {
+            return "\(connection.displayName) · \(folder)"
+        }
+        return folder
+    }
+
     var emptyConversation: some View {
         VStack(spacing: Theme.Spacing.md) {
             Image(systemName: "bubble.left.and.text.bubble.right")

@@ -23,6 +23,7 @@ const job = (jobId: string, phase: ControlSetupJob["phase"] = "preparing"): Cont
   jobId,
   harness: "codex",
   action: "login",
+  transport: "daemon",
   state: "queued",
   phase,
   command: null,

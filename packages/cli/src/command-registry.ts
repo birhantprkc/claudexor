@@ -1,4 +1,4 @@
-import { RETRY_COMMAND_SPECS } from "./retry-command-specs.js";
+import { REMOTE_COMMAND_SPECS, RETRY_COMMAND_SPECS } from "./additional-command-specs.js";
 import {
   CLI_FLAGS,
   FROZEN_REVIEW_FLAG_NAMES,
@@ -8,7 +8,6 @@ import {
 export { CLI_FLAGS, type CliFlagKind, type CliFlagSpec } from "./command-flags.js";
 
 export type CliMutability = "read" | "write" | "delivery" | "ops";
-
 export interface CliCommandSpec {
   readonly id: string;
   readonly aliases?: readonly string[];
@@ -222,6 +221,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     mutability: "ops",
     stability: "stable",
   },
+  ...REMOTE_COMMAND_SPECS,
   {
     id: "gc",
     usageArgs: "[--dry-run]",
@@ -265,10 +265,10 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "harness",
-    usageArgs: "list [--all]",
-    summary: "List real harnesses (--all includes fakes)",
-    flags: ["all", "json"],
-    mutability: "read",
+    usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run]",
+    summary: "List harnesses or run one server-owned allowlisted installer",
+    flags: ["all", "dry-run", "json"],
+    mutability: "ops",
     stability: "stable",
   },
   {

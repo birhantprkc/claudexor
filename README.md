@@ -46,6 +46,7 @@ composer](docs/assets/app-agent-run.jpg)
 
 - [Prerequisites](#prerequisites)
 - [Install](#install)
+- [Remote SSH](#remote-ssh)
 - [Quickstart](#quickstart)
 - [Modes](#modes)
 - [Credential Profiles And Quota](#credential-profiles-and-quota)
@@ -100,6 +101,22 @@ The app is self-contained: it bundles its own daemon runtime and starts it
 on launch; installing the CLI is only needed for terminal use. (The v1.0.0
 DMG was unsigned — if you kept it, either upgrade or approve it via System
 Settings → Privacy & Security → Open Anyway.)
+
+## Remote SSH
+
+The macOS app can run a thread on a Linux or macOS SSH host while keeping the
+UI local. Add a concrete alias from `~/.ssh/config` in **Settings →
+Connections**, connect it, then choose a saved folder or **Browse on
+&lt;host&gt;…** from the project picker. The thread is permanently bound to that
+host and folder; changing either creates a new draft.
+
+Claudexor uses the system `/usr/bin/ssh`, so existing keys, ssh-agent,
+`known_hosts`, MFA and `ProxyJump` remain OpenSSH's responsibility. On first
+connection the app verifies and installs a signed, no-`sudo` runtime under
+`~/.claudexor/remote/`, then reaches its loopback-only control API through an
+SSH local forward. Vendor CLIs and their credentials remain on the server and
+are installed or logged in only after confirmation. Remote threads include an
+embedded SSH terminal and an explicit-port preview tunnel.
 
 ### Updates
 

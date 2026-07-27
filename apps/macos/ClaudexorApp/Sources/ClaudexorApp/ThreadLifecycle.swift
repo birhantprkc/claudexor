@@ -5,55 +5,178 @@ import ClaudexorKit
 /// the one PATCH /threads/:id endpoint; the app never invents thread state.
 extension AppModel {
     func openThread(_ id: String) async {
-        guard let client else { return }
+        await openThread(locationID: .local, id: id)
+    }
+
+    func openThread(locationID: ExecutionLocationID, id: String) async {
+        await loadThread(
+            locationID: locationID,
+            id: id,
+            mayReconnect: true,
+            preserveExistingDetail: false)
+    }
+
+    /// Refresh the already-visible thread without replacing the conversation
+    /// with the empty/loading state. Remote run streams call this repeatedly,
+    /// so clearing `selectedThreadDetail` here would make the whole feed flash
+    /// on every event.
+    func refreshOpenThread(locationID: ExecutionLocationID, id: String) async {
+        await loadThread(
+            locationID: locationID,
+            id: id,
+            mayReconnect: true,
+            preserveExistingDetail: true)
+    }
+
+    private func loadThread(
+        locationID: ExecutionLocationID,
+        id: String,
+        mayReconnect: Bool,
+        preserveExistingDetail: Bool
+    ) async {
+        let keepsVisibleDetail =
+            preserveExistingDetail
+            && selectedExecutionLocation == locationID
+            && selectedThreadId == id
+            && selectedThreadDetail?.thread.id == id
+        if gateway(for: locationID) == nil, let connectionID = locationID.remoteConnectionID {
+            selectedExecutionLocation = locationID
+            selectedThreadId = id
+            if !keepsVisibleDetail { selectedThreadDetail = nil }
+            pendingRemoteThreadSelection = (locationID, id)
+            await connectRemote(connectionID)
+        }
+        guard let requestClient = gateway(for: locationID) else {
+            selectedExecutionLocation = locationID
+            selectedThreadId = id
+            if !keepsVisibleDetail { selectedThreadDetail = nil }
+            threadStatus = "This host is offline. Reconnect it to load the conversation."
+            return
+        }
+        if pendingRemoteThreadSelection?.locationID == locationID,
+           pendingRemoteThreadSelection?.threadID == id
+        {
+            pendingRemoteThreadSelection = nil
+        }
         // View hydration is presentation-scoped. Once another thread is
         // selected, a later bounded runs refresh may evict this thread's
         // off-page Delegate family; reopening must be allowed to restore it.
-        let reconcileRunList = runListReconciliationNeeded || (
-            selectedThreadId != nil && selectedThreadId != id && !liveTasks.isEmpty)
-        if selectedThreadId != id { hydratedRunDetails.removeAll() }
+        let reconcileRunList = locationID == .local && (
+            runListReconciliationNeeded || (
+                selectedThreadId != nil && selectedThreadId != id && !liveTasks.isEmpty
+            )
+        )
+        if locationID == .local, selectedThreadId != id {
+            hydratedRunDetails.removeAll()
+        }
         threadLoadGeneration += 1
         let generation = threadLoadGeneration
+        selectedExecutionLocation = locationID
         selectedThreadId = id
-        selectedThreadDetail = nil
+        if !keepsVisibleDetail { selectedThreadDetail = nil }
         threadStatus = nil
         // Start the new thread fetch before reconciling the bounded global run
         // page. The two requests overlap, while the list pass reclaims any
         // detail-restored family from the previous selection in a quiet daemon.
-        let detailLoad = Task { try await client.threadDetail(id: id) }
+        let detailLoad = Task { try await requestClient.threadDetail(id: id) }
         if reconcileRunList {
             // Dirty-before-I/O: a direct A→B switch must retry reclamation if
             // this bounded list request fails, just like the draft detour.
             runListReconciliationNeeded = true
             let refreshSuccesses = successfulRunsRefreshes
             await refreshRuns()
-            guard selectedThreadId == id, threadLoadGeneration == generation else { return }
+            guard selectedExecutionLocation == locationID,
+                  selectedThreadId == id,
+                  threadLoadGeneration == generation
+            else { return }
             if successfulRunsRefreshes > refreshSuccesses {
                 runListReconciliationNeeded = false
             }
         }
         do {
             let detail = try await detailLoad.value
-            guard selectedThreadId == id, threadLoadGeneration == generation else { return }
+            guard selectedExecutionLocation == locationID,
+                  selectedThreadId == id,
+                  threadLoadGeneration == generation
+            else { return }
             selectedThreadDetail = detail
-            guard selectedThreadId == id, threadLoadGeneration == generation else { return }
+            guard selectedExecutionLocation == locationID,
+                  selectedThreadId == id, threadLoadGeneration == generation else { return }
             evictBackgroundRunData()
-            for turn in detail.turns.suffix(5) {
-                guard selectedThreadId == id, threadLoadGeneration == generation else { return }
-                if let runId = turn.runId {
-                    let missing = !liveTasks.contains(where: { $0.id == runId })
-                    if !missing || turn.run?.delegation?.requested == true {
-                        await ensureRunDetail(runId, insertingIfMissing: missing)
+            // Existing run projection is local-daemon scoped. Remote chat cards
+            // carry their server-owned run summaries inline and are refreshed by
+            // the remote poller, avoiding daemon-id collisions.
+            if locationID == .local {
+                for turn in detail.turns.suffix(5) {
+                    guard selectedThreadId == id, threadLoadGeneration == generation else { return }
+                    if let runId = turn.runId {
+                        let missing = !liveTasks.contains(where: { $0.id == runId })
+                        if !missing || turn.run?.delegation?.requested == true {
+                            await ensureRunDetail(runId, insertingIfMissing: missing)
+                        }
                     }
+                }
+            } else {
+                // Match local bounded hydration: completed remote turns carry
+                // detail-only apply/evidence fields that the runs list omits.
+                for turn in detail.turns.suffix(5) {
+                    guard selectedExecutionLocation == locationID,
+                          selectedThreadId == id,
+                          threadLoadGeneration == generation
+                    else { return }
+                    if let runID = turn.runId,
+                       remoteTasks[locationID]?.contains(where: { $0.id == runID }) == true
+                    {
+                        await loadRunDetail(runID, locationID: locationID)
+                    }
+                }
+                if let runID = detail.thread.headRunId,
+                   remoteTasks[locationID]?.first(where: {
+                       $0.id == runID
+                   })?.phase.isActive == true
+                {
+                    streamRemoteRun(
+                        locationID: locationID, runID: runID, threadID: id)
                 }
             }
         } catch {
-            guard selectedThreadId == id, threadLoadGeneration == generation else { return }
-            threadStatus = "Could not load thread: \(userMessage(for: error))"
+            guard selectedExecutionLocation == locationID,
+                  selectedThreadId == id, threadLoadGeneration == generation else { return }
+            if mayReconnect,
+               isRecoverableRemoteTransportFailure(error),
+               let connectionID = locationID.remoteConnectionID
+            {
+                let host = remoteConnection(for: locationID)?.displayName ?? "remote host"
+                threadStatus = "Reconnecting to \(host)…"
+                pendingRemoteThreadSelection = (locationID, id)
+                await disconnectRemote(connectionID)
+                await connectRemote(connectionID)
+                guard selectedExecutionLocation == locationID,
+                      selectedThreadId == id
+                else { return }
+                if gateway(for: locationID) != nil {
+                    await loadThread(
+                        locationID: locationID,
+                        id: id,
+                        mayReconnect: false,
+                        preserveExistingDetail: keepsVisibleDetail)
+                } else {
+                    threadStatus =
+                        remoteConnectionMessages[connectionID]
+                        ?? "Could not reconnect to \(host)."
+                }
+                return
+            }
+            let detail = locationID == .local
+                ? userMessage(for: error)
+                : userMessageForRemote(error)
+            threadStatus = "Could not load thread: \(detail)"
         }
     }
 
     func startDraftThread() {
+        let previousLocation = selectedExecutionLocation
+        let previousRoot = currentThread?.repoRoot
         runListReconciliationNeeded = runListReconciliationNeeded || !liveTasks.isEmpty
         hydratedRunDetails.removeAll()
         threadLoadGeneration += 1
@@ -69,6 +192,13 @@ extension AppModel {
         // a fresh one. nil => the new target repo's own trust default is the
         // baseline; a stale Full is never carried into an unrelated project draft.
         draftThreadAccess = nil
+        if previousLocation != .local, let previousRoot {
+            draftExecutionLocation = previousLocation
+            draftRemoteProjectRoot = previousRoot
+        } else if previousLocation == .local {
+            draftExecutionLocation = .local
+            draftRemoteProjectRoot = nil
+        }
     }
 
     /// Composer project chip — "No project (Ask only)" (QA-006). Returns the draft
@@ -80,49 +210,79 @@ extension AppModel {
     /// an MRU deletion.
     func clearProject() {
         if selectedThreadId != nil { startDraftThread() }
+        draftExecutionLocation = .local
+        draftRemoteProjectRoot = nil
         projectRoot = ""
     }
 
     /// Apply a run's reviewed patch through the server-owned delivery gate.
-    func applyRun(runId: String, mode: String = "apply") async -> String? {
-        guard let client else { return "Engine offline." }
+    func applyRun(
+        runId: String,
+        mode: String = "apply",
+        locationID requestedLocationID: ExecutionLocationID? = nil
+    ) async -> String? {
+        let locationID = requestedLocationID ?? selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
-            let result = try await client.apply(runId: runId, body: ApplyRunRequest(mode: mode))
-            if let index = liveTasks.firstIndex(where: { $0.id == runId }) {
-                liveTasks[index].deliveryReceipt = result
-            }
+            let result = try await requestClient.apply(
+                runId: runId, body: ApplyRunRequest(mode: mode))
+            mutateTask(runId, at: locationID) { $0.deliveryReceipt = result }
             guard result.applied else { return result.detail ?? "Apply was refused." }
-            await loadRunDetail(runId)
+            if locationID == .local {
+                await loadRunDetail(runId)
+            } else if let threadId = selectedThreadId {
+                await refreshRemoteThreads(locationID)
+                await openThread(locationID: locationID, id: threadId)
+            }
             route = .task(runId)
             return nil
         } catch { return "Apply failed: \(error)" }
     }
 
-    func retryRunExact(_ runId: String) async -> String? {
-        guard let client else { return "Engine offline." }
+    func retryRunExact(
+        _ runId: String,
+        locationID requestedLocationID: ExecutionLocationID? = nil
+    ) async -> String? {
+        let locationID = requestedLocationID ?? selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
-            let retry = try await client.retryRun(runId: runId)
-            await refreshRuns()
-            if let id = retry.runId {
+            let retry = try await requestClient.retryRun(runId: runId)
+            if locationID == .local {
+                await refreshRuns()
+            } else {
+                await refreshRemoteThreads(locationID)
+            }
+            if locationID == .local, let id = retry.runId {
                 route = .task(id)
                 stream(runId: id)
             }
-            if let threadId = selectedThreadId { await openThread(threadId) }
+            if let threadId = selectedThreadId {
+                await openThread(locationID: locationID, id: threadId)
+            }
             return nil
         } catch { return "Retry failed: \(userMessage(for: error))" }
     }
 
-    func loadRunAgainDraft(_ runId: String) async -> RunAgainDraft? {
-        guard let client else { return nil }
-        return try? await client.runAgainDraft(runId: runId)
+    func loadRunAgainDraft(
+        _ runId: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> RunAgainDraft? {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else { return nil }
+        return try? await requestClient.runAgainDraft(runId: runId)
     }
 
     func startRunAgain(_ draft: RunAgainDraft, prompt: String) async -> String? {
-        guard let client else { return "Engine offline." }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
-            let result = try await client.startRunAgain(request: draft.request, prompt: prompt)
-            await refreshRuns()
-            if case .started(let info) = result {
+            let result = try await requestClient.startRunAgain(
+                request: draft.request, prompt: prompt)
+            if locationID == .local {
+                await refreshRuns()
+            } else {
+                await refreshRemoteThreads(locationID)
+            }
+            if locationID == .local, case .started(let info) = result {
                 route = .task(info.runId)
                 stream(runId: info.runId)
             }
@@ -132,31 +292,78 @@ extension AppModel {
 
     /// Rename a thread: server-owned title via the existing PATCH.
     func renameThread(_ id: String, title: String) async {
-        guard let client else { threadStatus = "Engine offline — reconnect to rename."; return }
+        await renameThread(locationID: selectedExecutionLocation, id: id, title: title)
+    }
+
+    func renameThread(locationID: ExecutionLocationID, id: String, title: String) async {
+        guard let requestClient = gateway(for: locationID) else {
+            threadStatus = "Engine offline — reconnect to rename."; return
+        }
         do {
-            let updated = try await client.updateThread(id: id, body: UpdateThreadRequest(title: title))
-            applyThreadUpdate(updated)
-            await refreshThreads()
+            let updated = try await requestClient.updateThread(
+                id: id, body: UpdateThreadRequest(title: title))
+            if locationID == .local {
+                applyThreadUpdate(updated)
+                await refreshThreads()
+            } else {
+                await refreshRemoteThreads(locationID)
+                if selectedExecutionLocation == locationID, selectedThreadId == id {
+                    await openThread(locationID: locationID, id: id)
+                }
+            }
         } catch { threadStatus = userMessage(for: error) }
     }
 
     /// Archive (close) a thread; it stays inspectable, out of the active list.
     func archiveThread(_ id: String) async {
-        await setThreadState(id, state: "closed")
+        await setThreadState(locationID: selectedExecutionLocation, id: id, state: "closed")
+    }
+
+    func archiveThread(locationID: ExecutionLocationID, id: String) async {
+        await setThreadState(locationID: locationID, id: id, state: "closed")
     }
 
     /// Reopen a previously archived thread. The server ThreadState enum is
     /// `active | closed` — "open" is NOT a member and 400s.
     func reopenThread(_ id: String) async {
-        await setThreadState(id, state: "active")
+        await setThreadState(locationID: selectedExecutionLocation, id: id, state: "active")
     }
 
-    private func setThreadState(_ id: String, state: String) async {
-        guard let client else { threadStatus = "Engine offline — reconnect to change thread state."; return }
+    func reopenThread(locationID: ExecutionLocationID, id: String) async {
+        await setThreadState(locationID: locationID, id: id, state: "active")
+    }
+
+    private func setThreadState(
+        locationID: ExecutionLocationID,
+        id: String,
+        state: String
+    ) async {
+        guard let requestClient = gateway(for: locationID) else {
+            threadStatus = "Engine offline — reconnect to change thread state."; return
+        }
         do {
-            let updated = try await client.updateThread(id: id, body: UpdateThreadRequest(state: state))
-            applyThreadUpdate(updated)
-            await refreshThreads()
+            let updated = try await requestClient.updateThread(
+                id: id, body: UpdateThreadRequest(state: state))
+            if locationID == .local {
+                applyThreadUpdate(updated)
+                await refreshThreads()
+            } else {
+                await refreshRemoteThreads(locationID)
+            }
         } catch { threadStatus = userMessage(for: error) }
+    }
+}
+
+func isRecoverableRemoteTransportFailure(_ error: Error) -> Bool {
+    guard let urlError = error as? URLError else { return false }
+    switch urlError.code {
+    case .cannotConnectToHost,
+         .networkConnectionLost,
+         .notConnectedToInternet,
+         .timedOut,
+         .cannotLoadFromNetwork:
+        return true
+    default:
+        return false
     }
 }

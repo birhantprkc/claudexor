@@ -88,6 +88,15 @@
               "const": "login",
               "description": "The daemon-managed native-login action."
             },
+            "transport": {
+              "type": "string",
+              "enum": [
+                "daemon",
+                "client_pty"
+              ],
+              "description": "Who owns the interactive terminal: daemon opens a local Terminal, or the client attaches its PTY.",
+              "default": "daemon"
+            },
             "profileId": {
               "type": [
                 "string",

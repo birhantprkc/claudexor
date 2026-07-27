@@ -19,6 +19,29 @@ extension GatewayClient {
         try await mutateProject(path: "projects/\(id)/relink", root: root)
     }
 
+    public func listRemoteDirectory(path: String? = nil) async throws -> RemoteDirectoryListing {
+        let query = path.map { [URLQueryItem(name: "path", value: $0)] } ?? []
+        let req = request("filesystem/directories", method: "GET", queryItems: query)
+        let (data, resp) = try await session.data(for: req)
+        try Self.requireOK(resp, data: data)
+        return try Self.decoder.decode(RemoteDirectoryListing.self, from: data)
+    }
+
+    public func fetchProjectFile(
+        projectID: String,
+        relativePath: String
+    ) async throws -> (data: Data, contentType: String) {
+        let req = request(
+            "projects/\(projectID)/file",
+            method: "GET",
+            queryItems: [URLQueryItem(name: "path", value: relativePath)])
+        let (data, resp) = try await session.data(for: req)
+        try Self.requireOK(resp, data: data)
+        let contentType = (resp as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+        return (data, contentType)
+    }
+
     private func mutateProject(path: String, root: String) async throws -> RegisteredProject {
         var req = request(path, method: "POST")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

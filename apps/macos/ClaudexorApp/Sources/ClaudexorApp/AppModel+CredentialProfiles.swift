@@ -19,27 +19,30 @@ extension AppModel {
             }
             return
         }
-        guard let client else {
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
             threadStatus = "Engine offline — reconnect to change the account."
             return
         }
         do {
-            let updated = try await client.updateThread(
+            let updated = try await requestClient.updateThread(
                 id: id,
                 body: UpdateThreadRequest(
                     primaryHarness: harnessId.map { .some($0) },
                     eligibleHarnesses: profileId == nil ? nil : harnessId.map { [$0] },
                     credentialProfileId: .some(profileId)))
-            applyThreadUpdate(updated)
+            applyThreadUpdate(updated, at: locationID)
         } catch {
-            threadStatus = userMessage(for: error)
+            if selectedExecutionLocation == locationID, selectedThreadId == id {
+                threadStatus = userMessage(for: error)
+            }
         }
     }
 
     /// Registered credential profiles + doctor readiness (INV-135). Drives the
     /// accounts popover; a failing fetch leaves the last snapshot in place.
-    func refreshCredentialProfiles() async {
-        _ = await loadCredentialProfiles()
+    func refreshCredentialProfiles(locationID: ExecutionLocationID? = nil) async {
+        _ = await loadCredentialProfiles(locationID: locationID)
     }
 
     /// Load credential profiles, returning the honest error on failure (batch-6
@@ -47,12 +50,22 @@ extension AppModel {
     /// state + retry) from an EMPTY registry ("No accounts yet"). nil = loaded OK
     /// (the arrays are updated); non-nil = the failure message (last snapshot kept).
     @discardableResult
-    func loadCredentialProfiles() async -> String? {
-        guard let client else { return "Engine offline — reconnect to load accounts." }
+    func loadCredentialProfiles(locationID requestedLocationID: ExecutionLocationID? = nil) async
+        -> String?
+    {
+        let locationID = requestedLocationID ?? activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return "Engine offline — reconnect to load accounts."
+        }
         do {
-            let response = try await client.credentialProfiles()
-            credentialProfiles = response.profiles
-            harnessAccounts = response.harnessAccounts
+            let response = try await requestClient.credentialProfiles()
+            if locationID == .local {
+                credentialProfiles = response.profiles
+                harnessAccounts = response.harnessAccounts
+            } else {
+                remoteCredentialProfiles[locationID] = response.profiles
+                remoteHarnessAccounts[locationID] = response.harnessAccounts
+            }
             return nil
         } catch {
             // Endpoint absent (older daemon) / offline / malformed config — keep
@@ -66,7 +79,7 @@ extension AppModel {
     /// the projection is absent (pre-V11b daemon) — callers then fall back to
     /// client-derived state.
     func harnessAccounts(for harnessId: String) -> HarnessAccounts? {
-        harnessAccounts.first { $0.harnessId == harnessId }
+        activeHarnessAccounts.first { $0.harnessId == harnessId }
     }
 
     /// Toggle a credential profile's Enabled (V11b — the Enabled row of the
@@ -74,14 +87,17 @@ extension AppModel {
     /// so Enabled/Active reflect wire truth. Returns a refusal string on failure.
     @discardableResult
     func setProfileEnabled(harnessId: String, profileId: String, enabled: Bool) async -> String? {
-        guard let client else { return "Engine offline — reconnect to change the account." }
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return "Engine offline — reconnect to change the account."
+        }
         do {
-            _ = try await client.updateCredentialProfile(
+            _ = try await requestClient.updateCredentialProfile(
                 harnessId: harnessId, profileId: profileId, enabled: enabled)
-            await refreshCredentialProfiles()
+            await refreshCredentialProfiles(locationID: locationID)
             return nil
         } catch {
-            await refreshCredentialProfiles()
+            await refreshCredentialProfiles(locationID: locationID)
             return userMessage(for: error)
         }
     }
@@ -93,9 +109,10 @@ extension AppModel {
     /// only the accounts projection reloads here. Returns nil on success.
     @discardableResult
     func setNativeCredentialsEnabled(harnessId: String, enabled: Bool) async -> String? {
+        let locationID = activeExecutionLocation
         let ok = await saveSettings(SettingsUpdateRequest(
             harnesses: [harnessId: HarnessSettingsPatch(nativeCredentialsEnabled: enabled)]))
-        await refreshCredentialProfiles()
+        await refreshCredentialProfiles(locationID: locationID)
         return ok ? nil : (settingsStatus ?? "Could not update the native login setting.")
     }
 
@@ -115,11 +132,14 @@ extension AppModel {
     /// invalid slug or harness) is returned verbatim for inline display.
     func createCredentialProfile(harnessId: String, profileId: String, displayName: String?) async
         -> (entry: CredentialProfileEntry?, error: String?) {
-        guard let client else { return (nil, "Engine offline — reconnect to add an account.") }
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return (nil, "Engine offline — reconnect to add an account.")
+        }
         do {
-            let entry = try await client.createCredentialProfile(
+            let entry = try await requestClient.createCredentialProfile(
                 CreateCredentialProfileRequest(harnessId: harnessId, profileId: profileId, displayName: displayName))
-            await refreshCredentialProfiles()
+            await refreshCredentialProfiles(locationID: locationID)
             return (entry, nil)
         } catch {
             return (nil, userMessage(for: error))
@@ -132,18 +152,27 @@ extension AppModel {
     /// daemon's reason on refusal (409 while a login job is active) and any
     /// cleanup warning verbatim for inline display.
     func deleteCredentialProfile(harnessId: String, profileId: String) async -> String? {
-        guard let client else { return "Engine offline — reconnect to remove an account." }
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return "Engine offline — reconnect to remove an account."
+        }
         do {
-            let receipt = try await client.deleteCredentialProfile(
+            let receipt = try await requestClient.deleteCredentialProfile(
                 harnessId: harnessId, profileId: profileId)
             if draftCredentialProfileId == profileId {
                 draftCredentialProfileId = nil
                 if draftPrimaryHarness == harnessId { draftPrimaryHarness = nil }
             }
-            await refreshCredentialProfiles()
-            await refreshQuota(force: true)
-            await refreshThreads()
-            if let selectedThreadId { await openThread(selectedThreadId) }
+            await refreshCredentialProfiles(locationID: locationID)
+            if locationID == .local {
+                await refreshQuota(force: true)
+                await refreshThreads()
+            } else {
+                await refreshRemoteThreads(locationID)
+            }
+            if let selectedThreadId {
+                await openThread(locationID: locationID, id: selectedThreadId)
+            }
             return receipt.cleanupWarning
         } catch {
             return userMessage(for: error)
@@ -163,7 +192,7 @@ extension AppModel {
             ? draftCredentialProfileId
             : currentThread?.credentialProfileId
         guard let profileId else { return (label, nil) }
-        let name = credentialProfiles.first {
+        let name = activeCredentialProfiles.first {
             $0.profile.profileId == profileId && $0.profile.harnessId == harnessId
         }?.profile.displayName
         return (label, name ?? profileId)
@@ -176,7 +205,7 @@ extension AppModel {
     /// crosses profiles, so this is which account owns each resumable session.
     func sessionAccountLabel(harnessId: String, profileId: String?) -> String {
         guard let profileId else { return "Default account" }
-        let name = credentialProfiles.first {
+        let name = activeCredentialProfiles.first {
             $0.profile.profileId == profileId && $0.profile.harnessId == harnessId
         }?.profile.displayName
         return name ?? profileId
@@ -384,7 +413,7 @@ extension AppModel {
     /// switch to (owner: "renders but doesn't activate").
     var autoBalanceHarnessIds: [String] {
         AccountsAutoBalance.eligibleHarnessIds(
-            profileHarnessIds: credentialProfiles.map(\.profile.harnessId))
+            profileHarnessIds: activeCredentialProfiles.map(\.profile.harnessId))
     }
 
     /// Aggregated auto-switch state across the eligible harnesses. `mixed` (they
@@ -397,7 +426,7 @@ extension AppModel {
             return autoBalanceHarnessIds.isEmpty ? .unavailable : (pending ? .on : .off)
         }
         let actions = autoBalanceHarnessIds.map {
-            settingsSnapshot?.harnesses?[$0]?.profileLimitAction ?? "fail"
+            activeSettingsSnapshot?.harnesses?[$0]?.profileLimitAction ?? "fail"
         }
         return AccountsAutoBalance.state(actions: actions)
     }
@@ -410,7 +439,7 @@ extension AppModel {
         // the toggle must not erase it.
         let patch = Dictionary(uniqueKeysWithValues: autoBalanceHarnessIds.compactMap {
             id -> (String, HarnessSettingsPatch)? in
-            let current = settingsSnapshot?.harnesses?[id]?.profileLimitAction ?? "fail"
+            let current = activeSettingsSnapshot?.harnesses?[id]?.profileLimitAction ?? "fail"
             if on { return current == "rotate" ? nil : (id, HarnessSettingsPatch(profileLimitAction: "rotate")) }
             return current == "rotate" ? (id, HarnessSettingsPatch(profileLimitAction: "fail")) : nil
         })

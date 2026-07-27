@@ -5,24 +5,39 @@ import {
   ControlProjectRegisterRequest,
   ControlProjectRelinkRequest,
   ControlProjectRemoveReceipt,
+  ControlDirectoryListing,
 } from "@claudexor/schema";
 import { assertNoInlineSecretValues } from "@claudexor/util";
 import { requiredIdempotencyKey } from "./run-start.js";
 
+export interface ProjectRouteServices {
+  listProjects?: () => Promise<{ projects: unknown[] }>;
+  registerProject?: (input: {
+    root: string;
+    idempotencyKey: string;
+    clientId: string;
+  }) => Promise<unknown>;
+  relinkProject?: (id: string, root: string) => Promise<unknown>;
+  removeProject?: (id: string) => Promise<unknown>;
+  listDirectory?: (path?: string) => Promise<unknown>;
+  fetchProjectFile?: (
+    projectId: string,
+    path: string,
+  ) => Promise<{ data: Buffer; contentType: string; fileName: string }>;
+}
+
 export interface ProjectRouteContext {
-  services?: {
-    listProjects?: () => Promise<{ projects: unknown[] }>;
-    registerProject?: (input: {
-      root: string;
-      idempotencyKey: string;
-      clientId: string;
-    }) => Promise<unknown>;
-    relinkProject?: (id: string, root: string) => Promise<unknown>;
-    removeProject?: (id: string) => Promise<unknown>;
-  };
+  services?: ProjectRouteServices;
   readBody(req: IncomingMessage): Promise<unknown>;
   json(res: ServerResponse, status: number, body: unknown): void;
   requestError(res: ServerResponse, error: unknown): void;
+  binary(
+    res: ServerResponse,
+    status: number,
+    body: Buffer,
+    contentType: string,
+    fileName: string,
+  ): void;
 }
 
 export async function handleProjectRoute(
@@ -32,6 +47,25 @@ export async function handleProjectRoute(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
+  if (method === "GET" && path === "/filesystem/directories") {
+    const service = ctx.services?.listDirectory;
+    if (!service) return unsupported(ctx, res);
+    try {
+      const url = new URL(req.url ?? "", "http://localhost");
+      for (const key of url.searchParams.keys()) {
+        if (key !== "path") throw new Error(`unexpected query parameter: ${key}`);
+      }
+      if (url.searchParams.getAll("path").length > 1) {
+        throw new Error("path may be specified only once");
+      }
+      const listing = await service(url.searchParams.get("path") ?? undefined);
+      ctx.json(res, 200, ControlDirectoryListing.parse(listing));
+    } catch (error) {
+      ctx.requestError(res, error);
+    }
+    return true;
+  }
+
   if (method === "GET" && path === "/projects") {
     const service = ctx.services?.listProjects;
     if (!service) return unsupported(ctx, res);
@@ -70,6 +104,29 @@ export async function handleProjectRoute(
       const body = ControlProjectRelinkRequest.parse(raw);
       const project = await service(decodeURIComponent(projectRelinkMatch[1] as string), body.root);
       ctx.json(res, 200, projectWire(project));
+    } catch (error) {
+      ctx.requestError(res, error);
+    }
+    return true;
+  }
+
+  const projectFileMatch = /^\/projects\/([^/]+)\/file$/.exec(path);
+  if (method === "GET" && projectFileMatch) {
+    const service = ctx.services?.fetchProjectFile;
+    if (!service) return unsupported(ctx, res);
+    try {
+      const url = new URL(req.url ?? "", "http://localhost");
+      for (const key of url.searchParams.keys()) {
+        if (key !== "path") throw new Error(`unexpected query parameter: ${key}`);
+      }
+      if (url.searchParams.getAll("path").length !== 1) {
+        throw new Error("one path query parameter is required");
+      }
+      const file = await service(
+        decodeURIComponent(projectFileMatch[1] as string),
+        url.searchParams.get("path") ?? "",
+      );
+      ctx.binary(res, 200, file.data, file.contentType, file.fileName);
     } catch (error) {
       ctx.requestError(res, error);
     }

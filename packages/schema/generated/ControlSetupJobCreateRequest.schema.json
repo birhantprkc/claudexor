@@ -35,6 +35,15 @@
             "browser_redirect"
           ],
           "description": "Codex-only: device_auth (default; app-server device-code, isolated browser window), browser_callback (app-server browser-callback opt-in), or browser_redirect (legacy Terminal localhost callback / fallback)."
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "daemon",
+            "client_pty"
+          ],
+          "description": "Additive terminal handoff. client_pty prepares a sealed login job for `claudexor setup attach`.",
+          "default": "daemon"
         }
       },
       "required": [

@@ -92,11 +92,11 @@ struct AccountRowModel: Identifiable {
 enum AccountsPresentation {
     @MainActor
     static func rows(model: AppModel) -> [AccountRowModel] {
-        let groups = QuotaPresentation.groups(from: model.quotaResponse?.snapshots ?? [])
+        let groups = QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
         var rows: [AccountRowModel] = []
 
         // Default logins: one per native-login family the doctor knows.
-        for info in model.liveHarnesses
+        for info in model.harnesses
         where info.family.defaultAuthReadinessRequest?.source == .nativeSession {
             let family = info.family
             let source = model.authSource(for: family, source: .nativeSession)
@@ -123,7 +123,7 @@ enum AccountsPresentation {
         }
 
         // Registered profiles (additive; the default login is never touched).
-        for entry in model.credentialProfiles {
+        for entry in model.activeCredentialProfiles {
             let availability = entry.status.availability
             let verification = entry.status.verification
             let accounts = model.harnessAccounts(for: entry.profile.harnessId)
@@ -148,7 +148,7 @@ enum AccountsPresentation {
         // API-key meta-hosts (raw-api / openrouter): a symmetric account row, but
         // ONLY when a key is actually configured (routable per the wire). An
         // unconfigured meta-host is hidden ENTIRELY — no dead "log in" row (item g).
-        for info in model.liveHarnesses
+        for info in model.harnesses
         where info.family.isApiKeyMetaHost && !info.routableIntents.isEmpty {
             let family = info.family
             rows.append(AccountRowModel(
@@ -163,7 +163,7 @@ enum AccountsPresentation {
                 quotaGroups: groups.filter { $0.subjectId == nil && $0.harness == family.rawValue },
                 // The meta-host has no per-account rotation — Enabled IS the
                 // harness routing-enable setting.
-                enabled: model.settingsSnapshot?.harnesses?[family.rawValue]?.enabled ?? true,
+                enabled: model.activeSettingsSnapshot?.harnesses?[family.rawValue]?.enabled ?? true,
                 nextUp: false,
                 isApiKeyHost: true
             ))
@@ -203,7 +203,7 @@ enum AccountsPresentation {
         model: AppModel, harnessId: String, pinnedProfileId: String?
     ) -> AccountSegment {
         func profileName(_ id: String) -> String {
-            model.credentialProfiles.first {
+            model.activeCredentialProfiles.first {
                 $0.profile.profileId == id && $0.profile.harnessId == harnessId
             }?.profile.displayName ?? id
         }

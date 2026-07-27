@@ -70,12 +70,30 @@ final class AppModel {
     var recentProjects: [String] = [] {
         didSet { UserDefaults.standard.set(recentProjects, forKey: "claudexor.recentProjects") }
     }
+    /// A draft and every materialized thread have one immutable execution
+    /// location. Local daemon ids are never assumed globally unique: the UI
+    /// routes them together with this location id.
+    var selectedExecutionLocation: ExecutionLocationID = .local
+    var draftExecutionLocation: ExecutionLocationID = .local
+    var draftRemoteProjectRoot: String?
+    var remoteConnections: [RemoteConnection] = []
+    var availableSSHHosts: [SSHHost] = []
+    var remoteThreadCache: [RemoteThreadCacheEntry] = []
+    var remoteConnectionMessages: [UUID: String] = [:]
+    var remoteDirectoryBrowser: RemoteDirectoryBrowserRequest?
+    var remoteTerminalSheet: RemoteTerminalSheetRequest?
+    /// Terminal work launched from Settings stays owned by that window. Using
+    /// the main-window sheet here steals focus and makes Settings appear to
+    /// close as soon as an installer starts.
+    var settingsRemoteTerminalSheet: RemoteTerminalSheetRequest?
+    var remoteDeviceLogin: RemoteDeviceLoginRequest?
+    var remotePreview: RemotePreviewRequest?
 
     var liveTasks: [TaskRun] = []
-    /// Run ids the user has successfully cancelled. Lets `composerTurnState` treat a
-    /// cancelled run as inactive IMMEDIATELY — even in the bound-but-not-yet-hydrated
-    /// window where no live row exists to flip and the embedded card still says
-    /// "running" (otherwise Stop would appear to do nothing until hydration).
+    var remoteTasks: [ExecutionLocationID: [TaskRun]] = [:]
+    /// Located run ids the user has successfully cancelled. Daemon ids are not
+    /// globally unique, so cancellation memory must never leak between local and
+    /// remote engines (or between two cloned remote homes).
     private var cancelledRunIds: Set<String> = []
     /// A turn POST is in flight (composerSend: from the click until the thread detail
     /// reflects the accepted turn). The head-turn busy-gate is detail-derived and
@@ -113,10 +131,12 @@ final class AppModel {
     /// Registered credential profiles + doctor readiness (INV-135). Drives the
     /// bottom-left accounts popover (list + guided add + per-account login).
     var credentialProfiles: [CredentialProfileEntry] = []
+    var remoteCredentialProfiles: [ExecutionLocationID: [CredentialProfileEntry]] = [:]
     /// Per-harness accounts authority projection (INV-135 / V11b): native
     /// CLI-login state + the server-computed Active identity. The accounts
     /// surface reads Enabled/Active from HERE so nothing re-derives the symmetry.
     var harnessAccounts: [HarnessAccounts] = []
+    var remoteHarnessAccounts: [ExecutionLocationID: [HarnessAccounts]] = [:]
     /// M7 update-chip: latest availability (nil = nothing to advertise), read
     /// cheaply by refreshUpdateAvailability(); populated by checkForRuntimeUpdate().
     /// `updateProvider` (injectable for tests/dogfood) defaults to the real
@@ -169,26 +189,26 @@ final class AppModel {
     /// "Apply thread"). Fixed at thread creation, so it's only editable in the draft.
     var draftIsolatedWorkspace = false
     var liveHarnesses: [HarnessInfo] = []
+    var remoteHarnesses: [ExecutionLocationID: [HarnessInfo]] = [:]
+    var remoteSettingsSnapshots: [ExecutionLocationID: SettingsSnapshot] = [:]
+    var remoteProjects: [ExecutionLocationID: [RegisteredProject]] = [:]
     var exactAuthSources: [HarnessFamily: [AuthSourceKind: HarnessAuthSource]] = [:]
+    var remoteExactAuthSources:
+        [ExecutionLocationID: [HarnessFamily: [AuthSourceKind: HarnessAuthSource]]] = [:]
     var settingsSnapshot: SettingsSnapshot?
     var quotaResponse: ControlQuotaResponse?
+    var remoteQuotaResponses: [ExecutionLocationID: ControlQuotaResponse] = [:]
     var quotaStatus: String?
     var secretBackend = "unknown"
     var storedSecrets: [SecretInfo] = []
+    var remoteSecretBackends: [ExecutionLocationID: String] = [:]
+    var remoteStoredSecrets: [ExecutionLocationID: [SecretInfo]] = [:]
     var settingsStatus: String?
     /// Per-repo user-level trust files (Settings trust section).
     var trustEntries: [TrustEntry] = []
+    var remoteTrustEntries: [ExecutionLocationID: [TrustEntry]] = [:]
     var trustStatus: String?
-
     var projects: [Project] { liveProjects }
-    var harnesses: [HarnessInfo] { liveHarnesses }
-    /// Controls enumerate doctor truth, not a compiled enum. Built-ins remain
-    /// available before the first successful refresh; any adapter returned by
-    /// the daemon appears without a Swift patch.
-    var selectableHarnesses: [HarnessFamily] {
-        let live = liveHarnesses.map(\.family).filter { $0 != .fake }
-        return live.isEmpty ? HarnessFamily.builtIns : live
-    }
 
     /// Live runs grouped into a light project tree for the sidebar.
     private var liveProjects: [Project] {
@@ -200,18 +220,29 @@ final class AppModel {
         }
     }
 
-    var defaultRoutingGoal: String { settingsSnapshot?.routing.goal ?? "auto" }
-    var defaultMaxUsdPerRun: Double? { settingsSnapshot?.budget.paidBudgetPerRun.finiteMaxUsd }
-
     private(set) var client: GatewayClient?
-    private var connectionGeneration = 0
+    @ObservationIgnored let sshConnectionManager: SSHConnectionManager
+    @ObservationIgnored let remoteRuntimeInstaller: RemoteRuntimeInstaller
+    /// Tokens only live inside these in-memory clients. Persistence stores
+    /// connection labels and thread summaries, never credentials or endpoints.
+    @ObservationIgnored var remoteClients: [ExecutionLocationID: GatewayClient] = [:]
+    @ObservationIgnored var remoteControlForwards: [UUID: SSHForward] = [:]
+    @ObservationIgnored var remotePreviewForwards: [UUID: SSHForward] = [:]
+    @ObservationIgnored var remoteGlobalStreamTasks: [ExecutionLocationID: Task<Void, Never>] = [:]
+    @ObservationIgnored var remoteGlobalEventCursors: [ExecutionLocationID: String] = [:]
+    @ObservationIgnored var remoteRunStreamTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var remoteConnectTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored var remoteConnectionGenerations: [UUID: Int] = [:]
+    @ObservationIgnored var pendingRemoteThreadSelection:
+        (locationID: ExecutionLocationID, threadID: String)?
+    var connectionGeneration = 0
     var threadLoadGeneration = 0
     var streamTasks: [String: Task<Void, Never>] = [:]
     var globalStreamTask: Task<Void, Never>?
     var globalEventCursor: String?
     var lastEventIds: [String: Int] = [:]
     /// Highest sequence reflected by snapshots (distinct from the stream cursor).
-    private var snapshotReplayFences: [String: Int] = [:]
+    var snapshotReplayFences: [String: Int] = [:]
     var snapshotLoadDepth: [String: Int] = [:]
     @ObservationIgnored var runDetailLoads: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var runDetailLoadTokens: [String: UUID] = [:]
@@ -278,6 +309,9 @@ final class AppModel {
     func adoptClientForReconnect(_ newClient: GatewayClient) { client = newClient }
 
     init(client: GatewayClient? = nil, requestNotificationAuthorization: Bool = true) {
+        let sshManager = SSHConnectionManager()
+        self.sshConnectionManager = sshManager
+        self.remoteRuntimeInstaller = RemoteRuntimeInstaller(ssh: sshManager)
         self.client = client
         // Bind the update chip to the real, manifest-backed provider by default.
         // Tests/dogfood can still swap in the file-override provider.
@@ -297,11 +331,16 @@ final class AppModel {
         }
         projectRoot = UserDefaults.standard.string(forKey: "claudexor.projectRoot") ?? ProcessInfo.processInfo.environment["CLAUDEXOR_PROJECT_ROOT"] ?? ""
         recentProjects = UserDefaults.standard.stringArray(forKey: "claudexor.recentProjects") ?? []
+        remoteConnections = ((try? RemoteConnectionStore.applicationSupport().load()) ?? [])
+            .map { stored in
+                var value = stored
+                value.status = .offline
+                return value
+            }
+        remoteThreadCache = (try? RemoteThreadCacheStore.applicationSupport().load()) ?? []
+        availableSSHHosts =
+            (try? SSHConfigScanner().scan(path: "~/.ssh/config")) ?? []
     }
-
-    var tasks: [TaskRun] { liveTasks }
-
-    func task(_ id: String) -> TaskRun? { tasks.first { $0.id == id } }
 
     // MARK: Connection
 
@@ -333,6 +372,7 @@ final class AppModel {
     /// reconnect path repopulates these from `/v2`; user preferences and the
     /// current composer draft remain local and are intentionally preserved.
     func enterHardOffline() {
+        let keepRemoteSelection = selectedExecutionLocation != .local
         health = .offline
         endpoint = ""
         client = nil
@@ -345,7 +385,7 @@ final class AppModel {
         // criterion. Old ops retire inert through their epoch guards.
         settingsEpoch += 1
 
-        route = .threads
+        if !keepRemoteSelection { route = .threads }
         liveTasks.removeAll()
         cancelledRunIds.removeAll()
         transcripts.removeAll()
@@ -357,10 +397,12 @@ final class AppModel {
         threads.removeAll()
         projectListingProblems.removeAll()
         registeredProjects.removeAll()
-        selectedThreadId = nil
-        selectedThreadDetail = nil
-        threadStatus = nil
-        threadLoadGeneration += 1
+        if !keepRemoteSelection {
+            selectedThreadId = nil
+            selectedThreadDetail = nil
+            threadStatus = nil
+            threadLoadGeneration += 1
+        }
 
         liveHarnesses.removeAll()
         // X140 class: the credential-profile + harness-account registries load on
@@ -520,14 +562,16 @@ final class AppModel {
 
     @discardableResult
     func harnessModels(for family: HarnessFamily, route: String? = nil) async -> HarnessModelsResponse? {
-        guard let client else { return nil }
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return nil }
         // A nil return is a MEANINGFUL failure signal (QA-055b): the composer's
         // per-harness model row turns it into an honest "Couldn't load · Retry"
         // instead of hanging forever on "Loading models…". The explicit catch
         // (not a swallowing `try?`) makes that failure path deliberate — the
         // caller surfaces the retry state.
         do {
-            return try await client.harnessModels(harnessId: family.rawValue, route: route)
+            return try await requestClient.harnessModels(
+                harnessId: family.rawValue, route: route)
         } catch {
             return nil
         }
@@ -541,16 +585,31 @@ final class AppModel {
     var settingsEpoch = 0
 
     func refreshQuota(force: Bool = false) async {
-        guard health == .connected, let client else {
-            quotaResponse = nil; quotaStatus = "Quota is unavailable while the engine is offline."
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            if locationID == .local {
+                quotaResponse = nil
+            } else {
+                remoteQuotaResponses.removeValue(forKey: locationID)
+            }
+            quotaStatus = "Quota is unavailable while the engine is offline."
             return
         }
         do {
-            quotaResponse = try await client.quota(refresh: force); quotaStatus = nil
+            let response = try await requestClient.quota(refresh: force)
+            if locationID == .local {
+                quotaResponse = response
+            } else {
+                remoteQuotaResponses[locationID] = response
+            }
+            quotaStatus = nil
         } catch { quotaStatus = "Could not load quota: \(error)" }
     }
     var normalizedProjectRoot: String {
-        projectRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        if draftExecutionLocation != .local {
+            return draftRemoteProjectRoot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        return projectRoot.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var hasCurrentProject: Bool { !normalizedProjectRoot.isEmpty }
@@ -564,6 +623,8 @@ final class AppModel {
     func selectProject(_ path: String) {
         let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !p.isEmpty else { return }
+        draftExecutionLocation = .local
+        draftRemoteProjectRoot = nil
         projectRoot = p
         rememberProject(p)
     }
@@ -600,21 +661,31 @@ final class AppModel {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose / Create"
         panel.resolvesAliases = true
-        if hasCurrentProject {
+        if hasCurrentProject, draftExecutionLocation == .local {
             panel.directoryURL = URL(fileURLWithPath: normalizedProjectRoot, isDirectory: true)
         }
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url.path
     }
 
-    func refreshSecrets() async {
-        guard let client else { return }
+    func refreshSecrets(locationID requestedLocationID: ExecutionLocationID? = nil) async {
+        let locationID = requestedLocationID ?? activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return }
         do {
-            let res = try await client.listSecrets()
-            secretBackend = res.backend
-            storedSecrets = res.secrets
+            let response = try await requestClient.listSecrets()
+            if locationID == .local {
+                secretBackend = response.backend
+                storedSecrets = response.secrets
+            } else {
+                remoteSecretBackends[locationID] = response.backend
+                remoteStoredSecrets[locationID] = response.secrets
+            }
         } catch {
-            secretBackend = "unknown"
+            if locationID == .local {
+                secretBackend = "unknown"
+            } else {
+                remoteSecretBackends[locationID] = "unknown"
+            }
         }
     }
 
@@ -771,20 +842,24 @@ final class AppModel {
     }
 
     func cancel(_ id: String) async {
-        guard let client else { return }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return }
         do {
-            try await client.cancel(runId: id)
+            try await requestClient.cancel(runId: id)
             // Record the cancel authoritatively. When the live row already exists we
             // flip it; but in the bound-but-NOT-yet-hydrated window there is no row to
             // flip, and the head turn's EMBEDDED card still reads "running" — so the
             // composer would stay stuck on Stop after a successful cancel. Remember the
-            // cancelled id so `composerTurnState` reports it inactive immediately,
-            // until the real (cancelled) row hydrates. runIds are unique, so this is
-            // always-correct for that id and never needs pruning for correctness.
-            cancelledRunIds.insert(id)
-            if let idx = liveTasks.firstIndex(where: { $0.id == id }) {
-                liveTasks[idx].phase = .cancelled
-                liveTasks[idx].updatedAt = .now
+            // cancelled located id so `composerTurnState` reports it inactive
+            // immediately until the owning daemon's row hydrates.
+            cancelledRunIds.insert(locatedRunKey(id, at: locationID))
+            mutateTask(id, at: locationID) {
+                $0.phase = .cancelled
+                $0.updatedAt = .now
+            }
+            if locationID != .local, let threadId = selectedThreadId {
+                await refreshRemoteThreads(locationID)
+                await openThread(locationID: locationID, id: threadId)
             }
         } catch {
             // leave the row's status untouched if the server did not confirm the cancel
@@ -829,7 +904,14 @@ final class AppModel {
     /// the freshest copy after a PATCH/turn — falling back to the list summary).
     var currentThread: ThreadSummary? {
         if let d = selectedThreadDetail { return d.thread }
-        if let id = selectedThreadId { return threads.first { $0.id == id } }
+        if let id = selectedThreadId {
+            if selectedExecutionLocation == .local {
+                return threads.first { $0.id == id }
+            }
+            return remoteThreadCache.first {
+                $0.locationID == selectedExecutionLocation && $0.thread.id == id
+            }?.thread
+        }
         return nil
     }
 
@@ -838,7 +920,12 @@ final class AppModel {
     /// the owning thread's repo, not whatever is selected when the await resolves.
     func threadRepoRoot(_ tid: String) -> String? {
         if tid == selectedThreadId, let d = selectedThreadDetail { return d.thread.repoRoot }
-        return threads.first { $0.id == tid }?.repoRoot
+        if selectedExecutionLocation == .local {
+            return threads.first { $0.id == tid }?.repoRoot
+        }
+        return remoteThreadCache.first {
+            $0.locationID == selectedExecutionLocation && $0.thread.id == tid
+        }?.thread.repoRoot
     }
 
     /// The eligible pool bound to a SPECIFIC thread, not live selection. Used by
@@ -851,7 +938,7 @@ final class AppModel {
         }
         let sticky = threads.first { $0.id == tid }?.eligibleHarnesses ?? []
         if !sticky.isEmpty { return sticky }
-        return settingsSnapshot?.routing.eligibleHarnesses ?? []
+        return activeSettingsSnapshot?.routing.eligibleHarnesses ?? []
     }
 
     /// The selected thread's HEAD turn runId — the CANCEL target. Present as soon
@@ -866,7 +953,8 @@ final class AppModel {
            let runId = selectedThreadDetail?.turns.last?.runId {
             return runId
         }
-        return threads.first { $0.id == selectedThreadId }?.headRunId
+        guard let selectedThreadId else { return nil }
+        return threadSummary(selectedThreadId, at: selectedExecutionLocation)?.headRunId
     }
 
     /// The composer Send/Stop affordance for the head turn, resolved by the pure
@@ -891,7 +979,9 @@ final class AppModel {
         // composer would stay on Stop after a successful cancel in the not-yet-
         // hydrated window (the embedded card still says "running").
         let hydratedRowActive: Bool? = headRunId.flatMap { id in
-            cancelledRunIds.contains(id) ? false : task(id)?.phase.isActive
+            cancelledRunIds.contains(locatedRunKey(id, at: selectedExecutionLocation))
+                ? false
+                : task(id, at: selectedExecutionLocation)?.phase.isActive
         }
         let embeddedStateActive = last.run.map { RunPhase(api: $0.state).isActive } ?? false
         return resolveComposerTurnState(headRunId: headRunId,
@@ -926,9 +1016,10 @@ final class AppModel {
         // a thread whose head run already finished. This transient, self-correcting
         // window (it resolves the instant the detail/live row hydrates) is backstopped
         // by the per-thread server turn serialization, which rejects a real overlap.
-        guard let headRunId = threads.first(where: { $0.id == id })?.headRunId else { return false }
-        if cancelledRunIds.contains(headRunId) { return false }
-        return task(headRunId)?.phase.isActive ?? false
+        let locationID = activeExecutionLocation
+        guard let headRunId = threadSummary(id, at: locationID)?.headRunId else { return false }
+        if cancelledRunIds.contains(locatedRunKey(headRunId, at: locationID)) { return false }
+        return task(headRunId, at: locationID)?.phase.isActive ?? false
     }
 
     /// True while the selected thread's head turn is live (a submit is in flight,
@@ -951,7 +1042,7 @@ final class AppModel {
     /// In the draft state, the local draft value > global default. nil => engine auto.
     var effectivePrimaryHarness: String? {
         let sticky = selectedThreadId == nil ? draftPrimaryHarness : currentThread?.primaryHarness
-        let resolved = sticky ?? settingsSnapshot?.routing.primaryHarness
+        let resolved = sticky ?? activeSettingsSnapshot?.routing.primaryHarness
         // Honesty guard: never SURFACE a primary that is outside a non-empty effective
         // pool — the engine wouldn't route to it (it drops/clears such a primary), so
         // showing it would be a lie. This also covers the draft case where the primary
@@ -966,7 +1057,7 @@ final class AppModel {
     var effectiveEligiblePool: [String] {
         let sticky = selectedThreadId == nil ? draftEligiblePool : (currentThread?.eligibleHarnesses ?? [])
         if !sticky.isEmpty { return sticky }
-        return settingsSnapshot?.routing.eligibleHarnesses ?? []
+        return activeSettingsSnapshot?.routing.eligibleHarnesses ?? []
     }
 
     /// Switch the sticky primary harness. On a real thread this PATCHes the thread
@@ -974,11 +1065,19 @@ final class AppModel {
     /// Thin gateway: the engine owns routing — orderPool just pins primary first.
     func setPrimaryHarness(_ harness: String?) async {
         guard let id = selectedThreadId else { draftPrimaryHarness = harness; return }
-        guard let client else { threadStatus = "Engine offline — reconnect to change the primary harness."; return }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            threadStatus = "Engine offline — reconnect to change the primary harness."; return
+        }
         do {
-            let updated = try await client.updateThread(id: id, body: UpdateThreadRequest(primaryHarness: .some(harness)))
-            applyThreadUpdate(updated)
-        } catch { threadStatus = userMessage(for: error) }
+            let updated = try await requestClient.updateThread(
+                id: id, body: UpdateThreadRequest(primaryHarness: .some(harness)))
+            applyThreadUpdate(updated, at: locationID)
+        } catch {
+            if selectedExecutionLocation == locationID, selectedThreadId == id {
+                threadStatus = userMessage(for: error)
+            }
+        }
     }
 
     /// The thread's sticky write scope (D26): the open thread's server-side
@@ -996,11 +1095,19 @@ final class AppModel {
     /// setPrimaryHarness — the engine still owns the trust gate at run time.
     func setThreadAccess(_ access: String?) async {
         guard let id = selectedThreadId else { draftThreadAccess = access; return }
-        guard let client else { threadStatus = "Engine offline — reconnect to change the write scope."; return }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            threadStatus = "Engine offline — reconnect to change the write scope."; return
+        }
         do {
-            let updated = try await client.updateThread(id: id, body: UpdateThreadRequest(access: .some(access)))
-            applyThreadUpdate(updated)
-        } catch { threadStatus = userMessage(for: error) }
+            let updated = try await requestClient.updateThread(
+                id: id, body: UpdateThreadRequest(access: .some(access)))
+            applyThreadUpdate(updated, at: locationID)
+        } catch {
+            if selectedExecutionLocation == locationID, selectedThreadId == id {
+                threadStatus = userMessage(for: error)
+            }
+        }
     }
 
     // Credential-profile registry + auto-balance actions live in
@@ -1017,11 +1124,19 @@ final class AppModel {
             if let p = draftPrimaryHarness, !pool.isEmpty, !pool.contains(p) { draftPrimaryHarness = nil }
             return
         }
-        guard let client else { threadStatus = "Engine offline — reconnect to change the harness pool."; return }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            threadStatus = "Engine offline — reconnect to change the harness pool."; return
+        }
         do {
-            let updated = try await client.updateThread(id: id, body: UpdateThreadRequest(eligibleHarnesses: pool))
-            applyThreadUpdate(updated)
-        } catch { threadStatus = userMessage(for: error) }
+            let updated = try await requestClient.updateThread(
+                id: id, body: UpdateThreadRequest(eligibleHarnesses: pool))
+            applyThreadUpdate(updated, at: locationID)
+        } catch {
+            if selectedExecutionLocation == locationID, selectedThreadId == id {
+                threadStatus = userMessage(for: error)
+            }
+        }
     }
 
     /// Apply a PATCH-thread response OPTIMISTICALLY: update the list row and the
@@ -1029,10 +1144,35 @@ final class AppModel {
     /// `refreshThreads()` + `openThread()` re-fetch (which re-hydrated everything,
     /// flickered, and conflated a later GET's error with the PATCH).
     func applyThreadUpdate(_ updated: ThreadSummary) {
-        threadStatus = nil
-        if let i = threads.firstIndex(where: { $0.id == updated.id }) { threads[i] = updated }
-        if selectedThreadId == updated.id, let detail = selectedThreadDetail {
-            selectedThreadDetail = ThreadDetailResponse(thread: updated, sessions: detail.sessions, turns: detail.turns)
+        applyThreadUpdate(updated, at: .local)
+    }
+
+    func applyThreadUpdate(
+        _ updated: ThreadSummary,
+        at locationID: ExecutionLocationID
+    ) {
+        if locationID == .local {
+            if let i = threads.firstIndex(where: { $0.id == updated.id }) {
+                threads[i] = updated
+            }
+        } else {
+            remoteThreadCache.removeAll {
+                $0.locationID == locationID && $0.thread.id == updated.id
+            }
+            remoteThreadCache.append(RemoteThreadCacheEntry(
+                locationID: locationID, thread: updated, syncedAt: .now))
+            try? RemoteThreadCacheStore.applicationSupport().save(remoteThreadCache)
+        }
+        if selectedExecutionLocation == locationID,
+           selectedThreadId == updated.id
+        {
+            threadStatus = nil
+            if let detail = selectedThreadDetail {
+                selectedThreadDetail = ThreadDetailResponse(
+                    thread: updated,
+                    sessions: detail.sessions,
+                    turns: detail.turns)
+            }
         }
     }
 
@@ -1040,12 +1180,20 @@ final class AppModel {
     /// nil on success, else an honest message (empty/conflict/rejected, or a transport
     /// error). On success refreshes the thread (its head/state may have moved).
     func applyThread(id: String, mode: String = "apply") async -> String? {
-        guard let client else { return "Engine offline — reconnect to apply this thread." }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return "Engine offline — reconnect to apply this thread."
+        }
         do {
-            let res = try await client.applyThread(id: id, body: ThreadApplyRequest(mode: mode))
+            let res = try await requestClient.applyThread(
+                id: id, body: ThreadApplyRequest(mode: mode))
             if res.applied {
-                await refreshThreads()
-                await openThread(id)
+                if locationID == .local {
+                    await refreshThreads()
+                } else {
+                    await refreshRemoteThreads(locationID)
+                }
+                await openThread(locationID: locationID, id: id)
                 return nil
             }
             // Honest non-applied outcomes: surface the server's status + detail verbatim.
@@ -1072,7 +1220,11 @@ final class AppModel {
     }
 
     func newThread(title: String?) async {
-        guard let client else {
+        let locationID = draftExecutionLocation
+        if gateway(for: locationID) == nil, let connectionID = locationID.remoteConnectionID {
+            await connectRemote(connectionID)
+        }
+        guard let requestClient = gateway(for: locationID) else {
             threadStatus = "Engine offline: reconnect before creating a thread."
             return
         }
@@ -1085,7 +1237,7 @@ final class AppModel {
             // persist a primary the engine's pool-fallback would reject on the first
             // turn. The empty draft pool stays omitted (engine inherits the global pool,
             // the same pool the guard checked against).
-            let thread = try await client.createThread(CreateThreadRequest(
+            let thread = try await requestClient.createThread(CreateThreadRequest(
                 title: title,
                 scope: scope,
                 // Isolated => turns accumulate in a thread worktree (applied later);
@@ -1100,8 +1252,20 @@ final class AppModel {
                 // turn one (nil => the engine applies the repo trust default).
                 access: draftThreadAccess
             ))
-            threads.insert(thread, at: 0)
-            await openThread(thread.id)
+            if locationID == .local {
+                threads.insert(thread, at: 0)
+            } else {
+                remoteThreadCache.removeAll {
+                    $0.locationID == locationID && $0.thread.id == thread.id
+                }
+                remoteThreadCache.append(RemoteThreadCacheEntry(
+                    locationID: locationID, thread: thread, syncedAt: .now))
+                try? RemoteThreadCacheStore.applicationSupport().save(remoteThreadCache)
+                if let projectList = try? await requestClient.listProjects() {
+                    remoteProjects[locationID] = projectList.projects
+                }
+            }
+            await openThread(locationID: locationID, id: thread.id)
         } catch {
             threadStatus = "Could not create thread: \(userMessage(for: error))"
         }
@@ -1122,6 +1286,9 @@ final class AppModel {
     /// the async send.
     func composerSend(prompt: String, mode: RunMode, planRunId: String? = nil, model: String? = nil, attachments: [PendingAttachment] = [], options: TurnOptions = .init(), onThread explicitThreadId: String? = nil) async -> Bool {
         let targetId = explicitThreadId ?? selectedThreadId
+        let targetLocation = explicitThreadId == nil
+            ? (selectedThreadId == nil ? draftExecutionLocation : selectedExecutionLocation)
+            : selectedExecutionLocation
         // Single busy gate for EVERY turn-start path (composer, Implement-plan,
         // Implement-spec all funnel through here), so none can start a turn over a
         // live one — gated on the TARGET thread, not live selection. `isThreadBusy`
@@ -1142,7 +1309,15 @@ final class AppModel {
             guard threadId != nil else { return false } // newThread set threadStatus on failure
         }
         guard let tid = threadId else { return false }
-        return await sendTurn(threadId: tid, prompt: prompt, mode: mode, planRunId: planRunId, model: model, attachments: attachments, options: options)
+        return await sendTurn(
+            locationID: targetLocation,
+            threadId: tid,
+            prompt: prompt,
+            mode: mode,
+            planRunId: planRunId,
+            model: model,
+            attachments: attachments,
+            options: options)
     }
 
     /// Trim + drop empty entries; nil when nothing remains (key omitted on the wire).
@@ -1158,7 +1333,29 @@ final class AppModel {
     /// session resumes (plan -> implement is one conversation).
     @discardableResult
     func sendTurn(threadId: String, prompt: String, mode: RunMode, planRunId: String? = nil, model: String? = nil, attachments: [PendingAttachment] = [], options: TurnOptions = .init()) async -> Bool {
-        guard let client else {
+        await sendTurn(
+            locationID: selectedExecutionLocation,
+            threadId: threadId,
+            prompt: prompt,
+            mode: mode,
+            planRunId: planRunId,
+            model: model,
+            attachments: attachments,
+            options: options)
+    }
+
+    @discardableResult
+    func sendTurn(
+        locationID: ExecutionLocationID,
+        threadId: String,
+        prompt: String,
+        mode: RunMode,
+        planRunId: String? = nil,
+        model: String? = nil,
+        attachments: [PendingAttachment] = [],
+        options: TurnOptions = .init()
+    ) async -> Bool {
+        guard let requestClient = gateway(for: locationID) else {
             threadStatus = "Engine offline — reconnect before sending."
             return false
         }
@@ -1201,8 +1398,8 @@ final class AppModel {
         let repairMode = mode == .agent
         let result: RunStartResult
         do {
-            let attachmentRefs = try await uploadAttachments(attachments, client: client)
-            result = try await client.sendTurn(threadId: threadId, body: ThreadTurnRequest(
+            let attachmentRefs = try await uploadAttachments(attachments, client: requestClient)
+            result = try await requestClient.sendTurn(threadId: threadId, body: ThreadTurnRequest(
                 prompt: prompt,
                 mode: mode.apiValue,
                 harnesses: racePool.isEmpty ? nil : racePool,
@@ -1244,8 +1441,12 @@ final class AppModel {
             // refusal on a recorded turn (the error body carries its turnId),
             // reload the thread so the inline card shows IMMEDIATELY.
             if let refusal = Self.refusedTurn(from: error) {
-                await refreshRuns()
-                await openThread(threadId)
+                if locationID == .local {
+                    await refreshRuns()
+                } else {
+                    await refreshRemoteThreads(locationID)
+                }
+                await openThread(locationID: locationID, id: threadId)
                 if refusal.retryable {
                     // The prompt lives on the refused turn and Retry replays
                     // it — report "sent" so the composer clears (no duplicate
@@ -1264,10 +1465,21 @@ final class AppModel {
         // The turn is ACCEPTED here. Anything below (refresh/reload) is best-effort
         // presentation; its failure must NOT be read as a send failure.
         threadStatus = nil
-        await refreshRuns()
-        await openThread(threadId)
+        if locationID == .local {
+            await refreshRuns()
+        } else {
+            await refreshRemoteThreads(locationID)
+        }
+        await refreshOpenThread(locationID: locationID, id: threadId)
         if case .started(let info) = result {
-            stream(runId: info.runId)
+            if locationID == .local {
+                stream(runId: info.runId)
+            } else {
+                streamRemoteRun(
+                    locationID: locationID,
+                    runID: info.runId,
+                    threadID: threadId)
+            }
         }
         return true
     }
@@ -1317,10 +1529,20 @@ final class AppModel {
 
     /// Typed operator decision on a blocked run (review queue actions).
     func decide(runId: String, action: String, feedback: String? = nil, acceptedRisks: [String]? = nil) async -> String? {
-        guard let client else { return "Engine offline." }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
-            let res = try await client.decide(runId: runId, body: RunDecisionRequest(action: action, feedback: feedback, acceptedRisks: acceptedRisks ?? []))
-            await refreshRuns()
+            let res = try await requestClient.decide(
+                runId: runId,
+                body: RunDecisionRequest(
+                    action: action, feedback: feedback,
+                    acceptedRisks: acceptedRisks ?? []))
+            if locationID == .local {
+                await refreshRuns()
+            } else if let threadId = selectedThreadId {
+                await refreshRemoteThreads(locationID)
+                await openThread(locationID: locationID, id: threadId)
+            }
             return res.accepted ? nil : (res.message ?? "Decision was not accepted (\(res.status)).")
         } catch {
             return "Decision failed: \(error)"
@@ -1332,9 +1554,11 @@ final class AppModel {
     /// on press. Returns nil when apply would proceed cleanly, or the server's honest
     /// refusal reason (the gate error body, or the patch's non-applying stderr).
     func applyCheck(runId: String) async -> String? {
-        guard let client else { return "Engine offline." }
+        guard let requestClient = gateway(for: selectedExecutionLocation) else {
+            return "Engine offline."
+        }
         do {
-            let res = try await client.applyCheck(runId: runId)
+            let res = try await requestClient.applyCheck(runId: runId)
             return res.ok ? nil : (res.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "The patch would not apply cleanly."
                 : res.stderr)
@@ -1355,16 +1579,28 @@ final class AppModel {
         case error(String)
     }
 
-    func revertRun(runId: String) async -> RevertOutcome {
-        guard let client else { return .error("Engine offline.") }
+    func revertRun(
+        runId: String,
+        locationID requestedLocationID: ExecutionLocationID? = nil
+    ) async -> RevertOutcome {
+        let locationID = requestedLocationID ?? selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return .error("Engine offline.")
+        }
         do {
-            let res = try await client.revertRun(runId: runId)
+            let res = try await requestClient.revertRun(runId: runId)
             guard res.accepted else {
                 return .error(res.message ?? "Revert was refused (\(res.status)).")
             }
-            await refreshRuns()
-            await loadRunDetail(runId)
-            if let tid = selectedThreadId { await openThread(tid) }
+            if locationID == .local {
+                await refreshRuns()
+                await loadRunDetail(runId)
+            } else {
+                await refreshRemoteThreads(locationID)
+            }
+            if let tid = selectedThreadId {
+                await openThread(locationID: locationID, id: tid)
+            }
             return .reverted
         } catch GatewayError.http(let status, let body) where status == 409 {
             // 409 == the divergence guard refused (postimage no longer matches):
@@ -1380,18 +1616,23 @@ final class AppModel {
     /// Deliver the user's answers for a pending interactive question. Returns
     /// an error message on failure (the question card surfaces it verbatim).
     func answerInteraction(runId: String, interactionId: String, answers: [InteractionAnswerPayload]) async -> String? {
-        guard let client else { return "Engine offline: reconnect before answering." }
+        let locationID = selectedExecutionLocation
+        guard let requestClient = gateway(for: locationID) else {
+            return "Engine offline: reconnect before answering."
+        }
         do {
-            let response = try await client.answerInteraction(runId: runId, interactionId: interactionId, answers: answers)
+            let response = try await requestClient.answerInteraction(
+                runId: runId, interactionId: interactionId, answers: answers)
             guard response.accepted else {
                 return response.message ?? "Answer was not accepted (\(response.status))."
             }
-            if let idx = liveTasks.firstIndex(where: {
-                $0.id == runId || $0.resolvedRunId == runId
-            }) {
-                liveTasks[idx].pendingInteractions.removeAll { $0.interactionId == interactionId }
-                liveTasks[idx].waitingOnUser = !liveTasks[idx].pendingInteractions.isEmpty
-                liveTasks[idx].updatedAt = .now
+            mutateTask(runId, at: locationID) {
+                $0.pendingInteractions.removeAll { $0.interactionId == interactionId }
+                $0.waitingOnUser = !$0.pendingInteractions.isEmpty
+                $0.updatedAt = .now
+            }
+            if locationID != .local, let threadId = selectedThreadId {
+                await refreshOpenThread(locationID: locationID, id: threadId)
             }
             return nil
         } catch {
@@ -1399,274 +1640,13 @@ final class AppModel {
         }
     }
 
-    func performRunDetailLoad(
-        _ id: String,
-        insertingIfMissing: Bool,
-        loadToken: UUID
-    ) async {
-        guard let requestClient = client else { return }
-        let requestGeneration = connectionGeneration
-        // A cold insert/restoration belongs to one selected thread generation.
-        // Capture that authority before the request and re-prove it after every
-        // suspension so a late response from thread A cannot repopulate rows or
-        // start child streams after the user has switched to thread B.
-        let insertionThreadFence: (id: String, generation: Int)?
-        if insertingIfMissing {
-            guard let selectedThreadId,
-                  selectedThreadAuthorizesColdRun(id) else { return }
-            insertionThreadFence = (selectedThreadId, threadLoadGeneration)
-        } else {
-            insertionThreadFence = nil
-        }
-        guard insertingIfMissing || liveTasks.contains(where: { $0.id == id }) else { return }
-        // Snapshot fence, write side: stream events arriving DURING this load
-        // are deferred and re-applied after the snapshot lands. Without this,
-        // the final `liveTasks[writeIdx] = task` write (built from a pre-await
-        // copy) would erase them — and lastEventIds has already advanced past
-        // their seq, so they would never be replayed.
-        snapshotLoadDepth[id, default: 0] += 1
-        defer {
-            // A pre-reconnect request must not decrement/replay the NEW
-            // connection's same-id snapshot state.
-            if connectionGeneration == requestGeneration,
-               runDetailLoadTokens[id] == loadToken {
-                snapshotLoadDepth[id, default: 1] -= 1
-                if snapshotLoadDepth[id] ?? 0 <= 0 {
-                    snapshotLoadDepth[id] = nil
-                    let deferred = deferredEnvelopes[id] ?? []
-                    deferredEnvelopes[id] = nil
-                    // Seq fence for the REPLAY too: the snapshot we just
-                    // merged reflects everything <= lastSeq; re-applying a
-                    // deferred envelope from that range would double-count spend
-                    // and duplicate timeline rows.
-                    let fence = snapshotReplayFences.removeValue(forKey: id) ?? 0
-                    for env in deferred where !(env.seq > 0 && env.seq <= fence) { apply(env, to: id) }
-                    if deferredOverflow.remove(id) != nil {
-                        // W23: envelopes were dropped at the cap — a replay would be
-                        // incomplete, so a FRESH snapshot supersedes them instead.
-                        Task { await self.loadRunDetail(id) }
-                    }
-                }
-            }
-        }
-        do {
-            let detail = try await requestClient.runDetail(runId: id)
-            guard !Task.isCancelled,
-                  connectionGeneration == requestGeneration,
-                  client === requestClient,
-                  runDetailLoadTokens[id] == loadToken else { return }
-            if let fence = insertionThreadFence {
-                guard selectedThreadId == fence.id,
-                      threadLoadGeneration == fence.generation,
-                      selectedThreadAuthorizesColdRun(id) else { return }
-            }
-            // A targeted detail response may create the missing parent row.
-            // Bind that authority to the exact run id. The one valid mismatch
-            // is an existing optimistic row keyed by jobId until list refresh
-            // remaps it; a missing alias can never authorize a foreign insert.
-            let existingBaseIdx = liveTasks.firstIndex(where: { $0.id == id })
-            let exactIdentity = detail.summary.runId == id
-            let queuedAlias = detail.summary.jobId == id && existingBaseIdx != nil
-            guard exactIdentity || queuedAlias else { return }
-            if existingBaseIdx == nil {
-                let belongsToSelectedThread = selectedThreadDetail?.turns.contains {
-                    $0.runId == id || ($0.run?.delegatedChildRunIds ?? []).contains(id)
-                } == true
-                guard exactIdentity, insertingIfMissing, belongsToSelectedThread else { return }
-                liveTasks.append(Self.liveTask(from: detail.summary))
-            }
-            // Re-resolve the row BY ID after the await: refreshes/inserts may
-            // have reordered liveTasks, and a stale index would merge this
-            // snapshot into (and copy hydrated fields from) a DIFFERENT run.
-            guard let baseIdx = liveTasks.firstIndex(where: { $0.id == id }) else { return }
-            // Concurrent detail loads race (release wave round-12): an OLDER
-            // response resolving after a newer one must not roll the task
-            // back — deferred events at or below the newer fence were already
-            // consumed and cannot repair it. Older-than-fence responses are
-            // no-ops.
-            if detail.lastSeq < (snapshotReplayFences[id] ?? 0) { return }
-            let existingIds = Set(liveTasks.map(\.id))
-            let resolvedParentRunId = detail.summary.runId
-            let activeRestoredChildren = Self.restoredActiveChildIds(
-                detail.children, parentRunId: resolvedParentRunId, existingIds: existingIds)
-            liveTasks = Self.mergingDelegatedChildren(
-                detail.children, parentRunId: resolvedParentRunId, into: liveTasks)
-            for childRunId in activeRestoredChildren { stream(runId: childRunId) }
-            // Snapshot truth and stream progress are related but distinct: the
-            // resume cursor may already be newer than this response.
-            snapshotReplayFences[id] = max(snapshotReplayFences[id] ?? 0, detail.lastSeq)
-            lastEventIds[id] = max(lastEventIds[id] ?? 0, detail.lastSeq)
-            var task = liveTasks[baseIdx]
-            task.resolvedRunId = detail.summary.runId
-            task.phase = RunPhase(api: detail.summary.state)
-            task.mode = RunMode(apiValue: detail.summary.mode, strategy: detail.summary.strategy)
-            task.operatorDecisionAction = detail.operatorDecisionAction
-            task.parentRunId = detail.summary.parentRunId ?? task.parentRunId
-            task.delegatedFromRunId = detail.summary.delegatedFromRunId ?? task.delegatedFromRunId
-            task.delegation = detail.summary.delegation ?? task.delegation
-            // v3 terminal-truth axes + Run Detail satellites (D8/D17/D18/D31):
-            // the outcome facts, the server-owned banner rendered verbatim, the
-            // single-producer apply eligibility, and plan/council projections.
-            task.outcomeFacts = detail.summary.outcomeFacts ?? task.outcomeFacts
-            task.outcomeBanner = detail.outcomeBanner
-            task.applyEligibility = detail.applyEligibility
-            task.planReadiness = detail.planReadiness
-            task.planQuestions = detail.planQuestions
-            task.council = detail.council
-            if let result = detail.summary.result {
-                task.applyState = result.applyState
-                task.revertable = result.revertable
-                task.adopted = result.adopted == true
-            }
-            task.prompt = detail.summary.prompt ?? task.prompt
-            if !task.prompt.isEmpty { task.title = String(task.prompt.prefix(64)) }
-            task.project = detail.summary.project?.projectName ?? detail.summary.project?.root.map { URL(fileURLWithPath: $0).lastPathComponent } ?? task.project
-            task.repoRoot = detail.summary.project?.root ?? task.repoRoot
-            task.harnesses = (detail.summary.harnesses ?? []).compactMap { HarnessFamily(rawValue: $0) }
-            task.applyPaidBudget(detail.summary.paidBudget)
-            task.spendUsd = detail.summary.spendUsd ?? task.spendUsd
-            task.spendKnown = detail.summary.spendUsd != nil || task.spendKnown
-            task.spendEstimated = detail.summary.spendEstimated ?? task.spendEstimated
-            let failure = detail.failure ?? detail.summary.failure
-            task.engineError = failure?.safeMessage ?? detail.summary.error
-            task.failureCategory = failure?.category
-            task.runDir = detail.summary.runDir ?? failure?.runDir ?? task.runDir
-            task.outputReadyState = detail.summary.outputReadyState
-            task.pendingInteractions = detail.pendingInteractions
-            task.waitingOnUser = detail.summary.waitingOnUser ?? !detail.pendingInteractions.isEmpty
-            if let route = detail.summary.route {
-                task.observedModel = route.observedModel
-                task.routeProof = route.verified == true ? .verified : .unverified
-            }
-            task.authRoute = detail.summary.authRoute ?? task.authRoute
-            task.requestedAccess = detail.summary.requestedAccess
-            task.effectiveAccess = detail.summary.effectiveAccess
-            task.externalContextPolicy = detail.summary.externalContextPolicy
-            task.tests = detail.summary.tests ?? task.tests
-            task.reviewerPanel = detail.summary.reviewerPanel
-            task.protectedPathApprovals = detail.summary.protectedPathApprovals
-            task.browserRequirementDetail = browserRequirementDetail(detail.summary.requestRequirements)
-            if detail.summary.webEvidence?.available == false {
-                task.webEvidenceStatus = nil
-                task.webEvidenceDetail = "Web/tool telemetry unavailable for this run (predates telemetry.yaml or still running)."
-            } else {
-                task.webEvidenceStatus = detail.summary.webEvidence?.status
-                task.webEvidenceDetail = Self.webEvidenceDetail(detail.summary.webEvidence)
-            }
-            task.artifactPaths = detail.artifacts.map(\.path)
-            // Live plan checklist + candidate cards: mapping owned
-            // by RunDetailMapping.swift.
-            if let planItems = RunDetailMapping.planItems(detail.planProgress) { task.plan = planItems }
-            task.candidates = RunDetailMapping.candidates(detail.candidates, runPhase: task.phase)
-            if let budget = detail.budget {
-                if let cap = budget.maxUsd { task.capUsd = cap }
-                if let spend = budget.spendUsd { task.spendUsd = spend }
-                task.capKnown = budget.maxUsd != nil
-                task.spendKnown = budget.spendUsd != nil
-                task.spendEstimated = budget.estimated
-                // QA-023c: the KNOWN subscription valuation only (unknown stays
-                // absent, never a fabricated $0). Rendered beside cash so a $0
-                // cash subscription run still shows what the work was worth.
-                task.valuationUsd = budget.knownValuationUsd
-            }
-            // Seed the live box's spend from the snapshot (authoritative up to
-            // lastSeq): post-fence budget.observation increments then add ON
-            // TOP — same "seed from replay OR summary, never both" rule.
-            if let box = liveBoxes[id], task.spendKnown {
-                box.spendUsd = task.spendUsd
-                box.spendKnown = true
-                box.spendEstimated = task.spendEstimated
-            }
-            if let final = detail.finalSummary, !final.isEmpty,
-               !task.activity.contains(where: { $0.title == "Final summary" }) {
-                task.activity.append(ActivityEvent(.message, "Final summary", detail: final))
-            }
-            if let primary = detail.primaryOutput, let text = primary.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let displayedText = primary.truncated == true
-                    ? text + "\n\n_Inline preview bounded; open \(primary.path) for the full output._"
-                    : text
-                if primary.kind == "diagnostic" {
-                    task.diagnosticText = displayedText
-                    task.answerText = nil
-                } else if primary.kind == "patch" {
-                    // A raw diff is NEVER markdown-rendered as the Outcome; it
-                    // belongs to the Diff tab (parsed below).
-                    task.answerText = nil
-                } else {
-                    task.answerText = displayedText
-                }
-            } else {
-                task.answerText = await firstArtifactText(client: requestClient, runId: id, paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md", "final/summary.md"])
-            }
-            // The fallback artifact fetch above is the final suspension point
-            // in this load. A disconnect can retire the request while it is
-            // awaiting bytes, so re-validate before any new-connection state
-            // (live boxes, rows, or the hydration cache) can be mutated.
-            guard !Task.isCancelled,
-                  connectionGeneration == requestGeneration,
-                  client === requestClient,
-                  runDetailLoadTokens[id] == loadToken else { return }
-            if let fence = insertionThreadFence {
-                guard selectedThreadId == fence.id,
-                      threadLoadGeneration == fence.generation,
-                      selectedThreadAuthorizesColdRun(id) else { return }
-            }
-            // Diff bytes are TAB-DEMAND payload (INV-136): hydration records
-            // artifact existence; TaskDetail loads/parses only when Diff opens.
-            if !detail.timeline.isEmpty {
-                task.activity = detail.timeline.map(Self.activityEvent(from:))
-                // A STREAMING run's feed lives in its box (views read the box
-                // overlay): the snapshot timeline is authoritative up to
-                // lastSeq, so it replaces the SSE-accumulated feed (the ring
-                // counter resets with it — the server snapshot carries its own
-                // truncation marker); deferred envelopes past the fence
-                // re-append after this load.
-                if let box = liveBoxes[id] {
-                    box.activity = task.activity
-                    box.activityDropped = 0
-                }
-            }
-            task.diagnosticText = RunDiagnosticsPresentation.summary(
-                detail: detail, error: task.engineError)
-            let persistedFindings = detail.reviewFindings.compactMap { Self.finding(from: $0, taskTitle: task.title) }
-            if !persistedFindings.isEmpty {
-                task.findings = persistedFindings
-            }
-            task.reviewVerdict = RunDetailMapping.reviewVerdict(
-                decision: detail.decision, candidates: detail.candidates,
-                findings: task.findings, failure: failure, phase: task.phase, outcomeFacts: task.outcomeFacts
-            )
-            if !detail.artifacts.isEmpty, task.plan.isEmpty, task.mode == .plan {
-                // Only the actual SpecPack artifact is a "plan" row; arbitrary
-                // nested paths must not be synthesized into plan steps.
-                task.plan = detail.artifacts
-                    .filter { $0.kind == "file" && $0.path == "final/plan.md" }
-                    .map { PlanItem($0.path, .done, note: $0.bytes.map { "\($0) bytes" }) }
-            }
-            // Re-resolve the row index at WRITE time: streams/refreshes may have
-            // inserted or removed rows during the awaits above.
-            if let writeIdx = liveTasks.firstIndex(where: { $0.id == id }) {
-                liveTasks[writeIdx] = task
-                hydratedRunDetails.insert(id)
-            }
-        } catch {
-            guard !Task.isCancelled,
-                  connectionGeneration == requestGeneration,
-                  client === requestClient,
-                  runDetailLoadTokens[id] == loadToken else { return }
-            if let idx = liveTasks.firstIndex(where: { $0.id == id }) {
-                liveTasks[idx].engineError = "Could not load run detail: \(error)"
-                liveTasks[idx].diagnosticText = liveTasks[idx].engineError
-                liveTasks[idx].updatedAt = .now
-            }
-        }
-    }
 
     func storeSecret(name: String, value: String, for family: HarnessFamily) async -> (stored: Bool, readinessRefreshed: Bool) {
-        guard let client else { return (false, false) }
+        let locationID = activeExecutionLocation
+        guard let requestClient = gateway(for: locationID) else { return (false, false) }
         do {
-            try await client.setSecret(name: name, value: value)
-            await refreshSecrets()
+            try await requestClient.setSecret(name: name, value: value)
+            await refreshSecrets(locationID: locationID)
             guard let request = family.apiKeyAuthReadinessRequest else { return (true, false) }
             return (true, await refreshAuthReadiness(for: family, request: request))
         } catch {
@@ -1674,37 +1654,5 @@ final class AppModel {
         }
     }
 
-    private static func activityEvent(from event: TimelineEvent) -> ActivityEvent {
-        let kind: ActivityKind
-        if event.type.contains("review") || event.type.contains("finding") {
-            kind = .review
-        } else if event.type.contains("gate") {
-            kind = .gate
-        } else if event.type.contains("harness") {
-            let lowered = (event.detail ?? event.title).lowercased()
-            kind = lowered.contains("file") ? .file : lowered.contains("tool") ? .tool : lowered.contains("think") ? .thinking : .message
-        } else {
-            kind = .system
-        }
-        // QA-070: disclose unsupported per-harness knobs the route could NOT honor
-        // (INV-105) as a warning-shaped Activity detail — the wire already sets
-        // severity=warning on the harness.started row, so a dropped max_turns /
-        // tools / effort limit is visible, not a benign-looking start.
-        let ignored = (event.ignoredSettings ?? []).isEmpty
-            ? nil
-            : "Ignored (unsupported by this harness): " + (event.ignoredSettings ?? []).joined(separator: "; ")
-        let detailParts = [event.detail, ignored, event.target.map { "target: \($0)" }, event.errorSummary.map { "error: \($0)" }]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty }
-        return ActivityEvent(
-            kind,
-            harness: event.harnessId.flatMap { HarnessFamily(rawValue: $0) },
-            event.title,
-            detail: detailParts.isEmpty ? nil : detailParts.joined(separator: "\n"),
-            severity: event.severity,
-            code: event.rawRef,
-            at: parseEventDate(event.ts) ?? .now
-        )
-    }
 
 }

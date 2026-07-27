@@ -20,6 +20,10 @@ on:
         description: Base64 owner-signed runtime-update manifest (D-2); required only for publish
         required: false
         type: string
+      remote_runtime_manifest_b64:
+        description: Base64 owner-signed four-target SSH runtime manifest; required only for publish
+        required: false
+        type: string
       candidate_run_id:
         description: The candidate workflow run id whose exact artifact bytes publish promotes (A-5); required only for publish
         required: false
@@ -33,6 +37,7 @@ env:
   RELEASE_REF_INPUT: ${{ inputs.ref }}
   REVIEW_ATTESTATION_B64_INPUT: ${{ inputs.review_attestation_b64 }}
   RUNTIME_MANIFEST_B64_INPUT: ${{ inputs.runtime_manifest_b64 }}
+  REMOTE_RUNTIME_MANIFEST_B64_INPUT: ${{ inputs.remote_runtime_manifest_b64 }}
   CANDIDATE_RUN_ID_INPUT: ${{ inputs.candidate_run_id }}
 
 concurrency:
@@ -400,6 +405,88 @@ jobs:
           actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
           test "$declared" = "$actual" || { echo "::error::runtime manifest sha256 does not match the tarball"; exit 1; }
 
+      - name: Verify promoted candidate closure provenance (publish, A-5)
+        if: needs.prepare.outputs.mode == 'publish'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The promoted closure bytes must carry the CANDIDATE run's build
+          # provenance (digest-keyed, repo-scoped) before they are trusted.
+          gh attestation verify "candidate-assets/claudexor-runtime-$VERSION.tar.gz" \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Build (candidate) or promote (publish) all SSH runtime targets
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PREPARED_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          remote="$RUNNER_TEMP/remote-runtimes"
+          rm -rf "$remote"
+          mkdir -p "$remote"
+          if [ "$RELEASE_MODE_INPUT" = publish ]; then
+            cp candidate-assets/claudexor-remote-runtime-"$VERSION"-*.tar.gz "$remote/"
+            cp candidate-assets/remote-runtime-manifest.json "$remote/"
+          else
+            node_version="$(cat .node-version)"
+            resources="apps/macos/dist/Claudexor.app/Contents/Resources"
+            for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+              archive="$RUNNER_TEMP/node-v$node_version-$target.tar.gz"
+              curl --fail --location --proto '=https' --tlsv1.2 \
+                "https://nodejs.org/dist/v$node_version/node-v$node_version-$target.tar.gz" \
+                --output "$archive"
+              digest="$(node -e 'const x=require("./scripts/remote-node-sha256.json");process.stdout.write(x.assets[process.argv[1]])' "$target")"
+              node scripts/build-remote-runtime.mjs \
+                --target "$target" \
+                --version "$VERSION" \
+                --build-sha "$PREPARED_SHA" \
+                --resources "$resources" \
+                --node-archive "$archive" \
+                --node-sha256 "$digest" \
+                --node-version "$node_version" \
+                --out "$remote"
+            done
+            node scripts/build-remote-runtime-manifest.mjs \
+              --version "$VERSION" \
+              --build-sha "$PREPARED_SHA" \
+              --min-app-version "$VERSION" \
+              --assets-dir "$remote" \
+              --out "$remote/remote-runtime-manifest.json"
+          fi
+          test "$(find "$remote" -name 'claudexor-remote-runtime-*.tar.gz' | wc -l | tr -d ' ')" = 4
+          test -s "$remote/remote-runtime-manifest.json"
+          for archive in "$remote"/claudexor-remote-runtime-"$VERSION"-*.tar.gz; do
+            node scripts/verify-remote-runtime-archive.mjs "$archive"
+          done
+
+      - name: Smoke native Darwin SSH runtime through a PTY
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) target=darwin-arm64 ;;
+            x86_64) target=darwin-x64 ;;
+            *) echo "::error::unsupported Darwin runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          scripts/smoke-darwin-remote-runtime.sh \
+            "$RUNNER_TEMP/remote-runtimes/claudexor-remote-runtime-$VERSION-$target.tar.gz"
+
+      - name: Verify promoted SSH runtime provenance (publish)
+        if: needs.prepare.outputs.mode == 'publish'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for file in candidate-assets/claudexor-remote-runtime-"$VERSION"-*.tar.gz; do
+            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"
+          done
+
       - name: Assemble checksums, SBOM and review evidence
         shell: bash
         env:
@@ -427,6 +514,7 @@ jobs:
               > "$assets/Claudexor-$VERSION.spdx.json"
           fi
           cp "$RUNNER_TEMP/runtime-closure/claudexor-runtime-$VERSION.tar.gz" "$assets/"
+          cp "$RUNNER_TEMP/remote-runtimes"/claudexor-remote-runtime-"$VERSION"-*.tar.gz "$assets/"
           # D-2/A-5: candidate ships the UNSIGNED manifest (owner signs it
           # offline); publish ships only the OWNER-SIGNED manifest after
           # fail-closed verification against the PROMOTED candidate closure
@@ -446,6 +534,22 @@ jobs:
             cp "$RUNNER_TEMP/runtime-closure/runtime-manifest.json" "$assets/"
           fi
           if [ "$RELEASE_MODE_INPUT" = publish ]; then
+            remote_signed="$RUNNER_TEMP/remote-runtime-manifest.signed.json"
+            printf '%s' "$REMOTE_RUNTIME_MANIFEST_B64_INPUT" | base64 -d > "$remote_signed"
+            node scripts/verify-signed-remote-runtime-manifest.mjs \
+              --signed "$remote_signed" \
+              --unsigned "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" \
+              --assets-dir "$RUNNER_TEMP/remote-runtimes" \
+              --version "$VERSION" \
+              --expected-build-sha "$PREPARED_SHA"
+            cp "$remote_signed" "$assets/remote-runtime-manifest.json"
+          else
+            cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"
+          fi
+          node scripts/generate-remote-runtime-sbom.mjs \
+            "$RUNNER_TEMP/remote-runtimes" "$VERSION" \
+            > "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"
+          if [ "$RELEASE_MODE_INPUT" = publish ]; then
             cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"
           fi
           (cd "$assets" && shasum -a 256 * > SHA256SUMS)
@@ -463,9 +567,36 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/release-assets/*
 
+  remote-linux-ssh-smoke:
+    name: Exercise the promoted Linux runtime over OpenSSH
+    needs: [prepare, package-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: Claudexor-${{ needs.prepare.outputs.version }}-release-assets
+          path: release-assets
+
+      - name: Auto-install, bootstrap, browse, create a thread, reconnect and forward preview
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/smoke-remote-runtime-ssh.sh \
+            "release-assets/claudexor-remote-runtime-$VERSION-linux-x64.tar.gz"
+
   publish-npm:
     name: Publish npm packages with provenance
-    needs: [prepare, package-macos]
+    needs: [prepare, package-macos, remote-linux-ssh-smoke]
     if: needs.prepare.outputs.mode == 'publish'
     runs-on: macos-26
     permissions:
@@ -551,7 +682,7 @@ jobs:
 
   publish-release:
     name: Publish immutable GitHub Release
-    needs: [prepare, package-macos, publish-npm, npm-smoke]
+    needs: [prepare, package-macos, remote-linux-ssh-smoke, publish-npm, npm-smoke]
     if: needs.prepare.outputs.mode == 'publish'
     runs-on: ubuntu-latest
     permissions:

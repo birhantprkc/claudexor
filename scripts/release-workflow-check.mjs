@@ -455,9 +455,9 @@ if (
 }
 
 const directInputs = [...release.matchAll(/\$\{\{\s*inputs\.[^}]+\}\}/g)].map((match) => match[0]);
-if (directInputs.length !== 5) {
+if (directInputs.length !== 6) {
   errors.push(
-    `release.yml: expected exactly five input projections into workflow env, got ${directInputs.length}`,
+    `release.yml: expected exactly six input projections into workflow env, got ${directInputs.length}`,
   );
 }
 if (errors.length) {

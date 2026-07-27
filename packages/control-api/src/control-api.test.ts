@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DaemonControlApiServer,
+  inlineContentDisposition,
   normalizeRunStartRequest,
   runListFingerprintProbeCountForTests,
   resetRunListFingerprintProbeCountForTests,
@@ -185,6 +186,21 @@ describe("normalizeRunStart prompt validation", () => {
   });
 });
 
+describe("remote project file headers", () => {
+  it("preserves a Unicode filename through RFC 5987 without exposing it in the ASCII fallback", () => {
+    expect(inlineContentDisposition('отчёт "финал".png')).toBe(
+      "inline; filename=\"_____ _______.png\"; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82%20%22%D1%84%D0%B8%D0%BD%D0%B0%D0%BB%22.png",
+    );
+  });
+
+  it("removes CRLF from both filename projections", () => {
+    const header = inlineContentDisposition("safe\r\nX-Evil: yes.txt");
+    expect(header).not.toContain("\r");
+    expect(header).not.toContain("\n");
+    expect(header).toContain("filename*=UTF-8''safe__X-Evil%3A%20yes.txt");
+  });
+});
+
 describe("DaemonControlApiServer", () => {
   const token = "daemon-token-123";
   const readyIdentity = {};
@@ -235,6 +251,7 @@ describe("DaemonControlApiServer", () => {
             }
           : { ...binding, state: "running", startedAt: "2026-01-01T00:00:01.000Z" },
       ...overrides,
+      transport: overrides.transport ?? "daemon",
     };
   };
 
@@ -4411,7 +4428,12 @@ describe("DaemonControlApiServer", () => {
         expect(await created.json()).toMatchObject({ jobId: "setup-1", action: "login" });
         expect(seen).toEqual([
           {
-            request: { harness: "cursor", action: "login", authRequest: "subscription" },
+            request: {
+              harness: "cursor",
+              action: "login",
+              authRequest: "subscription",
+              transport: "daemon",
+            },
             idempotencyKey: "setup-create-1",
             clientId: "control-api",
           },

@@ -10,15 +10,22 @@ extension AppModel {
     /// List a run's produced artifacts (path/kind/bytes/mime) for the gallery.
     /// nil = the LOAD failed (offline/transport) — distinct from an honest
     /// empty list, so the gallery can show its error state.
-    func runArtifacts(runId: String) async -> [ArtifactInfo]? {
-        guard let client else { return nil }
-        return try? await client.listRunArtifacts(runId: runId)
+    func runArtifacts(
+        runId: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> [ArtifactInfo]? {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else { return nil }
+        return try? await requestClient.listRunArtifacts(runId: runId)
     }
 
     /// Raw bytes of one artifact (images / pdf) for inline rendering or open.
-    func artifactBytes(runId: String, path: String) async -> Data? {
-        guard let client else { return nil }
-        return try? await client.artifactData(runId: runId, path: path)
+    func artifactBytes(
+        runId: String,
+        path: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> Data? {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else { return nil }
+        return try? await requestClient.artifactData(runId: runId, path: path)
     }
 
     /// Text content of one artifact (markdown / code / json / log), typed so a
@@ -26,9 +33,15 @@ extension AppModel {
     /// refusal becomes a `.notRenderable` reason the viewer shows verbatim, a 413
     /// oversize its own reason, and anything else `.offline` — never a silent nil
     /// the row would paint as a generic "engine offline" blob.
-    func artifactTextOutcome(runId: String, path: String) async -> Result<String, PayloadError> {
-        guard let client else { return .failure(ArtifactFetchError.offline(path: path)) }
-        do { return .success(try await client.artifactText(runId: runId, path: path)) }
+    func artifactTextOutcome(
+        runId: String,
+        path: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> Result<String, PayloadError> {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else {
+            return .failure(ArtifactFetchError.offline(path: path))
+        }
+        do { return .success(try await requestClient.artifactText(runId: runId, path: path)) }
         catch { return .failure(ArtifactFetchError.payloadError(from: error, path: path)) }
     }
 
@@ -36,24 +49,37 @@ extension AppModel {
 
     /// List a run's PRODUCED outputs — files the run writes into the project's
     /// `artifacts/` folder — for the thread-workspace Artifacts gallery. nil = load failed.
-    func producedArtifacts(runId: String) async -> [ArtifactInfo]? {
-        guard let client else { return nil }
-        return try? await client.listProducedFiles(runId: runId)
+    func producedArtifacts(
+        runId: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> [ArtifactInfo]? {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else { return nil }
+        return try? await requestClient.listProducedFiles(runId: runId)
     }
 
     /// Raw bytes of one produced output (images / pdf) for inline rendering or open.
-    func producedBytes(runId: String, path: String) async -> Data? {
-        guard let client else { return nil }
-        return try? await client.producedData(runId: runId, path: path)
+    func producedBytes(
+        runId: String,
+        path: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> Data? {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else { return nil }
+        return try? await requestClient.producedData(runId: runId, path: path)
     }
 
     /// Text content of one produced output (markdown / code / json / log), typed
     /// like `artifactTextOutcome` so a 409 sensitive-file refusal renders as its
     /// typed reason (QA-067).
-    func producedTextOutcome(runId: String, path: String) async -> Result<String, PayloadError> {
-        guard let client else { return .failure(ArtifactFetchError.offline(path: path)) }
+    func producedTextOutcome(
+        runId: String,
+        path: String,
+        locationID: ExecutionLocationID? = nil
+    ) async -> Result<String, PayloadError> {
+        guard let requestClient = gateway(for: locationID ?? selectedExecutionLocation) else {
+            return .failure(ArtifactFetchError.offline(path: path))
+        }
         do {
-            let data = try await client.producedData(runId: runId, path: path)
+            let data = try await requestClient.producedData(runId: runId, path: path)
             // STRICT decode (round-3 crit #3): `String(decoding:as:UTF8.self)` silently
             // REPLACES malformed bytes with U+FFFD and paints corruption as if it were
             // real text. Refuse a non-UTF-8 body with its path instead.

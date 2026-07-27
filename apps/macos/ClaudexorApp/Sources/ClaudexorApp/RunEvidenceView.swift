@@ -9,6 +9,7 @@ import SwiftUI
 /// sheet, and the copy/retry helpers live with them, not on the detail shell.
 struct RunEvidenceView: View {
     @Environment(AppModel.self) private var model
+    let locationID: ExecutionLocationID
     let task: TaskRun
 
     @State private var actionError: String?
@@ -22,7 +23,9 @@ struct RunEvidenceView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 SectionLabel("Artifacts", systemImage: "photo.on.rectangle.angled")
-                ArtifactGalleryView(runId: task.id)
+                ArtifactGalleryView(
+                    locationID: locationID,
+                    runId: task.id)
                     .frame(minHeight: 160)
             }
             diagnosticsContent(task)
@@ -42,24 +45,56 @@ struct RunEvidenceView: View {
                 .buttonStyle(.bordered)
                 .help("Copy the bounded diagnostics summary and run metadata.")
                 Button {
-                    if let runDir = task.runDir { NSWorkspace.shared.open(URL(fileURLWithPath: runDir)) }
+                    if locationID == .local {
+                        if let runDir = task.runDir {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: runDir))
+                        }
+                    } else if let directory = task.runDir ?? task.repoRoot {
+                        Task {
+                            await model.openRemoteTerminal(
+                                directory: directory, title: "Run folder")
+                        }
+                    }
                 } label: {
-                    Label("Open Run Folder", systemImage: "folder")
+                    Label(
+                        locationID == .local
+                            ? "Open Run Folder" : "Open Terminal Here",
+                        systemImage: locationID == .local
+                            ? "folder" : "terminal")
                 }
                 .buttonStyle(.bordered)
                 .disabled(task.runDir == nil)
-                .help(task.runDir ?? "Run folder is not available yet.")
+                .help(
+                    task.runDir.map {
+                        locationID == .local
+                            ? $0 : "Open an SSH shell in \($0)"
+                    } ?? "Run folder is not available yet.")
                 Button {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claudexor/v3/daemon/claudexord.log"))
+                    if locationID == .local {
+                        NSWorkspace.shared.open(
+                            URL(fileURLWithPath: NSHomeDirectory())
+                                .appendingPathComponent(
+                                    ".claudexor/v3/daemon/claudexord.log"))
+                    } else {
+                        Task { await model.openRemoteDaemonLog() }
+                    }
                 } label: {
-                    Label("Open Daemon Log", systemImage: "terminal")
+                    Label(
+                        locationID == .local
+                            ? "Open Daemon Log" : "Tail Daemon Log",
+                        systemImage: "terminal")
                 }
                 .buttonStyle(.bordered)
-                .help("Open ~/.claudexor/v3/daemon/claudexord.log.")
+                .help(
+                    locationID == .local
+                        ? "Open ~/.claudexor/v3/daemon/claudexord.log."
+                        : "Tail the daemon log over the existing SSH connection.")
                 Button {
                     retrying = true
                     Task {
-                        actionError = await model.retryRunExact(task.id)
+                        actionError = await model.retryRunExact(
+                            task.id,
+                            locationID: locationID)
                         retrying = false
                     }
                 } label: { Label(retrying ? "Retrying…" : "Retry Exact", systemImage: "arrow.clockwise") }
@@ -69,7 +104,10 @@ struct RunEvidenceView: View {
                 .help("Create a new attempt from the immutable original request and run a fresh preflight.")
                 Button {
                     Task {
-                        guard let draft = await model.loadRunAgainDraft(task.id) else {
+                        guard let draft = await model.loadRunAgainDraft(
+                            task.id,
+                            locationID: locationID
+                        ) else {
                             actionError = "Could not load the editable run draft."
                             return
                         }

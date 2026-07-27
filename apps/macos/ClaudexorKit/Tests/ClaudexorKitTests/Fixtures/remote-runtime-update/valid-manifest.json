@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "kind": "claudexor-remote-runtime",
+  "version": "3.4.0",
+  "buildSha": "0123456789abcdef0123456789abcdef01234567",
+  "protocolMajor": 3,
+  "minAppVersion": "2.1.0",
+  "notes": "remote-runtime cross-language test vector — never shipped",
+  "assets": [
+    {
+      "target": "linux-x64",
+      "platform": "linux",
+      "arch": "x64",
+      "nodeVersion": "24.16.0",
+      "archiveName": "claudexor-remote-runtime-3.4.0-linux-x64.tar.gz",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v3.4.0/claudexor-remote-runtime-3.4.0-linux-x64.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "target": "linux-arm64",
+      "platform": "linux",
+      "arch": "arm64",
+      "nodeVersion": "24.16.0",
+      "archiveName": "claudexor-remote-runtime-3.4.0-linux-arm64.tar.gz",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v3.4.0/claudexor-remote-runtime-3.4.0-linux-arm64.tar.gz",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "target": "darwin-x64",
+      "platform": "darwin",
+      "arch": "x64",
+      "nodeVersion": "24.16.0",
+      "archiveName": "claudexor-remote-runtime-3.4.0-darwin-x64.tar.gz",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v3.4.0/claudexor-remote-runtime-3.4.0-darwin-x64.tar.gz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "target": "darwin-arm64",
+      "platform": "darwin",
+      "arch": "arm64",
+      "nodeVersion": "24.16.0",
+      "archiveName": "claudexor-remote-runtime-3.4.0-darwin-arm64.tar.gz",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v3.4.0/claudexor-remote-runtime-3.4.0-darwin-arm64.tar.gz",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "keyId": "claudexor-runtime-update-TESTVECTOR-ed25519",
+  "algorithm": "Ed25519",
+  "signature": "yb6xXb5/GI/wMvaIvGz6hKm4rTuNuQLGcN7ZnIcZxbpAMXkdvZU3Re5LKw0wg2+tYAwpaOiuYe23+A+sDY7JDQ=="
+}

@@ -52,13 +52,12 @@ import {
   assertCredentialProfileCompatibility,
   assertCredentialProfileRegistered,
 } from "./profile-compatibility.js";
+import { listRemoteDirectory, readScopedProjectFile } from "./remote-filesystem.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
-
 type SetupJobManager = ReturnType<typeof createSetupJobManager>;
 type SetupBinding = SetupLifecycleBinding<SetupJobStore, SetupJobManager>;
 type HarnessListInput = { fresh?: boolean; includeFakes?: boolean; harnessIds?: string[] };
-
 /**
  * The project ROOT a non-terminal job runs against (project-remove active-run
  * fence), or null when it holds no project. Parsed via the typed `RunScope`
@@ -140,6 +139,9 @@ export function controlServices(
         projects: store.list().map((p) => ({ ...p, nesting: store.nestingFor(p.id) })) as unknown[],
       };
     },
+    listDirectory: async (path?: string) => listRemoteDirectory(path),
+    fetchProjectFile: async (id: string, path: string) =>
+      readScopedProjectFile(projects(), id, path),
     registerProject: async (input: Parameters<ProjectStore["register"]>[0]) => {
       const project = threads.registerProject(input);
       return { ...project, nesting: projects().nestingFor(project.id) };
