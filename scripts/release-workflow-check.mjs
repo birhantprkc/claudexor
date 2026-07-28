@@ -323,6 +323,14 @@ const exactPromotionMutationCases = [
     "byte-compared candidate SBOM",
   ],
   [
+    "thirteenth assembled asset",
+    packageMacosJob.replace(
+      '(cd "$assets" && shasum -a 256 * > SHA256SUMS)',
+      'cp "$RUNNER_TEMP/debug-notes.txt" "$assets/"\n          (cd "$assets" && shasum -a 256 * > SHA256SUMS)',
+    ),
+    "assembled release-asset writes",
+  ],
+  [
     "publish remote SBOM prepared-SHA binding",
     packageMacosJob.replace(
       'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs',
@@ -370,6 +378,37 @@ if (!/^\s+ref:\s*\$\{\{\s*github\.sha\s*\}\}\s*$/m.test(prepareJob)) {
 }
 if (!/^\s{4}runs-on:\s*macos-26\s*$/m.test(publishNpmJob)) {
   errors.push("release.yml: npm publication must run on macos-26");
+}
+// The Linux SSH smoke is a publication gate: both publish jobs must depend on
+// it and it must really exercise the promoted archive (not a no-op).
+errors.push(...remoteSmokeGateFindings(release));
+for (const [label, mutated] of [
+  [
+    "publish-npm without the SSH smoke gate",
+    release.replace(
+      "needs: [prepare, package-macos, remote-linux-ssh-smoke]",
+      "needs: [prepare, package-macos]",
+    ),
+  ],
+  [
+    "publish-release without the SSH smoke gate",
+    release.replace(
+      "needs: [prepare, package-macos, remote-linux-ssh-smoke, publish-npm, npm-smoke]",
+      "needs: [prepare, package-macos, publish-npm, npm-smoke]",
+    ),
+  ],
+  [
+    "no-op SSH smoke invocation",
+    release.replace(
+      /scripts\/smoke-remote-runtime-ssh\.sh \\\n\s*"release-assets\/claudexor-remote-runtime-\$VERSION-linux-x64\.tar\.gz"/,
+      "true",
+    ),
+  ],
+  ["deleted SSH smoke job", release.replace("  remote-linux-ssh-smoke:\n", "  renamed-job:\n")],
+]) {
+  if (mutated === release || remoteSmokeGateFindings(mutated).length === 0) {
+    errors.push(`release-workflow-check self-test: failed to reject ${label}`);
+  }
 }
 const beforeAssets = publishReleaseJob.indexOf("--phase before");
 const uploadAssets = publishReleaseJob.indexOf('gh release upload "$TAG" "$file"');
@@ -678,6 +717,40 @@ function exactCandidateAppPromotionErrors(job) {
     /else[\s\S]*?GITHUB_SHA="\$PREPARED_SHA" pnpm licenses list --prod --json \|[\s\S]*?GITHUB_SHA="\$PREPARED_SHA" node scripts\/generate-release-sbom\.mjs[\s\S]*?--app-bundle apps\/macos\/dist\/Claudexor\.app/,
     assembleStep,
   );
+  // Every write into "$assets/" is pinned: the released asset set is exactly
+  // twelve names, and a new cp/redirect here would ship a 13th asset without
+  // touching the candidate allowlist above (which only reads candidate-assets
+  // on the publish path). Adding an asset must be a deliberate, reviewed
+  // change to BOTH lists.
+  const assembledAssetWrites = assembleStep
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) => (line.startsWith("cp ") || line.startsWith("> ")) && line.includes('"$assets/'),
+    )
+    .sort();
+  const expectedAssembledAssetWrites = [
+    'cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"',
+    'cp "candidate-assets/Claudexor-$VERSION.zip" "$assets/"',
+    'cp "candidate-assets/Claudexor-$VERSION.spdx.json" "$assets/"',
+    'cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"',
+    'cp "apps/macos/dist/Claudexor-$VERSION.zip" "$assets/"',
+    '> "$assets/Claudexor-$VERSION.spdx.json"',
+    'cp "$RUNNER_TEMP/runtime-closure/claudexor-runtime-$VERSION.tar.gz" "$assets/"',
+    'cp "$RUNNER_TEMP/remote-runtimes"/claudexor-remote-runtime-"$VERSION"-*.tar.gz "$assets/"',
+    'cp "$signed" "$assets/runtime-manifest.json"',
+    'cp "$RUNNER_TEMP/runtime-closure/runtime-manifest.json" "$assets/"',
+    'cp "$remote_signed" "$assets/remote-runtime-manifest.json"',
+    'cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"',
+    'cp "candidate-assets/Claudexor-remote-runtime-$VERSION.spdx.json" "$assets/"',
+    '> "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"',
+    'cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"',
+  ].sort();
+  if (JSON.stringify(assembledAssetWrites) !== JSON.stringify(expectedAssembledAssetWrites)) {
+    findings.push(
+      "release.yml: assembled release-asset writes drifted from the pinned exact set (adding a 13th asset needs a deliberate review of the candidate allowlist, SHA256SUMS, provenance, and the publish-release phase checks)",
+    );
+  }
   const publishArmStart = assembleStep.indexOf('if [ "$RELEASE_MODE_INPUT" = publish ]; then');
   const publishArmEnd = assembleStep.indexOf("\n          else", publishArmStart);
   const publishArm =
@@ -692,6 +765,42 @@ function exactCandidateAppPromotionErrors(job) {
   const assemble = job.indexOf("Assemble checksums, SBOM and review evidence");
   if (!(download >= 0 && download < verify && verify < assemble)) {
     findings.push("release.yml: candidate download, verification, and assembly order is invalid");
+  }
+  return findings;
+}
+
+/** Like jobBody, but pure: usable on mutated workflow copies in self-tests. */
+function jobSection(workflow, name) {
+  const start = workflow.indexOf(`  ${name}:\n`);
+  if (start < 0) return "";
+  const next = workflow.slice(start + 2).search(/^  [a-z0-9-]+:\n/m);
+  return next < 0 ? workflow.slice(start) : workflow.slice(start, start + 2 + next);
+}
+
+function remoteSmokeGateFindings(workflow) {
+  const findings = [];
+  const smokeJob = jobSection(workflow, "remote-linux-ssh-smoke");
+  if (!smokeJob) {
+    findings.push("release.yml: remote-linux-ssh-smoke job is missing");
+  } else if (
+    !/scripts\/smoke-remote-runtime-ssh\.sh \\\n\s*"release-assets\/claudexor-remote-runtime-\$VERSION-linux-x64\.tar\.gz"/.test(
+      smokeJob,
+    )
+  ) {
+    findings.push(
+      "release.yml: remote-linux-ssh-smoke must invoke scripts/smoke-remote-runtime-ssh.sh on the promoted linux-x64 archive (a no-op invocation hollows the gate)",
+    );
+  }
+  for (const gate of ["publish-npm", "publish-release"]) {
+    if (
+      !/^\s+needs:\s*\[[^\]]*\bremote-linux-ssh-smoke\b[^\]]*\]\s*$/m.test(
+        jobSection(workflow, gate),
+      )
+    ) {
+      findings.push(
+        `release.yml: ${gate} must list remote-linux-ssh-smoke in needs: — publication is gated on the SSH smoke`,
+      );
+    }
   }
   return findings;
 }
