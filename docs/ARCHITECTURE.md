@@ -1994,11 +1994,15 @@ artifacts are fetched after reconnect.
 
 Remote project browsing uses the home-contained directory endpoint, which
 lists only visible (non-hidden) directories and refuses to descend into dot
-trees — file names and hidden names are never disclosed. Remote image links
-use the registered-project-scoped, size-capped file endpoint, which serves
-raster images only (magic-byte validated; anything else is refused before its
-content is read). Both endpoints are wired only into the remote runtime — a
-local daemon never serves them.
+trees — file names and hidden names are never disclosed, and every refusal
+(absent, outside home, not a directory, hidden) is one constant typed answer
+so the endpoint is not an existence oracle for the names it hides. Remote
+image links use the registered-project-scoped, size-capped file endpoint:
+content type is identified by magic bytes, never by file name — a
+non-matching file is refused before its content is read, while a matching
+file's remaining bytes are served verbatim (the sniff authenticates the
+header, not the whole container). Both endpoints are wired only into the
+remote runtime — a local daemon never serves them.
 Shells, daemon-log tails and `client_pty` setup attachment use the system SSH
 PTY; Codex device login stays a typed setup-job UI. Preview creates a
 short-lived forward from an ephemeral local port to the requested remote

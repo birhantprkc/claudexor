@@ -68,7 +68,35 @@ describe("remote filesystem containment", () => {
 
   it("refuses to list INTO a hidden directory", () => {
     mkdirSync(join(root, ".ssh"));
-    expect(() => listRemoteDirectory(join(root, ".ssh"), root)).toThrow(/hidden/);
+    expect(() => listRemoteDirectory(join(root, ".ssh"), root)).toThrow(
+      "directory is not listable",
+    );
+  });
+
+  it("collapses absent/outside/file/hidden refusals into one constant answer (no oracle)", () => {
+    mkdirSync(join(root, ".ssh"));
+    writeFileSync(join(root, "server.key"), "PRIVATE");
+    const probes = [
+      join(root, "no-such-dir"), // absent inside home
+      "/tmp", // outside home, exists
+      "/no-such-root-anywhere-xyz", // outside home, absent
+      join(root, "server.key"), // exists but is a file
+      join(root, ".ssh"), // hidden, exists
+      join(root, ".gnupg"), // hidden, absent
+    ];
+    for (const probe of probes) {
+      let refusal: unknown;
+      try {
+        listRemoteDirectory(probe, root);
+      } catch (error) {
+        refusal = error;
+      }
+      expect(refusal, probe).toBeInstanceOf(Error);
+      expect((refusal as { status?: number }).status, probe).toBe(404);
+      expect((refusal as { code?: string }).code, probe).toBe("directory_not_listable");
+      // Constant message: identical for every cause and never echoes the path.
+      expect((refusal as Error).message, probe).toBe("directory is not listable");
+    }
   });
 
   it("discloses a bounded listing instead of silently hiding overflow", () => {
@@ -81,7 +109,7 @@ describe("remote filesystem containment", () => {
   });
 
   it("refuses directory traversal outside home", () => {
-    expect(() => listRemoteDirectory("/tmp", root)).toThrow(/escapes/);
+    expect(() => listRemoteDirectory("/tmp", root)).toThrow("directory is not listable");
   });
 
   it("serves each allowed raster image type, content-typed by magic bytes", () => {

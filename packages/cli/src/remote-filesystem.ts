@@ -23,10 +23,15 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /**
  * QA-067: the project-file endpoint exists for exactly one consumer — the
- * remote markdown image gallery — so the server serves ONLY raster images,
- * identified by content (magic bytes), never by file name. Everything else is
- * refused before its content is read. SVG is deliberately excluded: it is a
- * scripting-capable text format, not a raster image.
+ * remote markdown image gallery. Content type is identified by magic bytes,
+ * never by file name: a file whose leading bytes are not a known raster
+ * signature is refused before any further content is read. A matching file's
+ * REMAINING bytes are then served verbatim — the sniff authenticates the
+ * header only, not the whole container, so a raster-prefixed polyglot (PNG
+ * magic + arbitrary tail) is served in full. Accepted risk: writing such a
+ * file into a registered project already requires owning the remote user.
+ * SVG is deliberately excluded: it is a scripting-capable text format, not a
+ * raster image.
  */
 function sniffRasterImage(header: Buffer): string | null {
   if (header.length >= 8 && header.subarray(0, 8).equals(PNG_MAGIC)) return "image/png";
@@ -64,7 +69,23 @@ function contained(root: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
+/**
+ * QA-067: a refusal must not be an existence oracle. The listing deliberately
+ * hides hidden trees and everything outside HOME, so the four refusal causes
+ * — absent, outside home, not a directory, hidden — must be indistinguishable
+ * by status, code, and message: one typed refusal with constant text that
+ * never echoes the requested path. Distinct responses here would confirm
+ * guessed secret-bearing names the listing never discloses.
+ */
+function refuseDirectoryListing(): never {
+  throw Object.assign(new Error("directory is not listable"), {
+    status: 404,
+    code: "directory_not_listable",
+  });
+}
+
 function canonicalDirectory(path: string, root: string): string {
+  // Shape-only validation (no filesystem state involved) may stay specific.
   if (!isAbsolute(path)) {
     throw Object.assign(new Error("directory path must be absolute"), { status: 400 });
   }
@@ -72,23 +93,11 @@ function canonicalDirectory(path: string, root: string): string {
   try {
     canonical = realpathSync(path);
   } catch {
-    throw Object.assign(new Error(`directory does not exist: ${path}`), { status: 400 });
+    refuseDirectoryListing();
   }
-  if (!contained(root, canonical)) {
-    throw Object.assign(new Error("directory path escapes the remote home"), {
-      status: 403,
-      code: "path_outside_remote_home",
-    });
-  }
-  if (!statSync(canonical).isDirectory()) {
-    throw Object.assign(new Error("directory path is not a directory"), { status: 400 });
-  }
-  if (hiddenUnderHome(root, canonical)) {
-    throw Object.assign(new Error("hidden directories are not listable"), {
-      status: 403,
-      code: "hidden_path_refused",
-    });
-  }
+  if (!contained(root, canonical)) refuseDirectoryListing();
+  if (!statSync(canonical).isDirectory()) refuseDirectoryListing();
+  if (hiddenUnderHome(root, canonical)) refuseDirectoryListing();
   return canonical;
 }
 
