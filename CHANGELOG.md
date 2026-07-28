@@ -3,6 +3,25 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **Unreleased** — Remote SSH execution (#82, kazzand). A thread can bind to a
+  concrete `~/.ssh/config` host: the app delegates transport and auth to the
+  system `/usr/bin/ssh` (interactive auth in an ephemeral SwiftTerm PTY,
+  nothing persisted), installs a signed remote runtime — an Ed25519
+  `kind`-separated manifest binds four platform archives with pinned Node
+  digests, atomic activate/rollback, no sudo — and drives the complete engine
+  through a loopback SSH forward with location-tagged threads, remote setup
+  and login, log tails, and preview forwarding. Remote project browsing lists
+  only visible home-contained directories; remote markdown images are served
+  by a registered-project-scoped endpoint that magic-byte-validates raster
+  images and refuses everything else before reading it; both endpoints exist
+  only in the remote runtime, never on the local daemon. Non-PTY SSH
+  invocations run with `BatchMode=yes`. The release pipeline builds, attests,
+  SBOMs, and publishes the four remote-runtime archives, the signed remote
+  manifest, and the remote SBOM as first-class release assets (12-asset
+  publish allowlist, provenance verified before any use). The unverified
+  `claudexor harness install` remote vendor installer was cut pending a
+  verified install UX (follow-up issue).
+
 - **Unreleased** — Canonical RunFacts receipt (GH #29). Every terminal run
   now seals its outcome into one immutable, invariant-validated `RunFacts`
   object built once from canonical artifacts, embedded in the terminal
