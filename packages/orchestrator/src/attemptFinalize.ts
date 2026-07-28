@@ -374,12 +374,13 @@ function validateWorkReport(
 }
 
 /**
- * QA-036: the terminal outcome facts for a read-only (ask) run that produced NO
+ * QA-036: the terminal outcome facts for a read-only run that produced NO
  * successful attempt. The D8 legacy mapping treated ANY web-blocked run as a
  * succeeded/review_blocked terminal (exit 0, "Needs review"); a blocked Ask that
- * delivered nothing then read as done. This re-checks the DELIVERABLE: only a
- * blocked attempt that actually produced a partial answer is a review-blocked
- * SUCCESS; an empty blocked (or plain failed) run is a failure (exit 1).
+ * delivered nothing then read as done, and Plan later repeated the same error
+ * without a final/plan.md. This re-checks the DELIVERABLE: only a blocked
+ * attempt that actually produced a canonical read-only output is a
+ * review-blocked SUCCESS; an empty blocked (or plain failed) run is a failure.
  */
 export function readOnlyNoSuccessTerminal(opts: {
   webBlocked: boolean;

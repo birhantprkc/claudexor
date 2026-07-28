@@ -294,19 +294,6 @@ enum RunMode: String, CaseIterable, Identifiable, Hashable {
         case .unknown: return "exclamationmark.triangle"
         }
     }
-    var blurb: String {
-        switch self {
-        case .ask: return "Read-only answer. No edit, run, or apply controls."
-        case .agent: return "Single primary-biased envelope route; apply explicitly after review."
-        case .bestOfN: return "N candidates in isolated envelopes, cross-reviewed, best wins."
-        case .maxAttempts: return "Repair loop with a hard attempt cap and gates."
-        case .untilClean: return "One envelope repaired until gates/review are clean."
-        case .plan: return "Multi-harness planning → adversarial plan review → SpecPack."
-        case .create: return "Scaffold a brand-new repo or component."
-        case .readOnlyAudit: return "Read-only audit / map of a codebase."
-        case .unknown: return "Persisted run uses an unsupported or legacy mode id."
-        }
-    }
     var isMultiCandidate: Bool { self == .bestOfN }
     var isReadOnly: Bool { self == .ask || self == .plan || self == .readOnlyAudit }
     var requiresProject: Bool { self != .ask }

@@ -13,12 +13,14 @@
  *  4. Version parity across the generated constant and every manifest.
  *  5. macOS debug-route parity (AppModel.swift vs apps/macos/README.md).
  *  6. Deleted-screen guard (chat-first collapse must not silently revert).
- *  7. Dead-symbol check: code-shaped backticked identifiers in public docs
+ *  7. Retired-contract guard for small, owner-approved phrases whose return
+ *     would contradict current schema/runtime truth.
+ *  8. Dead-symbol check: code-shaped backticked identifiers in public docs
  *     must exist in the source tree (catches NavigationSplitView/glowHi-class
  *     staleness).
- *  8. Enum parity: inspector tabs vs DESIGN_SYSTEM; MCP tool names vs
+ *  9. Enum parity: inspector tabs vs DESIGN_SYSTEM; MCP tool names vs
  *     INTEGRATIONS.
- *  9. Version-anchor lint: descriptions of current behavior must not carry
+ * 10. Version-anchor lint: descriptions of current behavior must not carry
  *     `v0.N` anchors (history phrasing is allowed) — Bible INV-133.
  *
  * Exit 1 with an explicit list on any mismatch.
@@ -328,7 +330,51 @@ for (const docPath of ["docs/DESIGN_SYSTEM.md", "docs/ARCHITECTURE.md"]) {
 }
 
 // --------------------------------------------------------------------------
-// 6. Dead-symbol check: code-shaped backticked identifiers in public docs must
+// 6. Retired contracts: these literal claims each contradicted an executable
+//    owner. Normalize whitespace only so wrapped Markdown cannot evade the
+//    guard; this is deliberately a small inventory, not prose-regex policy.
+// --------------------------------------------------------------------------
+
+const RETIRED_CONTRACT_CLAIMS = [
+  ["docs/DESIGN_SYSTEM.md", "per-harness budget cap"],
+  ["docs/DESIGN_SYSTEM.md", "attachments ride any non-plan turn"],
+  ["docs/DESIGN_SYSTEM.md", "A read-only plan run takes no attachments"],
+  ["docs/ARCHITECTURE.md", "`plan` - read-only multi-harness planning"],
+  ["docs/ARCHITECTURE.md", "cross-reviews when reviewers are available"],
+  ["docs/ARCHITECTURE.md", "A Plan reviewer evaluates"],
+  ["docs/ARCHITECTURE.md", "this panel as `--reviewers`"],
+  ["docs/CHECKLISTS.md", "Plan-review prompts must declare"],
+  ["docs/CHECKLISTS.md", "reviewSubject=plan"],
+  ["docs/WHITEPAPER.md", "every member critiques the merged plan from its own lane"],
+  ["docs/ARCHITECTURE.md", "the run never hangs forever"],
+  [
+    "docs/INTEGRATIONS.md",
+    "an unanswered question declines benignly after the configurable `interaction_timeout_ms`",
+  ],
+  ["README.md", "Pass `--reviewers`"],
+  ["packages/schema/src/control.ts", "CLI `--reviewers"],
+  [
+    "apps/macos/ClaudexorApp/Sources/ClaudexorApp/DomainModels.swift",
+    "Multi-harness planning → adversarial plan review → SpecPack.",
+  ],
+  ["packages/orchestrator/src/orchestrator.ts", "review (race/convergence under agent, and plan)"],
+  ["packages/orchestrator/src/runSupport.ts", "Relay cross-share: the prior planners' plans"],
+  [
+    "apps/macos/ClaudexorApp/Sources/ClaudexorApp/AppModel+RunDetailHydration.swift",
+    'Only the actual SpecPack artifact is a "plan" row',
+  ],
+  ["scripts/real-harness-battery.mjs", 'const plansDir = join(detail.runDir, "plans")'],
+];
+
+for (const [targetPath, claim] of RETIRED_CONTRACT_CLAIMS) {
+  const normalized = readFileSync(targetPath, "utf8").replace(/\s+/g, " ");
+  if (normalized.includes(claim)) {
+    failures.push(`${targetPath} restores retired contract claim '${claim}'`);
+  }
+}
+
+// --------------------------------------------------------------------------
+// 7. Dead-symbol check: code-shaped backticked identifiers in public docs must
 //    exist somewhere in the source tree. Catches NavigationSplitView / glowHi /
 //    MeshGradient-class staleness where docs legislate about deleted code.
 // --------------------------------------------------------------------------

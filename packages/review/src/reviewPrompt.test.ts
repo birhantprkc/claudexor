@@ -1,49 +1,34 @@
 import { describe, expect, it } from "vitest";
+import type { ReviewCandidateInput } from "./reviewEngine.js";
 import { buildReviewPrompt } from "./reviewPrompt.js";
 
 const patch = {
   diffPath: "/evidence/DIFF.patch",
   summaryPath: "/evidence/DIFF_SUMMARY.md",
   diffSha256: "sha256:test",
-  summary: "(plan review — no code diff)",
+  summary: "(code review)",
 };
 
-describe("typed review subject", () => {
-  it("does not ask plan reviewers to find missing implementation/screenshots", () => {
-    const prompt = buildReviewPrompt("Plan", "/candidate", "/evidence", patch, false, "plan");
-    expect(prompt).toContain("READ-ONLY PLAN");
-    expect(prompt).toContain("absence is NOT a finding");
-    expect(prompt).toContain("PLAN_ACCEPTED.md");
-    expect(prompt).toContain("do not demand a code diff");
+const CODE_GROUNDING = "grounded in the current patch or in artifacts under Candidate root";
+
+type ReviewSubjectWasRemoved = "reviewSubject" extends keyof ReviewCandidateInput ? false : true;
+type PlanSubjectArgumentWasRemoved = 6 extends Parameters<typeof buildReviewPrompt>["length"]
+  ? false
+  : true;
+const reviewSubjectWasRemoved: ReviewSubjectWasRemoved = true;
+const planSubjectArgumentWasRemoved: PlanSubjectArgumentWasRemoved = true;
+
+describe("retired standalone Plan-review API", () => {
+  it("keeps both the candidate input and prompt builder code-only", () => {
+    expect(reviewSubjectWasRemoved).toBe(true);
+    expect(planSubjectArgumentWasRemoved).toBe(true);
   });
 });
 
-const CODE_GROUNDING = "grounded in the current patch or in artifacts under Candidate root";
-const PLAN_GROUNDING =
-  "grounded in the accepted plan in PLAN_ACCEPTED.md or in the evidence packet supplied with it";
-
 describe("finding-discipline rules (pinned clause by clause)", () => {
-  // Universal clauses reach every reviewer spawn; the grounding clause names the
-  // artifact THAT subject actually reviews, so it is pinned per subject.
-  for (const [name, built, grounding, wrongGrounding] of [
-    [
-      "code",
-      buildReviewPrompt("Cand", "/candidate", "/evidence", patch),
-      CODE_GROUNDING,
-      PLAN_GROUNDING,
-    ],
-    [
-      "sealed code",
-      buildReviewPrompt("Cand", "/candidate", "/evidence", patch, true),
-      CODE_GROUNDING,
-      PLAN_GROUNDING,
-    ],
-    [
-      "plan",
-      buildReviewPrompt("Plan", "/candidate", "/evidence", patch, false, "plan"),
-      PLAN_GROUNDING,
-      CODE_GROUNDING,
-    ],
+  for (const [name, built] of [
+    ["code", buildReviewPrompt("Cand", "/candidate", "/evidence", patch)],
+    ["sealed code", buildReviewPrompt("Cand", "/candidate", "/evidence", patch, true)],
   ] as const) {
     it(`tells the ${name} reviewer the machine decides from typed fields, not prose`, () => {
       // "the ONLY field the consumer reads" would be false: isBlocking also
@@ -66,9 +51,8 @@ describe("finding-discipline rules (pinned clause by clause)", () => {
       expect(built).toContain("under different wording");
     });
 
-    it(`grounds the ${name} reviewer's findings in the artifact that subject reviews`, () => {
-      expect(built).toContain(grounding);
-      expect(built).not.toContain(wrongGrounding);
+    it(`grounds the ${name} reviewer's findings in the reviewed code`, () => {
+      expect(built).toContain(CODE_GROUNDING);
       expect(built).toContain("Do not manufacture a finding from");
       expect(built).toContain("that contradiction is itself the finding");
     });
@@ -89,16 +73,4 @@ describe("finding-discipline rules (pinned clause by clause)", () => {
       );
     });
   }
-
-  it("never tells the PLAN reviewer that PLAN_ACCEPTED.md alone is too thin a source", () => {
-    // In plan review PLAN_ACCEPTED.md IS the reviewed deliverable and the patch
-    // is an acknowledged placeholder, so the code-subject grounding clause would
-    // disqualify the only artifact under review.
-    const plan = buildReviewPrompt("Plan", "/candidate", "/evidence", patch, false, "plan");
-    expect(plan).not.toContain(
-      "Do not manufacture a finding from USER_INTENT.md, PLAN_ACCEPTED.md, or TESTS.txt text alone",
-    );
-    expect(plan).not.toContain("a code defect must be locatable in the reviewed code");
-    expect(plan).toContain("a plan defect must be locatable in the plan text you were given");
-  });
 });

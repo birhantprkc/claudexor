@@ -101,13 +101,6 @@ export function writeRaceDeliveryDecision(
   });
 }
 
-/**
- * Relay cross-share: the prior planners' plans, injected into a later
- * planner's prompt so the harnesses CONVERGE on an aligned plan instead of
- * each planning in isolation. `runPlan` already iterates planners
- * sequentially, so each leg after the first sees what the earlier ones
- * proposed and is asked to reconcile/extend them (not blindly repeat).
- */
 export interface TransientRetryPolicy {
   maxRetries: number;
   initialDelayMs: number;

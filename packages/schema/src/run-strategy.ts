@@ -14,6 +14,9 @@ export function runStartStrategyViolations(value: {
   n?: number;
   delegate?: boolean;
   reviewerPanel?: unknown;
+  reviewerModels?: unknown;
+  reviewerEfforts?: unknown;
+  protectedPathApprovals?: unknown;
 }): string[] {
   const mode = value.mode ?? "agent";
   const violations: string[] = [];
@@ -54,10 +57,18 @@ export function runStartStrategyViolations(value: {
   if (value.delegate === true && mode !== "agent") {
     violations.push(`delegate is an agent strategy; mode is '${mode}'`);
   }
-  if (value.reviewerPanel !== undefined && mode !== "agent") {
-    violations.push(
-      `reviewerPanel only applies to agent runs (plan review was retired in v3; Council is the plan critique path); mode is '${mode}'`,
-    );
+  const agentOnlyReviewControls = [
+    ["reviewerPanel", value.reviewerPanel],
+    ["reviewerModels", value.reviewerModels],
+    ["reviewerEfforts", value.reviewerEfforts],
+    ["protectedPathApprovals", value.protectedPathApprovals],
+  ] as const;
+  for (const [control, setting] of agentOnlyReviewControls) {
+    if (setting !== undefined && mode !== "agent") {
+      violations.push(
+        `${control} only applies to agent runs (plan review was retired in v3; Council is the plan critique path); mode is '${mode}'`,
+      );
+    }
   }
   return violations;
 }

@@ -13,7 +13,6 @@ export function buildReviewPrompt(
   evidenceDir: string,
   patch: DiffEvidence,
   sealed = false,
-  subject: "code" | "plan" = "code",
 ): string {
   const responseContract = sealed
     ? [
@@ -26,16 +25,12 @@ export function buildReviewPrompt(
       ]
     : ["Output ONLY a JSON array of findings."];
   return [
-    subject === "plan"
-      ? "You are an adversarial implementation-plan reviewer. The reviewed deliverable is a READ-ONLY PLAN: implementation, file changes, tests, and requested screenshots belong to the future executor and their absence is NOT a finding. Review feasibility, scope, sequencing, risks, acceptance coverage, and unresolved product decisions."
-      : "You are an adversarial code reviewer.",
+    "You are an adversarial code reviewer.",
     `Candidate root: ${candidateRoot}.`,
     sealed
       ? `First verify MANIFEST.sha256 and read every file it seals in ${evidenceDir}, including FREEZE.json and DECIDED_TRADEOFFS.md. If the manifest or a sealed file is missing, return INSUFFICIENT_EVIDENCE.`
       : `First read the evidence packet in ${evidenceDir} (USER_INTENT.md, FORBIDDEN_FINDINGS.md, PLAN_ACCEPTED.md, DECIDED_TRADEOFFS.md, TESTS.txt, DIFF.patch, DIFF_SUMMARY.md). If a mandatory file is missing, return INSUFFICIENT_EVIDENCE.`,
-    subject === "plan"
-      ? `Review ${label}'s plan from PLAN_ACCEPTED.md and the evidence packet. The placeholder patch only records that this is plan review; do not demand a code diff.`
-      : `Review ${label}'s change from the file-backed patch artifact, not from this prompt. Full patch: ${patch.diffPath}. Summary: ${patch.summaryPath}. Patch digest: ${patch.diffSha256}.`,
+    `Review ${label}'s change from the file-backed patch artifact, not from this prompt. Full patch: ${patch.diffPath}. Summary: ${patch.summaryPath}. Patch digest: ${patch.diffSha256}.`,
     "All code/file evidence must come from Candidate root or the evidence packet. Do not inspect or cite sibling/base repository paths outside Candidate root; if required evidence is unavailable there, return INSUFFICIENT_EVIDENCE.",
     "Treat TESTS.txt as the gate evidence. Do not rerun full build/test gates from the review; run only small targeted commands when needed to verify a concrete finding.",
     "In finding evidence, cite candidate files with paths relative to Candidate root. Cite evidence packet files by their evidence filename (for example DIFF.patch or TESTS.txt). Do not cite absolute Candidate root, reviewer workspace, or evidenceDir paths; those are disposable transport paths and will be rejected as evidence.",
@@ -44,9 +39,7 @@ export function buildReviewPrompt(
     "Rules: no evidence => do NOT use BLOCK. Do not relitigate FORBIDDEN_FINDINGS or DECIDED_TRADEOFFS.",
     "The machine consumer decides from typed fields, never from prose: severity is what makes a finding block, and attached evidence is what lets BLOCK or FIX_FIRST stand. A hedge, caveat, or withdrawal written inside claim or proposed_fix changes nothing mechanically, so a finding you have talked yourself out of must be dropped or carry a non-blocking severity — WARN, NIT, or OUT_OF_SCOPE. BLOCK, FIX_FIRST, NEEDS_HUMAN, and INSUFFICIENT_EVIDENCE all block; never leave a withdrawn finding at any of those four.",
     "One root cause is one finding. Do not re-raise the same underlying defect as a second finding under different wording; emit it once and list every affected location in evidence.",
-    subject === "plan"
-      ? "Every finding must be grounded in the accepted plan in PLAN_ACCEPTED.md or in the evidence packet supplied with it. Do not manufacture a finding from the placeholder patch or from this prompt's narrative alone; a plan defect must be locatable in the plan text you were given. If the supplied intent or decision evidence contradicts the accepted plan, that contradiction is itself the finding: claim it and cite both sides."
-      : "Every finding must be grounded in the current patch or in artifacts under Candidate root. Do not manufacture a finding from USER_INTENT.md, PLAN_ACCEPTED.md, or TESTS.txt text alone; a code defect must be locatable in the reviewed code. If the supplied intent or test evidence contradicts the patch, that contradiction is itself the finding: claim it and cite both sides.",
+    "Every finding must be grounded in the current patch or in artifacts under Candidate root. Do not manufacture a finding from USER_INTENT.md, PLAN_ACCEPTED.md, or TESTS.txt text alone; a code defect must be locatable in the reviewed code. If the supplied intent or test evidence contradicts the patch, that contradiction is itself the finding: claim it and cite both sides.",
     "The prose is for the human, not for the machine. State the reasoning that makes the claim true, not only the conclusion, so a person reading the finding can check it against the cited lines; the consumer never weighs that reasoning, it acts on the typed fields above. The two carry different jobs and neither substitutes for the other: a correct severity with unexplained reasoning wastes the reader, and airtight reasoning under a withdrawn-but-blocking severity stops the run anyway. A proposed_fix whose own justification does not survive checking is worse than no finding, because the author will comply with it.",
     "",
     "Patch summary (not a replacement for reading DIFF.patch):",

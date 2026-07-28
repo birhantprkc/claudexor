@@ -369,10 +369,9 @@ pnpm test
 - When the required review gate names exact reviewers or repeated models from
   the same harness, use the explicit `reviewerPanel` / `--reviewer-panel` path
   and verify the per-reviewer telemetry records every requested entry separately.
-- Plan-review prompts must declare `reviewSubject=plan`: verify reviewers do
-  not block on implementation/tests/screenshots that belong to the future
-  executor; only feasibility, scope, sequencing, risks, acceptance coverage,
-  and unresolved decisions are reviewable.
+- Reviewer panels and protected-path approvals are Agent-only. Ask and Plan
+  must reject them at the schema boundary; use Council when a Plan needs
+  multi-harness critique, never the retired standalone Plan-review path.
 - Review-panel spend is route-scoped: native subscription reviewers settle to
   valuation, API-key reviewers to cash. Verify mixed panels preserve both
   totals and never debit the aggregate as cash.

@@ -38,7 +38,8 @@ engine strategies are flags on a mode, never modes:
   to be `audit --swarm` / `explore` (`intent: audit`), writing
   `final/report.md`, `final/explore-findings.yaml`, and `final/omissions.md`
   (see §6 for the synthesis reducer that produces `final/report.md`).
-- `plan` - read-only multi-harness planning; writes `final/plan.md`.
+- `plan` - one read-only planner by default; `--council` enables the explicit
+  multi-harness draft-and-merge strategy. Both write one `final/plan.md`.
 - `agent` - default `claudexor agent`; one primary-biased envelope route. Flags
   select the strategy on the SAME mode: `--n N` (best-of-N race with isolated
   candidate envelopes, review, synthesis, arbitration), `--attempts N`
@@ -750,15 +751,13 @@ eligible harness rotation.
 
 ### Plan
 
-Runs eligible planners read-only with an explicit "plan, do not implement"
+Runs one eligible planner read-only with an explicit "plan, do not implement"
 instruction wrapped around the goal (so the model produces a plan instead of
-trying to build it and dumping code when writes are blocked), stores per-harness
-plans, cross-reviews when reviewers are available, and writes `final/plan.md` —
-an honest `# Plan` document (goal, per-planner plans, ALL review findings with
-severity so a BLOCK like "feature not delivered" is visible, open questions).
-The multi-harness relay cross-shares each earlier planner's plan into the next
-planner's prompt, so planners converge on one aligned plan instead of planning
-blind. It
+trying to build it and dumping code when writes are blocked) and writes
+`final/plan.md` — an honest `# Plan` document with the goal, plan, and open
+questions. Multi-harness plan critique belongs to Council's explicit
+draft-then-merge strategy; Plan never enters the code-review pipeline or carries
+reviewer/protected-approval controls. It
 also writes `final/work_product.yaml` with `result_kind: plan` and a null
 diffstat, so a surface reports "plan only — no files changed" rather than a green
 "succeeded" over nothing. A follow-up turn implements it via the `planRunId`
@@ -1251,18 +1250,22 @@ Harnesses with the `interactive` capability (Claude Code via its bidirectional
 stream-json control protocol) can raise typed user questions mid-run; the
 orchestrator OFFERS the interaction channel only to routes whose manifest
 declares `interactive`. The
-engine emits `interaction.requested` (questions, options, timeout deadline),
+engine emits `interaction.requested` (questions, options, nullable timeout deadline),
 parks ONLY that attempt, and the daemon journals the pending projection in the
 run's global or `project:<id>` partition before exposing it via
 `GET /v2/runs/:id` (`pendingInteractions`, `summary.waitingOnUser`). Answers
 arrive via `POST /v2/runs/:id/interactions/:id/answer` and are delivered into the
 live session only after the resolution is journaled (`interaction.answered`).
 After daemon restart an unresolved question becomes interrupted rather than
-resurrecting a dead in-process continuation. An unanswered question times out after
-the configurable `interaction_timeout_ms` (default 15 min) into a benign
-decline (`interaction.timeout`) — the model continues with stated assumptions
-and the run never hangs forever. Declined/timed-out interactive flow-control
-tools are benign timeline events, never blocking tool errors.
+resurrecting a dead in-process continuation. `interaction_timeout_ms` is one
+finite-or-disabled policy: absent uses the 15-minute default, a positive value
+sets automatic expiry, and `null` disables automatic expiry. A real finite
+expiry becomes a benign decline (`interaction.timeout`) so the model can
+continue with stated assumptions. With expiry disabled, answer, Cancel/abort,
+the run's outer deadline, terminal cleanup, daemon restart, or registry release
+still ends the wait; those releases must not be relabeled as timeouts.
+Declined/timed-out interactive flow-control tools are benign timeline events,
+never blocking tool errors.
 
 Delegate children use this same interaction contract. A parent/list child
 summary may carry `waitingOnUser:true`, but it does not own the question body;
@@ -1550,14 +1553,16 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    the git boundary excludes them. A bridge failure never fails the run (it is a
    convenience, not a precondition).
 
-Reviewer selection is schema-owned. The automatic selector uses provider-family
+Reviewer selection is Agent-only and schema-owned. Ask and Plan reject reviewer
+panels and protected-path approvals; Council is Plan's critique path. The
+automatic Agent selector uses provider-family
 diversity plus optional per-family `reviewerModels` / `reviewerEfforts` hints.
 For release and dogfood gates, the `reviewerPanel` field on
 `ControlRunStartRequest` carries an
 ordered list of explicit `{ harness, model?, effort? }` entries. The CLI spells
-this panel as `--reviewers` with comma-separated `harness=model:effort` entries
+this panel as `--reviewer-panel` with comma-separated `harness=model:effort` entries
 (model and effort optional), e.g.
-`--reviewers "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`. That panel is
+`--reviewer-panel "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`. That panel is
 used verbatim: repeated harness ids are allowed for multi-model Cursor passes,
 no provider-family dedupe is applied, and unknown/unavailable/disabled/fake-only
 or review-incompatible harnesses fail the run before review starts. If an
@@ -1569,15 +1574,12 @@ the run fails loudly with a `claudexor models --harness` hint instead of letting
 the native CLI fail later as unparseable review output.
 Same-family panels are allowed for diagnostics and repeated-model comparison,
 but they do not make a clean verified review gate by themselves: the gate still
-requires at least two distinct observed provider families. CLI
-`--reviewer-panel` is the primary operator surface for this field; UI clients may
+requires at least two distinct observed provider families. UI clients may
 send the same DTO but must not invent reviewer readiness outside doctor/status
 and declared intent.
 
-Reviewer prompts carry a typed subject. A Plan reviewer evaluates the read-only
-plan's feasibility/scope/risks/questions and is explicitly forbidden from
-reporting absent implementation, tests, or screenshots as defects. Code review
-retains the normal patch contract.
+Reviewer prompts always review code through the normal patch contract. The
+retired standalone Plan-review subject has no runtime or surface representation.
 
 Paid budgets use an explicit tagged contract: `{kind: unlimited}` or
 `{kind: finite, maxUsd >= 0}`. CLI `--max-usd N` is syntax sugar for the finite

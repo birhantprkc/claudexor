@@ -255,7 +255,7 @@ export const ControlRunStartRequest = z
       .min(1)
       .optional()
       .describe(
-        'Explicit reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewers "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`). Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps.',
+        'Explicit Agent reviewer panel — who reviews the change, one entry per reviewer as `harness=model:effort` (CLI `--reviewer-panel "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`). Duplicate harness entries are kept so one provider can review through several models; overrides the legacy reviewerModels/reviewerEfforts maps.',
       ),
     /** Per-run auth route override (subscription/api_key/auto). */
     authPreference: AuthPreference.optional().describe("Per-run auth route override."),

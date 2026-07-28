@@ -186,12 +186,13 @@ does not bypass built-in critical/security human gates.
 
 ### Reviewers and approvals
 
-Two power knobs shape review:
+Two Agent-only power knobs shape review; Ask and Plan reject both, and Council
+is the explicit multi-harness critique path for Plan:
 
-- **Reviewers** — pick exactly who reviews a change. Pass `--reviewers` a
+- **Reviewers** — pick exactly who reviews a change. Pass `--reviewer-panel` a
   comma-separated list of `harness=model:effort` entries (model and effort are
   optional); repeat a harness to review through several models. Example:
-  `--reviewers "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`. Omitted, the
+  `--reviewer-panel "claude=claude-opus-4-8:max,cursor=gemini-3.1-pro"`. Omitted, the
   engine chooses a cross-family panel automatically.
 - **Approvals** — mark paths that must clear a human before a change touching
   them can be applied. Set canonical repo-relative globs in the versioned

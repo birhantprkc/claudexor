@@ -320,7 +320,10 @@ routing, review, or delivery must start in `packages/schema`.
    behavior changes.
 6. Add or update focused tests for the behavior.
 
-Do not fork contracts in UI code, CLI parsing, adapter output, or docs.
+Do not fork contracts in UI code, CLI parsing, adapter output, or docs. Run
+`pnpm docs:check` in the same change: its small retired-contract inventory is a
+ratchet, so removing or replacing a product surface also removes every stale
+positive promise instead of relying on a one-time documentation cleanup.
 
 ## Boundaries
 

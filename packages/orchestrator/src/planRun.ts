@@ -12,7 +12,7 @@ import { ArtifactStore, type RunPaths } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
 import { BudgetLedger } from "@claudexor/budget";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
-import type { AttemptOutcomeClass } from "./attemptFinalize.js";
+import { readOnlyNoSuccessTerminal, type AttemptOutcomeClass } from "./attemptFinalize.js";
 import { cancelledResult, writeFailure } from "./runTerminals.js";
 import { type BudgetDenial, budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import { extractPlanQuestions } from "./planQuestions.js";
@@ -561,37 +561,36 @@ export function writePlanHarnessFailure(
   // D-16 r9: when NO planner blocked/budget-failed and some ran out of
   // context, the terminal is interrupted — not a generic harness failure.
   const anyInterrupted = planAttempts.some((p) => p.outcomeClass === "interrupted");
+  // The Plan failure tail has no canonical final/plan.md by definition. Reuse
+  // the read-only deliverable owner so a policy-blocked raw response cannot be
+  // promoted to a successful "Needs review" run after its plan was discarded.
+  const noPlanTerminal = readOnlyNoSuccessTerminal({
+    webBlocked: blocked,
+    hasDeliverable: false,
+    budgetStopped: false,
+    attemptsCount: planAttempts.length,
+  });
+  const planFailFacts =
+    !blocked && !budgetMapping && anyInterrupted
+      ? makeOutcomeFacts("interrupted", { reason: "context_capacity_exhausted" })
+      : budgetMapping
+        ? makeOutcomeFacts("failed", { reason: budgetMapping.reason })
+        : makeOutcomeFacts(noPlanTerminal.lifecycle, { reason: noPlanTerminal.reason });
   store.writeText(
     join(paths.finalDir, "summary.md"),
-    `# Run ${runId} (plan)\n\n- Lifecycle: ${blocked ? "succeeded (needs review)" : anyInterrupted && !budgetMapping ? "interrupted" : "failed"}\n\n${message}\n`,
+    `# Run ${runId} (plan)\n\n- Lifecycle: ${planFailFacts.lifecycle}${planFailFacts.reason ? ` (${planFailFacts.reason})` : ""}\n\n${message}\n`,
   );
   log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
-  const planFailFacts = blocked
-    ? makeOutcomeFacts("succeeded", { review: "blocked", reason: "review_blocked" })
-    : !budgetMapping && anyInterrupted
-      ? makeOutcomeFacts("interrupted", { reason: "context_capacity_exhausted" })
-      : makeOutcomeFacts("failed", {
-          reason: budgetMapping ? budgetMapping.reason : "harness_failed",
-        });
   const failPhase = budgetMapping ? budgetMapping.phase : "harness";
-  if (blocked)
-    log.emit("run.blocked", {
-      lifecycle: planFailFacts.lifecycle,
-      facts: planFailFacts,
-      phase: "harness",
-      error: message,
-      failure_ref: "final/failure.yaml",
-    });
-  else
-    log.emit("run.failed", {
-      lifecycle: planFailFacts.lifecycle,
-      facts: planFailFacts,
-      reason: planFailFacts.reason,
-      phase: failPhase,
-      ...(budgetMapping?.harnessId ? { harness_id: budgetMapping.harnessId } : {}),
-      error: message,
-      failure_ref: "final/failure.yaml",
-    });
+  log.emit("run.failed", {
+    lifecycle: planFailFacts.lifecycle,
+    facts: planFailFacts,
+    reason: planFailFacts.reason,
+    phase: failPhase,
+    ...(budgetMapping?.harnessId ? { harness_id: budgetMapping.harnessId } : {}),
+    error: message,
+    failure_ref: "final/failure.yaml",
+  });
   void input;
   return {
     spendUsd: ledger.spend(),

@@ -7052,6 +7052,77 @@ describe("Orchestrator", () => {
     };
   }
 
+  function terminalPlanAdapter(id: string, terminal: "blocked" | "interrupted"): HarnessAdapter {
+    return {
+      id,
+      async discover() {
+        return HarnessManifest.parse({
+          id,
+          display_name: id,
+          kind: "local_cli",
+          provider_family: "openai",
+          capabilities: { plan: true, web_policy: "tools" },
+          access_profiles_supported: ["readonly"],
+        });
+      },
+      async doctor() {
+        return ConformanceReport.parse({
+          harness_id: id,
+          status: "ok",
+          enabled_intents: ["plan", "synthesize"],
+        });
+      },
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        if (terminal === "blocked") {
+          yield { type: "message", session_id: spec.session_id, ts, text: TOOL_ERROR_PLAN };
+        } else {
+          yield {
+            type: "tool_result",
+            session_id: spec.session_id,
+            ts,
+            tool: {
+              name: "WebSearch",
+              kind: "web",
+              status: "ok",
+              target: "required evidence",
+            },
+          };
+          yield {
+            type: "context",
+            session_id: spec.session_id,
+            ts,
+            context: {
+              kind: "capacity_exhausted",
+              cause: "window_exceeded",
+              native_code: null,
+              trigger: "auto",
+              pre_tokens: null,
+            },
+          };
+        }
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+  }
+
+  function expectMixedPlanFailure(res: OrchestratorResult): void {
+    expect(res.facts).toMatchObject({
+      lifecycle: "failed",
+      review: "not_run",
+      reason: "harness_failed",
+    });
+    expect(existsSync(join(res.runDir, "final", "plan.md"))).toBe(false);
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "category: policy",
+    );
+    const terminals = readRunEvents(res.runDir).filter((event) =>
+      ["run.completed", "run.blocked", "run.failed"].includes(event.type),
+    );
+    expect(terminals.map((event) => event.type)).toEqual(["run.failed"]);
+  }
+
   async function runToolErrorPlan(
     planner: HarnessAdapter,
     extra: { web?: "live" } = {},
@@ -7105,9 +7176,10 @@ describe("Orchestrator", () => {
     });
   });
 
-  it("required web evidence still blocks a planner that delivered plan text", async () => {
-    // Delivers a plan but never attempts the REQUIRED web evidence — the web
-    // gate is a separate axis and is NOT softened by the deliverable exception.
+  it("fails a Plan when required web evidence rejects its raw text before delivery", async () => {
+    // The planner emits text but never attempts REQUIRED web evidence. That
+    // policy gate discards the raw response, so no canonical final/plan.md
+    // exists and the read-only run must fail rather than say Needs review.
     // (web_policy "tools" makes the harness eligible for --web live.)
     const planner: HarnessAdapter = {
       ...toolErrorPlannerAdapter("planner", { finalText: TOOL_ERROR_PLAN, toolError: false }),
@@ -7123,14 +7195,43 @@ describe("Orchestrator", () => {
       },
     };
     const { res, outcome } = await runToolErrorPlan(planner, { web: "live" });
-    expect(legacyOutcome(res)).toBe("blocked");
+    expect(legacyOutcome(res)).toBe("failed");
+    expect(res.facts).toMatchObject({
+      lifecycle: "failed",
+      review: "not_run",
+      reason: "harness_failed",
+    });
+    expect(existsSync(join(res.runDir, "final", "plan.md"))).toBe(false);
     expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
       "never attempted",
     );
+    const terminalEvents = readRunEvents(res.runDir).filter((event) =>
+      ["run.completed", "run.blocked", "run.failed"].includes(event.type),
+    );
+    expect(terminalEvents.map((event) => event.type)).toEqual(["run.failed"]);
     expect(outcome).toMatchObject({
       web_required_unsatisfied: true,
       status: "blocked",
     });
+  });
+
+  it("keeps a blocked solo planner above an interrupted fallback in terminal precedence", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map<string, HarnessAdapter>([
+        ["blocked", terminalPlanAdapter("blocked", "blocked")],
+        ["interrupted", terminalPlanAdapter("interrupted", "interrupted")],
+      ]),
+      reviewers: [],
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "plan with required evidence",
+      mode: "plan",
+      web: "live",
+      harnesses: ["blocked", "interrupted"],
+    });
+    expectMixedPlanFailure(res);
   });
 
   it("a needs_input work_report veto still rides a delivered plan with a tool error", async () => {
@@ -7509,6 +7610,27 @@ describe("Orchestrator", () => {
     expect(legacyOutcome(res)).toBe("failed");
     expect(existsSync(join(res.runDir, "final", "plan.md"))).toBe(false);
     expect(res.candidates.every((c) => c.status !== "success")).toBe(true);
+  });
+
+  it("keeps a blocked Council member above an interrupted peer in terminal precedence", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map<string, HarnessAdapter>([
+        ["blocked", terminalPlanAdapter("blocked", "blocked")],
+        ["interrupted", terminalPlanAdapter("interrupted", "interrupted")],
+      ]),
+      reviewers: [],
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "merge plans with required evidence",
+      mode: "plan",
+      council: true,
+      n: 2,
+      web: "live",
+      harnesses: ["blocked", "interrupted"],
+    });
+    expectMixedPlanFailure(res);
   });
 
   it("QA-047: an EXPLICIT council with an unavailable (no-manifest) member fails loudly, naming it", async () => {

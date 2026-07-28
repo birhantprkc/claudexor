@@ -193,6 +193,11 @@ describe("sealed release native reviewer contract", () => {
       expect(prompt).toContain("findingCount must exactly equal findings.length");
       expect(result.findings.map((finding) => finding.claim)).toContain("release wrapper finding");
       expect(
+        JSON.parse(
+          readFileSync(join(artifactsDir, "01-release-reviewer", "metadata.json"), "utf8"),
+        ),
+      ).not.toHaveProperty("review_subject");
+      expect(
         JSON.parse(readFileSync(join(artifactsDir, "01-release-reviewer", "metadata.json"), "utf8"))
           .review_wave_id,
       ).toBe("11111111-1111-4111-8111-111111111111");

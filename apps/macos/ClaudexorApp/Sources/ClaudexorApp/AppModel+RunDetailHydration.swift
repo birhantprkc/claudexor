@@ -240,7 +240,7 @@ extension AppModel {
                 findings: task.findings, failure: failure, phase: task.phase, outcomeFacts: task.outcomeFacts
             )
             if !detail.artifacts.isEmpty, task.plan.isEmpty, task.mode == .plan {
-                // Only the actual SpecPack artifact is a "plan" row; arbitrary
+                // Only the canonical final plan artifact is a "plan" row; arbitrary
                 // nested paths must not be synthesized into plan steps.
                 task.plan = detail.artifacts
                     .filter { $0.kind == "file" && $0.path == "final/plan.md" }

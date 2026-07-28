@@ -226,6 +226,10 @@ function artifactExists(runDir, relPath) {
   return existsSync(join(runDir, relPath));
 }
 
+function councilFlags(memberCount) {
+  return ["--council", ...(memberCount === undefined ? [] : ["--n", String(memberCount)])];
+}
+
 function nonEmpty(path) {
   try {
     return statSync(path).size > 0;
@@ -427,6 +431,40 @@ function assertPrimaryOutput(phase, name, out, kind) {
     fail(phase, `${name} primary output`, { expected: kind, path, runId: out.json.runId });
   else pass(phase, `${name} primary output`, { path, runId: out.json.runId });
   return detail;
+}
+
+function assertCouncilArtifacts(phase, name, detail, runDir = detail?.runDir) {
+  const council = detail?.council;
+  const members = Array.isArray(council?.members) ? council.members : [];
+  const draftedMembers = members.filter(
+    (member) => member?.status === "drafted" || member?.status === "merged",
+  );
+  const draftFiles = draftedMembers.map((member) =>
+    runDir ? artifactExists(runDir, `council/draft-${member.harnessId}.md`) : false,
+  );
+  const evidence = {
+    requested: council?.requested,
+    drafted: council?.drafted,
+    mergedBy: council?.mergedBy,
+    members: members.map((member) => ({
+      harnessId: member?.harnessId,
+      status: member?.status,
+    })),
+    membership: Boolean(runDir && artifactExists(runDir, "council/membership.yaml")),
+    draftFiles,
+  };
+  const valid =
+    Number(council?.requested) >= 2 &&
+    Number(council?.drafted) >= 2 &&
+    council?.drafted === draftedMembers.length &&
+    typeof council?.mergedBy === "string" &&
+    council.mergedBy.length > 0 &&
+    members.some(
+      (member) => member?.harnessId === council.mergedBy && member?.status === "merged",
+    ) &&
+    evidence.membership &&
+    draftFiles.every(Boolean);
+  return valid ? pass(phase, name, evidence) : fail(phase, name, evidence);
 }
 
 function recordRunEvidence(phase, name, out, cwd) {
@@ -673,6 +711,7 @@ function runReadonlyPhase() {
         "Plan adding multiply; reconcile disagreements between planners.",
         "--harness",
         multi.join(","),
+        ...councilFlags(),
         "--effort",
         "low",
         "--max-usd",
@@ -682,13 +721,7 @@ function runReadonlyPhase() {
     );
     const detail = assertPrimaryOutput(phase, "multi plan", plan, "plan.md");
     if (detail?.runDir) {
-      const plansDir = join(detail.runDir, "plans");
-      const hasReview = artifactExists(detail.runDir, "reviews/plan-review.yaml");
-      pass(phase, "multi plan artifacts", {
-        hasReview,
-        plansDirExists: existsSync(plansDir),
-        runId: plan.json?.runId,
-      });
+      assertCouncilArtifacts(phase, "multi plan council artifacts", detail);
     }
     const exp = runCliJson(
       [
@@ -1491,8 +1524,7 @@ function runPlanPhase() {
       prompt,
       "--harness",
       multi.join(","),
-      "--n",
-      String(Math.min(3, multi.length)),
+      ...councilFlags(Math.min(3, multi.length)),
       "--effort",
       "low",
       "--max-usd",
@@ -1505,8 +1537,11 @@ function runPlanPhase() {
     return;
   }
   const planMd = plan.json?.runDir ? join(plan.json.runDir, "final", "plan.md") : null;
-  if (planMd && existsSync(planMd)) pass(phase, "plan produced", { runId: plan.json?.runId });
-  else {
+  if (planMd && existsSync(planMd)) {
+    pass(phase, "plan produced", { runId: plan.json?.runId });
+    const planDetail = inspectRun(plan.json.runId, repo);
+    assertCouncilArtifacts(phase, "plan council artifacts", planDetail, plan.json.runDir);
+  } else {
     fail(phase, "plan produced", { reason: "no final/plan.md", json: plan.json });
     return;
   }

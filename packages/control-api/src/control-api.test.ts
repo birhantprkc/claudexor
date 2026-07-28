@@ -136,6 +136,39 @@ describe("normalizeRunStart prompt validation", () => {
     expect(req.protectedPathApprovals?.[0]?.path).toBe("packages/**/*.test.ts");
     expect(req.protectedPathApprovals?.[0]?.reason).toBe("test authoring requested");
   });
+  it.each(["ask", "plan"] as const)(
+    "rejects Agent-only review and approval controls on %s runs",
+    (mode) => {
+      for (const control of [
+        { reviewerPanel: [{ harness: "claude" }] },
+        { reviewerModels: { anthropic: "claude-opus-4-8" } },
+        { reviewerEfforts: { anthropic: "max" } },
+        { protectedPathApprovals: [{ path: "packages/**/*.test.ts" }] },
+      ]) {
+        expect(() =>
+          normalizeRunStartRequest({
+            ...projectScope(),
+            prompt: "do the thing",
+            mode,
+            ...control,
+          }),
+        ).toThrowError(/only applies to agent runs/);
+      }
+    },
+  );
+  it("accepts the complete review and approval control set on Agent runs", () => {
+    expect(() =>
+      normalizeRunStartRequest({
+        ...projectScope(),
+        prompt: "do the thing",
+        mode: "agent",
+        reviewerPanel: [{ harness: "claude" }],
+        reviewerModels: { anthropic: "claude-opus-4-8" },
+        reviewerEfforts: { anthropic: "max" },
+        protectedPathApprovals: [{ path: "packages/**/*.test.ts" }],
+      }),
+    ).not.toThrow();
+  });
   // Council (INV-031) is a PLAN strategy; `--n` on a plan is legal ONLY with it.
   it("accepts council on a plan run", () => {
     expect(() =>
@@ -4049,6 +4082,7 @@ describe("DaemonControlApiServer", () => {
   });
 
   it("validates reviewer effort overrides at the HTTP boundary", async () => {
+    const reviewerRoot = reapMk(join(tmpdir(), "claudexor-reviewer-overrides-"));
     const { daemon } = fakeDaemon();
     let enqueued: unknown;
     const wrapped: DaemonFacadeClient = {
@@ -4064,7 +4098,8 @@ describe("DaemonControlApiServer", () => {
         headers: { authorization: `Bearer ${token}` },
         body: JSON.stringify({
           prompt: "2+2?",
-          mode: "ask",
+          mode: "agent",
+          scope: { kind: "project", root: reviewerRoot },
           harnesses: ["codex"],
           reviewerEfforts: { anthropic: "max", openai: "xhigh" },
         }),
@@ -4078,7 +4113,8 @@ describe("DaemonControlApiServer", () => {
         headers: { authorization: `Bearer ${token}` },
         body: JSON.stringify({
           prompt: "2+2?",
-          mode: "ask",
+          mode: "agent",
+          scope: { kind: "project", root: reviewerRoot },
           harnesses: ["codex"],
           reviewerEfforts: { openai: "high" },
         }),
@@ -4092,7 +4128,8 @@ describe("DaemonControlApiServer", () => {
         headers: { authorization: `Bearer ${token}` },
         body: JSON.stringify({
           prompt: "2+2?",
-          mode: "ask",
+          mode: "agent",
+          scope: { kind: "project", root: reviewerRoot },
           harnesses: ["codex"],
           reviewerModels: { openai: "gpt-4o" },
         }),
@@ -4106,7 +4143,8 @@ describe("DaemonControlApiServer", () => {
         headers: { authorization: `Bearer ${token}` },
         body: JSON.stringify({
           prompt: "2+2?",
-          mode: "ask",
+          mode: "agent",
+          scope: { kind: "project", root: reviewerRoot },
           harnesses: ["codex"],
           // Malformed SHAPE is refused at the boundary (spaces/uppercase are not
           // an effort slug). A well-formed but unsupported LEVEL is refused too,
@@ -4126,7 +4164,8 @@ describe("DaemonControlApiServer", () => {
         headers: { authorization: `Bearer ${token}` },
         body: JSON.stringify({
           prompt: "2+2?",
-          mode: "ask",
+          mode: "agent",
+          scope: { kind: "project", root: reviewerRoot },
           harnesses: ["codex"],
           reviewerEfforts: { banana: "max" },
         }),
@@ -4139,7 +4178,8 @@ describe("DaemonControlApiServer", () => {
         headers: { authorization: `Bearer ${token}` },
         body: JSON.stringify({
           prompt: "2+2?",
-          mode: "ask",
+          mode: "agent",
+          scope: { kind: "project", root: reviewerRoot },
           harnesses: ["codex"],
           reviewerModels: { opneai: "gpt-4o" },
         }),
@@ -4150,6 +4190,7 @@ describe("DaemonControlApiServer", () => {
   });
 
   it("rejects whitespace-only nested run controls at the HTTP boundary", async () => {
+    const nestedControlRoot = reapMk(join(tmpdir(), "claudexor-nested-controls-"));
     const { daemon } = fakeDaemon();
     let enqueued = 0;
     const wrapped: DaemonFacadeClient = {
@@ -4173,7 +4214,12 @@ describe("DaemonControlApiServer", () => {
         const res = await apiFetch(`${base}/runs`, {
           method: "POST",
           headers: { authorization: `Bearer ${token}` },
-          body: JSON.stringify({ prompt: "2+2?", mode: "ask", ...body }),
+          body: JSON.stringify({
+            prompt: "2+2?",
+            mode: "agent",
+            scope: { kind: "project", root: nestedControlRoot },
+            ...body,
+          }),
         });
         expect(res.status).toBe(400);
       }

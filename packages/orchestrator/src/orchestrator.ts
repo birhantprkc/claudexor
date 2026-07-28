@@ -756,11 +756,11 @@ export class Orchestrator {
         this.projectConfig(resolved.repoRoot).context.mandatory_files,
       );
     }
-    // Reviewer panels are validated only inside the strategies that actually
-    // review (race/convergence under agent, and plan) — AFTER run-dir
+    // Reviewer panels are validated only inside Agent strategies that actually
+    // review (race/convergence) — AFTER run-dir
     // creation, so a doomed explicit panel yields typed failure ARTIFACTS
     // (failure.yaml naming the refusal) instead of a bare pre-run throw.
-    // ask/audit never spawn reviewers, so a panel there never spends doctor/
+    // Ask and Plan never spawn code reviewers, so a panel there never spends doctor/
     // model probes and never fails a run that would not use it.
     // Whole-strategy terminal net: once a strategy ANNOUNCES its
     // run, any escaped throw still stamps failure.yaml + summary + run.failed

@@ -116,8 +116,7 @@ time, not as prompt text pasted into the conversation.
 
 Multi-harness planning is a council, not a concatenation: members draft in
 parallel lanes, the primary merges into one plan and one question list, the
-user answers once, and every member critiques the merged plan from its own
-lane in the next round. The user always faces one document and one batch of
+user answers once, and the user always faces one document and one batch of
 questions.
 
 Delegation is a capability of building, not a mode: an agent turn may be

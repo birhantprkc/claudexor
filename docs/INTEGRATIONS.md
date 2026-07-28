@@ -190,8 +190,10 @@ should render those as infrastructure/retry evidence, not as model findings.
 Interactive runs use the typed interaction surface instead of raw input
 forwarding: `interaction.requested` events carry the questions, the macOS app
 and `claudexor follow` answer via `POST /v2/runs/:id/interactions/:id/answer`,
-and an unanswered question declines benignly after the configurable
-`interaction_timeout_ms`. Pending and resolved interaction projections are
+and a finite `interaction_timeout_ms` lets an unanswered question decline
+benignly; `null` disables only that automatic expiry. Answers, cancellation,
+outer run deadlines, terminal cleanup, and daemon restart still release the
+wait. Pending and resolved interaction projections are
 fsynced in the run's journal partition; daemon restart terminalizes unresolved
 questions instead of presenting a stale prompt as live.
 

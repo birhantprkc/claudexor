@@ -56,8 +56,6 @@ export interface ReviewerSpec {
 
 export interface ReviewCandidateInput {
   candidateLabel: string;
-  /** Typed deliverable under review: plans are not implementation patches. */
-  reviewSubject?: "code" | "plan";
   diff: string;
   evidenceDir: string;
   artifactsDir?: string;
@@ -221,7 +219,6 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       diff_path: persistentPatch.diffPath,
       summary_path: persistentPatch.summaryPath,
       diff_sha256: persistentPatch.diffSha256,
-      review_subject: input.reviewSubject ?? "code",
       ...frozenMetadata,
     },
   );
@@ -262,7 +259,6 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         persistent_diff_path: persistentPatch.diffPath,
         persistent_summary_path: persistentPatch.summaryPath,
         diff_sha256: persistentPatch.diffSha256,
-        review_subject: input.reviewSubject ?? "code",
         ...frozenMetadata,
       });
       const runtimePrompt = buildReviewPrompt(
@@ -271,7 +267,6 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         reviewerWorkspace.evidenceDir,
         reviewerPatch,
         input.evidenceReadOnly === true,
-        input.reviewSubject ?? "code",
       );
       spec = HarnessRunSpec.parse({
         session_id: newId("rev"),

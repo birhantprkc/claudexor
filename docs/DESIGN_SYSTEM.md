@@ -738,9 +738,11 @@ views in the shared design-system files; screens compose them.
     (typed, policy-governed fallback), and the route actually taken is
     disclosed as a badge on the finished run — the composer never claims what
     "will be charged";
-  - the **reviewer panel editor** (ordered explicit `harness[=model[:effort]]`
-    entries; invalid entries block Send with an inline reason) and typed
-    **protected-path approvals** for auto-protected gate/test paths;
+  - for **Agent only**, the **reviewer panel editor** (ordered explicit
+    `harness[=model[:effort]]` entries; invalid entries block Send with an
+    inline reason) and typed **protected-path approvals** for auto-protected
+    gate/test paths; Ask and Plan omit both controls, and Council is Plan's
+    multi-harness critique path;
   - the **browser** toggle (see below);
   - the **Workspace** section with the **isolated-workspace toggle** (a draft
     thread can choose `isolated` — turns accumulate in a persistent thread
@@ -775,14 +777,15 @@ views in the shared design-system files; screens compose them.
   absorbed Spec.
 - **Composer attachments + Capture.** The paperclip picker attaches files to a
   turn; attached files render as removable chips above the input. Generic file
-  attachments ride any non-plan turn; IMAGE attachments and the **Capture**
+  attachments ride Agent, Ask, and Plan as read-only context; IMAGE attachments
+  and the **Capture**
   button (system `screencapture` region select, off the main thread; a
   denied/cancelled grab yields no attachment — never a blank fake image) are
   gated by the pool's finite `capability_profile.attachment_inputs` declarations.
   Upload progress/cancel happens before Send; if any selected lane lacks the
   MIME/size/count transport, Send is blocked with the engine's typed reason — an
-  attachment the model never saw must never look delivered. A read-only plan run
-  takes no attachments and says so instead of silently dropping them.
+  attachment the model never saw must never look delivered. Plan keeps its
+  read-only access contract while receiving those finalized resource bytes.
 - **Agent-driven browser toggle.** A per-turn `Browser` toggle in the "⋯"
   popover, offered ONLY when a pooled harness reports the `browser_tool`
   capability (hidden otherwise — never a dead switch). It is live egress and is
@@ -1054,8 +1057,8 @@ views in the shared design-system files; screens compose them.
   Settings groups are flat, solid, and shadowless. Settings does NOT own
   project selection — there is no Current Project field; the working directory
   is picked only in the chat composer's `ProjectChip`. The Per-Harness Defaults
-  editor (enable/disable, model override, effort, web policy, per-harness
-  budget cap, tool allow/deny lists, fallback model) **auto-saves** PARTIAL
+  editor (enable/disable, model override, effort, web policy, tool allow/deny
+  lists, fallback model) **auto-saves** PARTIAL
   patches to the engine config via `/settings` — there is no Save button; an
   empty field is an explicit "clear the override", and in-flight saves must not
   clobber the user's typing. Quick-launch and Retry honor saved engine defaults
