@@ -9,6 +9,19 @@ struct SSHProcessOutput: Sendable {
     let stdinWriteError: String?
 }
 
+/// Runs one blocking pipe operation on its OWN thread.
+///
+/// Pipe drains and stdin writes block until the child moves; running them on
+/// the width-limited global concurrent queue lets a handful of concurrent SSH
+/// invocations park every pooled thread on a blocking read and starve the pool
+/// that would have finished them. A dedicated thread cannot exhaust a shared
+/// pool. Stack size is the default; these bodies only shuttle bytes.
+func blockingDrainThread(name: String, _ body: @escaping @Sendable () -> Void) {
+    let thread = Thread(block: body)
+    thread.name = name
+    thread.start()
+}
+
 enum SSHConnectionError: Error, LocalizedError {
     case needsInteraction(String)
     case commandFailed(String)
@@ -85,8 +98,10 @@ private final class SSHRunningProcess: @unchecked Sendable {
             // Write concurrently with stdout/stderr draining. SSH can emit
             // enough diagnostics while consuming stdin to fill both pipe
             // buffers; serially writing all input first deadlocks that case.
+            // Dedicated thread for the same reason the drains use one: this
+            // write blocks until the child consumes the bytes.
             inputWrites.enter()
-            DispatchQueue.global(qos: .utility).async { [self] in
+            blockingDrainThread(name: "claudexor.ssh.stdin") { [self] in
                 defer {
                     try? input.fileHandleForWriting.close()
                     inputWrites.leave()
@@ -107,9 +122,19 @@ private final class SSHRunningProcess: @unchecked Sendable {
         // Drain both pipes before waiting: ssh -G, directory listings, and
         // command failures can exceed the kernel pipe buffer. Waiting first
         // would deadlock the child while it waits for us to read.
+        //
+        // These drains run on DEDICATED threads, never on the global
+        // concurrent queue. `readDataToEndOfFile` blocks until the child
+        // closes its end, and the global pool is width-limited by the core
+        // count: several concurrent invocations (a parallel test suite, or a
+        // real fan-out over hosts) would each park two pooled threads on a
+        // blocking read, starve the pool, and hang every remaining drain with
+        // no thread left to finish one. A dedicated thread per pipe cannot
+        // exhaust a shared pool, and it costs nothing to a process that is
+        // already waiting on a child.
         let drains = DispatchGroup()
         drains.enter()
-        DispatchQueue.global().async { [self] in
+        blockingDrainThread(name: "claudexor.ssh.stdout") { [self] in
             let data = output.fileHandleForReading.readDataToEndOfFile()
             drainLock.lock()
             stdoutData = data
@@ -117,7 +142,7 @@ private final class SSHRunningProcess: @unchecked Sendable {
             drains.leave()
         }
         drains.enter()
-        DispatchQueue.global().async { [self] in
+        blockingDrainThread(name: "claudexor.ssh.stderr") { [self] in
             let data = errors.fileHandleForReading.readDataToEndOfFile()
             drainLock.lock()
             stderrData = data

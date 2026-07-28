@@ -53,6 +53,38 @@ import Testing
         await manager.shutdown()
     }
 
+    /// The drains must not ride the width-limited global pool.
+    ///
+    /// A candidate release build hung here for three hours: every drain blocks
+    /// until its child closes, so on a small-core runner a handful of parallel
+    /// invocations parked every pooled thread on a blocking read and no thread
+    /// was left to finish one. This runs MORE concurrent large-output children
+    /// than the machine has cores; with pool-based drains it deadlocks, with
+    /// dedicated threads it completes.
+    @Test func concurrentLargeOutputInvocationsCannotStarveTheDrainPool() async throws {
+        let width = max(8, ProcessInfo.processInfo.activeProcessorCount * 3)
+        try await withThrowingTaskGroup(of: Int.self) { group in
+            for _ in 0 ..< width {
+                group.addTask {
+                    let manager = SSHConnectionManager()
+                    let invocation = SSHInvocation(
+                        executable: "/bin/sh",
+                        arguments: [
+                            "-c",
+                            "/usr/bin/yes x | /usr/bin/head -c 120000; " +
+                                "/usr/bin/yes y | /usr/bin/head -c 120000 >&2",
+                        ])
+                    let result = try await manager.runForTesting(invocation)
+                    await manager.shutdown()
+                    return result.stdout.count + result.stderr.count
+                }
+            }
+            var total = 0
+            for try await bytes in group { total += bytes }
+            #expect(total == width * 240_000)
+        }
+    }
+
     @Test func drainsLargeStdoutAndStderrWithoutWaitingForProcessExitFirst() async throws {
         let manager = SSHConnectionManager()
         let invocation = SSHInvocation(
