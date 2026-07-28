@@ -10,16 +10,16 @@ import UniformTypeIdentifiers
 /// existing TaskDetail surface (a turn links to its run).
 struct ThreadsScreen: View {
     @Environment(AppModel.self) var model
-    @State private var composerText = ""
+    @State var composerText = ""
     /// Files/images staged for upload before the next turn. Images are gated by
     /// each selected harness's finite attachment-input declaration.
     @State var composerAttachments: [PendingAttachment] = []
     @State var composerMode: RunMode = .agent
     // "⋯" per-turn options (collapsed by default).
-    @State private var showOptions = false
+    @State var showOptions = false
     @State var capUsdText = ""
-    @State var access: AccessProfile = .workspaceWrite
-    @State var webPolicy = "auto"
+    @State var selectedAccess: AccessProfile = .workspaceWrite
+    @State var selectedWebPolicy = "auto"
     /// Per-turn auth route REQUEST (W18): auto | subscription | api_key. Not sticky.
     @State var authRoutePreference = ""  // "" = Thread default; see authRouteRequest (sol #1)
     /// Per-turn reasoning effort ("" = harness default). Not sticky.
@@ -38,8 +38,9 @@ struct ThreadsScreen: View {
     /// access (codex's sandbox cancels navigation otherwise); turning it on forces
     /// access to full + is disclosed in the options panel. Not sticky across threads.
     @State var browser = false
-    @State var reviewerPanelText = ""
-    @State var protectedApprovalsText = ""
+    /// Parent-owned complete Advanced draft. Incomplete rows remain visible to
+    /// Send validity and survive popover dismissal; only valid rows serialize.
+    @State var reviewDraft = ComposerReviewDraft()
     /// QA-010: optional Create-turn deterministic test command (argv text). Shown
     /// only for the Create agent strategy; parsed into the run's typed `tests`
     /// gate. Not sticky across threads.
@@ -54,7 +55,10 @@ struct ThreadsScreen: View {
     /// Cached model truth sources per pooled harness (id -> catalog).
     @State var poolModelCatalogs: [String: HarnessModelsResponse] = [:]
     /// True while a Stop request is in flight for the head run (server owns the cancel).
-    @State private var stopping = false
+    @State var stopping = false
+    /// One generation-fenced owner for async sends and the exact thread created
+    /// by first-turn materialization. Explicit switches invalidate completions.
+    @State var composerSubmissions = ComposerSubmissionCoordinator()
     /// Width of the LEFT thread list, driven by an explicit drag handle (item 6).
     /// HSplitView dragged from the "wrong side" (the right pane grew when you dragged
     /// the divider) — an explicit width + Divider makes the drag track the cursor:
@@ -96,21 +100,51 @@ struct ThreadsScreen: View {
             ? model.draftCredentialProfileId
             : model.currentThread?.credentialProfileId
     }
+
+    var composerSelectionContext: ComposerSelectionContext {
+        let repoRoot = model.selectedThreadId == nil
+            ? model.normalizedProjectRoot
+            : (model.currentThread?.repoRoot ?? model.normalizedProjectRoot)
+        return .init(
+            locationID: model.activeExecutionLocation.rawValue,
+            threadID: model.selectedThreadId,
+            repoRoot: repoRoot
+        )
+    }
+
+    var browserPolicy: ComposerBrowserPolicy {
+        .init(
+            selectedAccess: selectedAccess,
+            selectedWebPolicy: selectedWebPolicy,
+            browserArmed: browser,
+            browserAvailable: browserAvailableForCurrentTurn
+        )
+    }
+
+    var effectiveBrowserArmed: Bool { browserPolicy.effectiveBrowserArmed }
+    var effectiveAccess: AccessProfile { browserPolicy.effectiveAccess }
+    var effectiveWebPolicy: String { browserPolicy.effectiveWebPolicy }
+    var runControlApplicability: ComposerRunControlApplicability {
+        .resolve(mode: composerMode)
+    }
     /// Per-turn options the "⋯" panel collects, mapped onto engine run-start fields.
-    private var currentOptions: TurnOptions {
+    var currentOptions: TurnOptions {
         TurnOptions(
             maxUsd: ComposerOptionParser.parseNonnegativeFiniteDouble(capUsdText),
-            access: access == .workspaceWrite ? nil : access.wire,  // workspace_write is the engine default
-            web: webPolicy == "auto" ? nil : webPolicy,
+            access: effectiveAccess == .workspaceWrite ? nil : effectiveAccess.wire,
+            web: effectiveWebPolicy == "auto" ? nil : effectiveWebPolicy,
             // untilClean / delegate / council are overlaid in send() from the
             // resolved Agent/Plan strategy (resolveComposerStrategy). Delegate
             // is additionally masked there by requestedForWire so a stale ON
             // value cannot cross a known-unavailable route.
             maxAttempts: maxAttempts == 3 ? nil : maxAttempts,
-            browser: browser,
+            browser: effectiveBrowserArmed,
             models: composerModels,
-            reviewerPanel: reviewerPanelEntries.isEmpty ? nil : reviewerPanelEntries,
-            protectedPathApprovals: protectedPathApprovals.isEmpty ? nil : protectedPathApprovals,
+            reviewerPanel: runControlApplicability.reviewers.applicable && !reviewerPanelEntries.isEmpty
+                ? reviewerPanelEntries : nil,
+            protectedPathApprovals:
+                runControlApplicability.protectedPathApprovals.applicable && !protectedPathApprovals.isEmpty
+                ? protectedPathApprovals : nil,
             // QA-010: the typed test-command gate rides ONLY on a Create turn (the
             // one surface the field is offered on) — a stale command from a hidden
             // field never leaks onto a non-Create turn.
@@ -162,34 +196,44 @@ struct ThreadsScreen: View {
     }
 
     var reviewerPanelInvalid: Bool {
+        guard runControlApplicability.reviewers.applicable else { return false }
         let tokens = reviewerPanelTokens
-        return !tokens.isEmpty && tokens.count != reviewerPanelEntries.count
+        return reviewDraft.reviewerPickerIncomplete
+            || (!tokens.isEmpty && tokens.count != reviewerPanelEntries.count)
     }
 
     var protectedApprovalsInvalid: Bool {
+        guard runControlApplicability.protectedPathApprovals.applicable else { return false }
         let tokens = protectedApprovalTokens
-        return !tokens.isEmpty && tokens.count != protectedPathApprovals.count
+        return reviewDraft.approvalRowsInvalid
+            || (!tokens.isEmpty && tokens.count != protectedPathApprovals.count)
     }
 
-    private var composerOptionsInvalid: Bool {
-        capUsdInvalid || reviewerPanelInvalid || protectedApprovalsInvalid || testCommandInvalid
+    var composerAttachmentsInvalid: Bool {
+        !composerAttachments.isEmpty && !composerAttachmentAdmission.canSend
     }
 
-    private var composerImageAttachmentsInvalid: Bool {
-        composerAttachments.contains { $0.kind == "image" } && !imageAttachmentsAllowed
-    }
-
-    private var composerSendInvalid: Bool {
-        composerOptionsInvalid || composerImageAttachmentsInvalid
-    }
-
-    private var composerBlockHelp: String {
-        if capUsdInvalid { return "Fix the budget cap in ⋯ options to send" }
-        if reviewerPanelInvalid { return "Fix the reviewer panel in ⋯ options to send" }
-        if protectedApprovalsInvalid { return "Fix protected path approvals in ⋯ options to send" }
-        if testCommandInvalid { return "Fix the test command in ⋯ options to send" }
-        if composerImageAttachmentsInvalid { return "Images need an available vision-capable route" }
-        return "Send (⌘↩)"
+    var composerSendAvailability: ComposerSendAvailability {
+        var blockers: [ComposerSendBlocker] = []
+        if capUsdInvalid {
+            blockers.append(.budget("Fix the budget cap in More options to send"))
+        }
+        if reviewerPanelInvalid {
+            blockers.append(.reviewer("Fix the reviewer panel in More options to send"))
+        }
+        if protectedApprovalsInvalid {
+            blockers.append(.approvals("Fix protected path approvals in More options to send"))
+        }
+        if let message = testCommandErrorMessage {
+            blockers.append(.testCommand(message))
+        }
+        if composerAttachmentsInvalid {
+            blockers.append(.attachments(
+                composerAttachmentAdmission.message
+                    ?? "Change the harness pool or remove incompatible attachments"
+            ))
+        }
+        return .resolve(message: composerText, blockers: blockers)
     }
 
     var body: some View {
@@ -423,7 +467,7 @@ struct ThreadsScreen: View {
                 // D26: the write scope is STICKY per thread — the chip reflects
                 // the thread's server-side `access` and a switch PATCHes it
                 // (persists across turns/reload). " · Browser" appends while armed.
-                AccessChip(access: $access, browserArmed: browser,
+                AccessChip(access: $selectedAccess, browserArmed: effectiveBrowserArmed,
                            writeDisabled: composerMode.isReadOnly)
             }
             // The "⋯" options button is ALWAYS available — a no-project Ask is
@@ -432,7 +476,8 @@ struct ThreadsScreen: View {
             Button {
                 showOptions.toggle()
             } label: {
-                Image(systemName: "slider.horizontal.3")
+                Label("More options", systemImage: "slider.horizontal.3")
+                    .labelStyle(.iconOnly)
                     // Subtle active tint only while the panel is open, so the
                     // options control reads as a PEER of the other composer-row
                     // controls — not the one prominent filled button (it
@@ -446,7 +491,7 @@ struct ThreadsScreen: View {
             // QA-003: name the icon-only options control (else the AX name is the
             // localized `slider.horizontal.3` description, `Изменить`). `.help`
             // stays the separate hint enumerating what the popover holds.
-            .accessibilityLabel("More options")
+            .productControlAccessibility("More options")
             .help("More options: harness pool, model, budget, access, web, repair strategies")
             // Native dismissible popover — no inline glass-on-glass panel.
             .popover(isPresented: $showOptions, arrowEdge: .bottom) {
@@ -462,9 +507,12 @@ struct ThreadsScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { if !threadHasProject { composerMode = .ask } }
-        .onChange(
-            of: "\(model.activeExecutionLocation.rawValue)|\(model.selectedThreadId ?? "draft")|\(model.normalizedProjectRoot)"
-        ) {
+        .onChange(of: composerSelectionContext) { oldContext, newContext in
+            if composerSubmissions.classifySelection(
+                from: oldContext, to: newContext
+            ) != .explicitSelection {
+                return
+            }
             // QA-007: a FRESH draft seeds intent from the project default — Agent
             // for a project, Ask for none — so a stale Ask/Plan from the previous
             // thread never leaks onto a new project draft. Selecting an EXISTING
@@ -474,23 +522,13 @@ struct ThreadsScreen: View {
             } else if !threadHasProject {
                 composerMode = .ask
             }
-            // Per-turn knobs are not sticky — don't carry one thread's budget
-            // cap / web / repair flags / model into the next thread. Access is
-            // the exception (D26): it's sticky per thread, so SEED it from the
-            // thread's server-side value (nil sticky => the repo trust default,
-            // A8: seed the actual default, not a hardcoded Workspace write).
-            capUsdText = ""; webPolicy = "auto"; authRoutePreference = ""; effortPreference = ""
-            access = model.effectiveThreadAccess.flatMap(AccessProfile.init(wire:)) ?? model.composerAccessDefault
-            maxAttempts = 3; showOptions = false; browser = false
-            agentStrategy = .single; delegate = false; councilEnabled = false; councilMembers = 2
-            reviewerPanelText = ""; protectedApprovalsText = ""; testCommandText = ""
-            composerModels = [:]; poolModelCatalogs = [:]  // route-scoped (W20)
+            resetPerTurnComposerOptions()
         }
         // D26: a write-scope switch is STICKY — PATCH the thread (or the draft
         // value) so it persists. Guarded so re-seeding on thread switch, and
         // picking the value that already equals the trust default (nil sticky),
         // never fire a redundant PATCH.
-        .onChange(of: access) { _, picked in
+        .onChange(of: selectedAccess) { _, picked in
             let stickyOrDefault = model.effectiveThreadAccess ?? model.composerAccessDefault.wire
             guard picked.wire != stickyOrDefault else { return }
             Task { await model.setThreadAccess(picked.wire) }
@@ -503,7 +541,15 @@ struct ThreadsScreen: View {
         // An armed Browser cannot ride a read-only intent: the toggle hides in
         // ⋯ for read-only modes, so disarm here — never send browser:true on Ask.
         .onChange(of: composerMode) { _, mode in
-            if mode.isReadOnly { browser = false }
+            browser = ComposerBrowserPolicy.browserArmed(browser, afterSelecting: mode)
+        }
+        // A pool/readiness change can remove the last browser-capable lane while
+        // the popover is closed. Effective policy above fails closed immediately;
+        // this also reconciles the stored toggle so reopening shows honest state.
+        .onChange(of: browserAvailableForCurrentTurn) { _, available in
+            browser = ComposerBrowserPolicy.browserArmed(
+                browser, afterAvailability: available
+            )
         }
         // Models are harness-scoped now: a primary switch keeps each
         // harness's own selection valid. Prune entries for harnesses NO LONGER
@@ -527,6 +573,8 @@ struct ThreadsScreen: View {
                 composerAccessHint
                 composerGrantCTA
                 if !composerAttachments.isEmpty { attachmentChips }
+                composerAttachmentNotice
+                composerSendReason
                 HStack(alignment: .center, spacing: Theme.Spacing.sm) {
                     attachButton
                     captureButton
@@ -546,23 +594,31 @@ struct ThreadsScreen: View {
                         // runId binds.
                         Button("Starting…", action: {})
                             .buttonStyle(AccentButtonStyle())
+                            .productControlAccessibility("Starting")
                             .keyboardShortcut(.return, modifiers: .command)
                             .disabled(true)
                             .help("The turn is starting — Stop becomes available once it binds")
                     } else if model.selectedThreadBusy {
                         Button(stopping ? "Stopping…" : "Stop", action: stop)
                             .buttonStyle(AccentButtonStyle())
+                            .productControlAccessibility(stopping ? "Stopping" : "Stop")
                             .keyboardShortcut(.return, modifiers: .command)
                             .disabled(stopping)
                             .help("Cancel the running turn (server-owned)")
                     } else {
+                        let availability = composerSendAvailability
                         Button("Send", action: send)
                             .buttonStyle(AccentButtonStyle())
+                            .productControlAccessibility(
+                                availability.name,
+                                value: availability.enabled ? "Available" : "Unavailable"
+                            )
+                            .accessibilityHint(availability.help)
                             .keyboardShortcut(.return, modifiers: .command)
                             // Blocked on empty text OR invalid option fields — never send a
                             // turn whose typed controls would be silently dropped.
-                            .disabled(composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || composerSendInvalid)
-                            .help(composerBlockHelp)
+                            .disabled(!availability.enabled)
+                            .help(availability.help)
                     }
                 }
             }
@@ -573,88 +629,4 @@ struct ThreadsScreen: View {
         }
     }
 
-    /// Inline guidance on the controls row: the no-project gate (only Ask works
-    /// without a project) or, in the draft state, where the new thread lands.
-    @ViewBuilder private var composerHint: some View {
-        if capUsdInvalid {
-            // Highest priority: a bad budget cap blocks Send — say so even with the
-            // "⋯" popover closed, so the disabled Send isn't a mystery.
-            Label("Budget cap must be a non-negative number (in ⋯)", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption).foregroundStyle(.orange).lineLimit(1)
-        } else if let testCommandMessage = testCommandErrorMessage {
-            Label(testCommandMessage, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption).foregroundStyle(.orange).lineLimit(1)
-        } else if !threadHasProject {
-            Text("Pick a project to use Agent · Plan · Best-of")
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                .help("Without a project, only Ask (read-only) is available")
-        } else if model.selectedThreadId == nil {
-            Text("New thread on \(URL(fileURLWithPath: model.normalizedProjectRoot).lastPathComponent)")
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-        }
-    }
-
-    /// The composer is ALWAYS live: with no thread selected, the first message
-    /// materializes one (on the Current Project). No silent no-op (the v0.9 bug).
-    /// The text is cleared only after a successful send, restored on failure.
-    private func send() {
-        // While the head turn is still running, ⌘↩ / Return submits through
-        // GlassField.onSubmit must not queue a second turn over a live one — route
-        // the keystroke to Stop instead (mirrors the swapped button).
-        if model.selectedThreadBusy { stop(); return }
-        let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        // Guard options HERE too, not only on the Send button: ⌘↩ / Return submit
-        // through GlassField.onSubmit calls send() directly, bypassing the disabled
-        // button. Never send a turn whose typed controls would be silently dropped.
-        guard !composerSendInvalid else {
-            if composerImageAttachmentsInvalid {
-                model.threadStatus = "Images need an available vision-capable route."
-            }
-            return
-        }
-        // Resolve the composer's intent + strategy knobs (D24/D31/D32) into the
-        // effective wire mode + delegate/council/until-clean facts.
-        let resolution = resolveComposerStrategy(
-            intent: composerMode, agentStrategy: agentStrategy,
-            delegate: DelegationPresentation.requestedForWire(
-                isOn: delegate, control: delegateControlState),
-            councilEnabled: councilEnabled, councilMembers: councilMembers)
-        let mode = resolution.mode
-        var options = currentOptions
-        options.untilClean = resolution.untilClean
-        options.delegate = resolution.delegate
-        options.council = resolution.council
-        options.councilN = resolution.councilN
-        let chosenModel = primaryFamily.flatMap { composerModels[$0.rawValue] } ?? ""
-        let atts = composerAttachments
-        composerText = ""
-        composerAttachments = []
-        Task {
-            let sent = await model.composerSend(prompt: text, mode: mode, model: chosenModel, attachments: atts, options: options)
-            // Restore ONLY if the engine rejected it AND the user hasn't started
-            // typing the next message in the meantime — never clobber in-flight text.
-            if !sent && composerText.isEmpty { composerText = text; composerAttachments = atts }
-        }
-    }
-
-    /// Cancel the selected thread's active head run (server-owned cancel via
-    /// /runs/:id/control). Fires whenever the composer is in the cancellable
-    /// `.busy` state — including the bound-but-not-yet-hydrated window, where the
-    /// runId (`selectedHeadRunId`) is a valid cancel target even before the live
-    /// `TaskRun` row merges. No-op while `.starting` (no runId) or `.idle`.
-    private func stop() {
-        // Fire whenever the composer is SHOWING Stop (busy and not the no-target
-        // "Starting…" state) and a cancel target exists — including the detail-load
-        // window, where busy/headRunId come from the thread-summary head run.
-        guard !stopping, model.selectedThreadBusy, !model.selectedThreadStarting,
-              let runId = model.selectedHeadRunId else { return }
-        stopping = true
-        Task {
-            // defer: the button must re-enable on EVERY exit (incl. task
-            // cancellation mid-await), never park as "Stopping...".
-            defer { stopping = false }
-            await model.cancel(runId)
-        }
-    }
 }

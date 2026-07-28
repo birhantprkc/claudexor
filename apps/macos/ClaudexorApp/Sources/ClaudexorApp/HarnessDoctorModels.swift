@@ -33,8 +33,9 @@ struct HarnessInfo: Identifiable, Hashable {
     var routableIntents: [String] = []
     var reasons: [String] = []
     var readiness: [ReadinessCheck] = []
-    /// Manifest declares a finite image attachment input (composer gating).
-    var acceptsImages: Bool = false
+    /// Full finite attachment declaration. Composer admission preserves kind,
+    /// MIME, byte/count limits, and transport rather than collapsing to vision.
+    var attachmentInputs: [HarnessAttachmentInput] = []
     /// Manifest `browser_tool` capability — drives the composer's
     /// agent-browser toggle (only offered where Playwright MCP can inject).
     var acceptsBrowser: Bool = false

@@ -14,6 +14,16 @@ import Foundation
 // the available harness chips highlighted-as-included. Pure + unit-tested so the
 // mode mapping can't drift from what the composer puts on the wire.
 enum HarnessPoolPresentation {
+    struct Availability: Equatable {
+        var available: Bool
+        var reason: String
+    }
+
+    struct ChipDescriptor: Equatable {
+        var included: Bool
+        var help: String
+        var accessibilityValue: String
+    }
     /// Auto = the sticky pool is empty (engine auto-pools all available). Any
     /// non-empty pool is an explicit user subset.
     static func isAuto(pool: [String]) -> Bool { pool.isEmpty }
@@ -50,6 +60,51 @@ enum HarnessPoolPresentation {
     /// is never materialized — this is a presentation projection only.
     static func includedFamilies(pool: [String], available: [String]) -> [String] {
         isAuto(pool: pool) ? available : pool
+    }
+
+    /// ONE per-family presentation owner: visual selection, hover help and AX
+    /// value are derived from the same membership fact.
+    static func chipDescriptor(
+        _ family: String,
+        pool: [String],
+        available: [String],
+        availability: Availability
+    ) -> ChipDescriptor {
+        let included = isIncluded(family, pool: pool, available: available)
+        if !availability.available {
+            if isAuto(pool: pool) {
+                return .init(
+                    included: included,
+                    help: "Auto includes available harnesses; this one is unavailable: \(availability.reason)",
+                    accessibilityValue: "Not included by Auto, unavailable"
+                )
+            }
+            let membership = included ? "included" : "excluded"
+            let accessibilityMembership = included ? "Included" : "Excluded"
+            return .init(
+                included: included,
+                help: "This harness is \(membership) in the explicit eligible pool, but is unavailable: \(availability.reason)",
+                accessibilityValue: "\(accessibilityMembership), unavailable"
+            )
+        }
+        if isAuto(pool: pool) {
+            return .init(
+                included: included,
+                help: "This harness is included by Auto. Select it to pin an explicit subset.",
+                accessibilityValue: "Included by Auto"
+            )
+        }
+        return included
+            ? .init(
+                included: true,
+                help: "This harness is included in the explicit eligible pool. Select it to exclude it.",
+                accessibilityValue: "Included"
+            )
+            : .init(
+                included: false,
+                help: "This harness is excluded from the explicit eligible pool. Select it to include it.",
+                accessibilityValue: "Excluded"
+            )
     }
 
     /// The caption that states the semantics under the pool chips.

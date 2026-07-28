@@ -27,6 +27,7 @@ let package = Package(
         .testTarget(
             name: "ClaudexorAppTests",
             dependencies: ["ClaudexorApp", .product(name: "ClaudexorKit", package: "ClaudexorKit")],
+            resources: [.process("Fixtures")],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

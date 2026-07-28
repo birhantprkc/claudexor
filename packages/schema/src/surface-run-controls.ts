@@ -1,7 +1,8 @@
-import { AccessProfile, ExternalContextPolicy, ProviderFamily } from "./primitives.js";
+import { AccessProfile, ExternalContextPolicy, ModeKind, ProviderFamily } from "./primitives.js";
 import { EffortHint } from "./harness.js";
 import { TestCommandInvocation } from "./task.js";
 import { PaidBudget } from "./budget.js";
+import { runStartStrategyViolations } from "./run-strategy.js";
 
 /**
  * ONE owner for the surface-level run-control argument validation shared by
@@ -111,6 +112,15 @@ export function validateSurfaceRunControls(obj: Record<string, unknown>): string
       }
     }
   }
+  const parsedMode = ModeKind.safeParse(obj.mode);
+  const applicabilityError = runStartStrategyViolations({
+    mode: parsedMode.success ? parsedMode.data : undefined,
+    reviewerPanel: obj.reviewerPanel,
+    reviewerModels: obj.reviewerModels,
+    reviewerEfforts: obj.reviewerEfforts,
+    protectedPathApprovals: obj.protectedPathApprovals,
+  })[0];
+  if (applicabilityError) return applicabilityError;
   return null;
 }
 

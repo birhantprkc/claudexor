@@ -88,9 +88,11 @@ enum AboutPanel {
 /// A bare SwiftPM executable does not get a regular activation policy automatically,
 /// so its window may not appear. Force `.regular` + activate on launch. (Harmless for
 /// the notarized .app bundle, essential for `swift run` dev/CI.)
-final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor weak var model: AppModel?
     private var terminationPending = false
+    private weak var mainWindow: NSWindow?
+    private var containmentInstalled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -119,7 +121,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the previous per-frame guard in the SwiftUI representable never fired.
         makeWindowsTranslucent()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            MainActor.assumeIsolated { self?.makeWindowsTranslucent() }
+            MainActor.assumeIsolated {
+                self?.makeWindowsTranslucent()
+                self?.installMainWindowContainmentIfNeeded()
+            }
         }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
@@ -143,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         devIconURL(bases: [Bundle.main.resourceURL, Bundle.main.bundleURL])
     }
 
-    static func devIconURL(bases: [URL?]) -> URL? {
+    nonisolated static func devIconURL(bases: [URL?]) -> URL? {
         let bundleName = "ClaudexorApp_ClaudexorApp.bundle"
         for base in bases {
             guard let base else { continue }
@@ -164,6 +169,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             win.isOpaque = false
             win.backgroundColor = .clear
         }
+    }
+
+    /// Keep the main window inside the CURRENT owning screen's safe drawable
+    /// area across resize, inspector negotiation, screen moves, full-screen
+    /// reversal, and Dock/menu/display changes. `visibleFrame` is read on every
+    /// event; it is intentionally never cached.
+    @MainActor private func installMainWindowContainmentIfNeeded() {
+        if mainWindow == nil {
+            mainWindow = NSApp.windows.first(where: { $0.isVisible }) ?? NSApp.windows.first
+        }
+        guard let mainWindow else { return }
+        containMainWindow(mainWindow)
+        guard !containmentInstalled else { return }
+        containmentInstalled = true
+
+        let center = NotificationCenter.default
+        for name in WindowContainment.clampWindowNotifications {
+            center.addObserver(
+                self,
+                selector: #selector(mainWindowGeometryDidChange(_:)),
+                name: name,
+                object: mainWindow
+            )
+        }
+        center.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+    }
+
+    @objc private func mainWindowGeometryDidChange(_ note: Notification) {
+        guard let window = note.object as? NSWindow else { return }
+        containMainWindow(window)
+    }
+
+    @objc private func screenParametersDidChange(_ note: Notification) {
+        guard let mainWindow else { return }
+        containMainWindow(mainWindow)
+    }
+
+    @MainActor private func containMainWindow(_ window: NSWindow) {
+        guard !window.styleMask.contains(.fullScreen),
+              let screen = window.screen ?? NSScreen.main else { return }
+        let target = WindowContainment.clampedFrame(window.frame, within: screen.visibleFrame)
+        guard target != window.frame else { return }
+        window.setFrame(target, display: true)
     }
 
     /// Dev/QA only: deterministically size+center the window for screenshot testing at

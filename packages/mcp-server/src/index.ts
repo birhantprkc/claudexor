@@ -15,6 +15,7 @@ import {
   effortJsonSchema,
   ExternalContextPolicy,
   ProviderFamily,
+  runControlApplicability,
   validateOptionalNonEmptyString,
   validateSurfaceRunControls,
 } from "@claudexor/schema";
@@ -260,7 +261,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
       effortJsonSchema(`Reviewer effort for the ${family} family.`),
     ]),
   );
-  const promptSchema = (minN = 1) => ({
+  const promptSchema = (minN = 1, mode: "ask" | "plan" | "agent" = "agent") => ({
     type: "object",
     additionalProperties: false,
     properties: {
@@ -326,46 +327,54 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         enum: ["readonly", "workspace_write", "full", "external_sandbox_full", "inherit_native"],
         description: "Optional access profile for this run.",
       },
-      reviewerPanel: {
-        type: "array",
-        minItems: 1,
-        description: "Explicit reviewer panel entries, preserving order and duplicates.",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            harness: { type: "string", minLength: 1 },
-            model: { type: "string", minLength: 1 },
-            effort: effortJsonSchema("Effort for this reviewer entry."),
-          },
-          required: ["harness"],
-        },
-      },
-      reviewerModels: {
-        type: "object",
-        additionalProperties: false,
-        properties: reviewerModelProperties,
-        description: "Per-provider reviewer model overrides.",
-      },
-      reviewerEfforts: {
-        type: "object",
-        additionalProperties: false,
-        properties: reviewerEffortProperties,
-        description: "Per-provider reviewer effort overrides.",
-      },
-      protectedPathApprovals: {
-        type: "array",
-        description: "Typed approvals for existing protected path edits.",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string", minLength: 1 },
-            reason: { type: "string", minLength: 1 },
-          },
-          required: ["path"],
-        },
-      },
+      ...(runControlApplicability({ mode }).reviewerPanel.applicable
+        ? {
+            reviewerPanel: {
+              type: "array",
+              minItems: 1,
+              description: "Explicit reviewer panel entries, preserving order and duplicates.",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  harness: { type: "string", minLength: 1 },
+                  model: { type: "string", minLength: 1 },
+                  effort: effortJsonSchema("Effort for this reviewer entry."),
+                },
+                required: ["harness"],
+              },
+            },
+            reviewerModels: {
+              type: "object",
+              additionalProperties: false,
+              properties: reviewerModelProperties,
+              description: "Per-provider reviewer model overrides.",
+            },
+            reviewerEfforts: {
+              type: "object",
+              additionalProperties: false,
+              properties: reviewerEffortProperties,
+              description: "Per-provider reviewer effort overrides.",
+            },
+          }
+        : {}),
+      ...(runControlApplicability({ mode }).protectedPathApprovals.applicable
+        ? {
+            protectedPathApprovals: {
+              type: "array",
+              description: "Typed approvals for existing protected path edits.",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  path: { type: "string", minLength: 1 },
+                  reason: { type: "string", minLength: 1 },
+                },
+                required: ["path"],
+              },
+            },
+          }
+        : {}),
     },
     required: ["prompt"],
   });
@@ -383,7 +392,10 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
   ): McpTool => ({
     name,
     description,
-    inputSchema: promptSchema(minN),
+    inputSchema: promptSchema(
+      minN,
+      params["mode"] === "ask" || params["mode"] === "plan" ? params["mode"] : "agent",
+    ),
     outputSchema: mcpRunToolResultSchema,
     annotations: annotationsFor(params),
     // Summary first, then the runId/artifacts trailer (hosts get a handle);

@@ -653,7 +653,135 @@ struct AppModelRefreshTests {
         }
 
         #expect(await model.refreshHarnesses())
-        #expect(model.harnessInfo(for: .claude)?.acceptsImages == true)
+        #expect(model.harnessInfo(for: .claude)?.attachmentInputs.map(\.kind) == ["image"])
+    }
+
+    @MainActor
+    @Test func planComposerUploadsExactBytesAndSendsOnlyTheFinalizedResourceReference() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let payload = Data("PLAN_ATTACHMENT_SENTINEL\n".utf8)
+        let exercised = AppRefreshCallCounter()
+
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/uploads"):
+                guard let body = appTestRequestBody(request),
+                      let object = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      object["kind"] as? String == "file",
+                      object["mime"] as? String == "text/plain",
+                      object["name"] as? String == "plan-note.txt",
+                      object["sizeBytes"] as? Int == payload.count else {
+                    throw AppRefreshTestError.badRequest
+                }
+                exercised.increment()
+                return (
+                    appResponse(for: request, status: 201),
+                    Data(#"{"uploadId":"upload-plan"}"#.utf8)
+                )
+            case ("PUT", "/v2/uploads/upload-plan/bytes"):
+                guard appTestRequestBody(request) == payload else {
+                    throw AppRefreshTestError.badRequest
+                }
+                exercised.increment()
+                return (appResponse(for: request), Data())
+            case ("POST", "/v2/uploads/upload-plan/finalize"):
+                exercised.increment()
+                return (
+                    appResponse(for: request, status: 201),
+                    Data(#"{"resourceId":"resource-plan"}"#.utf8)
+                )
+            case ("POST", "/v2/threads/thread-plan/turns"):
+                guard let body = appTestRequestBody(request),
+                      let object = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      object["prompt"] as? String == "Use the attached planning context",
+                      object["mode"] as? String == "plan",
+                      object["access"] == nil,
+                      let attachments = object["attachments"] as? [[String: Any]],
+                      attachments.count == 1,
+                      attachments[0].count == 1,
+                      attachments[0]["resourceId"] as? String == "resource-plan" else {
+                    throw AppRefreshTestError.badRequest
+                }
+                exercised.increment()
+                return (
+                    appResponse(for: request, status: 202),
+                    Data(#"{"jobId":"job-plan","state":"queued","error":null}"#.utf8)
+                )
+            case ("GET", "/v2/runs"):
+                return (appResponse(for: request), Data(#"{"runs":[]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let sent = await model.composerSend(
+            prompt: "Use the attached planning context",
+            mode: .plan,
+            attachments: [PendingAttachment(
+                kind: "file", mime: "text/plain", name: "plan-note.txt", data: payload
+            )],
+            onThread: "thread-plan"
+        )
+
+        #expect(sent)
+        #expect(exercised.count == 4)
+    }
+
+    @MainActor
+    @Test func explicitBestOfPreservesUnavailableSelectedMembersOnTheWire() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.draftEligiblePool = ["claude", "cursor"]
+        model.liveHarnesses = [
+            HarnessInfo(
+                family: .claude, health: .ok, version: "1", auth: "ready",
+                intents: ["implement"], routableIntents: ["implement"]
+            ),
+            HarnessInfo(
+                family: .cursor, health: .unavailable, version: "1", auth: "not ready",
+                intents: ["implement"], routableIntents: []
+            ),
+        ]
+        let bodyBox = CreateBodyBox()
+
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/threads/thread-race/turns"):
+                bodyBox.data = appTestRequestBody(request)
+                return (
+                    appResponse(for: request, status: 202),
+                    Data(#"{"jobId":"job-race","state":"queued","error":null}"#.utf8)
+                )
+            case ("GET", "/v2/runs"):
+                return (appResponse(for: request), Data(#"{"runs":[]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let sent = await model.composerSend(
+            prompt: "Race the selected pool",
+            mode: .bestOfN,
+            onThread: "thread-race"
+        )
+
+        let request = try JSONDecoder().decode(
+            ThreadTurnRequest.self, from: #require(bodyBox.data)
+        )
+        #expect(sent)
+        #expect(request.harnesses == ["claude", "cursor"])
+        #expect(request.n == 2)
     }
 
     @MainActor
@@ -2527,9 +2655,9 @@ private final class CreateBodyBox: @unchecked Sendable {
     var data: Data?
 }
 
-private func appResponse(for request: URLRequest) -> HTTPURLResponse {
+private func appResponse(for request: URLRequest, status: Int = 200) -> HTTPURLResponse {
     HTTPURLResponse(
-        url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+        url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
         headerFields: ["Content-Type":"application/json"]
     )!
 }

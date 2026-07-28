@@ -10,19 +10,31 @@ struct PendingAttachment: Identifiable, Equatable, Sendable {
 }
 
 extension AppModel {
-    static func acceptsImages(manifest: JSONValue?) -> Bool {
+    nonisolated static func attachmentInputs(manifest: JSONValue?) -> [HarnessAttachmentInput] {
         guard case .array(let inputs) = manifest?["capability_profile"]?["attachment_inputs"] else {
-            return false
+            return []
         }
-        return inputs.contains { input in
-            guard input["kind"]?.stringValue == "image",
+        return inputs.compactMap { input in
+            guard let kind = input["kind"]?.stringValue,
+                  kind == "image" || kind == "file",
                   let maxBytes = input["max_bytes"]?.doubleValue, maxBytes > 0, maxBytes.isFinite,
                   let maxCount = input["max_count"]?.doubleValue, maxCount > 0, maxCount.isFinite,
-                  input["transport"]?.stringValue != nil,
+                  maxBytes.rounded(.towardZero) == maxBytes,
+                  maxCount.rounded(.towardZero) == maxCount,
+                  maxBytes <= Double(Int.max), maxCount <= Double(Int.max),
+                  let transport = input["transport"]?.stringValue, !transport.isEmpty,
                   case .array(let mimeTypes) = input["mime_types"] else {
-                return false
+                return nil
             }
-            return mimeTypes.contains { $0.stringValue?.isEmpty == false }
+            let mimes = mimeTypes.compactMap(\.stringValue).filter { !$0.isEmpty }
+            guard !mimes.isEmpty else { return nil }
+            return HarnessAttachmentInput(
+                kind: kind,
+                mimeTypes: mimes,
+                maxBytes: Int(maxBytes),
+                maxCount: Int(maxCount),
+                transport: transport
+            )
         }
     }
 

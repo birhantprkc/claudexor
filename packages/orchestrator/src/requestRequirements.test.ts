@@ -103,6 +103,45 @@ describe("RequestRequirementsResolver browser preflight", () => {
       ),
     ).toBeNull();
   });
+
+  it("returns typed per-lane attachment admission reasons", () => {
+    const attachment = {
+      resource_id: "res-1",
+      kind: "file" as const,
+      mime: "text/plain",
+      name: "notes.txt",
+      sha256: "sha256:test",
+      size_bytes: 12,
+      path: "/tmp/notes.txt",
+    };
+    expect(resolver.resolveAttachmentLane("cursor", [attachment], [])).toMatchObject({
+      harnessId: "cursor",
+      admitted: false,
+      reason: "unsupported_input",
+      attachmentResourceId: "res-1",
+    });
+    const declaration = {
+      kind: "file" as const,
+      mime_types: ["text/plain"],
+      max_bytes: 20,
+      max_count: 1,
+      transport: "text_inline" as const,
+    };
+    expect(
+      resolver.resolveAttachmentLane(
+        "cursor",
+        [{ ...attachment, resource_id: "big", size_bytes: 21 }],
+        [declaration],
+      ),
+    ).toMatchObject({ admitted: false, reason: "max_bytes_exceeded" });
+    expect(
+      resolver.resolveAttachmentLane(
+        "cursor",
+        [attachment, { ...attachment, resource_id: "res-2" }],
+        [declaration],
+      ),
+    ).toMatchObject({ admitted: false, reason: "max_count_exceeded" });
+  });
 });
 
 describe("RequestRequirementsResolver Delegate preflight", () => {

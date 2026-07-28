@@ -1,0 +1,99 @@
+{
+  "runControls": [
+    {
+      "name": "agent",
+      "schemaMode": "agent",
+      "swiftMode": "agent",
+      "reviewers": { "applicable": true },
+      "protectedPathApprovals": { "applicable": true }
+    },
+    {
+      "name": "ask",
+      "schemaMode": "ask",
+      "swiftMode": "ask",
+      "reviewers": {
+        "applicable": false,
+        "reason": "Reviewer controls only apply to Agent runs; Council is the Plan critique path."
+      },
+      "protectedPathApprovals": {
+        "applicable": false,
+        "reason": "Protected-path approvals only apply to Agent runs; Ask and Plan are read-only."
+      }
+    },
+    {
+      "name": "plan",
+      "schemaMode": "plan",
+      "swiftMode": "plan",
+      "reviewers": {
+        "applicable": false,
+        "reason": "Reviewer controls only apply to Agent runs; Council is the Plan critique path."
+      },
+      "protectedPathApprovals": {
+        "applicable": false,
+        "reason": "Protected-path approvals only apply to Agent runs; Ask and Plan are read-only."
+      }
+    },
+    {
+      "name": "best-of-n-agent-projection",
+      "schemaMode": "agent",
+      "swiftMode": "bestOfN",
+      "reviewers": { "applicable": true },
+      "protectedPathApprovals": { "applicable": true }
+    },
+    {
+      "name": "create-agent-projection",
+      "schemaMode": "agent",
+      "swiftMode": "create",
+      "reviewers": { "applicable": true },
+      "protectedPathApprovals": { "applicable": true }
+    }
+  ],
+  "attachmentInput": {
+    "kind": "file",
+    "mimeTypes": ["text/plain"],
+    "maxBytes": 20,
+    "maxCount": 1,
+    "transport": "text_inline"
+  },
+  "attachmentCases": [
+    {
+      "name": "admitted",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "admitted": true,
+      "reason": "admitted"
+    },
+    {
+      "name": "unsupported-input",
+      "attachments": [
+        {
+          "id": "a1",
+          "kind": "file",
+          "mime": "application/json",
+          "name": "notes.json",
+          "sizeBytes": 12
+        }
+      ],
+      "admitted": false,
+      "reason": "unsupported_input"
+    },
+    {
+      "name": "max-bytes-exceeded",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "large.txt", "sizeBytes": 21 }
+      ],
+      "admitted": false,
+      "reason": "max_bytes_exceeded"
+    },
+    {
+      "name": "max-count-exceeded",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "one.txt", "sizeBytes": 12 },
+        { "id": "a2", "kind": "file", "mime": "text/plain", "name": "two.txt", "sizeBytes": 12 }
+      ],
+      "admitted": false,
+      "reason": "max_count_exceeded"
+    }
+  ]
+}

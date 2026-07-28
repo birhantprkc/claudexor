@@ -9,22 +9,65 @@ import ClaudexorKit
 // effort segment) that generates the `harness=model:effort` wire token, with a
 // raw power-syntax field kept inside Advanced for multi-reviewer strings;
 // Approvals is a small LIST EDITOR (path-glob + reason rows) that generates the
-// `glob:reason` entries. Both bind to the existing SSOT strings the send path
-// already reads (`reviewerText` / `approvalsText`) — the mapping is the pure,
-// unit-tested `ComposerOptionParser` grammar, so this view carries no wire logic.
+// `glob:reason` entries. One parent-owned draft keeps complete and incomplete
+// values alive across disclosure/popover lifecycle; the send path projects it
+// through the pure, unit-tested `ComposerOptionParser` wire grammar.
 
-/// A single editable approval row (stable identity for in-place list editing).
-private struct ApprovalDraft: Identifiable, Equatable {
-    let id = UUID()
+/// A single parent-owned approval row (stable identity for in-place editing).
+struct ComposerApprovalDraft: Identifiable, Equatable {
+    let id: UUID
     var path: String = ""
     var reason: String = ""
+
+    init(id: UUID = UUID(), path: String = "", reason: String = "") {
+        self.id = id
+        self.path = path
+        self.reason = reason
+    }
+}
+
+/// Complete Advanced draft. Invalid structured values stay represented here
+/// even though they intentionally contribute nothing to the wire projection.
+struct ComposerReviewDraft: Equatable {
+    var reviewerText: String = ""
+    var pickerHarness: String = ""
+    var pickerModel: String = ""
+    var pickerEffort: String = ""
+    var approvals: [ComposerApprovalDraft] = []
+
+    var reviewerPickerIncomplete: Bool {
+        pickerHarness.isEmpty && (!pickerModel.trimmed.isEmpty || !pickerEffort.isEmpty)
+    }
+
+    var approvalRowsInvalid: Bool {
+        approvals.contains { $0.path.trimmed.isEmpty }
+    }
+
+    var hasIncompleteRows: Bool { reviewerPickerIncomplete || approvalRowsInvalid }
+
+    var reviewerWireToken: String? {
+        ComposerOptionParser.reviewerWireToken(
+            harness: pickerHarness,
+            model: pickerModel,
+            effort: pickerEffort.isEmpty ? nil : pickerEffort
+        )
+    }
+
+    var approvalWireText: String {
+        ComposerOptionParser.joinApprovalTokens(
+            approvals.map {
+                ProtectedPathApproval(
+                    path: $0.path,
+                    reason: $0.reason.isEmpty ? nil : $0.reason
+                )
+            }
+        )
+    }
 }
 
 struct AdvancedReviewControls: View {
-    /// SSOT the send path reads (raw `harness=model:effort` power syntax).
-    @Binding var reviewerText: String
-    /// SSOT the send path reads (raw `glob:reason` entries).
-    @Binding var approvalsText: String
+    /// Parent-owned SSOT for complete and incomplete structured draft state.
+    @Binding var draft: ComposerReviewDraft
     /// Available harnesses the reviewer dropdown offers.
     let harnessChoices: [HarnessFamily]
     /// Union of the pool's declared effort ladders (for the effort segment).
@@ -34,26 +77,6 @@ struct AdvancedReviewControls: View {
     let reviewerRawInvalid: Bool
 
     @State private var expanded = false
-    // Reviewer structured picker state.
-    @State private var pickerHarness = ""
-    @State private var pickerModel = ""
-    @State private var pickerEffort = ""
-    // Approvals list-editor state.
-    @State private var approvals: [ApprovalDraft] = []
-    @State private var hydrated = false
-
-    private var validHarnessIds: Set<String> { Set(harnessChoices.map(\.rawValue)) }
-
-    /// The reviewer picker is incomplete when a model/effort is set but no
-    /// harness is chosen — the token then contributes nothing, so we say why.
-    private var reviewerPickerIncomplete: Bool {
-        pickerHarness.isEmpty && (!pickerModel.trimmed.isEmpty || !pickerEffort.isEmpty)
-    }
-
-    private var approvalRowsInvalid: Bool {
-        approvals.contains { $0.path.trimmed.isEmpty && !$0.reason.trimmed.isEmpty }
-    }
-
     var body: some View {
         DisclosureRow("Advanced", isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
@@ -64,7 +87,6 @@ struct AdvancedReviewControls: View {
             .padding(.top, Theme.Spacing.sm)
         }
         .font(.callout.weight(.medium))
-        .onAppear(perform: hydrateOnce)
     }
 
     // MARK: Reviewers
@@ -73,7 +95,7 @@ struct AdvancedReviewControls: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             Text("Reviewers").font(.subheadline.weight(.semibold))
             HStack(spacing: Theme.Spacing.sm) {
-                Picker("", selection: $pickerHarness) {
+                Picker("", selection: $draft.pickerHarness) {
                     Text("Auto").tag("")
                     ForEach(harnessChoices) { family in
                         Text(family.label).tag(family.rawValue)
@@ -81,28 +103,28 @@ struct AdvancedReviewControls: View {
                 }
                 .labelsHidden()
                 .fixedSize()
-                .onChange(of: pickerHarness) { _, _ in writeReviewerToken() }
-                TextField("model (optional, e.g. opus)", text: $pickerModel)
+                .onChange(of: draft.pickerHarness) { _, _ in writeReviewerToken() }
+                TextField("model (optional, e.g. opus)", text: $draft.pickerModel)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.caption, design: .monospaced))
                     .frame(maxWidth: 150)
-                    .onChange(of: pickerModel) { _, _ in writeReviewerToken() }
+                    .onChange(of: draft.pickerModel) { _, _ in writeReviewerToken() }
             }
             if !effortLevels.isEmpty {
-                Picker("Effort", selection: $pickerEffort) {
+                Picker("Effort", selection: $draft.pickerEffort) {
                     Text("Default").tag("")
                     ForEach(effortLevels, id: \.self) { Text($0.capitalized).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .fixedSize()
-                .onChange(of: pickerEffort) { _, _ in writeReviewerToken() }
+                .onChange(of: draft.pickerEffort) { _, _ in writeReviewerToken() }
             }
-            if reviewerPickerIncomplete {
+            if draft.reviewerPickerIncomplete {
                 inlineError("Pick a harness — a model or effort alone is not a reviewer.")
             }
             // Power syntax: multi-reviewer strings, prefilled from the picker.
             HStack(spacing: Theme.Spacing.xs) {
-                TextField("claude=opus:max, cursor", text: $reviewerText)
+                TextField("claude=opus:max, cursor", text: $draft.reviewerText)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.caption, design: .monospaced))
                     .help("Comma or newline entries: harness[=model[:effort]] or harness[:effort]")
@@ -121,12 +143,8 @@ struct AdvancedReviewControls: View {
     /// raw SSOT (the common single-reviewer case). An unchosen harness leaves the
     /// raw string untouched so a hand-typed multi-reviewer string is not clobbered.
     private func writeReviewerToken() {
-        guard let token = ComposerOptionParser.reviewerWireToken(
-            harness: pickerHarness,
-            model: pickerModel,
-            effort: pickerEffort.isEmpty ? nil : pickerEffort
-        ) else { return }
-        reviewerText = token
+        guard let token = draft.reviewerWireToken else { return }
+        draft.reviewerText = token
     }
 
     // MARK: Approvals
@@ -137,59 +155,32 @@ struct AdvancedReviewControls: View {
                 Text("Approvals").font(.subheadline.weight(.semibold))
                 Spacer()
                 Button {
-                    approvals.append(ApprovalDraft())
+                    draft.approvals.append(ComposerApprovalDraft())
                 } label: { Label("Add", systemImage: "plus") }
                     .buttonStyle(.borderless).controlSize(.small)
                     .help("Approve changes under one more protected path glob.")
             }
-            ForEach($approvals) { $row in
+            ForEach($draft.approvals) { $row in
                 HStack(spacing: Theme.Spacing.xs) {
                     TextField("path glob (e.g. test/**)", text: $row.path)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.caption, design: .monospaced))
-                        .onChange(of: row.path) { _, _ in writeApprovals() }
                     TextField("reason (optional)", text: $row.reason)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
-                        .onChange(of: row.reason) { _, _ in writeApprovals() }
                     Button(role: .destructive) {
-                        approvals.removeAll { $0.id == row.id }
-                        writeApprovals()
+                        draft.approvals.removeAll { $0.id == row.id }
                     } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless).controlSize(.small)
                 }
             }
-            if approvalRowsInvalid {
+            if draft.approvalRowsInvalid {
                 inlineError("Each approval needs a non-empty path glob.")
             }
             Text("Approvals let this run change auto-protected gate/test paths; they never bypass the built-in critical/security path human gates.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    /// Serialize the list editor back into the raw SSOT (skipping incomplete rows).
-    private func writeApprovals() {
-        approvalsText = ComposerOptionParser.joinApprovalTokens(
-            approvals.map { ProtectedPathApproval(path: $0.path, reason: $0.reason.isEmpty ? nil : $0.reason) })
-    }
-
-    // MARK: Hydration
-
-    /// Seed the structured editors from any existing raw strings (a thread draft
-    /// or a prior turn), ONCE, so re-opening the popover doesn't wipe them.
-    private func hydrateOnce() {
-        guard !hydrated else { return }
-        hydrated = true
-        if let first = ComposerOptionParser.splitOptionTokens(reviewerText).first,
-           let entry = ComposerOptionParser.parseReviewerPanelEntry(first, effortLevels: Set(effortLevels)) {
-            pickerHarness = validHarnessIds.contains(entry.harness) ? entry.harness : ""
-            pickerModel = entry.model ?? ""
-            pickerEffort = entry.effort ?? ""
-        }
-        approvals = ComposerOptionParser.splitOptionTokens(approvalsText)
-            .compactMap(ComposerOptionParser.parseProtectedPathApproval)
-            .map { ApprovalDraft(path: $0.path, reason: $0.reason ?? "") }
     }
 
     private func inlineError(_ text: String) -> some View {

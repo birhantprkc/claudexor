@@ -124,13 +124,16 @@ struct HarnessAccountChip: View {
 /// access downgrade while armed is UNREPRESENTABLE: the menu disables instead
 /// of offering a contradiction.
 struct AccessChip: View {
+    /// User-selected sticky value. Browser derives a separate displayed/wire
+    /// Full value and never mutates this binding.
     @Binding var access: AccessProfile
     let browserArmed: Bool
     /// Read-only intents never write — the chip disables, and the visible
     /// reason rides composerAccessHint below the row (not a hover-only tooltip).
     let writeDisabled: Bool
 
-    private var tint: Color { access == .full ? .orange : Theme.accent }
+    private var effectiveAccess: AccessProfile { browserArmed ? .full : access }
+    private var tint: Color { effectiveAccess == .full ? .orange : Theme.accent }
 
     // The chip is JUST the menu — its disable/armed reason rides a separate
     // full-width caption line below the controls row (composerAccessHint), so
@@ -145,8 +148,8 @@ struct AccessChip: View {
             disabled: writeDisabled || browserArmed,
             help: chipHelp
         ) {
-            Image(systemName: access.glyph).imageScale(.small)
-            Text(browserArmed ? "\(access.label) · Browser" : access.label)
+            Image(systemName: effectiveAccess.glyph).imageScale(.small)
+            Text(browserArmed ? "\(effectiveAccess.label) · Browser" : effectiveAccess.label)
         } menu: {
             ForEach(AccessProfile.composerCases) { profile in
                 Button { access = profile } label: {
@@ -184,7 +187,7 @@ extension ThreadsScreen {
                 Text("\(composerMode.label) never writes — switch to Agent to change access")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if browser {
+            } else if effectiveBrowserArmed {
                 Text("Browser armed → Full (disarm in ⋯)")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -221,7 +224,7 @@ extension ThreadsScreen {
         // intent can actually write. Ask/Plan are engine-clamped to Read-only, so
         // a sticky/stale Full beside them needs no grant — offering it invites a
         // durable unsandboxed authorization the read-only turn will never use.
-        if access == .full, !composerMode.isReadOnly,
+        if effectiveAccess == .full, !composerMode.isReadOnly,
            let repoRoot = composerRepoRoot,
            !model.fullAccessGranted(repoRoot: repoRoot) {
             HStack(spacing: Theme.Spacing.sm) {

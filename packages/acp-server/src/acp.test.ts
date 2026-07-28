@@ -498,7 +498,7 @@ describe("AcpServer official SDK projection", () => {
     );
   });
 
-  it("routes images and embedded resources through attachment descriptors, never inline paths", async () => {
+  it("routes Plan images and embedded resources through attachment descriptors, never inline paths", async () => {
     const cwd = project();
     let promptCall: any;
     await withClient(
@@ -519,6 +519,7 @@ describe("AcpServer official SDK projection", () => {
               resource: { uri: "memory://note", mimeType: "text/plain", text: "context" },
             },
           ],
+          _meta: { claudexor: { mode: "plan" } },
         });
       },
     );
@@ -526,6 +527,7 @@ describe("AcpServer official SDK projection", () => {
       expect.objectContaining({ kind: "image", mime: "image/png", data: "aGVsbG8=" }),
       expect.objectContaining({ kind: "file", mime: "text/plain" }),
     ]);
+    expect(promptCall.runMode).toBe("plan");
     expect(JSON.stringify(promptCall.attachments)).not.toContain("/tmp/");
   });
 

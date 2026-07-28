@@ -26,6 +26,17 @@ export interface DelegationLaneRequirementInput {
   fullAccess: boolean;
 }
 
+export type AttachmentAdmissionReason =
+  "admitted" | "unsupported_input" | "max_bytes_exceeded" | "max_count_exceeded";
+
+export interface AttachmentLaneAdmission {
+  harnessId: string;
+  admitted: boolean;
+  reason: AttachmentAdmissionReason;
+  message: string | null;
+  attachmentResourceId?: string;
+}
+
 /** Access profiles that map to an unsandboxed/full-access harness lane. */
 export function isFullAccess(access: AccessProfile): boolean {
   return access === "full" || access === "external_sandbox_full";
@@ -72,22 +83,67 @@ export class RequestRequirementsResolver {
     attachments: Attachment[],
     declarations: AttachmentInputClass[],
   ): string | null {
+    return this.resolveAttachmentLane(harnessId, attachments, declarations).message;
+  }
+
+  /** Typed finite-descriptor admission for one selected harness lane. */
+  resolveAttachmentLane(
+    harnessId: string,
+    attachments: Attachment[],
+    declarations: AttachmentInputClass[],
+  ): AttachmentLaneAdmission {
     for (const attachment of attachments) {
-      const declaration = declarations.find(
+      const matching = declarations.filter(
         (candidate) =>
           candidate.kind === attachment.kind && candidate.mime_types.includes(attachment.mime),
       );
-      if (!declaration)
-        return `${harnessId} cannot receive every mandatory attachment: ${attachment.kind} ${attachment.mime} is unsupported; choose a compatible harness pool or remove the attachment`;
-      if (attachment.size_bytes > declaration.max_bytes)
-        return `${harnessId} cannot receive every mandatory attachment: ${attachment.name || attachment.resource_id} is ${attachment.size_bytes} bytes (max ${declaration.max_bytes} for ${attachment.mime}); choose a compatible harness pool or remove the attachment`;
-      const count = attachments.filter(
-        (item) => item.kind === declaration.kind && declaration.mime_types.includes(item.mime),
-      ).length;
-      if (count > declaration.max_count)
-        return `${harnessId} cannot receive every mandatory attachment: ${count} ${declaration.kind} attachments exceed max_count ${declaration.max_count}; choose a compatible harness pool or remove the attachment`;
+      if (matching.length === 0) {
+        return {
+          harnessId,
+          admitted: false,
+          reason: "unsupported_input",
+          attachmentResourceId: attachment.resource_id,
+          message: `${harnessId} cannot receive every mandatory attachment: ${attachment.kind} ${attachment.mime} is unsupported; choose a compatible harness pool or remove the attachment`,
+        };
+      }
+
+      const sizeCompatible = matching.filter(
+        (declaration) => attachment.size_bytes <= declaration.max_bytes,
+      );
+      if (sizeCompatible.length === 0) {
+        const maxBytes = Math.max(...matching.map((declaration) => declaration.max_bytes));
+        return {
+          harnessId,
+          admitted: false,
+          reason: "max_bytes_exceeded",
+          attachmentResourceId: attachment.resource_id,
+          message: `${harnessId} cannot receive every mandatory attachment: ${attachment.name || attachment.resource_id} is ${attachment.size_bytes} bytes (max ${maxBytes} for ${attachment.mime}); choose a compatible harness pool or remove the attachment`,
+        };
+      }
+
+      const countCompatible = sizeCompatible.find((declaration) => {
+        const count = attachments.filter(
+          (item) => item.kind === declaration.kind && declaration.mime_types.includes(item.mime),
+        ).length;
+        return count <= declaration.max_count;
+      });
+      if (!countCompatible) {
+        const declaration = sizeCompatible.reduce((best, candidate) =>
+          candidate.max_count > best.max_count ? candidate : best,
+        );
+        const count = attachments.filter(
+          (item) => item.kind === declaration.kind && declaration.mime_types.includes(item.mime),
+        ).length;
+        return {
+          harnessId,
+          admitted: false,
+          reason: "max_count_exceeded",
+          attachmentResourceId: attachment.resource_id,
+          message: `${harnessId} cannot receive every mandatory attachment: ${count} ${declaration.kind} attachments exceed max_count ${declaration.max_count}; choose a compatible harness pool or remove the attachment`,
+        };
+      }
     }
-    return null;
+    return { harnessId, admitted: true, reason: "admitted", message: null };
   }
 
   browserSpec(

@@ -1,5 +1,34 @@
 import SwiftUI
 
+// MARK: - Product-owned native accessibility boundary
+
+private struct ProductControlAccessibilityModifier: ViewModifier {
+    let name: String
+    let value: String?
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let value {
+            content
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(name))
+                .accessibilityValue(Text(value))
+        } else {
+            content
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(name))
+        }
+    }
+}
+
+extension View {
+    /// Final control-boundary identity. Visible labels and SF Symbols remain
+    /// presentation; this stable English name/value is what the packaged AX
+    /// element exports.
+    func productControlAccessibility(_ name: String, value: String? = nil) -> some View {
+        modifier(ProductControlAccessibilityModifier(name: name, value: value))
+    }
+}
+
 // MARK: - Status pill (solid tinted — content layer)
 
 struct StatusPill: View {
@@ -276,6 +305,7 @@ struct FilterChip: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .productControlAccessibility(label, value: isActive ? "Selected" : "Not selected")
         .accessibilityAddTraits(isActive ? [.isSelected, .isButton] : .isButton)
         .help(isActive ? "\(label) filter is selected." : "Filter by \(label).")
     }
@@ -307,4 +337,3 @@ struct FlowLayout: Layout {
         }
     }
 }
-

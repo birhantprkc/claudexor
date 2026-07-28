@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ClaudexorKit
 
 // MARK: - Composer "⋯" options popover
@@ -15,7 +16,7 @@ extension ThreadsScreen {
         let families = primaryFamily.map { [$0] } ?? effectiveIncludedFamilies
         return DelegationPresentation.control(
             capabilities: families.map { model.harnessInfo(for: $0)?.delegation },
-            hasFullAccess: access.satisfiesFullAccessRequirement
+            hasFullAccess: effectiveAccess.satisfiesFullAccessRequirement
         )
     }
 
@@ -71,7 +72,8 @@ extension ThreadsScreen {
     /// The advanced options popover ("⋯"): clean SOLID sections on the popover's
     /// own material — harness pool, per-turn budget/access/web, agent repair strategies.
     var composerOptions: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
             OptionSection(title: "Harness pool — Best-of runs these; the primary answers in chat") {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                     FlowLayout(spacing: Theme.Spacing.sm) {
@@ -91,6 +93,15 @@ extension ThreadsScreen {
                         .help("Auto — the engine routes across every available harness. Pick specific harnesses to pin an explicit subset.")
                         ForEach(poolFamilies) { family in
                             let avail = model.availability(for: family, mode: composerMode)
+                            let descriptor = HarnessPoolPresentation.chipDescriptor(
+                                family.rawValue,
+                                pool: model.effectiveEligiblePool,
+                                available: availablePoolIds,
+                                availability: .init(
+                                    available: avail.available,
+                                    reason: avail.reason
+                                )
+                            )
                             // In Auto every available harness renders highlighted-as-
                             // included (distinct from a user-excluded chip); tapping one
                             // switches to explicit-subset mode. Never synthesize a
@@ -98,13 +109,12 @@ extension ThreadsScreen {
                             // dimming + the hover reason convey unavailability.
                             FilterChip(label: family.label,
                                        iconImage: HarnessIconImage.image(for: family),
-                                       isActive: poolIncludes(family), tint: family.color) {
+                                       isActive: descriptor.included, tint: family.color) {
                                 togglePool(family)
                             }
                             .disabled(!avail.available)
-                            .help(avail.available
-                                  ? (auto ? "Included (Auto). Tap to pin an explicit subset." : "In the eligible pool")
-                                  : avail.reason)
+                            .help(descriptor.help)
+                            .accessibilityValue(descriptor.accessibilityValue)
                         }
                     }
                     Text(HarnessPoolPresentation.caption(pool: model.effectiveEligiblePool))
@@ -142,7 +152,7 @@ extension ThreadsScreen {
             // The Access control moved to the composer's main controls row
             // (AccessChip, W19) — the popover keeps only the secondary knobs.
             OptionRow(label: "Web") {
-                Picker("", selection: $webPolicy) {
+                Picker("", selection: $selectedWebPolicy) {
                     Text("Auto").tag("auto"); Text("Off").tag("off")
                     Text("Cached").tag("cached"); Text("Live").tag("live")
                 }
@@ -187,21 +197,23 @@ extension ThreadsScreen {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .padding(.leading, 2)
+                .fixedSize(horizontal: false, vertical: true)
             // Per-thread account pinning was REMOVED (INV-135): accounts, their
             // logins, quotas, and the auto-balance toggle all live in the
             // bottom-left accounts popover now. Runs use the default account
             // unless engine auto-balance rotates at a quota limit.
             // Review controls (owner round-3): Reviewers + Approvals moved under
             // a collapsed "Advanced" DisclosureGroup with a structured reviewer
-            // picker + an approvals list editor (ComposerReviewControls). They
-            // bind to the same SSOT strings the send path reads.
-            OptionSection(title: "Review controls") {
-                AdvancedReviewControls(
-                    reviewerText: $reviewerPanelText,
-                    approvalsText: $protectedApprovalsText,
-                    harnessChoices: poolFamilies,
-                    effortLevels: composerEffortLevels,
-                    reviewerRawInvalid: reviewerPanelInvalid)
+            // picker + an approvals list editor (ComposerReviewControls). One
+            // parent-owned draft projects the exact values the send path reads.
+            if runControlApplicability.reviewers.applicable {
+                OptionSection(title: "Review controls") {
+                    AdvancedReviewControls(
+                        draft: $reviewDraft,
+                        harnessChoices: poolFamilies,
+                        effortLevels: composerEffortLevels,
+                        reviewerRawInvalid: reviewerPanelInvalid)
+                }
             }
             // Agent-driven browser (Playwright MCP). Offered only where a pooled
             // harness can inject it. Arming it forces Full access (codex's sandbox
@@ -213,8 +225,6 @@ extension ThreadsScreen {
                         get: { browser },
                         set: { on in
                             browser = on
-                            if on { access = .full }
-                            if on { webPolicy = webPolicy == "off" ? "auto" : webPolicy }
                         }
                     ))
                     .labelsHidden()
@@ -222,7 +232,7 @@ extension ThreadsScreen {
                     .tint(Theme.accent)
                     .help("Let the agent drive a real browser (navigate / screenshot / read). Runs headed so you watch the real window live; navigation snapshots are recorded in the run.")
                 }
-                if browser {
+                if effectiveBrowserArmed {
                     Text("Agent browses in a real window · runs at Full access")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -316,9 +326,12 @@ extension ThreadsScreen {
                     }
                 }
             }
+            }
+            .padding(Theme.Spacing.lg)
         }
-        .padding(Theme.Spacing.lg)
         .frame(width: Theme.Layout.composerOptionsWidth, alignment: .leading)
+        .frame(maxHeight: ComposerOptionsLayout.currentMaximumHeight)
+        .scrollIndicators(.visible)
         // Root-level text selection for the options popover (batch-6 item c / §2.9).
         .textSelection(.enabled)
     }
@@ -367,13 +380,6 @@ extension ThreadsScreen {
         poolFamilies
             .filter { model.availability(for: $0, mode: composerMode).available }
             .map(\.rawValue)
-    }
-
-    /// Is this harness chip highlighted-as-included? Auto ⇒ every available
-    /// harness; explicit ⇒ only the chosen subset (owner F9).
-    private func poolIncludes(_ family: HarnessFamily) -> Bool {
-        HarnessPoolPresentation.isIncluded(
-            family.rawValue, pool: model.effectiveEligiblePool, available: availablePoolIds)
     }
 
     /// Tapping a harness chip: in Auto this materializes the "all available" set as

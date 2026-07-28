@@ -26,7 +26,7 @@ extension ThreadsScreen {
     }
 
     var reviewerPanelTokens: [String] {
-        ComposerOptionParser.splitOptionTokens(reviewerPanelText)
+        ComposerOptionParser.splitOptionTokens(reviewDraft.reviewerText)
     }
 
     var reviewerPanelEntries: [ReviewerPanelEntry] {
@@ -37,7 +37,7 @@ extension ThreadsScreen {
     }
 
     var protectedApprovalTokens: [String] {
-        ComposerOptionParser.splitOptionTokens(protectedApprovalsText)
+        ComposerOptionParser.splitOptionTokens(reviewDraft.approvalWireText)
     }
 
     var protectedPathApprovals: [ProtectedPathApproval] {

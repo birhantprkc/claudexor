@@ -1,5 +1,37 @@
 import type { ModeKind } from "./primitives.js";
 
+export interface RunControlApplicabilityItem {
+  applicable: boolean;
+  reason?: string;
+}
+
+export interface RunControlApplicability {
+  reviewerPanel: RunControlApplicabilityItem;
+  protectedPathApprovals: RunControlApplicabilityItem;
+}
+
+const REVIEWER_UNAVAILABLE_REASON =
+  "Reviewer controls only apply to Agent runs; Council is the Plan critique path.";
+const APPROVAL_UNAVAILABLE_REASON =
+  "Protected-path approvals only apply to Agent runs; Ask and Plan are read-only.";
+
+/**
+ * Focused applicability owner for the two run-control families that authorize
+ * Agent review/change behavior. Surfaces project this result; they do not
+ * independently infer mode applicability from read-only labels or UI layout.
+ */
+export function runControlApplicability(value: { mode?: ModeKind }): RunControlApplicability {
+  const applicable = (value.mode ?? "agent") === "agent";
+  return {
+    reviewerPanel: applicable
+      ? { applicable: true }
+      : { applicable: false, reason: REVIEWER_UNAVAILABLE_REASON },
+    protectedPathApprovals: applicable
+      ? { applicable: true }
+      : { applicable: false, reason: APPROVAL_UNAVAILABLE_REASON },
+  };
+}
+
 /** Mode/strategy coherence (D11): meaningless flag combinations are refused
  * at every wire boundary instead of being silently ignored. ONE owner — the
  * control-api normalization funnel throws these as 400s; kept beside the
@@ -57,18 +89,33 @@ export function runStartStrategyViolations(value: {
   if (value.delegate === true && mode !== "agent") {
     violations.push(`delegate is an agent strategy; mode is '${mode}'`);
   }
-  const agentOnlyReviewControls = [
-    ["reviewerPanel", value.reviewerPanel],
-    ["reviewerModels", value.reviewerModels],
-    ["reviewerEfforts", value.reviewerEfforts],
-    ["protectedPathApprovals", value.protectedPathApprovals],
-  ] as const;
-  for (const [control, setting] of agentOnlyReviewControls) {
-    if (setting !== undefined && mode !== "agent") {
-      violations.push(
-        `${control} only applies to agent runs (plan review was retired in v3; Council is the plan critique path); mode is '${mode}'`,
-      );
-    }
+  const applicability = runControlApplicability({ mode });
+  if (value.reviewerPanel !== undefined && !applicability.reviewerPanel.applicable) {
+    violations.push(
+      `reviewerPanel only applies to agent runs (plan review was retired in v3; Council is the plan critique path); mode is '${mode}'`,
+    );
+  }
+  if (hasRecordEntries(value.reviewerModels) && !applicability.reviewerPanel.applicable) {
+    violations.push(`reviewerModels only applies to agent runs; mode is '${mode}'`);
+  }
+  if (hasRecordEntries(value.reviewerEfforts) && !applicability.reviewerPanel.applicable) {
+    violations.push(`reviewerEfforts only applies to agent runs; mode is '${mode}'`);
+  }
+  if (
+    hasArrayEntries(value.protectedPathApprovals) &&
+    !applicability.protectedPathApprovals.applicable
+  ) {
+    violations.push(`protectedPathApprovals only applies to agent runs; mode is '${mode}'`);
   }
   return violations;
+}
+
+function hasRecordEntries(value: unknown): boolean {
+  return (
+    !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0
+  );
+}
+
+function hasArrayEntries(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
 }

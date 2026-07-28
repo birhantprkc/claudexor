@@ -11,39 +11,71 @@ import UniformTypeIdentifiers
 extension ThreadsScreen {
     // MARK: - Composer attachments (D)
 
-    /// True when the current route is both available for this intent and declares
-    /// image input. Best-of is pool-wide: every available raced harness must accept
-    /// images because each candidate receives the same attachment set.
-    var primaryAcceptsImages: Bool {
-        let configuredPool = resolvedPoolFamilies.isEmpty ? poolFamilies : resolvedPoolFamilies
-        let availablePool = configuredPool.filter { family in
-            model.availability(for: family, mode: composerMode).available
-        }
-        if composerMode == .bestOfN {
-            guard !availablePool.isEmpty else { return false }
-            return availablePool.allSatisfy { model.harnessInfo(for: $0)?.acceptsImages == true }
-        }
-        if let primary = primaryFamily {
-            return model.availability(for: primary, mode: composerMode).available &&
-                model.harnessInfo(for: primary)?.acceptsImages == true
-        }
-        // No resolved primary: the engine auto-pools and may route to ANY harness
-        // in the effective eligible pool, so only offer attach when EVERY routable
-        // harness can take images — otherwise the image would be silently dropped
-        // on whichever non-vision harness the pool picks.
-        guard !availablePool.isEmpty else { return false }
-        return availablePool.allSatisfy { model.harnessInfo(for: $0)?.acceptsImages == true }
+    var composerAttachmentPoolMode: ComposerAttachmentPoolMode {
+        model.effectiveEligiblePool.isEmpty ? .auto : .explicit
     }
 
-    /// File attachments ride the shared turn DTO for every intent; image
-    /// attachments still require a vision-capable route so the engine will not
-    /// silently drop them.
-    var fileAttachmentsAllowed: Bool { true }
-    var imageAttachmentsAllowed: Bool { primaryAcceptsImages }
+    var composerAttachmentLanes: [ComposerAttachmentLane] {
+        let poolMode = composerAttachmentPoolMode
+        return effectiveIncludedFamilies.compactMap { family in
+            ComposerAttachmentAdmission.projectLane(
+                id: family.rawValue,
+                inputs: model.harnessInfo(for: family)?.attachmentInputs,
+                available: model.availability(for: family, mode: composerMode).available,
+                poolMode: poolMode
+            )
+        }
+    }
+
+    var composerAttachmentDescriptors: [ComposerAttachmentDescriptor] {
+        composerAttachments.map {
+            .init(
+                id: $0.id.uuidString,
+                kind: $0.kind,
+                mime: $0.mime,
+                name: $0.name,
+                sizeBytes: $0.data.count
+            )
+        }
+    }
+
+    var composerAttachmentAdmission: ComposerAttachmentPoolAdmission {
+        ComposerAttachmentAdmission.resolve(
+            poolMode: composerAttachmentPoolMode,
+            attachments: composerAttachmentDescriptors,
+            lanes: composerAttachmentLanes
+        )
+    }
+
+    /// Before content is chosen, Attach is useful only when the selected pool
+    /// has at least one finite input declaration (Auto) or every explicit lane
+    /// has one. Exact MIME/size/count admission runs after staging.
+    var fileAttachmentsAllowed: Bool {
+        guard !composerAttachmentLanes.isEmpty else { return false }
+        switch composerAttachmentPoolMode {
+        case .auto: return composerAttachmentLanes.contains { !$0.inputs.isEmpty }
+        case .explicit: return composerAttachmentLanes.allSatisfy { !$0.inputs.isEmpty }
+        }
+    }
+
+    var captureAdmission: ComposerAttachmentPoolAdmission {
+        ComposerAttachmentAdmission.resolve(
+            poolMode: composerAttachmentPoolMode,
+            attachments: [
+                .init(id: "capture", kind: "image", mime: "image/png", name: "screenshot.png", sizeBytes: 0)
+            ],
+            lanes: composerAttachmentLanes
+        )
+    }
+
+    var imageAttachmentsAllowed: Bool {
+        !composerAttachmentLanes.isEmpty && captureAdmission.canSend
+    }
 
     var attachButton: some View {
         Button { pickAttachments() } label: {
-            Image(systemName: "paperclip")
+            Label("Attach files", systemImage: "paperclip")
+                .labelStyle(.iconOnly)
                 .imageScale(.medium)
                 .foregroundStyle(fileAttachmentsAllowed ? Color.secondary : Color.secondary.opacity(0.4))
                 .padding(.horizontal, Theme.Spacing.xs)
@@ -55,14 +87,22 @@ extension ThreadsScreen {
         // English NAME — otherwise the AX name falls back to the host-localized
         // `paperclip` SF Symbol description (`Вложенные Файлы`). `.help` stays the
         // separate consequence hint.
-        .accessibilityLabel("Attach files")
+        .productControlAccessibility("Attach files")
         .help(attachButtonHelp)
     }
 
     private var attachButtonHelp: String {
-        return primaryAcceptsImages
-            ? "Attach files or images"
-            : "Attach files; images need an available vision-capable route"
+        guard fileAttachmentsAllowed else {
+            return composerAttachmentPoolMode == .explicit
+                ? "Every explicitly selected harness must declare an attachment input. Change the pool first."
+                : "No available harness declares attachment input support."
+        }
+        let context = composerMode == .plan
+            ? "Attach files or images as read-only planning context"
+            : "Attach files or images"
+        return composerAttachmentPoolMode == .auto
+            ? "\(context); Auto may omit incompatible lanes before launch."
+            : "\(context); every explicit lane must accept the selected content."
     }
 
     var attachmentChips: some View {
@@ -97,31 +137,20 @@ extension ThreadsScreen {
         panel.canChooseFiles = true
         guard panel.runModal() == .OK else { return }
         let urls = panel.urls
-        let acceptsImages = primaryAcceptsImages
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (attachments: [PendingAttachment], skippedImages: Int) in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> [PendingAttachment] in
                 var attachments: [PendingAttachment] = []
-                var skippedImages = 0
                 for url in urls {
                     guard let data = try? Data(contentsOf: url) else { continue }
                     let mime = Self.mimeType(for: url)
                     let isImage = mime.hasPrefix("image/")
-                    if isImage && !acceptsImages {
-                        skippedImages += 1
-                        continue
-                    }
                     attachments.append(PendingAttachment(
                         kind: isImage ? "image" : "file", mime: mime, name: url.lastPathComponent,
                         data: data))
                 }
-                return (attachments, skippedImages)
+                return attachments
             }.value
-            composerAttachments.append(contentsOf: loaded.attachments)
-            if loaded.skippedImages > 0 {
-                model.threadStatus = loaded.skippedImages == 1
-                    ? "Image skipped — switch to a vision-capable primary harness to attach it."
-                    : "\(loaded.skippedImages) images skipped — switch to a vision-capable primary harness to attach them."
-            }
+            composerAttachments.append(contentsOf: loaded)
         }
     }
 
@@ -132,7 +161,8 @@ extension ThreadsScreen {
 
     var captureButton: some View {
         Button { captureScreenshot() } label: {
-            Image(systemName: "camera.viewfinder")
+            Label("Capture screen region", systemImage: "camera.viewfinder")
+                .labelStyle(.iconOnly)
                 .imageScale(.medium)
                 .foregroundStyle(imageAttachmentsAllowed ? Color.secondary : Color.secondary.opacity(0.4))
                 .padding(.horizontal, Theme.Spacing.xs)
@@ -143,14 +173,29 @@ extension ThreadsScreen {
         // QA-003: stable English name for the icon-only capture control. A
         // disabled capture keeps its NAME and separately announces the vision-
         // capability reason via `.help` (the acceptance-criteria case).
-        .accessibilityLabel("Capture screen region")
+        .productControlAccessibility("Capture screen region")
         .help(captureButtonHelp)
     }
 
     private var captureButtonHelp: String {
-        return primaryAcceptsImages
-            ? "Capture a screen region to attach (you pick the area)"
-            : "Screen captures need an available vision-capable route"
+        guard imageAttachmentsAllowed else {
+            return captureAdmission.message
+                ?? "Screen captures need an available image-capable harness lane."
+        }
+        return composerAttachmentPoolMode == .auto && captureAdmission.outcome == .degraded
+            ? "Capture a screen region; Auto will omit incompatible lanes before launch."
+            : "Capture a screen region to attach (you pick the area)."
+    }
+
+    @ViewBuilder var composerAttachmentNotice: some View {
+        if !composerAttachments.isEmpty,
+           composerAttachmentAdmission.outcome == .degraded,
+           let message = composerAttachmentAdmission.message {
+            Label(message, systemImage: "arrow.triangle.branch")
+                .font(.caption2)
+                .foregroundStyle(Theme.status(.caution))
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// Grab a screen region via the system `screencapture` (interactive crosshair),

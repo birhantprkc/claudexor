@@ -1224,14 +1224,22 @@ final class AppModel {
         }
     }
 
-    func newThread(title: String?) async {
+    @discardableResult
+    func newThread(
+        title: String?,
+        shouldSelectCreatedThread: ((String) -> Bool)? = nil,
+        completionIsRelevant: (() -> Bool)? = nil
+    ) async -> String? {
         let locationID = draftExecutionLocation
         if gateway(for: locationID) == nil, let connectionID = locationID.remoteConnectionID {
             await connectRemote(connectionID)
         }
         guard let requestClient = gateway(for: locationID) else {
-            threadStatus = "Engine offline: reconnect before creating a thread."
-            return
+            applyComposerCompletionStatus(
+                "Engine offline: reconnect before creating a thread.",
+                isRelevant: completionIsRelevant
+            )
+            return nil
         }
         let scope: RunScope = normalizedProjectRoot.isEmpty ? .none : .project(root: normalizedProjectRoot)
         do {
@@ -1270,9 +1278,20 @@ final class AppModel {
                     remoteProjects[locationID] = projectList.projects
                 }
             }
-            await openThread(locationID: locationID, id: thread.id)
+            // First-turn send registers this exact server-created id with the
+            // composer's generation fence before selection. If the user selected
+            // another thread while createThread awaited, do not steal it back.
+            let shouldSelect = shouldSelectCreatedThread?(thread.id) ?? true
+            if shouldSelect {
+                await openThread(locationID: locationID, id: thread.id)
+            }
+            return thread.id
         } catch {
-            threadStatus = "Could not create thread: \(userMessage(for: error))"
+            applyComposerCompletionStatus(
+                "Could not create thread: \(userMessage(for: error))",
+                isRelevant: completionIsRelevant
+            )
+            return nil
         }
     }
 
@@ -1289,7 +1308,17 @@ final class AppModel {
     /// Binding the target removes the thread-selection race: an action begun on one
     /// thread can't be re-pointed at a different thread the user switched to during
     /// the async send.
-    func composerSend(prompt: String, mode: RunMode, planRunId: String? = nil, model: String? = nil, attachments: [PendingAttachment] = [], options: TurnOptions = .init(), onThread explicitThreadId: String? = nil) async -> Bool {
+    func composerSend(
+        prompt: String,
+        mode: RunMode,
+        planRunId: String? = nil,
+        model: String? = nil,
+        attachments: [PendingAttachment] = [],
+        options: TurnOptions = .init(),
+        onThread explicitThreadId: String? = nil,
+        onMaterializedThread: ((String) -> Bool)? = nil,
+        completionIsRelevant: (() -> Bool)? = nil
+    ) async -> Bool {
         let targetId = explicitThreadId ?? selectedThreadId
         let targetLocation = explicitThreadId == nil
             ? (selectedThreadId == nil ? draftExecutionLocation : selectedExecutionLocation)
@@ -1309,8 +1338,11 @@ final class AppModel {
         defer { turnSubmitting = false }
         var threadId = targetId
         if threadId == nil {
-            await newThread(title: nil)
-            threadId = selectedThreadId
+            threadId = await newThread(
+                title: nil,
+                shouldSelectCreatedThread: onMaterializedThread,
+                completionIsRelevant: completionIsRelevant
+            )
             guard threadId != nil else { return false } // newThread set threadStatus on failure
         }
         guard let tid = threadId else { return false }
@@ -1322,7 +1354,8 @@ final class AppModel {
             planRunId: planRunId,
             model: model,
             attachments: attachments,
-            options: options)
+            options: options,
+            completionIsRelevant: completionIsRelevant)
     }
 
     /// Trim + drop empty entries; nil when nothing remains (key omitted on the wire).
@@ -1358,29 +1391,32 @@ final class AppModel {
         planRunId: String? = nil,
         model: String? = nil,
         attachments: [PendingAttachment] = [],
-        options: TurnOptions = .init()
+        options: TurnOptions = .init(),
+        completionIsRelevant: (() -> Bool)? = nil
     ) async -> Bool {
         guard let requestClient = gateway(for: locationID) else {
-            threadStatus = "Engine offline — reconnect before sending."
+            applyComposerCompletionStatus(
+                "Engine offline — reconnect before sending.",
+                isRelevant: completionIsRelevant
+            )
             return false
         }
         guard mode != .unknown else {
-            threadStatus = "Unknown mode — pick an intent from the composer."
+            applyComposerCompletionStatus(
+                "Unknown mode — pick an intent from the composer.",
+                isRelevant: completionIsRelevant
+            )
             return false
         }
         let flags = mode.strategyFlags
-        // Best-of runs the eligible pool: one candidate per AVAILABLE harness. Send the
-        // pool EXPLICITLY (what the user sees races) and size n to that same set, so
-        // the engine never wraps a too-large n back over a smaller resolved pool
-        // (which would race a harness against itself). Other modes send no harnesses
-        // and inherit the thread's sticky pool server-side (primary too).
+        // Best-of sends the exact explicit eligible pool the user selected. The
+        // engine owns explicit-lane availability and fails loudly rather than the
+        // app silently shrinking the request. Empty means Auto and remains omitted
+        // so the engine may resolve available candidates. Other modes inherit the
+        // thread's sticky pool server-side (primary too).
         var racePool: [String] = []
         if mode == .bestOfN {
-            let available = effectiveEligiblePool.filter { id in
-                let family = HarnessFamily(rawValue: id)
-                return availability(for: family, mode: mode).available
-            }
-            racePool = available.isEmpty ? effectiveEligiblePool : available
+            racePool = effectiveEligiblePool
         }
         // Best-of width = one candidate per harness in the pool (≥2). A SINGLE-harness
         // pool can't race against itself: send n=1 so the engine single-routes that
@@ -1451,31 +1487,39 @@ final class AppModel {
                 } else {
                     await refreshRemoteThreads(locationID)
                 }
-                await openThread(locationID: locationID, id: threadId)
+                if selectedExecutionLocation == locationID, selectedThreadId == threadId {
+                    await openThread(locationID: locationID, id: threadId)
+                }
                 if refusal.retryable {
                     // The prompt lives on the refused turn and Retry replays
                     // it — report "sent" so the composer clears (no duplicate
                     // unsent draft).
-                    threadStatus = nil
+                    applyComposerCompletionStatus(nil, isRelevant: completionIsRelevant)
                     return true
                 }
                 // NOT retryable (no recorded job to replay): keep the draft —
                 // "send a new message" is the remedy the card states.
-                threadStatus = userMessage(for: error)
+                applyComposerCompletionStatus(
+                    userMessage(for: error), isRelevant: completionIsRelevant
+                )
                 return false
             }
-            threadStatus = userMessage(for: error)
+            applyComposerCompletionStatus(
+                userMessage(for: error), isRelevant: completionIsRelevant
+            )
             return false
         }
         // The turn is ACCEPTED here. Anything below (refresh/reload) is best-effort
         // presentation; its failure must NOT be read as a send failure.
-        threadStatus = nil
+        applyComposerCompletionStatus(nil, isRelevant: completionIsRelevant)
         if locationID == .local {
             await refreshRuns()
         } else {
             await refreshRemoteThreads(locationID)
         }
-        await refreshOpenThread(locationID: locationID, id: threadId)
+        if selectedExecutionLocation == locationID, selectedThreadId == threadId {
+            await refreshOpenThread(locationID: locationID, id: threadId)
+        }
         if case .started(let info) = result {
             if locationID == .local {
                 stream(runId: info.runId)
@@ -1487,6 +1531,19 @@ final class AppModel {
             }
         }
         return true
+    }
+
+    /// Composer-only async completion fence. Other action surfaces omit the
+    /// predicate and retain their existing global status behavior.
+    private func applyComposerCompletionStatus(
+        _ completion: String?,
+        isRelevant: (() -> Bool)?
+    ) {
+        threadStatus = ComposerCompletionStatus.resolving(
+            current: threadStatus,
+            completion: completion,
+            ownsCompletion: isRelevant?() ?? true
+        )
     }
 
     /// Human-readable message for a gateway error (never a raw Swift dump in the UI).

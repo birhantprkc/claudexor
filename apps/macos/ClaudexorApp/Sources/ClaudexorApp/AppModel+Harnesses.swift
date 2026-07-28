@@ -39,7 +39,7 @@ extension AppModel {
                 status.manifest?["version"]?.stringValue
                 ?? status.manifest?["adapter_version"]?.stringValue ?? "unknown"
             let auth = Self.harnessReadinessText(status: status, health: health)
-            let acceptsImages = Self.acceptsImages(manifest: status.manifest)
+            let attachmentInputs = Self.attachmentInputs(manifest: status.manifest)
             let acceptsBrowser =
                 status.manifest?["capabilities"]?["browser_tool"]?.boolValue ?? false
             let effortLevels: [String] = {
@@ -70,7 +70,8 @@ extension AppModel {
                 intents: status.enabledIntents,
                 routableIntents: status.routableIntents,
                 reasons: status.reasons ?? [], readiness: status.readiness,
-                acceptsImages: acceptsImages, acceptsBrowser: acceptsBrowser,
+                attachmentInputs: attachmentInputs,
+                acceptsBrowser: acceptsBrowser,
                 delegation: status.delegation,
                 effortLevels: effortLevels,
                 modelEffortLevels: modelEffortLevels)

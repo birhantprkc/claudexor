@@ -2,8 +2,21 @@ import Foundation
 
 public enum ComposerOptionParser {
     public static func splitOptionTokens(_ text: String) -> [String] {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        return text
+        // Swift treats CRLF as one extended grapheme cluster, so splitting a
+        // Character sequence on LF alone misses interior Windows line endings.
+        // Canonicalize every line ending first; reviewer and approval parsing
+        // then share the same line-oriented semantics on every platform.
+        var normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        // A line-oriented paste normally ends in a line break. Those terminal
+        // line endings are layout, not an additional empty reviewer/approval.
+        // Preserve comma empties and INTERIOR blank lines as diagnostics.
+        while normalized.hasSuffix("\n") {
+            normalized.removeLast()
+        }
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        return normalized
             .split(omittingEmptySubsequences: false, whereSeparator: { $0 == "," || $0 == "\n" })
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }

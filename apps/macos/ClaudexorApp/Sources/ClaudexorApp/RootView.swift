@@ -101,7 +101,7 @@ struct RootView: View {
         ToolbarItemGroup(placement: .primaryAction) {
             AppearanceMenu()
 
-            Button { withAnimation(.snappy) { model.inspectorPresented.toggle() } } label: {
+            Button { model.inspectorPresented.toggle() } label: {
                 Label("Thread workspace", systemImage: "sidebar.trailing")
             }
             .labelStyle(.iconOnly)

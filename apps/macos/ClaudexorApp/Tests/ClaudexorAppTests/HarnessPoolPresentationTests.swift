@@ -47,6 +47,56 @@ import Testing
         #expect(!HarnessPoolPresentation.isIncluded("codex", pool: pool, available: available))
     }
 
+    @Test func chipDescriptorKeepsHelpAndAccessibilityValueInSyncWithMembership() {
+        let included = HarnessPoolPresentation.chipDescriptor(
+            "claude", pool: ["claude"], available: available,
+            availability: .init(available: true, reason: "")
+        )
+        let excluded = HarnessPoolPresentation.chipDescriptor(
+            "codex", pool: ["claude"], available: available,
+            availability: .init(available: true, reason: "")
+        )
+        #expect(included.included)
+        #expect(included.help.contains("included"))
+        #expect(included.accessibilityValue == "Included")
+        #expect(!excluded.included)
+        #expect(excluded.help.contains("excluded"))
+        #expect(excluded.accessibilityValue == "Excluded")
+    }
+
+    @Test func unavailableHarnessPreservesExplicitMembershipInEveryPresentationLayer() {
+        let unavailable = HarnessPoolPresentation.Availability(
+            available: false, reason: "Claude is not installed."
+        )
+        let included = HarnessPoolPresentation.chipDescriptor(
+            "claude", pool: ["claude"], available: available,
+            availability: unavailable
+        )
+        let excluded = HarnessPoolPresentation.chipDescriptor(
+            "codex", pool: ["claude"], available: available,
+            availability: unavailable
+        )
+        #expect(included.included)
+        #expect(included.help.contains("included"))
+        #expect(included.help.contains("not installed"))
+        #expect(included.accessibilityValue == "Included, unavailable")
+        #expect(!excluded.included)
+        #expect(excluded.help.contains("excluded"))
+        #expect(excluded.help.contains("not installed"))
+        #expect(excluded.accessibilityValue == "Excluded, unavailable")
+    }
+
+    @Test func autoDescribesAnUnavailableHarnessWithoutCallingThePoolExplicit() {
+        let descriptor = HarnessPoolPresentation.chipDescriptor(
+            "claude", pool: [], available: ["codex"],
+            availability: .init(available: false, reason: "Claude is not installed.")
+        )
+        #expect(!descriptor.included)
+        #expect(descriptor.help.contains("Auto"))
+        #expect(descriptor.help.contains("not installed"))
+        #expect(descriptor.accessibilityValue == "Not included by Auto, unavailable")
+    }
+
     @Test func emptyingTheSubsetFallsBackToAuto() {
         // Removing the last explicit harness leaves an empty pool = Auto (the wire
         // treats empty as auto, so the UI must read it the same way).
