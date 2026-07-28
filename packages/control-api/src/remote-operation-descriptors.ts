@@ -9,11 +9,12 @@ export const REMOTE_OPERATION_DRAFTS = [
     requestSchema: null,
     responseSchema: "ControlDirectoryListing",
     responseKind: "json",
-    summary: "List a directory contained by the server user's home.",
+    summary: "List the visible subdirectories of a directory contained by the server user's home.",
     parameters: [
       queryParam({
         name: "path",
-        description: "Absolute directory under the server user's home; omit to start at HOME.",
+        description:
+          "Absolute visible (non-hidden) directory under the server user's home; omit to start at HOME.",
       }),
     ],
   },
@@ -24,12 +25,13 @@ export const REMOTE_OPERATION_DRAFTS = [
     requestSchema: null,
     responseSchema: null,
     responseKind: "binary",
-    summary: "Fetch one bounded file contained by a registered project.",
+    summary: "Fetch one bounded raster image contained by a registered project.",
     parameters: [
       queryParam({
         name: "path",
         required: true,
-        description: "Relative path contained by the registered project.",
+        description:
+          "Relative path contained by the registered project; the content must be a raster image (magic-byte validated).",
       }),
     ],
   },

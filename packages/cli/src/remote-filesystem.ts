@@ -10,12 +10,54 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ProjectStore } from "@claudexor/daemon";
 import { ControlDirectoryListing } from "@claudexor/schema";
 
 const MAX_DIRECTORY_ENTRIES = 1_000;
 const MAX_PROJECT_FILE_BYTES = 25 * 1024 * 1024;
+// Enough bytes to identify every allowed raster signature (WebP needs 12).
+const IMAGE_HEADER_BYTES = 12;
+
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * QA-067: the project-file endpoint exists for exactly one consumer — the
+ * remote markdown image gallery — so the server serves ONLY raster images,
+ * identified by content (magic bytes), never by file name. Everything else is
+ * refused before its content is read. SVG is deliberately excluded: it is a
+ * scripting-capable text format, not a raster image.
+ */
+function sniffRasterImage(header: Buffer): string | null {
+  if (header.length >= 8 && header.subarray(0, 8).equals(PNG_MAGIC)) return "image/png";
+  if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (header.length >= 6) {
+    const gif = header.subarray(0, 6).toString("latin1");
+    if (gif === "GIF87a" || gif === "GIF89a") return "image/gif";
+  }
+  if (
+    header.length >= 12 &&
+    header.subarray(0, 4).toString("latin1") === "RIFF" &&
+    header.subarray(8, 12).toString("latin1") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+/**
+ * QA-067: hidden trees under HOME (`~/.ssh`, `~/.gnupg`, `~/.aws`, harness
+ * homes, …) are where credentials and secret-bearing names live, and no
+ * legitimate remote project root lives inside one — so the picker neither
+ * lists a hidden directory nor lists INTO one.
+ */
+function hiddenUnderHome(home: string, canonical: string): boolean {
+  const rel = relative(home, canonical);
+  if (rel === "") return false;
+  return rel.split(sep).some((segment) => segment.startsWith("."));
+}
 
 function contained(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
@@ -41,6 +83,12 @@ function canonicalDirectory(path: string, root: string): string {
   if (!statSync(canonical).isDirectory()) {
     throw Object.assign(new Error("directory path is not a directory"), { status: 400 });
   }
+  if (hiddenUnderHome(root, canonical)) {
+    throw Object.assign(new Error("hidden directories are not listable"), {
+      status: 403,
+      code: "hidden_path_refused",
+    });
+  }
   return canonical;
 }
 
@@ -49,12 +97,15 @@ export function listRemoteDirectory(requestedPath: string | undefined, homePath 
   const path = canonicalDirectory(requestedPath || home, home);
   const candidates = [];
   for (const name of readdirSync(path)) {
+    // QA-067: project selection needs visible directories only — file names
+    // and dot-entries are undisclosed (they can carry secret-bearing names).
+    if (name.startsWith(".")) continue;
     const lexical = join(path, name);
     try {
       const target = realpathSync(lexical);
-      if (!contained(home, target)) continue;
+      if (!contained(home, target) || hiddenUnderHome(home, target)) continue;
       const stat = statSync(target);
-      if (!stat.isDirectory() && !stat.isFile()) continue;
+      if (!stat.isDirectory()) continue;
       let readable = true;
       try {
         accessSync(target, constants.R_OK);
@@ -64,18 +115,14 @@ export function listRemoteDirectory(requestedPath: string | undefined, homePath 
       candidates.push({
         name,
         path: target,
-        kind: stat.isDirectory() ? ("directory" as const) : ("file" as const),
+        kind: "directory" as const,
         readable,
       });
     } catch {
       // Broken and inaccessible symlinks are not actionable picker entries.
     }
   }
-  candidates.sort(
-    (left, right) =>
-      (left.kind === right.kind ? 0 : left.kind === "directory" ? -1 : 1) ||
-      left.name.localeCompare(right.name),
-  );
+  candidates.sort((left, right) => left.name.localeCompare(right.name));
   const entries = candidates.slice(0, MAX_DIRECTORY_ENTRIES);
   const parentPath = path === home ? null : resolve(path, "..");
   return ControlDirectoryListing.parse({
@@ -158,6 +205,26 @@ export function readScopedProjectFile(
     }
     const buffer = Buffer.allocUnsafe(Math.min(MAX_PROJECT_FILE_BYTES + 1, before.size + 1));
     let bytes = 0;
+    // Sniff the magic bytes FIRST: a non-image is refused before its content
+    // is read (QA-067 — this endpoint must never page a secret into memory).
+    while (bytes < Math.min(IMAGE_HEADER_BYTES, buffer.length)) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        bytes,
+        Math.min(IMAGE_HEADER_BYTES, buffer.length) - bytes,
+        null,
+      );
+      if (count === 0) break;
+      bytes += count;
+    }
+    const contentType = sniffRasterImage(buffer.subarray(0, bytes));
+    if (!contentType) {
+      throw Object.assign(new Error("project file fetch serves raster images only"), {
+        status: 415,
+        code: "project_file_not_raster_image",
+      });
+    }
     for (;;) {
       const count = readSync(descriptor, buffer, bytes, buffer.length - bytes, null);
       if (count === 0) break;
@@ -196,12 +263,36 @@ export function readScopedProjectFile(
     }
     return {
       data: buffer.subarray(0, bytes),
-      contentType: mimeType(openedPath),
+      contentType,
       fileName: openedPath.split(sep).at(-1) ?? "remote-file",
     };
   } finally {
     closeSync(descriptor);
   }
+}
+
+export interface RemoteFilesystemServices {
+  listDirectory?: (path?: string) => Promise<ControlDirectoryListing>;
+  fetchProjectFile?: (projectId: string, path: string) => Promise<ScopedProjectFile>;
+}
+
+/**
+ * QA-067: the filesystem routes exist for the SSH remote runtime (the app
+ * browses the remote host through the control tunnel). A local daemon must not
+ * grow a generic bearer-reachable filesystem surface, so the services — and
+ * with them the routes, which answer 501 without a bound service — are wired
+ * only when the process runs as the remote runtime.
+ */
+export function remoteFilesystemServices(
+  projects: () => ProjectStore,
+  env: NodeJS.ProcessEnv = process.env,
+): RemoteFilesystemServices {
+  if (env.CLAUDEXOR_REMOTE_RUNTIME !== "1") return {};
+  return {
+    listDirectory: async (path?: string) => listRemoteDirectory(path),
+    fetchProjectFile: async (projectId: string, path: string) =>
+      readScopedProjectFile(projects(), projectId, path),
+  };
 }
 
 function openedDescriptorPath(descriptor: number, fallback: string): string {
@@ -213,31 +304,5 @@ function openedDescriptorPath(descriptor: number, fallback: string): string {
     return realpathSync(`/proc/self/fd/${descriptor}`);
   } catch {
     return fallback;
-  }
-}
-
-function mimeType(path: string): string {
-  switch (extname(path).toLowerCase()) {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".gif":
-      return "image/gif";
-    case ".webp":
-      return "image/webp";
-    case ".svg":
-      return "image/svg+xml";
-    case ".json":
-      return "application/json";
-    case ".md":
-    case ".txt":
-    case ".log":
-      return "text/plain; charset=utf-8";
-    case ".html":
-      return "text/html; charset=utf-8";
-    default:
-      return "application/octet-stream";
   }
 }

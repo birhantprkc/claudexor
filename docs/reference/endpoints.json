@@ -78,7 +78,7 @@
       "path": "/v2/filesystem/directories",
       "mutating": false,
       "applicability": "global",
-      "summary": "List a directory contained by the server user's home.",
+      "summary": "List the visible subdirectories of a directory contained by the server user's home.",
       "auth": "loopback_bearer",
       "request_schema": null,
       "parameters": [
@@ -89,7 +89,7 @@
           "repeatable": false,
           "enum": null,
           "schema_ref": null,
-          "description": "Absolute directory under the server user's home; omit to start at HOME."
+          "description": "Absolute visible (non-hidden) directory under the server user's home; omit to start at HOME."
         }
       ],
       "response_schema": "ControlDirectoryListing",
@@ -299,7 +299,7 @@
       "path": "/v2/projects/:id/file",
       "mutating": false,
       "applicability": "project",
-      "summary": "Fetch one bounded file contained by a registered project.",
+      "summary": "Fetch one bounded raster image contained by a registered project.",
       "auth": "loopback_bearer",
       "request_schema": null,
       "parameters": [
@@ -310,7 +310,7 @@
           "repeatable": false,
           "enum": null,
           "schema_ref": null,
-          "description": "Relative path contained by the registered project."
+          "description": "Relative path contained by the registered project; the content must be a raster image (magic-byte validated)."
         }
       ],
       "response_schema": null,

@@ -1992,8 +1992,13 @@ only location-tagged thread summaries with a last-sync timestamp under
 `~/Library/Application Support/Claudexor/` (mode `0600`); transcripts and
 artifacts are fetched after reconnect.
 
-Remote project browsing uses the home-contained directory endpoint. Remote
-file links use the registered-project-scoped, size-capped file endpoint.
+Remote project browsing uses the home-contained directory endpoint, which
+lists only visible (non-hidden) directories and refuses to descend into dot
+trees — file names and hidden names are never disclosed. Remote image links
+use the registered-project-scoped, size-capped file endpoint, which serves
+raster images only (magic-byte validated; anything else is refused before its
+content is read). Both endpoints are wired only into the remote runtime — a
+local daemon never serves them.
 Shells, daemon-log tails and `client_pty` setup attachment use the system SSH
 PTY; Codex device login stays a typed setup-job UI. Preview creates a
 short-lived forward from an ephemeral local port to the requested remote
