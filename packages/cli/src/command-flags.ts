@@ -230,3 +230,16 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
   booleanFlag("help", "Show this help"),
   booleanFlag("version", "Print the CLI version"),
 ];
+
+/** Every flag the CLI accepts anywhere (the unknown-flag preflight set). */
+export const KNOWN_FLAGS: ReadonlySet<string> = new Set(CLI_FLAGS.map((f) => f.name));
+
+/** Flags that require a non-empty value. */
+export const VALUE_FLAGS: readonly string[] = CLI_FLAGS.filter((f) => f.kind === "value").map(
+  (f) => f.name,
+);
+
+/** Flags that never consume a following token as a value. */
+export const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(
+  CLI_FLAGS.filter((f) => f.kind === "boolean").map((f) => f.name),
+);

@@ -87,13 +87,6 @@ struct RemoteTerminalSheet: View {
                     }
                 } else if case .setup(let connectionID, _) = request.purpose {
                     Task { await model.runRemoteHarnessDoctor(connectionID: connectionID) }
-                } else if case .install(let connectionID, let harness) = request.purpose {
-                    Task {
-                        await model.finishRemoteHarnessInstall(
-                            connectionID: connectionID,
-                            harness: harness,
-                            exitCode: code)
-                    }
                 }
             }
         }

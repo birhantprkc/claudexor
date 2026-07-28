@@ -107,6 +107,14 @@ export interface FixtureStreamExpectations {
   final_is_last_message?: boolean;
   /** Exact count of thinking events — lifecycle frames must never inflate it. */
   thinking_events?: number;
+  /**
+   * Exact count of normalized run-level `started` events. Some vendors emit
+   * more than one native lifecycle frame per run (codex `--json` pairs
+   * `thread.started` with `turn.started`); the adapter must collapse them to
+   * ONE normalized start, and only an exact count catches a regression that
+   * re-emits the duplicate.
+   */
+  started_events?: number;
   /** Exact count of display-stream delta chunks (payload.delta === true). */
   delta_messages?: number;
   /** Exact count of typed error tool results. */
@@ -130,6 +138,7 @@ export function streamExpectationViolations(
 ): string[] {
   let finals = 0;
   let thinking = 0;
+  let started = 0;
   let deltas = 0;
   let rateLimits = 0;
   let toolErrorResults = 0;
@@ -150,6 +159,7 @@ export function streamExpectationViolations(
       lastMessageWasFinal = ev.final === true;
     }
     if (ev.type === "thinking") thinking += 1;
+    if (ev.type === "started") started += 1;
     if (ev.type === "tool_result" && ev.tool?.status === "error") toolErrorResults += 1;
     if (ev.rate_limit !== undefined) rateLimits += 1;
     // The typed retry CLASS is ONLY the adapter's classification. Deriving a
@@ -167,6 +177,7 @@ export function streamExpectationViolations(
   };
   check("final_messages", expectations.final_messages, finals);
   check("thinking_events", expectations.thinking_events, thinking);
+  check("started_events", expectations.started_events, started);
   check("delta_messages", expectations.delta_messages, deltas);
   check("tool_error_results", expectations.tool_error_results, toolErrorResults);
   if (expectations.final_source !== undefined) {

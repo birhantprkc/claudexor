@@ -10,12 +10,11 @@ enum RemoteTerminalPurpose: Equatable {
     case authentication(UUID, Int)
     case shell
     case setup(UUID, String)
-    case install(UUID, String)
     case log
 
     var blocksDismissalWhileRunning: Bool {
         switch self {
-        case .authentication, .setup, .install:
+        case .authentication, .setup:
             return true
         case .shell, .log:
             return false
@@ -371,12 +370,6 @@ extension AppModel {
         {
             remoteTerminalSheet = nil
         }
-        if let purpose = settingsRemoteTerminalSheet?.purpose,
-           case .install(let sheetID, _) = purpose,
-           sheetID == id
-        {
-            settingsRemoteTerminalSheet = nil
-        }
         cancelRemoteStreams(.remote(id))
         await closeRemoteControlForward(id)
         if let forward = remotePreviewForwards.removeValue(forKey: id) {
@@ -418,7 +411,6 @@ extension AppModel {
         remoteControlForwards.removeAll()
         remotePreviewForwards.removeAll()
         remoteTerminalSheet = nil
-        settingsRemoteTerminalSheet = nil
         await sshConnectionManager.shutdown()
         // A cancellation-aware child may settle just as the first shutdown pass
         // snapshots the registry. A second idempotent pass closes anything that

@@ -27,15 +27,7 @@ import { printJson, printUsageError } from "./cli-io.js";
 import { resolveSetupLoginRunnerPath } from "./setup-job-support.js";
 
 function runtimeTarget(): string {
-  const currentPlatform = platform();
-  const currentArch = arch();
-  if (
-    (currentPlatform === "linux" || currentPlatform === "darwin") &&
-    (currentArch === "x64" || currentArch === "arm64")
-  ) {
-    return `${currentPlatform}-${currentArch}`;
-  }
-  return `${currentPlatform}-${currentArch}`;
+  return `${platform()}-${arch()}`;
 }
 
 function endpointPort(baseUrl: string): number {

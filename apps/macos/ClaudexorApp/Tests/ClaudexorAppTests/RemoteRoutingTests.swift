@@ -29,11 +29,10 @@ import Testing
         #expect(model.task("same-run", at: locationID)?.phase == .cancelled)
     }
 
-    @Test func terminalSetupAndInstallAreOneShotBlockingOperations() {
+    @Test func terminalAuthAndSetupAreOneShotBlockingOperations() {
         let id = UUID()
         #expect(RemoteTerminalPurpose.authentication(id, 1).blocksDismissalWhileRunning)
         #expect(RemoteTerminalPurpose.setup(id, "setup-job").blocksDismissalWhileRunning)
-        #expect(RemoteTerminalPurpose.install(id, "cursor").blocksDismissalWhileRunning)
         #expect(!RemoteTerminalPurpose.shell.blocksDismissalWhileRunning)
         #expect(!RemoteTerminalPurpose.log.blocksDismissalWhileRunning)
     }

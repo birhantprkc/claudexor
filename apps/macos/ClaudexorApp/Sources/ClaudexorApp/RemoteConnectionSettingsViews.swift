@@ -63,7 +63,6 @@ private struct RemoteConnectionSettingsRow: View {
     @State private var nickname = ""
     @State private var confirmRemoval = false
     @State private var confirmInstall = false
-    @State private var installHarness: String?
 
     private var connection: RemoteConnection? {
         model.remoteConnections.first { $0.id == connectionID }
@@ -119,12 +118,6 @@ private struct RemoteConnectionSettingsRow: View {
                 HStack {
                     Button("Harness Doctor") {
                         Task { await model.runRemoteHarnessDoctor(connectionID: connectionID) }
-                    }
-                    Menu("Install harness") {
-                        ForEach(["claude", "codex", "cursor", "opencode"], id: \.self) {
-                            harness in
-                            Button(harness.capitalized) { installHarness = harness }
-                        }
                     }
                     Button("Install runtime…") { confirmInstall = true }
                     Menu("Login") {
@@ -198,26 +191,6 @@ private struct RemoteConnectionSettingsRow: View {
                 Text(
                     "This removes local connection metadata and cached thread titles. Nothing is deleted from the server.")
             }
-            .confirmationDialog(
-                "Install \(installHarness?.capitalized ?? "harness")?",
-                isPresented: Binding(
-                    get: { installHarness != nil },
-                    set: { if !$0 { installHarness = nil } })
-            ) {
-                Button("Run installer") {
-                    guard let harness = installHarness else { return }
-                    installHarness = nil
-                    Task {
-                        await model.startRemoteHarnessInstall(
-                            connectionID: connectionID, harness: harness)
-                    }
-                }
-                Button("Cancel", role: .cancel) { installHarness = nil }
-            } message: {
-                let disclosure = installerDisclosure(installHarness ?? "")
-                Text(
-                    "Command: \(disclosure.command)\nInstall location: \(disclosure.location)\n\nThe command runs on \(connection.displayName) in the embedded terminal. Claudexor runs Harness Doctor afterward.")
-            }
         }
     }
 
@@ -238,31 +211,6 @@ private struct RemoteConnectionSettingsRow: View {
         case .connecting, .installing: Theme.status(.caution)
         case .needsInteraction, .failed: SwiftUI.Color.orange
         case .offline: SwiftUI.Color.secondary
-        }
-    }
-
-    private func installerDisclosure(_ harness: String) -> (
-        command: String, location: String
-    ) {
-        switch harness {
-        case "claude":
-            (
-                "npm install --global --prefix ~/.claudexor/remote/vendor @anthropic-ai/claude-code@latest",
-                "~/.claudexor/remote/vendor/bin")
-        case "codex":
-            (
-                "npm install --global --prefix ~/.claudexor/remote/vendor @openai/codex@latest",
-                "~/.claudexor/remote/vendor/bin")
-        case "opencode":
-            (
-                "npm install --global --prefix ~/.claudexor/remote/vendor opencode-ai@latest",
-                "~/.claudexor/remote/vendor/bin")
-        case "cursor":
-            (
-                "curl https://cursor.com/install -fsS | bash",
-                "~/.local/bin (or ~/.cursor/bin)")
-        default:
-            ("", "")
         }
     }
 }

@@ -100,7 +100,7 @@ import { quotaCommand } from "./quota-command.js";
 import { trustCommand } from "./trust-command.js";
 import { projectCommand } from "./project-command.js";
 import { remoteCommand, setupCommand } from "./remote-command.js";
-import { harnessCommand } from "./harness-installer.js";
+import { harnessCommand } from "./harness-command.js";
 import { runRepl } from "./repl.js";
 import {
   parseProtectedPathApprovalFlags,

@@ -67,12 +67,6 @@ struct SettingsScreen: View {
         .onChange(of: maxUsdPerRun) { _, _ in markEngineDraftsEdited() }
         .onChange(of: budgetUnlimited) { _, _ in markEngineDraftsEdited() }
         .onChange(of: interactionTimeoutMinutes) { _, _ in markEngineDraftsEdited() }
-        .sheet(item: $model.settingsRemoteTerminalSheet) { request in
-            RemoteTerminalSheet(request: request) {
-                model.settingsRemoteTerminalSheet = nil
-            }
-            .environment(model)
-        }
     }
 
     private var draftSnapshot: [String] {

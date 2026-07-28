@@ -82,10 +82,6 @@ final class AppModel {
     var remoteConnectionMessages: [UUID: String] = [:]
     var remoteDirectoryBrowser: RemoteDirectoryBrowserRequest?
     var remoteTerminalSheet: RemoteTerminalSheetRequest?
-    /// Terminal work launched from Settings stays owned by that window. Using
-    /// the main-window sheet here steals focus and makes Settings appear to
-    /// close as soon as an installer starts.
-    var settingsRemoteTerminalSheet: RemoteTerminalSheetRequest?
     var remoteDeviceLogin: RemoteDeviceLoginRequest?
     var remotePreview: RemotePreviewRequest?
 

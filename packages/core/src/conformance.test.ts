@@ -48,6 +48,17 @@ describe("streamExpectationViolations", () => {
     ).toEqual([]);
   });
 
+  it("started_events pins the run-level start count exactly", () => {
+    // Vendors can emit two native lifecycle frames for one run (codex pairs
+    // thread.started with turn.started); an adapter dedup regression re-emits
+    // the second as a normalized start, and only an exact count sees it.
+    const started = { type: "started", session_id: session, ts };
+    expect(streamExpectationViolations([started], { started_events: 1 })).toEqual([]);
+    expect(streamExpectationViolations([started, started], { started_events: 1 })).toEqual([
+      "started_events: expected 1, got 2",
+    ]);
+  });
+
   it("retry_class asserts the CLASS, not the mere presence of a signal", () => {
     const withCategory = [
       {

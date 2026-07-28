@@ -1,13 +1,22 @@
-import { REMOTE_COMMAND_SPECS, RETRY_COMMAND_SPECS } from "./additional-command-specs.js";
+import { REMOTE_COMMAND_SPECS } from "./remote-command-specs.js";
+import { RETRY_COMMAND_SPECS } from "./retry-command-specs.js";
 import {
   CLI_FLAGS,
   FROZEN_REVIEW_FLAG_NAMES,
   RUN_FLAGS,
   type CliFlagKind,
 } from "./command-flags.js";
-export { CLI_FLAGS, type CliFlagKind, type CliFlagSpec } from "./command-flags.js";
+export {
+  BOOLEAN_FLAGS,
+  CLI_FLAGS,
+  KNOWN_FLAGS,
+  VALUE_FLAGS,
+  type CliFlagKind,
+  type CliFlagSpec,
+} from "./command-flags.js";
 
 export type CliMutability = "read" | "write" | "delivery" | "ops";
+
 export interface CliCommandSpec {
   readonly id: string;
   readonly aliases?: readonly string[];
@@ -265,10 +274,10 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "harness",
-    usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run]",
-    summary: "List harnesses or run one server-owned allowlisted installer",
-    flags: ["all", "dry-run", "json"],
-    mutability: "ops",
+    usageArgs: "list [--all]",
+    summary: "List real harnesses (--all includes fakes)",
+    flags: ["all", "json"],
+    mutability: "read",
     stability: "stable",
   },
   {
@@ -327,19 +336,6 @@ export const REPL_COMMANDS: readonly {
   { name: "/help", help: "this help" },
   { name: "/quit", help: "exit" },
 ];
-
-/** Every flag the CLI accepts anywhere (the unknown-flag preflight set). */
-export const KNOWN_FLAGS: ReadonlySet<string> = new Set(CLI_FLAGS.map((f) => f.name));
-
-/** Flags that require a non-empty value. */
-export const VALUE_FLAGS: readonly string[] = CLI_FLAGS.filter((f) => f.kind === "value").map(
-  (f) => f.name,
-);
-
-/** Flags that never consume a following token as a value. */
-export const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(
-  CLI_FLAGS.filter((f) => f.kind === "boolean").map((f) => f.name),
-);
 
 export function commandFlagScopeError(
   commandId: string,
