@@ -214,12 +214,38 @@ async function phaseC() {
     srv.send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tools = await srv.waitFor((m) => m.id === 1, 15_000);
     const list = tools?.result?.tools ?? [];
+    // The expected surface mirrors the REGISTRATION SITE
+    // (packages/mcp-server/src/index.ts + recovery-tools.ts), not observed
+    // output. Exact name-set equality catches a missing, renamed, or
+    // unexpected extra tool — a bare count never named the delta.
+    const expectedTools = [
+      "claudexor_answer_interaction",
+      "claudexor_apply_check",
+      "claudexor_ask",
+      "claudexor_best_of",
+      "claudexor_capabilities",
+      "claudexor_create",
+      "claudexor_inspect",
+      "claudexor_journal_recovery",
+      "claudexor_plan",
+      "claudexor_quarantine_journal",
+      "claudexor_run",
+      "claudexor_run_cancel",
+      "claudexor_run_interactions",
+      "claudexor_run_result",
+      "claudexor_run_status",
+      "claudexor_runs",
+      "claudexor_status",
+    ];
+    const names = list.map((t) => t.name);
+    const missing = expectedTools.filter((n) => !names.includes(n));
+    const extra = names.filter((n) => !expectedTools.includes(n));
     const race = list.find((t) => t.name === "claudexor_best_of");
     check(
       "C",
-      "12 tools; best_of n.minimum=2",
-      list.length === 12 && race?.inputSchema?.properties?.n?.minimum === 2,
-      { count: list.length },
+      "tool name-set matches registration; best_of n.minimum=2",
+      missing.length === 0 && extra.length === 0 && race?.inputSchema?.properties?.n?.minimum === 2,
+      { count: names.length, missing, extra },
     );
     const runSchema = list.find((t) => t.name === "claudexor_run")?.inputSchema?.properties ?? {};
     const requiredControls = ["prompt", "repoPath", "model", "effort", "web", "reviewerPanel"];
@@ -294,7 +320,9 @@ async function phaseD() {
           prompt: "fix add() so it adds",
           repoPath: fixtureRepo,
           harness: "fake-implement",
-          tests: ['node -e "process.exit(0)"'],
+          // Canonical typed argv (schema TestCommandInvocation): explicit
+          // program + args, no implicit shell parsing.
+          tests: [{ program: "node", args: ["-e", "process.exit(0)"] }],
         },
       },
     });
@@ -302,6 +330,26 @@ async function phaseD() {
     const text = String(call?.result?.content?.[0]?.text ?? "");
     const runId = /runId: (\S+)/.exec(text)?.[1];
     check("D", "write run returns runId", Boolean(runId), { head: text.slice(0, 80) });
+    // The deferred handle intentionally returns while the run is still live
+    // (the SDK-era contract); terminal truth comes from the explicit
+    // claudexor_run_status tool, polled here exactly as a host would.
+    let status = null;
+    if (runId) {
+      const deadline = Date.now() + 180_000;
+      for (let id = 100; Date.now() < deadline; id++) {
+        srv.send({
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name: "claudexor_run_status", arguments: { runId } },
+        });
+        const poll = await srv.waitFor((m) => m.id === id, 30_000);
+        status = poll?.result?.structuredContent?.status ?? null;
+        if (status && status !== "queued" && status !== "running") break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    check("D", "run_status polls to succeeded terminal", status === "succeeded", { status });
     // Artifact correlation BY ID (the old mtime hack is retired): inspect works.
     const inspect = runCli(["inspect", runId ?? "missing", "--json"], env, fixtureRepo);
     check(
