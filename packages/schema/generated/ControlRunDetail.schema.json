@@ -1090,7 +1090,7 @@
             "waitingOnUser": {
               "type": "boolean",
               "default": false,
-              "description": "True while at least one interactive question is awaiting the user's answer."
+              "description": "True while at least one interactive question awaits answer, timeout, run-terminal, or interruption release."
             },
             "route": {
               "anyOf": [

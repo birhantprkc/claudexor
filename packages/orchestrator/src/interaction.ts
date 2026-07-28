@@ -1,24 +1,48 @@
 /**
  * Per-attempt interaction channel. Emits the typed lifecycle events
  * (`interaction.requested` / `interaction.answered` / `interaction.timeout`)
- * around the caller-provided answer surface, enforcing the wait budget so a
- * run can never hang forever on an unanswered question. Undefined when the
- * caller provides no surface — the adapter then runs non-interactive.
+ * around the caller-provided answer surface. The wait policy is finite or has
+ * automatic expiry disabled; answers, cancellation, terminal cleanup, and
+ * registry release still end either form. Undefined when the caller provides
+ * no surface — the adapter then runs non-interactive.
  *
  * Capability gate: the channel is OFFERED only to routes whose manifest
  * declares `interactive` — a non-interactive harness never gets a surface it
  * cannot raise questions through.
  */
 import type { InteractionChannel } from "@claudexor/core";
-import type { InteractionAnswerSet, InteractionRequest } from "@claudexor/schema";
+import type {
+  InteractionAnswerSet,
+  InteractionHandlerRelease,
+  InteractionHandlerResult,
+  InteractionRequest,
+} from "@claudexor/schema";
+import { INTERACTION_TIMEOUT_MAX_MS } from "@claudexor/schema";
 import type { EventLog } from "@claudexor/event-log";
 import { nowIso } from "@claudexor/util";
 import type { PendingInteractionContext } from "./orchestrator.js";
 
 export interface InteractionChannelWiring {
-  onInteraction?: (ctx: PendingInteractionContext) => Promise<InteractionAnswerSet | null>;
-  interactionTimeoutMs?: number;
+  onInteraction?: (ctx: PendingInteractionContext) => Promise<InteractionHandlerResult>;
+  interactionTimeoutMs?: number | null;
   signal?: AbortSignal;
+}
+
+export type InteractionTimeoutPolicy = { kind: "finite"; timeoutMs: number } | { kind: "disabled" };
+
+export function resolveInteractionTimeoutPolicy(
+  configured: number | null | undefined,
+  defaultTimeoutMs: number,
+): InteractionTimeoutPolicy {
+  const value = configured === undefined ? defaultTimeoutMs : configured;
+  if (value === null) return { kind: "disabled" };
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("interaction timeout must be a positive safe integer or null");
+  }
+  if (value > INTERACTION_TIMEOUT_MAX_MS) {
+    throw new Error("interaction timeout exceeds the supported maximum");
+  }
+  return { kind: "finite", timeoutMs: value };
 }
 
 export function interactionChannelFor(
@@ -34,7 +58,10 @@ export function interactionChannelFor(
   if (!supportsInteractive) return undefined;
   const handler = input.onInteraction;
   if (!handler) return undefined;
-  const timeoutMs = input.interactionTimeoutMs ?? defaultTimeoutMs;
+  const timeoutPolicy = resolveInteractionTimeoutPolicy(
+    input.interactionTimeoutMs,
+    defaultTimeoutMs,
+  );
   // Waiting on a human is legitimate stream silence: the inactivity watchdog
   // consults this count and re-arms instead of killing the "wedged" harness.
   let pending = 0;
@@ -42,7 +69,9 @@ export function interactionChannelFor(
     pendingCount: () => pending,
     request: async (request: InteractionRequest): Promise<InteractionAnswerSet | null> => {
       const requestedAt = nowIso();
-      const timeoutAt = new Date(Date.now() + timeoutMs).toISOString();
+      const deadlineAtMs =
+        timeoutPolicy.kind === "finite" ? finiteDeadline(timeoutPolicy.timeoutMs) : null;
+      const timeoutAt = deadlineAtMs === null ? null : new Date(deadlineAtMs).toISOString();
       pending += 1;
       try {
         // Invoke the answer surface BEFORE announcing the event: handlers
@@ -54,7 +83,7 @@ export function interactionChannelFor(
         // The handler is invoked SYNCHRONOUSLY (the registry-population contract
         // below depends on it); only its failure handling is normalized — a
         // synchronous throw becomes the same null-answer path as an async one.
-        let answersPromise: Promise<InteractionAnswerSet | null>;
+        let answersPromise: Promise<InteractionHandlerResult>;
         try {
           answersPromise = Promise.resolve(
             handler({
@@ -79,27 +108,37 @@ export function interactionChannelFor(
           requested_at: requestedAt,
           timeout_at: timeoutAt,
         });
-        let timer: NodeJS.Timeout | undefined;
+        let cancelTimer: (() => void) | undefined;
         let onAbort: (() => void) | undefined;
         const startedWaiting = Date.now();
-        const answers = await Promise.race([
-          answersPromise,
-          new Promise<null>((resolve) => {
-            timer = setTimeout(() => resolve(null), timeoutMs);
-            timer.unref?.();
-          }),
+        type WaitResult =
+          | { kind: "handler"; result: InteractionHandlerResult }
+          | { kind: "timeout" }
+          | { kind: "abort" };
+        const waits: Promise<WaitResult>[] = [
+          answersPromise.then((result) => ({ kind: "handler", result })),
           // A cancelled run must release the interaction wait IMMEDIATELY —
-          // the abort already kills the harness process, and sitting out the
-          // remaining timeout would park a dead run in waiting_on_user.
-          new Promise<null>((resolve) => {
+          // the abort already kills the harness process, and neither a finite
+          // nor disabled-expiry policy may park a dead run in waiting_on_user.
+          new Promise<WaitResult>((resolve) => {
             if (!input.signal) return;
-            if (input.signal.aborted) return resolve(null);
-            onAbort = () => resolve(null);
+            if (input.signal.aborted) return resolve({ kind: "abort" });
+            onAbort = () => resolve({ kind: "abort" });
             input.signal.addEventListener("abort", onAbort, { once: true });
           }),
-        ]);
-        if (timer) clearTimeout(timer);
+        ];
+        if (deadlineAtMs !== null) {
+          waits.push(
+            new Promise<WaitResult>((resolve) => {
+              cancelTimer = scheduleSafeDeadline(deadlineAtMs, () => resolve({ kind: "timeout" }));
+            }),
+          );
+        }
+        const result = await Promise.race(waits);
+        cancelTimer?.();
         if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+        const handlerResult = result.kind === "handler" ? result.result : null;
+        const answers = isInteractionHandlerRelease(handlerResult) ? null : handlerResult;
         if (answers && answers.answers.length > 0) {
           log.emit("interaction.answered", {
             interaction_id: request.interaction_id,
@@ -109,24 +148,38 @@ export function interactionChannelFor(
           });
           return answers;
         }
+        // An untyped external null or a terminal/restart registry release is a
+        // decline, not an automatic expiry. The daemon tags only its own
+        // finite expiry so that race can retain exact provenance.
+        if (
+          result.kind === "handler" &&
+          (!isInteractionHandlerRelease(handlerResult) ||
+            handlerResult.reason !== "timeout" ||
+            deadlineAtMs === null)
+        ) {
+          return null;
+        }
+        // Keep the established event kind for cancellation compatibility, but
+        // type it with reason=cancelled so consumers never mistake it for the
+        // automatic finite-policy expiry.
         log.emit("interaction.timeout", {
           interaction_id: request.interaction_id,
           attempt_id: attemptId,
           harness_id: harnessId,
           waited_ms: Date.now() - startedWaiting,
-          ...(input.signal?.aborted ? { reason: "cancelled" } : {}),
+          ...(result.kind === "abort" ? { reason: "cancelled" } : {}),
         });
         // Late-answer honesty: the run already declined this
         // interaction; an answer arriving AFTER the timeout must be visibly
         // DISCARDED, not silently swallowed (the user typed it in good faith).
         void answersPromise.then((late) => {
-          if (late && late.answers.length > 0) {
+          if (late && !isInteractionHandlerRelease(late) && late.answers.length > 0) {
             log.emit("interaction.answer_discarded", {
               interaction_id: request.interaction_id,
               attempt_id: attemptId,
               harness_id: harnessId,
               answer_count: late.answers.length,
-              reason: input.signal?.aborted ? "run_cancelled" : "timed_out",
+              reason: result.kind === "abort" ? "run_cancelled" : "timed_out",
             });
           }
         });
@@ -138,4 +191,43 @@ export function interactionChannelFor(
       }
     },
   };
+}
+
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
+function finiteDeadline(timeoutMs: number): number {
+  const deadline = Date.now() + timeoutMs;
+  if (!Number.isSafeInteger(deadline) || deadline > MAX_DATE_MS) {
+    throw new Error("interaction timeout is too large to represent as a deadline");
+  }
+  return deadline;
+}
+
+/** Node clamps one setTimeout above 2^31-1 ms to ~1 ms. Re-arm in bounded
+ * chunks so a large valid finite policy cannot expire immediately. */
+function scheduleSafeDeadline(deadline: number, fire: () => void): () => void {
+  let timer: NodeJS.Timeout | undefined;
+  let cancelled = false;
+  const arm = () => {
+    if (cancelled) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      fire();
+      return;
+    }
+    timer = setTimeout(arm, Math.min(remaining, MAX_TIMER_DELAY_MS));
+    timer.unref?.();
+  };
+  arm();
+  return () => {
+    cancelled = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
+function isInteractionHandlerRelease(
+  result: InteractionHandlerResult,
+): result is InteractionHandlerRelease {
+  return result !== null && "kind" in result && result.kind === "released";
 }

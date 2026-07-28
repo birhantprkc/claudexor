@@ -13,10 +13,19 @@
           "description": "Config file paths that contributed to the snapshot."
         },
         "interactionTimeoutMs": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 8000000000000000,
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": 900000,
-          "description": "How long a run waits for an interactive answer before a benign decline, in milliseconds."
+          "description": "Automatic-expiry policy for an interactive answer: positive milliseconds deliver a benign decline at the deadline; null disables automatic expiry."
         },
         "routing": {
           "type": "object",

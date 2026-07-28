@@ -37,6 +37,14 @@ rl.on('line', (line) => {
 rl.on('close', () => process.exit(0));
 `;
 
+const FAKE_EXITING_BIDI_CLI = `
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.once('line', () => {
+  console.log(JSON.stringify({ type: 'control_request', request_id: 'r-exit' }));
+  setTimeout(() => process.exit(17), 10);
+});
+`;
+
 describe("runCliHarness session mode", () => {
   it("writes the initial frame, routes control frames to the handler, and closes stdin on the result frame", async () => {
     const written: string[] = [];
@@ -108,6 +116,49 @@ describe("runCliHarness session mode", () => {
     expect(completed?.type).toBe("completed");
     expect(completed?.payload?.["exit_code"]).toBe(0);
   }, 15_000);
+
+  it("consumes a queued child exit while an inline session handler awaits process closure", async () => {
+    const collect = async (): Promise<HarnessEvent[]> => {
+      const events: HarnessEvent[] = [];
+      for await (const event of runCliHarness({
+        bin: process.execPath,
+        args: ["-e", FAKE_EXITING_BIDI_CLI],
+        spec: spec(),
+        parseEvent: () => null,
+        session: {
+          initialStdin: '{"type":"user"}\n',
+          matches: (obj) => (obj as Record<string, unknown>)["type"] === "control_request",
+          handle: async function* (_obj, io) {
+            yield {
+              type: "interaction_requested",
+              session_id: "ses-loop",
+              ts: new Date().toISOString(),
+            } as HarnessEvent;
+            await io.closed;
+          },
+        },
+      })) {
+        events.push(event);
+      }
+      return events;
+    };
+
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("runCliHarness remained blocked after child exit")),
+        2_000,
+      );
+    });
+    const events = await Promise.race([collect(), timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+
+    expect(events.some((event) => event.type === "interaction_requested")).toBe(true);
+    expect(events.some((event) => event.type === "error")).toBe(true);
+    expect(events.at(-1)?.type).toBe("completed");
+    expect(events.at(-1)?.payload?.["exit_code"]).toBe(17);
+  }, 5_000);
 });
 
 // QA-027: a cancellation whose whole-tree death proof cannot confirm death must

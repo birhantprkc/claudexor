@@ -19,6 +19,21 @@ afterEach(() => {
 });
 
 describe("spawnProcess", () => {
+  it("exposes child closure to bidirectional session handlers", async () => {
+    let closed: Promise<void> | undefined;
+    for await (const _ev of spawnProcess(process.execPath, ["-e", "process.exit(0)"], {
+      keepStdinOpen: true,
+      onSpawn: (io) => {
+        closed = io.closed;
+      },
+    })) {
+      // Consume the terminal event so the process lifecycle is complete.
+    }
+
+    expect(closed).toBeDefined();
+    await expect(closed).resolves.toBeUndefined();
+  });
+
   it("kills the child when the consumer closes the stream early", async () => {
     const dir = tempDir();
     const marker = join(dir, "survived.txt");

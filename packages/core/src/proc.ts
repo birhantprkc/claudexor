@@ -78,6 +78,10 @@ export interface ChildStdin {
   write(data: string): void;
   /** Close stdin (EOF) — the cooperative way to end a streaming session. */
   end(): void;
+  /** Settles once the child process closes or fails to spawn. Session handlers
+   * race blocking protocol work against this instead of orphaning a wait after
+   * the native process can no longer answer. */
+  closed: Promise<void>;
 }
 
 export type ProcEvent =
@@ -124,6 +128,13 @@ export async function* spawnProcess(
     detached: true,
   });
   if (typeof child.pid === "number") registerChildProcess(child.pid, cmd);
+
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  child.once("error", () => resolveClosed());
+  child.once("close", () => resolveClosed());
 
   // Seed the DIRECT group identity NOW, while the child is provably alive and is
   // its own group leader (detached => pgid == pid). If the direct child later
@@ -176,6 +187,7 @@ export async function* spawnProcess(
           /* already closed */
         }
       },
+      closed,
     });
   } else {
     child.stdin.end();

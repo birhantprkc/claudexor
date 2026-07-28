@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChildStdin } from "@claudexor/core";
 import type { HarnessEvent } from "@claudexor/schema";
 import {
@@ -13,19 +13,25 @@ import {
   isResultFrame,
 } from "./interactive.js";
 
-function fakeIo(): { io: ChildStdin; written: string[]; ended: boolean } {
+function fakeIo(): { io: ChildStdin; written: string[]; ended: boolean; close(): void } {
   const state = { written: [] as string[], ended: false };
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
   return {
     io: {
       write: (data: string) => state.written.push(data),
       end: () => {
         state.ended = true;
       },
+      closed,
     },
     written: state.written,
     get ended() {
       return state.ended;
     },
+    close: resolveClosed,
   };
 }
 
@@ -156,7 +162,7 @@ describe("claude interactive control protocol", () => {
     expect(written[0]).toContain("Detailed");
   });
 
-  it("declines benignly when the channel resolves null (timeout)", async () => {
+  it("declines benignly when the channel resolves an unclassified null", async () => {
     const { io, written } = fakeIo();
     const events: HarnessEvent[] = [];
     const channel = { request: async () => null };
@@ -165,6 +171,25 @@ describe("claude interactive control protocol", () => {
     expect(events).toHaveLength(1);
     expect(written[0]).toContain('"behavior":"deny"');
     expect(written[0]).toContain(DECLINE_MESSAGE.slice(0, 20));
+  });
+
+  it("releases a pending native question when the child process closes", async () => {
+    const { io, written, close } = fakeIo();
+    const events: HarnessEvent[] = [];
+    const consuming = (async () => {
+      for await (const ev of handleControlRequestFrame(NATIVE_ASK, io, "ses-1", {
+        request: () => new Promise(() => undefined),
+      })) {
+        events.push(ev);
+      }
+    })();
+
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    close();
+    await consuming;
+
+    expect(events[0]?.type).toBe("interaction_requested");
+    expect(written).toEqual([]);
   });
 
   it("denies non-interactive permission requests without liberalizing policy", async () => {

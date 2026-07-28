@@ -29,6 +29,7 @@ import { RunScope } from "./control-run-scope.js";
 import { HarnessStatusDto } from "./readiness.js";
 import { makeControlRunRetrySchemas } from "./control-run-retry.js";
 import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
+import { InteractionTimeoutValue } from "./config.js";
 
 export const RunExecution = z
   .object({
@@ -806,11 +807,13 @@ export const ControlRunSummary = z
       .describe(
         "D8 terminal outcome axes (checks/review/reason/noChanges) projected from decision.facts or derived from the failure; null while non-terminal.",
       ),
-    /** True while at least one interaction.requested has no answered/timeout. */
+    /** True while at least one requested interaction has no terminal release. */
     waitingOnUser: z
       .boolean()
       .default(false)
-      .describe("True while at least one interactive question is awaiting the user's answer."),
+      .describe(
+        "True while at least one interactive question awaits answer, timeout, run-terminal, or interruption release.",
+      ),
     /** Route evidence from telemetry; null when no telemetry exists (legacy). */
     route: ControlRouteInfo.nullable()
       .default(null)
@@ -1497,15 +1500,10 @@ export const ControlSettingsSnapshot = z
       .array(z.string())
       .default([])
       .describe("Config file paths that contributed to the snapshot."),
-    /** How long a run waits for an interactive answer before a benign decline. */
-    interactionTimeoutMs: z
-      .number()
-      .int()
-      .positive()
-      .default(900_000)
-      .describe(
-        "How long a run waits for an interactive answer before a benign decline, in milliseconds.",
-      ),
+    /** Automatic-expiry policy for one interactive answer wait. */
+    interactionTimeoutMs: InteractionTimeoutValue.default(900_000).describe(
+      "Automatic-expiry policy for an interactive answer: positive milliseconds deliver a benign decline at the deadline; null disables automatic expiry.",
+    ),
     routing: z
       .object({
         primaryHarness: z
@@ -1707,12 +1705,9 @@ export const ControlSettingsUpdateRequest = z
     routingGoal: RoutingGoal.optional(),
     paidFallback: PaidFallback.optional(),
     qualityTiers: QualityTierSet.optional(),
-    interactionTimeoutMs: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe("New interactive-answer timeout, in milliseconds."),
+    interactionTimeoutMs: InteractionTimeoutValue.optional().describe(
+      "New interactive-answer timeout in milliseconds; null disables automatic expiry.",
+    ),
     primaryHarness: NonBlankString.nullable()
       .optional()
       .describe("New global primary harness; null clears back to engine routing."),

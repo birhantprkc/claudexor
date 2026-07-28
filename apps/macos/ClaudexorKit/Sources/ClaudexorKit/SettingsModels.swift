@@ -1,9 +1,22 @@
 import Foundation
 
+/// Swift consumer of the schema-owned finite timeout ceiling. Keep this wire
+/// constant equal to `INTERACTION_TIMEOUT_MAX_MS` in @claudexor/schema.
+public enum InteractionTimeoutContract {
+    public static let maxFiniteMilliseconds = 8_000_000_000_000_000
+}
+
 // MARK: - Settings wire models
 //
 // GET/POST /v2/settings: the engine-owned settings snapshot and its partial
 // patches. Split from Models.swift (readability ratchet) — same wire shapes.
+
+public enum InteractionTimeoutSnapshotValue: Sendable, Equatable {
+    /// Compatibility with older daemons that omitted the field entirely.
+    case absent
+    case disabled
+    case finite(Int)
+}
 
 public struct SettingsSnapshot: Codable, Sendable, Equatable {
     public let sources: [String]
@@ -11,9 +24,54 @@ public struct SettingsSnapshot: Codable, Sendable, Equatable {
     public let budget: BudgetSettings
     public let runtime: RuntimeSettings?
     public let harnesses: [String: HarnessSettings]?
-    /// Wait before an unanswered interactive question declines benignly (ms).
-    /// Optional: pre-v0.8 daemons do not report it.
-    public let interactionTimeoutMs: Int?
+    /// Presence-aware wire value: old daemon omission, explicit no-expiry null,
+    /// or a finite positive millisecond duration are distinct states.
+    public let interactionTimeout: InteractionTimeoutSnapshotValue
+
+    /// Compatibility projection for existing finite-value consumers. Disabled
+    /// and old-daemon absence are both nil; new settings UI reads the typed
+    /// `interactionTimeout` value above.
+    public var interactionTimeoutMs: Int? {
+        guard case .finite(let value) = interactionTimeout else { return nil }
+        return value
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sources, routing, budget, runtime, harnesses, interactionTimeoutMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sources = try c.decode([String].self, forKey: .sources)
+        routing = try c.decode(RoutingSettings.self, forKey: .routing)
+        budget = try c.decode(BudgetSettings.self, forKey: .budget)
+        runtime = try c.decodeIfPresent(RuntimeSettings.self, forKey: .runtime)
+        harnesses = try c.decodeIfPresent([String: HarnessSettings].self, forKey: .harnesses)
+        if !c.contains(.interactionTimeoutMs) {
+            interactionTimeout = .absent
+        } else if try c.decodeNil(forKey: .interactionTimeoutMs) {
+            interactionTimeout = .disabled
+        } else {
+            interactionTimeout = .finite(try c.decode(Int.self, forKey: .interactionTimeoutMs))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(sources, forKey: .sources)
+        try c.encode(routing, forKey: .routing)
+        try c.encode(budget, forKey: .budget)
+        try c.encodeIfPresent(runtime, forKey: .runtime)
+        try c.encodeIfPresent(harnesses, forKey: .harnesses)
+        switch interactionTimeout {
+        case .absent:
+            break
+        case .disabled:
+            try c.encodeNil(forKey: .interactionTimeoutMs)
+        case .finite(let value):
+            try c.encode(value, forKey: .interactionTimeoutMs)
+        }
+    }
 }
 
 public struct RoutingSettings: Codable, Sendable, Equatable {
@@ -136,7 +194,9 @@ public struct SettingsUpdateRequest: Encodable, Sendable, Equatable {
     public var envInheritance: String?
     public var authPreference: String?
     public var paidBudgetPerRun: PaidBudget?
-    public var interactionTimeoutMs: Int?
+    /// Double optional preserves PATCH semantics: outer nil omits the key;
+    /// `.some(nil)` sends JSON null to disable automatic expiry.
+    public var interactionTimeoutMs: Int??
     public var harnesses: [String: HarnessSettingsPatch]?
 
     public init(routingGoal: String? = nil, paidFallback: String? = nil,
@@ -145,7 +205,7 @@ public struct SettingsUpdateRequest: Encodable, Sendable, Equatable {
                 eligibleHarnesses: [String]? = nil, envInheritance: String? = nil,
                 authPreference: String? = nil,
                 paidBudgetPerRun: PaidBudget? = nil,
-                interactionTimeoutMs: Int? = nil,
+                interactionTimeoutMs: Int?? = nil,
                 harnesses: [String: HarnessSettingsPatch]? = nil) {
         self.routingGoal = routingGoal
         self.paidFallback = paidFallback
@@ -176,7 +236,13 @@ public struct SettingsUpdateRequest: Encodable, Sendable, Equatable {
         try c.encodeIfPresent(envInheritance, forKey: .envInheritance)
         try c.encodeIfPresent(authPreference, forKey: .authPreference)
         try c.encodeIfPresent(paidBudgetPerRun, forKey: .paidBudgetPerRun)
-        try c.encodeIfPresent(interactionTimeoutMs, forKey: .interactionTimeoutMs)
+        if let interactionTimeoutMs {
+            if let value = interactionTimeoutMs {
+                try c.encode(value, forKey: .interactionTimeoutMs)
+            } else {
+                try c.encodeNil(forKey: .interactionTimeoutMs)
+            }
+        }
         try c.encodeIfPresent(harnesses, forKey: .harnesses)
     }
 }

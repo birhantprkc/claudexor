@@ -109,7 +109,7 @@ enum RunFacts {
         if task.waitingOnUser {
             facts.append(Fact(id: "needs_answer", text: "Needs your answer",
                               glyph: "questionmark.bubble.fill", tone: .warning,
-                              help: "The harness asked a question; the run is waiting for you (it declines benignly on timeout)."))
+                              help: "The harness asked a question; the run is waiting for you and declines benignly only if automatic expiry is configured."))
         }
         // Best-of count — honest degradation when fewer candidates landed than
         // requested (never a silent full-race read).

@@ -2,8 +2,8 @@ import ClaudexorKit
 import SwiftUI
 
 /// Live harness question (waiting_on_user). The run is parked until the user
-/// answers or the engine's timeout declines benignly; this card is the answer
-/// surface. One card per pending interaction, shown on every tab of the run.
+/// answers or a finite expiry/lifecycle release ends the wait; automatic expiry
+/// may be disabled. One answer card is shown on every tab of the run.
 struct InteractionCard: View {
     @Environment(AppModel.self) private var model
     let interaction: PendingInteraction
@@ -24,12 +24,13 @@ struct InteractionCard: View {
                     HarnessChip(family: harness)
                 }
                 Spacer()
-                if let timeout = timeoutLabel {
-                    Label(timeout, systemImage: "clock")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .help("Unanswered questions decline automatically; the model continues with stated assumptions.")
-                }
+                Label(
+                    InteractionExpiryPresentation.label(timeoutAt: interaction.timeoutAt),
+                    systemImage: "clock"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .help(InteractionExpiryPresentation.help(timeoutAt: interaction.timeoutAt))
             }
 
             ForEach(interaction.questions) { question in
@@ -92,17 +93,6 @@ struct InteractionCard: View {
         InteractionAnswerComposer.hasAnyAnswer(interaction, selections: selections, freeText: freeText)
     }
 
-    private var timeoutLabel: String? {
-        guard let timeoutAt = interaction.timeoutAt else { return nil }
-        // Shared static formatters (AppModel.parseEventDate): ISO8601DateFormatter
-        // allocation is expensive and this label re-evaluates on every card render.
-        guard let date = AppModel.parseEventDate(timeoutAt) else { return nil }
-        let remaining = date.timeIntervalSinceNow
-        guard remaining > 0 else { return "expiring" }
-        let minutes = Int(remaining / 60)
-        return minutes > 0 ? "auto-declines in \(minutes) min" : "auto-declines soon"
-    }
-
     private func binding(for questionId: String) -> Binding<String> {
         Binding(get: { freeText[questionId] ?? "" }, set: { freeText[questionId] = $0 })
     }
@@ -131,6 +121,28 @@ struct InteractionCard: View {
             sending = false
             errorMessage = failure
         }
+    }
+}
+
+/// Visible expiry truth for the card. A nil deadline is a deliberate disabled
+/// policy, not missing data, so it must remain explicit on every UI surface.
+@MainActor
+enum InteractionExpiryPresentation {
+    static func label(timeoutAt: String?, now: Date = .now) -> String {
+        guard let timeoutAt else { return "No automatic expiry" }
+        // Shared static formatters (AppModel.parseEventDate): formatter
+        // allocation is expensive and this label re-evaluates on every render.
+        guard let date = AppModel.parseEventDate(timeoutAt) else { return "Expiry unavailable" }
+        let remaining = date.timeIntervalSince(now)
+        guard remaining > 0 else { return "expiring" }
+        let minutes = Int(remaining / 60)
+        return minutes > 0 ? "auto-declines in \(minutes) min" : "auto-declines soon"
+    }
+
+    static func help(timeoutAt: String?) -> String {
+        timeoutAt == nil
+            ? "This question waits until it is answered, cancelled, or released by run termination or restart."
+            : "Unanswered questions decline automatically; the model continues with stated assumptions."
     }
 }
 

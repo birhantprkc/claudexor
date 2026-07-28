@@ -10,6 +10,22 @@ import { CredentialProfile } from "./credential-profile.js";
 import { PaidBudget, PaidFallback, QualityTierSet, RoutingGoal } from "./budget.js";
 import { TestCommandGrant, TestCommandInvocation } from "./task.js";
 
+/** Largest persisted finite interaction wait. It stays comfortably below the
+ * ECMAScript ISO-Date ceiling even after adding a contemporary epoch, while
+ * still exercising the chunked-timer path far beyond Node's 2^31-1 limit. */
+export const INTERACTION_TIMEOUT_MAX_MS = 8_000_000_000_000_000;
+
+/** One finite-or-disabled value contract shared by persisted config and every
+ * control-plane projection. Defaults/optionality belong to the containing
+ * field, not to this scalar schema. */
+export const InteractionTimeoutValue = z
+  .number()
+  .int()
+  .safe()
+  .positive()
+  .max(INTERACTION_TIMEOUT_MAX_MS)
+  .nullable();
+
 const ProjectProtectedPathGlob = NonBlankString.regex(
   /^(?!\/)(?![A-Za-z]:)(?!.*\\)(?!.*\0)(?!.*\/\/)(?!.*\/$)(?!.*(?:^|\/)\.\.?(?:\/|$))\S(?:.*\S)?$/,
   "must be a canonical repo-relative glob using forward slashes, without absolute roots, empty/dot segments, or '..' traversal",
@@ -116,19 +132,11 @@ export type TrustConfig = z.infer<typeof TrustConfig>;
 export const GlobalConfig = z
   .object({
     version: z.literal(1).default(1).describe("Config format version."),
-    /**
-     * How long an interactive run waits for the user's answer to a harness
-     * question (interaction.requested) before delivering a benign decline and
-     * letting the model continue with assumptions.
-     */
-    interaction_timeout_ms: z
-      .number()
-      .int()
-      .positive()
-      .default(900_000)
-      .describe(
-        "How long an interactive run waits for the user's answer to a harness question before delivering a benign decline and letting the model continue.",
-      ),
+    /** Automatic-expiry policy for one interaction wait. Positive milliseconds
+     * produce a benign decline at the deadline; null disables that expiry. */
+    interaction_timeout_ms: InteractionTimeoutValue.default(900_000).describe(
+      "Automatic-expiry policy for an interactive answer: positive milliseconds deliver a benign decline at the deadline; null disables automatic expiry.",
+    ),
     routing: z
       .object({
         primary_harness: z

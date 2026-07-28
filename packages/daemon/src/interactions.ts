@@ -2,6 +2,7 @@ import type { DurableJournal } from "@claudexor/journal";
 import type {
   ControlPendingInteraction,
   InteractionAnswerSet,
+  InteractionHandlerRelease,
   InteractionRequest,
 } from "@claudexor/schema";
 import {
@@ -17,7 +18,7 @@ export interface InteractionContext {
   harnessId: string;
   request: InteractionRequest;
   requestedAt: string;
-  timeoutAt: string;
+  timeoutAt: string | null;
 }
 
 export type InteractionAnswerStatus = "delivered" | "not_found" | "already_resolved" | "rejected";
@@ -145,8 +146,8 @@ export class InteractionStore {
 
 interface LiveEntry {
   store: InteractionStore;
-  resolve: (answers: InteractionAnswerSet | null) => void;
-  expiresAtMs: number;
+  resolve: (result: InteractionAnswerSet | InteractionHandlerRelease) => void;
+  expiresAtMs: number | null;
 }
 
 /** Live answer bridge; durable state remains owned by InteractionStore. */
@@ -160,15 +161,21 @@ export class InteractionRegistry {
     },
   ) {}
 
-  register(ctx: InteractionContext, params: unknown): Promise<InteractionAnswerSet | null> {
+  register(
+    ctx: InteractionContext,
+    params: unknown,
+  ): Promise<InteractionAnswerSet | InteractionHandlerRelease> {
     this.prune();
+    // Validate before the durable request append: a malformed internal
+    // deadline must not leave an unanswerable journal row without a live owner.
+    const expiresAtMs = parseExpiry(ctx.timeoutAt);
     const store = this.stores.forRequest(params);
     store.request(ctx);
-    return new Promise<InteractionAnswerSet | null>((resolve) => {
+    return new Promise<InteractionAnswerSet | InteractionHandlerRelease>((resolve) => {
       this.live.set(interactionKey(ctx.runId, ctx.request.interaction_id), {
         store,
         resolve,
-        expiresAtMs: Date.parse(ctx.timeoutAt) || Date.now() + 900_000,
+        expiresAtMs,
       });
     });
   }
@@ -206,7 +213,7 @@ export class InteractionRegistry {
     for (const [key, entry] of this.live) {
       if (!key.startsWith(`${runId}\u0000`)) continue;
       this.live.delete(key);
-      entry.resolve(null);
+      entry.resolve({ kind: "released", reason: "run_terminal" });
     }
   }
 
@@ -218,15 +225,22 @@ export class InteractionRegistry {
   private prune(): void {
     const now = Date.now();
     for (const [key, entry] of this.live) {
-      if (entry.expiresAtMs > now) continue;
+      if (entry.expiresAtMs === null || entry.expiresAtMs > now) continue;
       const split = key.indexOf("\u0000");
       const runId = key.slice(0, split);
       const interactionId = key.slice(split + 1);
       entry.store.resolve(runId, interactionId, "timeout");
       this.live.delete(key);
-      entry.resolve(null);
+      entry.resolve({ kind: "released", reason: "timeout" });
     }
   }
+}
+
+function parseExpiry(timeoutAt: string | null): number | null {
+  if (timeoutAt === null) return null;
+  const value = Date.parse(timeoutAt);
+  if (!Number.isFinite(value)) throw new Error("invalid interaction timeoutAt");
+  return value;
 }
 
 export function interactionProjection() {

@@ -1,9 +1,8 @@
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { daemonDir, readToken } from "@claudexor/daemon";
-import type { InteractionAnswerSet, InteractionQuestion } from "@claudexor/schema";
+import type { InteractionQuestion } from "@claudexor/schema";
 import type { RunOutcomeFacts } from "@claudexor/schema";
 import {
   InteractionQuestion as InteractionQuestionSchema,
@@ -13,6 +12,8 @@ import {
   processExitCode,
 } from "@claudexor/schema";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
+import { promptQuestionsOnTty } from "./interaction-prompt.js";
+export { collectInteractionAnswers } from "./interaction-prompt.js";
 
 const print = (s: string): void => {
   process.stdout.write(s + "\n");
@@ -98,7 +99,9 @@ export function formatRunEventLine(ev: Record<string, unknown>): string | null {
     case "interaction.answered":
       return `[${who}] answer delivered`;
     case "interaction.timeout":
-      return `[${who}] no answer in time — continuing with assumptions`;
+      return p["reason"] === "cancelled"
+        ? `[${who}] question wait cancelled`
+        : `[${who}] no answer in time — continuing with assumptions`;
     case "harness.completed":
       return `[${who}] completed: ${String(p["status"] ?? "?")}${p["error"] ? ` — ${truncate(String(p["error"]), 160)}` : ""}`;
     case "gate.completed":
@@ -216,72 +219,6 @@ export function createRunEventLineFormatter(): (ev: Record<string, unknown>) => 
     lastMessageTitleByLane.set(lane, rendered);
     return line;
   };
-}
-
-/**
- * Prompt the questions on the controlling TTY. Returns null on a non-TTY
- * stdin or when the deadline passes (the engine then declines benignly).
- */
-export async function promptQuestionsOnTty(
-  interactionId: string,
-  questions: InteractionQuestion[],
-  timeoutAt?: string,
-): Promise<InteractionAnswerSet | null> {
-  if (!process.stdin.isTTY) {
-    print("(question received, but stdin is not a TTY — the run continues with assumptions)");
-    return null;
-  }
-  const deadlineMs = timeoutAt ? Date.parse(timeoutAt) - Date.now() : null;
-  if (deadlineMs !== null && (!Number.isFinite(deadlineMs) || deadlineMs <= 0)) {
-    // An already-expired deadline must decline immediately — prompting with
-    // no signal would hang the TTY forever on a question the engine already
-    // timed out (e.g. a historical event replayed by `follow`).
-    print("(question already timed out — the run continues with assumptions)");
-    return null;
-  }
-  const signal = deadlineMs !== null ? AbortSignal.timeout(deadlineMs) : undefined;
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answers: InteractionAnswerSet["answers"] = [];
-    for (const q of questions) {
-      print("");
-      print(`? ${q.header ? `[${q.header}] ` : ""}${q.question}`);
-      q.options.forEach((o, idx) =>
-        print(`   ${idx + 1}) ${o.label}${o.description ? ` — ${o.description}` : ""}`),
-      );
-      const hint =
-        q.options.length > 0
-          ? q.multi_select
-            ? "numbers separated by commas, or free text"
-            : "a number, or free text"
-          : "free text";
-      const raw = (
-        signal
-          ? await rl.question(`   answer (${hint}): `, { signal })
-          : await rl.question(`   answer (${hint}): `)
-      ).trim();
-      if (!raw) continue;
-      const picks = raw
-        .split(",")
-        .map((part) => Number.parseInt(part.trim(), 10))
-        .filter((n) => Number.isInteger(n) && n >= 1 && n <= q.options.length);
-      if (picks.length > 0 && picks.length === raw.split(",").length) {
-        answers.push({
-          question_id: q.id,
-          selected_labels: picks.map((n) => q.options[n - 1]?.label ?? "").filter(Boolean),
-          free_text: null,
-        });
-      } else {
-        answers.push({ question_id: q.id, selected_labels: [], free_text: raw });
-      }
-    }
-    return answers.length > 0 ? { interaction_id: interactionId, answers } : null;
-  } catch {
-    print("(answer window closed — the run continues with assumptions)");
-    return null;
-  } finally {
-    rl.close();
-  }
 }
 
 export interface ControlApiAddress {
@@ -415,6 +352,34 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
   let sawTerminal = false;
   let lastSeq = 0;
   const maxReconnects = 5;
+  const promptControllers = new Set<AbortController>();
+  let promptTail = Promise.resolve();
+  const stopPrompts = () => {
+    for (const controller of promptControllers) controller.abort();
+  };
+  const finish = async (code: number): Promise<number> => {
+    stopPrompts();
+    await promptTail;
+    return code;
+  };
+  const queueInteractionPrompt = (ev: Record<string, unknown>) => {
+    const controller = new AbortController();
+    promptControllers.add(controller);
+    const runPrompt = async () => {
+      try {
+        if (!controller.signal.aborted) {
+          await answerInteractionFromTty(addr, runId, ev, controller.signal);
+        }
+      } catch {
+        // Prompt delivery is a best-effort TTY projection. The run stream and
+        // its terminal remain authoritative; transport errors are surfaced by
+        // the ordinary interaction/readback paths without breaking follow.
+      } finally {
+        promptControllers.delete(controller);
+      }
+    };
+    promptTail = promptTail.then(runPrompt, runPrompt);
+  };
   // One formatter for the whole follow, reconnects included: a resumed stream
   // replays from Last-Event-ID, and the dedup state has to span that seam.
   const formatLine = createRunEventLineFormatter();
@@ -438,13 +403,17 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
     const type = String(ev["type"] ?? "");
     if (type === "run.completed" || type === "run.failed" || type === "run.blocked") {
       sawTerminal = true;
+      stopPrompts();
       // The lifecycle IS the exit code (D8): run.blocked fires on a SUCCEEDED
       // lifecycle (needs review) and therefore exits 0 — "Done · needs review".
       const payload = (ev["payload"] ?? {}) as Record<string, unknown>;
       exitCode = exitCodeForTerminalPayload(payload);
     }
     if (type === "interaction.requested" && !json) {
-      await answerInteractionFromTty(addr, runId, ev);
+      // Keep consuming SSE while the terminal owns stdin. A disabled question
+      // has no deadline, so awaiting it inline would prevent this same loop
+      // from observing the cancel/terminal event that must close the prompt.
+      queueInteractionPrompt(ev);
     }
     return "continue";
   };
@@ -471,7 +440,7 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
     }
     if (res.status === 404) {
       process.stderr.write(`claudexor follow: no such run '${runId}'\n`);
-      return 1;
+      return finish(1);
     }
     if (!res.ok || !res.body) {
       continue;
@@ -492,11 +461,11 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
             dataLines = [];
             eventName = "message";
             if (outcome === "end") {
-              if (sawTerminal) return exitCode;
+              if (sawTerminal) return finish(exitCode);
               // Server-side end WITHOUT a terminal event (interrupted run,
               // never-materialized job): the run did not finish cleanly.
               process.stderr.write("claudexor follow: stream ended without a terminal event\n");
-              return 1;
+              return finish(1);
             }
             continue;
           }
@@ -508,22 +477,24 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
     } catch {
       /* mid-stream transport drop — fall through to reconnect */
     }
-    if (sawTerminal) return exitCode;
+    if (sawTerminal) return finish(exitCode);
   }
   process.stderr.write(
     `claudexor follow: stream lost after ${maxReconnects} reconnects (no terminal event observed)\n`,
   );
-  return 1;
+  return finish(1);
 }
 
 async function answerInteractionFromTty(
   addr: ControlApiAddress,
   runId: string,
   ev: Record<string, unknown>,
+  signal: AbortSignal,
 ): Promise<void> {
   const p = (ev["payload"] ?? {}) as Record<string, unknown>;
   const interactionId = typeof p["interaction_id"] === "string" ? p["interaction_id"] : null;
   if (!interactionId) return;
+  if (signal.aborted) return;
   const questions = Array.isArray(p["questions"])
     ? p["questions"]
         .map((q) => InteractionQuestionSchema.safeParse(q))
@@ -540,6 +511,7 @@ async function answerInteractionFromTty(
   try {
     const detailRes = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
       headers: { Authorization: `Bearer ${addr.token}` },
+      signal,
     });
     if (detailRes.ok) {
       const detail = (await detailRes.json()) as {
@@ -554,14 +526,16 @@ async function answerInteractionFromTty(
       if (!active || !stillPending) return;
     }
   } catch {
+    if (signal.aborted) return;
     /* fall through to the deadline guard */
   }
   const answers = await promptQuestionsOnTty(
     interactionId,
     questions,
     typeof p["timeout_at"] === "string" ? p["timeout_at"] : undefined,
+    signal,
   );
-  if (!answers) return;
+  if (!answers || signal.aborted) return;
   const body = {
     answers: answers.answers.map((a) => ({
       questionId: a.question_id,
@@ -576,6 +550,7 @@ async function answerInteractionFromTty(
       method: "POST",
       headers: { Authorization: `Bearer ${addr.token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     },
   );
   if (!res.ok) {

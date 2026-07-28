@@ -274,6 +274,26 @@ import Testing
         let empty = SettingsUpdateRequest()
         let emptyObj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(empty)) as? [String: Any]
         #expect(emptyObj?["interactionTimeoutMs"] == nil)
+        let disabled = SettingsUpdateRequest(interactionTimeoutMs: .some(nil))
+        let disabledRaw = String(data: try JSONEncoder().encode(disabled), encoding: .utf8) ?? ""
+        #expect(disabledRaw.contains("\"interactionTimeoutMs\":null"))
+    }
+
+    @Test func settingsSnapshotDistinguishesAbsentDisabledAndFiniteTimeout() throws {
+        func decode(_ member: String) throws -> SettingsSnapshot {
+            try JSONDecoder().decode(SettingsSnapshot.self, from: Data("""
+            {"sources":[],"routing":{"goal":"auto","paidFallback":"when_unavailable","qualityTiers":{},"primaryHarness":null,"eligibleHarnesses":[],"envInheritance":"mirror_native","authPreference":"auto"},"budget":{"paidBudgetPerRun":{"kind":"unlimited"}},"runtime":null,"harnesses":{}\(member)}
+            """.utf8))
+        }
+        let absent = try decode("")
+        let disabled = try decode(",\"interactionTimeoutMs\":null")
+        #expect(absent.interactionTimeout == .absent)
+        #expect(disabled.interactionTimeout == .disabled)
+        #expect(try decode(",\"interactionTimeoutMs\":60000").interactionTimeout == .finite(60_000))
+        let absentWire = String(data: try JSONEncoder().encode(absent), encoding: .utf8) ?? ""
+        let disabledWire = String(data: try JSONEncoder().encode(disabled), encoding: .utf8) ?? ""
+        #expect(!absentWire.contains("interactionTimeoutMs"))
+        #expect(disabledWire.contains("\"interactionTimeoutMs\":null"))
     }
 
     @Test func settingsSnapshotDecodesRuntime() throws {
@@ -976,52 +996,7 @@ import Testing
                                          embeddedStateActive: false) == .idle)
     }
 
-    // MARK: - Per-harness auto-save (staged-field patch + anti-clobber)
-
-    @Test func harnessPatchClearsEmptyDraftsWithExplicitNull() throws {
-        // Empty/whitespace drafts must encode an EXPLICIT clear (.some(nil) -> JSON
-        // null), not be omitted — so the override is dropped server-side.
-        let patch = buildHarnessPatch(enabled: false, modelDraft: "  ", effort: "__default",
-                                      web: "off", toolsAllowDraft: " , ",
-                                      toolsDenyDraft: "", fallbackDraft: "")
-        #expect(patch.defaultModel == .some(Optional<String>.none))   // cleared
-        #expect(patch.effort == .some(Optional<String>.none))         // sentinel -> cleared
-        #expect(patch.fallbackModel == .some(Optional<String>.none))
-        #expect(patch.toolsAllow == [])                               // " , " -> no tokens
-        #expect(patch.enabled == false)
-        let json = String(decoding: try JSONEncoder().encode(patch), as: UTF8.self)
-        #expect(json.contains("\"defaultModel\":null"))               // explicit clear on the wire
-        #expect(json.contains("\"fallbackModel\":null"))
-    }
-
-    @Test func harnessPatchSetsTypedValuesAndParses() {
-        // Typed values survive into the patch; CSV/number parsing is fixed.
-        let patch = buildHarnessPatch(enabled: true, modelDraft: " fable ", effort: "high",
-                                      web: "live", toolsAllowDraft: "bash, edit ,read",
-                                      toolsDenyDraft: "web", fallbackDraft: "opus")
-        #expect(patch.defaultModel == .some("fable"))                 // trimmed, set
-        #expect(patch.effort == .some("high"))
-        #expect(patch.toolsAllow == ["bash", "edit", "read"])         // trimmed CSV
-        #expect(patch.toolsDeny == ["web"])
-        #expect(patch.fallbackModel == .some("opus"))
-        #expect(patch.web == "live")
-    }
-
-    @Test func harnessPatchOmitsStoredModelWhenNotEditable() throws {
-        // H2 guard: on a truth-less harness (models catalog cannot enumerate)
-        // a stored legacy model must NOT ride along with other saves — the
-        // strict engine would 400 the whole patch. Explicit clears still go.
-        let stuck = buildHarnessPatch(enabled: true, modelDraft: "legacy-model", effort: "__default",
-                                      web: "off", toolsAllowDraft: "",
-                                      toolsDenyDraft: "", fallbackDraft: "", modelEditable: false)
-        #expect(stuck.defaultModel == Optional<String?>.none)         // omitted entirely
-        let json = String(decoding: try JSONEncoder().encode(stuck), as: UTF8.self)
-        #expect(!json.contains("defaultModel"))                       // absent on the wire
-        let clear = buildHarnessPatch(enabled: true, modelDraft: "  ", effort: "__default",
-                                      web: "off", toolsAllowDraft: "",
-                                      toolsDenyDraft: "", fallbackDraft: "", modelEditable: false)
-        #expect(clear.defaultModel == .some(Optional<String>.none))   // explicit null clear rides
-    }
+    // MARK: - Per-harness model field
 
     @Test func modelFieldStateCoversAllCatalogOutcomes() {
         // Pure branch selection for the model-override control: a transport
@@ -1040,19 +1015,8 @@ import Testing
         // loading state — NEVER the "default only" truth claim.
         #expect(modelFieldState(models: nil, modelDraft: "", loadFailed: false) == .loading)
         #expect(modelFieldState(models: nil, modelDraft: "legacy", loadFailed: false) == .loading)
-        // Whitespace-only draft normalizes to empty (matches buildHarnessPatch).
+        // Whitespace-only draft normalizes to an explicit-clear candidate.
         #expect(modelFieldState(models: answered("none", []), modelDraft: "  ", loadFailed: false) == .defaultOnly)
-    }
-
-    @Test func harnessSaveDoesNotSettleWhenNewerEditRacedIn() {
-        // The field-revert bug: a typed value must SURVIVE a settings refresh until
-        // its OWN save settles. An older in-flight save (captured an earlier gen)
-        // must NOT clear `dirty` when a newer edit has bumped the generation.
-        var gen = 0
-        gen += 1; let firstEdit = gen      // user types "fable" -> gen 1
-        gen += 1; let secondEdit = gen     // user types "fable5" before save lands -> gen 2
-        #expect(harnessSaveShouldSettle(capturedGen: firstEdit, currentGen: gen) == false)  // stale, stays dirty
-        #expect(harnessSaveShouldSettle(capturedGen: secondEdit, currentGen: gen) == true)  // newest, settles
     }
 }
 

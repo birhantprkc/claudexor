@@ -54,6 +54,7 @@ const HARNESS_KEY_RE = new RegExp(
 const USAGE =
   "usage: claudexor settings set <key> <value>\n" +
   `  global keys: ${Object.keys(GLOBAL_SETTING_FIELDS).join(", ")}\n` +
+  "  interaction_timeout_ms: positive milliseconds or disabled\n" +
   `  harness keys: harness.<id>.{${Object.keys(HARNESS_SETTING_FIELDS).join(",")}}`;
 
 export async function settingsCommand(args: ParsedArgs, json: boolean): Promise<number> {
@@ -219,6 +220,9 @@ export function settingPatch(key: string, value: string): SettingsPatch {
     });
   }
   if (key === "interaction_timeout_ms") {
+    if (value.trim() === "disabled") {
+      return ControlSettingsUpdateRequest.parse({ interactionTimeoutMs: null });
+    }
     const interactionTimeoutMs = Number(value.trim());
     return ControlSettingsUpdateRequest.parse({ interactionTimeoutMs });
   }
@@ -238,7 +242,9 @@ function printSettings(settings: ReturnType<typeof ControlSettingsSnapshot.parse
   print(
     `budget.paid_budget_per_run: ${settings.budget.paidBudgetPerRun.kind === "unlimited" ? "unlimited" : settings.budget.paidBudgetPerRun.maxUsd}`,
   );
-  print(`interaction_timeout_ms: ${settings.interactionTimeoutMs}`);
+  print(
+    `interaction_timeout_ms: ${formatInteractionTimeoutSetting(settings.interactionTimeoutMs)}`,
+  );
   print(`runtime.reviewer_timeout_ms: ${settings.runtime.reviewerTimeoutMs}`);
   print(`runtime.transient_retry.max_retries: ${settings.runtime.transientRetry.maxRetries}`);
   print(
@@ -253,4 +259,8 @@ function printSettings(settings: ReturnType<typeof ControlSettingsSnapshot.parse
       `  ${id}: enabled=${harness.enabled} cli_login=${harness.nativeCredentialsEnabled ? "on" : "off"} model=${harness.defaultModel ?? "(native)"} fallback=${harness.fallbackModel ?? "(none)"} effort=${harness.effort ?? "(native)"} web=${harness.web} max_turns=${harness.maxTurns ?? "(none)"} max_rounds=${harness.maxRounds ?? "(default)"} auth=${harness.authPreference} limit_action=${harness.profileLimitAction}`,
     );
   }
+}
+
+export function formatInteractionTimeoutSetting(value: number | null): string {
+  return value === null ? "disabled" : String(value);
 }

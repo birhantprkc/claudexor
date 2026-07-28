@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { ControlHarnessSettingsPatch, ControlSettingsUpdateRequest } from "@claudexor/schema";
-import { GLOBAL_SETTING_FIELDS, HARNESS_SETTING_FIELDS, settingPatch } from "./settings-command.js";
+import {
+  ControlHarnessSettingsPatch,
+  ControlSettingsUpdateRequest,
+  INTERACTION_TIMEOUT_MAX_MS,
+} from "@claudexor/schema";
+import {
+  formatInteractionTimeoutSetting,
+  GLOBAL_SETTING_FIELDS,
+  HARNESS_SETTING_FIELDS,
+  settingPatch,
+} from "./settings-command.js";
 
 /**
  * Settings-coverage sweep (D28 / M6 item 3): every global/per-harness setting
@@ -40,6 +49,21 @@ describe("settings coverage sweep", () => {
 });
 
 describe("settingPatch", () => {
+  it("sets or disables the interactive-answer timeout without a magic number", () => {
+    expect(settingPatch("interaction_timeout_ms", "60000")).toEqual({
+      interactionTimeoutMs: 60_000,
+    });
+    expect(settingPatch("interaction_timeout_ms", "disabled")).toEqual({
+      interactionTimeoutMs: null,
+    });
+    expect(formatInteractionTimeoutSetting(null)).toBe("disabled");
+    expect(formatInteractionTimeoutSetting(60_000)).toBe("60000");
+    expect(settingPatch("interaction_timeout_ms", String(INTERACTION_TIMEOUT_MAX_MS))).toEqual({
+      interactionTimeoutMs: INTERACTION_TIMEOUT_MAX_MS,
+    });
+    expect(() => settingPatch("interaction_timeout_ms", "8640000000000000")).toThrow();
+  });
+
   it("maps the newly-covered global auth_preference", () => {
     expect(settingPatch("auth_preference", "api_key")).toEqual({ authPreference: "api_key" });
   });

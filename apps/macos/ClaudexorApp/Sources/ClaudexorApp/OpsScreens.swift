@@ -4,37 +4,18 @@ import ClaudexorKit
 
 // MARK: - Settings
 
+@MainActor
 struct SettingsScreen: View {
     @Environment(AppModel.self) var model
-    @State private var routingGoal = "auto"
-    @State private var paidFallback = "when_unavailable"
-    @State private var primaryHarness = "__none"
-    @State private var authPreference = "auto"
-    @State private var envInheritance = "mirror_native"
-    @State private var eligibleHarnesses: Set<HarnessFamily> = []
-    @State private var maxUsdPerRun = ""
-    @State private var budgetUnlimited = true
-    @State private var interactionTimeoutMinutes = ""
-    @State private var engineDraftsDirty = false
-    @State private var syncedSnapshot: [String] = []
-    private var runCapValid: Bool { budgetUnlimited || ComposerOptionParser.parseNonnegativeFiniteDouble(maxUsdPerRun) != nil }
-    /// Configured quality-tier count across intents (server truth; no UI tier
-    /// editor — D-22 backlog).
-    private var qualityTierCount: Int {
-        model.activeSettingsSnapshot?.routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0
-    }
-    /// GH #22 pre-guard: Quality routing with ZERO configured tiers can never
-    /// route — the engine refuses every quality run at preflight ("quality
-    /// routing requires a comparable user-declared tier"). Block Save so the UI
-    /// never persists an unroutable goal (and a quality run never traps the user
-    /// later). Configure tiers via `claudexor settings` until the tier editor
-    /// ships (D-22).
-    private var qualityTierGuardTripped: Bool { routingGoal == "quality" && qualityTierCount == 0 }
-    private var interactionTimeoutValid: Bool {
-        let trimmed = interactionTimeoutMinutes.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return true }
-        return (Int(trimmed) ?? 0) > 0
-    }
+    @State private var drafts: [ExecutionLocationID: GlobalSettingsDraft] = [:]
+    @State private var laneReducers: [SettingsLaneKey: SettingsLaneReducer] = [:]
+    @State private var admittedEdits: [SettingsLaneKey: AdmittedSettingsEdit] = [:]
+    @State private var debounceTasks: [SettingsLaneKey: Task<Void, Never>] = [:]
+    @State private var savingKeys: Set<SettingsLaneKey> = []
+    @State var harnessAutosave = HarnessSettingsAutosaveState()
+    @FocusState private var focusedLane: SettingsLane?
+
+    private static let debounceNanoseconds: UInt64 = 600_000_000
 
     var body: some View {
         @Bindable var model = model
@@ -56,17 +37,17 @@ struct SettingsScreen: View {
         }
         .frame(minWidth: 720, minHeight: 600)
         .task { await refreshAll() }
-        .onAppear { syncFromModel() }
-        .onChange(of: model.activeSettingsSnapshot) { _, _ in syncFromModel() }
-        .onChange(of: routingGoal) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: paidFallback) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: primaryHarness) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: authPreference) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: envInheritance) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: eligibleHarnesses) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: maxUsdPerRun) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: budgetUnlimited) { _, _ in markEngineDraftsEdited() }
-        .onChange(of: interactionTimeoutMinutes) { _, _ in markEngineDraftsEdited() }
+        .onAppear { hydrate(model.activeExecutionLocation) }
+        .onChange(of: model.activeSettingsSnapshot) { _, _ in
+            hydrate(model.activeExecutionLocation)
+        }
+        .onChange(of: model.activeExecutionLocation) { _, locationID in
+            hydrate(locationID)
+        }
+        .onChange(of: focusedLane) { oldLane, newLane in
+            if let oldLane, oldLane != newLane { flush(oldLane) }
+        }
+        .onDisappear { flushAll() }
         .sheet(item: $model.settingsRemoteTerminalSheet) { request in
             RemoteTerminalSheet(request: request) {
                 model.settingsRemoteTerminalSheet = nil
@@ -75,222 +56,64 @@ struct SettingsScreen: View {
         }
     }
 
-    private var draftSnapshot: [String] {
-        [routingGoal, paidFallback, primaryHarness, authPreference, envInheritance,
-         eligibleHarnesses.map(\.rawValue).sorted().joined(separator: ","),
-         budgetUnlimited ? "unlimited" : "finite", maxUsdPerRun, interactionTimeoutMinutes]
-    }
-
-    private func markEngineDraftsEdited() {
-        if draftSnapshot != syncedSnapshot { engineDraftsDirty = true }
-    }
-
-    private func settingsTab<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-                content()
-            }
-            .padding(.horizontal, Theme.Spacing.xl)
-            .padding(.vertical, Theme.Spacing.xl)
-            .frame(maxWidth: Theme.Layout.readableMaxWidth, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            // QA-076 (issue-076): under keyboard navigation the Settings window
-            // had NO reachable focus descendant — `AXFocusedUIElement` stayed on
-            // the `AXWindow` and no tab item or button ever entered focus. The
-            // root `TabView`'s nested `ScrollView`/`VStack` content offered the
-            // focus engine no section to enter. Marking each pane's content a
-            // `.focusSection()` gives SwiftUI an explicit focus cohort to route
-            // into, so Tab reaches the pane's enabled buttons/fields instead of
-            // dead-ending on the window. (The panes' controls are native
-            // buttons/fields — already focusable; they only lacked an entry.)
-            .focusSection()
-        }
-        .scrollContentBackground(.hidden)
-        .background(Theme.surfaceBase)
-    }
-
-    @ViewBuilder private var generalGroup: some View {
-        @Bindable var model = model
-        settingsGroup("General", "gearshape") {
-                    KeyValueRow(key: "Engine status", value: model.health.label, valueColor: model.health == .connected ? Theme.status(.positive) : .secondary)
-                    HStack {
-                        Button { Task { await model.connect() } } label: { Label("Reconnect", systemImage: "arrow.clockwise") }.buttonStyle(.bordered)
-                        Button { Task { await refreshAll() } } label: { Label("Refresh metadata", systemImage: "arrow.triangle.2.circlepath") }.buttonStyle(.bordered)
-                    }
-                }
-    }
-
-    @ViewBuilder private var appearanceGroup: some View {
-        @Bindable var model = model
-        settingsGroup("Appearance", "paintpalette") {
-                    Picker("Theme", selection: $model.appearance) {
-                        ForEach(AppearanceMode.allCases) { Label($0.label, systemImage: $0.glyph).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    Text("The window is matte glass — the desktop shows faintly through it. Code and diffs stay on a solid surface for contrast. Reduce Transparency falls back to a solid backdrop.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-    }
-
-    @ViewBuilder private var routingGroup: some View {
-        settingsGroup("Agent & Routing", "point.3.connected.trianglepath.dotted") {
-                    Picker("Routing goal", selection: $routingGoal) {
-                        Text("Auto").tag("auto")
-                        Text("Quality").tag("quality")
-                        Text("Economy").tag("economy")
-                    }
-                    .help("Auto paces expiring quota, Quality uses your highest comparable tier, and Economy minimizes incremental paid spend.")
-                    Picker("Paid fallback", selection: $paidFallback) {
-                        Text("Never").tag("never")
-                        Text("When unavailable").tag("when_unavailable")
-                        Text("Allowed within cap").tag("allowed_within_cap")
-                    }
-                    .help("Controls whether routing may leave subscription or proven-zero routes.")
-                    KeyValueRow(
-                        key: "Quality tiers",
-                        value: "\(model.activeSettingsSnapshot?.routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0) configured"
-                    )
-                    Picker("Primary harness", selection: $primaryHarness) {
-                        Text("None").tag("__none")
-                        ForEach(model.selectableHarnesses.filter { $0 != .raw }) { family in
-                            Label { Text(family.label) } icon: { HarnessIconImage.image(for: family) }.tag(family.rawValue)
-                        }
-                    }
-                    .help("Primary is a bias, not a hardcoded semantic role.")
-                    Picker("Env inheritance", selection: $envInheritance) {
-                        Text("Mirror native").tag("mirror_native")
-                        Text("Clean").tag("clean")
-                    }
-                    .help("mirror_native reuses native CLI auth/session context by default.")
-                    Picker("Auth route", selection: $authPreference) {
-                        Text("Auto (subscription first)").tag("auto")
-                        Text("Subscription").tag("subscription")
-                        Text("API key").tag("api_key")
-                    }
-                    .help("Which credential route harness runs prefer. Auto seeds the native subscription session and falls back to a stored API key; an explicit route discloses any fallback in the run events.")
-                    FlowLayout(spacing: Theme.Spacing.sm) {
-                        ForEach(model.selectableHarnesses.filter { $0 != .raw }) { family in
-                            FilterChip(label: family.label, iconImage: HarnessIconImage.image(for: family),
-                                       isActive: eligibleHarnesses.contains(family), tint: family.color) {
-                                if eligibleHarnesses.contains(family) { eligibleHarnesses.remove(family) }
-                                else { eligibleHarnesses.insert(family) }
-                            }
-                            .help("Default eligible pool. Empty means auto-discover available harnesses.")
-                        }
-                    }
-                    HStack {
-                        Button { Task { await saveEngineDefaults() } } label: { Label("Save engine defaults", systemImage: "checkmark.circle") }
-                            .buttonStyle(.borderedProminent).tint(Theme.accent)
-                            .disabled(qualityTierGuardTripped)
-                            .help(qualityTierGuardTripped
-                                  ? "Quality routing needs at least one configured quality tier; configure tiers with `claudexor settings` first."
-                                  : "Persist the routing, harness pool, auth-route, and env-inheritance defaults.")
-                        if let status = model.settingsStatus {
-                            Text(status).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
-                        }
-                    }
-                    if qualityTierGuardTripped {
-                        Label("Quality routing has no configured tiers, so every quality run would be refused at preflight. Add a quality tier (via `claudexor settings`) or choose Auto/Economy.",
-                              systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(Theme.status(.caution))
-                    }
-                }
-    }
-
-    @ViewBuilder private var harnessDoctorGroup: some View {
-        settingsGroup("Harness Doctor & Auth", "cpu") {
-                    Text("Claudexor mirrors native harness auth first, with API-key fallback through stored secret refs.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    KeyValueRow(key: "Control API", value: model.endpoint.isEmpty ? "—" : "http://\(model.endpoint)", mono: true)
-                    ForEach(model.selectableHarnesses.filter { $0 != .raw }) { family in
-                        nativeAuthRow(family)
-                    }
-                }
-    }
-
-    @ViewBuilder private var secretsGroup: some View {
-        settingsGroup("Secrets", "key") {
-                    Text("Secret values live in the v2 0600 file store. Run params and artifacts store refs/metadata only.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    KeyValueRow(key: "Secret backend", value: model.activeSecretBackend)
-                    if !model.activeStoredSecrets.isEmpty {
-                        FlowLayout(spacing: Theme.Spacing.xs) {
-                            ForEach(model.activeStoredSecrets) { secret in
-                                Text("\(secret.name) · \(secret.backend)")
-                                    .font(.caption2)
-                                    .padding(.horizontal, Theme.Spacing.sm).padding(.vertical, 2)
-                                    .background(Theme.surfaceRaisedHi, in: Capsule())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    FlowLayout(spacing: Theme.Spacing.sm) {
-                        ForEach(model.selectableHarnesses) { family in
-                            Button { model.authSheetTarget = AuthSheetTarget(family: family) } label: {
-                                Label { Text("Open \(family.label) Auth") } icon: { HarnessIconImage.image(for: family) }
-                            }
-                            .buttonStyle(.bordered)
-                            .help("Store fallback refs and run setup jobs in the shared \(family.label) Auth sheet.")
-                        }
-                    }
-                }
-    }
-
-    @ViewBuilder private var perHarnessGroup: some View {
-        settingsGroup("Per-Harness Defaults", "slider.horizontal.3") {
-                    Text("Engine-level defaults per harness: enable/disable, model override, effort, and web policy. Stored in ~/.claudexor/v3/config.yaml.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    ForEach(model.selectableHarnesses.filter { $0 != .raw }) { family in
-                        HarnessDefaultsRow(family: family,
-                                           settings: model.activeSettingsSnapshot?.harnesses?[family.rawValue])
-                    }
-                }
-    }
-
     @ViewBuilder private var budgetGroup: some View {
         settingsGroup("Budget", "dollarsign.circle") {
-                    Toggle("Unlimited paid budget", isOn: $budgetUnlimited)
-                        .toggleStyle(.switch)
-                        .tint(Theme.accent)
-                        .help("Unlimited still records exact or estimated spend; it removes only the paid cap.")
-                    HStack(spacing: Theme.Spacing.md) {
-                        TextField("Max USD per run", text: $maxUsdPerRun)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(budgetUnlimited)
-                            .help("Finite paid cap. Zero admits only proven-zero or subscription-entitlement routes.")
-                    }
-                    if !runCapValid {
-                        Label("Use a non-negative USD number for a finite budget.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(Theme.status(.negative))
-                    }
-                    Button { Task { await saveEngineDefaults() } } label: { Label("Save budget defaults", systemImage: "checkmark.circle") }
-                        .buttonStyle(.bordered)
-                        .disabled(!runCapValid)
-                        .help("Save the explicit unlimited or finite paid-budget contract.")
-                    QuotaDetailView()
-                        .frame(minHeight: 260)
-                }
+            HStack {
+                Toggle(
+                    "Unlimited paid budget",
+                    isOn: draftBinding(\.budgetUnlimited, lane: .paidBudget)
+                )
+                .toggleStyle(.switch)
+                .tint(Theme.accent)
+                .help("Unlimited still records exact or estimated spend; it removes only the paid cap.")
+                laneStatus(.paidBudget)
+            }
+            TextField(
+                "Max USD per run",
+                text: draftBinding(\.maxUsdPerRun, lane: .paidBudget, debounced: true)
+            )
+            .textFieldStyle(.roundedBorder)
+            .disabled(activeDraft.budgetUnlimited)
+            .focused($focusedLane, equals: .paidBudget)
+            .onSubmit { flush(.paidBudget) }
+            .help("Finite paid cap. Zero admits only proven-zero or subscription-entitlement routes.")
+            QuotaDetailView()
+                .frame(minHeight: 260)
+        }
     }
 
     @ViewBuilder private var interactiveGroup: some View {
         settingsGroup("Interactive questions", "questionmark.bubble") {
-                    HStack(spacing: Theme.Spacing.md) {
-                        TextField("Answer timeout (minutes)", text: $interactionTimeoutMinutes)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 220)
-                            .help("How long a run waits for your answer to a harness question before continuing with assumptions. Empty keeps the engine default (15 minutes).")
-                        Button { Task { await saveInteractionTimeout() } } label: { Label("Save", systemImage: "checkmark.circle") }
-                            .buttonStyle(.bordered)
-                            .disabled(!interactionTimeoutValid)
-                    }
-                    if !interactionTimeoutValid {
-                        Label("Use a positive whole number of minutes, or leave the field empty.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(Theme.status(.negative))
-                    }
+            Picker(
+                "Waiting policy",
+                selection: draftBinding(\.interactionTimeoutMode, lane: .interactionTimeout)
+            ) {
+                Text("Continue after timeout").tag(InteractionTimeoutMode.finite)
+                Text("No automatic expiry").tag(InteractionTimeoutMode.disabled)
+            }
+            .pickerStyle(.segmented)
+            .help("Disabled removes automatic expiry only; answering, cancelling, restart cleanup, and terminal cleanup still release the question.")
+            if activeDraft.interactionTimeoutMode == .finite {
+                HStack(spacing: Theme.Spacing.md) {
+                    TextField(
+                        "Positive whole minutes",
+                        text: draftBinding(
+                            \.interactionTimeoutMinutes,
+                            lane: .interactionTimeout,
+                            debounced: true
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 220)
+                    .focused($focusedLane, equals: .interactionTimeout)
+                    .onSubmit { flush(.interactionTimeout) }
+                    .help("How long a run waits before continuing with assumptions. Enter a positive whole number.")
+                    laneStatus(.interactionTimeout)
                 }
+            } else {
+                laneStatus(.interactionTimeout)
+            }
+        }
     }
 
     @ViewBuilder private var advancedGroup: some View {
@@ -338,83 +161,270 @@ struct SettingsScreen: View {
     }
 
     // Thin local shim over the shared SettingsGroup shell (kept so the many
-    // call sites in this file stay diff-quiet; the recipe lives in ONE place).
-    private func settingsGroup<Content: View>(_ title: String, _ systemImage: String, @ViewBuilder content: @escaping () -> Content) -> some View {
+    // call sites and the companion extension stay diff-quiet; the recipe lives
+    // in ONE design-system component.
+    func settingsGroup<Content: View>(_ title: String, _ systemImage: String, @ViewBuilder content: @escaping () -> Content) -> some View {
         SettingsGroup(title, systemImage: systemImage, content: content)
     }
 
-    private func refreshAll() async {
+    func refreshAll() async {
         await model.refreshSettings()
         await model.refreshQuota()
         await model.refreshSecrets()
         await model.refreshHarnesses()
         await model.refreshTrust()
-        syncFromModel()
+        hydrate(model.activeExecutionLocation)
     }
 
-    private func syncFromModel() {
-        guard let s = model.activeSettingsSnapshot, !engineDraftsDirty else { return }
-        routingGoal = s.routing.goal
-        paidFallback = s.routing.paidFallback
-        primaryHarness = s.routing.primaryHarness ?? "__none"
-        authPreference = s.routing.authPreference ?? "auto"
-        envInheritance = s.routing.envInheritance
-        eligibleHarnesses = Set(s.routing.eligibleHarnesses.map { HarnessFamily(rawValue: $0) })
-        budgetUnlimited = s.budget.paidBudgetPerRun == .unlimited
-        maxUsdPerRun = s.budget.paidBudgetPerRun.finiteMaxUsd.map { String(format: "%.2f", $0) } ?? ""
-        interactionTimeoutMinutes = s.interactionTimeoutMs.map { String(max(1, $0 / 60_000)) } ?? ""
-        syncedSnapshot = draftSnapshot
+    var activeDraft: GlobalSettingsDraft {
+        draft(at: model.activeExecutionLocation)
     }
 
-    private func saveInteractionTimeout() async {
-        let trimmed = interactionTimeoutMinutes.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard interactionTimeoutValid, !trimmed.isEmpty, let minutes = Int(trimmed) else { return }
-        if await model.saveSettings(SettingsUpdateRequest(interactionTimeoutMs: minutes * 60_000)) {
-            // PARTIAL save: only the timeout reached the server. Mark just that
-            // field as synced and re-derive dirtiness — unsaved routing/budget
-            // drafts must survive (a full release here would resync every
-            // field from the snapshot and silently discard them).
-            if syncedSnapshot.count == draftSnapshot.count, !syncedSnapshot.isEmpty {
-                syncedSnapshot[syncedSnapshot.count - 1] = interactionTimeoutMinutes
+    private func snapshot(at locationID: ExecutionLocationID) -> SettingsSnapshot? {
+        locationID == .local
+            ? model.settingsSnapshot
+            : model.remoteSettingsSnapshots[locationID]
+    }
+
+    private func draft(at locationID: ExecutionLocationID) -> GlobalSettingsDraft {
+        drafts[locationID]
+            ?? snapshot(at: locationID).map(GlobalSettingsDraft.from)
+            ?? .defaults
+    }
+
+    func qualityTierCount(at locationID: ExecutionLocationID? = nil) -> Int {
+        snapshot(at: locationID ?? model.activeExecutionLocation)?
+            .routing.qualityTiers.values.reduce(0) { $0 + $1.count } ?? 0
+    }
+
+    func draftBinding<Value>(
+        _ keyPath: WritableKeyPath<GlobalSettingsDraft, Value>,
+        lane: SettingsLane,
+        debounced: Bool = false
+    ) -> Binding<Value> {
+        let locationID = model.activeExecutionLocation
+        return Binding(
+            get: { draft(at: locationID)[keyPath: keyPath] },
+            set: { value in
+                var next = draft(at: locationID)
+                next[keyPath: keyPath] = value
+                drafts[locationID] = next
+                admit(lane, at: locationID, debounced: debounced)
             }
-            engineDraftsDirty = draftSnapshot != syncedSnapshot
-            if !engineDraftsDirty { syncFromModel() }
-        }
-    }
-
-    /// Our settled save releases the drafts back to server sync; a failed save
-    /// keeps them dirty so edits survive the next snapshot republish.
-    private func releaseDraftsToSync() {
-        engineDraftsDirty = false
-        syncFromModel()
-    }
-
-    private func saveEngineDefaults() async {
-        guard runCapValid else {
-            model.settingsStatus = "Budget defaults were not saved: enter non-negative USD numbers or leave fields empty."
-            return
-        }
-        // Defense-in-depth behind the disabled Save button (GH #22): never send a
-        // quality goal that has no configured tiers to the engine.
-        guard !qualityTierGuardTripped else {
-            model.settingsStatus = "Quality routing needs at least one configured quality tier; nothing was saved."
-            return
-        }
-        let paidBudget: PaidBudget = budgetUnlimited
-            ? .unlimited
-            : .finite(maxUsd: ComposerOptionParser.parseNonnegativeFiniteDouble(maxUsdPerRun) ?? 0)
-        let patch = SettingsUpdateRequest(
-            routingGoal: routingGoal,
-            paidFallback: paidFallback,
-            // Explicit null clears the primary (no "__none" magic string —
-            // the server validates ids against the real registry).
-            primaryHarness: primaryHarness == "__none" ? .some(nil) : .some(primaryHarness),
-            eligibleHarnesses: eligibleHarnesses.map(\.rawValue).sorted(),
-            envInheritance: envInheritance,
-            authPreference: authPreference,
-            paidBudgetPerRun: paidBudget
         )
-        if await model.saveSettings(patch) { releaseDraftsToSync() }
+    }
+
+    func primaryHarnessBinding() -> Binding<String> {
+        let locationID = model.activeExecutionLocation
+        return Binding(
+            get: { draft(at: locationID).primaryHarness ?? "__none" },
+            set: { value in
+                var next = draft(at: locationID)
+                next.primaryHarness = value == "__none" ? nil : value
+                drafts[locationID] = next
+                admit(.primaryHarness, at: locationID, debounced: false)
+            }
+        )
+    }
+
+    func toggleEligibleHarness(_ family: HarnessFamily) {
+        let locationID = model.activeExecutionLocation
+        var next = draft(at: locationID)
+        if next.eligibleHarnesses.contains(family) {
+            next.eligibleHarnesses.remove(family)
+        } else {
+            next.eligibleHarnesses.insert(family)
+        }
+        drafts[locationID] = next
+        admit(.eligibleHarnesses, at: locationID, debounced: false)
+    }
+
+    /// Merge fresh server truth lane-by-lane. Drafts with an admitted edit or a
+    /// failed save remain owned by the user; unrelated responses cannot clobber
+    /// them and settled lanes immediately return to server ownership.
+    private func hydrate(_ locationID: ExecutionLocationID) {
+        guard let incoming = snapshot(at: locationID) else { return }
+        let preserving = Set(SettingsLane.allCases.filter { lane in
+            laneReducers[SettingsLaneKey(locationID: locationID, lane: lane)]?
+                .phase.preservesDraft == true
+        })
+        if var current = drafts[locationID] {
+            current.adopt(incoming, preserving: preserving)
+            drafts[locationID] = current
+        } else {
+            drafts[locationID] = GlobalSettingsDraft.from(incoming)
+        }
+    }
+
+    /// Admit one logical field edit, validate it before any POST, and freeze its
+    /// exact one-key patch plus execution location before the debounce begins.
+    private func admit(
+        _ lane: SettingsLane,
+        at locationID: ExecutionLocationID,
+        debounced: Bool
+    ) {
+        let key = SettingsLaneKey(locationID: locationID, lane: lane)
+        let edit = draft(at: locationID).edit(
+            for: lane,
+            qualityTierCount: qualityTierCount(at: locationID)
+        )
+        let validationError: String?
+        switch edit.validation {
+        case .valid:
+            validationError = nil
+        case .invalid(let message):
+            validationError = message
+        }
+
+        var reducer = laneReducers[key] ?? SettingsLaneReducer()
+        let generation = reducer.admit(
+            validationError: validationError,
+            debounced: debounced && validationError == nil
+        )
+        laneReducers[key] = reducer
+        debounceTasks[key]?.cancel()
+        debounceTasks.removeValue(forKey: key)
+
+        guard validationError == nil else {
+            admittedEdits.removeValue(forKey: key)
+            return
+        }
+        admittedEdits[key] = AdmittedSettingsEdit(
+            edit: edit,
+            target: SettingsSaveTarget(
+                locationID: locationID,
+                generation: model.settingsGeneration(for: locationID)
+            ),
+            generation: generation
+        )
+
+        if debounced {
+            debounceTasks[key] = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: Self.debounceNanoseconds)
+                guard !Task.isCancelled else { return }
+                debounceTasks.removeValue(forKey: key)
+                queueAndSave(key, generation: generation)
+            }
+        } else {
+            Task { @MainActor in await runSaveLoop(for: key) }
+        }
+    }
+
+    private func flush(_ lane: SettingsLane) {
+        let key = SettingsLaneKey(locationID: model.activeExecutionLocation, lane: lane)
+        flush(key)
+    }
+
+    private func flush(_ key: SettingsLaneKey) {
+        debounceTasks[key]?.cancel()
+        debounceTasks.removeValue(forKey: key)
+        guard let generation = admittedEdits[key]?.generation else { return }
+        queueAndSave(key, generation: generation)
+    }
+
+    private func flushAll() {
+        for key in Array(admittedEdits.keys) { flush(key) }
+    }
+
+    private func queueAndSave(_ key: SettingsLaneKey, generation: Int) {
+        var reducer = laneReducers[key] ?? SettingsLaneReducer()
+        guard reducer.queue(generation: generation) else { return }
+        laneReducers[key] = reducer
+        Task { @MainActor in await runSaveLoop(for: key) }
+    }
+
+    private func runSaveLoop(for key: SettingsLaneKey) async {
+        guard !savingKeys.contains(key) else { return }
+        savingKeys.insert(key)
+        defer { savingKeys.remove(key) }
+
+        while let admitted = admittedEdits[key] {
+            var reducer = laneReducers[key] ?? SettingsLaneReducer()
+            guard reducer.beginSave(generation: admitted.generation) else { return }
+            laneReducers[key] = reducer
+
+            guard case .valid(let patch) = admitted.edit.validation else { return }
+            let result = await model.writeSettings(
+                patch,
+                at: admitted.target.locationID,
+                admittedGeneration: admitted.target.generation
+            )
+            let outcome: SettingsSaveOutcome = result.succeeded
+                ? .saved
+                : .failed(result.failureMessage ?? "Could not save this setting.")
+
+            reducer = laneReducers[key] ?? reducer
+            let reduction = reducer.complete(
+                generation: admitted.generation,
+                outcome: outcome
+            )
+            laneReducers[key] = reducer
+
+            if admittedEdits[key]?.generation == admitted.generation {
+                if result.succeeded {
+                    admittedEdits.removeValue(forKey: key)
+                    hydrate(key.locationID)
+                    clearSavedLater(key, generation: admitted.generation)
+                } else {
+                    return
+                }
+            }
+            guard reduction == .saveTrailing else { return }
+            debounceTasks[key]?.cancel()
+            debounceTasks.removeValue(forKey: key)
+        }
+    }
+
+    private func clearSavedLater(_ key: SettingsLaneKey, generation: Int) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard var reducer = laneReducers[key], reducer.generation == generation else { return }
+            reducer.clearSaved()
+            laneReducers[key] = reducer
+        }
+    }
+
+    private func retry(_ lane: SettingsLane) {
+        let locationID = model.activeExecutionLocation
+        admit(lane, at: locationID, debounced: false)
+    }
+
+    @ViewBuilder
+    func laneStatus(_ lane: SettingsLane) -> some View {
+        let key = SettingsLaneKey(locationID: model.activeExecutionLocation, lane: lane)
+        switch laneReducers[key]?.phase ?? .clean {
+        case .clean:
+            EmptyView()
+        case .editing:
+            Text("Editing…")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .invalid(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(Theme.status(.negative))
+                .lineLimit(2)
+                .help(message)
+        case .queued, .saving:
+            Label("Saving…", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .saved:
+            Label("Saved", systemImage: "checkmark.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(Theme.status(.positive))
+        case .failed(let message):
+            HStack(spacing: Theme.Spacing.xs) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.status(.negative))
+                    .lineLimit(2)
+                    .help(message)
+                Button("Retry") { retry(lane) }
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+            }
+        }
     }
 
 }

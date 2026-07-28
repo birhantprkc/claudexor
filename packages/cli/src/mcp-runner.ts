@@ -535,7 +535,7 @@ export function makeInteractionBridge(
                 interaction_id: id,
                 questions: Array.isArray(pi.questions) ? pi.questions : [],
               },
-              timeoutAt: pi.timeoutAt ?? undefined,
+              ...(Object.hasOwn(pi, "timeoutAt") ? { timeoutAt: pi.timeoutAt } : {}),
             });
         answerCache.set(id, result);
         const answers = result && Array.isArray(result.answers) ? result.answers : null;

@@ -11,10 +11,19 @@
           "description": "Config format version."
         },
         "interaction_timeout_ms": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 8000000000000000,
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
           "default": 900000,
-          "description": "How long an interactive run waits for the user's answer to a harness question before delivering a benign decline and letting the model continue."
+          "description": "Automatic-expiry policy for an interactive answer: positive milliseconds deliver a benign decline at the deadline; null disables automatic expiry."
         },
         "routing": {
           "type": "object",

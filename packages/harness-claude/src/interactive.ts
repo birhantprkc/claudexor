@@ -235,12 +235,22 @@ export async function* handleControlRequestFrame(
     interaction,
   };
 
-  let answers: InteractionAnswerSet | null = null;
-  try {
-    answers = await channel.request(interaction);
-  } catch {
-    answers = null;
-  }
+  const answer = Promise.resolve(channel.request(interaction)).then(
+    (answers): { kind: "answer"; answers: InteractionAnswerSet | null } => ({
+      kind: "answer",
+      answers,
+    }),
+    (): { kind: "answer"; answers: null } => ({ kind: "answer", answers: null }),
+  );
+  const result = await Promise.race([
+    answer,
+    io.closed.then((): { kind: "closed" } => ({ kind: "closed" })),
+  ]);
+  // The process owns this protocol channel. Once it is gone there is nowhere
+  // to deliver even a benign deny frame; returning lets runloop consume the
+  // already-queued exit and terminal cleanup release the durable question.
+  if (result.kind === "closed") return;
+  const answers = result.answers;
 
   if (answers && answers.answers.length > 0) {
     io.write(allowResponseFrame(requestId, request?.input ?? {}, interaction, answers));

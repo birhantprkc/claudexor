@@ -11,6 +11,11 @@ import ClaudexorKit
 /// that drives the card's presence AND the pure answer composer behind Send, so
 /// the affordance is both present and actually answerable in default config.
 @Suite struct InteractionCardTests {
+    @MainActor
+    @Test func disabledInteractionShowsExplicitNoExpiryTruth() {
+        #expect(InteractionExpiryPresentation.label(timeoutAt: nil) == "No automatic expiry")
+    }
+
     private func question(_ id: String, multi: Bool = false) -> InteractionQuestion {
         InteractionQuestion(
             id: id, question: "Which store?", header: nil,

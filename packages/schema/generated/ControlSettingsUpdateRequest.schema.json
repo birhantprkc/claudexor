@@ -78,9 +78,18 @@
           "description": "Per-intent quality tiers ordered highest to lowest; no provider or benchmark priors are inferred."
         },
         "interactionTimeoutMs": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "description": "New interactive-answer timeout, in milliseconds."
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 8000000000000000,
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "New interactive-answer timeout in milliseconds; null disables automatic expiry."
         },
         "primaryHarness": {
           "anyOf": [

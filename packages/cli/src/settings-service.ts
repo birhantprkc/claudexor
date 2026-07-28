@@ -317,7 +317,8 @@ export function mergeSettingsPatch(
 ): GlobalConfigT {
   return {
     ...cfg,
-    interaction_timeout_ms: p.interactionTimeoutMs ?? cfg.interaction_timeout_ms,
+    interaction_timeout_ms:
+      p.interactionTimeoutMs === undefined ? cfg.interaction_timeout_ms : p.interactionTimeoutMs,
     routing: {
       ...cfg.routing,
       primary_harness: nullableSettingName(p.primaryHarness, cfg.routing.primary_harness),

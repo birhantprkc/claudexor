@@ -9,6 +9,7 @@ import {
   followRun,
   formatRunEventLine,
   handshakeControlApi,
+  collectInteractionAnswers,
 } from "./live.js";
 
 /** Stub control API speaking just enough SSE for the follow contract. */
@@ -111,6 +112,24 @@ describe("claudexor follow", () => {
         payload: { harness_id: "codex", attempt_id: "a01", external_context_policy: "auto" },
       }),
     ).not.toContain("WARNING");
+  });
+
+  it("renders an automatic interaction expiry as elapsed time", () => {
+    expect(
+      formatRunEventLine({
+        type: "interaction.timeout",
+        payload: { harness_id: "claude", attempt_id: "a01" },
+      }),
+    ).toBe("[a01/claude] no answer in time — continuing with assumptions");
+  });
+
+  it("does not relabel a cancelled interaction wait as an automatic expiry", () => {
+    expect(
+      formatRunEventLine({
+        type: "interaction.timeout",
+        payload: { harness_id: "claude", attempt_id: "a01", reason: "cancelled" },
+      }),
+    ).toBe("[a01/claude] question wait cancelled");
   });
 
   it("renders plan.brief.materialized with source run + short sha (QA-046)", () => {
@@ -265,6 +284,91 @@ describe("claudexor follow", () => {
       expect(code).toBe(1);
     } finally {
       server.close();
+    }
+  });
+});
+
+describe("interactive TTY prompt lifetime", () => {
+  it("is abortable without a deadline when the run terminates", async () => {
+    const controller = new AbortController();
+    let closed = false;
+    const pending = collectInteractionAnswers(
+      "int-disabled",
+      [
+        {
+          id: "q1",
+          question: "Continue?",
+          header: "Choice",
+          options: [],
+          multi_select: false,
+        },
+      ] as never,
+      {
+        signal: controller.signal,
+        reader: {
+          question: (_prompt, options) =>
+            new Promise<string>((_resolve, reject) => {
+              options?.signal?.addEventListener(
+                "abort",
+                () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+                { once: true },
+              );
+            }),
+          close: () => {
+            closed = true;
+          },
+        },
+      },
+    );
+
+    controller.abort();
+    await expect(pending).resolves.toBeNull();
+    expect(closed).toBe(true);
+  });
+
+  it("chunks deadlines above Node's single-timer ceiling instead of expiring immediately", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-28T00:00:00.000Z"));
+    let closed = false;
+    try {
+      const pending = collectInteractionAnswers(
+        "int-large",
+        [
+          {
+            id: "q1",
+            question: "Continue?",
+            header: "Choice",
+            options: [],
+            multi_select: false,
+          },
+        ] as never,
+        {
+          timeoutAt: new Date(Date.now() + 2_147_483_647 + 5_000).toISOString(),
+          reader: {
+            question: (_prompt, options) =>
+              new Promise<string>((_resolve, reject) => {
+                options?.signal?.addEventListener(
+                  "abort",
+                  () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+                  { once: true },
+                );
+              }),
+            close: () => {
+              closed = true;
+            },
+          },
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(2_147_483_647);
+      expect(closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toBeNull();
+      expect(closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -46,6 +46,8 @@ describe("makeInteractionBridge (MCP daemon-run interaction plumbing)", () => {
     await bridge({ runId: "run-1" });
     expect(seenRequests).toHaveLength(1);
     expect((seenRequests[0] as any).request.interaction_id).toBe("int-1");
+    expect(Object.hasOwn(seenRequests[0] as object, "timeoutAt")).toBe(true);
+    expect((seenRequests[0] as any).timeoutAt).toBeNull();
     expect(posts).toHaveLength(1);
     expect(posts[0]!.url).toContain("/runs/run-1/interactions/int-1/answer");
     // Engine snake_case answers map to the control API's camelCase contract.

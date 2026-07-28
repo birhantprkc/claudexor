@@ -25,6 +25,7 @@ export * from "./context.js";
 export * from "./raw.js";
 export * from "./effort.js";
 export * from "./harness.js";
+export * from "./interaction.js";
 export * from "./review.js";
 export * from "./workproduct.js";
 export * from "./budget.js";

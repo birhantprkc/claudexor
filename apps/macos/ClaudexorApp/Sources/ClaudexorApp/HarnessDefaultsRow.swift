@@ -1,117 +1,89 @@
 //
-// HarnessDefaultsRow — per-harness engine defaults editor (model/effort/
-// fallback) with debounced saves and anti-clobber draft sync. Split from
-// OpsScreens.swift to keep the settings screen readable.
+// HarnessDefaultsRow — per-harness defaults with field-owned autosave lanes.
 //
 
-import SwiftUI
 import AppKit
 import ClaudexorKit
+import SwiftUI
 
-/// One harness's engine defaults (enabled / model / effort / web), saved as a
-/// partial patch so untouched fields keep their stored values.
-// @MainActor: this View's helpers (`performSave`, `scheduleSave`, `sync`,
-// `flushPendingSave`, `loadModels`) read/mutate `@State`. View methods are NOT
-// implicitly main-actor-isolated, so an async/detached Task running one of them
-// could mutate SwiftUI `@State` off the main actor (a threading violation under
-// strict concurrency). Annotating the struct pins every helper — and the
-// `Task { @MainActor in … }` closures that call them — to the main actor.
 @MainActor
 struct HarnessDefaultsRow: View {
     @Environment(AppModel.self) private var model
     let family: HarnessFamily
     let settings: HarnessSettings?
-    @State private var enabled = true
-    @State private var modelDraft = ""
-    /// Catalog answer for THIS harness; nil = offline/unloaded. The save path
-    /// derives modelEditable from it (H2: truth-less rows must not persist).
-    @State private var models: HarnessModelsResponse?
-    @State private var effort = "__default"
-    @State private var web = "auto"
-    @State private var fallbackDraft = ""
-    @State private var toolsAllowDraft = ""
-    @State private var toolsDenyDraft = ""
-    @State private var saving = false
-    /// Anti-clobber: true once the user edits a field, until OUR save settles.
-    /// While dirty, `sync()` refuses to re-derive drafts from `settings`, so a
-    /// post-save snapshot republish (the save answer republishes `settingsSnapshot`
-    /// to EVERY row) can't overwrite an in-progress edit — in this row or any other.
-    @State private var dirty = false
-    /// Debounce handle: each edit (re)schedules this; it sleeps, then auto-saves.
-    /// Cancelled on further edits so typing is one save, not a save per keystroke.
-    @State private var debounce: Task<Void, Never>?
-    /// Transient per-row save status shown next to the row (Saved ✓ / error).
-    @State private var status: SaveStatus = .idle
-    /// True while `sync()` is programmatically writing the drafts. The field
-    /// `.onChange` handlers check this so a server-driven re-sync does not look
-    /// like a user edit and re-trigger an auto-save (which would loop).
-    @State private var applyingSync = false
-    /// Value snapshot of the drafts as last written by `sync()`. scheduleSave ignores
-    /// a `.onChange` whose drafts still equal this (a programmatic sync echo that fires
-    /// a cycle after `applyingSync` was cleared), so server refreshes don't auto-save.
-    @State private var syncedSnapshot: [String] = []
+    @Binding var autosave: HarnessSettingsAutosaveState
+    @FocusState private var focusedLane: HarnessSettingsLane?
 
-    /// Per-row save lifecycle for the transient status line.
-    private enum SaveStatus: Equatable {
-        case idle, editing, saving, saved, failed(String)
+    private static let debounceNanoseconds: UInt64 = 600_000_000
+
+    private var activeScope: HarnessSettingsScopeKey {
+        HarnessSettingsScopeKey(
+            locationID: model.activeExecutionLocation,
+            harnessID: family.rawValue
+        )
     }
 
-    /// Debounce window: long enough that typing a model id is one save, short
-    /// enough that a blur/commit feels immediate.
-    private static let debounceMs: UInt64 = 600
+    private var draft: HarnessSettingsDraft {
+        autosave.draft(at: activeScope, serverSettings: settings(at: activeScope))
+    }
 
     private var effortLevels: [String] {
         let info = model.harnessInfo(for: family)
-        // Per-model narrowing, same rule as the engine's `effortLevelsForModel`:
-        // when a default model is chosen and the manifest recorded its ladder,
-        // the menu offers exactly what THAT model advertises (in the vendor's
-        // own order); otherwise the harness-wide merged ladder.
-        let chosenModel = modelDraft.trimmingCharacters(in: .whitespaces)
+        let chosenModel = draft.modelDraft.trimmingCharacters(in: .whitespaces)
         var levels = (chosenModel.isEmpty ? nil : info?.modelEffortLevels[chosenModel])
             ?? info?.effortLevels ?? []
-        if effort != "__default", !levels.contains(effort) { levels.insert(effort, at: 0) }
+        if draft.effort != "__default", !levels.contains(draft.effort) {
+            levels.insert(draft.effort, at: 0)
+        }
         return levels
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            // Header is a control row on the shared AlignedListRow component
-            // (UI cut 3 §1): the leading is the HarnessChip (not a dot+title
-            // identity, so it uses the `leading:` escape hatch); the status label
-            // and the Enabled toggle are trailing Grid columns, so the toggle
-            // stays collinear across every harness card and a long status can
-            // never shove it around.
             AlignedList {
                 AlignedListRow {
-                    HarnessChip(family: family, selected: enabled, available: true)
+                    HarnessChip(family: family, selected: draft.enabled, available: true)
                 } controls: {
-                    statusLabel
+                    laneStatus(.enabled)
                         .alignedControlColumn(minWidth: 60, alignment: .trailing)
-                    Toggle("Enabled", isOn: $enabled)
-                        .toggleStyle(.switch).tint(Theme.accent)
-                        .labelsHidden()
-                        .help("Disabled harnesses are excluded from routing and pools.")
-                        // A toggle commits immediately — no debounce for a discrete flip.
-                        .onChange(of: enabled) { _, _ in scheduleSave(immediate: true) }
-                        .alignedControlColumn(minWidth: 40, alignment: .trailing)
+                    Toggle(
+                        "Enabled",
+                        isOn: draftBinding(\.enabled, lane: .enabled)
+                    )
+                    .toggleStyle(.switch)
+                    .tint(Theme.accent)
+                    .labelsHidden()
+                    .help("Disabled harnesses are excluded from routing and pools.")
+                    .alignedControlColumn(minWidth: 40, alignment: .trailing)
                 }
             }
+
             HStack(spacing: Theme.Spacing.sm) {
-                // Settings default-model enumeration stays UNfiltered: the
-                // global truth source, not a per-turn route (W11 — strictness
-                // lives at run preflight, not settings-write).
-                HarnessModelOverrideField(family: family, modelDraft: $modelDraft,
-                                          fetch: { await model.harnessModels(for: $0) }, models: $models)
+                // Settings enumeration stays unfiltered: this is global model
+                // truth, not a per-turn route restriction.
+                HarnessModelOverrideField(
+                    family: family,
+                    modelDraft: draftBinding(\.modelDraft, lane: .modelAndEffort),
+                    fetch: { await model.harnessModels(for: $0) },
+                    models: modelCatalogBinding(at: activeScope)
+                )
+                .id(activeScope)
                 if !effortLevels.isEmpty {
-                    Picker("Effort", selection: $effort) {
+                    Picker(
+                        "Effort",
+                        selection: draftBinding(\.effort, lane: .modelAndEffort)
+                    ) {
                         Text("Default").tag("__default")
                         ForEach(effortLevels, id: \.self) { Text($0).tag($0) }
                     }
                     .fixedSize()
                     .help("Adapter-declared reasoning effort for \(family.label).")
-                    .onChange(of: effort) { _, _ in scheduleSave(immediate: true) }
                 }
-                Picker("Web", selection: $web) {
+                laneStatus(.modelAndEffort)
+            }
+
+            HStack(spacing: Theme.Spacing.sm) {
+                Picker("Web", selection: draftBinding(\.web, lane: .web)) {
                     Text("Auto").tag("auto")
                     Text("Off").tag("off")
                     Text("Cached").tag("cached")
@@ -119,206 +91,275 @@ struct HarnessDefaultsRow: View {
                 }
                 .fixedSize()
                 .help("Default external web/search policy for this harness.")
-                .onChange(of: web) { _, _ in scheduleSave(immediate: true) }
+                laneStatus(.web)
             }
+
             HStack(spacing: Theme.Spacing.sm) {
-                TextField("fallback model", text: $fallbackDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.caption, design: .monospaced))
-                    .help("Model used if the primary model is unavailable. Empty = none.")
-                    .onChange(of: fallbackDraft) { _, _ in scheduleSave() }
-                    .onSubmit { scheduleSave(immediate: true) }
+                TextField(
+                    "fallback model",
+                    text: draftBinding(
+                        \.fallbackDraft,
+                        lane: .fallbackModel,
+                        debounced: true
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .focused($focusedLane, equals: .fallbackModel)
+                .onSubmit { flush(.fallbackModel) }
+                .help("Model used if the primary model is unavailable. Empty = none.")
+                laneStatus(.fallbackModel)
             }
+
             HStack(spacing: Theme.Spacing.sm) {
-                TextField("tools allow (comma-separated)", text: $toolsAllowDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.caption, design: .monospaced))
-                    .help("Allow-list of tool ids for \(family.label). Empty = harness default.")
-                    .onChange(of: toolsAllowDraft) { _, _ in scheduleSave() }
-                    .onSubmit { scheduleSave(immediate: true) }
-                TextField("tools deny (comma-separated)", text: $toolsDenyDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.caption, design: .monospaced))
-                    .help("Deny-list of tool ids for \(family.label).")
-                    .onChange(of: toolsDenyDraft) { _, _ in scheduleSave() }
-                    .onSubmit { scheduleSave(immediate: true) }
+                TextField(
+                    "tools allow (comma-separated)",
+                    text: draftBinding(\.toolsAllowDraft, lane: .toolsAllow, debounced: true)
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .focused($focusedLane, equals: .toolsAllow)
+                .onSubmit { flush(.toolsAllow) }
+                .help("Allow-list of tool ids for \(family.label). Empty = harness default.")
+                laneStatus(.toolsAllow)
+            }
+
+            HStack(spacing: Theme.Spacing.sm) {
+                TextField(
+                    "tools deny (comma-separated)",
+                    text: draftBinding(\.toolsDenyDraft, lane: .toolsDeny, debounced: true)
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.caption, design: .monospaced))
+                .focused($focusedLane, equals: .toolsDeny)
+                .onSubmit { flush(.toolsDeny) }
+                .help("Deny-list of tool ids for \(family.label).")
+                laneStatus(.toolsDeny)
             }
         }
         .padding(Theme.Spacing.sm)
-        .background(Theme.surfaceRaisedHi.opacity(0.5), in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
-        // The model override Picker mutates modelDraft via its binding, not via
-        // free-text typing, so debounce-save its commits here (discrete choice).
-        .onChange(of: modelDraft) { _, _ in scheduleSave() }
-        .onAppear { sync() }
-        // Re-sync from the server snapshot ONLY when this row is not mid-edit.
-        // `sync()` is guarded by `dirty`, so a post-save refresh that republishes
-        // `settingsSnapshot` to every row never clobbers a value being typed.
-        .onChange(of: settings) { _, _ in sync() }
-        // Lazily enumerate this harness's models when the row first appears.
-        // FLUSH on disappear (Finding 1): if Settings closes / the row navigates
-        // away within the ~600ms debounce window, a typed-but-unsaved value would
-        // be lost if we only cancelled. Cancel the pending debounce SLEEP, then
-        // persist immediately if there's a valid unsaved edit. We pass the current
-        // `saveGen` so the flush settles the latest edit (clears `dirty`, flashes
-        // "Saved ✓") unless a brand-new edit raced in after the flush fired.
-        .onDisappear { flushPendingSave() }
+        .background(
+            Theme.surfaceRaisedHi.opacity(0.5),
+            in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+        )
+        .onAppear { hydrate(activeScope) }
+        .onChange(of: settings) { _, _ in hydrate(activeScope) }
+        .onChange(of: model.activeExecutionLocation) { _, _ in hydrate(activeScope) }
+        .onChange(of: focusedLane) { oldLane, newLane in
+            if let oldLane, oldLane != newLane { flush(oldLane) }
+        }
+        .onDisappear { flushAll() }
     }
 
-    /// Persist any pending debounced edit before the row goes away. Called from
-    /// `.onDisappear`; safe to call when there's nothing to save (no-ops unless
-    /// `dirty`).
-    private func flushPendingSave() {
-        debounce?.cancel()
-        guard dirty else { return }
-        // Single-flight performSave: if a loop is already running it persists the
-        // latest drafts; otherwise this starts one.
-        Task { @MainActor in await performSave() }
+    private func draftBinding<Value>(
+        _ keyPath: WritableKeyPath<HarnessSettingsDraft, Value>,
+        lane: HarnessSettingsLane,
+        debounced: Bool = false
+    ) -> Binding<Value> {
+        let scope = activeScope
+        return Binding(
+            get: {
+                autosave.draft(at: scope, serverSettings: settings(at: scope))[keyPath: keyPath]
+            },
+            set: { value in
+                var next = autosave.draft(
+                    at: scope,
+                    serverSettings: settings(at: scope)
+                )
+                next[keyPath: keyPath] = value
+                autosave.drafts[scope] = next
+                admit(lane, at: scope, debounced: debounced)
+            }
+        )
     }
 
-    /// Transient per-row save status — replaces the old "Save" button the user
-    /// could not find. Shows "Saving…", "Saved ✓", or a clear error.
-    @ViewBuilder private var statusLabel: some View {
-        switch status {
-        case .idle:
+    private func modelCatalogBinding(
+        at scope: HarnessSettingsScopeKey
+    ) -> Binding<HarnessModelsResponse?> {
+        Binding(
+            get: { autosave.modelCatalogs[scope] },
+            set: { value in
+                if let value {
+                    autosave.modelCatalogs[scope] = value
+                } else {
+                    autosave.modelCatalogs.removeValue(forKey: scope)
+                }
+            }
+        )
+    }
+
+    private func settings(at scope: HarnessSettingsScopeKey) -> HarnessSettings? {
+        let snapshot = scope.locationID == .local
+            ? model.settingsSnapshot
+            : model.remoteSettingsSnapshots[scope.locationID]
+        return snapshot?.harnesses?[scope.harnessID]
+    }
+
+    /// Server refreshes update only server-owned lanes. A response for Web can
+    /// never clobber a Tools draft, and a pending Tools edit never hides an
+    /// externally changed sibling field.
+    private func hydrate(_ scope: HarnessSettingsScopeKey) {
+        autosave.hydrate(settings(at: scope), at: scope)
+    }
+
+    private func admit(
+        _ lane: HarnessSettingsLane,
+        at scope: HarnessSettingsScopeKey,
+        debounced: Bool
+    ) {
+        let key = HarnessSettingsLaneKey(scope: scope, lane: lane)
+        let edit = autosave.draft(
+            at: scope,
+            serverSettings: settings(at: scope)
+        ).edit(for: lane, modelEditable: autosave.modelCatalogs[scope]?.canEnumerate == true)
+        guard case .valid(let patch) = edit.validation(harnessID: family.rawValue) else { return }
+
+        var reducer = autosave.laneReducers[key] ?? SettingsLaneReducer()
+        let generation = reducer.admit(validationError: nil, debounced: debounced)
+        autosave.laneReducers[key] = reducer
+        autosave.debounceTasks[key]?.cancel()
+        autosave.debounceTasks.removeValue(forKey: key)
+
+        autosave.admittedEdits[key] = AdmittedHarnessSettingsEdit(
+            patch: patch,
+            target: SettingsSaveTarget(
+                locationID: scope.locationID,
+                generation: model.settingsGeneration(for: scope.locationID)
+            ),
+            generation: generation
+        )
+
+        if debounced {
+            autosave.debounceTasks[key] = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: Self.debounceNanoseconds)
+                guard !Task.isCancelled else { return }
+                autosave.debounceTasks.removeValue(forKey: key)
+                queueAndSave(key, generation: generation)
+            }
+        } else {
+            Task { @MainActor in await runSaveLoop(for: key) }
+        }
+    }
+
+    private func flush(_ lane: HarnessSettingsLane) {
+        flush(HarnessSettingsLaneKey(scope: activeScope, lane: lane))
+    }
+
+    private func flush(_ key: HarnessSettingsLaneKey) {
+        autosave.debounceTasks[key]?.cancel()
+        autosave.debounceTasks.removeValue(forKey: key)
+        guard let generation = autosave.admittedEdits[key]?.generation else { return }
+        queueAndSave(key, generation: generation)
+    }
+
+    private func flushAll() {
+        for key in autosave.admittedEdits.keys where key.harnessID == family.rawValue {
+            flush(key)
+        }
+    }
+
+    private func queueAndSave(_ key: HarnessSettingsLaneKey, generation: Int) {
+        var reducer = autosave.laneReducers[key] ?? SettingsLaneReducer()
+        guard reducer.queue(generation: generation) else { return }
+        autosave.laneReducers[key] = reducer
+        Task { @MainActor in await runSaveLoop(for: key) }
+    }
+
+    private func runSaveLoop(for key: HarnessSettingsLaneKey) async {
+        guard !autosave.savingKeys.contains(key) else { return }
+        autosave.savingKeys.insert(key)
+        defer { autosave.savingKeys.remove(key) }
+
+        while let admitted = autosave.admittedEdits[key] {
+            var reducer = autosave.laneReducers[key] ?? SettingsLaneReducer()
+            guard reducer.beginSave(generation: admitted.generation) else { return }
+            autosave.laneReducers[key] = reducer
+
+            let result = await model.writeSettings(
+                admitted.patch,
+                at: admitted.target.locationID,
+                admittedGeneration: admitted.target.generation
+            )
+            let outcome: SettingsSaveOutcome = result.succeeded
+                ? .saved
+                : .failed(result.failureMessage ?? "Could not save this setting.")
+
+            reducer = autosave.laneReducers[key] ?? reducer
+            let reduction = reducer.complete(
+                generation: admitted.generation,
+                outcome: outcome
+            )
+            autosave.laneReducers[key] = reducer
+
+            if autosave.admittedEdits[key]?.generation == admitted.generation {
+                if result.succeeded {
+                    autosave.admittedEdits.removeValue(forKey: key)
+                    let scope = HarnessSettingsScopeKey(
+                        locationID: key.locationID,
+                        harnessID: key.harnessID
+                    )
+                    hydrate(scope)
+                    clearSavedLater(key, generation: admitted.generation)
+                } else {
+                    return
+                }
+            }
+            guard reduction == .saveTrailing else { return }
+            autosave.debounceTasks[key]?.cancel()
+            autosave.debounceTasks.removeValue(forKey: key)
+        }
+    }
+
+    private func clearSavedLater(_ key: HarnessSettingsLaneKey, generation: Int) {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard var reducer = autosave.laneReducers[key],
+                  reducer.generation == generation
+            else { return }
+            reducer.clearSaved()
+            autosave.laneReducers[key] = reducer
+        }
+    }
+
+    private func retry(_ lane: HarnessSettingsLane) {
+        admit(lane, at: activeScope, debounced: false)
+    }
+
+    @ViewBuilder
+    private func laneStatus(_ lane: HarnessSettingsLane) -> some View {
+        let key = HarnessSettingsLaneKey(scope: activeScope, lane: lane)
+        switch autosave.laneReducers[key]?.phase ?? .clean {
+        case .clean:
             EmptyView()
         case .editing:
-            Text("Editing…").font(.caption2).foregroundStyle(.secondary)
-        case .saving:
+            Text("Editing…")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .invalid(let message):
+            failureLabel(message)
+        case .queued, .saving:
             Label("Saving…", systemImage: "arrow.triangle.2.circlepath")
-                .font(.caption2).foregroundStyle(.secondary).labelStyle(.titleAndIcon)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         case .saved:
             Label("Saved", systemImage: "checkmark.circle.fill")
-                .font(.caption2).foregroundStyle(Theme.status(.positive)).labelStyle(.titleAndIcon)
+                .font(.caption2)
+                .foregroundStyle(Theme.status(.positive))
         case .failed(let message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption2).foregroundStyle(Theme.status(.negative)).labelStyle(.titleAndIcon)
-                .lineLimit(2).help(message)
+            HStack(spacing: Theme.Spacing.xs) {
+                failureLabel(message)
+                Button("Retry") { retry(lane) }
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+            }
         }
     }
 
-    /// Re-derive the @State drafts from the server `settings`. ANTI-CLOBBER: this
-    /// is a no-op while the row is `dirty` (the user has unsaved edits or a save in
-    /// flight), so a post-save snapshot republish — which republishes
-    /// `settingsSnapshot` to EVERY row — can never overwrite a value being typed,
-    /// in this row or any other. `dirty` is cleared authoritatively by the save's
-    /// success path (`performSave`), after which the drafts already hold the saved
-    /// value, so the row reflects the save instead of reverting. Before the first
-    /// edit (`dirty == false`) it always syncs, so the row hydrates normally.
-    private func sync() {
-        if dirty { return }
-        applyingSync = true
-        defer { applyingSync = false }
-        enabled = settings?.enabled ?? true
-        modelDraft = settings?.defaultModel ?? ""
-        effort = settings?.effort ?? "__default"
-        web = settings?.web ?? "auto"
-        fallbackDraft = settings?.fallbackModel ?? ""
-        toolsAllowDraft = (settings?.toolsAllow ?? []).joined(separator: ", ")
-        toolsDenyDraft = (settings?.toolsDeny ?? []).joined(separator: ", ")
-        // Record the just-synced values. `applyingSync` alone is timing-fragile — the
-        // field `.onChange` handlers fire on a LATER SwiftUI update, after this defer
-        // has already cleared it — so a server-driven sync would otherwise schedule a
-        // spurious save. scheduleSave compares against this snapshot to ignore the
-        // programmatic echo (a real user edit makes the drafts differ from it).
-        syncedSnapshot = draftSnapshot()
+    private func failureLabel(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption2)
+            .foregroundStyle(Theme.status(.negative))
+            .lineLimit(2)
+            .help(message)
     }
-
-    /// A value snapshot of the editable drafts, for distinguishing a programmatic
-    /// `sync()` echo from a genuine user edit (see `syncedSnapshot`).
-    private func draftSnapshot() -> [String] {
-        [String(enabled), modelDraft, effort, web, fallbackDraft, toolsAllowDraft, toolsDenyDraft]
-    }
-
-    /// AUTO-SAVE entry point fired by every field's `.onChange`/`.onSubmit`. Marks
-    /// the row dirty (so server re-syncs can't clobber the edit) and schedules a
-    /// debounced save. `immediate` (discrete controls: toggle/picker, or Enter)
-    /// shortens the wait to ~0 so the change feels instant. A programmatic draft
-    /// write from `sync()` (applyingSync) is ignored — it is not a user edit.
-    private func scheduleSave(immediate: Bool = false) {
-        if applyingSync { return }
-        // A `.onChange` whose drafts still equal the last server sync is a programmatic
-        // echo (sync()'s writes firing onChange a cycle late), not a user edit — don't
-        // POST it. A genuine edit makes at least one draft differ from the snapshot.
-        if draftSnapshot() == syncedSnapshot { return }
-        dirty = true
-        status = .editing
-        // Bump the edit generation so an IN-FLIGHT save loop knows newer drafts
-        // exist and must re-POST them (and must not settle on the stale ones).
-        saveGen &+= 1
-        debounce?.cancel()
-        debounce = Task { @MainActor in
-            if !immediate {
-                try? await Task.sleep(nanoseconds: Self.debounceMs * 1_000_000)
-            }
-            if Task.isCancelled { return }
-            await performSave()
-        }
-    }
-
-    /// Persist the current drafts, SERIALIZED: at most one POST is ever in flight for
-    /// this row. If a save loop is already running, return — it will pick up the
-    /// latest drafts when its current POST returns. This prevents two overlapping
-    /// POSTs from landing out of order and writing a STALE patch to config.yaml
-    /// (Finding: gen guard protected the UI dirty state but not the HTTP write order).
-    ///
-    /// The loop re-POSTs whenever `saveGen` advanced during a POST (a newer edit
-    /// arrived), so the LAST write always carries the newest drafts. It settles
-    /// (clears `dirty`, flashes "Saved ✓") only when no newer edit raced in — the
-    /// post-save server re-sync (`sync()`) is a no-op while dirty, so nothing reverts.
-    private func performSave() async {
-        if saving { return }            // single-flight: a loop is already persisting
-        saving = true
-        status = .saving
-        defer { saving = false }
-        while true {
-            let gen = saveGen
-            // Staged-field patch mapping lives in Kit (buildHarnessPatch) so it's tested.
-            let patch = buildHarnessPatch(
-                enabled: enabled,
-                modelDraft: modelDraft,
-                effort: effort,
-                web: web,
-                toolsAllowDraft: toolsAllowDraft,
-                toolsDenyDraft: toolsDenyDraft,
-                fallbackDraft: fallbackDraft,
-                // Truth-less harness: the model field is read-only ("default
-                // only"), so a stored legacy value must not ride along with
-                // other saves (it would 400 the whole patch); clears still go.
-                modelEditable: models?.canEnumerate == true
-            )
-            let ok = await model.saveSettings(SettingsUpdateRequest(harnesses: [family.rawValue: patch]))
-            if !ok {
-                // Surface the failure only if it's still the latest edit (else a newer
-                // edit is pending and its own iteration will report). Keep `dirty`.
-                if harnessSaveShouldSettle(capturedGen: gen, currentGen: saveGen) {
-                    status = .failed(model.settingsStatus ?? "Save failed.")
-                }
-                return
-            }
-            if harnessSaveShouldSettle(capturedGen: gen, currentGen: saveGen) {
-                // No newer edit landed during the POST → settle.
-                dirty = false
-                status = .saved
-                let stamp = UUID()
-                savedStamp = stamp
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    if savedStamp == stamp, status == .saved { status = .idle }
-                }
-                return
-            }
-            // A newer edit arrived DURING the POST. Loop and persist the LATEST drafts
-            // in this SAME single-flight save — never a concurrent POST.
-        }
-    }
-
-    /// Identifies the latest successful save so a stale auto-clear timer doesn't
-    /// wipe a newer "Saved ✓".
-    @State private var savedStamp = UUID()
-    /// Monotonic edit generation. `scheduleSave` bumps it and captures the value;
-    /// `performSave` only clears `dirty`/flashes "Saved ✓" if its captured token is
-    /// still the latest — so an edit that lands DURING an in-flight save (which
-    /// re-sets `dirty`) is not silently un-guarded by the older save's success
-    /// path. The newer edit's own debounced save settles it. Mirrors `savedStamp`.
-    @State private var saveGen = 0
 }

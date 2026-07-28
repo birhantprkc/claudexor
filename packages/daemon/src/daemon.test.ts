@@ -1620,7 +1620,7 @@ describe("InteractionRegistry", () => {
       {},
     );
     registry.dropForRun("run");
-    await expect(pending).resolves.toBeNull();
+    await expect(pending).resolves.toEqual({ kind: "released", reason: "run_terminal" });
     expect(registry.pendingForRun("run")).toEqual([]);
     journal.close();
   });

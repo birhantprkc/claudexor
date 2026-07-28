@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ControlSettingsUpdateRequest } from "@claudexor/schema";
+import { ControlSettingsUpdateRequest, GlobalConfig } from "@claudexor/schema";
 import type { GlobalConfig as GlobalConfigT } from "@claudexor/schema";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -38,8 +38,27 @@ const {
   assertSettingsPatchValid,
   assertRoutingGoalTiersConsistent,
   commitSettingsUpdate,
+  mergeSettingsPatch,
 } = await import("./settings-service.js");
 const { loadConfig, updateGlobalConfig } = await import("@claudexor/config");
+
+describe("interaction timeout patch presence", () => {
+  it("keeps an omitted value but persists explicit null", () => {
+    const finite = GlobalConfig.parse({ interaction_timeout_ms: 123_000 });
+    expect(
+      mergeSettingsPatch(finite, ControlSettingsUpdateRequest.parse({})).interaction_timeout_ms,
+    ).toBe(123_000);
+    expect(
+      mergeSettingsPatch(finite, ControlSettingsUpdateRequest.parse({ interactionTimeoutMs: null }))
+        .interaction_timeout_ms,
+    ).toBeNull();
+
+    const disabled = GlobalConfig.parse({ interaction_timeout_ms: null });
+    expect(
+      mergeSettingsPatch(disabled, ControlSettingsUpdateRequest.parse({})).interaction_timeout_ms,
+    ).toBeNull();
+  });
+});
 
 /** The daemon POST /settings validation core, tested offline
  * against the codex manifest truth source (static known_models). */
