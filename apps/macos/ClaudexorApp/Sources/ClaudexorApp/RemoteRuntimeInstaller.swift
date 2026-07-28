@@ -421,6 +421,7 @@ actor RemoteRuntimeInstaller {
         umask 077
         mkdir -p "$root/incoming" "$root/.staging" "$root/versions"
         if ! mkdir "$lock" 2>/dev/null; then
+          echo "another install holds the lock $lock (remove it if no install is running)" >&2
           exit 75
         fi
         cleanup() {
@@ -522,6 +523,7 @@ actor RemoteRuntimeInstaller {
         lock="$root/.install-lock"
         umask 077
         if ! mkdir "$lock" 2>/dev/null; then
+          echo "another install holds the lock $lock (remove it if no install is running)" >&2
           exit 75
         fi
         cleanup() { rmdir "$lock" 2>/dev/null || true; }

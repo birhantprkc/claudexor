@@ -453,15 +453,33 @@ actor SSHConnectionManager {
 /// connectivity, socket-path, config-permission, or changed/revoked-host-key
 /// failures and presenting one implies that user input is expected.
 ///
-/// Trust boundary: this substring sniffing is only sound because the batch
-/// master runs with LogLevel=ERROR (SSHCommandFactory.startMaster), which
-/// keeps OpenSSH's own error()/fatal() text but suppresses the display of the
-/// server-authored pre-auth banner. Without that fence a hostile server could
-/// plant "password:"/"the authenticity of host" in stderr and provoke a false
-/// interactive trust prompt. The changed/revoked-host-key guard is evaluated
-/// first on purpose: when both marker families appear, the hard refusal wins.
+/// Trust boundary: LogLevel=ERROR on the batch master
+/// (SSHCommandFactory.startMaster) suppresses the INFO-level display of the
+/// server's pre-auth banner, but it does NOT keep server-controlled bytes out
+/// of stderr: OpenSSH logs the SSH_MSG_DISCONNECT text at ERROR level
+/// ("Received disconnect from <host> port N:2: <up to ~400 server bytes>"),
+/// echoes a hostile identification string in "Bad remote protocol version
+/// identification: '<server bytes>'", and reports banner-exchange failures.
+/// Those server-echo line families are dropped below BEFORE any substring
+/// matching, so a hostile server cannot plant "password:"/"the authenticity
+/// of host" text and provoke a false interactive trust prompt. The
+/// changed/revoked-host-key guard is evaluated first on purpose: when both
+/// marker families appear, the hard refusal wins.
+private let sshServerEchoLinePrefixes = [
+    "received disconnect from ",
+    "bad remote protocol version identification",
+    "banner exchange",
+]
+
 func sshBatchFailureNeedsInteraction(_ detail: String) -> Bool {
-    let message = detail.lowercased()
+    let message = detail
+        .lowercased()
+        .split(separator: "\n", omittingEmptySubsequences: true)
+        .filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return !sshServerEchoLinePrefixes.contains { trimmed.hasPrefix($0) }
+        }
+        .joined(separator: "\n")
     guard !message.isEmpty else { return false }
 
     let changedOrRevokedHostKey =

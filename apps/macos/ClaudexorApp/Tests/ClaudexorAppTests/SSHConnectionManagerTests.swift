@@ -140,4 +140,28 @@ import Testing
                 + "Host key verification failed."))
         #expect(!sshBatchFailureNeedsInteraction(""))
     }
+
+    // LogLevel=ERROR does not stop a hostile server from reaching stderr:
+    // OpenSSH echoes server-supplied text inside its own ERROR-level
+    // disconnect / protocol-identification / banner-exchange lines. Those
+    // lines are dropped before matching, so injected prompt markers cannot
+    // provoke a false interactive trust prompt.
+    @Test func serverEchoedStderrLinesCannotProvokeInteraction() {
+        #expect(!sshBatchFailureNeedsInteraction(
+            "Received disconnect from 203.0.113.7 port 22:2: "
+                + "please retype your password: The authenticity of host"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "Bad remote protocol version identification: "
+                + "'Enter passphrase for key keyboard-interactive'"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "banner exchange: Connection to 203.0.113.7 port 22: password:"))
+        #expect(!sshBatchFailureNeedsInteraction(
+            "Received disconnect from 203.0.113.7 port 22:2: password:\n"
+                + "Disconnected from 203.0.113.7 port 22"))
+        // A genuine OpenSSH prompt on its own line still classifies even when
+        // a server-echo line precedes it.
+        #expect(sshBatchFailureNeedsInteraction(
+            "Received disconnect from 203.0.113.7 port 22:2: bye\n"
+                + "user@example: Permission denied (publickey,password)."))
+    }
 }

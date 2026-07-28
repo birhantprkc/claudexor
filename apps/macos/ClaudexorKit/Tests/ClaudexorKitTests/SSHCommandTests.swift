@@ -61,6 +61,27 @@ import Testing
         #expect(command == "cd -- '/srv/it'\"'\"'s app' && exec \"${SHELL:-/bin/sh}\" -l")
     }
 
+    // The two interactive builders feed a visible SwiftTerm sheet: without a
+    // remote PTY the shell has no prompt/job control and a raw-mode vendor
+    // login (claude/cursor via setup attach) cannot work, and with BatchMode a
+    // key-passphrase prompt shown in that sheet would be refused instead of
+    // answered. A remote command suppresses ssh's `RequestTTY auto`, so the
+    // TTY must be requested explicitly.
+    @Test func interactiveShellAndSetupAttachRequestATTYAndNeverBatchMode() throws {
+        let factory = try SSHCommandFactory(alias: "prod", controlPath: "/tmp/cx/master")
+        let shell = factory.shell(in: "/srv/app").arguments
+        let attach = try factory.setupAttach(jobID: "setup-ab12").arguments
+        for arguments in [shell, attach] {
+            #expect(arguments.contains("-tt"))
+            #expect(!arguments.contains("BatchMode=yes"))
+            #expect(!arguments.contains("LogLevel=ERROR"))
+        }
+        // Genuinely non-interactive exec keeps refusing prompts.
+        let exec = factory.remoteCommand("true").arguments
+        #expect(exec.contains("BatchMode=yes"))
+        #expect(!exec.contains("-tt"))
+    }
+
     @Test func optionLikeHostIsRejected() {
         #expect(throws: SSHConfigError.self) {
             _ = try SSHCommandFactory(

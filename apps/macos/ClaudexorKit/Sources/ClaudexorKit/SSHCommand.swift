@@ -50,11 +50,14 @@ public struct SSHCommandFactory: Sendable {
         if batchMode {
             // LogLevel=ERROR keeps OpenSSH's own error()/fatal() diagnostics
             // (Permission denied, Host key verification failed, the
-            // changed-host-key warning) but suppresses the INFO-level display
-            // of the server's pre-auth banner. The batch stderr is sniffed by
-            // sshBatchFailureNeedsInteraction, so a hostile server must not be
-            // able to inject "password:"/"the authenticity of host" text and
-            // provoke a false interactive trust prompt.
+            // changed-host-key warning) and suppresses the INFO-level display
+            // of the server's pre-auth banner. That narrows server-controlled
+            // stderr but does NOT eliminate it: a hostile server still reaches
+            // ERROR level through the SSH_MSG_DISCONNECT text ("Received
+            // disconnect from …: <server bytes>"), the bad-protocol-version
+            // echo, and banner-exchange failures. The batch stderr sniffer
+            // (sshBatchFailureNeedsInteraction) therefore drops those
+            // server-echo line families before matching.
             arguments += ["-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
         }
         arguments.append(alias)
@@ -73,15 +76,22 @@ public struct SSHCommandFactory: Sendable {
         _ command: String,
         requestTTY: Bool = false
     ) -> SSHInvocation {
-        // Non-PTY commands ride the app-owned control master; nobody is
-        // watching an ssh prompt. If the master has died, OpenSSH would fall
-        // back to a fresh connection and could block on (or misbind) an
-        // authentication/host-key prompt, so refuse it with BatchMode and keep
-        // the stderr free of server-banner text (LogLevel=ERROR) because those
-        // bytes surface in app error messages. Fresh authentication belongs
-        // exclusively to the interactive master path (startMaster(batchMode:
-        // false) in a real terminal). PTY commands (requestTTY) stay untouched:
-        // they run in a visible terminal where prompting is legitimate.
+        // Plain exec commands (the default) ride the app-owned control master
+        // with nobody watching an ssh prompt. If the master has died, OpenSSH
+        // would fall back to a fresh connection and could block on (or
+        // misbind) an authentication/host-key prompt, so refuse it with
+        // BatchMode; LogLevel=ERROR trims INFO chatter from the stderr that
+        // surfaces in app error messages (it is not a complete fence against
+        // server-authored bytes — see sshBatchFailureNeedsInteraction). Fresh
+        // authentication belongs to the interactive master path
+        // (startMaster(batchMode: false) in a real terminal).
+        //
+        // Interactive commands (requestTTY: true) render inside the app's
+        // SwiftTerm sheet where a person IS watching: `-tt` forces a remote
+        // PTY (with a remote command, ssh's `RequestTTY auto` would NOT
+        // allocate one), which interactive vendor logins and a usable remote
+        // shell require, and BatchMode must NEVER apply — a key-passphrase or
+        // login prompt shown in that sheet must be answerable.
         SSHInvocation(arguments:
             ["-S", controlPath, "-o", "ControlMaster=no"]
             + (requestTTY ? ["-tt"] : ["-o", "BatchMode=yes", "-o", "LogLevel=ERROR"])
@@ -104,11 +114,18 @@ public struct SSHCommandFactory: Sendable {
         ])
     }
 
+    /// Interactive: feeds the visible SwiftTerm sheet, so the remote shell
+    /// needs a real PTY (prompt, job control, raw mode) and prompts must be
+    /// answerable — never BatchMode here.
     public func shell(in remoteDirectory: String) -> SSHInvocation {
         remoteCommand(
-            "cd -- \(Self.posixQuote(remoteDirectory)) && exec \"${SHELL:-/bin/sh}\" -l")
+            "cd -- \(Self.posixQuote(remoteDirectory)) && exec \"${SHELL:-/bin/sh}\" -l",
+            requestTTY: true)
     }
 
+    /// Interactive: the client_pty transport is the ONLY remote harness-login
+    /// path; vendor logins (claude/cursor) need raw-mode terminal input, so a
+    /// remote PTY is mandatory and BatchMode must never apply.
     public func setupAttach(jobID: String) throws -> SSHInvocation {
         guard jobID.hasPrefix("setup-"),
               jobID.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" })
@@ -117,7 +134,8 @@ public struct SSHCommandFactory: Sendable {
         // "every interpolation is posixQuoted" invariant machine-checkable.
         return remoteCommand(
             "~/.claudexor/remote/current/bin/claudexor setup attach "
-                + Self.posixQuote(jobID))
+                + Self.posixQuote(jobID),
+            requestTTY: true)
     }
 
     /// POSIX single-quote encoding for the remote login shell. The local app
