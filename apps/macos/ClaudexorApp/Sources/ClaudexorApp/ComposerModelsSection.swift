@@ -12,10 +12,6 @@ import ClaudexorKit
 /// `models` map that rides the turn; the pool is never poisoned by one
 /// vendor's model id.
 struct ComposerModelsSection: View {
-    /// Keep every closed picker inside the 380pt options popover even when a
-    /// vendor catalog contains very long labels (Cursor currently does).
-    static let modelPickerWidth: CGFloat = 180
-
     let families: [HarnessFamily]
     let primary: HarnessFamily?
     /// Effective per-turn credential route (W20): the server filters
@@ -116,17 +112,19 @@ struct ComposerModelsSection: View {
                 // A previously-chosen id the truth source no longer lists (or
                 // the current route hides) stays visible so the user can SEE
                 // and clear it (the engine refuses it at preflight either way
-                // — never silently dropped).
+                // — never silently dropped). Rendered through the shared cap
+                // so even a pathological stored id cannot widen the open menu
+                // (the tag keeps the FULL id).
                 if let current = selections[id], !current.isEmpty,
                    !visible.contains(where: { $0.id == current }) {
-                    Text("\(current) (not offered here)").tag(current)
+                    Text("\(HarnessModelPresentation.menuTitle(label: nil, id: current)) (not offered here)")
+                        .tag(current)
                 }
                 ForEach(visible) { m in
-                    Text(menuLabel(m)).tag(m.id)
+                    Text(HarnessModelPresentation.menuTitle(label: m.label, id: m.id)).tag(m.id)
                 }
             }
-            .labelsHidden()
-            .frame(width: Self.modelPickerWidth, alignment: .leading)
+            .catalogModelPicker()
             .help(pickerHelp(family, catalog, hiddenOnRoute: catalog.models.count - visible.count))
         } else if catalogs[key] != nil {
             // A LOADED catalog that cannot enumerate (source: none) — the
@@ -165,11 +163,6 @@ struct ComposerModelsSection: View {
                 else { selections[id] = newValue }
             },
         )
-    }
-
-    private func menuLabel(_ m: HarnessModel) -> String {
-        let name = m.label.map { $0.isEmpty ? m.id : $0 } ?? m.id
-        return name == m.id ? name : "\(name) (\(m.id))"
     }
 
     private func pickerHelp(_ family: HarnessFamily, _ catalog: HarnessModelsResponse, hiddenOnRoute: Int) -> String {

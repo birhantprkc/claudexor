@@ -170,6 +170,23 @@ struct OptionRow<Content: View>: View {
     }
 }
 
+extension View {
+    /// The shared CLOSED-control contract for a catalog-fed model picker
+    /// (composer models rows + Settings model override). Vendor catalogs are
+    /// free text with no length contract, so the closed button pins to the
+    /// `Theme.Layout.modelPickerWidth` token and truncates mid-string — the
+    /// family prefix and the id tail both stay readable — instead of widening
+    /// its row (§1 rule 4; issue #53). The OPEN menu is bounded separately by
+    /// `HarnessModelPresentation.menuTitle`: an NSMenu sizes to its widest
+    /// ITEM, which no closed-control frame can cap.
+    func catalogModelPicker() -> some View {
+        labelsHidden()
+            .frame(width: Theme.Layout.modelPickerWidth, alignment: .leading)
+            .lineLimit(1)
+            .truncationMode(.middle)
+    }
+}
+
 // MARK: - Chrome glass (floating panel) with a Reduce-Transparency solid fallback
 
 extension View {

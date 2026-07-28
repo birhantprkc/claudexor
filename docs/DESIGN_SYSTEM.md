@@ -1126,6 +1126,12 @@ DesignSystemComponents.swift, DesignTokens.swift.)
 - **`OptionSection` / `OptionRow`** — the "⋯" popover building blocks: a caption-titled
   section, and a `labelWidth`-aligned label+control row (replaces ad-hoc `.fixedSize()` /
   magic-width pickers so every option lines up). Solid surface, token spacing.
+- **`catalogModelPicker()` + `Layout.modelPickerWidth`** — the catalog-fed model picker
+  contract (composer models rows, Settings model override). Vendor catalogs are free text
+  with no length limit, so the CLOSED control pins to the 180pt token and truncates
+  mid-string, and every menu item renders through `HarnessModelPresentation.menuTitle`
+  (one capped "label (id)" derivation, middle ellipsis) — the OPEN `Picker` menu is an
+  NSMenu sized by its widest item, which no closed-control frame can bound (issue #53).
 - **`composerGlass()`** — the floating-panel glass modifier: static `.glassEffect(.regular)`
   (NOT `.interactive()` — see §3.1) with a `surfaceRaised` solid fallback under Reduce
   Transparency. Chrome only.

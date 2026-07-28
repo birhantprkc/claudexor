@@ -180,6 +180,14 @@ enum Theme {
         static let conversationMaxWidth: CGFloat = 680
         /// The composer "⋯" options popover — a readable column for the option rows.
         static let composerOptionsWidth: CGFloat = 380
+        /// Closed width of a CATALOG-FED model picker (composer models rows,
+        /// Settings model override). Derived from the popover budget: the
+        /// 380pt `composerOptionsWidth` column minus its 2×`Spacing.lg`
+        /// padding leaves 348pt for a row; the 92pt harness-label column, the
+        /// `Spacing.sm` gaps and the trailing "primary" tag leave ~180pt for
+        /// the control. Long vendor labels truncate INSIDE this width (§1
+        /// rule 4) — they never widen their row.
+        static let modelPickerWidth: CGFloat = 180
     }
 
     /// Vertical padding for capsule chips (intent / primary / project). Between

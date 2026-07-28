@@ -53,21 +53,30 @@ struct HarnessModelOverrideField: View {
         }
     }
 
+    /// Same `LabeledContent("Model")` shell as every sibling state above, so
+    /// the row does not re-layout when the catalog resolves; the control obeys
+    /// the shared catalog-picker contract (fixed token width + capped menu
+    /// titles) exactly like the composer surface.
     @ViewBuilder private var picker: some View {
         if let models {
-            Picker("Model override", selection: $modelDraft) {
-                Text("Harness default").tag("")
-                // A stored override the truth source no longer lists (legacy value)
-                // stays visible so the user can SEE and clear it — the engine
-                // refuses it at run preflight either way.
-                if !modelDraft.isEmpty, !models.models.contains(where: { $0.id == modelDraft }) {
-                    Text("\(modelDraft) (not in \(models.source) list)").tag(modelDraft)
+            LabeledContent("Model") {
+                Picker("Model override", selection: $modelDraft) {
+                    Text("Harness default").tag("")
+                    // A stored override the truth source no longer lists (legacy
+                    // value) stays visible so the user can SEE and clear it — the
+                    // engine refuses it at run preflight either way. Rendered
+                    // through the shared cap so a pathological stored id cannot
+                    // widen the open menu (the tag keeps the FULL id).
+                    if !modelDraft.isEmpty, !models.models.contains(where: { $0.id == modelDraft }) {
+                        Text("\(HarnessModelPresentation.menuTitle(label: nil, id: modelDraft)) (not in \(models.source) list)")
+                            .tag(modelDraft)
+                    }
+                    ForEach(models.models) { m in
+                        Text(HarnessModelPresentation.menuTitle(label: m.label, id: m.id)).tag(m.id)
+                    }
                 }
-                ForEach(models.models) { m in
-                    Text(modelMenuLabel(m)).tag(m.id)
-                }
+                .catalogModelPicker()
             }
-            .labelsHidden()
             .help(modelPickerHelp(models))
         }
     }
@@ -116,12 +125,6 @@ struct HarnessModelOverrideField: View {
                 }
             }
             .help("Could not load the \(family.label) model catalog. Retry after reconnecting.")
-    }
-
-    private func modelMenuLabel(_ m: HarnessModel) -> String {
-        let name = (m.label.map { $0.isEmpty ? m.id : $0 } ?? m.id)
-        let suffix = name == m.id ? "" : " (\(m.id))"
-        return name + suffix
     }
 
     private func modelPickerHelp(_ models: HarnessModelsResponse) -> String {

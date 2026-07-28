@@ -164,6 +164,36 @@ public struct HarnessModel: Codable, Sendable, Identifiable, Equatable, Hashable
     }
 }
 
+/// Menu-facing presentation for enumerable models (issue #53). An open
+/// `Picker` popup is an NSMenu, and an NSMenu sizes to its WIDEST item — a
+/// `.frame` on the closed control cannot bound it. Vendor catalogs are free
+/// text with no length contract (Cursor ships very long labels), so the menu
+/// STRING itself carries the guarantee. Kept in ClaudexorKit as a pure value
+/// transform so the cap semantics are unit-tested without the UI and run in
+/// CI (`QuotaPresentation` precedent).
+public enum HarnessModelPresentation {
+    /// Hard cap for one menu title. 48 characters keeps the widest possible
+    /// menu item close to the closed control's `modelPickerWidth` while
+    /// leaving both the human-label prefix and the id tail recognizable.
+    public static let menuTitleMaxCharacters = 48
+
+    /// The ONE shared "label (id)" derivation for catalog-fed picker menus
+    /// (composer models rows + Settings model override): the id alone when no
+    /// distinct label exists; whitespace runs collapse to single spaces (a
+    /// menu item must never carry a newline); overflow truncates in the
+    /// MIDDLE so the family prefix AND the differentiating id tail both stay
+    /// readable.
+    public static func menuTitle(label: String?, id: String) -> String {
+        let name = label.flatMap { $0.isEmpty ? nil : $0 } ?? id
+        let full = name == id ? name : "\(name) (\(id))"
+        let collapsed = full.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard collapsed.count > menuTitleMaxCharacters else { return collapsed }
+        let keep = menuTitleMaxCharacters - 1
+        let head = (keep + 1) / 2
+        return "\(collapsed.prefix(head))…\(collapsed.suffix(keep - head))"
+    }
+}
+
 /// Models enumerable for one harness (GET /harnesses/:id/models). `source` is
 /// honest about provenance: "api" when the adapter implemented a real
 /// enumeration, "manifest" reserved for a future manifest list, "none" when the
