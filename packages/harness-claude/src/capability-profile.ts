@@ -1,6 +1,35 @@
 import type { HarnessCapabilityProfile } from "@claudexor/schema";
 import { HarnessCapabilityProfile as HarnessCapabilityProfileSchema } from "@claudexor/schema";
 
+/**
+ * Manifest model truth source (strict model-truth validation: an explicit
+ * model outside this list is refused, never forwarded to die as a native
+ * error). Stable aliases plus current full ids; verified against the vendor
+ * model-config docs and the INSTALLED CLI recorded in
+ * `CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST`.
+ */
+export const CLAUDE_KNOWN_MODELS: readonly string[] = [
+  "sonnet",
+  "opus",
+  "haiku",
+  "fable",
+  "best",
+  "claude-fable-5",
+  "claude-sonnet-5",
+  "claude-opus-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
+];
+
+/** Installed vendor CLI the known-model list above was last live-verified
+ * against (the strict freshness gate compares this against the live CLI). */
+export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST = "2.1.165";
+
 export const CLAUDE_CAPABILITY_PROFILE: HarnessCapabilityProfile =
   HarnessCapabilityProfileSchema.parse({
     auth: {

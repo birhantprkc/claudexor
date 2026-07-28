@@ -34,7 +34,11 @@ import {
 } from "@claudexor/core";
 import { resolveSecret } from "@claudexor/secrets";
 import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
-import { CLAUDE_CAPABILITY_PROFILE } from "./capability-profile.js";
+import {
+  CLAUDE_CAPABILITY_PROFILE,
+  CLAUDE_KNOWN_MODELS,
+  CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST,
+} from "./capability-profile.js";
 import { claudeNativeLoginRemedy } from "./doctor-remedy.js";
 import { claudeNativeHomeEnv, defaultNativeClaudeConfigDir } from "./native-home.js";
 export { claudeAccountIdentity, defaultNativeClaudeConfigDir } from "./native-home.js";
@@ -404,27 +408,10 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           effort_levels_verified_against: efforts.live
             ? version
             : CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-          // Manifest model truth source (strict model-truth validation: an explicit model outside
-          // this list is refused, never forwarded to die as a native error).
-          // Stable aliases plus current full ids; verified against the vendor
-          // model-config docs and the installed CLI recorded below.
-          known_models: [
-            "sonnet",
-            "opus",
-            "haiku",
-            "fable",
-            "best",
-            "claude-fable-5",
-            "claude-sonnet-5",
-            "claude-opus-5",
-            "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-            "claude-sonnet-4-6",
-            "claude-sonnet-4-5",
-            "claude-haiku-4-5",
-          ],
-          known_models_verified_against: "2.1.168",
+          // Manifest model truth source + the installed CLI it was verified
+          // against; the catalog itself lives in capability-profile.ts.
+          known_models: [...CLAUDE_KNOWN_MODELS],
+          known_models_verified_against: CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST,
         },
         capability_profile: {
           ...CLAUDE_CAPABILITY_PROFILE,
