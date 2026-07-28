@@ -1890,7 +1890,8 @@ show fake zero spend/quota values.
 ## 9. macOS App
 
 The UI behavioral and visual contract — the one-screen chat shell, the
-composer, the thread workspace (`Changes | Artifacts | Evidence`), Settings, and
+composer, the thread workspace (`Changes | Artifacts | Evidence`, plus a
+remote-only `Terminal` on remote threads), Settings, and
 every interaction rule — lives in [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md), the
 macOS UI/UX SSOT. This section keeps only the engine-facing facts.
 

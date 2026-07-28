@@ -2821,9 +2821,75 @@ describe("Orchestrator", () => {
     // empty answer gets — raw whitespace is never shipped as content.
     expect(readFileSync(join(res.runDir, "final", "answer.md"), "utf8")).toContain("(no output)");
     const telemetry = new ArtifactStore(repo).readYaml<{
-      attempts?: Array<{ outcome?: { deliverable_present?: boolean } }>;
+      attempts?: Array<{ outcome?: { deliverable_present?: boolean; status?: string } }>;
     }>(join(res.runDir, "final", "telemetry.yaml"));
     expect(telemetry?.attempts?.[0]?.outcome?.deliverable_present).toBe(false);
+    // Terminal axes: the adapter completed CLEANLY with an honestly empty
+    // answer — that is a succeeded run with no deliverable, never a fake
+    // harness failure (the trim fix must not convert a phantom deliverable
+    // into a phantom harness error). The attempt record agrees: a clean
+    // empty completion is a success, not a fake contract failure.
+    expect(telemetry?.attempts?.[0]?.outcome?.status).toBe("success");
+    expect(res.lifecycle).toBe("succeeded");
+    expect(res.facts.reason ?? null).toBeNull();
+  });
+
+  it("an ask harness ERROR with no deliverable still fails the run (honest-empty never masks a real failure)", async () => {
+    const repo = await initRepo();
+    const asker = askAdapter("asker", function* (sessionId) {
+      const ts = new Date().toISOString();
+      yield { type: "started", session_id: sessionId, ts };
+      yield { type: "error", session_id: sessionId, ts, error: "vendor process crashed" };
+    });
+    const res = await new Orchestrator({
+      registry: new Map([["asker", asker]]),
+      reviewers: [],
+    }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask", harnesses: ["asker"] });
+    expect(res.lifecycle).toBe("failed");
+    expect(res.facts.reason).toBe("harness_failed");
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "vendor process crashed",
+    );
+  });
+
+  it("a deliverable-less ask still hard-fails on an unrecovered tool error", async () => {
+    // The honest-empty completion (previous tests) applies only to a CLEAN
+    // attempt: with no deliverable, the first unrecovered tool error stays a
+    // hard harness failure (INV-043/INV-044 deliverable exception).
+    const repo = await initRepo();
+    const asker = askAdapter("asker", function* (sessionId) {
+      const ts = new Date().toISOString();
+      yield { type: "started", session_id: sessionId, ts };
+      yield {
+        type: "tool_call",
+        session_id: sessionId,
+        ts,
+        text: "Bash",
+        tool: { name: "Bash", kind: "command", use_id: "t1", target: "cat notes.md" },
+      };
+      yield {
+        type: "tool_result",
+        session_id: sessionId,
+        ts,
+        tool: {
+          name: "Bash",
+          kind: "command",
+          use_id: "t1",
+          status: "error",
+          error_summary: "command not found",
+        },
+      };
+      yield { type: "completed", session_id: sessionId, ts };
+    });
+    const res = await new Orchestrator({
+      registry: new Map([["asker", asker]]),
+      reviewers: [],
+    }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask", harnesses: ["asker"] });
+    expect(res.lifecycle).toBe("failed");
+    expect(res.facts.reason).toBe("harness_failed");
+    expect(readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8")).toContain(
+      "failed without recovery",
+    );
   });
 
   it("QA-050: a zero-budget Ask refusal is a typed budget failure (phase=budget, code=finite_zero, route preserved) with budget remediation, never auth/setup", async () => {

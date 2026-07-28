@@ -74,14 +74,41 @@ export function canonicalDeliverable(args: {
       producer_attempt_id: null,
     };
   }
+  const producerAttemptId =
+    args.workProduct?.producer_attempt_id ??
+    args.decision?.winner ??
+    args.telemetry?.final_attempt_id ??
+    null;
+  // The file probe alone cannot see an honestly empty answer/report: the
+  // read-only final artifact wrapper (title heading + the "(no output)"
+  // marker) makes final/answer.md non-empty BY CONSTRUCTION. For those two
+  // kinds the D-16 attempt record is the one owner of "delivered" — when the
+  // identified producer attested deliverable_present=false, the run truly
+  // delivered nothing and the receipt projects an absent deliverable (a clean
+  // empty ask completion), instead of manufacturing a producer/deliverable
+  // invariant contradiction that would rewrite an honest completion into a
+  // fake harness failure. Wrapper-free kinds (patch, plan, structured output)
+  // keep the strict cross-check: real file content contradicting the record
+  // stays a loud terminal-facts failure, and the probe above still
+  // fail-closes the opposite lie (issue #29: a zero-byte artifact can never
+  // count as present, whatever the attempt claimed).
+  if (producerAttemptId && (selected.kind === "answer" || selected.kind === "report")) {
+    const producer = args.telemetry?.attempts.find(
+      (attempt) => attempt.attempt_id === producerAttemptId,
+    );
+    if (producer && producer.outcome.deliverable_present === false) {
+      return {
+        present: false,
+        kind: null,
+        path: null,
+        producer_attempt_id: null,
+      };
+    }
+  }
   return {
     present: true,
     kind: selected.kind,
     path: selected.path,
-    producer_attempt_id:
-      args.workProduct?.producer_attempt_id ??
-      args.decision?.winner ??
-      args.telemetry?.final_attempt_id ??
-      null,
+    producer_attempt_id: producerAttemptId,
   };
 }

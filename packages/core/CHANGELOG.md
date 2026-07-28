@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- The remote-runtime vendor PATH prefix (`~/.claudexor/remote/vendor/bin`) is probed only when the remote runtime marker is set; local runtimes never see it.
 - @claudexor/schema@3.2.0
 - @claudexor/util@3.2.0
 

@@ -283,6 +283,10 @@ pnpm test
 - Verify app, ZIP-contained app, and DMG signatures, notarization tickets,
   staples, checksums, SBOM, and GitHub provenance. Do not upload stale local
   `apps/macos/dist` artifacts.
+- DMG quarantine smoke before publish: download the candidate DMG/ZIP asset,
+  verify its sha256 against SHA256SUMS, confirm the downloaded file carries
+  `com.apple.quarantine`, run `codesign --verify --deep --strict` and
+  `spctl --assess` on the app, and boot the quarantined (translocated) app.
 - npm packages publish with provenance in dependency order. Existing versions
   are retryable only when local tarball integrity and published provenance
   match; any mismatch blocks as a version collision.

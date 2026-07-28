@@ -259,7 +259,6 @@ import {
   readTextSafe,
   appendLine,
   assertNoInlineSecretValues,
-  containsSecretLikeToken,
   DELEGATION_ENV,
   hashJson,
   newId,
@@ -4030,7 +4029,7 @@ export class Orchestrator {
       })) {
         log.emit("output.ready", { kind: "artifact", path });
       }
-      assertNoSecretLikeTokens("final patch diff", winnerRun.diff);
+      secretDiff.assertNoSecretLikeTokens("final patch diff", winnerRun.diff);
       const patchSha256 = sha256(winnerRun.diff);
       store.writeText(join(paths.finalDir, "patch.diff"), winnerRun.diff);
       const wstats = diffStats(winnerRun.diff);
@@ -5461,7 +5460,7 @@ export class Orchestrator {
     // work_product (its partial patch.diff stays diagnostic via attempts/);
     // in-place keeps the product so the honest Revert offer survives.
     if (lastRun && (!interrupted || input.inPlace === true)) {
-      assertNoSecretLikeTokens("final patch diff", lastRun.diff);
+      secretDiff.assertNoSecretLikeTokens("final patch diff", lastRun.diff);
       const patchSha256 = sha256(lastRun.diff);
       store.writeText(join(paths.finalDir, "patch.diff"), lastRun.diff);
       // Honest apply-state (parity with runRace single-candidate in-place): a
@@ -7013,6 +7012,13 @@ export class Orchestrator {
         harnessErrored: harnessError !== null && !webBlocked,
         webRequiredUnsatisfied: webBlocked,
         workState: roFinalized.workState,
+        // A read-only attempt that completed CLEANLY with an honestly empty
+        // answer is a success with deliverable_present=false ("(no output)"),
+        // never a fake contract failure — the trim above must not convert a
+        // phantom deliverable into a phantom harness failure. Only the clean
+        // finalizer class qualifies: contract failures, vetoes, and context
+        // interruptions keep the strict deliverable requirement.
+        emptyDeliverableAllowed: roFinalized.outcomeClass === "clean",
       });
       if (harnessError) {
         log.emit("harness.completed", {
@@ -7670,11 +7676,5 @@ export class Orchestrator {
       summary: redactSecrets(report).slice(0, 400),
       candidates: candidateSummaries,
     };
-  }
-}
-
-function assertNoSecretLikeTokens(label: string, text: string): void {
-  if (containsSecretLikeToken(text)) {
-    throw new Error(`${label} contains secret-like token; refusing to persist artifact`);
   }
 }

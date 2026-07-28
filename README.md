@@ -518,7 +518,8 @@ context/context_error.md?
 
 Files are the source of truth. Terminal output and UI rows are projections. The
 macOS thread workspace surfaces Changes, Artifacts, and Evidence (with each
-run's Outcome facts on top when a receipt is selected) directly from these
+run's Outcome facts on top when a receipt is selected, and a remote-only
+Terminal tab on remote threads) directly from these
 artifacts/events, so successful answers and failed runs are inspectable instead
 of disappearing into logs.
 

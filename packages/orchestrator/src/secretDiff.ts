@@ -168,3 +168,11 @@ function candidatePathIdentity(root: string, raw: string): string {
     return absolute;
   }
 }
+
+/** Fail-loud persistence fence for a final artifact: a secret-like token in
+ * the winner's bytes must throw before anything is written (INV-062). */
+export function assertNoSecretLikeTokens(label: string, text: string): void {
+  if (containsSecretLikeToken(text)) {
+    throw new Error(`${label} contains secret-like token; refusing to persist artifact`);
+  }
+}

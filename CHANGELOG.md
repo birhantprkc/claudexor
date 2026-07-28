@@ -39,7 +39,11 @@ Release history for Claudexor. The current version is declared in the root
   truncated-label owner, so a long vendor catalog can no longer widen the
   composer or Settings menus (GH #53, Alex Basis). The Claude manifest pins
   `claude-opus-5` and `claude-opus-4-5` against the verified CLI (#54,
-  ndrew1337). Toolchain: `@modelcontextprotocol/server` 2.0.0 GA with the
+  ndrew1337). The release also ships a carried-over changeset: portable Agent
+  Skill and GitHub Copilot plugin artifacts, official MCP Registry
+  distribution metadata, experimental ACP Terminal Auth for Codex, and
+  repository-configured protected path gates.
+  Toolchain: `@modelcontextprotocol/server` 2.0.0 GA with the
   2026-07-28 discover envelope pinned by regression, TypeScript 7.0.2 with a
   sidecar for the one compiler-API consumer, and zod 4.4.3 with the schema
   package bridged through the `zod/v3` subpath so all generated JSON Schema

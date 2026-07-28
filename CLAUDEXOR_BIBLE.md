@@ -455,8 +455,9 @@ invariant or owner decision before proceeding.
   thread; turns run in-place so the next turn sees the work. verify:
   DESIGN_SYSTEM contract; visual QA checklist.
 - **INV-091** The trailing region is the CURRENT THREAD's workspace (D42),
-  not a per-run inspector: three tabs — Changes, Artifacts, Evidence —
-  aggregated across the thread's runs on solid surfaces. Selecting a chat
+  not a per-run inspector: three always-present tabs — Changes, Artifacts,
+  Evidence — aggregated across the thread's runs on solid surfaces, plus a
+  remote-only Terminal tab on remote threads. Selecting a chat
   receipt FILTERS the workspace to that run (its Outcome facts on top); run
   detail is demoted to this filtered view, never the panel's identity.
   Produced outputs (including any project preview) fold into Artifacts —

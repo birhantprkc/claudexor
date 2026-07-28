@@ -17,7 +17,8 @@ Claudexor is a native **chat-first cockpit** over multiple coding harnesses (Cod
 Claude Code, Cursor, OpenCode): ONE screen — a thread list, the conversation, and a
 persistent composer. You just type; the first message starts a thread; turns run
 in-place so the next turn sees the work; the trailing panel is the THREAD
-WORKSPACE (D42) — the current thread's Changes / Artifacts / Evidence, filtered
+WORKSPACE (D42) — the current thread's Changes / Artifacts / Evidence (plus a
+remote-only Terminal on remote threads), filtered
 to a run when you select its chat receipt. Its
 single real differentiator from a bare harness is multi-vendor
 **race + review** with the winner adopted into the tree. It must feel instantly
@@ -588,8 +589,9 @@ frequency and volume are. The contracts:
     the inline activity transcript. The always-live composer closes the feed.
   - **Thread workspace (trailing `.inspector`, glass chrome):** the panel's
     IDENTITY is the CURRENT THREAD's workspace (D42), not a per-run inspector.
-    Three tabs — **Changes / Artifacts / Evidence** — aggregate across the whole
-    thread's runs. Selecting a chat receipt FILTERS the panel to that run (a
+    Three always-present tabs — **Changes / Artifacts / Evidence** — aggregate
+    across the whole thread's runs; a remote thread adds a fourth, **Terminal**
+    (a shell on the remote workspace; never shown for local threads). Selecting a chat receipt FILTERS the panel to that run (a
     "run: <id> ×" chip clears back to whole-thread) and renders that run's
     Outcome facts at the top; run detail is DEMOTED, not deleted — it is the
     run-filtered state of this panel. Changes = the thread-cumulative diff
@@ -1000,9 +1002,11 @@ views in the shared design-system files; screens compose them.
   code is transient — read from the snapshot/SSE overlay only, never persisted
   by the app.
 - **Thread workspace (trailing `.inspector`).** ONE panel whose identity is the
-  CURRENT THREAD's workspace (D42), with exactly three tabs (`WorkspaceTab`:
-  `changes`, `artifacts`, `evidence`, via the shared `SegmentedTabs`) aggregated
-  across the thread's runs. Selecting a chat receipt FILTERS the panel to that
+  CURRENT THREAD's workspace (D42), with three always-present tabs
+  (`WorkspaceTab`: `changes`, `artifacts`, `evidence`, via the shared
+  `SegmentedTabs`) aggregated across the thread's runs, plus a remote-only
+  `terminal` tab (available only when the thread executes on a remote
+  location; never shown for local threads). Selecting a chat receipt FILTERS the panel to that
   run (`.task(runId)` route; a "run: <id> ×" chip clears back to whole-thread)
   and renders the run's Outcome facts at the top (server banner verbatim, answer,
   plan readiness, review verdict + findings, material facts via

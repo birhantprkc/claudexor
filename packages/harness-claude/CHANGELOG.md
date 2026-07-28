@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- The known-model list is a strict catalog verified against the installed vendor CLI, with the catalog and its verified-against stamp moved into capability-profile.ts.
 - @claudexor/core@3.2.0
 - @claudexor/schema@3.2.0
 - @claudexor/secrets@3.2.0

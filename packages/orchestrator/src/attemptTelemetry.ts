@@ -562,10 +562,19 @@ export function setAttemptOutcome(
      * incomplete veto rides HERE without flipping `status` — the lifecycle
      * stays succeeded-class; applyability and the CLI exit read the axis. */
     workState?: WorkState;
+    /** The lane's contract does NOT require a deliverable: a clean completion
+     * with an honestly empty answer stays a success (read-only ask/report,
+     * where "(no output)" is a valid outcome). Every harder axis still wins —
+     * a harness error, failed gate, unsatisfied web, or belt failure fails the
+     * attempt exactly as before; this only stops a MISSING deliverable from
+     * being counted as a contract failure on its own. */
+    emptyDeliverableAllowed?: boolean;
   },
 ): void {
   const warnings = toolWarnings(t).length;
-  const contractFailed = !opts.deliverablePresent || opts.gatesPassed === false;
+  const contractFailed =
+    (!opts.deliverablePresent && opts.emptyDeliverableAllowed !== true) ||
+    opts.gatesPassed === false;
   // INV-030: after injection, startup failure or an unrecovered exact belt
   // operation is an unsatisfied required capability. It can only ELEVATE
   // severity, never soften into a warning or mask a harder terminal fact.

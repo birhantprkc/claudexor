@@ -188,12 +188,16 @@ promoted candidate assets and signs offline:
 
 ```
 pnpm sign:remote-runtime-manifest \
-  --in          remote-runtime-manifest.json  # the candidate's unsigned manifest
-  --assets-dir  <dir holding the four promoted claudexor-remote-runtime-<v>-<target>.tar.gz> \
+  --in remote-runtime-manifest.json \
+  --assets-dir <promoted-assets-dir> \
   --private-key ~/.claudexor/keys/runtime-update-ed25519.pem \
-  --authority   release/runtime-update-authority.json \
-  --out         remote-runtime-manifest.signed.json
+  --authority release/runtime-update-authority.json \
+  --out remote-runtime-manifest.signed.json
 ```
+
+`--in` is the candidate's unsigned manifest; `--assets-dir` is the directory
+holding the four promoted
+`claudexor-remote-runtime-<v>-<target>.tar.gz` archives.
 
 The same OFFLINE runtime-update key signs both manifest kinds; domain
 separation is the signed `kind` field (`claudexor-remote-runtime`), which the
