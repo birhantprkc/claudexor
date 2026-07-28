@@ -78,7 +78,7 @@
       "path": "/v2/filesystem/directories",
       "mutating": false,
       "applicability": "global",
-      "summary": "List the visible subdirectories of a directory contained by the server user's home.",
+      "summary": "List the visible subdirectories of a directory contained by the server user's home; served only by the remote runtime (a local daemon answers 501).",
       "auth": "loopback_bearer",
       "request_schema": null,
       "parameters": [
@@ -299,7 +299,7 @@
       "path": "/v2/projects/:id/file",
       "mutating": false,
       "applicability": "project",
-      "summary": "Fetch one bounded raster image contained by a registered project.",
+      "summary": "Fetch one bounded raster image contained by a registered project; served only by the remote runtime (a local daemon answers 501).",
       "auth": "loopback_bearer",
       "request_schema": null,
       "parameters": [

@@ -114,8 +114,10 @@ Claudexor uses the system `/usr/bin/ssh`, so existing keys, ssh-agent,
 `known_hosts`, MFA and `ProxyJump` remain OpenSSH's responsibility. On first
 connection the app verifies and installs a signed, no-`sudo` runtime under
 `~/.claudexor/remote/`, then reaches its loopback-only control API through an
-SSH local forward. Vendor CLIs and their credentials remain on the server and
-are installed or logged in only after confirmation. Remote threads include an
+SSH local forward. Vendor CLIs and their credentials remain on the server;
+Claudexor never installs a vendor CLI for you — install them on the host
+yourself, then sign in from the app, which runs each vendor's own login in an
+embedded SSH terminal (Codex uses device auth). Remote threads include an
 embedded SSH terminal and an explicit-port preview tunnel.
 
 ### Updates

@@ -9,7 +9,8 @@ export const REMOTE_OPERATION_DRAFTS = [
     requestSchema: null,
     responseSchema: "ControlDirectoryListing",
     responseKind: "json",
-    summary: "List the visible subdirectories of a directory contained by the server user's home.",
+    summary:
+      "List the visible subdirectories of a directory contained by the server user's home; served only by the remote runtime (a local daemon answers 501).",
     parameters: [
       queryParam({
         name: "path",
@@ -25,7 +26,8 @@ export const REMOTE_OPERATION_DRAFTS = [
     requestSchema: null,
     responseSchema: null,
     responseKind: "binary",
-    summary: "Fetch one bounded raster image contained by a registered project.",
+    summary:
+      "Fetch one bounded raster image contained by a registered project; served only by the remote runtime (a local daemon answers 501).",
     parameters: [
       queryParam({
         name: "path",
