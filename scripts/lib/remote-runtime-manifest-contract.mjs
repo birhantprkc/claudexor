@@ -42,6 +42,36 @@ function targetParts(target) {
   return { platform, arch };
 }
 
+/**
+ * The Swift verifier (RemoteRuntime.signingBytes) hard-codes EXACTLY these
+ * seven asset fields into the signed bytes. The JS side must sign the same
+ * explicit projection — and validation must refuse any unknown asset field —
+ * or a future field added on one side would be signed here, dropped there,
+ * and silently break verification on every Mac.
+ */
+const REMOTE_RUNTIME_SIGNED_ASSET_FIELDS = Object.freeze([
+  "arch",
+  "archiveName",
+  "archiveUrl",
+  "nodeVersion",
+  "platform",
+  "sha256",
+  "target",
+]);
+
+function signedAssetProjection(asset) {
+  if (!asset || typeof asset !== "object" || Array.isArray(asset)) return asset;
+  return {
+    arch: asset.arch,
+    archiveName: asset.archiveName,
+    archiveUrl: asset.archiveUrl,
+    nodeVersion: asset.nodeVersion,
+    platform: asset.platform,
+    sha256: asset.sha256,
+    target: asset.target,
+  };
+}
+
 export function remoteRuntimeManifestSignedFields(manifest) {
   return {
     schemaVersion: manifest.schemaVersion,
@@ -51,7 +81,9 @@ export function remoteRuntimeManifestSignedFields(manifest) {
     protocolMajor: manifest.protocolMajor,
     minAppVersion: manifest.minAppVersion,
     notes: manifest.notes,
-    assets: manifest.assets,
+    assets: Array.isArray(manifest.assets)
+      ? manifest.assets.map(signedAssetProjection)
+      : manifest.assets,
     keyId: manifest.keyId,
     algorithm: manifest.algorithm,
   };
@@ -96,6 +128,18 @@ export function validateRemoteRuntimeManifestShape(manifest, { expectVersion } =
       if (!asset || typeof asset !== "object" || Array.isArray(asset)) {
         reasons.push("every asset must be an object");
         continue;
+      }
+      // Drift fence: an unknown asset field would be excluded from the Swift
+      // side's seven-field signing projection, so it is refused outright —
+      // never silently signed.
+      const unknownKeys = Object.keys(asset)
+        .filter((key) => !REMOTE_RUNTIME_SIGNED_ASSET_FIELDS.includes(key))
+        .sort();
+      if (unknownKeys.length > 0) {
+        reasons.push(
+          `asset ${String(asset.target)} has unknown field(s) ${unknownKeys.join(", ")}; ` +
+            `the cross-language signature covers exactly: ${REMOTE_RUNTIME_SIGNED_ASSET_FIELDS.join(", ")}`,
+        );
       }
       const target = asset.target;
       if (!REMOTE_RUNTIME_TARGETS.includes(target)) {

@@ -88,6 +88,30 @@ describe("remote runtime manifest", () => {
     );
   });
 
+  // The Swift verifier signs a hard-coded seven-field asset projection; the
+  // JS side signs the same explicit projection and REFUSES unknown asset
+  // fields, so a new field can never be signed here and dropped there.
+  it("refuses an asset with an unknown field instead of silently signing it", () => {
+    const widenedInput = unsignedManifest();
+    (widenedInput.assets[0] as unknown as Record<string, unknown>).mirrorUrl =
+      "https://evil.example/alt.tar.gz";
+    expect(() =>
+      signRemoteRuntimeManifest(widenedInput, TEST_PRIVATE_KEY_PEM, TEST_AUTHORITY),
+    ).toThrow(/unknown field/);
+
+    const signed = signRemoteRuntimeManifest(
+      unsignedManifest(),
+      TEST_PRIVATE_KEY_PEM,
+      TEST_AUTHORITY,
+    );
+    const widened = structuredClone(signed);
+    (widened.assets[0] as unknown as Record<string, unknown>).mirrorUrl =
+      "https://evil.example/alt.tar.gz";
+    const verdict = verifyRemoteRuntimeManifest(widened, TEST_AUTHORITY);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reasons.join("; ")).toMatch(/unknown field/);
+  });
+
   it("canonicalizes caller-provided asset order before signing", () => {
     const input = unsignedManifest();
     input.assets.reverse();
