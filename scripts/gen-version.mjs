@@ -35,13 +35,27 @@ const jsonVersionPaths = [
   join(root, "server.json"),
   join(root, "plugins", "copilot", "plugin.json"),
 ];
+// These files are hand-maintained and Prettier-formatted; only their version
+// strings are generated. Re-serializing the parsed object would reflow every
+// array Prettier keeps on one line, so `pnpm format:check` failed on every
+// release. Replace the version VALUES in place and leave the rest of the
+// bytes untouched.
 for (const path of jsonVersionPaths) {
-  const value = JSON.parse(readFileSync(path, "utf8"));
-  value.version = version;
-  if (path.endsWith("server.json")) {
-    for (const pkg of value.packages ?? []) pkg.version = version;
+  const text = readFileSync(path, "utf8");
+  const previous = JSON.parse(text).version;
+  const updated = text
+    .split(`"version": ${JSON.stringify(previous)}`)
+    .join(`"version": ${JSON.stringify(version)}`);
+  const parsed = JSON.parse(updated);
+  const stale =
+    parsed.version !== version || (parsed.packages ?? []).some((pkg) => pkg.version !== version);
+  if (stale) {
+    throw new Error(
+      `gen-version: ${path} still carries a version other than ${version} after substitution — ` +
+        `its version strings are not in lockstep, fix the file by hand`,
+    );
   }
-  writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
+  writeFileSync(path, updated);
 }
 
 process.stdout.write(`Wrote CLAUDEXOR_VERSION="${version}" and portable distribution versions\n`);

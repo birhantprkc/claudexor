@@ -9,13 +9,7 @@
   "homepage": "https://razzant.github.io/claudexor/",
   "repository": "https://github.com/razzant/claudexor",
   "license": "MIT",
-  "keywords": [
-    "claude-code",
-    "codex",
-    "cursor",
-    "multi-agent",
-    "mcp"
-  ],
+  "keywords": ["claude-code", "codex", "cursor", "multi-agent", "mcp"],
   "skills": "skills/",
   "mcpServers": ".mcp.json"
 }
