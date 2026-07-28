@@ -1,5 +1,17 @@
 # claudexor
 
+## 3.2.0
+
+### Minor Changes
+
+- d6f4cd5: Add portable Agent Skill and GitHub Copilot plugin artifacts, official MCP Registry distribution metadata, experimental ACP Terminal Auth for Codex, and repository-configured protected path gates.
+- faee66a: Add the canonical immutable RunFacts terminal receipt (GH #29): one invariant-validated object built from canonical artifacts, embedded in the terminal journal event, persisted as final/run_facts.yaml, and served verbatim by the control API, terminal CLI JSON/NDJSON, and inspect through one shared validation owner. Present-but-invalid receipts and corrupted canonical artifacts fail loudly on every surface; zero-gate delivery refusals stay blocked and non-eligible; the reviewer NEEDS_HUMAN gate is winner-only and fail-closed; zero-byte deliverables are never present.
+- 5a5907d: Add remote SSH execution: a thread can bind to a concrete `~/.ssh/config` host, where the app installs a signed remote runtime (Ed25519 manifest binding four platform archives with pinned Node digests, atomic activate/rollback, no sudo) and drives the complete engine through a loopback SSH forward. Authentication stays with the system `/usr/bin/ssh`; interactive auth runs in an ephemeral PTY and nothing is persisted. Remote browsing lists only visible home-contained directories, remote image links serve magic-byte-validated raster images scoped to a registered project, and both endpoints are served only by the remote runtime (a local daemon leaves them unwired and answers 501). The release pipeline builds, attests, and publishes the remote-runtime archives, manifest, and SBOM as first-class release assets.
+
+### Patch Changes
+
+- @claudexor/cli@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

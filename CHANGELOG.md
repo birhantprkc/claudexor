@@ -3,47 +3,47 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
-- **Unreleased** — Remote SSH execution (#82, kazzand). A thread can bind to a
-  concrete `~/.ssh/config` host: the app delegates transport and auth to the
-  system `/usr/bin/ssh` (interactive auth in an ephemeral SwiftTerm PTY,
-  nothing persisted), installs a signed remote runtime — an Ed25519
+- **v3.2.0** (2026-07-28) — a seven-pull-request batch: remote execution, a
+  canonical run receipt, and the toolchain moved forward. Remote SSH
+  execution (#82, kazzand): a thread can bind to a concrete `~/.ssh/config`
+  host, where the app delegates transport and auth to the system
+  `/usr/bin/ssh` (interactive auth runs in an ephemeral SwiftTerm PTY and
+  nothing is persisted) and installs a signed remote runtime — an Ed25519
   `kind`-separated manifest binds four platform archives with pinned Node
-  digests, atomic activate/rollback, no sudo — and drives the complete engine
-  through a loopback SSH forward with location-tagged threads, remote setup
-  and login, log tails, and preview forwarding. Remote project browsing lists
-  only visible home-contained directories; remote markdown images are served
-  by a registered-project-scoped endpoint that magic-byte-validates raster
-  images and refuses everything else before reading it; both endpoints exist
-  only in the remote runtime, never on the local daemon. Non-PTY SSH
-  invocations run with `BatchMode=yes`. The release pipeline builds, attests,
-  SBOMs, and publishes the four remote-runtime archives, the signed remote
-  manifest, and the remote SBOM as first-class release assets (12-asset
-  publish allowlist, provenance verified before any use). The unverified
-  `claudexor harness install` remote vendor installer was cut pending a
-  verified install UX (follow-up issue).
-
-- **Unreleased** — Canonical RunFacts receipt (GH #29). Every terminal run
-  now seals its outcome into one immutable, invariant-validated `RunFacts`
-  object built once from canonical artifacts, embedded in the terminal
-  journal event, persisted as `final/run_facts.yaml`, and served verbatim by
-  the control API detail, terminal CLI JSON/NDJSON, and `claudexor inspect`
-  through one shared validation owner with unified run/task/lifecycle
-  identity binding. Fail-loud everywhere: a present-but-invalid receipt is a
-  typed `run_facts_invalid` failure on every surface (the CLI exits non-zero
-  instead of reading it as a legacy run), a corrupted canonical artifact or
-  malformed review finding fails the terminal instead of projecting as "not
-  configured", and daemon restart reconciliation no longer re-reads per-run
-  evidence for already-reconciled terminals or poisons a partition whose run
-  directory disk retention legitimately reclaimed. The checks axis now
-  reflects ALL deterministic checks: a refused live delivery or failed fresh
-  verify blocks a zero-gate run exactly like a gated one (run.blocked,
-  non-eligible) instead of normalizing to a clean completion. The reviewer
-  NEEDS_HUMAN gate is winner-only and fail-closed: a losing candidate's
-  findings stay disclosed evidence without vetoing a clean winner, and a
-  winner missing its review evidence blocks. A zero-byte deliverable of any
-  kind is no longer counted as present. The terminal event type is derived
-  from validated outcome facts, and Cancel after the terminal journal commit
-  is a documented no-op.
+  digests, atomic activate/rollback, no sudo — then drives the complete
+  engine through a loopback SSH forward with location-tagged threads, remote
+  setup and login, log tails, and preview forwarding. Remote browsing lists
+  only visible home-contained directories and refuses every other path with
+  one constant answer; remote markdown images ride a registered-project
+  endpoint that identifies raster images by magic bytes and refuses anything
+  else before reading its content; both remote endpoints are wired only into
+  the remote runtime, so a local daemon answers 501. The release pipeline
+  builds, attests, SBOMs, and publishes the four remote-runtime archives, the
+  signed remote manifest, and the remote SBOM as first-class assets (a
+  12-asset publish allowlist, provenance verified before any use). Canonical
+  RunFacts receipt (GH #29, Alex Basis): every terminal run seals its outcome
+  into one immutable, invariant-validated object built once from canonical
+  artifacts, embedded in the terminal journal event, persisted as
+  `final/run_facts.yaml`, and served verbatim by the control API, terminal
+  CLI JSON/NDJSON, and `claudexor inspect` through one shared validation
+  owner. Fail-loud throughout: a present-but-invalid receipt is a typed
+  `run_facts_invalid` failure on every surface, a corrupted canonical
+  artifact or malformed review finding fails the terminal instead of
+  projecting "not configured", and restart reconciliation neither re-reads
+  evidence for settled terminals nor poisons a partition whose run directory
+  retention legitimately reclaimed. The checks axis now covers ALL
+  deterministic checks, so a refused delivery or failed fresh verify blocks a
+  zero-gate run exactly like a gated one; the reviewer NEEDS_HUMAN gate is
+  winner-only and fail-closed; a zero-byte deliverable is never reported
+  present. Cursor model pickers are bounded by a shared layout token and one
+  truncated-label owner, so a long vendor catalog can no longer widen the
+  composer or Settings menus (GH #53, Alex Basis). The Claude manifest pins
+  `claude-opus-5` and `claude-opus-4-5` against the verified CLI (#54,
+  ndrew1337). Toolchain: `@modelcontextprotocol/server` 2.0.0 GA with the
+  2026-07-28 discover envelope pinned by regression, TypeScript 7.0.2 with a
+  sidecar for the one compiler-API consumer, and zod 4.4.3 with the schema
+  package bridged through the `zod/v3` subpath so all generated JSON Schema
+  stays byte-identical.
 
 - **v3.1.2** (2026-07-26) — Delegate recovery patch. Packaged macOS and npm
   installs now expose the six-tool delegation belt through the exact daemon
