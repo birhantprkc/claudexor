@@ -29,7 +29,27 @@ node -e '
 # the same terminal primitive SwiftTerm ultimately fronts.
 pty_output=$(HOME="$smoke_home" /usr/bin/script -q /dev/null \
   "$runtime/bin/claudexor" remote probe --json)
-printf '%s' "$pty_output" | grep -q '"protocolMajor":3'
+# Parse the payload instead of matching its bytes: `--json` prints INDENTED
+# JSON, and a PTY additionally rewrites line endings, so a literal
+# `"protocolMajor":3` substring never appears. Strip the carriage returns the
+# PTY adds, take the JSON object, and assert the value.
+printf '%s' "$pty_output" | tr -d '\r' | node -e '
+  let raw = "";
+  process.stdin.on("data", (chunk) => { raw += chunk; });
+  process.stdin.on("end", () => {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start < 0 || end <= start) {
+      console.error("darwin PTY smoke: no JSON object in the probe output");
+      process.exit(1);
+    }
+    const value = JSON.parse(raw.slice(start, end + 1));
+    if (!value.ok || value.protocolMajor !== 3 || !String(value.target).startsWith("darwin-")) {
+      console.error("darwin PTY smoke: unexpected probe payload " + JSON.stringify(value));
+      process.exit(1);
+    }
+  });
+'
 
 bootstrap=$(HOME="$smoke_home" "$runtime/bin/claudexor" remote bootstrap --json)
 port=$(node -e '
