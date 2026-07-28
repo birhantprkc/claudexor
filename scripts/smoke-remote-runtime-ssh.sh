@@ -115,6 +115,7 @@ curl --fail --silent --show-error "${headers[@]}" \
   '
 curl --fail --silent --show-error "${headers[@]}" \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: release-ssh-project' \
   -d '{"root":"/home/remote/project"}' \
   "$api/v2/projects" >/dev/null
 curl --fail --silent --show-error "${headers[@]}" \
