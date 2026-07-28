@@ -1047,8 +1047,8 @@ views in the shared design-system files; screens compose them.
     plan it froze and ran; a plan-readiness override is recorded on the turn for
     provenance, never inferred.
 - **Settings.** Native macOS `Settings` scene (`Cmd+,`) with grouped tabs: General,
-  Routing, Harnesses (per-harness defaults + doctor), Budget, Secrets, and
-  Appearance. The editable budget cockpit and the Harness Doctor are Settings
+  Routing, Harnesses (per-harness defaults + doctor), Connections (SSH execution
+  locations), Budget, Secrets, and Appearance. The editable budget cockpit and the Harness Doctor are Settings
   tabs, not top-level screens. (Review is inline per turn, not a Settings
   section; delivery is server-owned via the run decision/apply endpoints.)
   Settings groups are flat, solid, and shadowless. Settings does NOT own
@@ -1060,6 +1060,21 @@ views in the shared design-system files; screens compose them.
   empty field is an explicit "clear the override", and in-flight saves must not
   clobber the user's typing. Quick-launch and Retry honor saved engine defaults
   instead of hardcoded portfolio/cap values.
+- **Connections (remote execution locations).** The Connections tab lists the
+  SSH hosts a thread can execute on, read from the user's own `~/.ssh/config`;
+  Claudexor never stores a credential, a key or a password for them. Each row
+  carries ONE server-derived status from a fixed ladder — Offline, Connecting,
+  Needs authentication, Installing, Connected, Failed — rendered as a status
+  dot plus its label, never as a bare color: `role/muted` for Offline,
+  `role/accent` while Connecting or Installing, `role/warning` for Needs
+  authentication, `role/success` for Connected, `role/danger` for Failed. The
+  ladder is a projection of the daemon's connection state; the app never
+  invents a state, and an unknown state renders as Offline with its reason in
+  hover help. Installing and removing a remote runtime are destructive-adjacent
+  actions and go through an explicit confirmation dialog naming the host.
+  Interactive authentication happens in the embedded terminal (the same PTY
+  surface the remote Terminal tab uses) so the user sees exactly what `ssh`
+  asks; Claudexor neither reads nor echoes what is typed there.
 - **Help and tooltips.** Every compact/non-obvious control gets `.help(...)` hover help.
   Mode menus and harness chips expose descriptions on hover directly; do not add a
   separate adjacent info button just to explain a normal mode. Use a richer click popover
