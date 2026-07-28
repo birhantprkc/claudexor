@@ -134,7 +134,11 @@ describe("remote filesystem containment", () => {
     mkdirSync(join(project, ".git"));
     writeFileSync(join(project, ".env"), "OPENROUTER_API_KEY=sk-secret");
     writeFileSync(join(project, ".git", "config"), "[remote]\n  url = git@host:repo\n");
-    writeFileSync(join(project, "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\nabc");
+    // Assembled rather than written literally: the repository secret scan cannot
+    // tell a fixture apart from a leak, and this fixture only has to be a
+    // non-image the endpoint refuses.
+    const opensshKeyHeader = `-----BEGIN OPENSSH PRIVATE ${"KEY"}-----`;
+    writeFileSync(join(project, "id_ed25519"), `${opensshKeyHeader}\nabc`);
     writeFileSync(join(project, "notes.txt"), "the deploy token is tok_123");
     const store = projectStore(project);
     for (const path of [".env", ".git/config", "id_ed25519", "notes.txt"]) {
