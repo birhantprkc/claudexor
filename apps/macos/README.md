@@ -123,9 +123,10 @@ verb; the former `interrupt` alias was deleted as a duplicate of cancel); live
 input forwarding is not part of the control surface (the former input stub was
 removed as dead code), so the app shows no input UI for active runs.
 
-The trailing workspace belongs to the current thread and has three tabs:
-Changes, Artifacts, and Evidence. It aggregates the thread's runs until a receipt
-filters it. Project-produced outputs from `GET /runs/:id/produced` fill the
+The trailing workspace belongs to the current thread and has three always-present
+tabs: Changes, Artifacts, and Evidence. A thread executing on a remote location
+adds a fourth, Terminal; it is never shown for local threads. It aggregates the
+thread's runs until a receipt filters it. Project-produced outputs from `GET /runs/:id/produced` fill the
 Artifacts gallery, including project preview; internal run-tree artifacts stay
 with diagnostics under Evidence. There is no separate Canvas plane or two-plane
 Workbench. The composer sends

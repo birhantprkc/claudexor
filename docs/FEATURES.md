@@ -12,7 +12,7 @@ Statuses: `broken` > `dead` (wired to nothing) > `half-baked` > `suspicious` >
 owns the fix (`backlog` = not yet scheduled). Evidence is file:line at the
 time of the audit; lines drift with edits — verify before relying on them.
 
-Rows: **8** (works: 1, works-with-caveats: 7)
+Rows: **9** (works: 1, works-with-caveats: 7, broken: 1)
 
 | Area | Feature | Status | What is wrong / caveat | Evidence | Planned |
 |---|---|---|---|---|---|
@@ -29,3 +29,4 @@ New rows are added the moment a non-solid feature ships (see the rule above).
 Deliberate design boundaries that used to live here as "caveats" are
 documented in the "Design constraints" sections of `docs/ARCHITECTURE.md`
 (engine) and `docs/INTEGRATIONS.md` (host/external surfaces).
+| dev/gates | Real-harness battery (`pnpm battery:real`) | broken | The battery has drifted away from the shipped contracts and no longer proves what it claims. On the v3.2.0 candidate it reports PASS=11 FAIL=11 SKIP=14, and the RELEASED v3.1.2 tree reports the identical PASS=11 FAIL=11 SKIP=14 — the failures predate this release and are stale expectations, not regressions. The failures are the same class already fixed in the Cursor battery: `--test` is sent as implicit shell syntax that the typed-argv contract now rejects, `mcp tools/list` asserts an outdated tool set, `acp session/new` omits the now-required `mcpServers`, and three fail-loud phases assert outdated messages/exit codes. The 14 skips are honest: the battery runs under its own scratch `CLAUDEXOR_CONFIG_DIR`, which carries no vendor logins, so multi-harness phases cannot run there even though the host doctor reports codex, claude and cursor `ok`. Until this is repaired the battery does NOT cover: apply/decision lifecycle, create across harnesses, multi-harness image and web routes, plan lifecycle, and `agent --delegate`. | scripts/real-harness-battery.mjs; identical baseline captured on tag v3.1.2 (`pnpm battery:real` → PASS=11 FAIL=11 SKIP=14) | backlog (GH issue) |
