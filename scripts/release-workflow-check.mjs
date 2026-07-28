@@ -58,6 +58,10 @@ const exactPromotionPairedNeedles = [
   ],
   ["daemon version probe comparison", "probe.version !== process.argv[2]"],
   ["daemon build-SHA probe comparison", "probe.buildSha !== process.argv[3]"],
+  [
+    "remote SBOM generator prepared-SHA binding",
+    'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs',
+  ],
 ];
 for (const [label, pattern] of [
   ["workflow has candidate mode", /candidate/],
@@ -108,6 +112,24 @@ for (const [label, pattern] of [
   [
     "signed runtime manifest input is documented for publish",
     /runtime_manifest_b64:\s*\n\s*description:[^\n]*owner-signed runtime-update manifest/,
+  ],
+  [
+    // The remote SSH runtime manifest is the THIRD owner-signed publish input,
+    // transported exactly like the engine runtime manifest.
+    "signed remote runtime manifest input is documented for publish",
+    /remote_runtime_manifest_b64:\s*\n\s*description:[^\n]*owner-signed four-target SSH runtime manifest/,
+  ],
+  [
+    "publish verifies the owner-signed remote runtime manifest",
+    /verify-signed-remote-runtime-manifest\.mjs/,
+  ],
+  [
+    "remote runtime archives ship as release assets",
+    /cp "\$RUNNER_TEMP\/remote-runtimes"\/claudexor-remote-runtime-"\$VERSION"-\*\.tar\.gz "\$assets\/"/,
+  ],
+  [
+    "remote runtime archives are structurally verified before assembly",
+    /for archive in "\$remote"\/claudexor-remote-runtime-"\$VERSION"-\*\.tar\.gz; do\n\s*node scripts\/verify-remote-runtime-archive\.mjs "\$archive"/,
   ],
   [
     // A-5: publish must PROMOTE the exact candidate artifact bytes, not rebuild.
@@ -262,6 +284,60 @@ const exactPromotionMutationCases = [
       'cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"',
       'cp "apps/macos/dist/Claudexor-$VERSION.dmg" "$assets/"',
     )}\n# cp "candidate-assets/Claudexor-$VERSION.dmg" "$assets/"`,
+  ],
+  [
+    "twelve-asset candidate allowlist",
+    packageMacosJob.replace(
+      "            `claudexor-remote-runtime-${version}-linux-x64.tar.gz`,\n",
+      "",
+    ),
+    "exact twelve-asset release set",
+  ],
+  [
+    "remote archive use before provenance",
+    packageMacosJob.replace(
+      'run_meta="$(gh api',
+      'cp candidate-assets/claudexor-remote-runtime-premature.tar.gz "$RUNNER_TEMP/"\n          run_meta="$(gh api',
+    ),
+    "must come after the single early candidate provenance loop",
+  ],
+  [
+    "late duplicate provenance verifier",
+    `${packageMacosJob}\n          gh attestation verify "candidate-assets/late.tar.gz" --repo "$GITHUB_REPOSITORY"`,
+    "ONLY provenance verifier",
+  ],
+  [
+    "signed remote manifest promotion",
+    packageMacosJob.replace(
+      'cp "$remote_signed" "$assets/remote-runtime-manifest.json"',
+      'cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"',
+    ),
+    "unsigned-to-signed",
+  ],
+  [
+    "remote SBOM byte comparison",
+    packageMacosJob.replace(
+      'cmp "candidate-assets/Claudexor-remote-runtime-$VERSION.spdx.json" \\',
+      ": \\",
+    ),
+    "byte-compared candidate SBOM",
+  ],
+  [
+    "publish remote SBOM prepared-SHA binding",
+    packageMacosJob.replace(
+      'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs',
+      "node scripts/generate-remote-runtime-sbom.mjs",
+    ),
+    "publish must regenerate the remote SBOM",
+  ],
+  [
+    "candidate remote SBOM prepared-SHA binding",
+    replaceLastOccurrence(
+      packageMacosJob,
+      'GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs',
+      "node scripts/generate-remote-runtime-sbom.mjs",
+    ),
+    "candidate remote SBOM generation must bind the prepared SHA",
   ],
 ];
 for (const [label, needle] of exactPromotionPairedNeedles) {
@@ -528,6 +604,11 @@ function exactCandidateAppPromotionErrors(job) {
     /unexpected candidate asset set[\s\S]*?stat\.isFile\(\)[\s\S]*?stat\.isSymbolicLink\(\)[\s\S]*?stat\.size === 0/,
     verifyStep,
   );
+  requirePattern(
+    "candidate promotion allowlist must be the exact twelve-asset release set",
+    /const expected = \[\n\s*`Claudexor-\$\{version\}\.dmg`,\n\s*`Claudexor-\$\{version\}\.spdx\.json`,\n\s*`Claudexor-\$\{version\}\.zip`,\n\s*`Claudexor-remote-runtime-\$\{version\}\.spdx\.json`,\n\s*"SHA256SUMS",\n\s*`claudexor-remote-runtime-\$\{version\}-darwin-arm64\.tar\.gz`,\n\s*`claudexor-remote-runtime-\$\{version\}-darwin-x64\.tar\.gz`,\n\s*`claudexor-remote-runtime-\$\{version\}-linux-arm64\.tar\.gz`,\n\s*`claudexor-remote-runtime-\$\{version\}-linux-x64\.tar\.gz`,\n\s*`claudexor-runtime-\$\{version\}\.tar\.gz`,\n\s*"remote-runtime-manifest\.json",\n\s*"runtime-manifest\.json",\n\s*\]\.sort\(\);/,
+    verifyStep,
+  );
   const attestation = verifyStep.indexOf('gh attestation verify "$file"');
   const checksum = verifyStep.indexOf("shasum -a 256 -c SHA256SUMS");
   if (!(attestation >= 0 && attestation < checksum)) {
@@ -535,6 +616,43 @@ function exactCandidateAppPromotionErrors(job) {
       "release.yml: provenance must be verified before candidate SHA256SUMS is trusted",
     );
   }
+  // The exact allowlist makes the early loop cover EVERY promoted asset, so it
+  // is the SINGLE owner of promoted-candidate provenance: nothing may consume a
+  // candidate asset before it, and no later step may re-verify (a late verifier
+  // is a duplicate owner that lets uses drift ahead of it unnoticed).
+  const provenanceLoop = job.indexOf('gh attestation verify "$file"');
+  for (const [useLabel, useNeedle] of [
+    ["closure tarball promotion", 'cp "$cand" "$tarball"'],
+    ["remote archive promotion", "cp candidate-assets/claudexor-remote-runtime-"],
+    ["remote manifest promotion", "cp candidate-assets/remote-runtime-manifest.json"],
+  ]) {
+    const use = job.indexOf(useNeedle);
+    if (!(provenanceLoop >= 0 && use >= 0 && provenanceLoop < use)) {
+      findings.push(
+        `release.yml: ${useLabel} must come after the single early candidate provenance loop`,
+      );
+    }
+  }
+  if (job.split("gh attestation verify").length - 1 !== 1) {
+    findings.push(
+      "release.yml: the early candidate loop must be the ONLY provenance verifier in package-macos",
+    );
+  }
+  requirePattern(
+    "publish must ship the remote manifest only after unsigned-to-signed verification against promoted archives",
+    /remote_signed="\$RUNNER_TEMP\/remote-runtime-manifest\.signed\.json"\n\s*printf '%s' "\$REMOTE_RUNTIME_MANIFEST_B64_INPUT" \| base64 -d > "\$remote_signed"\n\s*node scripts\/verify-signed-remote-runtime-manifest\.mjs \\\n\s*--signed "\$remote_signed" \\\n\s*--unsigned "\$RUNNER_TEMP\/remote-runtimes\/remote-runtime-manifest\.json" \\\n\s*--assets-dir "\$RUNNER_TEMP\/remote-runtimes" \\\n\s*--version "\$VERSION" \\\n\s*--expected-build-sha "\$PREPARED_SHA"\n\s*cp "\$remote_signed" "\$assets\/remote-runtime-manifest\.json"/,
+    assembleStep,
+  );
+  requirePattern(
+    "publish must regenerate the remote SBOM from promoted bytes and ship the byte-compared candidate SBOM",
+    /GITHUB_SHA="\$PREPARED_SHA" node scripts\/generate-remote-runtime-sbom\.mjs \\\n\s*"\$RUNNER_TEMP\/remote-runtimes" "\$VERSION" \\\n\s*> "\$RUNNER_TEMP\/promoted-remote-runtime\.spdx\.json"\n\s*cmp "candidate-assets\/Claudexor-remote-runtime-\$VERSION\.spdx\.json" \\\n\s*"\$RUNNER_TEMP\/promoted-remote-runtime\.spdx\.json"\n\s*cp "candidate-assets\/Claudexor-remote-runtime-\$VERSION\.spdx\.json" "\$assets\/"/,
+    assembleStep,
+  );
+  requirePattern(
+    "candidate remote SBOM generation must bind the prepared SHA",
+    /else\n\s*GITHUB_SHA="\$PREPARED_SHA" node scripts\/generate-remote-runtime-sbom\.mjs \\\n\s*"\$RUNNER_TEMP\/remote-runtimes" "\$VERSION" \\\n\s*> "\$assets\/Claudexor-remote-runtime-\$VERSION\.spdx\.json"/,
+    assembleStep,
+  );
   requirePattern(
     "candidate ZIP app must verify signature, version, and exact daemon build SHA",
     /ditto -x -k "\$candidate_zip"[\s\S]*?codesign --verify --strict[\s\S]*?PlistBuddy[\s\S]*?test "\$app_version" = "\$VERSION"[\s\S]*?claudexord\.bundle\.cjs" --probe[\s\S]*?probe\.version !== process\.argv\[2\][\s\S]*?probe\.buildSha !== process\.argv\[3\]/,

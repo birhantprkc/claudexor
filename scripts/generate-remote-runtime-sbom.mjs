@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 const directory = resolve(process.argv[2] ?? "");
 const version = process.argv[3] ?? "";
@@ -22,20 +22,34 @@ const licenses = licensesPath
       }),
     );
 const dependencies = licensedPackages(licenses);
+// Per-archive facts come from the (unsigned) remote runtime manifest, the one
+// metadata artifact that travels with the archives through candidate promotion.
+// The per-target sidecar .json files are build-internal inputs to
+// build-remote-runtime-manifest.mjs and never become release assets, so the
+// publish run can regenerate this SBOM byte-identically without them.
+const manifest = readJson(join(directory, "remote-runtime-manifest.json"));
+if (manifest.kind !== "claudexor-remote-runtime" || manifest.version !== version) {
+  throw new Error("remote runtime SBOM manifest kind or version does not match");
+}
+const manifestAssets = new Map(
+  (Array.isArray(manifest.assets) ? manifest.assets : []).map((asset) => [
+    asset?.archiveName,
+    asset,
+  ]),
+);
 const archives = readdirSync(directory)
   .filter((name) => name.endsWith(".tar.gz"))
   .sort()
   .map((name, index) => {
-    const metadataName = `${basename(name, ".tar.gz")}.json`;
-    const metadata = readJson(join(directory, metadataName));
+    const metadata = manifestAssets.get(name);
     const digest = sha256(join(directory, name));
     if (
-      metadata.archiveName !== name ||
+      !metadata ||
       typeof metadata.target !== "string" ||
       typeof metadata.nodeVersion !== "string" ||
       metadata.sha256 !== digest
     ) {
-      throw new Error(`remote runtime SBOM metadata does not match ${name}`);
+      throw new Error(`remote runtime SBOM manifest metadata does not match ${name}`);
     }
     return {
       name,
@@ -45,6 +59,9 @@ const archives = readdirSync(directory)
       digest,
     };
   });
+if (manifestAssets.size !== archives.length) {
+  throw new Error("remote runtime SBOM requires one archive per manifest asset");
+}
 if (archives.length !== 4) throw new Error("remote runtime SBOM requires exactly four archives");
 if (new Set(archives.map((archive) => archive.target)).size !== archives.length) {
   throw new Error("remote runtime SBOM requires four distinct runtime targets");

@@ -305,8 +305,14 @@ jobs:
             `Claudexor-${version}.dmg`,
             `Claudexor-${version}.spdx.json`,
             `Claudexor-${version}.zip`,
+            `Claudexor-remote-runtime-${version}.spdx.json`,
             "SHA256SUMS",
+            `claudexor-remote-runtime-${version}-darwin-arm64.tar.gz`,
+            `claudexor-remote-runtime-${version}-darwin-x64.tar.gz`,
+            `claudexor-remote-runtime-${version}-linux-arm64.tar.gz`,
+            `claudexor-remote-runtime-${version}-linux-x64.tar.gz`,
             `claudexor-runtime-${version}.tar.gz`,
+            "remote-runtime-manifest.json",
             "runtime-manifest.json",
           ].sort();
           const actual = readdirSync("candidate-assets").sort();
@@ -320,6 +326,10 @@ jobs:
             }
           }
           NODE
+          # This loop is the SINGLE owner of promoted-candidate provenance: the
+          # exact allowlist above covers every candidate asset (app, closure,
+          # remote runtimes, manifests, SBOMs, SHA256SUMS), so each one is
+          # verified HERE, before any later step copies, extracts, or trusts it.
           for file in candidate-assets/*; do
             gh attestation verify "$file" \
               --repo "$GITHUB_REPOSITORY" \
@@ -405,18 +415,6 @@ jobs:
           actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
           test "$declared" = "$actual" || { echo "::error::runtime manifest sha256 does not match the tarball"; exit 1; }
 
-      - name: Verify promoted candidate closure provenance (publish, A-5)
-        if: needs.prepare.outputs.mode == 'publish'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          # The promoted closure bytes must carry the CANDIDATE run's build
-          # provenance (digest-keyed, repo-scoped) before they are trusted.
-          gh attestation verify "candidate-assets/claudexor-runtime-$VERSION.tar.gz" \
-            --repo "$GITHUB_REPOSITORY"
-
       - name: Build (candidate) or promote (publish) all SSH runtime targets
         shell: bash
         env:
@@ -475,17 +473,6 @@ jobs:
           esac
           scripts/smoke-darwin-remote-runtime.sh \
             "$RUNNER_TEMP/remote-runtimes/claudexor-remote-runtime-$VERSION-$target.tar.gz"
-
-      - name: Verify promoted SSH runtime provenance (publish)
-        if: needs.prepare.outputs.mode == 'publish'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          for file in candidate-assets/claudexor-remote-runtime-"$VERSION"-*.tar.gz; do
-            gh attestation verify "$file" --repo "$GITHUB_REPOSITORY"
-          done
 
       - name: Assemble checksums, SBOM and review evidence
         shell: bash
@@ -546,9 +533,22 @@ jobs:
           else
             cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"
           fi
-          node scripts/generate-remote-runtime-sbom.mjs \
-            "$RUNNER_TEMP/remote-runtimes" "$VERSION" \
-            > "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"
+          # The remote SBOM derives every archive fact from the unsigned
+          # manifest, so publish can REGENERATE it deterministically from the
+          # promoted bytes, prove byte-identity with the provenance-verified
+          # candidate SBOM, and ship the CANDIDATE bytes (A-5).
+          if [ "$RELEASE_MODE_INPUT" = publish ]; then
+            GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs \
+              "$RUNNER_TEMP/remote-runtimes" "$VERSION" \
+              > "$RUNNER_TEMP/promoted-remote-runtime.spdx.json"
+            cmp "candidate-assets/Claudexor-remote-runtime-$VERSION.spdx.json" \
+              "$RUNNER_TEMP/promoted-remote-runtime.spdx.json"
+            cp "candidate-assets/Claudexor-remote-runtime-$VERSION.spdx.json" "$assets/"
+          else
+            GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs \
+              "$RUNNER_TEMP/remote-runtimes" "$VERSION" \
+              > "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"
+          fi
           if [ "$RELEASE_MODE_INPUT" = publish ]; then
             cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"
           fi

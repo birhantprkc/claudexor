@@ -179,6 +179,39 @@ Candidate runs publish nothing signed; only publish ships the signed manifest.
 Rotate the key by minting a new keypair, bumping its `keyId`, and shipping the
 new public half in a signed DMG.
 
+The `publish` mode carries a THIRD signed input, `remote_runtime_manifest_b64`:
+the OWNER-SIGNED four-target SSH runtime manifest, transported the same way.
+The candidate run builds the four remote runtime archives
+(`claudexor-remote-runtime-<v>-{linux-x64,linux-arm64,darwin-x64,darwin-arm64}.tar.gz`)
+plus an UNSIGNED `remote-runtime-manifest.json`; the owner downloads the
+promoted candidate assets and signs offline:
+
+```
+pnpm sign:remote-runtime-manifest \
+  --in          remote-runtime-manifest.json  # the candidate's unsigned manifest
+  --assets-dir  <dir holding the four promoted claudexor-remote-runtime-<v>-<target>.tar.gz> \
+  --private-key ~/.claudexor/keys/runtime-update-ed25519.pem \
+  --authority   release/runtime-update-authority.json \
+  --out         remote-runtime-manifest.signed.json
+```
+
+The same OFFLINE runtime-update key signs both manifest kinds; domain
+separation is the signed `kind` field (`claudexor-remote-runtime`), which the
+engine manifest's signed bytes never contain. The signer refuses to read the
+private key until all four exactly-named archives sit in `--assets-dir` as
+nonempty regular files (no symlinks) whose digests match the unsigned
+manifest. In the publish run the promoted candidate artifact is an exact
+TWELVE-asset set (DMG, ZIP, app SBOM, SHA256SUMS, engine closure + unsigned
+runtime manifest, four remote archives, unsigned remote manifest, remote
+SBOM); one early `gh attestation verify` loop — the single provenance owner —
+verifies every one of them against the candidate run before ANY later step
+copies or extracts them. Publish then runs
+`scripts/verify-signed-remote-runtime-manifest.mjs` (pinned-authority
+signature, per-archive digest match against the promoted bytes, field equality
+with the candidate's unsigned manifest), regenerates the remote SBOM
+deterministically from the promoted unsigned manifest, `cmp`s it against the
+provenance-verified candidate SBOM, and ships the CANDIDATE bytes (A-5).
+
 The review process itself (panel composition, sealed packet contents, the
 blocker contract, wave discipline) is defined ONCE, in `docs/CHECKLISTS.md`
 (Release review protocol) — this file only covers the attestation transport.

@@ -115,28 +115,47 @@ describe("remote runtime SPDX SBOM", () => {
     const licensesPath = join(fixture, "licenses.json");
     writeFileSync(licensesPath, JSON.stringify(licenses));
     const targets = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
-    for (const target of targets) {
+    // The generator reads per-archive facts from the promoted (unsigned)
+    // manifest, never from build-internal sidecar files — publish regenerates
+    // the SBOM from exactly these promoted release assets.
+    const assets = targets.map((target) => {
       const name = `claudexor-remote-runtime-${rootVersion}-${target}.tar.gz`;
       const contents = `archive:${target}`;
       writeFileSync(join(fixture, name), contents);
-      writeFileSync(
-        join(fixture, `${name.slice(0, -".tar.gz".length)}.json`),
-        JSON.stringify({
-          archiveName: name,
-          target,
-          nodeVersion,
-          sha256: createHash("sha256").update(contents).digest("hex"),
-        }),
-      );
-    }
+      return {
+        archiveName: name,
+        target,
+        nodeVersion,
+        sha256: createHash("sha256").update(contents).digest("hex"),
+      };
+    });
+    writeFileSync(
+      join(fixture, "remote-runtime-manifest.json"),
+      JSON.stringify({ kind: "claudexor-remote-runtime", version: rootVersion, assets }),
+    );
     try {
-      const document = JSON.parse(
-        execFileSync(process.execPath, [remoteGenerator, fixture, rootVersion, licensesPath], {
+      const generated = execFileSync(
+        process.execPath,
+        [remoteGenerator, fixture, rootVersion, licensesPath],
+        {
           cwd: resolve("."),
           encoding: "utf8",
           env: { ...process.env, GITHUB_SHA: "b".repeat(40) },
-        }),
+        },
       );
+      const regenerated = execFileSync(
+        process.execPath,
+        [remoteGenerator, fixture, rootVersion, licensesPath],
+        {
+          cwd: resolve("."),
+          encoding: "utf8",
+          env: { ...process.env, GITHUB_SHA: "b".repeat(40) },
+        },
+      );
+      // Publish byte-compares its regeneration against the candidate SBOM, so
+      // two runs over the same promoted inputs must be byte-identical.
+      expect(regenerated).toBe(generated);
+      const document = JSON.parse(generated);
       expect(document.files).toHaveLength(4);
       expect(
         document.packages.filter((pkg: any) => pkg.name.startsWith("Claudexor remote runtime (")),

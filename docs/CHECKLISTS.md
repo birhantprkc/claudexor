@@ -261,9 +261,17 @@ pnpm test
   adjudication, one batched fix commit, one confirmation wave on the delta.
 - Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
   come from GitHub Actions `candidate` then `publish` mode; missing signing or
-  notarization credentials block publication. Publish promotes the candidate
-  DMG, ZIP, and SBOM byte-for-byte; only the signed runtime manifest, review
-  attestation, and final checksum set are assembled in the publish run.
+  notarization credentials block publication. Publish promotes the exact
+  twelve-asset candidate set byte-for-byte (DMG, ZIP, app SBOM, SHA256SUMS,
+  engine closure + unsigned runtime manifest, the four remote SSH runtime
+  archives, the unsigned remote manifest, and the remote SBOM), verifying every
+  promoted asset in ONE early provenance loop before any use; only the two
+  owner-signed manifests (`runtime_manifest_b64` and
+  `remote_runtime_manifest_b64`, sealed offline via `pnpm sign:runtime-manifest`
+  / `pnpm sign:remote-runtime-manifest`), review attestation, and final
+  checksum set are assembled in the publish run. The remote SBOM is regenerated
+  from the promoted unsigned manifest and must `cmp` byte-identical to the
+  candidate SBOM before the candidate bytes ship.
 - The publish input is an annotated stable tag on exact `origin/main` plus a
   signed attestation: the owner-review attestation binds the candidate
   SHA/tree, the full-gate receipt digest, and every panel reviewer report
