@@ -452,6 +452,14 @@ actor SSHConnectionManager {
 /// failures must remain ordinary errors: a terminal cannot repair DNS,
 /// connectivity, socket-path, config-permission, or changed/revoked-host-key
 /// failures and presenting one implies that user input is expected.
+///
+/// Trust boundary: this substring sniffing is only sound because the batch
+/// master runs with LogLevel=ERROR (SSHCommandFactory.startMaster), which
+/// keeps OpenSSH's own error()/fatal() text but suppresses the display of the
+/// server-authored pre-auth banner. Without that fence a hostile server could
+/// plant "password:"/"the authenticity of host" in stderr and provoke a false
+/// interactive trust prompt. The changed/revoked-host-key guard is evaluated
+/// first on purpose: when both marker families appear, the hard refusal wins.
 func sshBatchFailureNeedsInteraction(_ detail: String) -> Bool {
     let message = detail.lowercased()
     guard !message.isEmpty else { return false }

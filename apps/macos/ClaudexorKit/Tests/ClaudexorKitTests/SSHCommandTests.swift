@@ -12,10 +12,47 @@ import Testing
         #expect(master.arguments.contains("ServerAliveInterval=30"))
         #expect(master.arguments.contains("ServerAliveCountMax=3"))
         #expect(factory.remoteCommand("true").arguments == [
-            "-S", "/tmp/cx/master", "-o", "ControlMaster=no", "prod", "true",
+            "-S", "/tmp/cx/master", "-o", "ControlMaster=no",
+            "-o", "BatchMode=yes", "-o", "LogLevel=ERROR",
+            "prod", "true",
         ])
         #expect(factory.forward(localPort: 4400, remotePort: 3000).arguments.contains(
             "127.0.0.1:4400:127.0.0.1:3000"))
+    }
+
+    @Test func nonPTYCommandsRefusePromptsButPTYCommandsKeepThem() throws {
+        let factory = try SSHCommandFactory(alias: "prod", controlPath: "/tmp/cx/master")
+        let pty = factory.remoteCommand("tail -f log", requestTTY: true).arguments
+        #expect(pty == [
+            "-S", "/tmp/cx/master", "-o", "ControlMaster=no", "-tt", "prod", "tail -f log",
+        ])
+        #expect(!pty.contains("BatchMode=yes"))
+        #expect(!pty.contains("LogLevel=ERROR"))
+    }
+
+    @Test func batchMasterSuppressesServerBannerButInteractiveMasterDoesNot() throws {
+        let factory = try SSHCommandFactory(alias: "prod", controlPath: "/tmp/cx/master")
+        let batch = factory.startMaster(batchMode: true).arguments
+        // The banner-spoof fence: the stderr that connectBatch sniffs for
+        // "needs interaction" must only ever contain OpenSSH's own
+        // error()/fatal() text, never a server-authored pre-auth banner.
+        #expect(batch.contains("LogLevel=ERROR"))
+        let interactive = factory.startMaster(batchMode: false).arguments
+        #expect(!interactive.contains("BatchMode=yes"))
+        #expect(!interactive.contains("LogLevel=ERROR"))
+    }
+
+    @Test func setupAttachQuotesTheValidatedJobID() throws {
+        let factory = try SSHCommandFactory(alias: "prod", controlPath: "/tmp/cx/master")
+        let command = try #require(factory.setupAttach(jobID: "setup-ab12").arguments.last)
+        #expect(command
+            == "~/.claudexor/remote/current/bin/claudexor setup attach 'setup-ab12'")
+        #expect(throws: SSHConfigError.self) {
+            _ = try factory.setupAttach(jobID: "setup-a;rm -rf ~")
+        }
+        #expect(throws: SSHConfigError.self) {
+            _ = try factory.setupAttach(jobID: "prod-ab12")
+        }
     }
 
     @Test func remoteDirectoryIsQuotedWithoutLocalShellInterpolation() throws {

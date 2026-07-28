@@ -275,9 +275,13 @@ actor RemoteRuntimeInstaller {
         guard digest == asset.sha256 else {
             throw SSHConnectionError.unavailable("remote runtime archive digest mismatch")
         }
+        // digest == asset.sha256 was proven above, so the name is 64 hex
+        // chars; the posixQuote still keeps every remote interpolation on the
+        // single audited quoting path.
         let incoming =
             "umask 077; mkdir -p \"$HOME/.claudexor/remote/incoming\"; " +
-            "cat > \"$HOME/.claudexor/remote/incoming/\(asset.sha256).tar.gz\""
+            "cat > \"$HOME/.claudexor/remote/incoming/\"" +
+            SSHCommandFactory.posixQuote("\(asset.sha256).tar.gz")
         _ = try await ssh.execute(connection, remoteCommand: incoming, stdin: archive)
 
         let installCommand =
@@ -439,11 +443,20 @@ actor RemoteRuntimeInstaller {
           exit 69
         fi
         test "$actual" = "$expected"
+        # Capture both listings through plain assignments: `set -e` propagates
+        # a tar failure out of `x=$(...)`, while a substitution inline in the
+        # heredoc body would silently truncate the listing on a corrupt
+        # archive. Heredoc expansion never field-splits or globs, and the
+        # anchored patterns are closed under raw-newline entry names: any
+        # `..` path component leaves `..`, `../*`, `*/../*` or `*/..` on at
+        # least one physical line no matter where the name is split.
+        listing=$(tar -tzf "$archive")
         while IFS= read -r entry; do
           case "$entry" in /*|..|../*|*/../*|*/..) exit 65;; esac
         done <<EOF
-        $(tar -tzf "$archive")
+        $listing
         EOF
+        verbose=$(tar -tvzf "$archive")
         while IFS= read -r detail; do
           case "$detail" in
             -*) ;;
@@ -451,7 +464,7 @@ actor RemoteRuntimeInstaller {
             *) exit 65;;
           esac
         done <<EOF
-        $(tar -tvzf "$archive")
+        $verbose
         EOF
         mkdir "$staging"
         tar -xzf "$archive" -C "$staging" --no-same-owner

@@ -58,6 +58,27 @@ import Testing
         }
     }
 
+    /// Byte-for-byte lock between RemoteRuntime.signingBytes() and the mjs
+    /// canonicalJson (scripts/lib/remote-runtime-manifest-contract.mjs). The
+    /// fixture scrambles key order and exercises raw multibyte UTF-8, a char
+    /// that appears both raw and \u-escaped, every shorthand escape,
+    /// U+0000/U+0007/U+001F, raw DEL, and raw U+2028/U+2029; the .bin vector was
+    /// recorded from the mjs side and is asserted by BOTH test suites.
+    @Test func canonicalSigningBytesMatchTheRecordedCrossLanguageVector() throws {
+        let manifest = try JSONDecoder().decode(
+            RemoteRuntimeManifestV1.self, from: fixture("canonical-signing-manifest"))
+        let expectedURL = try #require(
+            Bundle.module.url(
+                forResource: "canonical-signing-bytes", withExtension: "bin",
+                subdirectory: "Fixtures/remote-runtime-update"))
+        let expected = try Data(contentsOf: expectedURL)
+        let produced = manifest.signingBytes()
+        // String comparison first for a readable diff, then the byte contract.
+        #expect(String(decoding: produced, as: UTF8.self)
+            == String(decoding: expected, as: UTF8.self))
+        #expect(produced == expected)
+    }
+
     @Test func swiftVerifiesTheJavaScriptSignedFourTargetFixture() throws {
         let value = RemoteRuntimeManifestV1.verified(
             try fixture("valid-manifest"), authority: try testAuthority())

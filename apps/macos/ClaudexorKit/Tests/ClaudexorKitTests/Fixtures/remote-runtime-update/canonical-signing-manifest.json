@@ -1,0 +1,50 @@
+{
+  "version": "9.9.9",
+  "notes": "\u03a9mega raw-Ω 💥 \"quoted\" back\\slash raw-é escaped-\u00e9 tab\t nl\n cr\r bs\b ff\f bell\u0007 unit\u001f nul\u0000 del ls  ps  end",
+  "schemaVersion": 1,
+  "protocolMajor": 3,
+  "assets": [
+    {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001",
+      "target": "linux-x64",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v9.9.9/claudexor-remote-runtime-9.9.9-linux-x64.tar.gz",
+      "arch": "x64",
+      "nodeVersion": "24.16.0",
+      "platform": "linux",
+      "archiveName": "claudexor-remote-runtime-9.9.9-linux-x64.tar.gz"
+    },
+    {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000002",
+      "target": "linux-arm64",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v9.9.9/claudexor-remote-runtime-9.9.9-linux-arm64.tar.gz",
+      "arch": "arm64",
+      "nodeVersion": "24.16.0",
+      "platform": "linux",
+      "archiveName": "claudexor-remote-runtime-9.9.9-linux-arm64.tar.gz"
+    },
+    {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000003",
+      "target": "darwin-x64",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v9.9.9/claudexor-remote-runtime-9.9.9-darwin-x64.tar.gz",
+      "arch": "x64",
+      "nodeVersion": "24.16.0",
+      "platform": "darwin",
+      "archiveName": "claudexor-remote-runtime-9.9.9-darwin-x64.tar.gz"
+    },
+    {
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000004",
+      "target": "darwin-arm64",
+      "archiveUrl": "https://github.com/razzant/claudexor/releases/download/v9.9.9/claudexor-remote-runtime-9.9.9-darwin-arm64.tar.gz",
+      "arch": "arm64",
+      "nodeVersion": "24.16.0",
+      "platform": "darwin",
+      "archiveName": "claudexor-remote-runtime-9.9.9-darwin-arm64.tar.gz"
+    }
+  ],
+  "kind": "claudexor-remote-runtime",
+  "buildSha": "fedcba9876543210fedcba9876543210fedcba98",
+  "keyId": "claudexor-runtime-update-вектор-ed25519",
+  "minAppVersion": "3.2.0",
+  "algorithm": "Ed25519",
+  "signature": "never-signed-canonical-bytes-vector"
+}

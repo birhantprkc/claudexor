@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   REMOTE_RUNTIME_MANIFEST_KIND,
@@ -93,5 +95,26 @@ describe("remote runtime manifest", () => {
     expect(signed.assets.map((asset: { target: string }) => asset.target)).toEqual(
       REMOTE_RUNTIME_TARGETS,
     );
+  });
+
+  // Byte-for-byte lock against the Swift mirror (RemoteRuntime.signingBytes).
+  // The shared fixture scrambles key order and stresses raw multibyte UTF-8, a
+  // char present both raw and \u-escaped, every shorthand escape,
+  // U+0000/U+0007/U+001F, raw DEL, and raw U+2028/U+2029. The recorded .bin
+  // vector is asserted by BOTH this test and the ClaudexorKit test
+  // canonicalSigningBytesMatchTheRecordedCrossLanguageVector, so either
+  // canonicalizer drifting breaks its suite.
+  it("produces the recorded cross-language canonical signing bytes", () => {
+    const vectorDir = resolve(
+      import.meta.dirname,
+      "../../../apps/macos/ClaudexorKit/Tests/ClaudexorKitTests/Fixtures/remote-runtime-update",
+    );
+    const manifest = JSON.parse(
+      readFileSync(resolve(vectorDir, "canonical-signing-manifest.json"), "utf8"),
+    );
+    const expected = readFileSync(resolve(vectorDir, "canonical-signing-bytes.bin"));
+    const produced = remoteRuntimeManifestSigningBytes(manifest);
+    expect(produced.toString("utf8")).toBe(expected.toString("utf8"));
+    expect(produced.equals(expected)).toBe(true);
   });
 });

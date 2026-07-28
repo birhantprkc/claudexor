@@ -47,7 +47,16 @@ public struct SSHCommandFactory: Sendable {
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
         ] + socketOption
-        if batchMode { arguments += ["-o", "BatchMode=yes"] }
+        if batchMode {
+            // LogLevel=ERROR keeps OpenSSH's own error()/fatal() diagnostics
+            // (Permission denied, Host key verification failed, the
+            // changed-host-key warning) but suppresses the INFO-level display
+            // of the server's pre-auth banner. The batch stderr is sniffed by
+            // sshBatchFailureNeedsInteraction, so a hostile server must not be
+            // able to inject "password:"/"the authenticity of host" text and
+            // provoke a false interactive trust prompt.
+            arguments += ["-o", "BatchMode=yes", "-o", "LogLevel=ERROR"]
+        }
         arguments.append(alias)
         return SSHInvocation(arguments: arguments)
     }
@@ -64,9 +73,18 @@ public struct SSHCommandFactory: Sendable {
         _ command: String,
         requestTTY: Bool = false
     ) -> SSHInvocation {
+        // Non-PTY commands ride the app-owned control master; nobody is
+        // watching an ssh prompt. If the master has died, OpenSSH would fall
+        // back to a fresh connection and could block on (or misbind) an
+        // authentication/host-key prompt, so refuse it with BatchMode and keep
+        // the stderr free of server-banner text (LogLevel=ERROR) because those
+        // bytes surface in app error messages. Fresh authentication belongs
+        // exclusively to the interactive master path (startMaster(batchMode:
+        // false) in a real terminal). PTY commands (requestTTY) stay untouched:
+        // they run in a visible terminal where prompting is legitimate.
         SSHInvocation(arguments:
             ["-S", controlPath, "-o", "ControlMaster=no"]
-            + (requestTTY ? ["-tt"] : [])
+            + (requestTTY ? ["-tt"] : ["-o", "BatchMode=yes", "-o", "LogLevel=ERROR"])
             + [alias, command])
     }
 
@@ -95,8 +113,11 @@ public struct SSHCommandFactory: Sendable {
         guard jobID.hasPrefix("setup-"),
               jobID.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" })
         else { throw SSHConfigError.resolutionFailed("invalid setup job id") }
+        // The allowlist above is the real fence; the quote keeps the
+        // "every interpolation is posixQuoted" invariant machine-checkable.
         return remoteCommand(
-            "~/.claudexor/remote/current/bin/claudexor setup attach \(jobID)")
+            "~/.claudexor/remote/current/bin/claudexor setup attach "
+                + Self.posixQuote(jobID))
     }
 
     /// POSIX single-quote encoding for the remote login shell. The local app
