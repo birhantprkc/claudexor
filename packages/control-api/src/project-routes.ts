@@ -50,8 +50,7 @@ export async function handleProjectRoute(
   if (method === "GET" && path === "/filesystem/directories") {
     const service = ctx.services?.listDirectory;
     if (!service) return unsupported(ctx, res);
-    let requestedPath: string | undefined;
-    try {
+    const requestedPath = await routeValue(ctx, res, 400, () => {
       const url = new URL(req.url ?? "", "http://localhost");
       for (const key of url.searchParams.keys()) {
         if (key !== "path") throw new Error(`unexpected query parameter: ${key}`);
@@ -59,115 +58,76 @@ export async function handleProjectRoute(
       if (url.searchParams.getAll("path").length > 1) {
         throw new Error("path may be specified only once");
       }
-      requestedPath = url.searchParams.get("path") ?? undefined;
-    } catch (error) {
-      ctx.requestError(res, error);
-      return true;
-    }
-    let listing: unknown;
-    try {
-      listing = await service(requestedPath);
-    } catch (error) {
-      ctx.requestError(res, error, 500);
-      return true;
-    }
-    try {
-      ctx.json(res, 200, ControlDirectoryListing.parse(listing));
-    } catch {
-      invalidServiceResponse(ctx, res, "listDirectory");
-    }
-    return true;
+      return url.searchParams.get("path") ?? undefined;
+    });
+    if (!requestedPath.ok) return true;
+    const listing = await routeValue(ctx, res, 500, () => service(requestedPath.value));
+    if (!listing.ok) return true;
+    return serviceResponse(ctx, res, "listDirectory", () =>
+      ctx.json(res, 200, ControlDirectoryListing.parse(listing.value)),
+    );
   }
 
   if (method === "GET" && path === "/projects") {
     const service = ctx.services?.listProjects;
     if (!service) return unsupported(ctx, res);
-    let response: { projects: unknown[] };
-    try {
-      response = await service();
-    } catch (error) {
-      ctx.requestError(res, error, 500);
-      return true;
-    }
-    try {
+    const response = await routeValue(ctx, res, 500, service);
+    if (!response.ok) return true;
+    return serviceResponse(ctx, res, "listProjects", () =>
       ctx.json(
         res,
         200,
-        ControlProjectListResponse.parse({ projects: response.projects.map(projectWire) }),
-      );
-    } catch {
-      invalidServiceResponse(ctx, res, "listProjects");
-    }
-    return true;
+        ControlProjectListResponse.parse({
+          projects: response.value.projects.map(projectWire),
+        }),
+      ),
+    );
   }
 
   if (method === "POST" && path === "/projects") {
     const service = ctx.services?.registerProject;
     if (!service) return unsupported(ctx, res);
-    let input: { root: string; idempotencyKey: string; clientId: string };
-    try {
+    const input = await routeValue(ctx, res, 400, async () => {
       const idempotencyKey = requiredIdempotencyKey(req);
       const raw = await ctx.readBody(req);
       assertNoInlineSecretValues(raw);
       const body = ControlProjectRegisterRequest.parse(raw);
-      input = { root: body.root, idempotencyKey, clientId: "control-api" };
-    } catch (error) {
-      ctx.requestError(res, error);
-      return true;
-    }
-    let project: unknown;
-    try {
-      project = await service(input);
-    } catch (error) {
-      ctx.requestError(res, error, 500);
-      return true;
-    }
-    try {
-      ctx.json(res, 200, projectWire(project));
-    } catch {
-      invalidServiceResponse(ctx, res, "registerProject");
-    }
-    return true;
+      return { root: body.root, idempotencyKey, clientId: "control-api" };
+    });
+    if (!input.ok) return true;
+    const project = await routeValue(ctx, res, 500, () => service(input.value));
+    if (!project.ok) return true;
+    return serviceResponse(ctx, res, "registerProject", () =>
+      ctx.json(res, 200, projectWire(project.value)),
+    );
   }
 
   const projectRelinkMatch = /^\/projects\/([^/]+)\/relink$/.exec(path);
   if (method === "POST" && projectRelinkMatch) {
     const service = ctx.services?.relinkProject;
     if (!service) return unsupported(ctx, res);
-    let projectId: string;
-    let root: string;
-    try {
-      projectId = decodeURIComponent(projectRelinkMatch[1] as string);
+    const input = await routeValue(ctx, res, 400, async () => {
+      const projectId = decodeURIComponent(projectRelinkMatch[1] as string);
       const raw = await ctx.readBody(req);
       assertNoInlineSecretValues(raw);
-      root = ControlProjectRelinkRequest.parse(raw).root;
-    } catch (error) {
-      ctx.requestError(res, error);
-      return true;
-    }
-    let project: unknown;
-    try {
-      project = await service(projectId, root);
-    } catch (error) {
-      ctx.requestError(res, error, 500);
-      return true;
-    }
-    try {
-      ctx.json(res, 200, projectWire(project));
-    } catch {
-      invalidServiceResponse(ctx, res, "relinkProject");
-    }
-    return true;
+      return { projectId, root: ControlProjectRelinkRequest.parse(raw).root };
+    });
+    if (!input.ok) return true;
+    const project = await routeValue(ctx, res, 500, () =>
+      service(input.value.projectId, input.value.root),
+    );
+    if (!project.ok) return true;
+    return serviceResponse(ctx, res, "relinkProject", () =>
+      ctx.json(res, 200, projectWire(project.value)),
+    );
   }
 
   const projectFileMatch = /^\/projects\/([^/]+)\/file$/.exec(path);
   if (method === "GET" && projectFileMatch) {
     const service = ctx.services?.fetchProjectFile;
     if (!service) return unsupported(ctx, res);
-    let projectId: string;
-    let requestedPath: string;
-    try {
-      projectId = decodeURIComponent(projectFileMatch[1] as string);
+    const input = await routeValue(ctx, res, 400, () => {
+      const projectId = decodeURIComponent(projectFileMatch[1] as string);
       const url = new URL(req.url ?? "", "http://localhost");
       for (const key of url.searchParams.keys()) {
         if (key !== "path") throw new Error(`unexpected query parameter: ${key}`);
@@ -175,24 +135,16 @@ export async function handleProjectRoute(
       if (url.searchParams.getAll("path").length !== 1) {
         throw new Error("one path query parameter is required");
       }
-      requestedPath = url.searchParams.get("path") ?? "";
-    } catch (error) {
-      ctx.requestError(res, error);
-      return true;
-    }
-    let file: { data: Buffer; contentType: string; fileName: string };
-    try {
-      file = await service(projectId, requestedPath);
-    } catch (error) {
-      ctx.requestError(res, error, 500);
-      return true;
-    }
-    try {
-      ctx.binary(res, 200, file.data, file.contentType, file.fileName);
-    } catch {
-      invalidServiceResponse(ctx, res, "fetchProjectFile");
-    }
-    return true;
+      return { projectId, requestedPath: url.searchParams.get("path") ?? "" };
+    });
+    if (!input.ok) return true;
+    const file = await routeValue(ctx, res, 500, () =>
+      service(input.value.projectId, input.value.requestedPath),
+    );
+    if (!file.ok) return true;
+    return serviceResponse(ctx, res, "fetchProjectFile", () =>
+      ctx.binary(res, 200, file.value.data, file.value.contentType, file.value.fileName),
+    );
   }
 
   // QA-049: DELETE /projects/:id — retire a durable project (registry entry +
@@ -202,26 +154,15 @@ export async function handleProjectRoute(
   if (method === "DELETE" && projectDeleteMatch) {
     const service = ctx.services?.removeProject;
     if (!service) return unsupported(ctx, res);
-    let projectId: string;
-    try {
-      projectId = decodeURIComponent(projectDeleteMatch[1] as string);
-    } catch (error) {
-      ctx.requestError(res, error);
-      return true;
-    }
-    let receipt: unknown;
-    try {
-      receipt = await service(projectId);
-    } catch (error) {
-      ctx.requestError(res, error, 500);
-      return true;
-    }
-    try {
-      ctx.json(res, 200, ControlProjectRemoveReceipt.parse(receipt));
-    } catch {
-      invalidServiceResponse(ctx, res, "removeProject");
-    }
-    return true;
+    const projectId = await routeValue(ctx, res, 400, () =>
+      decodeURIComponent(projectDeleteMatch[1] as string),
+    );
+    if (!projectId.ok) return true;
+    const receipt = await routeValue(ctx, res, 500, () => service(projectId.value));
+    if (!receipt.ok) return true;
+    return serviceResponse(ctx, res, "removeProject", () =>
+      ctx.json(res, 200, ControlProjectRemoveReceipt.parse(receipt.value)),
+    );
   }
   return false;
 }
@@ -231,19 +172,41 @@ function unsupported(ctx: ProjectRouteContext, res: ServerResponse): true {
   return true;
 }
 
-function invalidServiceResponse(
+type RouteValue<T> = { ok: true; value: T } | { ok: false };
+
+async function routeValue<T>(
+  ctx: ProjectRouteContext,
+  res: ServerResponse,
+  fallbackStatus: 400 | 500,
+  load: () => T | Promise<T>,
+): Promise<RouteValue<T>> {
+  try {
+    return { ok: true, value: await load() };
+  } catch (error) {
+    ctx.requestError(res, error, fallbackStatus);
+    return { ok: false };
+  }
+}
+
+function serviceResponse(
   ctx: ProjectRouteContext,
   res: ServerResponse,
   service: string,
-): void {
-  ctx.requestError(
-    res,
-    Object.assign(new Error(`${service} returned a response that violates its schema`), {
-      status: 500,
-      code: "invalid_service_response",
-    }),
-    500,
-  );
+  send: () => void,
+): true {
+  try {
+    send();
+  } catch {
+    ctx.requestError(
+      res,
+      Object.assign(new Error(`${service} returned a response that violates its schema`), {
+        status: 500,
+        code: "invalid_service_response",
+      }),
+      500,
+    );
+  }
+  return true;
 }
 
 function projectWire(input: unknown): ControlProject {
