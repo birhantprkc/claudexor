@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
@@ -179,6 +179,29 @@ describe("AcpServer official SDK projection", () => {
       "__acp_session_resume",
       "__acp_session_close",
     ]);
+  });
+
+  it("accepts a symlinked session cwd without rewriting the client spelling", async () => {
+    const target = project();
+    const parent = reapMk(join(tmpdir(), "claudexor-acp-symlink-"));
+    const cwd = join(parent, "project-link");
+    symlinkSync(target, cwd, "dir");
+    let received: unknown;
+
+    await withClient(
+      async (params) => {
+        received = params.repoPath;
+        return { sessionId: "thread-symlink", cwd };
+      },
+      async (agent) => {
+        const created = await agent.request(acp.methods.agent.session.new, {
+          cwd,
+          mcpServers: [],
+        });
+        expect(created.sessionId).toBe("thread-symlink");
+      },
+    );
+    expect(received).toBe(cwd);
   });
 
   it("session/load replays the full history as ordered user/agent pairs before responding (QA-020)", async () => {

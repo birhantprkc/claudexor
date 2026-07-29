@@ -4922,6 +4922,12 @@ describe("DaemonControlApiServer", () => {
           headers: { authorization: `Bearer ${token}` },
         });
         expect(invalid.status).toBe(400);
+        for (const query of ["harness=", "harness=codex&harness=%20%20"]) {
+          const blankHarness = await apiFetch(`${base}/harnesses?${query}`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          expect(blankHarness.status).toBe(400);
+        }
         expect(harnessInputs).toEqual([
           {},
           { fresh: true },
@@ -8395,7 +8401,11 @@ describe("DaemonControlApiServer", () => {
   it("rerun_with_feedback enqueues a follow-up run carrying the operator feedback", async () => {
     const { daemon, record } = fakeDaemon();
     record.state = "succeeded";
-    record.params = { ...(record.params as Record<string, unknown>), retryOf: "run-original" };
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      retryOf: "run-original",
+      protectedPathApprovals: [{ path: "packages/**/*.test.ts", reason: "source-run only" }],
+    };
     writeFileSync(
       join(record.runDir as string, "arbitration", "decision.yaml"),
       "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
@@ -8428,6 +8438,7 @@ describe("DaemonControlApiServer", () => {
       expect(String(enqueued?.["prompt"])).toContain("Narrow the diff to src/auth only.");
       expect(enqueued?.["parentRunId"]).toBe("run-d1");
       expect(enqueued).not.toHaveProperty("retryOf");
+      expect(enqueued).not.toHaveProperty("protectedPathApprovals");
     });
   });
 

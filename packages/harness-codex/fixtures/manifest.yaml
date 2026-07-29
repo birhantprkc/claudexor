@@ -47,6 +47,22 @@ fixtures:
       started_events: 1
       delta_messages: 0
       typed_rate_limit: false
+  # Live `codex exec --json` capture from 0.144.1. Identifiers, command text,
+  # plan prose, final prose, and usage counts were neutralized; native event
+  # names, lifecycle ordering, item shapes, and statuses are unchanged.
+  recorded-plan-progress-0.144.1.jsonl:
+    source: recorded
+    cli_version: "0.144.1"
+    recorded_at: "2026-07-29"
+    sanitized: "thread/item ids, command/output, plan/final text, usage counts"
+    expectations:
+      final_messages: 1
+      final_source: "last_agent_message"
+      final_is_last_message: true
+      thinking_events: 0
+      started_events: 1
+      delta_messages: 0
+      typed_rate_limit: false
   session-resume-rate-limit.jsonl:
     source: synthetic
     expectations:
@@ -107,3 +123,11 @@ fixtures:
     recorded_at: "2026-07-23"
     sanitized: "thread_id"
     terminal_out_of_band: "stderr (see exec-oversized-input.stderr.txt): turn/start failed, JSON-RPC code -32602, input_error_code=input_too_large, max_chars=1048576"
+  # Exact native error frame recovered from a real 0.144.1 run. Stored below
+  # the top-level conformance roster because it is a one-frame signal probe,
+  # not a complete run stream.
+  signals/reconnect-timeout.jsonl:
+    source: recorded
+    cli_version: "0.144.1"
+    recorded_at: "2026-07-25"
+    sanitized: "none"

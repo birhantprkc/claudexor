@@ -25,6 +25,7 @@ import {
 } from "@claudexor/core";
 import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import { runSetupLogin, runSetupLoginWorker } from "./setup-login-runner.js";
+import { waitForSetupLoginPermit } from "./setup-login-permit.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
   atomicPrivateJson,
@@ -312,6 +313,21 @@ describe("setup-login sidecar protocol v2", () => {
       permitIssuedAt: null,
       errorCode: "permit_timeout",
     });
+  });
+
+  it("measures the deferred permit window from runner observation, not wait entry", async () => {
+    const observedAt = Date.now();
+    const { spec } = prepare("#!/bin/sh\nexit 0\n", { permitWaitMs: 100 });
+    issuePermit(spec, new Date(observedAt + 50).toISOString());
+
+    await expect(
+      waitForSetupLoginPermit(
+        spec,
+        () => new Date(observedAt + 101),
+        async () => undefined,
+        new Date(observedAt).toISOString(),
+      ),
+    ).resolves.toBeNull();
   });
 
   it("refuses an executable changed after authorization even with a valid permit", async () => {

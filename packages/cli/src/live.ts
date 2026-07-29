@@ -356,10 +356,10 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
   let sawTerminal = false;
   let lastSeq = 0;
   const maxReconnects = 5;
-  const promptControllers = new Set<AbortController>();
+  const promptControllers = new Map<string, AbortController>();
   let promptTail = Promise.resolve();
   const stopPrompts = () => {
-    for (const controller of promptControllers) controller.abort();
+    for (const controller of promptControllers.values()) controller.abort();
   };
   const finish = async (code: number): Promise<number> => {
     stopPrompts();
@@ -367,8 +367,10 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
     return code;
   };
   const queueInteractionPrompt = (ev: Record<string, unknown>) => {
+    const interactionId = eventInteractionId(ev);
+    if (!interactionId || promptControllers.has(interactionId)) return;
     const controller = new AbortController();
-    promptControllers.add(controller);
+    promptControllers.set(interactionId, controller);
     const runPrompt = async () => {
       try {
         if (!controller.signal.aborted) {
@@ -379,7 +381,9 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
         // its terminal remain authoritative; transport errors are surfaced by
         // the ordinary interaction/readback paths without breaking follow.
       } finally {
-        promptControllers.delete(controller);
+        if (promptControllers.get(interactionId) === controller) {
+          promptControllers.delete(interactionId);
+        }
       }
     };
     promptTail = promptTail.then(runPrompt, runPrompt);
@@ -405,6 +409,12 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
       if (line) print(line);
     }
     const type = String(ev["type"] ?? "");
+    if (type === "interaction.answered" || type === "interaction.timeout") {
+      const interactionId = eventInteractionId(ev);
+      if (interactionId) {
+        promptControllers.get(interactionId)?.abort({ kind: "interaction_resolved", event: type });
+      }
+    }
     if (type === "run.completed" || type === "run.failed" || type === "run.blocked") {
       sawTerminal = true;
       stopPrompts();
@@ -487,6 +497,13 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
     `claudexor follow: stream lost after ${maxReconnects} reconnects (no terminal event observed)\n`,
   );
   return finish(1);
+}
+
+function eventInteractionId(ev: Record<string, unknown>): string | null {
+  const payload = ev["payload"];
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const interactionId = (payload as Record<string, unknown>)["interaction_id"];
+  return typeof interactionId === "string" && interactionId.length > 0 ? interactionId : null;
 }
 
 async function answerInteractionFromTty(

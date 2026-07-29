@@ -49,6 +49,7 @@ export async function rerunWithFeedback(
     planRunId: _planRunId,
     planRef: _planRef,
     retryOf: _retryOf,
+    protectedPathApprovals: _protectedPathApprovals,
     ...original
   } = source;
   let params: ControlRunStartRequest;

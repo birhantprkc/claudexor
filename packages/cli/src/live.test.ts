@@ -400,6 +400,50 @@ describe("interactive TTY prompt lifetime", () => {
     expect(closed).toBe(true);
   });
 
+  it("closes a prompt resolved by an interaction event without calling it a run ending", async () => {
+    const controller = new AbortController();
+    const written: string[] = [];
+    const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      const pending = collectInteractionAnswers(
+        "int-resolved",
+        [
+          {
+            id: "q1",
+            question: "Continue?",
+            header: "Choice",
+            options: [],
+            multi_select: false,
+          },
+        ] as never,
+        {
+          signal: controller.signal,
+          reader: {
+            question: (_prompt, options) =>
+              new Promise<string>((_resolve, reject) => {
+                options?.signal?.addEventListener(
+                  "abort",
+                  () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+                  { once: true },
+                );
+              }),
+            close: () => undefined,
+          },
+        },
+      );
+
+      controller.abort({ kind: "interaction_resolved", event: "interaction.answered" });
+      await expect(pending).resolves.toBeNull();
+    } finally {
+      write.mockRestore();
+    }
+    expect(written.join("\n")).toContain("question resolved");
+    expect(written.join("\n")).not.toContain("run ended");
+  });
+
   it("chunks deadlines above Node's single-timer ceiling instead of expiring immediately", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-28T00:00:00.000Z"));

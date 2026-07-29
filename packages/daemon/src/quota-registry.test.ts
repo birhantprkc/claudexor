@@ -31,6 +31,47 @@ function quotaSnapshot(harness: string, subjectId: string | null, usedRatio: num
 }
 
 describe("QuotaRegistry", () => {
+  it("coalesces foreground and background refreshes behind one fenced cycle", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-single-flight-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    let calls = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          await blocked;
+          return { snapshots: [quotaSnapshot("claude", null, 0.2)] };
+        },
+      ],
+      () => new Date("2026-07-28T00:00:01.000Z"),
+    );
+
+    const foreground = registry.refreshWithCursor();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    const background = registry.pollStale();
+    release();
+
+    const [fenced, polled] = await Promise.all([foreground, background]);
+    expect(polled).toBe(true);
+    expect(calls).toBe(1);
+    expect(
+      journal
+        .records()
+        .filter((record) => record.type === "quota.projection.updated")
+        .filter((record) => (record.payload as { reason?: unknown }).reason === "refresh"),
+    ).toHaveLength(1);
+    expect(journal.cursorFor(journal.records().at(-1)!)).toBe(fenced.quotaEventCursor);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("fences one refresh marker after the whole batch and replays only later direct mutations", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-fence-")));
     const now = () => new Date("2026-07-28T00:00:01.000Z");

@@ -57,9 +57,42 @@ describe("interactionChannelFor finite-or-disabled policy", () => {
     controller.abort();
     await expect(pending).resolves.toBeNull();
     expect(channel!.pendingCount!()).toBe(0);
-    expect(events.filter((event) => event.type === "interaction.timeout")).toEqual([
-      expect.objectContaining({ payload: expect.objectContaining({ reason: "cancelled" }) }),
-    ]);
+    expect(events.some((event) => event.type === "interaction.timeout")).toBe(false);
+  });
+
+  it("discloses an answer that loses the cancellation race without emitting a timeout", async () => {
+    const events: CapturedEvent[] = [];
+    const controller = new AbortController();
+    let resolveAnswer!: (value: { interaction_id: string; answers: string[] }) => void;
+    const answer = new Promise<{ interaction_id: string; answers: string[] }>((resolve) => {
+      resolveAnswer = resolve;
+    });
+    const channel = interactionChannelFor(
+      {
+        interactionTimeoutMs: null,
+        signal: controller.signal,
+        onInteraction: () => answer,
+      },
+      eventLog(events) as never,
+      "run-cancel-race",
+      "task-cancel-race",
+      "a01",
+      "claude",
+      true,
+      900_000,
+    );
+
+    const pending = channel!.request(request() as never);
+    controller.abort();
+    await expect(pending).resolves.toBeNull();
+    resolveAnswer({ interaction_id: "int-1", answers: ["A"] });
+    await answer;
+    await Promise.resolve();
+
+    expect(events.some((event) => event.type === "interaction.timeout")).toBe(false);
+    expect(
+      events.find((event) => event.type === "interaction.answer_discarded")?.payload,
+    ).toMatchObject({ interaction_id: "int-1", reason: "run_cancelled", answer_count: 1 });
   });
 
   it("keeps the finite policy and emits one benign automatic timeout", async () => {

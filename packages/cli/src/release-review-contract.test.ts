@@ -1001,6 +1001,7 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
       bytes: 12,
       sha256: "9".repeat(64),
     }));
+    const waveId = "11111111-1111-4111-8111-111111111111";
     const good = {
       status: "responded",
       error: null,
@@ -1013,7 +1014,7 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
       packetManifestSha256: manifest,
       fullGateReceiptSha256: gateReceipt,
       reviewRuntimeArtifacts,
-      reviewWaveId: "wave-1",
+      reviewWaveId: waveId,
       panel_slot: "triad",
       sub_wave: "macos",
       model_id: REQUIRED_TRIAD_MODELS[0],
@@ -1052,6 +1053,16 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
     expect(validateSlotRecord({ ...good, live: undefined }, expected).join(" ")).toContain(
       "liveness",
     );
+    for (const liveness_floor_ms of [undefined, 0, Number.NaN]) {
+      expect(validateSlotRecord({ ...good, liveness_floor_ms }, expected).join(" ")).toContain(
+        "liveness floor",
+      );
+    }
+    for (const reviewWaveId of [undefined, "wave-1", "11111111-1111-1111-1111-111111111111"]) {
+      expect(validateSlotRecord({ ...good, reviewWaveId }, expected).join(" ")).toContain(
+        "reviewWaveId",
+      );
+    }
     expect(validateSlotRecord({ ...good, duration_ms: 1_000 }, expected).join(" ")).toContain(
       "below its own recorded liveness floor",
     );
@@ -1077,9 +1088,12 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
         expected,
       ).join(" "),
     ).toContain("different release-review runtime bytes");
-    expect(validateSlotRecord(good, { ...expected, waveId: "wave-2" }).join(" ")).toContain(
-      "mixes wave",
-    );
+    expect(
+      validateSlotRecord(good, {
+        ...expected,
+        waveId: "22222222-2222-4222-8222-222222222222",
+      }).join(" "),
+    ).toContain("mixes wave");
     // Scope slot with a non-scope model.
     expect(
       validateSlotRecord(

@@ -1,4 +1,4 @@
-import { existsSync, lstatSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import {
   Readable,
@@ -229,9 +229,13 @@ export class AcpServer {
 
   private assertProjectRoot(path: string): void {
     this.assertAbsolutePath(path, "session cwd");
-    if (!existsSync(path) || !lstatSync(path).isDirectory()) {
-      throw new Error("session cwd must be an existing directory");
+    try {
+      if (statSync(path).isDirectory()) return;
+    } catch {
+      // Fall through to the stable ACP error below. statSync follows a valid
+      // directory symlink, matching run-start admission and project identity.
     }
+    throw new Error("session cwd must be an existing directory");
   }
 
   private assertAbsolutePath(path: string, name: string): void {

@@ -66,4 +66,14 @@ describe("remote runtime lifecycle", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("treats an already-absent pointer transition as an idempotent no-op", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-runtime-pointer-empty-"));
+    try {
+      expect(() => switchRemoteRuntimePointer("rollback", root, "-", "-")).not.toThrow();
+      expect(() => lstatSync(join(root, "current"))).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -84,6 +84,33 @@ describe("codex adapter conformance fixtures", () => {
         );
         expect(limited).toBeTruthy();
       }
+      if (name.startsWith("recorded-plan-progress")) {
+        const planSnapshots = events.filter(
+          (event) => (event as { plan_progress?: unknown }).plan_progress !== undefined,
+        ) as Array<{ plan_progress: { items: Array<{ status: string }> } }>;
+        expect(
+          planSnapshots.map((event) => event.plan_progress.items.map((item) => item.status)),
+        ).toEqual([[], ["pending"], ["completed"]]);
+      }
     });
   }
+
+  it("maps the recorded 0.144.1 reconnect frame to nonterminal retry status", () => {
+    const raw = readFileSync(join(FIXTURES, "signals", "reconnect-timeout.jsonl"), "utf8");
+    const { events, invalidLines, recognizedLines } = parseLines(raw);
+    expect(invalidLines).toBe(0);
+    expect(recognizedLines).toBe(1);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "status",
+        status: expect.objectContaining({
+          kind: "api_retry",
+          attempt: 4,
+          max_retries: 5,
+          error_category: "timeout",
+        }),
+        transient: expect.objectContaining({ kind: "timeout" }),
+      }),
+    ]);
+  });
 });

@@ -47,6 +47,7 @@ export class QuotaRegistry {
    * evidence may span several records; this is the commit/recovery boundary
    * consumed by snapshot-then-SSE clients. */
   private lastPublishedProjectionSignature: string | null = null;
+  private refreshInFlight: ReturnType<QuotaRegistry["performRefreshCycle"]> | null = null;
 
   constructor(
     private readonly journal: DurableJournal,
@@ -128,7 +129,16 @@ export class QuotaRegistry {
   /** Cycle-local core: the produced-snapshot count belongs to THIS invocation
    * (wave-2 finding: a shared mutable field let a concurrent user refresh
    * overwrite the poller's view of its own cycle). */
-  private async refreshCycle() {
+  private refreshCycle() {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const cycle = this.performRefreshCycle().finally(() => {
+      if (this.refreshInFlight === cycle) this.refreshInFlight = null;
+    });
+    this.refreshInFlight = cycle;
+    return cycle;
+  }
+
+  private async performRefreshCycle() {
     if (this.refreshers.length === 0) {
       throw Object.assign(new Error("no live vendor-owned quota refresh source is available"), {
         code: "quota_refresh_unavailable",

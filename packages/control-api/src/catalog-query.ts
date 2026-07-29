@@ -14,10 +14,11 @@ export function parseHarnessListQuery(url: URL): HarnessListQuery {
   assertOnlyQueryParams(url, ["fresh", "all", "harness"]);
   const fresh = optionalBooleanQuery(url, "fresh");
   const includeFakes = optionalBooleanQuery(url, "all");
-  const harnessIds = url.searchParams
-    .getAll("harness")
-    .map((id) => id.trim())
-    .filter(Boolean);
+  const harnessValues = url.searchParams.getAll("harness");
+  if (harnessValues.some((id) => id.trim().length === 0)) {
+    throw new Error("harness query parameters must be non-empty");
+  }
+  const harnessIds = harnessValues.map((id) => id.trim());
   return {
     ...(fresh === undefined ? {} : { fresh }),
     ...(includeFakes === undefined ? {} : { includeFakes }),

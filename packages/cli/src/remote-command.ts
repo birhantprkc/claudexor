@@ -175,6 +175,7 @@ export function switchRemoteRuntimePointer(
       throw new Error("remote runtime pointer target is not an immutable directory");
     }
   }
+  if (current === next) return;
   if (mode === "activate" && expected) {
     replaceRuntimePointer(root, "last-known-good", expected);
   }

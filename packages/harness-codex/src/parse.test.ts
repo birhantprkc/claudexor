@@ -527,6 +527,28 @@ describe("plan progress", () => {
     ]);
     expect(parseCodexEvent(raw, "s1", state)).toEqual([]);
   });
+
+  it("projects each distinct native todo-list lifecycle snapshot", () => {
+    const state: CodexParseState = {};
+    const snapshots = [
+      { type: "item.started", item: { type: "todo_list", items: [] } },
+      {
+        type: "item.updated",
+        item: { type: "todo_list", items: [{ text: "step one", completed: false }] },
+      },
+      {
+        type: "item.completed",
+        item: { type: "todo_list", items: [{ text: "step one", completed: true }] },
+      },
+    ];
+
+    const events = snapshots.flatMap((snapshot) => parseCodexEvent(snapshot, "s1", state) ?? []);
+    expect(events.map((event) => event.plan_progress?.items)).toEqual([
+      [],
+      [{ id: "codex-0", title: "step one", status: "pending" }],
+      [{ id: "codex-0", title: "step one", status: "completed" }],
+    ]);
+  });
 });
 
 describe("intermediate WorkReport envelope leak (D-16 / codex #19816)", () => {

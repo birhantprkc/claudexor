@@ -3,7 +3,11 @@ import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { EventLog } from "@claudexor/event-log";
 import { makeOutcomeFacts, type ModeKind, type RunReason } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { ensureGitRepository, GitCapabilityError } from "@claudexor/workspace";
+import {
+  ensureGitRepository,
+  GitCapabilityError,
+  type EnsureGitRepositoryResult,
+} from "@claudexor/workspace";
 import { writeFailure } from "./runTerminalResults.js";
 import { safeErrorMessage } from "./runSupport.js";
 
@@ -22,10 +26,11 @@ export async function ensureWriteModeGitBoundary(
   paths: ReturnType<ArtifactStore["runPaths"]>,
   runId: string,
   mode: ModeKind,
+  ensureRepository: (repoRoot: string) => Promise<EnsureGitRepositoryResult> = ensureGitRepository,
 ): Promise<GitPreconditionFailure | null> {
   if (repoRoot === NO_PROJECT_ROOT) return null;
   try {
-    const result = await ensureGitRepository(repoRoot);
+    const result = await ensureRepository(repoRoot);
     if (result.initialized || result.baselineCommitted) {
       log.emit("project.git.initialized", {
         repo_root: repoRoot,
@@ -39,7 +44,10 @@ export async function ensureWriteModeGitBoundary(
   } catch (error) {
     const message = safeErrorMessage(error);
     const prerequisite = error instanceof GitCapabilityError;
-    const reason: RunReason = prerequisite ? "workspace_unavailable" : "harness_failed";
+    // This boundary runs before a harness is admitted. Capability, filesystem,
+    // and repository-initialization failures are all workspace failures; none
+    // is evidence that a provider process failed.
+    const reason: RunReason = "workspace_unavailable";
     writeFailure(store, paths, {
       phase: "workspace",
       category: "project",

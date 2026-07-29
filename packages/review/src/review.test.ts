@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -37,6 +38,16 @@ function reapMk(...args: Parameters<typeof mkdtempSync>): string {
   const dir = mkdtempSync(...args);
   __reapDirs.push(dir);
   return dir;
+}
+
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 __afterAllReap(() => {
   for (const dir of __reapDirs.splice(0)) __rmSyncReap(dir, { recursive: true, force: true });
@@ -2277,10 +2288,10 @@ describe("reviewEngine", () => {
         });
       },
       async *run(spec) {
-        safeLinkVisible = existsSync(join(spec.cwd, "safe-link"));
-        relocatesOutsideLinkVisible = existsSync(join(spec.cwd, "relocates-outside-link"));
-        artifactLinkVisible = existsSync(join(spec.cwd, "artifact-link"));
-        outsideLinkVisible = existsSync(join(spec.cwd, "outside-link"));
+        safeLinkVisible = pathEntryExists(join(spec.cwd, "safe-link"));
+        relocatesOutsideLinkVisible = pathEntryExists(join(spec.cwd, "relocates-outside-link"));
+        artifactLinkVisible = pathEntryExists(join(spec.cwd, "artifact-link"));
+        outsideLinkVisible = pathEntryExists(join(spec.cwd, "outside-link"));
         const ts = new Date().toISOString();
         yield { type: "message", session_id: spec.session_id, ts, text: "[]\n" };
       },
@@ -2774,8 +2785,8 @@ describe("reviewEngine", () => {
     let sourceEvidenceTargetVisible = true;
     let canonicalEvidenceVisible = false;
     const reviewer = makeWorkspaceProbeReviewer("evidence-plane-reviewer", (cwd) => {
-      sourceEvidenceVisible = existsSync(join(cwd, "review-material", "USER_INTENT.md"));
-      sourceEvidenceTargetVisible = existsSync(join(cwd, "real-evidence", "USER_INTENT.md"));
+      sourceEvidenceVisible = pathEntryExists(join(cwd, "review-material"));
+      sourceEvidenceTargetVisible = pathEntryExists(join(cwd, "real-evidence", "USER_INTENT.md"));
       canonicalEvidenceVisible = existsSync(
         join(cwd, ".claudexor-review-evidence", "USER_INTENT.md"),
       );

@@ -4,7 +4,7 @@
  * absolute-root acceptance can never drift between surfaces. Split from
  * daemon-server.ts (INV-124 ratchet).
  */
-import { existsSync, lstatSync, mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isAbsolute } from "node:path";
 import {
@@ -29,13 +29,16 @@ export function normalizeExistingProjectRoot(requestedRoot: string): string {
   const repoRoot = requestedRoot.trim();
   const absoluteRepoError = validateAbsoluteRepoRoot(repoRoot);
   if (absoluteRepoError) throw Object.assign(new Error(absoluteRepoError), { status: 400 });
-  if (!existsSync(repoRoot) || !lstatSync(repoRoot).isDirectory()) {
-    throw Object.assign(
-      new Error(`project root does not exist or is not a directory: ${repoRoot}`),
-      { status: 400 },
-    );
+  try {
+    if (statSync(repoRoot).isDirectory()) return repoRoot;
+  } catch {
+    // Project-root admission projects every missing/broken/raced path through
+    // the same typed 400 below. statSync intentionally follows a directory
+    // symlink while the returned request spelling remains unchanged.
   }
-  return repoRoot;
+  throw Object.assign(new Error(`project root does not exist or is not a directory: ${repoRoot}`), {
+    status: 400,
+  });
 }
 
 export function normalizeRunStart(parsed: ControlRunStartRequest): ControlRunStartRequest {

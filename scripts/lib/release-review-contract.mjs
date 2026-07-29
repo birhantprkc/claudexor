@@ -314,6 +314,7 @@ export function extractReadableDiffSlice(prompt) {
  * into the signature, not merely a >=2 structural floor.
  */
 const SUB_WAVE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const REVIEW_WAVE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * Distinct sub-wave keys named by the sealed panel slots. A single-wave seal
@@ -442,10 +443,10 @@ export function validateSlotRecord(record, expected) {
   }
   if (!Number.isFinite(record.duration_ms) || record.duration_ms <= 0) {
     reasons.push("slot record duration is missing or implausible");
-  } else if (
-    Number.isFinite(record.liveness_floor_ms) &&
-    record.duration_ms < record.liveness_floor_ms
-  ) {
+  }
+  if (!Number.isFinite(record.liveness_floor_ms) || record.liveness_floor_ms <= 0) {
+    reasons.push("slot record liveness floor is missing or implausible");
+  } else if (Number.isFinite(record.duration_ms) && record.duration_ms < record.liveness_floor_ms) {
     reasons.push(
       `slot duration ${record.duration_ms}ms is below its own recorded liveness floor ${record.liveness_floor_ms}ms`,
     );
@@ -498,6 +499,9 @@ export function validateSlotRecord(record, expected) {
     canonicalJson(record.reviewRuntimeArtifacts) !== canonicalJson(expected.reviewRuntimeArtifacts)
   ) {
     reasons.push("slot record is bound to different release-review runtime bytes");
+  }
+  if (!REVIEW_WAVE_ID.test(record.reviewWaveId ?? "")) {
+    reasons.push("slot record reviewWaveId is missing or is not a UUID v4");
   }
   if (expected.waveId && record.reviewWaveId !== expected.waveId) {
     reasons.push(`slot record mixes wave ${record.reviewWaveId} into wave ${expected.waveId}`);

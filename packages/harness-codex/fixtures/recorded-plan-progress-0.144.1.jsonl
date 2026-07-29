@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"thread-recorded-plan"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"todo-recorded","type":"todo_list","items":[]}}
+{"type":"item.updated","item":{"id":"todo-recorded","type":"todo_list","items":[{"text":"Inspect the target","completed":false}]}}
+{"type":"item.started","item":{"id":"command-recorded","type":"command_execution","command":"inspect target","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"command-recorded","type":"command_execution","command":"inspect target","status":"completed","exit_code":0,"aggregated_output":"inspection complete"}}
+{"type":"item.completed","item":{"id":"todo-recorded","type":"todo_list","items":[{"text":"Inspect the target","completed":true}]}}
+{"type":"item.completed","item":{"id":"final-recorded","type":"agent_message","text":"Inspection complete."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5,"cached_input_tokens":0}}

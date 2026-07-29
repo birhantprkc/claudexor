@@ -140,6 +140,29 @@ export function interactionChannelFor(
         const result = await Promise.race(waits);
         cancelTimer?.();
         if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+        // Run cancellation has its own terminal event and is not an expired
+        // answer window. Emitting interaction.timeout here makes downstream
+        // surfaces briefly claim a benign timeout before the cancellation
+        // truth arrives.
+        if (result.kind === "abort") {
+          // Preserve late-answer honesty without fabricating an expiry. The
+          // registry may still deliver an answer racing the run cancellation;
+          // disclose that it was discarded for the actual terminal cause.
+          void answersPromise
+            .then((late) => {
+              if (late && !isInteractionHandlerRelease(late) && late.answers.length > 0) {
+                log.emit("interaction.answer_discarded", {
+                  interaction_id: request.interaction_id,
+                  attempt_id: attemptId,
+                  harness_id: harnessId,
+                  answer_count: late.answers.length,
+                  reason: "run_cancelled",
+                });
+              }
+            })
+            .catch(() => undefined);
+          return null;
+        }
         const handlerResult = result.kind === "handler" ? result.result : null;
         const answers = isInteractionHandlerRelease(handlerResult) ? null : handlerResult;
         if (answers && answers.answers.length > 0) {
@@ -162,15 +185,11 @@ export function interactionChannelFor(
         ) {
           return null;
         }
-        // Keep the established event kind for cancellation compatibility, but
-        // type it with reason=cancelled so consumers never mistake it for the
-        // automatic finite-policy expiry.
         log.emit("interaction.timeout", {
           interaction_id: request.interaction_id,
           attempt_id: attemptId,
           harness_id: harnessId,
           waited_ms: Date.now() - startedWaiting,
-          ...(result.kind === "abort" ? { reason: "cancelled" } : {}),
         });
         // Late-answer honesty: the run already declined this
         // interaction; an answer arriving AFTER the timeout must be visibly
@@ -182,7 +201,7 @@ export function interactionChannelFor(
               attempt_id: attemptId,
               harness_id: harnessId,
               answer_count: late.answers.length,
-              reason: result.kind === "abort" ? "run_cancelled" : "timed_out",
+              reason: "timed_out",
             });
           }
         });

@@ -125,10 +125,17 @@ export async function collectInteractionAnswers(
     }
     return answers.length > 0 ? { interaction_id: interactionId, answers } : null;
   } catch {
+    const resolvedElsewhere =
+      runSignal?.aborted &&
+      runSignal.reason &&
+      typeof runSignal.reason === "object" &&
+      (runSignal.reason as { kind?: unknown }).kind === "interaction_resolved";
     print(
-      runSignal?.aborted
-        ? "(run ended — answer prompt closed)"
-        : "(answer window closed — the run continues with assumptions)",
+      resolvedElsewhere
+        ? "(question resolved — answer prompt closed)"
+        : runSignal?.aborted
+          ? "(run ended — answer prompt closed)"
+          : "(answer window closed — the run continues with assumptions)",
     );
     return null;
   } finally {

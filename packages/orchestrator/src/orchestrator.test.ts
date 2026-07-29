@@ -9646,9 +9646,7 @@ describe("Orchestrator v0.8 honesty & streaming", () => {
     });
     expect(Date.now() - startedAt).toBeLessThan(20_000);
     const events = readRunEvents(res.runDir);
-    const timeoutEvent = events.find((e) => e.type === "interaction.timeout");
-    expect(timeoutEvent).toBeTruthy();
-    expect((timeoutEvent?.payload as Record<string, unknown>)["reason"]).toBe("cancelled");
+    expect(events.some((event) => event.type === "interaction.timeout")).toBe(false);
   });
 });
 

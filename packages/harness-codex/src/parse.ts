@@ -223,6 +223,8 @@ export function parseCodexEvent(
     const item = obj.item ?? {};
     const updated = type === "item.updated";
     switch (item.type) {
+      case "todo_list":
+        return planProgressEvent(item, sessionId, ts, state);
       case "reasoning":
         return [
           {
@@ -393,41 +395,48 @@ export function parseCodexEvent(
           },
         ];
       }
-      case "todo_list": {
-        // Codex's structured plan (re-emitted on revision; last wins). The
-        // TYPED plan_progress rides a message event: the UI renders the
-        // live checklist from the typed field while the prose stays available
-        // to plan-extraction. Verified shape: item.items[].{text,completed}.
-        const items = Array.isArray(item.items) ? item.items : [];
-        const planItems = items.map((t: { text?: string; completed?: boolean }, i: number) => ({
-          id: `codex-${i}`,
-          title: String(t.text ?? ""),
-          status: t.completed ? ("completed" as const) : ("pending" as const),
-        }));
-        const progressKey = JSON.stringify(planItems);
-        if (state?.lastPlanProgressKey === progressKey) return [];
-        if (state) state.lastPlanProgressKey = progressKey;
-        const lines = items.map(
-          (t: { text?: string; completed?: boolean }) =>
-            `${t.completed ? "[x]" : "[ ]"} ${String(t.text ?? "")}`,
-        );
-        return [
-          {
-            type: "message",
-            session_id: sessionId,
-            ts,
-            text: lines.length ? `Plan:\n${lines.join("\n")}` : "Plan updated",
-            plan_progress: {
-              items: planItems,
-            },
-          },
-        ];
-      }
+      case "todo_list":
+        return planProgressEvent(item, sessionId, ts, state);
       default:
         return null;
     }
   }
   return null;
+}
+
+/**
+ * Codex 0.144.1 emits todo-list snapshots throughout the native item
+ * lifecycle (started, updated, completed). All three frames are the same
+ * semantic producer; translating only the terminal frame hides live progress.
+ */
+function planProgressEvent(
+  item: Json,
+  sessionId: string,
+  ts: string,
+  state?: CodexParseState,
+): HarnessEvent[] {
+  const items = Array.isArray(item.items) ? item.items : [];
+  const planItems = items.map((entry: { text?: string; completed?: boolean }, index: number) => ({
+    id: `codex-${index}`,
+    title: String(entry.text ?? ""),
+    status: entry.completed ? ("completed" as const) : ("pending" as const),
+  }));
+  const progressKey = JSON.stringify(planItems);
+  if (state?.lastPlanProgressKey === progressKey) return [];
+  if (state) state.lastPlanProgressKey = progressKey;
+  const lines = items.map(
+    (entry: { text?: string; completed?: boolean }) =>
+      `${entry.completed ? "[x]" : "[ ]"} ${String(entry.text ?? "")}`,
+  );
+  return [
+    {
+      type: "message",
+      session_id: sessionId,
+      ts,
+      text: lines.length ? `Plan:\n${lines.join("\n")}` : "Plan updated",
+      plan_progress: { items: planItems },
+    },
+  ];
 }
 
 const REQUIRED_MCP_FAILURE_PREFIX = "required MCP servers failed to initialize:";

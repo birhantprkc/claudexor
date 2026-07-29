@@ -35,13 +35,17 @@ export async function waitForSetupLoginPermit(
   sleep: (ms: number) => Promise<void>,
   runnerObservedAt: string,
 ): Promise<SetupLoginPermit | null> {
-  const startedAt = now().getTime();
+  const runnerObservedAtMs = Date.parse(runnerObservedAt);
+  if (manifest.permitWaitMs !== undefined && !Number.isFinite(runnerObservedAtMs)) {
+    throw new Error("invalid setup-login runner observedAt");
+  }
   const deadline =
     manifest.permitWaitMs === undefined
       ? Date.parse(manifest.permitDeadlineAt)
-      : startedAt + manifest.permitWaitMs;
+      : runnerObservedAtMs + manifest.permitWaitMs;
   while (now().getTime() <= deadline) {
     const permit = readRunnerPermit(manifest.permitPath);
+    const issuedAt = permit ? Date.parse(permit.issuedAt) : Number.NaN;
     if (
       permit &&
       permit.jobId === manifest.jobId &&
@@ -49,7 +53,7 @@ export async function waitForSetupLoginPermit(
       permit.commandDigest === manifest.commandDigest &&
       permit.manifestDigest === manifest.manifestDigest &&
       (manifest.permitWaitMs === undefined ||
-        Date.parse(permit.issuedAt) >= Date.parse(runnerObservedAt))
+        (issuedAt >= runnerObservedAtMs && issuedAt <= deadline))
     )
       return permit;
     await sleep(Math.min(PERMIT_POLL_MS, Math.max(1, deadline - now().getTime())));
