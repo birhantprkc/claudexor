@@ -1,6 +1,14 @@
 import ClaudexorKit
 import SwiftUI
 
+func remoteDeviceLoginSnapshotAfterPollFailure(
+    _ snapshot: SetupJobSnapshot?
+) -> SetupJobSnapshot? {
+    guard let snapshot else { return nil }
+    return SetupJobSnapshot(
+        job: snapshot.job, cursor: snapshot.cursor, sequence: snapshot.sequence)
+}
+
 /// Keeps the setup-job outcome and the independently refreshed doctor truth
 /// visible at once. A recovered native session is ready, but its failed setup
 /// job never gets relabeled as a verified setup.

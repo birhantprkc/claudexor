@@ -188,6 +188,8 @@ const TERMINAL_CONTROL_SETUP_JOB_STATE_SET = new Set<ControlSetupJobState>(
   TERMINAL_CONTROL_SETUP_JOB_STATES,
 );
 
+const ActiveControlSetupJobState = ControlSetupJobState.exclude(TERMINAL_CONTROL_SETUP_JOB_STATES);
+
 export function isTerminalControlSetupJobState(state: ControlSetupJobState): boolean {
   return TERMINAL_CONTROL_SETUP_JOB_STATE_SET.has(state);
 }
@@ -449,6 +451,39 @@ export const SetupDeviceCodeDisclosure = z
   .describe("Transient device-code disclosure — read-time projection only, never journaled.");
 export type SetupDeviceCodeDisclosure = z.infer<typeof SetupDeviceCodeDisclosure>;
 
+const DeviceCodeEligibleControlSetupJob = ControlSetupJob.and(
+  z
+    .object({
+      harness: z.literal("codex"),
+      action: z.literal("login"),
+      state: ActiveControlSetupJobState,
+      phase: z.literal("awaiting_user"),
+    })
+    .passthrough(),
+);
+
+const ProjectedSetupDeviceCode = SetupDeviceCodeDisclosure.describe(
+  "Transient device-code disclosure overlaid at read time from the runner sidecar; never part of the journaled job.",
+);
+
+/** A declarative two-branch envelope keeps the transient-overlay invariant in
+ * both Zod and generated draft-07. Custom refinements are intentionally not
+ * used here because zod-to-json-schema cannot emit them. */
+function setupDeviceCodeProjectionEnvelope<
+  Shape extends z.ZodRawShape & { job: typeof ControlSetupJob },
+>(shape: Shape) {
+  return z.union([
+    z.object({ ...shape, deviceCode: z.never().optional() }).strict(),
+    z
+      .object({
+        ...shape,
+        job: DeviceCodeEligibleControlSetupJob,
+        deviceCode: ProjectedSetupDeviceCode,
+      })
+      .strict(),
+  ]);
+}
+
 export const ControlSetupJobListFilter = z
   .object({
     harness: ControlHarnessSetupHarness.optional(),
@@ -460,40 +495,35 @@ export const ControlSetupJobListFilter = z
   .describe("Supported GET /v2/setup/jobs filters.");
 export type ControlSetupJobListFilter = z.infer<typeof ControlSetupJobListFilter>;
 
-export const ControlSetupJobEvent = z
-  .object({
-    jobId: Id.describe("Setup job the event belongs to."),
-    cursor: z
-      .string()
-      .min(1)
-      .max(4096)
-      .describe("Opaque durable global-journal cursor for exact SSE resume."),
-    previousCursor: z
-      .string()
-      .min(1)
-      .max(4096)
-      .nullable()
-      .describe(
-        "Exact client-relative predecessor cursor; null only at the beginning of the global journal.",
-      ),
-    sequence: z
-      .number()
-      .int()
-      .positive()
-      .safe()
-      .describe(
-        "Global partition sequence used to reject duplicate or regressive frames; gaps are valid.",
-      ),
-    time: SetupTimestamp.describe("Event timestamp."),
-    kind: z.enum(["status"]).describe("Event kind; only status is ever produced."),
-    state: ControlSetupJobState,
-    message: z.string().describe("Human-readable status message."),
-    job: ControlSetupJob.describe("Full authoritative setup-job snapshot at this cursor."),
-    deviceCode: SetupDeviceCodeDisclosure.optional().describe(
-      "Transient device-code disclosure overlaid at read time from the runner sidecar; never part of the journaled job.",
+export const ControlSetupJobEvent = setupDeviceCodeProjectionEnvelope({
+  jobId: Id.describe("Setup job the event belongs to."),
+  cursor: z
+    .string()
+    .min(1)
+    .max(4096)
+    .describe("Opaque durable global-journal cursor for exact SSE resume."),
+  previousCursor: z
+    .string()
+    .min(1)
+    .max(4096)
+    .nullable()
+    .describe(
+      "Exact client-relative predecessor cursor; null only at the beginning of the global journal.",
     ),
-  })
-  .strict()
+  sequence: z
+    .number()
+    .int()
+    .positive()
+    .safe()
+    .describe(
+      "Global partition sequence used to reject duplicate or regressive frames; gaps are valid.",
+    ),
+  time: SetupTimestamp.describe("Event timestamp."),
+  kind: z.enum(["status"]).describe("Event kind; only status is ever produced."),
+  state: ControlSetupJobState,
+  message: z.string().describe("Human-readable status message."),
+  job: ControlSetupJob.describe("Full authoritative setup-job snapshot at this cursor."),
+})
   .superRefine((value, context) => {
     if (value.previousCursor === value.cursor) {
       context.addIssue({
@@ -518,26 +548,20 @@ export const ControlSetupJobEvent = z
   .describe("Status event on a setup job's event stream.");
 export type ControlSetupJobEvent = z.infer<typeof ControlSetupJobEvent>;
 
-export const ControlSetupJobSnapshot = z
-  .object({
-    job: ControlSetupJob,
-    cursor: z
-      .string()
-      .min(1)
-      .max(4096)
-      .describe("Opaque durable cursor fencing the returned snapshot."),
-    sequence: z
-      .number()
-      .int()
-      .nonnegative()
-      .safe()
-      .describe("Global partition sequence fenced by the snapshot."),
-    deviceCode: SetupDeviceCodeDisclosure.optional().describe(
-      "Transient device-code disclosure overlaid at read time from the runner sidecar; never part of the journaled job.",
-    ),
-  })
-  .strict()
-  .describe("Atomically fenced setup-job snapshot used before attaching or reattaching SSE.");
+export const ControlSetupJobSnapshot = setupDeviceCodeProjectionEnvelope({
+  job: ControlSetupJob,
+  cursor: z
+    .string()
+    .min(1)
+    .max(4096)
+    .describe("Opaque durable cursor fencing the returned snapshot."),
+  sequence: z
+    .number()
+    .int()
+    .nonnegative()
+    .safe()
+    .describe("Global partition sequence fenced by the snapshot."),
+}).describe("Atomically fenced setup-job snapshot used before attaching or reattaching SSE.");
 export type ControlSetupJobSnapshot = z.infer<typeof ControlSetupJobSnapshot>;
 
 export const ControlSetupJobListResponse = z

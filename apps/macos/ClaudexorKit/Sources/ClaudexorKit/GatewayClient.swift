@@ -218,6 +218,14 @@ public final class GatewayClient: Sendable {
         return try Self.decoder.decode(SetupJob.self, from: data)
     }
 
+    private static func decodeSetupJob(_ data: Data, expectedJobId: String) throws -> SetupJob {
+        let job = try decoder.decode(SetupJob.self, from: data)
+        guard job.jobId == expectedJobId else {
+            throw GatewayError.decoding("setup response does not match its requested job")
+        }
+        return job
+    }
+
     public func setupJob(jobId: String) async throws -> SetupJob {
         let escaped = jobId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? jobId
         let req = request("v2/setup/jobs/\(escaped)", method: "GET")
@@ -226,7 +234,7 @@ public final class GatewayClient: Sendable {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw GatewayError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
-        return try Self.decoder.decode(SetupJob.self, from: data)
+        return try Self.decodeSetupJob(data, expectedJobId: jobId)
     }
 
     public func setupJobSnapshot(jobId: String) async throws -> SetupJobSnapshot {
@@ -237,7 +245,11 @@ public final class GatewayClient: Sendable {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw GatewayError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
-        return try Self.decoder.decode(SetupJobSnapshot.self, from: data)
+        let snapshot = try Self.decoder.decode(SetupJobSnapshot.self, from: data)
+        guard snapshot.job.jobId == jobId else {
+            throw GatewayError.decoding("setup snapshot does not match its requested job")
+        }
+        return snapshot
     }
 
     public func listSetupJobs(filter: SetupJobListFilter = SetupJobListFilter()) async throws -> [SetupJob] {
@@ -263,7 +275,7 @@ public final class GatewayClient: Sendable {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw GatewayError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
-        return try Self.decoder.decode(SetupJob.self, from: data)
+        return try Self.decodeSetupJob(data, expectedJobId: jobId)
     }
 
     public func reconcileSetupJob(jobId: String) async throws -> SetupJob {
@@ -274,7 +286,7 @@ public final class GatewayClient: Sendable {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw GatewayError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
-        return try Self.decoder.decode(SetupJob.self, from: data)
+        return try Self.decodeSetupJob(data, expectedJobId: jobId)
     }
 
     public func extendSetupJob(jobId: String) async throws -> SetupJob {
@@ -285,7 +297,7 @@ public final class GatewayClient: Sendable {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             throw GatewayError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
-        return try Self.decoder.decode(SetupJob.self, from: data)
+        return try Self.decodeSetupJob(data, expectedJobId: jobId)
     }
 
     public func settings() async throws -> SettingsSnapshot {
@@ -536,6 +548,9 @@ public final class GatewayClient: Sendable {
                             let event = try Self.decoder.decode(SetupJobEvent.self, from: data)
                             guard frame.id == event.cursor else {
                                 throw GatewayError.decoding("setup SSE id does not match its durable event cursor")
+                            }
+                            guard event.jobId == jobId else {
+                                throw GatewayError.decoding("setup SSE event does not match its requested job")
                             }
                             guard try Self.yieldChecked(event, to: continuation, context: "setup SSE") else { return }
                         default:

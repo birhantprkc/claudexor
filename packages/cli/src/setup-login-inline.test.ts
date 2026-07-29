@@ -6,7 +6,10 @@ import {
   terminalLoginReport,
 } from "./setup-login-inline.js";
 
-type TerminalJob = Pick<ControlSetupJob, "state" | "message" | "nativeCommand">;
+type TerminalJob = Pick<
+  ControlSetupJob,
+  "harness" | "state" | "message" | "nativeCommand" | "profileId"
+>;
 
 function receipt(
   errorCode?: "device_auth_unsupported" | "spawn_failed",
@@ -28,8 +31,10 @@ describe("D-17 audit 8: CLI terminal login report", () => {
   it("renders device_auth_unsupported as an ACTIONABLE next step, not a dead end", () => {
     const job: TerminalJob = {
       state: "not_supported",
+      harness: "codex",
       message: "codex does not expose typed device-code auth over its app-server",
       nativeCommand: receipt("device_auth_unsupported"),
+      profileId: null,
     };
     const report = terminalLoginReport(job, "codex");
     expect(report.exitCode).toBe(1);
@@ -41,14 +46,25 @@ describe("D-17 audit 8: CLI terminal login report", () => {
 
   it("keeps ordinary terminal states on the plain status line", () => {
     expect(
-      terminalLoginReport({ state: "succeeded", message: "ok", nativeCommand: undefined }, "codex"),
+      terminalLoginReport(
+        {
+          harness: "codex",
+          state: "succeeded",
+          message: "ok",
+          nativeCommand: undefined,
+          profileId: null,
+        },
+        "codex",
+      ),
     ).toEqual({ lines: ["codex login succeeded: ok"], exitCode: 0 });
     // A not_supported WITHOUT the typed code (e.g. vendor not installed) has no
     // Terminal fallback claim — it stays the plain message.
     const bare: TerminalJob = {
       state: "not_supported",
+      harness: "codex",
       message: "install codex first",
       nativeCommand: undefined,
+      profileId: null,
     };
     const report = terminalLoginReport(bare, "codex");
     expect(report.exitCode).toBe(1);
@@ -58,10 +74,12 @@ describe("D-17 audit 8: CLI terminal login report", () => {
   it("scopes the profile fallback prose to the profile, not the default-store command", () => {
     const job: TerminalJob = {
       state: "not_supported",
+      harness: "codex",
       message: "codex does not expose typed device-code auth over its app-server",
       nativeCommand: receipt("device_auth_unsupported"),
+      profileId: "work",
     };
-    const report = terminalLoginReport(job, "codex/work", { profileId: "work" });
+    const report = terminalLoginReport(job, "codex/wrong-observer");
     expect(report.exitCode).toBe(1);
     // The default-store one-liner would log into the WRONG store for a profile.
     expect(report.lines.join("\n")).not.toContain("claudexor auth login codex --browser-redirect");
@@ -74,20 +92,61 @@ describe("D-17 audit 8: typed nextAction", () => {
     expect(
       terminalLoginFallback({
         state: "not_supported",
+        harness: "codex",
         nativeCommand: receipt("device_auth_unsupported"),
+        profileId: null,
       }),
     ).toEqual({
       kind: "terminal_login_fallback",
       reason: "device_auth_unsupported",
       loginFlow: "browser_redirect",
+      profileId: null,
     });
   });
 
-  it("has no next action for an ordinary terminal or a plain not_supported", () => {
-    expect(terminalLoginFallback({ state: "succeeded", nativeCommand: undefined })).toBeNull();
-    expect(terminalLoginFallback({ state: "not_supported", nativeCommand: undefined })).toBeNull();
+  it("projects the exact server-owned profile target", () => {
     expect(
-      terminalLoginFallback({ state: "failed", nativeCommand: receipt("spawn_failed") }),
+      terminalLoginFallback({
+        state: "not_supported",
+        harness: "codex",
+        nativeCommand: receipt("device_auth_unsupported"),
+        profileId: "work",
+      }),
+    ).toMatchObject({ profileId: "work" });
+  });
+
+  it("has no next action for an ordinary terminal or a plain not_supported", () => {
+    expect(
+      terminalLoginFallback({
+        harness: "codex",
+        state: "succeeded",
+        nativeCommand: undefined,
+        profileId: null,
+      }),
+    ).toBeNull();
+    expect(
+      terminalLoginFallback({
+        harness: "codex",
+        state: "not_supported",
+        nativeCommand: undefined,
+        profileId: null,
+      }),
+    ).toBeNull();
+    expect(
+      terminalLoginFallback({
+        state: "failed",
+        harness: "codex",
+        nativeCommand: receipt("spawn_failed"),
+        profileId: null,
+      }),
+    ).toBeNull();
+    expect(
+      terminalLoginFallback({
+        harness: "claude",
+        state: "not_supported",
+        nativeCommand: receipt("device_auth_unsupported"),
+        profileId: "work",
+      }),
     ).toBeNull();
   });
 });
@@ -129,12 +188,12 @@ const AUTHORIZATION = {
   manifestDigest: "b".repeat(64),
 };
 
-function unsupportedJob(): unknown {
+function unsupportedJob(profileId: string | null = null): unknown {
   return {
     jobId: "setup-inline-1",
     harness: "codex",
     action: "login",
-    profileId: null,
+    profileId,
     state: "not_supported",
     phase: "completed",
     outcome: { reason: "not_supported" },
@@ -253,17 +312,18 @@ describe("D-17 audit 8: streamDurableCodexLogin one-action fallback", () => {
     expect(out.join("")).toContain("claudexor auth login codex --browser-redirect");
   });
 
-  it("scopes an accepted profile fallback to that profile's store", async () => {
-    const { fetchImpl, posts } = makeTransport([snapshot(unsupportedJob())]);
+  it("scopes an accepted fallback to the server-owned profile, not the observer", async () => {
+    const { fetchImpl, posts } = makeTransport([snapshot(unsupportedJob("work"))]);
     const code = await streamDurableCodexLogin(ADDR, "setup-inline-1", {
-      label: "codex/work",
-      fallback: { harness: "codex", profileId: "work" },
+      label: "codex/wrong-observer",
+      fallback: { harness: "codex" },
       promptYesNo: async () => true,
       sleep: async () => {},
       fetchImpl,
     });
     expect(code).toBe(0);
     expect(posts[0].body).toMatchObject({ loginFlow: "browser_redirect", profileId: "work" });
+    expect(out.join("")).toContain("Terminal codex/work sign-in");
   });
 
   it("--json emits the typed nextAction on the miss and never auto-starts a job", async () => {
@@ -283,8 +343,28 @@ describe("D-17 audit 8: streamDurableCodexLogin one-action fallback", () => {
       kind: "terminal_login_fallback",
       reason: "device_auth_unsupported",
       loginFlow: "browser_redirect",
+      profileId: null,
     });
     expect(obj.job.state).toBe("not_supported");
+  });
+
+  it("--json keeps a profile miss scoped to the server-owned profile", async () => {
+    const { fetchImpl, posts } = makeTransport([snapshot(unsupportedJob("work"))]);
+    const code = await streamDurableCodexLogin(ADDR, "setup-inline-1", {
+      label: "codex/work",
+      json: true,
+      fallback: { harness: "codex" },
+      sleep: async () => {},
+      fetchImpl,
+    });
+    expect(code).toBe(1);
+    expect(posts).toHaveLength(0);
+    const obj = JSON.parse(out.join(""));
+    expect(obj.nextAction).toMatchObject({
+      kind: "terminal_login_fallback",
+      loginFlow: "browser_redirect",
+      profileId: "work",
+    });
   });
 
   it("--json returns the disclosure promptly for a supported flow (no hang, no fallback)", async () => {

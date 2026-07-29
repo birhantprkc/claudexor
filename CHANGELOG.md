@@ -89,7 +89,10 @@ Release history for Claudexor. The current version is declared in the root
   interaction wait offers either a positive duration or no automatic expiry.
   Extended remote login jobs remain attachable after their original deadline:
   the mutable journal deadline authorizes a fresh, bounded client-PTY permit
-  without rewriting the sealed runner manifest.
+  without rewriting the sealed runner manifest. Setup continuations stay bound
+  to the server-owned account even when opened from another account's sheet,
+  and transient device codes disappear as soon as an authoritative frame or
+  terminal connection state withdraws them.
   Deep Research resets inactivity only for genuine agent progress, while typed
   refusals, Git readiness, retry remedies, terminal output, and final RunFacts
   retain the same durable reason across UI, CLI, API, MCP, and ACP. Successful

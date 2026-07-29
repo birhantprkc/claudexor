@@ -197,4 +197,32 @@ import Testing
             harnessRoutable: false
         ) == .verified)
     }
+
+    @Test func profileReadinessUsesTheExactProfileAndPollFailureDropsTheCode() throws {
+        let entry = try JSONDecoder().decode(
+            CredentialProfileEntry.self,
+            from: Data(#"{"profile":{"profile_id":"work","harness_id":"codex","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}"#.utf8))
+        #expect(RemoteNativeLoginReadiness.profile(entry) == .init(
+            nativeSessionVerified: true, harnessRoutable: true))
+
+        let failed = try JSONDecoder().decode(
+            CredentialProfileEntry.self,
+            from: Data(#"{"profile":{"profile_id":"work","harness_id":"codex","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"failed","detail":"wrong account","last_verified_at":null}}"#.utf8))
+        #expect(RemoteNativeLoginReadiness.profile(failed) == .init(
+            nativeSessionVerified: false, harnessRoutable: false))
+
+        let job = SetupJob(
+            jobId: "device", harness: .codex, action: .login,
+            state: .waitingForInput, phase: .awaitingUser,
+            message: "waiting", createdAt: "2026-07-29T00:00:00Z",
+            profileId: "work")
+        let snapshot = SetupJobSnapshot(
+            job: job, cursor: "cursor", sequence: 1,
+            deviceCode: SetupDeviceCodeDisclosure(
+                flow: .chatgptDeviceCode,
+                verificationUrl: "https://chatgpt.com/device", userCode: "ABCD-1234"))
+        let afterPollFailure = try #require(remoteDeviceLoginSnapshotAfterPollFailure(snapshot))
+        #expect(afterPollFailure.job.profileId == "work")
+        #expect(afterPollFailure.deviceCode == nil)
+    }
 }

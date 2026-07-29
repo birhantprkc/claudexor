@@ -1389,6 +1389,15 @@ runner writes and a read-time overlay on `ControlSetupJobSnapshot` /
 never logged, and never written to the durable result receipt (the journal
 records only THAT a code was disclosed, via the `awaiting_user` transition). The
 sidecar is removed on terminalization so the code stops projecting.
+Snapshot/event schemas accept that overlay only for an active Codex login in
+`awaiting_user`. Stateful UI clients replace it from each authoritative frame,
+retain it only across a bounded same-job Extend/reconnect transition, and clear
+it on Cancel, detach, terminal/non-awaiting state, final stream loss, or poll
+failure. Every point response and SSE event must identify the setup job named
+by its request; cursor and sequence then fence ordering within that job.
+Every machine fallback and UI continuation takes its credential `profileId`
+from the server-owned setup job, never from the sheet or caller that happens to
+be observing it.
 
 The daemon writes a private runner manifest; the device-code runner is launched
 DETACHED (no Terminal, not macOS-gated), the Terminal fallback via

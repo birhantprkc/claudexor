@@ -4,6 +4,14 @@ import Foundation
 struct RemoteNativeLoginReadiness: Equatable {
     let nativeSessionVerified: Bool
     let harnessRoutable: Bool
+
+    static func profile(_ entry: CredentialProfileEntry) -> Self {
+        let available = entry.status.availability == "available"
+        let verified = available && entry.status.verification == "passed"
+        return Self(
+            nativeSessionVerified: verified,
+            harnessRoutable: entry.profile.enabled && verified)
+    }
 }
 
 /// The installable-harness allowlist — the ONE Swift copy, mirroring the
@@ -393,6 +401,7 @@ extension AppModel {
     func refreshRemoteNativeLoginReadiness(
         connectionID: UUID,
         harnessID: String,
+        profileID: String? = nil,
         actionLease: RemoteActionLease? = nil
     ) async -> RemoteNativeLoginReadiness? {
         let location = ExecutionLocationID.remote(connectionID)
@@ -400,6 +409,21 @@ extension AppModel {
         guard let client = remoteClients[location] else { return nil }
         if let actionLease {
             guard remoteActionIsCurrent(actionLease, client: client) else { return nil }
+        }
+        if let profileID {
+            guard let entry = await refreshExactCredentialProfile(
+                harnessID: harnessID, profileID: profileID, locationID: location),
+                isCurrentGateway(client, at: location)
+            else { return nil }
+            if let actionLease {
+                guard remoteActionIsCurrent(actionLease, client: client) else { return nil }
+            }
+            let readiness = RemoteNativeLoginReadiness.profile(entry)
+            remoteConnectionMessages[connectionID] =
+                readiness.nativeSessionVerified && readiness.harnessRoutable
+                ? "\(harnessID.capitalized) account is signed in and ready."
+                : (entry.status.detail ?? "\(harnessID.capitalized) account is not ready yet.")
+            return readiness
         }
         guard await refreshHarnesses(
             fresh: true, locationID: location, markStaleOnFailure: true),

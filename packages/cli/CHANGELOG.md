@@ -12,7 +12,8 @@
   deadline remains the permit authority.
 - Align Plan attachments, per-command flag ownership, location-scoped settings and accounts, durable refused-turn retry, Git applicability, canonical terminal output, and Settings validation envelopes with the control-plane contracts.
 - Validate successful run-detail responses, redact degraded MCP/ACP diagnostics,
-  and scrub vendor-installer child environments.
+  scrub vendor-installer child environments, and keep the machine-actionable
+  Codex login fallback bound to the server-owned credential profile.
 - @claudexor/acp-server@3.2.0
 - @claudexor/artifact-store@3.2.0
 - @claudexor/config@3.2.0

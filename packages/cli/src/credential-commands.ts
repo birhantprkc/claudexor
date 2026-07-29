@@ -112,7 +112,7 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
         return streamDurableCodexLogin(addr, job.jobId, {
           label: `codex/${profileId}`,
           json,
-          fallback: { harness: "codex", profileId },
+          fallback: { harness: "codex" },
         });
       }
       if (json) {

@@ -54,6 +54,9 @@ struct AuthSheet: View {
     }
     private var nativeHarness: SetupHarness? { SetupHarness(rawValue: family.setupHarnessId) }
     private var job: SetupJob? { lifecycle.job }
+    private var setupTarget: AuthSheetPresentation.SetupTarget {
+        AuthSheetPresentation.setupTarget(requestedProfileId: profileId, job: job)
+    }
     private var activeJobMatchesTarget: Bool { job.map { $0.profileId == profileId } ?? true }
     private var hasActiveJob: Bool { job?.isActive == true }
     private var activeStateUnknown: Bool {
@@ -201,6 +204,21 @@ struct AuthSheet: View {
         return entry?.profile.displayName ?? profileId
     }
 
+    private var setupTargetMismatchMessage: String? {
+        guard setupTarget.differsFromRequested else { return nil }
+        let owner: String
+        if let jobProfileId = setupTarget.profileId {
+            let entry = model.activeCredentialProfiles.first {
+                $0.profile.profileId == jobProfileId
+                    && $0.profile.harnessId == family.setupHarnessId
+            }
+            owner = entry?.profile.displayName ?? jobProfileId
+        } else {
+            owner = "the default account"
+        }
+        return "This setup job belongs to \(owner). Its controls continue that exact login; your selected account is unchanged."
+    }
+
     /// W4.7-UI: the shared readiness card for the DEFAULT store; a profile target
     /// shows ITS doctor projection (the default card would misattribute readiness).
     private var readinessPanel: some View {
@@ -291,7 +309,8 @@ struct AuthSheet: View {
             retryJob: { Task { await retryJob() } },
             reconnect: { Task { await reconnectSetupState() } },
             deviceAuthFallback: AuthSheetPresentation.deviceAuthFallback(job: job),
-            startTerminalFallback: { Task { await startTerminalFallback() } }
+            startTerminalFallback: { Task { await startTerminalFallback() } },
+            targetMismatchMessage: setupTargetMismatchMessage
         )
     }
 
@@ -359,7 +378,12 @@ struct AuthSheet: View {
         // there is no active job to adopt (and the target is not already
         // verified), start the login now — so "Add & log in" / an account-row
         // click is a single action. Consumed once.
-        if autoStartLogin, !didAutoStartLogin, lifecycle.job?.isActive != true, !targetVerified {
+        if AuthSheetPresentation.shouldAutoStartLogin(
+            requested: autoStartLogin,
+            consumed: didAutoStartLogin,
+            lifecycle: lifecycle,
+            targetVerified: targetVerified)
+        {
             didAutoStartLogin = true
             await runLogin()
         }
@@ -378,7 +402,7 @@ struct AuthSheet: View {
             if let job = next.job, job.isTerminal, lastRefreshedTerminalJobId != job.jobId {
                 lastRefreshedTerminalJobId = job.jobId
                 let refreshed = await model.refreshCredentialReadiness(
-                    for: family, profileId: profileId, after: job)
+                    for: family, profileId: job.profileId, after: job)
                 if !refreshed {
                     status = "Setup finished, but the exact auth-readiness refresh failed. Use Recheck before trusting readiness."
                 }
@@ -412,11 +436,11 @@ struct AuthSheet: View {
     /// transition — starts a fresh browser_redirect login — not a text hint. The
     /// prior job is terminal, so no cancel is needed.
     private func startTerminalFallback() async {
-        guard let controller else { return }
+        guard let controller, let job else { return }
         actionInFlight = true
         defer { actionInFlight = false }
         await controller.start(harness: family.setupHarnessId, action: "login",
-                               profileId: profileId, loginFlow: .browserRedirect)
+                               profileId: job.profileId, loginFlow: .browserRedirect)
     }
 
     /// D-17 explicit browser-callback opt-in (device-auth-disabled orgs). The
@@ -424,10 +448,11 @@ struct AuthSheet: View {
     /// conflict bucket, so a live job must be cancelled before the switch — this
     /// is never a silent fallback.
     private func switchToBrowserCallback() async {
-        guard let controller else { return }
+        guard let controller, let job else { return }
+        let continuationProfileId = job.profileId
         actionInFlight = true
         defer { actionInFlight = false }
-        if job?.isActive == true {
+        if job.isActive {
             await controller.cancel()
             // Wait (bounded) for the cancellation to terminalize so the new
             // create is not refused by the active-job guard.
@@ -437,7 +462,7 @@ struct AuthSheet: View {
             }
         }
         await controller.start(harness: family.setupHarnessId, action: "login",
-                               profileId: profileId, loginFlow: .browserCallback)
+                               profileId: continuationProfileId, loginFlow: .browserCallback)
     }
 
     private func extendDeadline() async {
@@ -461,8 +486,9 @@ struct AuthSheet: View {
     private func recheck() async {
         actionInFlight = true
         defer { actionInFlight = false }
+        let matchingJob = activeJobMatchesTarget ? job : nil
         if await model.refreshCredentialReadiness(
-            for: family, profileId: profileId, after: job)
+            for: family, profileId: profileId, after: matchingJob)
         {
             status = profileId == nil
                 ? "Exact auth-readiness check completed for \(family.label)."
@@ -478,7 +504,7 @@ struct AuthSheet: View {
         await controller.reconnect(harness: family.setupHarnessId)
         lifecycle = await controller.snapshot()
         if !(await model.refreshCredentialReadiness(
-            for: family, profileId: profileId, after: lifecycle.job))
+            for: family, profileId: setupTarget.profileId, after: lifecycle.job))
         {
             status = "Setup state reconnected, but the exact auth-readiness refresh failed. Use Recheck before trusting readiness."
         }

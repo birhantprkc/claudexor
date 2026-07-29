@@ -1554,6 +1554,57 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func exactProfileRefreshRejectsItsRetiredProjectionReceipt() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.credentialProfiles = try JSONDecoder().decode(
+            [CredentialProfileEntry].self,
+            from: Data(#"[{"profile":{"profile_id":"stale","harness_id":"codex","display_name":"Stale","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]"#.utf8))
+
+        let calls = AppRefreshCallCounter()
+        let exactArrived = AppRefreshCallCounter()
+        let newerArrived = AppRefreshCallCounter()
+        let releaseExact = DispatchSemaphore(value: 0)
+        let releaseNewer = DispatchSemaphore(value: 0)
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            if calls.incrementAndGet() == 1 {
+                exactArrived.increment()
+                _ = releaseExact.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "stale", displayName: "Retired stale",
+                    observedAt: "2026-07-29T00:00:01Z"))
+            }
+            newerArrived.increment()
+            _ = releaseNewer.wait(timeout: .now() + 5)
+            return (appResponse(for: request), appAccountsSnapshot(
+                profileID: "fresh", displayName: "Fresh",
+                observedAt: "2026-07-29T00:00:02Z"))
+        }
+
+        let exact = Task {
+            await model.refreshExactCredentialProfile(
+                harnessID: "codex", profileID: "stale")
+        }
+        try await waitForAppTest(exactArrived, message: "exact refresh never started")
+        let newer = Task { await model.refreshCredentialProfiles() }
+        try await waitForAppTest(newerArrived, message: "newer refresh never started")
+
+        releaseExact.signal()
+        #expect(await exact.value == nil)
+        releaseNewer.signal()
+        await newer.value
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["fresh"])
+    }
+
+    @MainActor
     @Test func newerAccountsSuccessWinsWhenAnOlderSuccessCompletesLast() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

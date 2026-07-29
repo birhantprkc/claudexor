@@ -50,6 +50,15 @@ public struct SetupLifecycleSnapshot: Sendable, Equatable {
 public actor SetupLifecycleController {
     public static let maximumReconnects = 5
 
+    /// Connection/action publications have no new disclosure authority and may
+    /// retain the same awaiting-user job's overlay. Snapshot/SSE publications
+    /// are authoritative, including an explicit absence that clears it.
+    private enum DeviceCodeUpdate {
+        case preserveSameAwaiting
+        case authoritative(SetupDeviceCodeDisclosure?)
+        case clear
+    }
+
     private let gateway: any SetupJobGateway
     private let reconnectDelays: [Duration]
     private var current = SetupLifecycleSnapshot()
@@ -177,14 +186,18 @@ public actor SetupLifecycleController {
 
     public func extendDeadline() async {
         guard let job = current.job else { return }
-        await performAction { try await gateway.extendSetupJob(jobId: job.jobId) }
+        await performAction(deviceCode: .preserveSameAwaiting) {
+            try await gateway.extendSetupJob(jobId: job.jobId)
+        }
     }
 
     /// Cancellation is asynchronously confirmed by the server. A `cancelling`
     /// response remains active and observed until a terminal snapshot arrives.
     public func cancel() async {
         guard let job = current.job else { return }
-        await performAction { try await gateway.cancelSetupJob(jobId: job.jobId) }
+        await performAction(deviceCode: .clear) {
+            try await gateway.cancelSetupJob(jobId: job.jobId)
+        }
     }
 
     /// Retry creates a distinct login job after a proven termination. An
@@ -201,9 +214,11 @@ public actor SetupLifecycleController {
     /// new start.
     public func reconnect(harness: String) async {
         if let job = current.job, job.blocksReplacement {
-            await performAction { try await gateway.reconcileSetupJob(jobId: job.jobId) }
+            await performAction(deviceCode: .clear) {
+                try await gateway.reconcileSetupJob(jobId: job.jobId)
+            }
         } else if let job = current.job, job.isActive {
-            adoptAndObserve(job)
+            adoptAndObserve(job, deviceCode: .preserveSameAwaiting)
         } else {
             await recoverActiveJob(harness: harness)
         }
@@ -214,34 +229,42 @@ public actor SetupLifecycleController {
         stopObservation(markDetached: true)
     }
 
-    private func performAction(_ action: () async throws -> SetupJob) async {
+    private func performAction(
+        deviceCode update: DeviceCodeUpdate,
+        _ action: () async throws -> SetupJob
+    ) async {
         let previous = current
         stopObservation(markDetached: false)
         let requestGeneration = generation
         publish(job: previous.job, connection: .recovering,
-                reconnectAttempt: 0, error: nil)
+                reconnectAttempt: 0, error: nil, deviceCode: update)
         do {
             let job = try await action()
             guard generation == requestGeneration, !Task.isCancelled else { return }
-            adoptAndObserve(job)
+            adoptAndObserve(job, deviceCode: update)
         } catch {
             guard generation == requestGeneration, !Task.isCancelled else { return }
             // A transport error cannot prove whether a mutating request reached
             // the daemon. Mark server state unknown and require reconciliation
             // instead of enabling a duplicate create/retry.
             publish(job: previous.job, connection: .streamLost,
-                    reconnectAttempt: 0, error: String(describing: error))
+                    reconnectAttempt: 0, error: String(describing: error),
+                    deviceCode: update)
         }
     }
 
-    private func adoptAndObserve(_ job: SetupJob) {
+    private func adoptAndObserve(
+        _ job: SetupJob,
+        deviceCode update: DeviceCodeUpdate = .clear
+    ) {
         stopObservation(markDetached: false)
         if job.isTerminal {
             publish(job: job, connection: .terminal, reconnectAttempt: 0, error: nil)
             return
         }
         let observedGeneration = generation
-        publish(job: job, connection: .connected, reconnectAttempt: 0, error: nil)
+        publish(job: job, connection: .connected, reconnectAttempt: 0, error: nil,
+                deviceCode: update)
         observationTask = Task { [weak self] in
             await self?.observe(jobId: job.jobId, generation: observedGeneration)
         }
@@ -264,7 +287,7 @@ public actor SetupLifecycleController {
                 publish(job: snapshot,
                         connection: snapshot.isTerminal ? .terminal : (reconnects == 0 ? .connected : .reconnecting),
                         reconnectAttempt: reconnects, error: nil,
-                        deviceCode: snapshot.isTerminal ? nil : fenced.deviceCode)
+                        deviceCode: .authoritative(fenced.deviceCode))
                 if snapshot.isTerminal { return }
 
                 for try await event in gateway.setupJobEvents(jobId: jobId, lastEventId: cursor) {
@@ -283,7 +306,7 @@ public actor SetupLifecycleController {
                     guard generation == observedGeneration, !Task.isCancelled else { return }
                     publish(job: next, connection: next.isTerminal ? .terminal : .connected,
                             reconnectAttempt: reconnects, error: nil,
-                            deviceCode: next.isTerminal ? nil : (event.deviceCode ?? current.deviceCode))
+                            deviceCode: .authoritative(event.deviceCode))
                     if next.isTerminal { return }
                 }
             } catch {
@@ -296,7 +319,7 @@ public actor SetupLifecycleController {
                 reconnects += 1
                 publish(job: current.job, connection: .reconnecting,
                         reconnectAttempt: reconnects, error: String(describing: error),
-                        deviceCode: current.deviceCode)
+                        deviceCode: .preserveSameAwaiting)
                 await waitBeforeReconnect(reconnects)
                 continue
             }
@@ -311,7 +334,8 @@ public actor SetupLifecycleController {
             }
             reconnects += 1
             publish(job: current.job, connection: .reconnecting,
-                    reconnectAttempt: reconnects, error: nil, deviceCode: current.deviceCode)
+                    reconnectAttempt: reconnects, error: nil,
+                    deviceCode: .preserveSameAwaiting)
             await waitBeforeReconnect(reconnects)
         }
     }
@@ -328,14 +352,26 @@ public actor SetupLifecycleController {
         observationTask = nil
         if markDetached {
             publish(job: current.job, connection: .detached,
-                    reconnectAttempt: current.reconnectAttempt, error: nil,
-                    deviceCode: current.deviceCode)
+                    reconnectAttempt: current.reconnectAttempt, error: nil)
         }
     }
 
     private func publish(job: SetupJob?, connection: SetupLifecycleConnection,
                          reconnectAttempt: Int, error: String?,
-                         deviceCode: SetupDeviceCodeDisclosure? = nil) {
+                         deviceCode update: DeviceCodeUpdate = .clear) {
+        var deviceCode: SetupDeviceCodeDisclosure?
+        if let job, job.admitsDeviceCodeDisclosure {
+            switch update {
+            case .preserveSameAwaiting where current.job?.jobId == job.jobId:
+                deviceCode = current.deviceCode
+            case .authoritative(let disclosure):
+                deviceCode = disclosure
+            default:
+                deviceCode = nil
+            }
+        } else {
+            deviceCode = nil
+        }
         current = SetupLifecycleSnapshot(job: job, connection: connection,
                                          reconnectAttempt: reconnectAttempt, lastError: error,
                                          deviceCode: deviceCode)

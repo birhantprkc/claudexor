@@ -5,6 +5,36 @@ import ClaudexorKit
 /// from the cause, and ONE merged human status line per setup job — never
 /// contradictory combos like "Failed + Completed + exit 0". Unit-tested.
 enum AuthSheetPresentation {
+    struct SetupTarget: Equatable {
+        let profileId: String?
+        let differsFromRequested: Bool
+    }
+
+    /// A sheet selects the target for a fresh login. Once a server-owned job is
+    /// present, every continuation follows that job's exact target, including
+    /// nil (the default store); nil must never fall back to the sheet profile.
+    static func setupTarget(requestedProfileId: String?, job: SetupJob?) -> SetupTarget {
+        guard let job else {
+            return SetupTarget(profileId: requestedProfileId, differsFromRequested: false)
+        }
+        return SetupTarget(
+            profileId: job.profileId,
+            differsFromRequested: job.profileId != requestedProfileId)
+    }
+
+    /// Auto-start is safe only after recovery positively proves that no active
+    /// setup job exists. A nil job paired with streamLost is unknown state, not
+    /// permission to create a possible duplicate.
+    static func shouldAutoStartLogin(
+        requested: Bool,
+        consumed: Bool,
+        lifecycle: SetupLifecycleSnapshot,
+        targetVerified: Bool
+    ) -> Bool {
+        requested && !consumed && lifecycle.connection == .idle
+            && lifecycle.job == nil && !targetVerified
+    }
+
     static func showsGlobalApiKeyPanel(profileId: String?, secretName: String?) -> Bool {
         profileId == nil && secretName != nil
     }

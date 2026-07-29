@@ -357,6 +357,13 @@ public struct SetupJob: Codable, Sendable, Equatable {
 
     public var isActive: Bool { !isTerminal }
 
+    /// A transient device-code overlay is valid only while the exact Codex
+    /// login job is actively waiting for the operator. This mirrors the wire
+    /// schema so every Swift consumer shares one fail-closed boundary.
+    public var admitsDeviceCodeDisclosure: Bool {
+        harness == .codex && action == .login && isActive && phase == .awaitingUser
+    }
+
     public var canCancel: Bool { isActive && phase != .cancelling }
     public var canExtend: Bool {
         isActive && deadlineAt != nil && (phase == .launching || phase == .awaitingUser)
@@ -391,12 +398,37 @@ public struct SetupJobSnapshot: Codable, Sendable, Equatable {
     /// of the journaled `job`.
     public let deviceCode: SetupDeviceCodeDisclosure?
 
+    enum CodingKeys: String, CodingKey { case job, cursor, sequence, deviceCode }
+
     public init(job: SetupJob, cursor: String, sequence: Int,
                 deviceCode: SetupDeviceCodeDisclosure? = nil) {
         self.job = job
         self.cursor = cursor
         self.sequence = sequence
-        self.deviceCode = deviceCode
+        self.deviceCode = job.admitsDeviceCodeDisclosure ? deviceCode : nil
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        job = try container.decode(SetupJob.self, forKey: .job)
+        cursor = try container.decode(String.self, forKey: .cursor)
+        sequence = try container.decode(Int.self, forKey: .sequence)
+        let decoded = try container.decodeIfPresent(
+            SetupDeviceCodeDisclosure.self, forKey: .deviceCode)
+        guard decoded == nil || job.admitsDeviceCodeDisclosure else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .deviceCode, in: container,
+                debugDescription: "Device code requires an active Codex login awaiting the user")
+        }
+        deviceCode = decoded
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(job, forKey: .job)
+        try container.encode(cursor, forKey: .cursor)
+        try container.encode(sequence, forKey: .sequence)
+        try container.encodeIfPresent(deviceCode, forKey: .deviceCode)
     }
 }
 
@@ -448,7 +480,7 @@ public struct SetupJobEvent: Codable, Sendable, Equatable {
         self.state = state
         self.message = message
         self.job = job
-        self.deviceCode = deviceCode
+        self.deviceCode = job.admitsDeviceCodeDisclosure ? deviceCode : nil
     }
 
     public init(from decoder: Decoder) throws {
@@ -466,12 +498,19 @@ public struct SetupJobEvent: Codable, Sendable, Equatable {
         state = try container.decode(SetupJobState.self, forKey: .state)
         message = try container.decode(String.self, forKey: .message)
         job = try container.decode(SetupJob.self, forKey: .job)
-        deviceCode = try container.decodeIfPresent(SetupDeviceCodeDisclosure.self, forKey: .deviceCode)
+        let decodedDeviceCode = try container.decodeIfPresent(
+            SetupDeviceCodeDisclosure.self, forKey: .deviceCode)
         guard !jobId.isEmpty, !cursor.isEmpty, sequence > 0, previousCursor != cursor,
               job.jobId == jobId, job.state == state, job.message == message else {
             throw DecodingError.dataCorrupted(.init(codingPath: container.codingPath,
                                                     debugDescription: "Setup event identity, cursor, or snapshot invariant failed"))
         }
+        guard decodedDeviceCode == nil || job.admitsDeviceCodeDisclosure else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .deviceCode, in: container,
+                debugDescription: "Device code requires an active Codex login awaiting the user")
+        }
+        deviceCode = decodedDeviceCode
     }
 
     public func encode(to encoder: Encoder) throws {

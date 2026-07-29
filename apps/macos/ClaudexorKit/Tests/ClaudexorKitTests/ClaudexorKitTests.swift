@@ -1475,7 +1475,8 @@ import Testing
     }
 
     @Test func snapshotAndEventCarryTheTransientDeviceCode() throws {
-        let awaiting = makeSetupJob(id: "dc", state: "waiting_for_input", phase: .awaitingUser)
+        let awaiting = makeSetupJob(
+            id: "dc", state: "waiting_for_input", phase: .awaitingUser, harness: .codex)
         let disclosure = SetupDeviceCodeDisclosure(
             flow: .chatgptDeviceCode, verificationUrl: "https://chatgpt.com/device", userCode: "ABCD-1234")
         let snapshot = SetupJobSnapshot(job: awaiting, cursor: "c", sequence: 1, deviceCode: disclosure)
@@ -1493,6 +1494,43 @@ import Testing
         #expect(try decoder.decode(SetupJobSnapshot.self, from: encoder.encode(bare)).deviceCode == nil)
     }
 
+    @Test func snapshotAndEventRejectDeviceCodeOutsideAwaitingCodexLogin() throws {
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .chatgptDeviceCode,
+            verificationUrl: "https://chatgpt.com/device", userCode: "ABCD-1234")
+        let encoder = JSONEncoder()
+        let invalidJobs = [
+            makeSetupJob(id: "claude", state: "waiting_for_input", phase: .awaitingUser),
+            makeSetupJob(
+                id: "launching", state: "waiting_for_input", phase: .launching,
+                harness: .codex),
+            makeSetupJob(
+                id: "done", state: "succeeded", phase: .awaitingUser, harness: .codex),
+        ]
+        for job in invalidJobs {
+            let jobObject = try #require(
+                JSONSerialization.jsonObject(with: encoder.encode(job)) as? [String: Any])
+            let codeObject = try #require(
+                JSONSerialization.jsonObject(with: encoder.encode(disclosure)) as? [String: Any])
+            let snapshotData = try JSONSerialization.data(withJSONObject: [
+                "job": jobObject, "cursor": "cursor", "sequence": 1,
+                "deviceCode": codeObject,
+            ])
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(SetupJobSnapshot.self, from: snapshotData)
+            }
+            let eventData = try JSONSerialization.data(withJSONObject: [
+                "jobId": job.jobId, "cursor": "cursor-2", "previousCursor": "cursor-1",
+                "sequence": 2, "time": "t", "kind": "status",
+                "state": job.state.rawValue, "message": job.message,
+                "job": jobObject, "deviceCode": codeObject,
+            ])
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(SetupJobEvent.self, from: eventData)
+            }
+        }
+    }
+
     @Test func browserCallbackDisclosureHasNoUserCode() {
         let disclosure = SetupDeviceCodeDisclosure(
             flow: .chatgpt, verificationUrl: "https://auth.openai.com/cb", userCode: "")
@@ -1500,9 +1538,11 @@ import Testing
     }
 
     @Test func controllerThreadsDeviceCodeWhileAwaitingAndClearsOnTerminal() async {
-        let awaiting = makeSetupJob(id: "login", state: "waiting_for_input", phase: .awaitingUser)
-        let done = makeSetupJob(id: "login", state: "succeeded", phase: .completed,
-                                outcome: SetupJobOutcome(reason: .completed))
+        let awaiting = makeSetupJob(
+            id: "login", state: "waiting_for_input", phase: .awaitingUser, harness: .codex)
+        let done = makeSetupJob(
+            id: "login", state: "succeeded", phase: .completed,
+            outcome: SetupJobOutcome(reason: .completed), harness: .codex)
         let disclosure = SetupDeviceCodeDisclosure(
             flow: .chatgptDeviceCode, verificationUrl: "https://chatgpt.com/device", userCode: "WXYZ-9")
         let gateway = FakeSetupGateway(
@@ -1514,15 +1554,114 @@ import Testing
             deviceCode: disclosure)
         let controller = SetupLifecycleController(gateway: gateway, reconnectDelays: [.zero])
         let updates = await controller.updates()
-        // makeSetupJob builds claude jobs; the harness must match so recovery
-        // adopts and observes (the disclosure threading is harness-agnostic).
-        await controller.recoverActiveJob(harness: "claude")
+        await controller.recoverActiveJob(harness: "codex")
         // The awaiting snapshot surfaces the transient code…
         let awaitingSnap = await firstSnapshot(in: updates) { $0.deviceCode != nil }
         #expect(awaitingSnap?.deviceCode == disclosure)
         // …and the terminal transition clears it.
         let terminal = await firstSnapshot(in: updates) { $0.connection == .terminal }
         #expect(terminal?.deviceCode == nil)
+    }
+
+    @Test func controllerPreservesDeviceCodeAcrossSameJobActionAndAdoption() async {
+        let awaiting = makeSetupJob(
+            id: "login-action", state: "waiting_for_input", phase: .awaitingUser, harness: .codex)
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .chatgptDeviceCode, verificationUrl: "https://chatgpt.com/device", userCode: "KEEP-1")
+        let gateway = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting, awaiting, awaiting],
+            streams: [.pending, .pending], deviceCode: disclosure)
+        let controller = SetupLifecycleController(gateway: gateway, reconnectDelays: [.zero])
+        let initial = await controller.updates()
+        await controller.recoverActiveJob(harness: "codex")
+        #expect(await firstSnapshot(in: initial) { $0.deviceCode == disclosure } != nil)
+
+        let transitions = await controller.updates()
+        await controller.extendDeadline()
+        var sawRecovering = false
+        var recoveringCode: SetupDeviceCodeDisclosure?
+        var adoptedCode: SetupDeviceCodeDisclosure?
+        for await snapshot in transitions {
+            if snapshot.connection == .recovering {
+                sawRecovering = true
+                recoveringCode = snapshot.deviceCode
+            } else if sawRecovering, snapshot.connection == .connected {
+                adoptedCode = snapshot.deviceCode
+                break
+            }
+        }
+        #expect(recoveringCode == disclosure)
+        #expect(adoptedCode == disclosure)
+
+        let reconnects = await controller.updates()
+        var reconnectIterator = reconnects.makeAsyncIterator()
+        _ = await reconnectIterator.next() // updates() first yields current.
+        await controller.reconnect(harness: "codex")
+        let reconnected = await reconnectIterator.next()
+        #expect(reconnected?.connection == .connected)
+        #expect(reconnected?.deviceCode == disclosure)
+    }
+
+    @Test func cancellingClearsDeviceCodeBeforeTheServerSettles() async {
+        let awaiting = makeSetupJob(
+            id: "login-cancel", state: "waiting_for_input", phase: .awaitingUser, harness: .codex)
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .chatgptDeviceCode, verificationUrl: "https://chatgpt.com/device", userCode: "CANCEL-1")
+        let gateway = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting, awaiting, awaiting],
+            streams: [.pending, .pending], deviceCode: disclosure)
+        let controller = SetupLifecycleController(gateway: gateway, reconnectDelays: [.zero])
+        let initial = await controller.updates()
+        await controller.recoverActiveJob(harness: "codex")
+        #expect(await firstSnapshot(in: initial) { $0.deviceCode == disclosure } != nil)
+
+        let transitions = await controller.updates()
+        await controller.cancel()
+        let cancelling = await firstSnapshot(in: transitions) { $0.connection == .recovering }
+        #expect(cancelling?.deviceCode == nil)
+    }
+
+    @Test func authoritativeAwaitingEventCanClearAStaleDeviceCode() async {
+        let awaiting = makeSetupJob(
+            id: "login-clear", state: "waiting_for_input", phase: .awaitingUser, harness: .codex)
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .chatgptDeviceCode, verificationUrl: "https://chatgpt.com/device", userCode: "CLEAR-1")
+        let event = SetupJobEvent(
+            jobId: awaiting.jobId, cursor: "cursor-event-1", previousCursor: "cursor-snapshot-1",
+            sequence: 2, time: "t", state: awaiting.state, message: awaiting.message, job: awaiting)
+        let gateway = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting], streams: [.events([event])],
+            deviceCode: disclosure)
+        let controller = SetupLifecycleController(gateway: gateway, reconnectDelays: [.zero])
+        let updates = await controller.updates()
+        await controller.recoverActiveJob(harness: "codex")
+        var sawDisclosure = false
+        var cleared = false
+        for await snapshot in updates {
+            if snapshot.deviceCode == disclosure { sawDisclosure = true }
+            if sawDisclosure, snapshot.job?.jobId == awaiting.jobId,
+               snapshot.connection == .connected, snapshot.deviceCode == nil {
+                cleared = true
+                break
+            }
+        }
+        #expect(cleared)
+    }
+
+    @Test func finalStreamLossClearsDeviceCodeAfterBoundedReconnects() async {
+        let awaiting = makeSetupJob(
+            id: "login-lost", state: "waiting_for_input", phase: .awaitingUser, harness: .codex)
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .chatgptDeviceCode, verificationUrl: "https://chatgpt.com/device", userCode: "LOST-1")
+        let gateway = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting],
+            streams: Array(repeating: .finish, count: 6), deviceCode: disclosure)
+        let controller = SetupLifecycleController(gateway: gateway, reconnectDelays: [.zero])
+        let updates = await controller.updates()
+        await controller.recoverActiveJob(harness: "codex")
+        let lost = await firstSnapshot(in: updates) { $0.connection == .streamLost }
+        #expect(lost?.reconnectAttempt == SetupLifecycleController.maximumReconnects)
+        #expect(lost?.deviceCode == nil)
     }
 
     @Test func controllerAcceptsSparseSequencesOnlyWhenTheCursorChainIsExact() async {
@@ -1677,6 +1816,39 @@ import Testing
         await controller.detach()
     }
 
+    @Test func gatewayRejectsSetupPointResponsesForAnotherRequestedJob() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RequestStubURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let client = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "t", session: session)
+        defer { RequestStubURLProtocol.handler = nil }
+
+        let wrong = makeSetupJob(id: "other", state: "running", phase: .verifying)
+        let jobData = try JSONEncoder().encode(wrong)
+        let snapshotData = try JSONEncoder().encode(
+            SetupJobSnapshot(job: wrong, cursor: "cursor", sequence: 1))
+        RequestStubURLProtocol.handler = { request in
+            let data = request.url?.path.hasSuffix("/snapshot") == true
+                ? snapshotData : jobData
+            return (Self.response(for: request), data)
+        }
+
+        await #expect(throws: GatewayError.self) { try await client.setupJob(jobId: "wanted") }
+        await #expect(throws: GatewayError.self) {
+            try await client.setupJobSnapshot(jobId: "wanted")
+        }
+        await #expect(throws: GatewayError.self) {
+            try await client.cancelSetupJob(jobId: "wanted")
+        }
+        await #expect(throws: GatewayError.self) {
+            try await client.reconcileSetupJob(jobId: "wanted")
+        }
+        await #expect(throws: GatewayError.self) {
+            try await client.extendSetupJob(jobId: "wanted")
+        }
+    }
+
     @Test func gatewaySetupSSEFailsVisiblyOnUnknownMalformedMismatchedEOFAndOverflow() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RequestStubURLProtocol.self]
@@ -1728,6 +1900,16 @@ import Testing
         install("id: wrong-id\nevent: setup\ndata: \(eventJSON)\n\nevent: end\ndata: {}\n\n")
         let mismatched = await consume(client.setupJobEvents(jobId: "j", lastEventId: "snapshot"))
         #expect(String(describing: mismatched.1).contains("does not match"))
+
+        let other = makeSetupJob(id: "other", state: "running", phase: .verifying)
+        let wrongJobEvent = SetupJobEvent(
+            jobId: "other", cursor: "cursor-other", previousCursor: "snapshot",
+            sequence: 2, time: "t", state: other.state, message: other.message, job: other)
+        let wrongJobJSON = String(decoding: try JSONEncoder().encode(wrongJobEvent), as: UTF8.self)
+        install("id: cursor-other\nevent: setup\ndata: \(wrongJobJSON)\n\nevent: end\ndata: {}\n\n")
+        let wrongJob = await consume(
+            client.setupJobEvents(jobId: "j", lastEventId: "snapshot"))
+        #expect(String(describing: wrongJob.1).contains("requested job"))
 
         install("id: cursor-1\nevent: setup\ndata: \(eventJSON)\n\n")
         let eof = await consume(client.setupJobEvents(jobId: "j", lastEventId: "snapshot"))
@@ -2223,12 +2405,15 @@ private func testRequestBody(_ request: URLRequest) -> Data? {
     return data
 }
 
-private func makeSetupCapability(state: SetupJobState) -> AuthCapabilityLifecycle {
+private func makeSetupCapability(
+    state: SetupJobState, harness: SetupHarness = .claude
+) -> AuthCapabilityLifecycle {
     let digest = String(repeating: "a", count: 64)
-    let disclosure = AuthSmokeDisclosure(harness: "claude", generatedAt: "2026-07-13T00:00:00Z")
+    let disclosure = AuthSmokeDisclosure(
+        harness: harness.rawValue, generatedAt: "2026-07-13T00:00:00Z")
     if state == .succeeded {
         let receipt = try! JSONDecoder().decode(AuthCapabilityReceipt.self, from: Data("""
-        {"receiptId":"receipt-test","attemptId":"attempt-test","harness":"claude",
+        {"receiptId":"receipt-test","attemptId":"attempt-test","harness":"\(harness.rawValue)",
          "requested":"subscription","requiredRoute":"vendor_native","requiredSource":"native_session",
          "effective":"vendor_native","effectiveSource":"native_session","selectionReason":"exact_requested_route",
          "availability":"available","verification":"passed","billingKnowledge":"unknown","costKnowledge":"unknown",
@@ -2259,7 +2444,8 @@ private func makeSetupCapability(state: SetupJobState) -> AuthCapabilityLifecycl
 
 private func makeSetupJob(id: String, state: String,
                           phase: SetupJobPhase, outcome: SetupJobOutcome? = nil,
-                          terminationReconciliation: SetupTerminationReconciliation? = nil) -> SetupJob {
+                          terminationReconciliation: SetupTerminationReconciliation? = nil,
+                          harness: SetupHarness = .claude) -> SetupJob {
     let typedState = SetupJobState(rawValue: state)!
     let terminal = typedState == .succeeded || typedState == .failed || typedState == .cancelled
         || typedState == .timedOut || typedState == .interruptedUnknown || typedState == .notSupported
@@ -2272,12 +2458,12 @@ private func makeSetupJob(id: String, state: String,
     case .notSupported: SetupJobOutcome(reason: .notSupported)
     case .queued, .running, .waitingForInput: nil
     }
-    return SetupJob(jobId: id, harness: .claude, action: .login, state: typedState, phase: phase,
+    return SetupJob(jobId: id, harness: harness, action: .login, state: typedState, phase: phase,
              deadlineAt: state == "waiting_for_input" ? "2099-01-01T00:00:00Z" : nil,
              outcome: outcome ?? defaultOutcome, message: state, createdAt: "2026-07-13T00:00:00Z",
              startedAt: typedState == .queued ? nil : "2026-07-13T00:00:01Z",
              finishedAt: terminal ? "2026-07-13T00:00:02Z" : nil,
-             authCapability: makeSetupCapability(state: typedState),
+             authCapability: makeSetupCapability(state: typedState, harness: harness),
              terminationReconciliation: terminationReconciliation)
 }
 
@@ -2293,6 +2479,7 @@ private enum FakeStreamResult: Sendable {
     case events([SetupJobEvent])
     case finish
     case failure
+    case pending
 }
 
 private struct FakeSetupError: Error, Sendable {}
@@ -2401,6 +2588,8 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
                 continuation.finish()
             case .failure:
                 continuation.finish(throwing: FakeSetupError())
+            case .pending:
+                break
             }
         }
     }

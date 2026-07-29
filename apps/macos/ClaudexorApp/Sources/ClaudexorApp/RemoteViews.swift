@@ -372,6 +372,7 @@ struct RemoteDeviceLoginSheet: View {
                         if let readiness = await model.refreshRemoteNativeLoginReadiness(
                             connectionID: request.connectionID,
                             harnessID: SetupHarness.codex.rawValue,
+                            profileID: current.job.profileId,
                             actionLease: request.lease)
                         {
                             guard model.remoteActionIsCurrent(request.lease, client: client)
@@ -383,6 +384,7 @@ struct RemoteDeviceLoginSheet: View {
                     }
                 } catch {
                     guard model.remoteActionIsCurrent(request.lease, client: client) else { return }
+                    snapshot = remoteDeviceLoginSnapshotAfterPollFailure(snapshot)
                     status = model.userMessage(for: error)
                 }
                 try? await Task.sleep(for: .seconds(1))

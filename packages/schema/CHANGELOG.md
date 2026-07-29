@@ -9,6 +9,8 @@
   setup runners after a deadline extension.
 - Keep frozen plan references server-owned at the thread-turn boundary and carry
   the deciding credential profile in the run auth-route receipt.
+- Reject transient device-code projections outside an active Codex login that
+  is awaiting the user.
 - @claudexor/util@3.2.0
 
 ## 3.1.2

@@ -286,8 +286,10 @@ pnpm test
   promoted asset in ONE early provenance loop before any use; only the two
   owner-signed manifests (`runtime_manifest_b64` and
   `remote_runtime_manifest_b64`, sealed offline via `pnpm sign:runtime-manifest`
-  / `pnpm sign:remote-runtime-manifest`), review attestation, and final
-  checksum set are assembled in the publish run. The remote SBOM is regenerated
+  / `pnpm sign:remote-runtime-manifest`). The required `candidate_run_id`
+  selects the candidate workflow run whose exact artifacts are promoted; only
+  those manifests, the review attestation, and the final checksum set are
+  assembled in the publish run. The remote SBOM is regenerated
   from the promoted unsigned manifest and must `cmp` byte-identical to the
   candidate SBOM before the candidate bytes ship.
 - The publish input is an annotated stable tag on exact `origin/main` plus a

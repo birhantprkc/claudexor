@@ -305,15 +305,8 @@ extension AppModel {
         guard let profileId else {
             return await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
         }
-        let locationID = activeExecutionLocation
-        guard await loadCredentialProfiles(locationID: locationID) == nil else { return false }
-        let profiles = locationID == .local
-            ? credentialProfiles
-            : (remoteCredentialProfiles[locationID] ?? [])
-        return profiles.contains {
-            $0.profile.harnessId == family.setupHarnessId
-                && $0.profile.profileId == profileId
-        }
+        return await refreshExactCredentialProfile(
+            harnessID: family.setupHarnessId, profileID: profileId) != nil
     }
 
     @discardableResult

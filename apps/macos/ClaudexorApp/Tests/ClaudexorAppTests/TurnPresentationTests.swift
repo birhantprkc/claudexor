@@ -30,6 +30,20 @@ import ClaudexorKit
             phase: phase, reason: reason, reviewNeedsDecision: needsDecision, waitingOnUser: waiting)
     }
 
+    @Test func autoLoginRequiresProvenIdleRecovery() {
+        let idle = SetupLifecycleSnapshot(connection: .idle)
+        let unknown = SetupLifecycleSnapshot(
+            connection: .streamLost, lastError: "snapshot unavailable")
+        #expect(AuthSheetPresentation.shouldAutoStartLogin(
+            requested: true, consumed: false, lifecycle: idle, targetVerified: false))
+        #expect(!AuthSheetPresentation.shouldAutoStartLogin(
+            requested: true, consumed: false, lifecycle: unknown, targetVerified: false))
+        #expect(!AuthSheetPresentation.shouldAutoStartLogin(
+            requested: true, consumed: true, lifecycle: idle, targetVerified: false))
+        #expect(!AuthSheetPresentation.shouldAutoStartLogin(
+            requested: true, consumed: false, lifecycle: idle, targetVerified: true))
+    }
+
     @Test func activeRunSaysWorkingAndFoldsRetryIntoTheStateWord() {
         #expect(line(.running).stateWord == "Working…")
         // Retry is FOLDED into the state word (never a second capsule).
@@ -200,6 +214,25 @@ import ClaudexorKit
             profileId: nil, secretName: nil))
     }
 
+    @Test func serverOwnedJobTargetWinsWithoutTreatingDefaultAsMissing() {
+        let profileJob = fallbackJob(
+            harness: .codex, state: .notSupported,
+            errorCode: .deviceAuthUnsupported, profileId: "work")
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: "other", job: profileJob
+        ) == .init(profileId: "work", differsFromRequested: true))
+
+        let defaultJob = fallbackJob(
+            harness: .codex, state: .notSupported,
+            errorCode: .deviceAuthUnsupported, profileId: nil)
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: "work", job: defaultJob
+        ) == .init(profileId: nil, differsFromRequested: true))
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: "work", job: nil
+        ) == .init(profileId: "work", differsFromRequested: false))
+    }
+
     @Test func primaryCTAFollowsTheCauseLadder() {
         // Unknown process state resolves before anything else.
         #expect(cta(streamLost: true) == .reconnect)
@@ -246,7 +279,8 @@ import ClaudexorKit
     // first-class native ACTION, not a dead-end label — keyed on the consistent
     // typed code `device_auth_unsupported` on the native-command receipt.
     private func fallbackJob(
-        harness: SetupHarness, state: SetupJobState, errorCode: SetupNativeCommandErrorCode?
+        harness: SetupHarness, state: SetupJobState, errorCode: SetupNativeCommandErrorCode?,
+        profileId: String? = nil
     ) -> SetupJob {
         let receipt: SetupNativeCommandReceipt? = errorCode.map {
             SetupNativeCommandReceipt(
@@ -258,7 +292,8 @@ import ClaudexorKit
         return SetupJob(
             jobId: "j", harness: harness, action: .login, state: state, phase: .completed,
             outcome: SetupJobOutcome(reason: state == .notSupported ? .notSupported : .commandFailed),
-            message: "m", createdAt: "2026-07-23T00:00:00Z", nativeCommand: receipt)
+            message: "m", createdAt: "2026-07-23T00:00:00Z", nativeCommand: receipt,
+            profileId: profileId)
     }
 
     @Test func deviceAuthUnsupportedExposesTheTerminalFallbackAction() {

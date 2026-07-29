@@ -22,13 +22,11 @@ const POLL_MS = 1_000;
 
 const NEGATIVE_TERMINAL_STATES = ["failed", "cancelled", "timed_out", "not_supported"];
 
-/** The target a device_auth_unsupported miss can pivot to the legacy Terminal
- * (browser_redirect) sign-in for. Presence of this on the streamer options is
- * what turns the terminal state from a message into a one-action offer. */
-export interface TerminalLoginFallbackTarget {
+/** Capability to offer the legacy Terminal (browser_redirect) continuation.
+ * Its target is deliberately absent: only the server-owned job may select the
+ * credential store that an existing setup flow continues. */
+export interface TerminalLoginFallbackCapability {
   harness: "codex";
-  /** INV-135 profile the fallback login should target; absent = default store. */
-  profileId?: string;
 }
 
 /**
@@ -44,17 +42,31 @@ export interface TerminalLoginNextAction {
   kind: "terminal_login_fallback";
   reason: "device_auth_unsupported";
   loginFlow: "browser_redirect";
+  /** Exact server-owned credential target; null = the default store. */
+  profileId: string | null;
 }
 
-/** The typed next action for a terminal job, or null for an ordinary outcome. */
+function hasTerminalLoginFallback(
+  job: Pick<ControlSetupJob, "harness" | "state" | "nativeCommand">,
+): boolean {
+  return (
+    job.harness === "codex" &&
+    job.state === "not_supported" &&
+    job.nativeCommand?.errorCode === "device_auth_unsupported"
+  );
+}
+
+/** The typed next action for a terminal job, or null for an ordinary outcome.
+ * The target comes from the server-owned job so every machine producer agrees. */
 export function terminalLoginFallback(
-  job: Pick<ControlSetupJob, "state" | "nativeCommand">,
+  job: Pick<ControlSetupJob, "harness" | "state" | "nativeCommand" | "profileId">,
 ): TerminalLoginNextAction | null {
-  if (job.state === "not_supported" && job.nativeCommand?.errorCode === "device_auth_unsupported") {
+  if (hasTerminalLoginFallback(job)) {
     return {
       kind: "terminal_login_fallback",
       reason: "device_auth_unsupported",
       loginFlow: "browser_redirect",
+      profileId: job.profileId,
     };
   }
   return null;
@@ -70,15 +82,16 @@ export function terminalLoginFallback(
  * declined path; a TTY OFFERS the transition directly (see below).
  */
 export function terminalLoginReport(
-  job: Pick<ControlSetupJob, "state" | "message" | "nativeCommand">,
+  job: Pick<ControlSetupJob, "harness" | "state" | "message" | "nativeCommand" | "profileId">,
   label: string,
-  target: { profileId?: string } = {},
 ): { lines: string[]; exitCode: number } {
-  if (terminalLoginFallback(job)) {
+  const nextAction = terminalLoginFallback(job);
+  if (nextAction) {
+    const fallbackLabel = nextAction.profileId ? `codex/${nextAction.profileId}` : "codex";
     return {
       lines: [
-        `${label} login not_supported (device_auth_unsupported): this codex build has no in-app device-code sign-in.`,
-        target.profileId
+        `${fallbackLabel} login not_supported (device_auth_unsupported): this codex build has no in-app device-code sign-in.`,
+        nextAction.profileId
           ? "Next: retry this profile with the legacy Terminal sign-in (the browser-redirect flow)."
           : "Next: run `claudexor auth login codex --browser-redirect` for the Terminal sign-in.",
       ],
@@ -120,18 +133,18 @@ async function defaultPromptYesNo(question: string): Promise<boolean> {
  */
 async function createTerminalFallbackJob(
   fetchImpl: FetchLike,
-  target: TerminalLoginFallbackTarget,
+  nextAction: TerminalLoginNextAction,
   label: string,
 ): Promise<number> {
   const response = await fetchImpl("/setup/jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      harness: target.harness,
+      harness: "codex",
       action: "login",
       authRequest: "subscription",
-      loginFlow: "browser_redirect",
-      ...(target.profileId ? { profileId: target.profileId } : {}),
+      loginFlow: nextAction.loginFlow,
+      ...(nextAction.profileId ? { profileId: nextAction.profileId } : {}),
     }),
   });
   if (!response.ok) {
@@ -157,7 +170,7 @@ export interface StreamDurableCodexLoginOptions {
   json?: boolean;
   /** Enables the one-action Terminal fallback on a device_auth_unsupported
    * miss (a y/N prompt on a TTY; a typed `nextAction` in `--json`). */
-  fallback?: TerminalLoginFallbackTarget;
+  fallback?: TerminalLoginFallbackCapability;
   /** Ordinary CLI detach is success; ACP terminal auth must report cancellation as non-success. */
   detachExitCode?: number;
   pollMs?: number;
@@ -263,22 +276,24 @@ export async function streamDurableCodexLogin(
         // the legacy Terminal sign-in in one action (explicit y/N — never a
         // silent fallback). Declining, or a non-TTY, falls back to the typed
         // report that names the exact next command.
-        if (opts.fallback && terminalLoginFallback(job)) {
+        const nextAction = terminalLoginFallback(job);
+        if (opts.fallback && nextAction) {
+          const fallbackLabel = nextAction.profileId ? `codex/${nextAction.profileId}` : "codex";
           print(
-            `${label} login not_supported (device_auth_unsupported): this codex build has no in-app device-code sign-in.`,
+            `${fallbackLabel} login not_supported (device_auth_unsupported): this codex build has no in-app device-code sign-in.`,
           );
           const yes = await promptYesNo(
             "Start the legacy Terminal (browser-redirect) sign-in now? [y/N] ",
           );
-          if (yes) return await createTerminalFallbackJob(fetchImpl, opts.fallback, label);
+          if (yes) return await createTerminalFallbackJob(fetchImpl, nextAction, fallbackLabel);
           print(
-            opts.fallback.profileId
+            nextAction.profileId
               ? "You can retry this profile with the legacy Terminal (browser-redirect) sign-in later."
               : "You can start it later with `claudexor auth login codex --browser-redirect`.",
           );
           return 1;
         }
-        const report = terminalLoginReport(job, label, { profileId: opts.fallback?.profileId });
+        const report = terminalLoginReport(job, label);
         for (const line of report.lines) print(line);
         return report.exitCode;
       }

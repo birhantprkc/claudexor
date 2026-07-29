@@ -24,6 +24,7 @@ struct AuthSheetJobPanel: View {
     /// legacy Terminal (browser_redirect) sign-in. nil unless that state holds.
     var deviceAuthFallback: AuthSheetPresentation.DeviceAuthFallback? = nil
     var startTerminalFallback: () -> Void = {}
+    var targetMismatchMessage: String? = nil
 
     /// M9-UX item 4: the terminal command + Guide/Retry are secondary detail,
     /// collapsed by default so the live-login controls stay the clear focus.
@@ -47,6 +48,13 @@ struct AuthSheetJobPanel: View {
                 }
 
                 Text(job.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+
+                if let targetMismatchMessage {
+                    Label(targetMismatchMessage, systemImage: "person.crop.circle.badge.exclamationmark")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.status(.caution))
+                        .textSelection(.enabled)
+                }
 
                 if let deadline = Self.parseDate(job.deadlineAt), job.isActive {
                     TimelineView(.periodic(from: .now, by: 1)) { context in

@@ -9,6 +9,7 @@ import {
   ControlSetupJob,
   ControlSetupJobCreateRequest,
   ControlSetupJobEvent,
+  ControlSetupJobSnapshot,
   ControlSettingsSnapshot,
   ControlThread,
   ControlThreadTurnRequest,
@@ -589,6 +590,55 @@ describe("Control API schemas", () => {
     ).toThrow();
     expect(() =>
       ControlSetupJobEvent.parse({ ...eventBase, previousCursor: null, sequence: 0 }),
+    ).toThrow();
+
+    const disclosure = {
+      flow: "chatgptDeviceCode" as const,
+      verificationUrl: "https://chatgpt.com/device",
+      userCode: "ABCD-1234",
+    };
+    const codexAwaiting = ControlSetupJob.parse({
+      ...job,
+      harness: "codex",
+      phase: "awaiting_user",
+      authCapability: {
+        ...job.authCapability,
+        disclosure: { ...job.authCapability?.disclosure, harness: "codex" },
+      },
+    });
+    expect(
+      ControlSetupJobSnapshot.parse({
+        job: codexAwaiting,
+        cursor: "journal-cursor-2",
+        sequence: 2,
+        deviceCode: disclosure,
+      }).deviceCode,
+    ).toEqual(disclosure);
+    expect(() =>
+      ControlSetupJobSnapshot.parse({
+        job,
+        cursor: "journal-cursor-2",
+        sequence: 2,
+        deviceCode: disclosure,
+      }),
+    ).toThrow();
+    expect(() =>
+      ControlSetupJobEvent.parse({
+        ...eventBase,
+        job: { ...codexAwaiting, phase: "verifying" },
+        state: codexAwaiting.state,
+        message: codexAwaiting.message,
+        previousCursor: null,
+        deviceCode: disclosure,
+      }),
+    ).toThrow();
+    expect(() =>
+      ControlSetupJobSnapshot.parse({
+        job: { ...codexAwaiting, state: "not_supported", phase: "awaiting_user" },
+        cursor: "journal-cursor-2",
+        sequence: 2,
+        deviceCode: disclosure,
+      }),
     ).toThrow();
   });
 });

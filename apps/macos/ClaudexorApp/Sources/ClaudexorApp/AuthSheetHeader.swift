@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Standard, labeled Auth sheet navigation chrome: profile drill-in gets Back;
-/// every level gets an always-visible Done. Active login state disables Back
-/// so the existing keep-running/cancel confirmation cannot be bypassed.
+/// every level gets an always-visible Done. Back is disabled only when this
+/// selected account owns the active login; a recovered job for another account
+/// remains visible while navigation returns to the shared Accounts surface.
 struct AuthSheetHeader: View {
     let family: HarnessFamily
     let profileDisplayName: String?

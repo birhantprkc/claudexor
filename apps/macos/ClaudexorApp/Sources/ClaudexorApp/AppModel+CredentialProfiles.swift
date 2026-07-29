@@ -72,6 +72,31 @@ extension AppModel {
         return receipt.error
     }
 
+    /// Fetch and return one exact account only when this request remains the
+    /// current projection owner through commit. The ordinary Accounts loader
+    /// intentionally retires an older caller silently when a newer refresh
+    /// supersedes it; setup verification must not mistake that nil error for a
+    /// fresh receipt and read the previous shared projection.
+    func refreshExactCredentialProfile(
+        harnessID: String,
+        profileID: String,
+        locationID requestedLocationID: ExecutionLocationID? = nil
+    ) async -> CredentialProfileEntry? {
+        let locationID = requestedLocationID ?? activeExecutionLocation
+        let receipt = await loadCredentialProfilesReceipt(
+            at: locationID, discardOnFailure: false)
+        settleAccountsLoad(receipt, at: locationID)
+        guard receipt.error == nil,
+              accountsRefreshGenerations[locationID] == receipt.generation
+        else { return nil }
+        let profiles = locationID == .local
+            ? credentialProfiles
+            : (remoteCredentialProfiles[locationID] ?? [])
+        return profiles.first {
+            $0.profile.harnessId == harnessID && $0.profile.profileId == profileID
+        }
+    }
+
     /// The request receipt keeps the data-generation fence and the Accounts
     /// presentation settlement on one authority. In particular, a newer
     /// background refresh that supersedes an in-flight foreground Retry owns

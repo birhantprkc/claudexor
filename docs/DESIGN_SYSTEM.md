@@ -1034,9 +1034,13 @@ views in the shared design-system files; screens compose them.
   CTA. A healthy sheet closes with the always-visible header Done; the footer
   appears only for a live status or a real primary action. Profile drill-in uses an explicit
   leading **Accounts** back button; every sheet has a labeled trailing
-  **Done** button (not an unlabeled x). Back is disabled while an active login
-  requires keep-running/cancel confirmation. Owner mapper:
-  `AuthSheetPresentation`.
+  **Done** button (not an unlabeled x). Back is disabled while the selected
+  account owns an active login requiring keep-running/cancel confirmation. If a
+  sheet recovers another account's active job, Back only navigates within the
+  sheet and the recovered job remains visible. Owner mapper:
+  `AuthSheetPresentation`. The mismatch is named, every job-derived
+  continuation follows the job's server-owned account, and a fresh
+  Login/Recheck remains scoped to the account the user opened.
 - **AuthSheet codex device-code card (D-17).** While a codex device-code login
   awaits the user, a dedicated card (`AuthSheetDeviceCodeCard`) shows the
   large one-time code in a monospaced style with an explicit **Copy** button
