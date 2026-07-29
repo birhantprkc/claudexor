@@ -289,6 +289,7 @@ final class AppModel {
     @ObservationIgnored var remoteGlobalEventCursors: [ExecutionLocationID: String] = [:]
     @ObservationIgnored var remoteRunStreamTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var remoteRunStreamTokens: [String: UUID] = [:]
+    @ObservationIgnored var remoteRunDetailLoadTokens: [RunDetailLoadKey: UUID] = [:]
     @ObservationIgnored var remoteConnectTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored var remoteConnectionGenerations: [UUID: Int] = [:]
     @ObservationIgnored var pendingRemoteThreadSelection:

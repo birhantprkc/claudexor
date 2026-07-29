@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import ClaudexorApp
 
@@ -5,12 +6,14 @@ import Testing
 /// the default + no-auto-jump-after-manual-selection guard.
 @Suite struct WorkspaceTabsTests {
     @Test func evidenceHydrationIsIdentityKeyedAndFailedLoadsRemainRetryable() {
+        let local = RunDetailLoadKey(locationID: .local, runId: "run-b")
+        let remote = RunDetailLoadKey(locationID: .remote(UUID()), runId: "run-b")
         #expect(RunEvidenceSection.needsDetailLoad(
-            runId: "run-b", loadedRunId: "run-a", hydrated: true))
+            loadKey: remote, loadedRunKey: local, hydrated: true))
         #expect(RunEvidenceSection.needsDetailLoad(
-            runId: "run-b", loadedRunId: nil, hydrated: false))
+            loadKey: remote, loadedRunKey: nil, hydrated: false))
         #expect(!RunEvidenceSection.needsDetailLoad(
-            runId: "run-b", loadedRunId: "run-b", hydrated: true))
+            loadKey: remote, loadedRunKey: remote, hydrated: true))
     }
 
     private func inputs(runSelected: Bool = false, failedNoOutput: Bool = false) -> WorkspaceTabInputs {

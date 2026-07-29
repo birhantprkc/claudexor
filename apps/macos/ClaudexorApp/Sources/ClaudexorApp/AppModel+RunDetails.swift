@@ -1,6 +1,11 @@
 import Foundation
 import ClaudexorKit
 
+struct RunDetailLoadKey: Hashable {
+    let locationID: ExecutionLocationID
+    let runId: String
+}
+
 extension AppModel {
     /// Load run detail from the daemon that owns the execution location.
     ///
@@ -20,6 +25,14 @@ extension AppModel {
         _ id: String,
         locationID: ExecutionLocationID
     ) async -> Bool {
+        let loadKey = RunDetailLoadKey(locationID: locationID, runId: id)
+        let loadToken = UUID()
+        remoteRunDetailLoadTokens[loadKey] = loadToken
+        defer {
+            if remoteRunDetailLoadTokens[loadKey] == loadToken {
+                remoteRunDetailLoadTokens[loadKey] = nil
+            }
+        }
         guard let requestClient = gateway(for: locationID),
               let original = remoteTasks[locationID]?.first(where: {
                   $0.id == id || $0.resolvedRunId == id
@@ -28,7 +41,8 @@ extension AppModel {
         do {
             let detail = try await requestClient.runDetail(runId: id)
             guard selectedExecutionLocation == locationID,
-                  gateway(for: locationID) === requestClient
+                  gateway(for: locationID) === requestClient,
+                  remoteRunDetailLoadTokens[loadKey] == loadToken
             else { return false }
             var task = Self.liveTask(from: detail.summary)
             task.diff = original.diff
@@ -62,6 +76,7 @@ extension AppModel {
                 for: detail, client: requestClient, runId: id)
             guard selectedExecutionLocation == locationID,
                   gateway(for: locationID) === requestClient,
+                  remoteRunDetailLoadTokens[loadKey] == loadToken,
                   let index = remoteTasks[locationID]?.firstIndex(where: {
                       $0.id == id || $0.resolvedRunId == id
                   })
@@ -84,6 +99,7 @@ extension AppModel {
             return true
         } catch {
             guard gateway(for: locationID) === requestClient,
+                  remoteRunDetailLoadTokens[loadKey] == loadToken,
                   let index = remoteTasks[locationID]?.firstIndex(where: {
                       $0.id == id || $0.resolvedRunId == id
                   })

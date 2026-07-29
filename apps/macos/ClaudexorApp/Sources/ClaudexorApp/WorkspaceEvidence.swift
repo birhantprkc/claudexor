@@ -40,7 +40,7 @@ struct RunEvidenceSection: View {
     let runId: String
     let expandedByDefault: Bool
     @State private var expanded = false
-    @State private var loadedRunId: String?
+    @State private var loadedRunKey: RunDetailLoadKey?
 
     private var run: TaskRun? { model.task(runId, at: locationID) }
 
@@ -80,31 +80,32 @@ struct RunEvidenceSection: View {
     }
 
     private func loadDetailOnce() async {
+        let loadKey = RunDetailLoadKey(locationID: locationID, runId: runId)
         if locationID != .local {
-            guard loadedRunId != runId,
+            guard loadedRunKey != loadKey,
                   model.task(runId, at: locationID) != nil
             else { return }
-            loadedRunId = await model.loadRunDetail(runId, locationID: locationID)
-                ? runId : nil
+            loadedRunKey = await model.loadRunDetail(runId, locationID: locationID)
+                ? loadKey : nil
             return
         }
         guard Self.needsDetailLoad(
-            runId: runId,
-            loadedRunId: loadedRunId,
+            loadKey: loadKey,
+            loadedRunKey: loadedRunKey,
             hydrated: model.hydratedRunDetails.contains(runId)
         ) else { return }
         await model.ensureRunDetail(
             runId, insertingIfMissing: model.task(runId) == nil)
         // A list-summary row is not proof that detail loaded. Commit only the
         // hydration owner's success bit so a failed GET remains retryable.
-        loadedRunId = model.hydratedRunDetails.contains(runId) ? runId : nil
+        loadedRunKey = model.hydratedRunDetails.contains(runId) ? loadKey : nil
     }
 
     nonisolated static func needsDetailLoad(
-        runId: String,
-        loadedRunId: String?,
+        loadKey: RunDetailLoadKey,
+        loadedRunKey: RunDetailLoadKey?,
         hydrated: Bool
     ) -> Bool {
-        loadedRunId != runId || !hydrated
+        loadedRunKey != loadKey || !hydrated
     }
 }
