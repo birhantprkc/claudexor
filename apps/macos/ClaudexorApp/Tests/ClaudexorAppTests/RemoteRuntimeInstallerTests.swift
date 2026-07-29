@@ -53,23 +53,119 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
 
 @Suite(.serialized) struct RemoteRuntimeInstallerTests {
     @Test func publicationRequiresHandshakeAndExactActivationCommit() {
-        var activated = RemoteRuntimePublicationGate(requiresActivationCommit: true)
+        let runtime = RemoteRuntimeProbe(
+            target: .darwinArm64, version: "3.4.0",
+            buildSha: String(repeating: "b", count: 40), protocolMajor: 3)
+        let engine = EngineBuildIdentity(
+            version: runtime.version, sha: runtime.buildSha, entry: "/runtime/daemon.js")
+        var activated = RemoteRuntimePublicationGate(
+            expectedRuntime: runtime, requiresActivationCommit: true)
         #expect(!activated.mayPublish)
         let prematureCommit = activated.acceptActivationCommit()
         #expect(!prematureCommit)
-        activated.acceptHandshake()
+        let acceptedHandshake = activated.acceptHandshake(engine)
+        #expect(acceptedHandshake)
         #expect(!activated.mayPublish)
         let committed = activated.acceptActivationCommit()
         #expect(committed)
+        let acceptedCurrent = activated.acceptCurrentRuntime(runtime)
+        #expect(acceptedCurrent)
         #expect(activated.mayPublish)
 
-        var ordinary = RemoteRuntimePublicationGate(requiresActivationCommit: false)
+        var ordinary = RemoteRuntimePublicationGate(
+            expectedRuntime: runtime, requiresActivationCommit: false)
         #expect(!ordinary.mayPublish)
-        ordinary.acceptHandshake()
+        let ordinaryHandshake = ordinary.acceptHandshake(engine)
+        let ordinaryCurrent = ordinary.acceptCurrentRuntime(runtime)
+        #expect(ordinaryHandshake)
+        #expect(ordinaryCurrent)
         #expect(ordinary.mayPublish)
+
+        var staleHandshakeGate = RemoteRuntimePublicationGate(
+            expectedRuntime: runtime, requiresActivationCommit: false)
+        let staleEngine = EngineBuildIdentity(
+            version: runtime.version, sha: String(repeating: "a", count: 40),
+            entry: "/old/daemon.js")
+        let mismatchedHandshake = staleHandshakeGate.acceptHandshake(staleEngine)
+        #expect(!mismatchedHandshake)
+        #expect(!staleHandshakeGate.mayPublish)
+
+        var finalMismatchGate = RemoteRuntimePublicationGate(
+            expectedRuntime: runtime, requiresActivationCommit: false)
+        let matchingHandshake = finalMismatchGate.acceptHandshake(engine)
+        let mismatchedCurrent = finalMismatchGate.acceptCurrentRuntime(RemoteRuntimeProbe(
+            target: runtime.target, version: "3.5.0", buildSha: runtime.buildSha,
+            protocolMajor: runtime.protocolMajor))
+        #expect(matchingHandshake)
+        #expect(!mismatchedCurrent)
+        #expect(!finalMismatchGate.mayPublish)
     }
     private let oldBuild = String(repeating: "a", count: 40)
     private let newBuild = String(repeating: "b", count: 40)
+
+    private func bootstrapJSON(
+        version: String,
+        buildSha: String,
+        engineVersion: String? = nil,
+        engineBuildSha: String? = nil
+    ) -> Data {
+        Data(#"""
+        {"ok":true,"target":"darwin-arm64","version":"\#(version)","buildSha":"\#(buildSha)","protocolMajor":3,"engineVersion":"\#(engineVersion ?? version)","engineBuildSha":"\#(engineBuildSha ?? buildSha)","endpoint":{"host":"127.0.0.1","port":43123,"token":"memory-only"}}
+        """#.utf8)
+    }
+
+    private func pendingActivation(
+        followedBy steps: [RemoteRuntimeTransportStub.Step]
+    ) async throws -> (
+        installer: RemoteRuntimeInstaller,
+        transport: RemoteRuntimeTransportStub,
+        connection: RemoteConnection,
+        lease: RemoteRuntimeActivationLease,
+        candidate: RemoteRuntimeProbe,
+        candidateTarget: String
+    ) {
+        let archive = Data("identity-bound candidate".utf8)
+        let digest = SHA256.hash(data: archive)
+            .map { String(format: "%02x", $0) }.joined()
+        let archiveName = RemoteRuntimeManifestV1.archiveName(
+            version: "3.4.0", target: .darwinArm64)
+        let manifest = try JSONDecoder().decode(
+            RemoteRuntimeManifestV1.self,
+            from: Data(#"""
+            {
+              "schemaVersion":1,"kind":"claudexor-remote-runtime",
+              "version":"3.4.0","buildSha":"\#(newBuild)","protocolMajor":3,
+              "minAppVersion":"2.1.0","notes":"identity settlement test",
+              "assets":[{
+                "target":"darwin-arm64","platform":"darwin","arch":"arm64",
+                "nodeVersion":"24.16.0","archiveName":"\#(archiveName)",
+                "archiveUrl":"https://runtime.test/\#(archiveName)","sha256":"\#(digest)"
+              }],"keyId":"test","algorithm":"Ed25519","signature":"test"
+            }
+            """#.utf8))
+        RemoteRuntimeArchiveURLProtocol.bytes = archive
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RemoteRuntimeArchiveURLProtocol.self]
+        let transport = RemoteRuntimeTransportStub(steps: [
+            .output(Data()), // pointer before snapshot
+            .output(Data()), // pointer after snapshot
+            .output(Data()), // archive upload
+            .output(Data()), // atomic install/activate
+            .output(bootstrapJSON(version: "3.4.0", buildSha: newBuild)),
+        ] + steps)
+        let installer = RemoteRuntimeInstaller(
+            ssh: transport, session: URLSession(configuration: configuration),
+            developmentDirectory: nil)
+        let connection = RemoteConnection(sshAlias: "identity-settlement")
+        let lease = try await installer.install(
+            manifest, target: .darwinArm64, on: connection, appVersion: "3.4.0")
+        let candidate = RemoteRuntimeProbe(
+            target: .darwinArm64, version: "3.4.0", buildSha: newBuild,
+            protocolMajor: 3)
+        return (
+            installer, transport, connection, lease, candidate,
+            "versions/3.4.0-\(digest)")
+    }
 
     private func activationPayload() -> RemoteRuntimeActivationState.Payload {
         RemoteRuntimeActivationState.Payload(
@@ -81,6 +177,88 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
             previous: RemoteRuntimeProbe(
                 target: .darwinArm64, version: "3.3.0", buildSha: oldBuild,
                 protocolMajor: 3))
+    }
+
+    @Test func bootstrapRejectsAStaleEngineBehindTheCurrentRuntime() async throws {
+        let transport = RemoteRuntimeTransportStub(steps: [
+            .output(bootstrapJSON(
+                version: "3.4.0", buildSha: newBuild,
+                engineVersion: "3.3.0", engineBuildSha: oldBuild)),
+        ])
+        let installer = RemoteRuntimeInstaller(ssh: transport, developmentDirectory: nil)
+        let connection = RemoteConnection(sshAlias: "stale-bootstrap")
+
+        await #expect(throws: SSHConnectionError.self) {
+            _ = try await installer.bootstrap(on: connection)
+        }
+        #expect(await transport.commands.count == 1)
+    }
+
+    @Test func bootstrapAcceptsAnExactNewerInstalledRuntime() async throws {
+        let newerBuild = String(repeating: "c", count: 40)
+        let transport = RemoteRuntimeTransportStub(steps: [
+            .output(bootstrapJSON(version: "3.5.0", buildSha: newerBuild)),
+        ])
+        let installer = RemoteRuntimeInstaller(ssh: transport, developmentDirectory: nil)
+        let connection = RemoteConnection(sshAlias: "newer-bootstrap")
+
+        let bootstrap = try await installer.bootstrap(on: connection)
+        #expect(bootstrap.runtime == RemoteRuntimeProbe(
+            target: .darwinArm64, version: "3.5.0", buildSha: newerBuild,
+            protocolMajor: 3))
+    }
+
+    @Test func commitRequiresTheLeaseCandidateAndExactPointer() async throws {
+        let fixture = try await pendingActivation(followedBy: [
+            .output(Data("versions/other-runtime\n".utf8)),
+            .failure("rollback CAS refused the raced pointer"),
+        ])
+
+        await #expect(throws: SSHConnectionError.self) {
+            try await fixture.installer.commitActivation(
+                fixture.lease, serving: fixture.candidate, on: fixture.connection)
+        }
+        do {
+            try await fixture.installer.recoverPendingActivation(on: fixture.connection)
+            Issue.record("a pointer race must remain a visible, retryable recovery failure")
+        } catch {
+            #expect(error.localizedDescription.contains("rollback CAS refused"))
+        }
+        #expect(await fixture.transport.commands.count == 7)
+    }
+
+    @Test func commitRefusesAnotherServingRuntimeAndKeepsRollbackOwnership() async throws {
+        let fixture = try await pendingActivation(followedBy: [
+            .output(Data(#"{"ok":true,"deactivated":true}"#.utf8)),
+        ])
+        let stale = RemoteRuntimeProbe(
+            target: fixture.candidate.target, version: "3.3.0", buildSha: oldBuild,
+            protocolMajor: fixture.candidate.protocolMajor)
+
+        await #expect(throws: SSHConnectionError.self) {
+            try await fixture.installer.commitActivation(
+                fixture.lease, serving: stale, on: fixture.connection)
+        }
+        try await fixture.installer.recoverPendingActivation(on: fixture.connection)
+        #expect(await fixture.transport.commands.count == 6)
+    }
+
+    @Test func exactCandidateAndPointerCommitOnce() async throws {
+        let digest = SHA256.hash(data: Data("identity-bound candidate".utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let candidateTarget = "versions/3.4.0-\(digest)"
+        let fixture = try await pendingActivation(followedBy: [
+            .output(Data("\(candidateTarget)\n".utf8)),
+        ])
+        #expect(fixture.candidateTarget == candidateTarget)
+
+        try await fixture.installer.commitActivation(
+            fixture.lease, serving: fixture.candidate, on: fixture.connection)
+        await #expect(throws: SSHConnectionError.self) {
+            try await fixture.installer.commitActivation(
+                fixture.lease, serving: fixture.candidate, on: fixture.connection)
+        }
+        #expect(await fixture.transport.commands.count == 6)
     }
 
     @Test func activationStateIsSingleFlightBeforeAnyAwait() throws {
@@ -103,19 +281,37 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
         }
     }
 
+    @Test func candidateMismatchNeverConsumesThePendingLease() throws {
+        var state = RemoteRuntimeActivationState()
+        let connectionID = UUID()
+        let lease = try state.claim(connectionID: connectionID)
+        try state.prepareMutation(activationPayload(), for: lease)
+        try state.confirmMutation(lease)
+        let other = RemoteRuntimeProbe(
+            target: .darwinArm64, version: "3.5.0",
+            buildSha: String(repeating: "c", count: 40), protocolMajor: 3)
+
+        #expect(throws: SSHConnectionError.self) {
+            _ = try state.beginCommit(lease, serving: other)
+        }
+        #expect(state.phase(for: lease) == .pending)
+        #expect(state.recoverableLease(connectionID: connectionID) == lease)
+    }
+
     @Test func staleLeaseCannotSettleANewerActivation() throws {
         var state = RemoteRuntimeActivationState()
         let connectionID = UUID()
         let oldLease = try state.claim(connectionID: connectionID)
         try state.prepareMutation(activationPayload(), for: oldLease)
         try state.confirmMutation(oldLease)
-        try state.commit(oldLease)
+        _ = try state.beginCommit(oldLease, serving: activationPayload().candidate)
+        try state.finishSettlement(oldLease)
 
         let currentLease = try state.claim(connectionID: connectionID)
         try state.prepareMutation(activationPayload(), for: currentLease)
         try state.confirmMutation(currentLease)
         #expect(throws: SSHConnectionError.self) {
-            try state.commit(oldLease)
+            _ = try state.beginCommit(oldLease, serving: activationPayload().candidate)
         }
         #expect(state.phase(for: currentLease) == .pending)
     }
@@ -131,7 +327,7 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
         #expect(payload.candidate.version == "3.4.0")
         #expect(state.phase(for: lease) == .settling)
         #expect(throws: SSHConnectionError.self) {
-            try state.commit(lease)
+            _ = try state.beginCommit(lease, serving: activationPayload().candidate)
         }
         #expect(throws: SSHConnectionError.self) {
             _ = try state.claim(connectionID: connectionID)
@@ -206,7 +402,8 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
         // stale, proving it was neither abandoned nor replaced.
         try await installer.recoverPendingActivation(on: connection)
         do {
-            try await installer.commitActivation(recovery.lease)
+            try await installer.commitActivation(
+                recovery.lease, serving: activationPayload().candidate, on: connection)
             Issue.record("a recovered lease must already be settled")
         } catch {
             // Expected exact stale-lease refusal.
@@ -274,7 +471,8 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
         try await installer.recoverPendingActivation(on: connection)
         #expect(await transport.commands.count == 7)
         do {
-            try await installer.commitActivation(recovery.lease)
+            try await installer.commitActivation(
+                recovery.lease, serving: activationPayload().candidate, on: connection)
             Issue.record("the recovered uncertain lease must already be settled")
         } catch {
             // Exact stale-lease refusal proves recovery removed this owner.

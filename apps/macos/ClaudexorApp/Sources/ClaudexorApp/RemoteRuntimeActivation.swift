@@ -9,20 +9,37 @@ struct RemoteRuntimeActivationLease: Hashable, Sendable {
     let connectionID: UUID
 }
 
+struct RemoteRuntimeGatewayBootstrap: Sendable {
+    let client: GatewayClient
+    let runtime: RemoteRuntimeProbe
+}
+
+extension RemoteRuntimeProbe {
+    func matches(_ engine: EngineBuildIdentity?) -> Bool {
+        engine?.version == version && engine?.sha == buildSha
+    }
+}
+
 /// One explicit publication barrier for a tunneled remote client. A regular
-/// reconnect needs only a successful Control handshake; a reconnect that owns
-/// a freshly activated runtime must also commit that exact activation before
-/// any client or daemon projection can become visible to the app.
+/// reconnect must prove that bootstrap, the tunneled Control handshake, and the
+/// final current-pointer probe all name one exact closure. A reconnect that
+/// owns a freshly activated runtime must additionally commit that exact
+/// activation before any client or daemon projection can become visible.
 struct RemoteRuntimePublicationGate: Equatable, Sendable {
+    let expectedRuntime: RemoteRuntimeProbe
     private(set) var handshakeAccepted = false
     private(set) var activationCommitted: Bool
+    private(set) var currentRuntimeAccepted = false
 
-    init(requiresActivationCommit: Bool) {
+    init(expectedRuntime: RemoteRuntimeProbe, requiresActivationCommit: Bool) {
+        self.expectedRuntime = expectedRuntime
         activationCommitted = !requiresActivationCommit
     }
 
-    mutating func acceptHandshake() {
-        handshakeAccepted = true
+    @discardableResult
+    mutating func acceptHandshake(_ engine: EngineBuildIdentity?) -> Bool {
+        handshakeAccepted = expectedRuntime.matches(engine)
+        return handshakeAccepted
     }
 
     @discardableResult
@@ -32,8 +49,14 @@ struct RemoteRuntimePublicationGate: Equatable, Sendable {
         return true
     }
 
+    @discardableResult
+    mutating func acceptCurrentRuntime(_ runtime: RemoteRuntimeProbe) -> Bool {
+        currentRuntimeAccepted = runtime == expectedRuntime
+        return currentRuntimeAccepted
+    }
+
     var mayPublish: Bool {
-        handshakeAccepted && activationCommitted
+        handshakeAccepted && activationCommitted && currentRuntimeAccepted
     }
 }
 
@@ -167,17 +190,27 @@ struct RemoteRuntimeActivationState: Sendable {
         return payload
     }
 
+    mutating func beginCommit(
+        _ lease: RemoteRuntimeActivationLease,
+        serving: RemoteRuntimeProbe
+    ) throws -> Payload {
+        guard var record = exactRecord(for: lease),
+              record.phase == .pending,
+              let payload = record.payload
+        else { throw staleLeaseError() }
+        guard payload.candidate == serving else {
+            throw SSHConnectionError.unavailable(
+                "the tunneled daemon does not match the pending runtime activation")
+        }
+        record.phase = .settling
+        records[lease.connectionID] = record
+        return payload
+    }
+
     mutating func settlementFailed(_ lease: RemoteRuntimeActivationLease) {
         guard var record = exactRecord(for: lease), record.phase == .settling else { return }
         record.phase = .pending
         records[lease.connectionID] = record
-    }
-
-    mutating func commit(_ lease: RemoteRuntimeActivationLease) throws {
-        guard let record = exactRecord(for: lease), record.phase == .pending else {
-            throw staleLeaseError()
-        }
-        records.removeValue(forKey: lease.connectionID)
     }
 
     mutating func finishSettlement(_ lease: RemoteRuntimeActivationLease) throws {

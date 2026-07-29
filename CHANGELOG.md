@@ -89,9 +89,12 @@ Release history for Claudexor. The current version is declared in the root
   Concurrency and upgrade paths are hardened at their owning boundaries. Remote
   setup, install, project, preview, directory, and terminal actions carry exact
   generation-scoped leases; runtime activation commits only after the tunneled
-  handshake and rolls back through the same opaque lease. The packaged app
-  probes the selected local daemon closure and reconciles exact version plus
-  build identity before hydrating state, deferring safely while work is active.
+  handshake identifies the lease-owned candidate and exact pointer, while every
+  reconnect binds bootstrap, tunneled engine, and final pointer identity before
+  publication. Failed activation still rolls back through the same opaque lease.
+  The packaged app probes the selected local daemon closure and reconciles exact
+  version plus build identity before hydrating state, deferring safely while
+  work is active.
   Accounts and Settings share explicit location-scoped loading truth. File and
   screenshot attachments are admitted from metadata before bounded reads,
   revalidated on publication, and retired on an explicit conversation switch.

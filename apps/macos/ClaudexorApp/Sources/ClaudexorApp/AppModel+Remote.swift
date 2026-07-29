@@ -231,14 +231,12 @@ extension AppModel {
             guard remoteConnectionGenerations[id] == generation else {
                 throw CancellationError()
             }
-            var activeClient = try await bootstrapRemoteClient(connection, generation: generation)
-            if activationLease == nil,
-               let manifest,
-               let currentProbe = try? await remoteRuntimeInstaller.probe(on: connection)
-            {
-                let hasActive = (try? await activeClient.engineHasActiveWork()) ?? true
+            var activeBootstrap = try await bootstrapRemoteClient(
+                connection, generation: generation)
+            if activationLease == nil, let manifest {
+                let hasActive = (try? await activeBootstrap.client.engineHasActiveWork()) ?? true
                 switch decideRemoteRuntime(
-                    probe: currentProbe,
+                    probe: activeBootstrap.runtime,
                     manifest: manifest,
                     appVersion: Self.appVersionString(),
                     hasActiveTasks: hasActive)
@@ -249,7 +247,7 @@ extension AppModel {
                     activationLease = try await remoteRuntimeInstaller.install(
                         manifest, target: detectedTarget, on: connection,
                         appVersion: Self.appVersionString())
-                    activeClient = try await bootstrapRemoteClient(
+                    activeBootstrap = try await bootstrapRemoteClient(
                         connection, generation: generation)
                 case .useCurrentAndOfferUpdate:
                     remoteConnectionMessages[id] =
@@ -258,27 +256,28 @@ extension AppModel {
                     break
                 }
             }
+            let activeClient = activeBootstrap.client
             var publicationGate = RemoteRuntimePublicationGate(
+                expectedRuntime: activeBootstrap.runtime,
                 requiresActivationCommit: activationLease != nil)
             let outcome = try await activeClient.handshake()
-            guard outcome.ok else {
-                throw SSHConnectionError.unavailable("remote daemon handshake failed")
+            guard outcome.ok, publicationGate.acceptHandshake(outcome.engine) else {
+                throw SSHConnectionError.unavailable(
+                    "remote daemon handshake does not match the bootstrapped runtime")
             }
-            publicationGate.acceptHandshake()
             guard remoteConnectionGenerations[id] == generation else {
                 throw CancellationError()
             }
             if let lease = activationLease {
-                try await remoteRuntimeInstaller.commitActivation(lease)
+                try await remoteRuntimeInstaller.commitActivation(
+                    lease, serving: activeBootstrap.runtime, on: connection)
+                // A later final-probe mismatch belongs to a newer pointer actor;
+                // never roll it back with this already-settled lease.
                 activationLease = nil
                 guard publicationGate.acceptActivationCommit() else {
                     throw SSHConnectionError.unavailable(
                         "remote runtime activation committed before its handshake")
                 }
-            }
-            guard publicationGate.mayPublish else {
-                throw SSHConnectionError.unavailable(
-                    "remote runtime activation was not committed before publication")
             }
             guard remoteConnectionGenerations[id] == generation else {
                 await closeRemoteControlForward(id, through: generation)
@@ -314,12 +313,18 @@ extension AppModel {
             } else {
                 fallbackHarnessValue = nil
             }
-            let finalProbe = try? await remoteRuntimeInstaller.probe(on: connection)
+            let finalProbe = try await remoteRuntimeInstaller.probe(on: connection)
             guard !Task.isCancelled,
                   remoteConnectionGenerations[id] == generation
             else {
                 await closeRemoteControlForward(id, through: generation)
                 return
+            }
+            guard publicationGate.acceptCurrentRuntime(finalProbe),
+                  publicationGate.mayPublish
+            else {
+                throw SSHConnectionError.unavailable(
+                    "remote runtime changed before its client could be published")
             }
             adoptRemoteClientForReconnect(activeClient, at: connection.locationID)
             let harnessSnapshotAccepted: Bool
@@ -388,7 +393,7 @@ extension AppModel {
             }
             mutateRemoteConnection(id) {
                 $0.status = .connected
-                $0.runtimeVersion = finalProbe?.version
+                $0.runtimeVersion = finalProbe.version
                 $0.lastConnectedAt = .now
             }
             remoteConnectionMessages[id] =
@@ -527,13 +532,21 @@ extension AppModel {
         _ connection: RemoteConnection,
         generation: Int
     ) async throws
-        -> GatewayClient
+        -> RemoteRuntimeGatewayBootstrap
     {
         await closeRemoteControlForward(connection.id, through: generation)
         guard remoteConnectionGenerations[connection.id] == generation else {
             throw CancellationError()
         }
         let bootstrap = try await remoteRuntimeInstaller.bootstrap(on: connection)
+        guard remoteConnectionGenerations[connection.id] == generation else {
+            throw CancellationError()
+        }
+        let currentRuntime = try await remoteRuntimeInstaller.probe(on: connection)
+        guard currentRuntime == bootstrap.runtime else {
+            throw SSHConnectionError.unavailable(
+                "remote runtime changed while its daemon was bootstrapping")
+        }
         guard remoteConnectionGenerations[connection.id] == generation else {
             throw CancellationError()
         }
@@ -545,9 +558,11 @@ extension AppModel {
         }
         remoteControlForwards[connection.id] = RemoteControlForwardLease(
             generation: generation, forward: forward)
-        return GatewayClient(
-            baseURL: URL(string: "http://127.0.0.1:\(forward.localPort)")!,
-            token: bootstrap.endpoint.token)
+        return RemoteRuntimeGatewayBootstrap(
+            client: GatewayClient(
+                baseURL: URL(string: "http://127.0.0.1:\(forward.localPort)")!,
+                token: bootstrap.endpoint.token),
+            runtime: bootstrap.runtime)
     }
 
     private func closeRemoteControlForward(_ id: UUID, through generation: Int) async {

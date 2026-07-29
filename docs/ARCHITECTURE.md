@@ -2096,6 +2096,13 @@ is lost, the exact candidate/previous payload remains `uncertain`: recovery must
 observe the candidate and roll it back, prove and restart the previous closure,
 or stay visibly blocked. An unreadable pointer is never collapsed into a proven
 absent pointer.
+Every reconnect binds one exact chain before publication: the current-pointer
+probe, bootstrap closure, bootstrap-disclosed engine, tunneled Control handshake,
+and final current-pointer probe must agree on the runtime identity. Activation
+commit additionally rechecks the lease-owned pointer target. Once that exact
+commit succeeds, a later final-probe mismatch is treated as a newer external
+pointer transition and fails the reconnect without rolling it back through the
+settled lease.
 
 Vendor harness CLIs land on a host only through the disclosed installer
 (`claudexor harness install`, reachable from Settings → Harnesses for a

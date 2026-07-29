@@ -39,6 +39,12 @@ struct RemoteBootstrapResponse: Decodable, Sendable {
     let engineVersion: String?
     let engineBuildSha: String?
     let endpoint: Endpoint
+
+    var runtime: RemoteRuntimeProbe {
+        RemoteRuntimeProbe(
+            target: target, version: version, buildSha: buildSha,
+            protocolMajor: protocolMajor)
+    }
 }
 
 actor RemoteRuntimeInstaller {
@@ -178,6 +184,8 @@ actor RemoteRuntimeInstaller {
         let bootstrap = try JSONDecoder().decode(RemoteBootstrapResponse.self, from: result.stdout)
         guard bootstrap.ok,
               bootstrap.protocolMajor == 3,
+              bootstrap.engineVersion == bootstrap.version,
+              bootstrap.engineBuildSha == bootstrap.buildSha,
               bootstrap.endpoint.host == "127.0.0.1",
               (1 ... 65_535).contains(bootstrap.endpoint.port),
               !bootstrap.endpoint.token.isEmpty
@@ -190,12 +198,7 @@ actor RemoteRuntimeInstaller {
         expecting expected: RemoteRuntimeProbe
     ) async throws -> RemoteBootstrapResponse {
         let value = try await bootstrap(on: connection)
-        guard value.target == expected.target,
-              value.version == expected.version,
-              value.buildSha == expected.buildSha,
-              value.protocolMajor == expected.protocolMajor,
-              value.engineVersion == expected.version,
-              value.engineBuildSha == expected.buildSha
+        guard value.runtime == expected
         else {
             throw SSHConnectionError.unavailable(
                 "the restarted daemon does not match the activated runtime")
@@ -480,10 +483,31 @@ actor RemoteRuntimeInstaller {
         }
     }
 
-    /// The app calls this only after its tunneled Control API handshake has
-    /// accepted the new daemon. Until then rollback remains a precise CAS.
-    func commitActivation(_ lease: RemoteRuntimeActivationLease) throws {
-        try activationState.commit(lease)
+    /// Commit only after the tunneled Control handshake identifies the exact
+    /// candidate and the remote pointer still names the lease-owned directory.
+    /// Any failed proof restores `pending`, so the caller can run the existing
+    /// exact rollback instead of forgetting an ambiguous activation.
+    func commitActivation(
+        _ lease: RemoteRuntimeActivationLease,
+        serving: RemoteRuntimeProbe,
+        on connection: RemoteConnection
+    ) async throws {
+        guard lease.connectionID == connection.id else {
+            throw SSHConnectionError.unavailable(
+                "the runtime activation lease belongs to another host")
+        }
+        let activation = try activationState.beginCommit(lease, serving: serving)
+        do {
+            let observed = try await currentPointerTarget(on: connection)
+            guard observed == activation.candidateTarget else {
+                throw SSHConnectionError.unavailable(
+                    "remote runtime pointer changed before activation commit")
+            }
+            try activationState.finishSettlement(lease)
+        } catch {
+            activationState.settlementFailed(lease)
+            throw error
+        }
     }
 
     private func userFacingRemoteRuntimeMessage(_ error: Error) -> String {
