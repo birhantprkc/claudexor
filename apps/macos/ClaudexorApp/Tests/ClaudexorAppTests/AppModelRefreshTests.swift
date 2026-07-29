@@ -2173,6 +2173,48 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func diagnosticPresentationKeepsStandardPrimaryOutOfTheAnswerLane() async {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-diagnostic-primary", title: "Run", prompt: "", mode: .ask,
+            phase: .cancelled, project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        let artifactFetches = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            if request.url?.path == "/v2/runs/run-diagnostic-primary" {
+                let json = #"{"summary":{"runId":"run-diagnostic-primary","state":"cancelled","mode":"ask","outputReadyState":"diagnostic"},"lastSeq":3,"artifacts":[{"path":"final/answer.md","kind":"file","bytes":25}],"primaryOutput":{"kind":"answer","path":"final/answer.md","text":"Unverified partial answer","truncated":false}}"#
+                return (appResponse(for: request), Data(json.utf8))
+            }
+            if request.url?.path.contains("/artifacts/") == true {
+                artifactFetches.increment()
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 404,
+                        httpVersion: "HTTP/1.1", headerFields: nil)!,
+                    Data()
+                )
+            }
+            throw AppRefreshTestError.badRequest
+        }
+
+        await model.loadRunDetail("run-diagnostic-primary")
+
+        #expect(model.liveTasks.first?.answerText == nil)
+        #expect(model.liveTasks.first?.diagnosticText?.contains("Unverified partial answer") == true)
+        #expect(artifactFetches.count == 0)
+    }
+
+    @MainActor
     @Test func milestoneBurstSharesOneDetailLoadAndAtMostOneTrailingRefresh() async {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

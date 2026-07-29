@@ -188,7 +188,7 @@ extension AppModel {
                 let displayedText = primary.truncated == true
                     ? text + "\n\n_Inline preview bounded; open \(primary.path) for the full output._"
                     : text
-                if primary.kind == "diagnostic" {
+                if primary.kind == "diagnostic" || detail.summary.outputReadyState == "diagnostic" {
                     task.diagnosticText = displayedText
                     task.answerText = nil
                 } else if primary.kind == "patch" {
@@ -198,8 +198,13 @@ extension AppModel {
                 } else {
                     task.answerText = displayedText
                 }
+            } else if detail.summary.outputReadyState != "diagnostic" {
+                // Legacy fallback is limited to genuine mode outputs. A
+                // successful summary is evidence, never a model answer, and a
+                // diagnostic receipt must not resurrect an earlier ready file.
+                task.answerText = await firstArtifactText(client: requestClient, runId: id, paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md"])
             } else {
-                task.answerText = await firstArtifactText(client: requestClient, runId: id, paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md", "final/summary.md"])
+                task.answerText = nil
             }
             // The fallback artifact fetch above is the final suspension point
             // in this load. A disconnect can retire the request while it is

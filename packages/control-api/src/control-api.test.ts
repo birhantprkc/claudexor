@@ -7988,6 +7988,79 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("projects terminal presentation from RunFacts for both list and detail", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.params = { ...(record.params as Record<string, unknown>), mode: "ask" };
+    record.state = "cancelled";
+    rmSync(join(record.runDir as string, "final", "patch.diff"), { force: true });
+    writeFileSync(join(record.runDir as string, "final", "answer.md"), "Earlier answer\n");
+    writeFileSync(
+      join(record.runDir as string, "final", "summary.md"),
+      "Ask cancelled while waiting for operator input.\n",
+    );
+    const outcome = {
+      lifecycle: "cancelled" as const,
+      noChanges: false,
+      checks: "not_configured" as const,
+      review: "not_run" as const,
+      reason: "user_cancelled" as const,
+    };
+    const runFacts = validateRunFactsInvariants({
+      schema_version: SCHEMA_VERSION,
+      run_id: "run-d1",
+      task_id: "task-d1",
+      mode: "ask",
+      outcome,
+      deliverable: { present: false, kind: null, path: null, producer_attempt_id: null },
+      presentation: {
+        state: "diagnostic",
+        primary: { kind: "diagnostic", path: "final/summary.md" },
+      },
+      participants: { planners: 0, attempts: [] },
+      gates: {
+        configured: false,
+        required: 0,
+        total: 0,
+        executed: false,
+        state: "not_configured",
+        receipt_attempt_id: null,
+      },
+      review: { state: "not_run", blocker_ids: [], blockers: 0 },
+      apply: { eligibility: null, operator_decision_present: false },
+      required_actions: requiredActionsFor(outcome, false),
+      generated_at: "2026-07-15T00:00:00.000Z",
+    });
+    writeFileSync(
+      join(record.runDir as string, "final", "run_facts.yaml"),
+      stringifyYaml(runFacts),
+    );
+
+    await withDaemonServer(daemon, async (base) => {
+      const list = (await (
+        await apiFetch(`${base}/runs`, { headers: { authorization: `Bearer ${token}` } })
+      ).json()) as { runs: Array<{ outputReadyState: string }> };
+      expect(list.runs[0]?.outputReadyState).toBe("diagnostic");
+
+      const detail = (await (
+        await apiFetch(`${base}/runs/run-d1`, { headers: { authorization: `Bearer ${token}` } })
+      ).json()) as {
+        summary: { outputReadyState: string };
+        primaryOutput: { kind: string; path: string; text: string } | null;
+        runFacts: { presentation?: unknown };
+      };
+      expect(detail.summary.outputReadyState).toBe("diagnostic");
+      expect(detail.primaryOutput).toMatchObject({
+        kind: "diagnostic",
+        path: "final/summary.md",
+        text: expect.stringContaining("Ask cancelled"),
+      });
+      // The earlier answer exists, but the late diagnostic receipt owns the
+      // terminal presentation and is never re-arbitrated by this surface.
+      expect(detail.primaryOutput?.text).not.toContain("Earlier answer");
+      expect(detail.runFacts.presentation).toEqual(runFacts.presentation);
+    });
+  });
+
   it("refuses symlink artifact escapes", async () => {
     const { daemon, record } = fakeDaemon();
     const outside = join(tmpdir(), `claudexor-outside-${Date.now()}.txt`);

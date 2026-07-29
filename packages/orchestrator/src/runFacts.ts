@@ -21,6 +21,7 @@ import {
 import { nowIso } from "@claudexor/util";
 import type { AnnouncedRunContext } from "./runTerminals.js";
 import { buildRunFacts } from "./runFactsBuilder.js";
+import { terminalFactsFailurePresentation } from "./runFactsPresentation.js";
 
 export { buildRunFacts };
 
@@ -187,6 +188,7 @@ export function prepareRunFactsFailureReceipt(
       path: null,
       producer_attempt_id: null,
     },
+    presentation: terminalFactsFailurePresentation(ctx),
     participants: { planners: 0, attempts: [] },
     gates: {
       configured: false,

@@ -1,0 +1,44 @@
+{
+  "$ref": "#/definitions/OutputReadyPayload",
+  "definitions": {
+    "OutputReadyPayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "answer",
+            "report",
+            "plan",
+            "summary",
+            "patch",
+            "structured_output",
+            "artifact"
+          ],
+          "description": "Kind of materialized output announced by this receipt."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run-relative path of the materialized output artifact."
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "diagnostic"
+          ],
+          "default": "ready",
+          "description": "Whether the announced artifact is normal output or diagnostic output."
+        }
+      },
+      "required": [
+        "kind",
+        "path"
+      ],
+      "additionalProperties": false,
+      "description": "Validated payload of an output.ready run event."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

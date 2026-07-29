@@ -126,6 +126,7 @@ describe("Delegate terminal drain ordering", () => {
           },
         });
         log.deferTerminal();
+        store.writeText(join(paths.finalDir, "summary.md"), "done\n");
         log.emit("output.ready", { path: "final/summary.md", kind: "summary" });
         log.emit("run.completed", { lifecycle: "succeeded" });
         return {
@@ -686,6 +687,7 @@ describe("Delegate terminal drain ordering", () => {
         mode: "agent",
         phase: "race",
       });
+      store.writeText(join(paths.finalDir, "summary.md"), "done\n");
       log.emit("output.ready", { path: "final/summary.md", kind: "summary" });
       log.emit("run.completed", { lifecycle: "succeeded" });
       return {

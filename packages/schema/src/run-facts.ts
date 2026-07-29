@@ -117,6 +117,38 @@ export const RunApplyFacts = z
   .describe("Terminal apply eligibility and operator-decision state.");
 export type RunApplyFacts = z.infer<typeof RunApplyFacts>;
 
+export const RunPresentationPrimary = z
+  .object({
+    kind: z
+      .enum(["answer", "report", "plan", "patch", "structured_output", "diagnostic"])
+      .describe("Presentation kind of the terminal primary artifact."),
+    path: z
+      .string()
+      .min(1)
+      .refine((value) => {
+        if (value.includes("\0") || value.includes("\\") || value.startsWith("/")) return false;
+        const parts = value.split("/");
+        return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
+      }, "must be a normalized run-relative artifact path")
+      .describe("Normalized run-relative path of the terminal primary artifact."),
+  })
+  .strict()
+  .describe("Primary user-facing artifact selected once during terminal preparation.");
+export type RunPresentationPrimary = z.infer<typeof RunPresentationPrimary>;
+
+export const RunPresentationFacts = z
+  .object({
+    state: z
+      .enum(["ready", "diagnostic"])
+      .describe("Terminal output readiness decided by the last valid output.ready receipt."),
+    primary: RunPresentationPrimary.nullable().describe(
+      "Selected terminal primary artifact, or null when the receipt announces readiness without a primary deliverable.",
+    ),
+  })
+  .strict()
+  .describe("Immutable terminal presentation facts shared by every surface.");
+export type RunPresentationFacts = z.infer<typeof RunPresentationFacts>;
+
 /**
  * Immutable terminal RunFacts receipt (GH #29). The orchestrator builds this
  * once from the attempt graph and canonical artifacts, validates its cross-axis
@@ -130,6 +162,9 @@ export const RunFacts = z
     mode: ModeKind,
     outcome: RunOutcomeFacts,
     deliverable: RunDeliverableFacts,
+    presentation: RunPresentationFacts.optional().describe(
+      "Immutable terminal output state and primary artifact. Absent only on legacy RunFacts receipts.",
+    ),
     participants: RunParticipantsFacts,
     gates: RunGateFacts,
     review: RunReviewFacts,
@@ -216,6 +251,10 @@ export function validateRunFactsInvariants(value: unknown): RunFacts {
   const facts = RunFacts.parse(value);
   const violations: string[] = [];
   const { deliverable, participants, gates, review, apply, outcome } = facts;
+
+  if (facts.presentation?.state === "ready" && facts.presentation.primary?.kind === "diagnostic") {
+    violations.push("ready presentation cannot use a diagnostic primary kind");
+  }
 
   const hasDeliverableIdentity = deliverable.kind !== null && deliverable.path !== null;
   if (deliverable.present !== hasDeliverableIdentity) {

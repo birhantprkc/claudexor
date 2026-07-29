@@ -90,6 +90,32 @@ describe("RunFacts invariant validator (GH #29)", () => {
     expect(validateRunFactsInvariants(validPlan())).toEqual(validPlan());
   });
 
+  it("keeps presentation optional for legacy receipts and validates new receipts", () => {
+    const legacy = validPlan();
+    expect(legacy.presentation).toBeUndefined();
+    expect(
+      validateRunFactsInvariants({
+        ...legacy,
+        presentation: {
+          state: "ready",
+          primary: { kind: "plan", path: "final/plan.md" },
+        },
+      }).presentation,
+    ).toEqual({
+      state: "ready",
+      primary: { kind: "plan", path: "final/plan.md" },
+    });
+    expect(() =>
+      validateRunFactsInvariants({
+        ...legacy,
+        presentation: {
+          state: "ready",
+          primary: { kind: "diagnostic", path: "final/summary.md" },
+        },
+      }),
+    ).toThrow(/ready presentation cannot use a diagnostic primary/);
+  });
+
   it("counts only planner lanes in a council, excluding merge and reviewer roles", () => {
     const base = validPlan();
     const council = {

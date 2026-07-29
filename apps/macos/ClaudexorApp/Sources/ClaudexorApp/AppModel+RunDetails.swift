@@ -69,8 +69,9 @@ extension AppModel {
                     ? text
                         + "\n\n_Inline preview bounded; open \(primary.path) for the full output._"
                     : text
-                if primary.kind == "diagnostic" {
+                if primary.kind == "diagnostic" || detail.summary.outputReadyState == "diagnostic" {
                     task.diagnosticText = rendered
+                    task.answerText = nil
                 } else {
                     task.answerText = rendered
                 }

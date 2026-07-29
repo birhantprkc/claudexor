@@ -1,11 +1,28 @@
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { ArtifactStore } from "@claudexor/artifact-store";
+import {
+  RunFailure,
+  SCHEMA_VERSION,
+  TaskContract,
+  makeOutcomeFacts,
+  requiredActionsFor,
+  validateRunFactsInvariants,
+} from "@claudexor/schema";
 
 const require = createRequire(import.meta.url);
 const tsxCli = require.resolve("tsx/cli");
 const cliSource = fileURLToPath(new URL("./cli.ts", import.meta.url));
+const tempRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe("run-command pre-daemon machine contract", () => {
   it("renders missing prompts for all five run verbs as exactly one NDJSON failure", () => {
@@ -97,5 +114,100 @@ describe("run-command pre-daemon machine contract", () => {
       code: "invalid_argument",
       message: expect.stringContaining("--reviewer-model"),
     });
+  });
+
+  it("inspect exposes a failed run's lifecycle, typed failure, actions, and presentation", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-cli-inspect-terminal-"));
+    tempRoots.push(root);
+    const project = join(root, "project");
+    const config = join(root, "config");
+    mkdirSync(project, { recursive: true });
+    const store = new ArtifactStore(project, { claudexorDir: config });
+    const paths = store.createRun("run-failed-inspect");
+    const outcome = makeOutcomeFacts("failed", { reason: "harness_failed" });
+    store.writeYaml(
+      join(paths.contextDir, "task.yaml"),
+      TaskContract.parse({
+        schema_version: SCHEMA_VERSION,
+        task_id: "task-failed-inspect",
+        created_at: "2026-07-29T00:00:00.000Z",
+        repo: { root: project, base_ref: "HEAD" },
+        mode: { kind: "ask" },
+        user_intent: { raw: "inspect a failed run" },
+        tests: { commands: [] },
+      }),
+    );
+    const failure = RunFailure.parse({
+      phase: "harness",
+      category: "harness_unavailable",
+      code: null,
+      safeMessage: "Provider is unavailable.",
+      runDir: paths.root,
+      nextActions: ["Choose another harness and retry."],
+    });
+    store.writeYaml(join(paths.finalDir, "failure.yaml"), failure);
+    store.writeText(join(paths.finalDir, "summary.md"), "Provider is unavailable.\n");
+    store.writeYaml(
+      join(paths.finalDir, "run_facts.yaml"),
+      validateRunFactsInvariants({
+        schema_version: SCHEMA_VERSION,
+        run_id: "run-failed-inspect",
+        task_id: "task-failed-inspect",
+        mode: "ask",
+        outcome,
+        deliverable: { present: false, kind: null, path: null, producer_attempt_id: null },
+        presentation: {
+          state: "diagnostic",
+          primary: { kind: "diagnostic", path: "final/summary.md" },
+        },
+        participants: { planners: 0, attempts: [] },
+        gates: {
+          configured: false,
+          required: 0,
+          total: 0,
+          executed: false,
+          state: "not_configured",
+          receipt_attempt_id: null,
+        },
+        review: { state: "not_run", blocker_ids: [], blockers: 0 },
+        apply: { eligibility: null, operator_decision_present: false },
+        required_actions: requiredActionsFor(outcome, false),
+        generated_at: "2026-07-29T00:00:01.000Z",
+      }),
+    );
+
+    const env = { ...process.env, CLAUDEXOR_CONFIG_DIR: config };
+    const json = spawnSync(
+      process.execPath,
+      [tsxCli, cliSource, "inspect", "run-failed-inspect", "--json"],
+      { cwd: project, encoding: "utf8", env },
+    );
+    expect(json.status, json.stderr).toBe(0);
+    expect(json.stderr).toBe("");
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      lifecycle: "failed",
+      outputReadyState: "diagnostic",
+      failure: {
+        category: "harness_unavailable",
+        code: null,
+        nextActions: ["Choose another harness and retry."],
+      },
+      primaryOutput: {
+        kind: "diagnostic",
+        path: "final/summary.md",
+        text: "Provider is unavailable.\n",
+      },
+      runFacts: { outcome: { lifecycle: "failed", reason: "harness_failed" } },
+    });
+
+    const human = spawnSync(
+      process.execPath,
+      [tsxCli, cliSource, "inspect", "run-failed-inspect"],
+      { cwd: project, encoding: "utf8", env },
+    );
+    expect(human.status, human.stderr).toBe(0);
+    expect(human.stdout).toContain("lifecycle: failed");
+    expect(human.stdout).toContain("failure: harness_unavailable phase=harness");
+    expect(human.stdout).toContain("next action: Choose another harness and retry.");
   });
 });

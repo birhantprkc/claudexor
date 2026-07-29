@@ -50,6 +50,29 @@ describe("primaryOutputForCli", () => {
     expect(primaryOutputForCli(root, "ask", { lifecycle: "succeeded" })).toBeNull();
   });
 
+  it("uses immutable presentation facts instead of re-selecting an earlier output", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-cli-primary-output-"));
+    tempRoots.push(root);
+    const finalDir = join(root, "final");
+    mkdirSync(finalDir, { recursive: true });
+    writeFileSync(join(finalDir, "answer.md"), "Earlier answer\n");
+    writeFileSync(join(finalDir, "summary.md"), "Late diagnostic\n");
+
+    expect(
+      primaryOutputForCli(root, "ask", {
+        lifecycle: "cancelled",
+        presentation: {
+          state: "diagnostic",
+          primary: { kind: "diagnostic", path: "final/summary.md" },
+        },
+      }),
+    ).toEqual({
+      kind: "diagnostic",
+      path: "final/summary.md",
+      text: "Late diagnostic\n",
+    });
+  });
+
   it("renders a typed RunFailure using its safe message", () => {
     const root = mkdtempSync(join(tmpdir(), "claudexor-cli-primary-output-"));
     tempRoots.push(root);

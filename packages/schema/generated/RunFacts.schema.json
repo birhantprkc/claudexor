@@ -232,6 +232,61 @@
           "additionalProperties": false,
           "description": "Canonical primary-output presence and identity for a terminal run."
         },
+        "presentation": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "ready",
+                "diagnostic"
+              ],
+              "description": "Terminal output readiness decided by the last valid output.ready receipt."
+            },
+            "primary": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "answer",
+                        "report",
+                        "plan",
+                        "patch",
+                        "structured_output",
+                        "diagnostic"
+                      ],
+                      "description": "Presentation kind of the terminal primary artifact."
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Normalized run-relative path of the terminal primary artifact."
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "path"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Primary user-facing artifact selected once during terminal preparation."
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Selected terminal primary artifact, or null when the receipt announces readiness without a primary deliverable."
+            }
+          },
+          "required": [
+            "state",
+            "primary"
+          ],
+          "additionalProperties": false,
+          "description": "Immutable terminal output state and primary artifact. Absent only on legacy RunFacts receipts."
+        },
         "participants": {
           "type": "object",
           "properties": {

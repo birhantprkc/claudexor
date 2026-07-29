@@ -2523,16 +2523,26 @@ function runOutcomeFacts(
    * carries its veto axis just like an arbitrated agent run. */
   workState: WorkState | null = null,
 ): RunOutcomeFacts | null {
+  const legacy = legacyRunOutcomeFacts(rec, decision, failure, workState);
+  if (!legacy) return null;
+  return effectiveTerminalFacts(rec.runDir, legacy, decision, expectedRunFacts(rec)).outcomeFacts;
+}
+
+/** Legacy-only terminal projection retained for active/pre-RunFacts records. */
+function legacyRunOutcomeFacts(
+  rec: DaemonRunRecord,
+  decision: DecisionRecord | null,
+  failure: RunFailure | null,
+  workState: WorkState | null = null,
+): RunOutcomeFacts | null {
   if (!isTerminalLifecycle(rec.state)) return null;
-  const effective = (facts: RunOutcomeFacts) =>
-    effectiveTerminalFacts(rec.runDir, facts, decision, expectedRunFacts(rec)).outcomeFacts;
   // Arbitrated runs already carry work_state on decision.facts (INV-116).
-  if (decision) return effective(decision.facts);
+  if (decision) return decision.facts;
   const lifecycle = rec.state as RunOutcomeFacts["lifecycle"];
   const base = outcomeFactsFromFailure(lifecycle, failure?.category);
-  if (!workState || lifecycle !== "succeeded") return effective(base);
+  if (!workState || lifecycle !== "succeeded") return base;
   const vetoed = workState.state === "needs_input" || workState.state === "incomplete";
-  return effective({
+  return {
     ...base,
     work_state: workState,
     ...(vetoed
@@ -2542,7 +2552,7 @@ function runOutcomeFacts(
             (workState.state === "needs_input" ? "input_required" : "work_incomplete"),
         }
       : {}),
-  });
+  };
 }
 
 /** D-16: the winning attempt's work_state from a run's telemetry.yaml, used to
@@ -2581,6 +2591,15 @@ function summarizeRun(
   const externalContextPolicy = telemetry?.external_context_policy ?? task?.external_context.policy;
   const webEvidence = controlWebEvidence(telemetry, task);
   const decision = safeReadStructuredArtifact(rec, "arbitration/decision.yaml", DecisionRecord);
+  const failure = readFailure(rec);
+  const workState = telemetry?.final_attempt_id
+    ? (telemetry.attempts.find((a) => a.attempt_id === telemetry.final_attempt_id)?.outcome
+        .work_state ?? null)
+    : null;
+  const legacyOutcome = legacyRunOutcomeFacts(rec, decision, failure, workState);
+  const terminalFacts = legacyOutcome
+    ? effectiveTerminalFacts(rec.runDir, legacyOutcome, decision, expectedRunFacts(rec))
+    : { runFacts: null, outcomeFacts: null, decision };
   const budget = budgetSnapshot(rec, decision, eventsSnapshot);
   const parsedReviewerPanel = Array.isArray(p["reviewerPanel"])
     ? ControlReviewerPanelEntry.array().safeParse(p["reviewerPanel"])
@@ -2613,7 +2632,7 @@ function summarizeRun(
     state: rec.state,
     runDir: rec.runDir,
     error: rec.error,
-    failure: readFailure(rec),
+    failure,
     project: projectMetadata(rec),
     mode: parsedMode.success ? parsedMode.data : undefined,
     strategy: strategyFromParams(p),
@@ -2664,19 +2683,12 @@ function summarizeRun(
     outputReadyState: outputReadyState(
       rec,
       parsedMode.success ? parsedMode.data : null,
-      readFailure(rec),
+      failure,
+      terminalFacts.runFacts,
     ),
     toolWarningsTotal: telemetry?.tool_warnings_total ?? 0,
     result: controlRunResult(rec),
-    outcomeFacts: runOutcomeFacts(
-      rec,
-      decision,
-      readFailure(rec),
-      telemetry?.final_attempt_id
-        ? (telemetry.attempts.find((a) => a.attempt_id === telemetry.final_attempt_id)?.outcome
-            .work_state ?? null)
-        : null,
-    ),
+    outcomeFacts: terminalFacts.outcomeFacts,
     route: controlRoute(telemetry, p),
     // QA-034: routing rationale projected verbatim from the engine telemetry —
     // surfaces never reconstruct the order from prose.
@@ -2774,7 +2786,7 @@ function detailFor(
     }),
     lastSeq,
     artifacts: rec.runDir ? listArtifacts(rec.runDir) : [],
-    primaryOutput: primaryOutput(rec, summary.mode, failure),
+    primaryOutput: primaryOutput(rec, summary.mode, failure, runFacts),
     timeline: timelineEvents(rec, events, integrity),
     budget: budgetSnapshot(rec, decision, events, integrity),
     finalSummary: boundedArtifactText(rec, "final/summary.md"),

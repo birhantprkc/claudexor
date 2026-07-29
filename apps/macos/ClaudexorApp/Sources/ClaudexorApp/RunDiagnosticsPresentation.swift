@@ -42,7 +42,8 @@ enum RunDiagnosticsPresentation {
             if let ref = web.rawDetailRef { lines.append("detail: \(ref)") }
             sections.append("# Web Evidence\n\n" + lines.joined(separator: "\n"))
         }
-        if detail.primaryOutput?.kind == "diagnostic",
+        if (detail.primaryOutput?.kind == "diagnostic"
+                || detail.summary.outputReadyState == "diagnostic"),
            let primary = detail.primaryOutput?.text,
            !primary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let bounded = String(primary.prefix(8_000))

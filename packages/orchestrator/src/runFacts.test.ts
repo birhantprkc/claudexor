@@ -44,7 +44,7 @@ function gate(id: string): TestCommand {
 
 function runFixture(
   commands: TestCommand[],
-  mode: "agent" | "plan" = "agent",
+  mode: "agent" | "ask" | "plan" = "agent",
   onEmit?: (event: RunEvent) => void,
 ) {
   const root = mkdtempSync(join(tmpdir(), "claudexor-run-facts-"));
@@ -101,6 +101,158 @@ function runFixture(
 }
 
 describe("RunFacts canonical artifact projection (GH #29)", () => {
+  it("freezes output presentation from ordered validated receipts", () => {
+    const ready = runFixture([]);
+    ready.store.writeText(join(ready.paths.finalDir, "answer.md"), "A useful answer\n");
+    ready.store.writeText(join(ready.paths.finalDir, "summary.md"), "Successful summary\n");
+    const readyTelemetry = RunTelemetry.parse(
+      ready.store.readYaml(join(ready.paths.finalDir, "telemetry.yaml")),
+    );
+    ready.store.writeYaml(
+      join(ready.paths.finalDir, "telemetry.yaml"),
+      RunTelemetry.parse({
+        ...readyTelemetry,
+        attempts: readyTelemetry.attempts.map((attempt) => ({
+          ...attempt,
+          outcome: { ...attempt.outcome, deliverable_present: true },
+        })),
+      }),
+    );
+    ready.log.emit("output.ready", {
+      kind: "summary",
+      path: "final/summary.md",
+      state: "ready",
+    });
+    expect(buildRunFacts(ready.ctx, makeOutcomeFacts("succeeded")).presentation).toEqual({
+      state: "ready",
+      primary: { kind: "answer", path: "final/answer.md" },
+    });
+
+    const lateDiagnostic = runFixture([]);
+    lateDiagnostic.store.writeText(
+      join(lateDiagnostic.paths.finalDir, "answer.md"),
+      "Earlier successful output\n",
+    );
+    lateDiagnostic.store.writeText(
+      join(lateDiagnostic.paths.finalDir, "summary.md"),
+      "Late terminal diagnostic\n",
+    );
+    const diagnosticTelemetry = RunTelemetry.parse(
+      lateDiagnostic.store.readYaml(join(lateDiagnostic.paths.finalDir, "telemetry.yaml")),
+    );
+    lateDiagnostic.store.writeYaml(
+      join(lateDiagnostic.paths.finalDir, "telemetry.yaml"),
+      RunTelemetry.parse({
+        ...diagnosticTelemetry,
+        attempts: diagnosticTelemetry.attempts.map((attempt) => ({
+          ...attempt,
+          outcome: { ...attempt.outcome, deliverable_present: true },
+        })),
+      }),
+    );
+    lateDiagnostic.log.emit("output.ready", {
+      kind: "answer",
+      path: "final/answer.md",
+    });
+    lateDiagnostic.log.emit("output.ready", {
+      kind: "summary",
+      path: "final/summary.md",
+      state: "diagnostic",
+    });
+    expect(
+      buildRunFacts(
+        lateDiagnostic.ctx,
+        makeOutcomeFacts("cancelled", {
+          reason: "user_cancelled",
+        }),
+      ).presentation,
+    ).toEqual({
+      state: "diagnostic",
+      primary: { kind: "diagnostic", path: "final/summary.md" },
+    });
+  });
+
+  it("preserves a mode-primary artifact only when that artifact was diagnostic", () => {
+    const { store, paths, log, ctx } = runFixture([], "ask");
+    store.writeText(join(paths.finalDir, "answer.md"), "Unverified partial answer\n");
+    store.writeText(join(paths.finalDir, "summary.md"), "Failure summary\n");
+    log.emit("output.ready", {
+      kind: "answer",
+      path: "final/answer.md",
+      state: "diagnostic",
+    });
+    log.emit("output.ready", {
+      kind: "summary",
+      path: "final/summary.md",
+      state: "diagnostic",
+    });
+    expect(
+      buildRunFacts(ctx, makeOutcomeFacts("failed", { reason: "harness_failed" })).presentation,
+    ).toEqual({
+      state: "diagnostic",
+      primary: { kind: "answer", path: "final/answer.md" },
+    });
+  });
+
+  it("fails terminal preparation closed for malformed, missing, unsafe, and symlinked receipts", () => {
+    const malformed = runFixture([]);
+    malformed.store.writeText(join(malformed.paths.finalDir, "summary.md"), "diagnostic\n");
+    malformed.log.emit("output.ready", { path: "final/summary.md" });
+    expect(() => buildRunFacts(malformed.ctx, makeOutcomeFacts("succeeded"))).toThrow(
+      /output\.ready payload is invalid/,
+    );
+
+    const missing = runFixture([]);
+    missing.log.emit("output.ready", { kind: "summary", path: "final/missing.md" });
+    expect(() => buildRunFacts(missing.ctx, makeOutcomeFacts("succeeded"))).toThrow(
+      /did not materialize/,
+    );
+
+    const unsafe = runFixture([]);
+    unsafe.log.emit("output.ready", { kind: "summary", path: "../outside.md" });
+    expect(() => buildRunFacts(unsafe.ctx, makeOutcomeFacts("succeeded"))).toThrow(/unsafe/);
+
+    const linked = runFixture([]);
+    const external = join(linked.root, "external-summary.md");
+    writeFileSync(external, "outside\n");
+    symlinkSync(external, join(linked.paths.finalDir, "linked-summary.md"));
+    linked.log.emit("output.ready", {
+      kind: "summary",
+      path: "final/linked-summary.md",
+    });
+    expect(() => buildRunFacts(linked.ctx, makeOutcomeFacts("succeeded"))).toThrow(/regular file/);
+  });
+
+  it("turns an invalid announcement into the existing fail-closed terminal receipt", async () => {
+    const { store, paths, log, ctx } = runFixture([]);
+    log.emit("output.ready", { kind: "summary", path: "final/not-written.md" });
+    const optimistic = makeOutcomeFacts("succeeded");
+    const result = await guardAnnouncedRun(undefined, async (announce) => {
+      announce(ctx);
+      log.emit("run.completed", { lifecycle: "succeeded", facts: optimistic });
+      return {
+        runId: ctx.runId,
+        taskId: ctx.taskId,
+        mode: ctx.mode,
+        lifecycle: optimistic.lifecycle,
+        facts: optimistic,
+        winner: null,
+        runDir: paths.root,
+        summary: "optimistic",
+        candidates: [],
+      };
+    });
+    const receipt = store.readYaml<{ presentation?: unknown; outcome?: unknown }>(
+      join(paths.finalDir, "run_facts.yaml"),
+    );
+    expect(result.lifecycle).toBe("failed");
+    expect(receipt?.presentation).toEqual({
+      state: "diagnostic",
+      primary: { kind: "diagnostic", path: "final/summary.md" },
+    });
+    expect(receipt?.outcome).toMatchObject({ lifecycle: "failed", reason: "harness_failed" });
+  });
+
   it("fails closed when a requested multi-gate set only has a partial passing receipt", () => {
     const { log, ctx } = runFixture([gate("gate-1"), gate("gate-2")]);
     log.emit("gate.completed", {

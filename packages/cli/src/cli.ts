@@ -85,10 +85,7 @@ import {
   terminalDelegationLines,
 } from "./delegation-output.js";
 import { readRunFactsArtifact } from "./run-facts-projection.js";
-import {
-  projectTerminalRunOutput,
-  terminalRunRequiredActionLines,
-} from "./terminal-run-output.js";
+import { projectTerminalRunOutput, terminalRunRequiredActionLines } from "./terminal-run-output.js";
 import { runPlanQuestionLoop } from "./plan-question-loop.js";
 import { resolveDecisionBody } from "./decision.js";
 import { primaryOutputForCli } from "./primary-output.js";
@@ -1091,7 +1088,11 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
       const primary = primaryOutputForCli(
         paths.root,
         contract.success ? contract.data.mode.kind : undefined,
-        { failure, lifecycle: runFacts?.outcome.lifecycle },
+        {
+          failure,
+          lifecycle: runFacts?.outcome.lifecycle,
+          ...(runFacts?.presentation ? { presentation: runFacts.presentation } : {}),
+        },
       );
       const toolErrors = telemetry
         ? telemetry.attempts.flatMap((a) =>
@@ -1119,19 +1120,21 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
         : [];
       const artifacts = listCliArtifacts(paths.root).filter((p) => !p.endsWith("/"));
       const outputReadyState =
-        primary?.kind === "diagnostic"
+        runFacts?.presentation?.state ??
+        (primary?.kind === "diagnostic"
           ? "diagnostic"
           : primary?.text.trim()
             ? "ready"
             : (failure ?? readTextSafe(join(paths.finalDir, "failure.yaml")))
               ? "diagnostic"
-              : "finalizing";
+              : "finalizing");
       const parsedDecision = DecisionRecord.safeParse(decision);
       const summary = readTextSafe(join(paths.finalDir, "summary.md"));
       if (json) {
         printJson({
           runId,
           runDir: paths.root,
+          lifecycle: runFacts?.outcome.lifecycle ?? null,
           outputReadyState,
           contract: contract.success ? contract.data : null,
           telemetry,
@@ -1148,6 +1151,7 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
         return summary || primary ? 0 : 1;
       }
       print(`run ${runId} @ ${paths.root}`);
+      if (runFacts) print(`lifecycle: ${runFacts.outcome.lifecycle}`);
       if (contract.success) {
         print(`mode: ${contract.data.mode.kind}`);
         print(

@@ -165,6 +165,27 @@ export const RunEventType = z
 export type RunEventType = z.infer<typeof RunEventType>;
 
 /**
+ * Typed receipt emitted only after a user-facing run artifact has materialized.
+ * Terminal preparation consumes these receipts in event order; the schema is
+ * intentionally strict so a malformed announcement cannot become presentation
+ * authority by accident.
+ */
+export const OutputReadyPayload = z
+  .object({
+    kind: z
+      .enum(["answer", "report", "plan", "summary", "patch", "structured_output", "artifact"])
+      .describe("Kind of materialized output announced by this receipt."),
+    path: z.string().min(1).describe("Run-relative path of the materialized output artifact."),
+    state: z
+      .enum(["ready", "diagnostic"])
+      .default("ready")
+      .describe("Whether the announced artifact is normal output or diagnostic output."),
+  })
+  .strict()
+  .describe("Validated payload of an output.ready run event.");
+export type OutputReadyPayload = z.infer<typeof OutputReadyPayload>;
+
+/**
  * Typed payload for `route.fallback.*` events. The orchestrator validates this
  * before stamping it onto the (otherwise free-form) RunEvent.payload, so a
  * fallback/auth-switch is always evidence-backed and surfaced as a warning,

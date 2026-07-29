@@ -1,5 +1,5 @@
 import { closeSync, lstatSync, openSync, readSync } from "node:fs";
-import { ControlPrimaryOutput, type RunFailure } from "@claudexor/schema";
+import { ControlPrimaryOutput, type RunFacts, type RunFailure } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import { safeArtifactPath } from "./artifact-paths.js";
 import type { DaemonRunRecord } from "./daemon-server.js";
@@ -65,7 +65,14 @@ export function primaryOutput(
   rec: DaemonRunRecord,
   mode: string | null | undefined,
   failure: RunFailure | null,
+  runFacts: RunFacts | null = null,
 ): ControlPrimaryOutput | null {
+  if (runFacts?.presentation) {
+    const primary = runFacts.presentation.primary;
+    if (!primary) return null;
+    const output = preview(rec, primary.path);
+    return output?.text.trim() ? ControlPrimaryOutput.parse({ ...primary, ...output }) : null;
+  }
   const candidates =
     mode === "ask"
       ? [
@@ -112,8 +119,10 @@ export function outputReadyState(
   rec: DaemonRunRecord,
   mode: string | null | undefined,
   failure: RunFailure | null,
+  runFacts: RunFacts | null = null,
 ): "pending" | "finalizing" | "ready" | "diagnostic" {
-  const primary = primaryOutput(rec, mode, failure);
+  if (runFacts?.presentation) return runFacts.presentation.state;
+  const primary = primaryOutput(rec, mode, failure, null);
   if (primary?.kind === "diagnostic") return "diagnostic";
   if (primary?.text?.trim()) return "ready";
   if (TERMINAL_STATES.has(rec.state)) return failure ? "diagnostic" : "finalizing";

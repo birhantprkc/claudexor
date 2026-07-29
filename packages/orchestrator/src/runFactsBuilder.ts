@@ -20,6 +20,7 @@ import type { AnnouncedRunContext } from "./runTerminals.js";
 import type { OrchestratorResult } from "./orchestrator.js";
 import { readReviewArtifacts } from "./runFactsReview.js";
 import { canonicalDeliverable } from "./runFactsDeliverable.js";
+import { terminalPresentation } from "./runFactsPresentation.js";
 
 interface CouncilRosterEvidence {
   members: Array<{
@@ -514,6 +515,7 @@ export function buildRunFacts(
     mode: ctx.mode,
     outcome,
     deliverable,
+    presentation: terminalPresentation(ctx),
     participants: {
       planners: participants.filter((participant) => participant.role === "planner").length,
       attempts: participants,
