@@ -23,11 +23,11 @@
  *     --round <n>             # round number for the output dir
  *     --out <dir>             # output root outside candidate and sealed packet
  *     --pack-subset <file>    # optional packet-split sub-wave: path/prefix
- *                             # selectors naming the changed-file AREA this wave
- *                             # renders in FULL text (docs/CHECKLISTS.md). The
- *                             # full diff stays in every wave; run
- *                             # scripts/review-coverage-check.mjs over ALL
- *                             # sub-wave packs to prove the union is exhaustive.
+ *                             # JSON selectors naming complete current text
+ *     --diff-subset <file>    # matching JSON selectors naming exact diff entries
+ *     --sub-wave <name>       # stable name shared by both reviewer roles
+ * Run scripts/review-coverage-check.mjs over BOTH role prompts from every
+ * sub-wave before sealing; it proves both unions are exact and exhaustive.
  *
  * The release panel and transport are immutable in source:
  *   triad: openai/gpt-5.6-sol, anthropic/claude-fable-5,
@@ -41,7 +41,7 @@
  * --skip-scope fail before evidence leaves the machine.
  *
  * Bounded transport settings:
- *   TRIAD_MAX_OUTPUT_TOKENS=100000
+ *   TRIAD_MAX_OUTPUT_TOKENS=60000
  *   TRIAD_MAX_PACK_BYTES=3000000
  *
  * Outputs (per round): raw per-model responses (NEVER truncated), parsed
@@ -69,19 +69,30 @@ import { dirname, join, resolve } from "node:path";
 import { containsSecretLikeToken, redactSecrets } from "../packages/util/dist/index.js";
 import { verifySealedEvidencePacket } from "../packages/context/dist/evidence.js";
 import { exactObservedModelMatch } from "./lib/openrouter-panel.mjs";
-import { diffAuthoritativeRule, parseNameStatusZ } from "./review-coverage-check.mjs";
+import {
+  CANONICAL_REVIEW_RENAME_ARG,
+  diffAuthoritativeRule,
+  parseNameStatusEntriesZ,
+  parseWholeFileList,
+} from "./review-coverage-check.mjs";
 import {
   REQUIRED_SCOPE_MODEL,
   REQUIRED_TRIAD_MODELS,
+  RELEASE_REVIEW_LIMITS_AUTHORITY,
   SCOPE_ITEMS,
   TRIAD_ITEMS,
   buildTouchedFilePack,
+  changedFileInventorySection,
   completionTermination,
+  decodeReviewUtf8,
   parseChecklistJson,
   livenessFloorMs,
   reviewerLiveness,
   pathIsWithin,
   panelLockText,
+  readableDiffSliceSection,
+  reviewPromptContextPreflight,
+  reviewSplitOptionContract,
   releaseReviewDecision,
   reviewDecisionLivenessFloors,
   validateChecklistResponse,
@@ -148,7 +159,7 @@ function positiveIntEnv(name, fallback) {
   return value;
 }
 
-const MAX_OUTPUT_TOKENS = positiveIntEnv("TRIAD_MAX_OUTPUT_TOKENS", 100_000);
+const MAX_OUTPUT_TOKENS = positiveIntEnv("TRIAD_MAX_OUTPUT_TOKENS", 60_000);
 const REQUEST_TIMEOUT_MS = 900_000;
 /**
  * Per-file cap inside the touched-file pack; the diff itself is never cut.
@@ -164,6 +175,10 @@ const MAX_PACK_BYTES = positiveIntEnv("TRIAD_MAX_PACK_BYTES", 3_000_000);
 
 function git(args, opts = {}) {
   return execFileSync("git", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, ...opts });
+}
+
+function gitBytes(args) {
+  return execFileSync("git", args, { maxBuffer: 256 * 1024 * 1024 });
 }
 
 function readDoc(path) {
@@ -210,7 +225,15 @@ function loadFrozenPacket(candidateRoot, candidateSha, candidateTree, packetMani
   if (requestedBase !== null && requestedBase !== sealed.baseSha) {
     throw new Error(`--base mismatch: packet has ${sealed.baseSha}, got ${String(requestedBase)}`);
   }
-  const actualDiff = git(["diff", "--binary", `${sealed.baseSha}..${candidateSha}`]);
+  const actualDiff = decodeReviewUtf8(
+    gitBytes([
+      "diff",
+      CANONICAL_REVIEW_RENAME_ARG,
+      "--binary",
+      `${sealed.baseSha}..${candidateSha}`,
+    ]),
+    "canonical binary diff",
+  );
   if (sealed.diff !== actualDiff) {
     throw new Error("sealed DIFF.patch does not match base..candidate");
   }
@@ -227,44 +250,9 @@ function loadFrozenPacket(candidateRoot, candidateSha, candidateTree, packetMani
     `is reproduced below; its own SHA-256 (the packet-manifest digest recorded in the panel ` +
     `lock and attestation) is ${sealed.manifestSha256}. Every packet file below hashed to its ` +
     `manifest entry, and DIFF.patch matched git diff base..candidate exactly.`;
-  // The PROMPT carries a READABLE diff view: binary blobs and
-  // diff-authoritative generated bulk (lockfile, generated schemas, image
-  // assets) are listed by path+status instead of base64 bodies — a 2MB
-  // asset-heavy release diff otherwise blows the 1M-token reviewer window
-  // while adding zero review value. The SEALED DIFF.patch (byte-identity
-  // verified above) remains the full truth; the omitted paths are named so
-  // nothing disappears silently, and their FULL TEXT (when text) still
-  // rides the touched-file pack under the A-8 coverage gate.
-  const reviewDiff = git([
-    "diff",
-    `${sealed.baseSha}..${candidateSha}`,
-    "--",
-    ".",
-    ":(exclude)site/assets",
-    ":(exclude)docs/assets",
-    ":(exclude)pnpm-lock.yaml",
-    ":(exclude)packages/schema/generated",
-  ]);
-  const omittedFromView = parseNameStatusZ(
-    git([
-      "diff",
-      "-z",
-      "--name-status",
-      `${sealed.baseSha}..${candidateSha}`,
-      "--",
-      "site/assets",
-      "docs/assets",
-      "pnpm-lock.yaml",
-      "packages/schema/generated",
-    ]),
-  );
-  const reviewDiffNote =
-    omittedFromView.length === 0
-      ? ""
-      : `\n\n## Diff view note\n\nThe following ${omittedFromView.length} binary/generated file(s) changed in this diff; their bodies are omitted from THIS readable view (full bytes are in the sealed DIFF.patch, byte-identity verified):\n${omittedFromView.map((entry) => `- ${entry.path}${entry.deleted ? " (deleted)" : ""}`).join("\n")}`;
   return {
     base: sealed.baseSha,
-    diff: reviewDiff + reviewDiffNote,
+    diff: sealed.diff,
     manifestSha256: sealed.manifestSha256,
     packet,
     prompt:
@@ -365,7 +353,8 @@ const THOROUGHNESS = `- Do NOT stop after finding the first issue. Check EVERY i
  * them) but stay in the prompt's changed-file list, annotated.
  */
 function changedFiles(base) {
-  return parseNameStatusZ(git(["diff", "-z", "--name-status", `${base}..HEAD`]))
+  return changedDiffEntries(base)
+    .map(({ path, deleted }) => ({ path, deleted }))
     .filter((entry) => !entry.deleted)
     .map((entry) => entry.path);
 }
@@ -382,27 +371,60 @@ function slotVerdict(status, findings) {
   return "pass";
 }
 
-/** The reviewer-facing changed-file list: every path, deletions annotated. */
+/** NUL-safe, status-complete changed-file inventory with JSON-escaped paths. */
 function changedFilesListing(base) {
-  return parseNameStatusZ(git(["diff", "-z", "--name-status", `${base}..HEAD`]))
-    .map((entry) => (entry.deleted ? `${entry.path} (deleted)` : entry.path))
-    .join("\n");
+  return changedFileInventorySection(changedDiffEntries(base));
 }
 
 /**
- * Read a packet-split sub-wave's full-text SUBSET selector (audit A-8). Each
- * non-empty, non-comment line is a path or a path PREFIX (top-level area, e.g.
- * `apps/macos/ClaudexorApp/`) naming which changed files this sub-wave renders
- * in FULL. The union of all sub-waves' subsets must equal the full changed set
- * — scripts/review-coverage-check.mjs asserts that as a required pre-seal gate.
- * The full diff and full changed-file list stay in every sub-wave's prompt; only
- * the full-TEXT pack is partitioned so each wave fits TRIAD_MAX_PACK_BYTES.
+ * Read a packet-split selector. JSON strings preserve spaces, tabs, Unicode,
+ * quotes, and embedded newlines without path re-parsing or shell assumptions.
  */
 function readPackSubset(path) {
-  return readFileSync(path, "utf8")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"));
+  const raw = readFileSync(path, "utf8");
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== "string" || !value)) {
+    throw new Error(`subset ${path} must be a JSON array of non-empty path strings`);
+  }
+  return parsed;
+}
+
+function changedDiffEntries(base) {
+  return parseNameStatusEntriesZ(
+    gitBytes(["diff", CANONICAL_REVIEW_RENAME_ARG, "-z", "--name-status", `${base}..HEAD`]),
+  );
+}
+
+function reviewDiffEntries(base, selectors) {
+  const all = changedDiffEntries(base);
+  if (!selectors) return all;
+  const selected = all.filter((entry) => inPackSubset(entry.path, selectors));
+  if (selected.length === 0) {
+    throw new Error(`--diff-subset selected 0 of ${all.length} changed entries`);
+  }
+  return selected;
+}
+
+function buildReadableDiffSlice(base, entries) {
+  return entries
+    .map((entry) => {
+      const paths = entry.oldPath ? [entry.oldPath, entry.path] : [entry.path];
+      const patch = decodeReviewUtf8(
+        gitBytes([
+          "--literal-pathspecs",
+          "diff",
+          CANONICAL_REVIEW_RENAME_ARG,
+          "--binary",
+          `${base}..HEAD`,
+          "--",
+          ...paths,
+        ]),
+        `readable diff slice for ${JSON.stringify(entry.path)}`,
+      );
+      if (!patch) throw new Error(`diff slice entry ${entry.path} produced zero bytes`);
+      return patch;
+    })
+    .join("");
 }
 
 function inPackSubset(file, selectors) {
@@ -425,11 +447,10 @@ function reviewPackFiles(base, packetDir, subsetSelectors = null) {
   const changed = changedFiles(base);
   let listed = [];
   try {
-    listed = readFileSync(join(packetDir, "FILES_TO_READ_WHOLE.txt"), "utf8")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
+    listed = parseWholeFileList(readFileSync(join(packetDir, "FILES_TO_READ_WHOLE.txt"), "utf8"));
   } catch {
+    if (existsSync(join(packetDir, "FILES_TO_READ_WHOLE.txt")))
+      throw new Error("FILES_TO_READ_WHOLE.txt must be a JSON array of exact path strings");
     // Optional packet file; absence means the changed set alone is the pack.
   }
   // Diff-authoritative files (generated bulk, binary media) never enter the
@@ -440,30 +461,25 @@ function reviewPackFiles(base, packetDir, subsetSelectors = null) {
   );
   if (!subsetSelectors) return union;
   const selected = union.filter((file) => inPackSubset(file, subsetSelectors));
-  // A packet-split sub-wave whose selectors match NOTHING would silently
-  // review its area with diff-only text (the exact A-8 failure). A bare
-  // directory selector missing its trailing slash is the common cause
-  // (inPackSubset treats a slash-less selector as an EXACT file match), so
-  // fail loudly instead of shipping an empty full-text pack.
   if (selected.length === 0) {
-    throw new Error(
-      `--pack-subset selected 0 of ${union.length} changed files; a directory selector needs a trailing slash (e.g. "apps/macos/"). Selectors: ${subsetSelectors.join(", ")}`,
-    );
+    throw new Error(`--pack-subset selected 0 of ${union.length} full-current-text files`);
   }
   return selected;
 }
 
 /** Compact whole-repo atlas: every tracked path + byte size (scope reviewer's map). */
 function repoAtlas() {
-  const lines = git(["ls-files"]).trim().split("\n");
-  const rows = lines.map((p) => {
+  const paths = decodeReviewUtf8(gitBytes(["ls-files", "-z"]), "tracked-path inventory")
+    .split("\0")
+    .filter((path) => path !== "");
+  const rows = paths.map((path) => {
     try {
-      return `${p} (${readFileSync(p).length}B)`;
+      return { path, bytes: readFileSync(path).length };
     } catch {
-      return `${p} (unreadable)`;
+      return { path, bytes: null, error: "unreadable" };
     }
   });
-  return rows.join("\n");
+  return JSON.stringify(rows, null, 2);
 }
 
 function checklistSection(title) {
@@ -473,25 +489,25 @@ function checklistSection(title) {
   return m ? m[0] : `(section "${title}" not found in docs/CHECKLISTS.md)`;
 }
 
-function subsetNote(subsetSelectors) {
-  if (!subsetSelectors) return "";
+function subsetNote(fullTextSelectors, diffSelectors) {
+  if (!fullTextSelectors && !diffSelectors) return "";
   return (
-    `\n\nPACKET-SPLIT SUB-WAVE: this wave's FULL-TEXT pack below covers exactly ` +
-    `the changed files under [${subsetSelectors.join(", ")}]. Every changed file ` +
-    `still appears in the diff and in the changed-files list (deletions annotated, ` +
-    `diff-only by nature); the remaining areas are ` +
-    `reviewed in full text in their own sibling sub-waves, and a deterministic ` +
-    `coverage checker asserts the union of sub-waves covers every changed file.`
+    `\n\nPACKET-SPLIT SUB-WAVE: this wave carries the exact readable diff slice ` +
+    `selected by [${(diffSelectors ?? []).join(", ")}] and the complete current ` +
+    `text selected by [${(fullTextSelectors ?? []).join(", ")}]. The full changed-file ` +
+    `list remains below. A deterministic pre-seal checker reconstructs the sealed ` +
+    `DIFF.patch byte-for-byte from every role's slice union and independently proves ` +
+    `that every hand-written current file appears whole exactly once.`
   );
 }
 
-function buildTriadPrompt(base, packetPrompt, diff, packFiles, subsetSelectors) {
+function buildTriadPrompt(base, packetPrompt, diff, packFiles, fullTextSelectors, diffSelectors) {
   return `${PREAMBLE}
 ## Review instructions
 
-Read the diff and full current text of every changed file. Review every
+Read this sub-wave's exact diff slice and full current-text subset. Review every
 checklist item, report every distinct current problem, and make every FAIL
-actionable with file/symbol evidence and a concrete fix.${subsetNote(subsetSelectors)}
+actionable with file/symbol evidence and a concrete fix.${subsetNote(fullTextSelectors, diffSelectors)}
 
 ${THOROUGHNESS}
 
@@ -534,11 +550,11 @@ ${readDoc("docs/ARCHITECTURE.md")}
 
 ## Current touched files (full content)
 
-${buildTouchedFilePack(packFiles, git, MAX_FILE_BYTES, MAX_PACK_BYTES, { onOmission: "throw" })}
+${buildTouchedFilePack(packFiles, gitBytes, MAX_FILE_BYTES, MAX_PACK_BYTES, { onOmission: "throw" })}
 
-## Diff under review
+## Exact readable diff slice
 
-${diff}
+${readableDiffSliceSection(diff)}
 
 ## Changed files
 
@@ -546,7 +562,7 @@ ${changedFilesListing(base)}
 `;
 }
 
-function buildScopePrompt(base, packetPrompt, diff, packFiles, subsetSelectors) {
+function buildScopePrompt(base, packetPrompt, diff, packFiles, fullTextSelectors, diffSelectors) {
   return `${PREAMBLE}
 ## Your role
 
@@ -605,13 +621,17 @@ ${readDoc("docs/ARCHITECTURE.md")}
 ${repoAtlas()}
 
 ## Current touched files (post-change)
-${subsetNote(subsetSelectors)}
+${subsetNote(fullTextSelectors, diffSelectors)}
 
-${buildTouchedFilePack(packFiles, git, MAX_FILE_BYTES, MAX_PACK_BYTES, { onOmission: "throw" })}
+${buildTouchedFilePack(packFiles, gitBytes, MAX_FILE_BYTES, MAX_PACK_BYTES, { onOmission: "throw" })}
 
-## Diff under review
+## Exact readable diff slice
 
-${diff}
+${readableDiffSliceSection(diff)}
+
+## Changed files
+
+${changedFilesListing(base)}
 `;
 }
 
@@ -845,63 +865,97 @@ async function main() {
   if (!outputCheck.ok) {
     throw new Error(`invalid review output '${outDir}': ${outputCheck.reasons.join("; ")}`);
   }
-  // Packet-split sub-wave (audit A-8): --pack-subset names the changed-file
-  // AREA this wave renders in full text. Absent = the whole changed set in one
-  // wave (buildTouchedFilePack then throws loudly if it would exceed the pack
-  // budget, forcing a split — a disclosed omission can no longer pass).
+  // Packet-split sub-wave (audit A-8): one selector names full-current-text
+  // evidence, the other names exact diff entries. Both are required together;
+  // their triad/scope prompt unions are recomputed before sealing.
   const packSubsetPath = arg("pack-subset");
+  const diffSubsetPath = arg("diff-subset");
+  const subWaveArg = arg("sub-wave");
+  const splitOptions = reviewSplitOptionContract(packSubsetPath, diffSubsetPath, subWaveArg);
+  if (!splitOptions.ok) throw new Error(splitOptions.reasons.join("; "));
+  const { splitRequested } = splitOptions;
   let subsetSelectors = null;
-  if (typeof packSubsetPath === "string" && packSubsetPath.trim()) {
+  let diffSelectors = null;
+  if (splitRequested) {
     subsetSelectors = readPackSubset(resolve(packSubsetPath));
-    if (subsetSelectors.length === 0) {
-      throw new Error("--pack-subset file lists no path/prefix selectors");
-    }
+    diffSelectors = readPackSubset(resolve(diffSubsetPath));
+    if (subsetSelectors.length === 0) throw new Error("--pack-subset lists no path selectors");
+    if (diffSelectors.length === 0) throw new Error("--diff-subset lists no path selectors");
   }
   // The sub-wave NAME this wave's slot records carry (the seal binds panel
   // slots and the coverage receipt through this name). Required WITH a pack
   // subset, forbidden without one — an unsplit wave is anonymous.
-  const subWaveArg = arg("sub-wave");
-  const subWaveName = typeof subWaveArg === "string" ? subWaveArg.trim() : null;
-  if (subsetSelectors && !/^[a-z0-9][a-z0-9-]{0,31}$/.test(subWaveName ?? "")) {
-    throw new Error("--sub-wave <name> ([a-z0-9-]) is required for a packet-split sub-wave");
-  }
-  if (!subsetSelectors && subWaveName) {
-    throw new Error("--sub-wave applies only to a packet-split sub-wave (--pack-subset)");
-  }
+  const subWaveName = splitRequested ? subWaveArg.trim() : null;
   const packFiles = reviewPackFiles(base, frozen.packet, subsetSelectors);
+  const diffEntries = reviewDiffEntries(base, diffSelectors);
+  const readableDiff = diffSelectors ? buildReadableDiffSlice(base, diffEntries) : frozen.diff;
   const triadPrompt = buildTriadPrompt(
     base,
     frozen.prompt,
-    frozen.diff,
+    readableDiff,
     packFiles,
     subsetSelectors,
+    diffSelectors,
   );
   const scopePrompt = buildScopePrompt(
     base,
     frozen.prompt,
-    frozen.diff,
+    readableDiff,
     packFiles,
     subsetSelectors,
+    diffSelectors,
   );
+  const contextPreflight = [
+    ...TRIAD_MODELS.map((model) => ({
+      role: "triad",
+      ...reviewPromptContextPreflight(model, triadPrompt, MAX_OUTPUT_TOKENS),
+    })),
+    {
+      role: "scope",
+      ...reviewPromptContextPreflight(SCOPE_MODEL, scopePrompt, MAX_OUTPUT_TOKENS),
+    },
+  ];
+  const refused = contextPreflight.filter((entry) => !entry.ok);
+  if (refused.length > 0) {
+    throw new Error(
+      `review prompt exceeds an exact-panel context/output limit: ${refused
+        .flatMap((entry) => entry.reasons.map((reason) => `${entry.model}: ${reason}`))
+        .join("; ")}`,
+    );
+  }
   // Fail BEFORE remote submission if the evidence contains a token-like value:
   // a leaked secret must not reach OpenRouter or the persisted artifacts.
-  if (containsSecretLikeToken(triadPrompt) || containsSecretLikeToken(scopePrompt)) {
+  if (
+    containsSecretLikeToken(triadPrompt) ||
+    containsSecretLikeToken(scopePrompt) ||
+    redactSecrets(triadPrompt) !== triadPrompt ||
+    redactSecrets(scopePrompt) !== scopePrompt
+  ) {
     throw new Error("review evidence contains a secret-like token; scrub the sealed packet");
   }
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "triad-prompt.md"), redactSecrets(triadPrompt));
-  writeFileSync(join(outDir, "scope-prompt.md"), redactSecrets(scopePrompt));
+  const triadPromptPath = join(outDir, "triad-prompt.md");
+  const scopePromptPath = join(outDir, "scope-prompt.md");
+  writeFileSync(triadPromptPath, triadPrompt);
+  writeFileSync(scopePromptPath, scopePrompt);
+  const submittedTriadPrompt = readFileSync(triadPromptPath, "utf8");
+  const submittedScopePrompt = readFileSync(scopePromptPath, "utf8");
+  if (submittedTriadPrompt !== triadPrompt || submittedScopePrompt !== scopePrompt) {
+    throw new Error("persisted review prompt bytes differ from the preflighted prompt");
+  }
+  writeFileSync(
+    join(outDir, "prompt-context-preflight.json"),
+    `${JSON.stringify({ authority: RELEASE_REVIEW_LIMITS_AUTHORITY, checks: contextPreflight }, null, 2)}\n`,
+  );
   const promptSha256 = {
-    triad: createHash("sha256")
-      .update(readFileSync(join(outDir, "triad-prompt.md")))
-      .digest("hex"),
-    scope: createHash("sha256")
-      .update(readFileSync(join(outDir, "scope-prompt.md")))
-      .digest("hex"),
+    triad: createHash("sha256").update(readFileSync(triadPromptPath)).digest("hex"),
+    scope: createHash("sha256").update(readFileSync(scopePromptPath)).digest("hex"),
   };
   const reviewRunId = randomUUID();
-  console.error(`triad prompt: ${triadPrompt.length} chars; models: ${TRIAD_MODELS.join(", ")}`);
-  console.error(`scope prompt: ${scopePrompt.length} chars; model: ${SCOPE_MODEL}`);
+  console.error(
+    `triad prompt: ${submittedTriadPrompt.length} chars; models: ${TRIAD_MODELS.join(", ")}`,
+  );
+  console.error(`scope prompt: ${submittedScopePrompt.length} chars; model: ${SCOPE_MODEL}`);
 
   // Write every start before any call, then launch the exact four slots in one
   // Promise.all so the Tier-2 evidence has one unambiguous concurrency boundary.
@@ -1001,8 +1055,8 @@ async function main() {
       },
     );
   const slotResults = await Promise.all([
-    ...TRIAD_MODELS.map((model) => runSlot(model, triadPrompt)),
-    runSlot(SCOPE_MODEL, scopePrompt, "scope"),
+    ...TRIAD_MODELS.map((model) => runSlot(model, submittedTriadPrompt)),
+    runSlot(SCOPE_MODEL, submittedScopePrompt, "scope"),
   ]);
   const triadResults = slotResults.slice(0, TRIAD_MODELS.length);
   const scopeResult = slotResults[TRIAD_MODELS.length];
@@ -1060,7 +1114,7 @@ async function main() {
       sub_wave: subWaveName,
       round: Number(requiredArg("round")),
       live: status === "responded",
-      liveness_floor_ms: livenessFloorMs(triadPrompt.length),
+      liveness_floor_ms: livenessFloorMs(submittedTriadPrompt.length),
       report_sha256: createHash("sha256")
         .update(redactSecrets(result.raw ?? ""))
         .digest("hex"),
@@ -1122,7 +1176,7 @@ async function main() {
       sub_wave: subWaveName,
       round: Number(requiredArg("round")),
       live: scopeStatus === "responded",
-      liveness_floor_ms: livenessFloorMs(scopePrompt.length),
+      liveness_floor_ms: livenessFloorMs(submittedScopePrompt.length),
       report_sha256: createHash("sha256")
         .update(redactSecrets(scopeResult.raw ?? ""))
         .digest("hex"),
@@ -1208,7 +1262,7 @@ async function main() {
   const decision = releaseReviewDecision({
     triadActors: actorRecords,
     scope,
-    ...reviewDecisionLivenessFloors(triadPrompt.length, scopePrompt.length),
+    ...reviewDecisionLivenessFloors(submittedTriadPrompt.length, submittedScopePrompt.length),
   });
   const summary = {
     reviewRunId,

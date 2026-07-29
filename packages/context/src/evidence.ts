@@ -100,6 +100,19 @@ export interface DiffEvidence {
 }
 
 export function writeEvidencePacket(dir: string, packet: EvidencePacket): void {
+  const filesToReadWhole = packet.filesToReadWhole ?? [];
+  if (
+    filesToReadWhole.some((path) => typeof path !== "string" || path.length === 0) ||
+    new Set(filesToReadWhole).size !== filesToReadWhole.length
+  ) {
+    throw new Error("FILES_TO_READ_WHOLE.txt requires unique non-empty path strings");
+  }
+  const filesToReadWholeJson = `${JSON.stringify(filesToReadWhole, null, 2)}\n`;
+  if (containsSecretLikeToken(filesToReadWholeJson)) {
+    throw new Error(
+      "FILES_TO_READ_WHOLE.txt contains a secret-like path; refusing to alter exact path evidence",
+    );
+  }
   writeText(join(dir, "USER_INTENT.md"), evidenceProse("USER_INTENT.md", packet.userIntent));
   writeText(
     join(dir, "FORBIDDEN_FINDINGS.md"),
@@ -118,10 +131,7 @@ export function writeEvidencePacket(dir: string, packet: EvidencePacket): void {
     ),
   );
   writeDiffEvidence(dir, packet.diff);
-  writeText(
-    join(dir, "FILES_TO_READ_WHOLE.txt"),
-    redactSecrets((packet.filesToReadWhole ?? []).join("\n")) + "\n",
-  );
+  writeText(join(dir, "FILES_TO_READ_WHOLE.txt"), filesToReadWholeJson);
   writeText(join(dir, "TESTS.txt"), evidenceProse("TESTS.txt", packet.tests, "(tests not run)"));
   writeText(
     join(dir, "DECIDED_TRADEOFFS.md"),

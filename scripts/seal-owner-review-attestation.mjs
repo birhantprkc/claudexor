@@ -176,7 +176,7 @@ try {
     // whole-file list come from the sealed packet's OWN FREEZE.json and
     // FILES_TO_READ_WHOLE.txt (--packet, required here), the coverage is
     // re-run over the receipt's referenced packs against THIS candidate,
-    // and every pack digest is recomputed from disk — a hand-authored
+    // and every role-specific prompt digest is recomputed from disk — a hand-authored
     // ok:true (or a shrunken base≈candidate) cannot seal. Only the
     // RECOMPUTED result is embedded (signature-bound). Trust boundary: the
     // verifier (no pack files at publish time) checks the signature and
@@ -191,6 +191,7 @@ try {
       ...bindCoverageReceipt(receipt, candidateSha, {
         baseSha: sealedPacket.baseSha,
         wholeFileListPath: existsSync(wholeFileListPath) ? wholeFileListPath : null,
+        diffPath: join(sealedPacket.evidenceDir, "DIFF.patch"),
       }),
     };
   }

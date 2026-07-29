@@ -1,25 +1,26 @@
 #!/usr/bin/env node
 /**
- * Deterministic reviewer full-text COVERAGE CHECKER (audit A-8).
+ * Deterministic reviewer EVIDENCE COVERAGE CHECKER (audit A-8).
  *
- * The triad release-review protocol tells every reviewer to read the FULL
- * CURRENT TEXT of every changed file. Before this gate, `buildTouchedFilePack`
+ * The triad release-review protocol requires each role's sub-wave union to
+ * carry the FULL CURRENT TEXT of every required changed file. Before this gate,
+ * `buildTouchedFilePack`
  * silently dropped files past a byte budget with only a disclosed "omission
  * note" — so on a large phase (Ф3: ~157 changed source files, ~3.68MB) the
  * reviewers did NOT actually receive every changed file's full text. A
  * disclosed omission is not a guarantee.
  *
- * This checker BLOCKS the seal unless every changed HAND-WRITTEN source file's
- * complete current bytes appear in at least one supplied touched-file pack. It
- * is run over ALL packet-split sub-wave packs at once; the union of what those
- * packs cover must equal the full changed-file set.
+ * This checker BLOCKS the seal unless, independently for triad and scope, every
+ * canonical diff entry appears exactly once and reconstructs the sealed binary
+ * diff while every changed HAND-WRITTEN source file's complete current bytes
+ * appear in exactly one supplied prompt.
  *
  * Coverage mechanism (byte-exact, never fuzzy):
- *   A file P with current text T is COVERED only if some pack contains the
- *   exact section `### P\n\n```\nT\n```` that buildTouchedFilePack emits — i.e.
- *   the file's complete current bytes, fenced, under its stable header. A
- *   truncated/omitted file has no such section (only an OMISSION NOTE entry or
- *   a header with different bytes) and is reported NOT covered.
+ *   A file P with current text T is COVERED only if one top-level V2 frame
+ *   carries independently length-prefixed UTF-8 bytes for exactly P and T.
+ *   Framing is injective even when a path or file contains marker-like text;
+ *   invalid UTF-8, truncation, alteration, duplication, or an unknown frame
+ *   fails closed.
  *
  * Classification: every changed file is HAND-WRITTEN SOURCE (requires full-text
  * coverage) unless it is DIFF-AUTHORITATIVE — a generated or fixture artifact
@@ -35,7 +36,8 @@
  * Usage:
  *   node scripts/review-coverage-check.mjs \
  *     --base <sha> --candidate <sha> \
- *     --pack <triad-prompt.md> [--pack <scope-prompt.md> ...] [--json]
+ *     --pack <subwave>=<triad-prompt.md> \
+ *     --scope-pack <subwave>=<scope-prompt.md> [--json]
  *
  * Exit 0: every hand-written changed file is fully covered.
  * Exit 1: one or more hand-written files are uncovered (listed precisely).
@@ -47,12 +49,20 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 
 import {
-  touchedFileSection,
-  touchedFileHeader,
+  changedFileInventoryBody,
+  decodeReviewUtf8,
+  extractChangedFileInventory,
+  extractReadableDiffSlice,
+  extractTouchedFileSections,
   TOUCHED_FILE_OMISSION_MARKER,
 } from "./lib/release-review-contract.mjs";
 
 const SHA1 = /^[0-9a-f]{40}$/;
+
+// Freeze rename-only detection so user/repo `diff.renames=copies` cannot turn
+// one source modification plus one copy into overlapping per-entry patches.
+// Every inventory, readable slice, and sealed binary diff uses this same flag.
+export const CANONICAL_REVIEW_RENAME_ARG = "--find-renames=50%";
 
 // Diff-authoritative classification rules. Everything NOT matched here is
 // HAND-WRITTEN SOURCE and requires full-text coverage.
@@ -91,29 +101,28 @@ export function diffAuthoritativeRule(path, allowlist = GENERATED_ARTIFACT_ALLOW
   return null;
 }
 
-/** The exact bytes a full-text-covered file contributes to a pack. */
-export function coverageNeedle(path, currentText) {
-  return touchedFileSection(path, currentText);
-}
-
 /**
  * Decide whether a single hand-written file's COMPLETE current text is present
  * in at least one pack. `reason` explains an uncovered verdict precisely.
  */
 export function fileCoverage(path, currentText, packContents) {
-  const needle = coverageNeedle(path, currentText);
+  const expectedContent = Buffer.from(
+    decodeReviewUtf8(currentText, `current file ${JSON.stringify(path)}`),
+    "utf8",
+  );
+  let malformed = null;
   for (const pack of packContents) {
-    // Line-start boundary: a section header quoted mid-line inside another
-    // file's body must not count as coverage. (A verbatim full-section embed
-    // at line start inside another changed file's fenced body remains a
-    // contrived residual false-positive — flagged advisory in gate-5; a full
-    // fence-nesting parser was judged not worth the complexity yet.)
-    if (pack.startsWith(needle) || pack.includes(`\n${needle}`)) {
+    const extracted = extractTouchedFileSections(pack);
+    if (!extracted.ok) malformed ??= extracted.error;
+    else if (
+      extracted.sections.some(
+        (section) => section.path === path && section.content.equals(expectedContent),
+      )
+    ) {
       return { covered: true, reason: null };
     }
   }
   // Not fully present — classify WHY for an actionable report.
-  const header = touchedFileHeader(path);
   for (const pack of packContents) {
     // Entry-boundary match: omission entries are ", "-joined after the
     // marker's ": " — a bare `path (` substring would misattribute a path
@@ -129,13 +138,15 @@ export function fileCoverage(path, currentText, packContents) {
     }
   }
   for (const pack of packContents) {
-    if (pack.includes(header)) {
+    const extracted = extractTouchedFileSections(pack);
+    if (extracted.ok && extracted.sections.some((section) => section.path === path)) {
       return {
         covered: false,
         reason: "section header present but full current bytes are truncated/altered",
       };
     }
   }
+  if (malformed) return { covered: false, reason: `malformed full-text envelope: ${malformed}` };
   return { covered: false, reason: "no full-text section in any supplied pack" };
 }
 
@@ -167,17 +178,97 @@ export function checkCoverage({ files, readCurrentText, packContents, allowlist 
   return { ok: uncovered.length === 0, covered, uncovered, skipped, deleted };
 }
 
+/** Stronger packet-split form: every required full-text file appears once. */
+export function checkFullTextPartition({ files, readCurrentText, promptContents, allowlist }) {
+  const covered = [];
+  const uncovered = [];
+  const skipped = [];
+  const deleted = [];
+  const duplicates = [];
+  const expectedSections = [];
+  const pathsByPrompt = promptContents.map(() => []);
+  const extracted = promptContents.map((prompt, promptIndex) => {
+    const result = extractTouchedFileSections(prompt);
+    return { promptIndex, ...result };
+  });
+  const invalidEnvelopes = extracted
+    .filter((entry) => !entry.ok)
+    .map((entry) => ({ promptIndex: entry.promptIndex, reason: entry.error }));
+  for (const file of files) {
+    if (file.deleted) {
+      deleted.push(file.path);
+      continue;
+    }
+    const rule = diffAuthoritativeRule(file.path, allowlist ?? GENERATED_ARTIFACT_ALLOWLIST);
+    if (rule) {
+      skipped.push({ path: file.path, rule });
+      continue;
+    }
+    const expectedContent = Buffer.from(
+      decodeReviewUtf8(readCurrentText(file.path), `current file ${JSON.stringify(file.path)}`),
+      "utf8",
+    );
+    expectedSections.push({ path: file.path, content: expectedContent });
+    const matches = [];
+    for (const prompt of extracted) {
+      if (!prompt.ok) continue;
+      const count = prompt.sections.filter(
+        (section) => section.path === file.path && section.content.equals(expectedContent),
+      ).length;
+      if (count > 0) pathsByPrompt[prompt.promptIndex].push(file.path);
+      for (let occurrence = 0; occurrence < count; occurrence++) {
+        matches.push(prompt.promptIndex);
+      }
+    }
+    if (matches.length === 0) {
+      uncovered.push({ path: file.path, reason: "no exact top-level full-text envelope" });
+    } else {
+      covered.push(file.path);
+    }
+    if (matches.length > 1) duplicates.push({ path: file.path, prompts: matches });
+  }
+  const unexpectedSections = [];
+  for (const prompt of extracted) {
+    if (!prompt.ok) continue;
+    for (const [sectionIndex, section] of prompt.sections.entries()) {
+      if (
+        !expectedSections.some(
+          (expected) => expected.path === section.path && expected.content.equals(section.content),
+        )
+      ) {
+        unexpectedSections.push({ promptIndex: prompt.promptIndex, sectionIndex });
+      }
+    }
+  }
+  for (const paths of pathsByPrompt) paths.sort();
+  return {
+    ok:
+      uncovered.length === 0 &&
+      duplicates.length === 0 &&
+      invalidEnvelopes.length === 0 &&
+      unexpectedSections.length === 0,
+    covered,
+    uncovered,
+    skipped,
+    deleted,
+    duplicates,
+    invalidEnvelopes,
+    unexpectedSections,
+    pathsByPrompt,
+  };
+}
+
 /**
  * Recompute-and-bind a coverage receipt for the attestation sealer (E-C3):
  * NEVER trust the caller's receipt — re-run the coverage computation over the
  * receipt's referenced packs against the receipt's base and the SEALED
- * candidate, recompute every pack digest from disk bytes, and throw on any
+ * candidate, recompute every role-specific prompt digest from disk bytes, and throw on any
  * mismatch (a hand-authored ok:true cannot seal). Returns the payload piece
  * built ONLY from recomputed values.
  */
 export function bindCoverageReceipt(receipt, candidateSha, authority = {}) {
-  if (receipt.schemaVersion !== 1) {
-    throw new Error(`coverage receipt schemaVersion ${receipt.schemaVersion} is not 1`);
+  if (receipt.schemaVersion !== 2) {
+    throw new Error(`coverage receipt schemaVersion ${receipt.schemaVersion} is not 2`);
   }
   if (receipt.candidate !== candidateSha) {
     throw new Error(
@@ -214,30 +305,58 @@ export function bindCoverageReceipt(receipt, candidateSha, authority = {}) {
   const recomputed = runCoverage({
     base,
     candidate: candidateSha,
-    packs: (receipt.packs ?? []).map((pack) => ({ subWave: pack.subWave, path: pack.path })),
+    packs: (receipt.packs ?? []).map((pack) => ({
+      subWave: pack.subWave,
+      triadPath: pack.triadPath,
+      scopePath: pack.scopePath,
+    })),
     wholeFileListPath,
   });
   if (!recomputed.report.ok) {
     throw new Error(
-      `coverage recomputation FAILED: uncovered ${recomputed.report.uncovered.map((entry) => entry.path).join(", ")}`,
+      `coverage recomputation FAILED: uncovered ${recomputed.report.fullText.triad.uncovered.map((entry) => entry.path).join(", ")}`,
     );
   }
   for (const [index, pack] of recomputed.receiptBody.packs.entries()) {
-    const claimed = receipt.packs?.[index]?.sha256;
-    if (pack.sha256 !== claimed) {
+    const claimed = receipt.packs?.[index];
+    if (pack.triadSha256 !== claimed?.triadSha256) {
       throw new Error(
-        `coverage receipt pack digest mismatch for ${pack.subWave || "(unsplit)"}: receipt claims ${claimed}, disk bytes are ${pack.sha256}`,
+        `coverage receipt triad prompt digest mismatch for ${pack.subWave || "(unsplit)"}: receipt claims ${claimed?.triadSha256}, disk bytes are ${pack.triadSha256}`,
+      );
+    }
+    if (pack.scopeSha256 !== claimed?.scopeSha256) {
+      throw new Error(
+        `coverage receipt scope prompt digest mismatch for ${pack.subWave || "(unsplit)"}: receipt claims ${claimed?.scopeSha256}, disk bytes are ${pack.scopeSha256}`,
       );
     }
   }
+  if (
+    receipt.diff?.sealedSha256 !== recomputed.receiptBody.diff.sealedSha256 ||
+    receipt.diff?.sealedBytes !== recomputed.receiptBody.diff.sealedBytes ||
+    receipt.diff?.entries !== recomputed.receiptBody.diff.entries
+  ) {
+    throw new Error("coverage receipt sealed diff identity/count does not match recomputation");
+  }
+  if (authority.diffPath) {
+    const packetDiff = readFileSync(authority.diffPath);
+    if (!packetDiff.equals(recomputed.sealedDiff)) {
+      throw new Error("coverage recomputation does not match the sealed packet DIFF.patch bytes");
+    }
+  }
   return {
+    schemaVersion: 2,
     base: recomputed.receiptBody.base,
     candidate: recomputed.receiptBody.candidate,
     ok: recomputed.report.ok,
     packs: recomputed.receiptBody.packs.map((pack) => ({
       subWave: pack.subWave,
-      sha256: pack.sha256,
+      triadSha256: pack.triadSha256,
+      scopeSha256: pack.scopeSha256,
     })),
+    diff: recomputed.receiptBody.diff,
+    inventory: recomputed.receiptBody.inventory,
+    fullText: recomputed.receiptBody.fullText,
+    subWaveMismatches: recomputed.receiptBody.subWaveMismatches,
   };
 }
 
@@ -246,7 +365,8 @@ export function bindCoverageReceipt(receipt, candidateSha, authority = {}) {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const packs = [];
+  const triadPacks = [];
+  const scopePacks = [];
   let base = null;
   let candidate = null;
   let json = false;
@@ -254,17 +374,17 @@ function parseArgs(argv) {
   let receipt = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--pack") {
+    if (a === "--pack" || a === "--scope-pack") {
       // `--pack <subwave>=<path>` labels a packet-split sub-wave's pack so the
       // receipt can bind panel slots to exact pack bytes; a bare `--pack
       // <path>` is the single unsplit wave (label "").
       const value = argv[++i] ?? "";
       const eq = value.indexOf("=");
-      if (eq > 0 && /^[a-z0-9][a-z0-9-]{0,31}$/.test(value.slice(0, eq))) {
-        packs.push({ subWave: value.slice(0, eq), path: value.slice(eq + 1) });
-      } else {
-        packs.push({ subWave: "", path: value });
-      }
+      const parsed =
+        eq > 0 && /^[a-z0-9][a-z0-9-]{0,31}$/.test(value.slice(0, eq))
+          ? { subWave: value.slice(0, eq), path: value.slice(eq + 1) }
+          : { subWave: "", path: value };
+      (a === "--pack" ? triadPacks : scopePacks).push(parsed);
     } else if (a === "--base") base = argv[++i];
     else if (a === "--candidate") candidate = argv[++i];
     else if (a === "--json") json = true;
@@ -277,12 +397,34 @@ function parseArgs(argv) {
   if (!candidate || !SHA1.test(candidate)) {
     return { error: "--candidate must be a full lowercase 40-char commit SHA" };
   }
-  if (packs.length === 0 || packs.some((p) => !p.path))
-    return { error: "at least one --pack [subwave=]<file> is required" };
-  const labels = packs.map((p) => p.subWave).filter(Boolean);
+  if (
+    triadPacks.length === 0 ||
+    scopePacks.length === 0 ||
+    triadPacks.some((p) => !p.path) ||
+    scopePacks.some((p) => !p.path)
+  ) {
+    return {
+      error:
+        "matching --pack and --scope-pack [subwave=]<file> entries are required for every reviewed sub-wave",
+    };
+  }
+  const triadLabels = triadPacks.map((pack) => pack.subWave);
+  const scopeLabels = scopePacks.map((pack) => pack.subWave);
+  if (
+    triadLabels.length !== scopeLabels.length ||
+    triadLabels.some((label, index) => label !== scopeLabels[index])
+  ) {
+    return { error: "--pack and --scope-pack labels/order must match exactly" };
+  }
+  const labels = triadLabels.filter(Boolean);
   if (new Set(labels).size !== labels.length) {
     return { error: "duplicate --pack sub-wave labels make the slot binding ambiguous" };
   }
+  const packs = triadPacks.map((pack, index) => ({
+    subWave: pack.subWave,
+    triadPath: pack.path,
+    scopePath: scopePacks[index].path,
+  }));
   return { base, candidate, packs, json, wholeFileList, receipt };
 }
 
@@ -305,28 +447,203 @@ function git(args) {
  * path that itself begins with "R"/"C" (consumed at an odd position) is never
  * mistaken for a status.
  */
-export function parseNameStatusZ(raw) {
-  const fields = raw.split("\0").filter((f) => f !== ""); // drop the trailing NUL
+export function parseNameStatusEntriesZ(raw) {
+  const fields = decodeReviewUtf8(raw, "Git changed-path inventory")
+    .split("\0")
+    .filter((f) => f !== ""); // drop the trailing NUL
   const files = [];
   for (let i = 0; i < fields.length;) {
     const status = fields[i];
     if (status.startsWith("R") || status.startsWith("C")) {
       // rename/copy carries old + new; the NEW path (2nd) has the current bytes.
+      const oldPath = fields[i + 1];
       const newPath = fields[i + 2];
-      if (newPath !== undefined) files.push({ path: newPath, deleted: false });
+      if (oldPath !== undefined && newPath !== undefined) {
+        files.push({ status, oldPath, path: newPath, deleted: false });
+      }
       i += 3;
     } else {
       const path = fields[i + 1];
-      if (path !== undefined) files.push({ path, deleted: status === "D" });
+      if (path !== undefined) files.push({ status, path, deleted: status === "D" });
       i += 2;
     }
   }
   return files;
 }
 
+/** Backward-compatible projection used by full-current-text coverage. */
+export function parseNameStatusZ(raw) {
+  return parseNameStatusEntriesZ(raw).map(({ path, deleted }) => ({ path, deleted }));
+}
+
 /** Enumerate changed files (base..candidate), marking deletions. */
 function changedFiles(base, candidate) {
-  return parseNameStatusZ(git(["diff", "-z", "--name-status", `${base}..${candidate}`]));
+  return changedDiffEntries(base, candidate).map(({ path, deleted }) => ({ path, deleted }));
+}
+
+function gitBytes(args) {
+  return execFileSync("git", args, { maxBuffer: 256 * 1024 * 1024 });
+}
+
+function changedDiffEntries(base, candidate) {
+  return parseNameStatusEntriesZ(
+    gitBytes(["diff", CANONICAL_REVIEW_RENAME_ARG, "-z", "--name-status", `${base}..${candidate}`]),
+  );
+}
+
+/**
+ * Decompose the canonical full binary patch into one exact patch per NUL-safe
+ * name-status entry. The caller supplies argv-based patch reads; no path is
+ * ever shell-quoted or parsed back out of a `diff --git` header.
+ */
+export function buildCanonicalDiffPatches(entries, readPatch) {
+  return entries.map((entry, index) => {
+    const value = readPatch(entry);
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+    if (bytes.length === 0) {
+      throw new Error(`canonical diff entry ${index} (${entry.path}) produced zero bytes`);
+    }
+    return {
+      ...entry,
+      index,
+      bytes,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+  });
+}
+
+function canonicalDiffPatches(base, candidate) {
+  const entries = changedDiffEntries(base, candidate);
+  const patches = buildCanonicalDiffPatches(entries, (entry) =>
+    gitBytes([
+      "--literal-pathspecs",
+      "diff",
+      CANONICAL_REVIEW_RENAME_ARG,
+      "--binary",
+      `${base}..${candidate}`,
+      "--",
+      ...(entry.oldPath ? [entry.oldPath, entry.path] : [entry.path]),
+    ]),
+  );
+  const reconstructed = Buffer.concat(patches.map((entry) => entry.bytes));
+  const sealed = gitBytes([
+    "diff",
+    CANONICAL_REVIEW_RENAME_ARG,
+    "--binary",
+    `${base}..${candidate}`,
+  ]);
+  if (!reconstructed.equals(sealed)) {
+    throw new Error(
+      "canonical per-entry diff decomposition does not reconstruct the sealed full DIFF.patch",
+    );
+  }
+  return { patches, sealed };
+}
+
+function diffEntryLabel(entry) {
+  return entry.oldPath
+    ? `${entry.status}:${entry.oldPath} -> ${entry.path}`
+    : `${entry.status}:${entry.path}`;
+}
+
+/**
+ * Prove that each prompt carries one valid exact-byte slice, every slice is a
+ * concatenation of canonical entry patches (nothing invented or truncated),
+ * and the role's union covers every patch exactly once.
+ */
+export function checkDiffCoverage({ expectedPatches, promptContents }) {
+  const covered = new Set();
+  const duplicates = [];
+  const invalidSlices = [];
+  const pathsByPrompt = promptContents.map(() => []);
+  for (const [promptIndex, prompt] of promptContents.entries()) {
+    const extracted = extractReadableDiffSlice(prompt);
+    if (!extracted.ok) {
+      invalidSlices.push({ promptIndex, reason: extracted.error });
+      continue;
+    }
+    const slice = extracted.bytes;
+    let offset = 0;
+    while (offset < slice.length) {
+      const matches = expectedPatches.filter(
+        (entry) =>
+          entry.bytes.length <= slice.length - offset &&
+          slice.subarray(offset, offset + entry.bytes.length).equals(entry.bytes),
+      );
+      if (matches.length !== 1) {
+        invalidSlices.push({
+          promptIndex,
+          reason:
+            matches.length === 0
+              ? `diff slice contains unknown/altered bytes at offset ${offset}`
+              : `diff slice is ambiguous at offset ${offset}`,
+        });
+        break;
+      }
+      const entry = matches[0];
+      if (covered.has(entry.index)) duplicates.push(diffEntryLabel(entry));
+      covered.add(entry.index);
+      pathsByPrompt[promptIndex].push(entry.path);
+      offset += entry.bytes.length;
+    }
+  }
+  const uncovered = expectedPatches
+    .filter((entry) => !covered.has(entry.index))
+    .map(diffEntryLabel);
+  return {
+    ok: invalidSlices.length === 0 && duplicates.length === 0 && uncovered.length === 0,
+    covered: covered.size,
+    total: expectedPatches.length,
+    uncovered,
+    duplicates,
+    invalidSlices,
+    pathsByPrompt,
+  };
+}
+
+export function checkSubWavePairing({
+  requiredPaths,
+  diffPathsByPrompt,
+  fullTextPathsByPrompt,
+  packs,
+  role,
+}) {
+  const mismatches = [];
+  for (const path of requiredPaths) {
+    const diffPrompt = diffPathsByPrompt.findIndex((paths) => paths.includes(path));
+    const fullTextPrompt = fullTextPathsByPrompt.findIndex((paths) => paths.includes(path));
+    if (diffPrompt !== -1 && fullTextPrompt !== -1 && diffPrompt !== fullTextPrompt) {
+      mismatches.push({
+        subWave: packs[fullTextPrompt]?.subWave ?? "",
+        reason:
+          `${role} diff/full-current-text pairing differs for ${JSON.stringify(path)} ` +
+          `(diff=${packs[diffPrompt]?.subWave ?? diffPrompt}, fullText=${packs[fullTextPrompt]?.subWave ?? fullTextPrompt})`,
+      });
+    }
+  }
+  return mismatches;
+}
+
+export function checkChangedFileInventory({ expectedEntries, promptContents }) {
+  const expected = Buffer.from(changedFileInventoryBody(expectedEntries), "utf8");
+  const invalid = [];
+  for (const [promptIndex, prompt] of promptContents.entries()) {
+    const extracted = extractChangedFileInventory(prompt);
+    if (!extracted.ok) {
+      invalid.push({ promptIndex, reason: extracted.error });
+    } else if (!extracted.body.equals(expected)) {
+      invalid.push({
+        promptIndex,
+        reason: "changed-file inventory differs from canonical Git state",
+      });
+    }
+  }
+  return {
+    ok: invalid.length === 0,
+    covered: promptContents.length - invalid.length,
+    total: promptContents.length,
+    invalid,
+  };
 }
 
 /**
@@ -337,13 +654,29 @@ function changedFiles(base, candidate) {
  * the zero-match guard nor the changed-file coverage, and the file silently
  * loses full-text review.
  */
+export function parseWholeFileList(listText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(listText);
+  } catch {
+    throw new Error("FILES_TO_READ_WHOLE.txt must be a JSON array of exact path strings");
+  }
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((path) => typeof path !== "string" || path.length === 0) ||
+    new Set(parsed).size !== parsed.length
+  ) {
+    throw new Error("FILES_TO_READ_WHOLE.txt must contain unique non-empty JSON path strings");
+  }
+  return parsed;
+}
+
 export function unionWithWholeFileList(files, listText) {
   if (!listText) return files;
   const union = [...files];
   const known = new Set(files.map((f) => f.path));
-  for (const line of listText.split("\n")) {
-    const path = line.trim();
-    if (path && !path.startsWith("#") && !known.has(path)) {
+  for (const path of parseWholeFileList(listText)) {
+    if (!known.has(path)) {
       union.push({ path, deleted: false });
       known.add(path);
     }
@@ -360,23 +693,56 @@ export function unionWithWholeFileList(files, listText) {
  */
 export function coverageReceiptBody(
   report,
-  { base, candidate, packs, packContents, wholeFileList },
+  { base, candidate, packs, triadPrompts, scopePrompts, wholeFileList },
 ) {
+  const diffRole = (role) => ({
+    ok: role.ok,
+    covered: role.covered,
+    total: role.total,
+    uncovered: role.uncovered,
+    duplicates: role.duplicates,
+    invalidSlices: role.invalidSlices,
+  });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ok: report.ok,
     base,
     candidate,
     packs: packs.map((pack, index) => ({
       subWave: pack.subWave,
-      path: pack.path,
-      sha256: createHash("sha256").update(packContents[index]).digest("hex"),
+      triadPath: pack.triadPath,
+      scopePath: pack.scopePath,
+      triadSha256: createHash("sha256").update(triadPrompts[index]).digest("hex"),
+      scopeSha256: createHash("sha256").update(scopePrompts[index]).digest("hex"),
     })),
     wholeFileList: wholeFileList ?? null,
-    covered: report.covered.length,
-    uncovered: report.uncovered,
-    diffAuthoritativeSkips: report.skipped.length,
-    deleted: report.deleted.length,
+    fullText: {
+      triad: {
+        covered: report.fullText.triad.covered.length,
+        uncovered: report.fullText.triad.uncovered,
+        duplicates: report.fullText.triad.duplicates,
+        invalidEnvelopes: report.fullText.triad.invalidEnvelopes,
+        unexpectedSections: report.fullText.triad.unexpectedSections,
+      },
+      scope: {
+        covered: report.fullText.scope.covered.length,
+        uncovered: report.fullText.scope.uncovered,
+        duplicates: report.fullText.scope.duplicates,
+        invalidEnvelopes: report.fullText.scope.invalidEnvelopes,
+        unexpectedSections: report.fullText.scope.unexpectedSections,
+      },
+      diffAuthoritativeSkips: report.fullText.triad.skipped.length,
+      deleted: report.fullText.triad.deleted.length,
+    },
+    diff: {
+      sealedSha256: report.diff.sealedSha256,
+      sealedBytes: report.diff.sealedBytes,
+      entries: report.diff.entries,
+      triad: diffRole(report.diff.triad),
+      scope: diffRole(report.diff.scope),
+    },
+    inventory: report.inventory,
+    subWaveMismatches: report.subWaveMismatches,
   };
 }
 
@@ -388,23 +754,111 @@ export function coverageReceiptBody(
  * trusting a caller-supplied receipt (a hand-authored ok:true must not seal).
  */
 export function runCoverage({ base, candidate, packs, wholeFileListPath }) {
-  const packContents = packs.map((pack) => readFileSync(pack.path, "utf8"));
+  const triadBytes = packs.map((pack) => readFileSync(pack.triadPath));
+  const scopeBytes = packs.map((pack) => readFileSync(pack.scopePath));
   const files = unionWithWholeFileList(
     changedFiles(base, candidate),
     wholeFileListPath ? readFileSync(wholeFileListPath, "utf8") : null,
   );
-  const report = checkCoverage({
+  const readCurrentText = (path) => gitBytes(["show", `${candidate}:${path}`]);
+  const triadFullText = checkFullTextPartition({
     files,
-    readCurrentText: (path) => git(["show", `${candidate}:${path}`]),
-    packContents,
+    readCurrentText,
+    promptContents: triadBytes,
   });
+  const scopeFullText = checkFullTextPartition({
+    files,
+    readCurrentText,
+    promptContents: scopeBytes,
+  });
+  const canonical = canonicalDiffPatches(base, candidate);
+  const triadDiff = checkDiffCoverage({
+    expectedPatches: canonical.patches,
+    promptContents: triadBytes,
+  });
+  const scopeDiff = checkDiffCoverage({
+    expectedPatches: canonical.patches,
+    promptContents: scopeBytes,
+  });
+  const triadInventory = checkChangedFileInventory({
+    expectedEntries: canonical.patches,
+    promptContents: triadBytes,
+  });
+  const scopeInventory = checkChangedFileInventory({
+    expectedEntries: canonical.patches,
+    promptContents: scopeBytes,
+  });
+  const subWaveMismatches = [];
+  const pairedPaths = canonical.patches
+    .filter((entry) => !entry.deleted && diffAuthoritativeRule(entry.path) === null)
+    .map((entry) => entry.path);
+  subWaveMismatches.push(
+    ...checkSubWavePairing({
+      requiredPaths: pairedPaths,
+      diffPathsByPrompt: triadDiff.pathsByPrompt,
+      fullTextPathsByPrompt: triadFullText.pathsByPrompt,
+      packs,
+      role: "triad",
+    }),
+    ...checkSubWavePairing({
+      requiredPaths: pairedPaths,
+      diffPathsByPrompt: scopeDiff.pathsByPrompt,
+      fullTextPathsByPrompt: scopeFullText.pathsByPrompt,
+      packs,
+      role: "scope",
+    }),
+  );
+  for (const [index, pack] of packs.entries()) {
+    const triadSlice = extractReadableDiffSlice(triadBytes[index]);
+    const scopeSlice = extractReadableDiffSlice(scopeBytes[index]);
+    if (
+      !triadSlice.ok ||
+      !scopeSlice.ok ||
+      triadSlice.sha256 !== scopeSlice.sha256 ||
+      !triadSlice.bytes?.equals(scopeSlice.bytes)
+    ) {
+      subWaveMismatches.push({ subWave: pack.subWave, reason: "triad/scope diff slices differ" });
+    }
+    if (
+      JSON.stringify(triadFullText.pathsByPrompt[index]) !==
+      JSON.stringify(scopeFullText.pathsByPrompt[index])
+    ) {
+      subWaveMismatches.push({
+        subWave: pack.subWave,
+        reason: "triad/scope full-current-text subsets differ",
+      });
+    }
+  }
+  const sealedSha256 = createHash("sha256").update(canonical.sealed).digest("hex");
+  const report = {
+    ok:
+      triadFullText.ok &&
+      scopeFullText.ok &&
+      triadDiff.ok &&
+      scopeDiff.ok &&
+      triadInventory.ok &&
+      scopeInventory.ok &&
+      subWaveMismatches.length === 0,
+    fullText: { triad: triadFullText, scope: scopeFullText },
+    diff: {
+      sealedSha256,
+      sealedBytes: canonical.sealed.length,
+      entries: canonical.patches.length,
+      triad: triadDiff,
+      scope: scopeDiff,
+    },
+    inventory: { triad: triadInventory, scope: scopeInventory },
+    subWaveMismatches,
+  };
   return {
     report,
+    sealedDiff: canonical.sealed,
     receiptBody: coverageReceiptBody(report, {
       base,
       candidate,
       packs,
-      packContents,
+      triadPrompts: triadBytes,
+      scopePrompts: scopeBytes,
       wholeFileList: wholeFileListPath ?? null,
     }),
   };
@@ -435,10 +889,10 @@ function main() {
           base,
           candidate,
           packs,
-          covered: report.covered,
-          uncovered: report.uncovered,
-          diffAuthoritativeSkips: report.skipped,
-          deleted: report.deleted,
+          fullText: report.fullText,
+          diff: report.diff,
+          inventory: report.inventory,
+          subWaveMismatches: report.subWaveMismatches,
         },
         null,
         2,
@@ -446,21 +900,52 @@ function main() {
     );
   } else {
     console.error(
-      `review-coverage-check: ${report.covered.length} hand-written file(s) fully covered, ` +
-        `${report.skipped.length} diff-authoritative skip(s), ${report.deleted.length} deleted.`,
+      `review-coverage-check: triad ${report.fullText.triad.covered.length}, scope ${report.fullText.scope.covered.length} hand-written file(s) fully covered; ` +
+        `${report.fullText.triad.skipped.length} diff-authoritative skip(s), ${report.fullText.triad.deleted.length} deleted; ` +
+        `diff triad ${report.diff.triad.covered}/${report.diff.entries}, scope ${report.diff.scope.covered}/${report.diff.entries}.`,
     );
-    if (report.skipped.length > 0) {
+    if (report.fullText.triad.skipped.length > 0) {
       console.error("Diff-authoritative (reviewed via diff, full text not required):");
-      for (const s of report.skipped) console.error(`  - ${s.path}  [${s.rule}]`);
+      for (const s of report.fullText.triad.skipped) console.error(`  - ${s.path}  [${s.rule}]`);
     }
     if (!report.ok) {
-      console.error(
-        `\nCOVERAGE_BLOCKED: ${report.uncovered.length} hand-written file(s) NOT fully covered:`,
-      );
-      for (const u of report.uncovered) console.error(`  - ${u.path}  (${u.reason})`);
+      console.error("\nCOVERAGE_BLOCKED:");
+      for (const role of ["triad", "scope"]) {
+        const fullText = report.fullText[role];
+        for (const entry of fullText.uncovered) {
+          console.error(`  - ${role} full text ${entry.path} (${entry.reason})`);
+        }
+        for (const entry of fullText.duplicates) {
+          console.error(`  - ${role} duplicate full text ${entry.path}`);
+        }
+        for (const entry of fullText.invalidEnvelopes) {
+          console.error(
+            `  - ${role} invalid full-text envelope ${entry.promptIndex}: ${entry.reason}`,
+          );
+        }
+        for (const entry of fullText.unexpectedSections) {
+          console.error(
+            `  - ${role} unexpected full-text envelope ${entry.promptIndex}:${entry.sectionIndex}`,
+          );
+        }
+        const diff = report.diff[role];
+        for (const entry of diff.uncovered) console.error(`  - ${role} missing diff ${entry}`);
+        for (const entry of diff.duplicates) console.error(`  - ${role} duplicate diff ${entry}`);
+        for (const entry of diff.invalidSlices) {
+          console.error(`  - ${role} invalid diff slice ${entry.promptIndex}: ${entry.reason}`);
+        }
+        for (const entry of report.inventory[role].invalid) {
+          console.error(
+            `  - ${role} invalid changed-file inventory ${entry.promptIndex}: ${entry.reason}`,
+          );
+        }
+      }
+      for (const mismatch of report.subWaveMismatches) {
+        console.error(`  - ${mismatch.subWave}: ${mismatch.reason}`);
+      }
     } else {
       console.error(
-        "\nCOVERAGE_OK: every hand-written changed file's full current text is covered.",
+        "\nCOVERAGE_OK: both reviewer roles cover every exact diff entry once and every hand-written file's full current bytes once.",
       );
     }
   }

@@ -7,6 +7,18 @@
 
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
+import { TextDecoder } from "node:util";
+
+const FATAL_UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+export function decodeReviewUtf8(value, label = "review evidence") {
+  if (typeof value === "string") return value;
+  try {
+    return FATAL_UTF8.decode(value);
+  } catch {
+    throw new Error(`${label} is not valid UTF-8; use exact binary diff evidence instead`);
+  }
+}
 
 export const REQUIRED_TRIAD_MODELS = Object.freeze([
   "openai/gpt-5.6-sol",
@@ -15,6 +27,86 @@ export const REQUIRED_TRIAD_MODELS = Object.freeze([
 ]);
 
 export const REQUIRED_SCOPE_MODEL = "anthropic/claude-fable-5";
+
+/** OpenRouter's exact-panel limits, frozen with the release protocol. */
+export const RELEASE_REVIEW_LIMITS_AUTHORITY = Object.freeze({
+  source: "https://openrouter.ai/api/v1/models",
+  verifiedAt: "2026-07-29",
+});
+export const RELEASE_REVIEW_MODEL_LIMITS = Object.freeze({
+  "openai/gpt-5.6-sol": Object.freeze({ contextTokens: 1_050_000, maxOutputTokens: 128_000 }),
+  "anthropic/claude-fable-5": Object.freeze({
+    contextTokens: 1_000_000,
+    maxOutputTokens: 128_000,
+  }),
+  "google/gemini-3.5-flash": Object.freeze({
+    contextTokens: 1_048_576,
+    maxOutputTokens: 65_536,
+  }),
+});
+
+// Conservative allowance for provider chat framing around the one user
+// message. UTF-8 byte length is an upper bound on text-token count because a
+// tokenizer token consumes at least one source byte; reserving framing on top
+// makes this a deterministic offline refusal, not a vendor token estimate.
+export const RELEASE_REVIEW_FRAMING_RESERVE_TOKENS = 4_096;
+
+export function reviewPromptContextPreflight(model, prompt, maxOutputTokens) {
+  const limits = RELEASE_REVIEW_MODEL_LIMITS[model];
+  if (!limits) {
+    return { ok: false, reasons: [`no frozen context limit for release reviewer ${model}`] };
+  }
+  const promptBytes = Buffer.byteLength(prompt, "utf8");
+  const inputTokenUpperBound = promptBytes + RELEASE_REVIEW_FRAMING_RESERVE_TOKENS;
+  const reasons = [];
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) {
+    reasons.push("configured max output tokens must be a positive integer");
+  } else {
+    if (maxOutputTokens > limits.maxOutputTokens) {
+      reasons.push(
+        `configured max output ${maxOutputTokens} exceeds ${model} maximum ${limits.maxOutputTokens}`,
+      );
+    }
+    if (inputTokenUpperBound + maxOutputTokens > limits.contextTokens) {
+      reasons.push(
+        `input upper bound ${inputTokenUpperBound} + max output ${maxOutputTokens} exceeds ${model} context ${limits.contextTokens}`,
+      );
+    }
+  }
+  return {
+    ok: reasons.length === 0,
+    reasons,
+    model,
+    promptBytes,
+    framingReserveTokens: RELEASE_REVIEW_FRAMING_RESERVE_TOKENS,
+    inputTokenUpperBound,
+    maxOutputTokens,
+    contextTokens: limits.contextTokens,
+    modelMaxOutputTokens: limits.maxOutputTokens,
+  };
+}
+
+export function reviewSplitOptionContract(packSubset, diffSubset, subWave) {
+  const splitRequested = packSubset !== null || diffSubset !== null;
+  const reasons = [];
+  if ((packSubset === null) !== (diffSubset === null)) {
+    reasons.push("--pack-subset and --diff-subset are required together");
+  }
+  if (splitRequested) {
+    if (typeof packSubset !== "string" || !packSubset.trim()) {
+      reasons.push("--pack-subset requires a non-empty selector file path");
+    }
+    if (typeof diffSubset !== "string" || !diffSubset.trim()) {
+      reasons.push("--diff-subset requires a non-empty selector file path");
+    }
+    if (typeof subWave !== "string" || !SUB_WAVE_NAME.test(subWave.trim())) {
+      reasons.push("--sub-wave <name> ([a-z0-9-]) is required for a packet-split sub-wave");
+    }
+  } else if (subWave !== null) {
+    reasons.push("--sub-wave applies only to packet-split --pack-subset/--diff-subset");
+  }
+  return { ok: reasons.length === 0, reasons, splitRequested };
+}
 
 export const TRIAD_ITEMS = Object.freeze([
   "review_protocol",
@@ -32,6 +124,167 @@ export const SCOPE_ITEMS = Object.freeze([
   "cross_module_bugs",
   "implicit_contracts",
 ]);
+
+export const READABLE_DIFF_SLICE_HEADER = "CLAUDEXOR_READABLE_DIFF_SLICE_V1";
+export const READABLE_DIFF_SLICE_FOOTER = "\nCLAUDEXOR_READABLE_DIFF_SLICE_END_V1\n";
+export const FULL_TEXT_FILE_HEADER = "CLAUDEXOR_FULL_TEXT_FILE_V2";
+export const FULL_TEXT_FILE_FOOTER = "\nCLAUDEXOR_FULL_TEXT_FILE_END_V2\n";
+export const CHANGED_FILE_INVENTORY_HEADER = "CLAUDEXOR_CHANGED_FILE_INVENTORY_V1";
+export const CHANGED_FILE_INVENTORY_FOOTER = "\nCLAUDEXOR_CHANGED_FILE_INVENTORY_END_V1\n";
+
+const REVIEW_EVIDENCE_FRAMES = Object.freeze([
+  {
+    kind: "diff",
+    header: READABLE_DIFF_SLICE_HEADER,
+    footer: READABLE_DIFF_SLICE_FOOTER,
+  },
+  {
+    kind: "fullText",
+    header: FULL_TEXT_FILE_HEADER,
+    footer: FULL_TEXT_FILE_FOOTER,
+  },
+  {
+    kind: "inventory",
+    header: CHANGED_FILE_INVENTORY_HEADER,
+    footer: CHANGED_FILE_INVENTORY_FOOTER,
+  },
+]);
+
+function reviewEvidenceFrame(header, footer, value) {
+  const body = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+  const digest = createHash("sha256").update(body).digest("hex");
+  return Buffer.concat([
+    Buffer.from(`${header} ${body.length} ${digest}\n`, "utf8"),
+    body,
+    Buffer.from(footer, "utf8"),
+  ]).toString("utf8");
+}
+
+function nextLineStart(bytes, marker, cursor) {
+  for (let at = bytes.indexOf(marker, cursor); at !== -1; at = bytes.indexOf(marker, at + 1)) {
+    if (at === 0 || bytes[at - 1] === 0x0a) return at;
+  }
+  return -1;
+}
+
+/**
+ * Parse all top-level evidence frames in one pass. Once a valid frame starts,
+ * its length owns the cursor, so either marker appearing inside the other
+ * frame's source bytes is data rather than a forged sibling frame.
+ */
+function parseReviewEvidenceFrames(prompt) {
+  const bytes = Buffer.isBuffer(prompt) ? prompt : Buffer.from(prompt, "utf8");
+  const frames = [];
+  for (let cursor = 0; cursor < bytes.length;) {
+    const next = REVIEW_EVIDENCE_FRAMES.map((spec) => ({
+      spec,
+      at: nextLineStart(bytes, Buffer.from(spec.header, "utf8"), cursor),
+    }))
+      .filter((candidate) => candidate.at !== -1)
+      .sort((left, right) => left.at - right.at)[0];
+    if (!next) break;
+    const headerEnd = bytes.indexOf(0x0a, next.at);
+    if (headerEnd === -1) {
+      return { ok: false, frames: [], error: `${next.spec.kind} envelope header is unterminated` };
+    }
+    const header = bytes.subarray(next.at, headerEnd).toString("utf8");
+    const fields = header.slice(next.spec.header.length + 1).split(" ");
+    if (
+      !header.startsWith(`${next.spec.header} `) ||
+      fields.length !== 2 ||
+      !/^(0|[1-9]\d*)$/.test(fields[0]) ||
+      !/^[0-9a-f]{64}$/.test(fields[1])
+    ) {
+      return { ok: false, frames: [], error: `${next.spec.kind} envelope header is malformed` };
+    }
+    const length = Number(fields[0]);
+    const bodyStart = headerEnd + 1;
+    const bodyEnd = bodyStart + length;
+    const footer = Buffer.from(next.spec.footer, "utf8");
+    if (
+      !Number.isSafeInteger(length) ||
+      bodyEnd + footer.length > bytes.length ||
+      !bytes.subarray(bodyEnd, bodyEnd + footer.length).equals(footer)
+    ) {
+      return {
+        ok: false,
+        frames: [],
+        error: `${next.spec.kind} envelope length/footer mismatch`,
+      };
+    }
+    const body = bytes.subarray(bodyStart, bodyEnd);
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    if (sha256 !== fields[1]) {
+      return { ok: false, frames: [], error: `${next.spec.kind} envelope digest mismatch` };
+    }
+    frames.push({ kind: next.spec.kind, body, sha256 });
+    cursor = bodyEnd + footer.length;
+  }
+  return { ok: true, frames, error: null };
+}
+
+/**
+ * Self-describing exact-byte envelope for one named readable diff slice.
+ * Length, not a delimiter scan, owns the body boundary, so source text that
+ * happens to contain the marker cannot truncate or extend the reviewed diff.
+ */
+export function readableDiffSliceSection(diff) {
+  return reviewEvidenceFrame(READABLE_DIFF_SLICE_HEADER, READABLE_DIFF_SLICE_FOOTER, diff);
+}
+
+export function changedFileInventoryBody(entries) {
+  return JSON.stringify(
+    entries.map((entry) => ({
+      status: entry.status,
+      ...(entry.oldPath ? { oldPath: entry.oldPath } : {}),
+      path: entry.path,
+      deleted: entry.deleted,
+    })),
+    null,
+    2,
+  );
+}
+
+export function changedFileInventorySection(entries) {
+  return reviewEvidenceFrame(
+    CHANGED_FILE_INVENTORY_HEADER,
+    CHANGED_FILE_INVENTORY_FOOTER,
+    changedFileInventoryBody(entries),
+  );
+}
+
+export function extractChangedFileInventory(prompt) {
+  const extracted = parseReviewEvidenceFrames(prompt);
+  if (!extracted.ok) return { ok: false, error: extracted.error, body: null, sha256: null };
+  const frames = extracted.frames.filter((frame) => frame.kind === "inventory");
+  if (frames.length !== 1) {
+    return {
+      ok: false,
+      error: `expected exactly one changed-file inventory, found ${frames.length}`,
+      body: null,
+      sha256: null,
+    };
+  }
+  return { ok: true, error: null, body: frames[0].body, sha256: frames[0].sha256 };
+}
+
+/** Parse and verify the one exact-byte diff envelope carried by a prompt. */
+export function extractReadableDiffSlice(prompt) {
+  const extracted = parseReviewEvidenceFrames(prompt);
+  if (!extracted.ok) {
+    return { ok: false, error: extracted.error, bytes: null, sha256: null };
+  }
+  const parsed = extracted.frames.filter((frame) => frame.kind === "diff");
+  if (parsed.length !== 1) {
+    return {
+      ok: false,
+      error: `expected exactly one readable diff slice header, found ${parsed.length}`,
+      bytes: null,
+      sha256: null,
+    };
+  }
+  return { ok: true, error: null, bytes: parsed[0].body, sha256: parsed[0].sha256 };
+}
 
 /**
  * The exact panel slots a sealed owner-review attestation must bind. The sealed
@@ -228,11 +481,11 @@ export function validateSlotRecord(record, expected) {
 }
 
 /**
- * Candidate-bound full-text coverage receipt (audit A-8): the JSON emitted by
- * review-coverage-check --receipt, embedded into the sealed payload. Required
- * whenever the panel is packet-split (more than one named sub-wave) — it is
- * the only artifact proving the UNION of the sub-wave packs covered every
- * changed file, so a seal listing one sub-wave cannot silently omit the rest.
+ * Candidate-bound review-evidence coverage receipt (audit A-8): the JSON
+ * emitted by review-coverage-check --receipt and embedded into the sealed
+ * payload. For BOTH triad and scope prompts it proves that the named sub-wave
+ * union reconstructs the sealed binary diff exactly and carries every required
+ * hand-written file's complete current text exactly once.
  */
 export function validateCoverageReceipt(receipt, expected, { required, namedSubWaves = [] }) {
   const reasons = [];
@@ -247,6 +500,9 @@ export function validateCoverageReceipt(receipt, expected, { required, namedSubW
   if (typeof receipt !== "object" || Array.isArray(receipt)) {
     return ["owner review coverageReceipt is not an object"];
   }
+  if (receipt.schemaVersion !== 2) {
+    reasons.push("owner review coverageReceipt schemaVersion must be 2");
+  }
   if (receipt.ok !== true) reasons.push("owner review coverageReceipt did not pass (ok !== true)");
   if (!SHA1.test(receipt.base ?? "")) {
     reasons.push("owner review coverageReceipt is missing a full base SHA");
@@ -260,14 +516,19 @@ export function validateCoverageReceipt(receipt, expected, { required, namedSubW
   const packs = Array.isArray(receipt.packs) ? receipt.packs : [];
   if (
     packs.length === 0 ||
-    packs.some((pack) => !SHA256.test(pack?.sha256 ?? "") || typeof pack?.subWave !== "string")
+    packs.some(
+      (pack) =>
+        !SHA256.test(pack?.triadSha256 ?? "") ||
+        !SHA256.test(pack?.scopeSha256 ?? "") ||
+        typeof pack?.subWave !== "string",
+    )
   ) {
     reasons.push(
-      "owner review coverageReceipt must map every reviewed pack's sub-wave name to its SHA-256",
+      "owner review coverageReceipt must map every sub-wave to exact triad and scope prompt SHA-256 digests",
     );
   }
   // One pack per label: duplicate sub-wave labels make the slot↔pack binding
-  // ambiguous (two different pack digests could each claim the same slots).
+  // ambiguous (two different prompt pairs could each claim the same slots).
   const labels = packs.map((pack) => pack?.subWave).filter((label) => typeof label === "string");
   if (new Set(labels).size !== labels.length) {
     reasons.push("owner review coverageReceipt lists duplicate sub-wave labels");
@@ -288,6 +549,91 @@ export function validateCoverageReceipt(receipt, expected, { required, namedSubW
         reasons.push(`owner review coverageReceipt pack sub-wave "${name}" has no panel slots`);
       }
     }
+  }
+
+  const fullText = receipt.fullText;
+  for (const role of ["triad", "scope"]) {
+    const report = fullText?.[role];
+    if (
+      !report ||
+      !Number.isInteger(report.covered) ||
+      report.covered < 0 ||
+      !Array.isArray(report.uncovered) ||
+      report.uncovered.length !== 0 ||
+      !Array.isArray(report.duplicates) ||
+      report.duplicates.length !== 0 ||
+      !Array.isArray(report.invalidEnvelopes) ||
+      report.invalidEnvelopes.length !== 0 ||
+      !Array.isArray(report.unexpectedSections) ||
+      report.unexpectedSections.length !== 0
+    ) {
+      reasons.push(`owner review coverageReceipt ${role} full-current-text proof is not clean`);
+    }
+  }
+  if (
+    !Number.isInteger(fullText?.diffAuthoritativeSkips) ||
+    fullText.diffAuthoritativeSkips < 0 ||
+    !Number.isInteger(fullText?.deleted) ||
+    fullText.deleted < 0
+  ) {
+    reasons.push(
+      "owner review coverageReceipt full-current-text classification counts are invalid",
+    );
+  }
+  if (
+    Number.isInteger(fullText?.triad?.covered) &&
+    Number.isInteger(fullText?.scope?.covered) &&
+    fullText.triad.covered !== fullText.scope.covered
+  ) {
+    reasons.push("owner review coverageReceipt triad/scope full-current-text counts differ");
+  }
+
+  const diff = receipt.diff;
+  if (
+    !SHA256.test(diff?.sealedSha256 ?? "") ||
+    !Number.isInteger(diff?.sealedBytes) ||
+    diff.sealedBytes < 0 ||
+    !Number.isInteger(diff?.entries) ||
+    diff.entries < 0
+  ) {
+    reasons.push("owner review coverageReceipt sealed diff identity/count is invalid");
+  }
+  for (const role of ["triad", "scope"]) {
+    const report = diff?.[role];
+    if (
+      !report ||
+      report.ok !== true ||
+      !Number.isInteger(report.covered) ||
+      !Number.isInteger(report.total) ||
+      report.covered !== diff?.entries ||
+      report.total !== diff?.entries ||
+      !Array.isArray(report.uncovered) ||
+      report.uncovered.length !== 0 ||
+      !Array.isArray(report.duplicates) ||
+      report.duplicates.length !== 0 ||
+      !Array.isArray(report.invalidSlices) ||
+      report.invalidSlices.length !== 0
+    ) {
+      reasons.push(`owner review coverageReceipt ${role} exact-diff proof is not clean`);
+    }
+  }
+  for (const role of ["triad", "scope"]) {
+    const report = receipt.inventory?.[role];
+    if (
+      !report ||
+      report.ok !== true ||
+      report.covered !== packs.length ||
+      report.total !== packs.length ||
+      !Array.isArray(report.invalid) ||
+      report.invalid.length !== 0
+    ) {
+      reasons.push(
+        `owner review coverageReceipt ${role} changed-file inventory proof is not clean`,
+      );
+    }
+  }
+  if (!Array.isArray(receipt.subWaveMismatches) || receipt.subWaveMismatches.length !== 0) {
+    reasons.push("owner review coverageReceipt triad/scope sub-wave evidence differs");
   }
   return reasons;
 }
@@ -338,7 +684,7 @@ const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const RELEASE_REVIEW_ATTESTATION_ALGORITHM = "Ed25519";
 
-// Owner-review attestation (schemaVersion 3): the signed publishing proof.
+// Owner-review attestation (schemaVersion 4): the signed publishing proof.
 // The retired schemaVersion-2 six-slot contract was removed in v3.0.0;
 // already-sealed v2 artifacts remain archived with valid signatures, but
 // the publish workflow no longer accepts them as input.
@@ -459,7 +805,7 @@ export function validateFullGateEvidence(gate, expected) {
 }
 
 /**
- * Owner-review payload semantics (schemaVersion 3): exact candidate binding,
+ * Owner-review payload semantics (schemaVersion 4): exact candidate binding,
  * the shared full-gate evidence, and >=2 uniquely-named reviewer reports each
  * digest-bound and carrying a non-blocking verdict. A "block" verdict can
  * never be signed into a shippable attestation — sealing one is the ship
@@ -531,25 +877,26 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
       namedSubWaves,
     }),
   );
-  // Bind each triad slot to the EXACT pack bytes its reviewer consumed: the
-  // slot record's prompt digest must equal its sub-wave's recomputed pack
-  // digest in the receipt — reviewer reports from one set of prompts can
-  // never seal with a coverage proof computed over different packs.
+  // Bind EVERY panel slot to the exact role-specific prompt bytes its reviewer
+  // consumed. Triad and scope prompts intentionally differ, so a single shared
+  // prompt digest would either reject honest evidence or leave one role unbound.
   const receiptPacks = new Map(
-    (payload.coverageReceipt?.packs ?? []).map((pack) => [pack.subWave, pack.sha256]),
+    (payload.coverageReceipt?.packs ?? []).map((pack) => [pack.subWave, pack]),
   );
   if (receiptPacks.size > 0) {
     for (const review of reviews) {
       const panel = review?.panel;
-      if (!panel || panel.slot !== "triad" || typeof panel.subWave !== "string") continue;
-      const expectedDigest = receiptPacks.get(panel.subWave);
+      if (!panel || !["triad", "scope"].includes(panel.slot)) continue;
+      const subWave = typeof panel.subWave === "string" ? panel.subWave : "";
+      const pack = receiptPacks.get(subWave);
+      const expectedDigest = panel.slot === "triad" ? pack?.triadSha256 : pack?.scopeSha256;
       if (!SHA256.test(review.promptSha256 ?? "")) {
         reasons.push(
-          `owner review triad slot ${panel.model} (sub-wave ${panel.subWave}) carries no prompt digest to bind against the coverage receipt`,
+          `owner review ${panel.slot} slot ${panel.model} (sub-wave ${subWave}) carries no prompt digest to bind against the coverage receipt`,
         );
       } else if (expectedDigest && review.promptSha256 !== expectedDigest) {
         reasons.push(
-          `owner review triad slot ${panel.model} (sub-wave ${panel.subWave}) reviewed prompt ${review.promptSha256.slice(0, 12)}… but the coverage receipt binds pack ${expectedDigest.slice(0, 12)}…`,
+          `owner review ${panel.slot} slot ${panel.model} (sub-wave ${subWave}) reviewed prompt ${review.promptSha256.slice(0, 12)}… but the coverage receipt binds prompt ${expectedDigest.slice(0, 12)}…`,
         );
       }
     }
@@ -602,19 +949,69 @@ export function validateFrozenReviewBinding(input) {
   return { ok: reasons.length === 0, reasons };
 }
 
-/**
- * The exact per-file section a covered file gets inside a touched-file pack.
- * The deterministic coverage checker (scripts/review-coverage-check.mjs)
- * matches this byte-for-byte to prove a file's COMPLETE current text reached
- * reviewers — so this format is a contract, not an implementation detail.
- */
-export function touchedFileSection(path, text) {
-  return `### ${path}\n\n\`\`\`\n${text}\n\`\`\``;
+export function touchedFileBody(path, text) {
+  const exactPath = decodeReviewUtf8(path, "full-text path");
+  const exactText = decodeReviewUtf8(text, `full-text file ${JSON.stringify(exactPath)}`);
+  const pathBytes = Buffer.from(exactPath, "utf8");
+  const content = Buffer.from(exactText, "utf8");
+  return Buffer.concat([
+    Buffer.from(`CLAUDEXOR_FULL_TEXT_PAYLOAD_V2 ${pathBytes.length} ${content.length}\n`, "utf8"),
+    pathBytes,
+    Buffer.from("\n\n----- BEGIN COMPLETE CURRENT FILE -----\n", "utf8"),
+    content,
+  ]).toString("utf8");
 }
 
-/** Stable prefix of a touched-file section header (used to spot truncated sections). */
-export function touchedFileHeader(path) {
-  return `### ${path}\n`;
+/** Length/digest-framed current-file evidence; nested forged headers are data. */
+export function touchedFileSection(path, text) {
+  const body = Buffer.from(touchedFileBody(path, text), "utf8");
+  return reviewEvidenceFrame(FULL_TEXT_FILE_HEADER, FULL_TEXT_FILE_FOOTER, body);
+}
+
+/** Extract every top-level full-text envelope while skipping framed bodies. */
+export function extractTouchedFileSections(prompt) {
+  const extracted = parseReviewEvidenceFrames(prompt);
+  if (!extracted.ok) return { ok: false, sections: [], error: extracted.error };
+  const separator = Buffer.from("\n\n----- BEGIN COMPLETE CURRENT FILE -----\n", "utf8");
+  const sections = [];
+  for (const frame of extracted.frames.filter((candidate) => candidate.kind === "fullText")) {
+    const headerEnd = frame.body.indexOf(0x0a);
+    if (headerEnd === -1) {
+      return { ok: false, sections: [], error: "full-text payload header is unterminated" };
+    }
+    const header = frame.body.subarray(0, headerEnd).toString("utf8");
+    const match = /^CLAUDEXOR_FULL_TEXT_PAYLOAD_V2 (0|[1-9]\d*) (0|[1-9]\d*)$/.exec(header);
+    if (!match) return { ok: false, sections: [], error: "full-text payload header is malformed" };
+    const pathLength = Number(match[1]);
+    const contentLength = Number(match[2]);
+    const pathStart = headerEnd + 1;
+    const pathEnd = pathStart + pathLength;
+    const contentStart = pathEnd + separator.length;
+    const contentEnd = contentStart + contentLength;
+    if (
+      !Number.isSafeInteger(pathLength) ||
+      !Number.isSafeInteger(contentLength) ||
+      contentEnd !== frame.body.length ||
+      !frame.body.subarray(pathEnd, contentStart).equals(separator)
+    ) {
+      return { ok: false, sections: [], error: "full-text payload length mismatch" };
+    }
+    const pathBytes = frame.body.subarray(pathStart, pathEnd);
+    const content = frame.body.subarray(contentStart, contentEnd);
+    const path = decodeReviewUtf8(pathBytes, "full-text payload path");
+    decodeReviewUtf8(content, `full-text payload ${JSON.stringify(path)}`);
+    sections.push({
+      body: frame.body,
+      sha256: frame.sha256,
+      path,
+      content,
+    });
+  }
+  return {
+    ok: true,
+    sections,
+    error: null,
+  };
 }
 
 export const TOUCHED_FILE_OMISSION_MARKER = "⚠️ OMISSION NOTE:";
@@ -639,14 +1036,19 @@ export function buildTouchedFilePack(paths, git, maxFileBytes, maxPackBytes, opt
     let text;
     try {
       text = git(["show", `HEAD:${path}`]);
-    } catch {
+    } catch (error) {
+      if (onOmission === "throw") {
+        throw new Error(
+          `touched-file pack could not read ${JSON.stringify(path)} from committed Git bytes: ${String(error)}`,
+        );
+      }
       out.push(`### ${path}\n\n(deleted by this diff)`);
       continue;
     }
     // Budgets count the UTF-8 bytes the transport actually submits — string
     // .length counts UTF-16 code units and undercounts multibyte text — and
     // the FULL section (header + fences + separators), not the bare file.
-    const fileBytes = Buffer.byteLength(text, "utf8");
+    const fileBytes = Buffer.isBuffer(text) ? text.length : Buffer.byteLength(text, "utf8");
     if (fileBytes > maxFileBytes) {
       omitted.push(`${path} (${fileBytes}B > per-file cap; review via diff)`);
       continue;

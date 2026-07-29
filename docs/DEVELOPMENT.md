@@ -118,14 +118,19 @@ current contract) binds the candidate SHA/tree, the full-gate receipt
 digest, and the panel reviewer report digests with non-blocking verdicts;
 a packet-split wave names each sub-wave on its panel slots
 (`triad@<subwave>=model`), must bind a FULL triad+scope panel per sub-wave,
-and must embed the `review-coverage-check --receipt` coverage receipt
-(candidate-bound pack digests + checker verdict) so one sub-wave's report
-can never stand in for the union — the workflow enforces the structural
+and must embed the `review-coverage-check --receipt` coverage receipt. The
+sealer recomputes both role-specific prompt digests, reconstructs the packet's
+complete sealed diff from each role's exact slice union, and proves every
+required hand-written file appears whole exactly once beside its diff, so one
+sub-wave's report can never stand in for the union — the workflow enforces the structural
 floors defined by the Release review protocol in `docs/CHECKLISTS.md`,
 where the panel composition, wave discipline, reviewer count, and round
-bound live as process law. Older schemas (v2's six-slot panel, v3 without
-the packet-split coverage receipt) are no longer accepted for new seals;
-already-sealed artifacts remain archived.
+bound live as process law. The outer attestation remains schema v4; its signed
+inner coverage receipt is independently versioned and current publish accepts
+only coverage schema v2. Historical signed outer-v4/coverage-v1 bytes remain
+cryptographically verifiable as archives but fail current semantic publish
+validation. Older outer schemas (v2's six-slot panel, v3 without packet-split
+coverage) are likewise not accepted for new seals.
 Only after that authority check does the workflow promote the candidate run's
 DMG, ZIP, and SBOM byte-for-byte instead of rebuilding the app; publish
 generates only the signed runtime manifest, review attestation, and final

@@ -327,7 +327,6 @@ describe("evidence packet", () => {
       forbiddenFindings: `Do not ignore ${fakeKey}`,
       planAccepted: `## Plan\nCheck ${fakeKey}`,
       diff: "diff --git a/x b/x\n",
-      filesToReadWhole: [`docs/${fakeKey}.md`],
       tests: `TOKEN=${fakeKey} pnpm test`,
       decidedTradeoffs: `Accepted ${fakeKey}`,
       runtime: `stdout ${fakeKey}`,
@@ -337,7 +336,6 @@ describe("evidence packet", () => {
       "USER_INTENT.md",
       "FORBIDDEN_FINDINGS.md",
       "PLAN_ACCEPTED.md",
-      "FILES_TO_READ_WHOLE.txt",
       "TESTS.txt",
       "DECIDED_TRADEOFFS.md",
       "RUNTIME.md",
@@ -346,6 +344,29 @@ describe("evidence packet", () => {
       expect(text).not.toContain(fakeKey);
       expect(text).toContain("[redacted]");
     }
+    expect(readFileSync(join(dir, "FILES_TO_READ_WHOLE.txt"), "utf8")).toBe("[]\n");
+  });
+
+  it("writes the whole-file authority as exact JSON and rejects secret-like paths", () => {
+    const dir = join(tmp(), ".adversarial-review");
+    const paths = [" leading.md", "line\nbreak.md", "#literal.md", "café.md"];
+    writeEvidencePacket(dir, {
+      userIntent: "do X",
+      diff: "diff --git a/x b/x\n",
+      filesToReadWhole: paths,
+    });
+    expect(JSON.parse(readFileSync(join(dir, "FILES_TO_READ_WHOLE.txt"), "utf8"))).toEqual(paths);
+
+    const rejected = join(tmp(), ".adversarial-review");
+    const fakeKey = "sk-" + "abcdefghijklmnopqrstuvwxyz";
+    expect(() =>
+      writeEvidencePacket(rejected, {
+        userIntent: "do X",
+        diff: "diff --git a/x b/x\n",
+        filesToReadWhole: [`docs/${fakeKey}.md`],
+      }),
+    ).toThrow(/secret-like path/);
+    expect(existsSync(join(rejected, "USER_INTENT.md"))).toBe(false);
   });
 
   it("reports raw patch stats in the redacted diff summary", () => {

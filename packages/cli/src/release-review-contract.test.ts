@@ -19,6 +19,8 @@ import {
   panelLockText,
   blockerContractGaps,
   releaseReviewDecision,
+  reviewPromptContextPreflight,
+  reviewSplitOptionContract,
   reviewDecisionLivenessFloors,
   releaseAttestationSigningBytes,
   livenessFloorMs,
@@ -27,6 +29,7 @@ import {
   validateNewReviewOutput,
   validatePanelLock,
   validateReleaseAttestation,
+  verifyReleaseAttestationSignature,
   validateReleaseInput,
   validateSlotRecord,
   validateChecklistResponse,
@@ -286,6 +289,51 @@ describe("release review fail-closed contract", () => {
     expect(
       reviewerLiveness({ status: "responded", duration_ms: 900 }, livenessFloorMs(150_000)).live,
     ).toBe(false);
+  });
+
+  it("refuses context/output overflow before a reviewer request", () => {
+    for (const model of [...REQUIRED_TRIAD_MODELS, REQUIRED_SCOPE_MODEL]) {
+      expect(reviewPromptContextPreflight(model, "small", 60_000).ok).toBe(true);
+    }
+    expect(
+      reviewPromptContextPreflight("anthropic/claude-fable-5", "x".repeat(900_000), 60_000),
+    ).toMatchObject({
+      ok: true,
+      promptBytes: 900_000,
+      contextTokens: 1_000_000,
+    });
+    const overflow = reviewPromptContextPreflight(
+      "anthropic/claude-fable-5",
+      "x".repeat(940_000),
+      60_000,
+    );
+    expect(overflow.ok).toBe(false);
+    expect(overflow.reasons.join(" ")).toContain("exceeds anthropic/claude-fable-5 context");
+    const output = reviewPromptContextPreflight("google/gemini-3.5-flash", "small", 100_000);
+    expect(output.ok).toBe(false);
+    expect(output.reasons.join(" ")).toContain("maximum 65536");
+    expect(reviewPromptContextPreflight("google/gemini-3.5-flash", "small", 65_537).ok).toBe(false);
+    expect(
+      reviewPromptContextPreflight("unknown/model", "small", 60_000).reasons.join(" "),
+    ).toContain("no frozen context limit");
+  });
+
+  it("cannot turn a split wave anonymous with a missing or blank selector value", () => {
+    expect(reviewSplitOptionContract("pack.json", "diff.json", "engine")).toEqual({
+      ok: true,
+      reasons: [],
+      splitRequested: true,
+    });
+    for (const [pack, diff] of [
+      ["pack.json", ""],
+      ["", "diff.json"],
+      ["pack.json", null],
+      [null, "diff.json"],
+    ]) {
+      expect(reviewSplitOptionContract(pack, diff, "engine").ok).toBe(false);
+    }
+    expect(reviewSplitOptionContract("pack.json", "diff.json", null).ok).toBe(false);
+    expect(reviewSplitOptionContract(null, null, "engine").ok).toBe(false);
   });
 
   it("uses the submitted prompt floors consistently in the final panel decision", () => {
@@ -607,28 +655,66 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
     });
   });
 
-  // One digest per sub-wave NAME, shared by slot fixtures and receipt
-  // fixtures — the validator now binds each triad slot's promptSha256 to its
-  // sub-wave's receipt pack digest.
-  const subWaveDigest = (name: string) =>
-    createHash("sha256").update(`pack-of-${name}`).digest("hex");
+  const subWaveDigest = (name: string, role: "triad" | "scope") =>
+    createHash("sha256").update(`${role}-prompt-of-${name}`).digest("hex");
   const asSubWave = (reviews: any[], name: string) =>
     reviews.map((review: any) => ({
       ...review,
       reviewer: `${review.reviewer}-${name}`,
-      promptSha256: subWaveDigest(name),
+      promptSha256: subWaveDigest(name, review.panel.slot),
       panel: { ...review.panel, subWave: name },
     }));
-  const coverageReceipt = (candidateSha: string, subWaves: string[] = ["macos", "engine"]) => ({
-    receiptSha256: "f".repeat(64),
-    base: "9".repeat(40),
-    candidate: candidateSha,
-    ok: true,
-    packs: subWaves.map((subWave) => ({
-      subWave,
-      sha256: subWaveDigest(subWave),
-    })),
-  });
+  const coverageReceipt = (candidateSha: string, subWaves: string[] = ["macos", "engine"]) => {
+    const diffEntries = 7;
+    const diffProof = {
+      ok: true,
+      covered: diffEntries,
+      total: diffEntries,
+      uncovered: [],
+      duplicates: [],
+      invalidSlices: [],
+    };
+    const fullTextProof = {
+      covered: 5,
+      uncovered: [],
+      duplicates: [],
+      invalidEnvelopes: [],
+      unexpectedSections: [],
+    };
+    const inventoryProof = {
+      ok: true,
+      covered: subWaves.length,
+      total: subWaves.length,
+      invalid: [],
+    };
+    return {
+      schemaVersion: 2,
+      receiptSha256: "f".repeat(64),
+      base: "9".repeat(40),
+      candidate: candidateSha,
+      ok: true,
+      packs: subWaves.map((subWave) => ({
+        subWave,
+        triadSha256: subWaveDigest(subWave, "triad"),
+        scopeSha256: subWaveDigest(subWave, "scope"),
+      })),
+      fullText: {
+        triad: fullTextProof,
+        scope: fullTextProof,
+        diffAuthoritativeSkips: 2,
+        deleted: 1,
+      },
+      diff: {
+        sealedSha256: "e".repeat(64),
+        sealedBytes: 1234,
+        entries: diffEntries,
+        triad: diffProof,
+        scope: diffProof,
+      },
+      inventory: { triad: inventoryProof, scope: inventoryProof },
+      subWaveMismatches: [],
+    };
+  };
 
   it("accepts a packet-split panel: a full triad+scope per named sub-wave plus a coverage receipt (A-8)", () => {
     const { attestation, authority, resign, expected } = ownerAttestation();
@@ -647,6 +733,54 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
       ok: true,
       reasons: [],
     });
+  });
+
+  it("binds triad and scope slots to their distinct role-specific prompt digests", () => {
+    const { attestation, authority, resign, expected } = ownerAttestation();
+    const reviews = asSubWave(attestation.payload.reviews, "macos");
+    const scopeIndex = reviews.findIndex((review: any) => review.panel.slot === "scope");
+    reviews[scopeIndex] = { ...reviews[scopeIndex], promptSha256: subWaveDigest("macos", "triad") };
+    const forged = resign({
+      ...attestation,
+      payload: {
+        ...attestation.payload,
+        reviews,
+        coverageReceipt: coverageReceipt(expected.candidateSha, ["macos"]),
+      },
+    });
+    const verdict = validateReleaseAttestation(forged, authority, expected);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reasons.join(" ")).toContain("scope slot");
+    expect(verdict.reasons.join(" ")).toContain("coverage receipt binds prompt");
+  });
+
+  it("cryptographically verifies archived outer-v4/coverage-v1 bytes but rejects them for publish", () => {
+    const { attestation, authority, resign, expected } = ownerAttestation();
+    const archived = resign({
+      ...attestation,
+      payload: {
+        ...attestation.payload,
+        reviews: asSubWave(attestation.payload.reviews, "macos"),
+        coverageReceipt: {
+          schemaVersion: 1,
+          receiptSha256: "f".repeat(64),
+          base: "9".repeat(40),
+          candidate: expected.candidateSha,
+          ok: true,
+          packs: [{ subWave: "macos", sha256: "e".repeat(64) }],
+        },
+      },
+    });
+    expect(
+      verifyReleaseAttestationSignature(
+        archived,
+        authority,
+        OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
+      ),
+    ).toEqual({ ok: true, reasons: [] });
+    const verdict = validateReleaseAttestation(archived, authority, expected);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reasons).toContain("owner review coverageReceipt schemaVersion must be 2");
   });
 
   it("rejects a packet-split panel with NO coverage receipt — one sub-wave cannot stand for all (A-8)", () => {
@@ -875,7 +1009,14 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
         reviews: asSubWave(attestation.payload.reviews, "macos"),
         coverageReceipt: {
           ...receipt,
-          packs: [...receipt.packs, { subWave: "macos", sha256: "9".repeat(64) }],
+          packs: [
+            ...receipt.packs,
+            {
+              subWave: "macos",
+              triadSha256: "9".repeat(64),
+              scopeSha256: "8".repeat(64),
+            },
+          ],
         },
       },
     });

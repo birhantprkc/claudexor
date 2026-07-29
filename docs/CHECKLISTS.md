@@ -465,7 +465,7 @@ itself). The v3 protocol bounds the loop mechanically.
   row in `docs/reference/review-ledger.md` (the findings ledger); its
   declined rows are the next wave's `DECLINED_FINDINGS.md`.
 - **One confirmation wave on the delta** (the fix diff + every file a fix
-  touched; the full diff is reviewed exactly once, in wave 1). A
+  touched; complete diff coverage is reviewed exactly once, in wave 1). A
   confirmation blocker on UNCHANGED code without new evidence is invalid.
 - **Stop.** New proven blockers after confirmation get a fix + targeted
   re-check of exactly those findings. Anything beyond that requires an
@@ -481,8 +481,9 @@ itself). The v3 protocol bounds the loop mechanically.
   in CI against synthetic fixtures (deep multi-row review, hostile JSON,
   empty output, instant null verdict). Two identical failures from
   different models mean the PROTOCOL is wrong, not the models.
-- **Full-text coverage is a deterministic pre-seal gate (audit A-8).** Every
-  reviewer is told to read the FULL CURRENT TEXT of every changed file. A
+- **Review-evidence coverage is a deterministic pre-seal gate (audit A-8).**
+  Across each role's named sub-wave program, reviewers receive the FULL CURRENT
+  TEXT of every required hand-written changed file. A
   disclosed "omission note" is NOT that guarantee: on a large phase (e.g. Ф3,
   ~157 changed source files, ~3.68MB) the touched-file pack silently dropped
   files past its byte budget, so reviewers did not receive every changed
@@ -491,29 +492,46 @@ itself). The v3 protocol bounds the loop mechanically.
   - `buildTouchedFilePack` in the release transport runs in strict mode: a
     would-be omission FAILS LOUDLY (non-zero) instead of emitting a note, so no
     wave can under-cover without the operator noticing.
-  - Large phases run as N **packet-split sub-waves**. Each sub-wave keeps the
-    full sealed diff and the full changed-file list, but renders the FULL TEXT
-    of only a NAMED SUBSET of the changed files, selected with
-    `--pack-subset <file>` (a list of paths or top-level area prefixes, e.g.
+  - Large phases run as N **packet-split sub-waves**. The sealed packet keeps
+    one complete `git diff --find-renames=50% --binary` as `DIFF.patch`.
+    Each sub-wave keeps the full JSON changed-file inventory and blocker
+    contract, but receives only a NAMED exact readable diff slice plus the FULL
+    TEXT of a NAMED SUBSET of current files. Select both with JSON string arrays:
+    `--diff-subset <file> --pack-subset <file> --sub-wave <name>` (paths or
+    top-level area prefixes, e.g.
     `packages/orchestrator/`, `packages/control-api/`, `apps/macos/ClaudexorApp/`,
     `apps/macos/ClaudexorKit/`, `packages/schema/`, `docs/`). Size each subset
     so `buildTouchedFilePack` supplies full text within `TRIAD_MAX_PACK_BYTES`
     (no omission). Every sub-wave keeps the identical reviewer contract — same
     triad + scope models, same blocker contract, its own per-sub-wave findings.
-  - The **union of every sub-wave's full-text subset MUST equal the full
-    changed-file set.** `scripts/review-coverage-check.mjs --base <sha>
-    --candidate <sha> --pack <each sub-wave's prompt/pack> …` proves this
-    deterministically and is a REQUIRED gate before the seal: it enumerates
-    `git diff -z --name-status base..candidate` (NUL-safe — `--name-only`
+  - The **union proof is role-specific and exact.**
+    `scripts/review-coverage-check.mjs --base <sha> --candidate <sha>
+    --pack <subwave>=<triad-prompt> --scope-pack
+    <subwave>=<scope-prompt> …` is REQUIRED before the seal. Independently for
+    triad and scope it proves every canonical diff entry (including deletions,
+    binaries, generated files, renames, and mode changes) appears exactly once
+    and concatenates byte-for-byte to the sealed `DIFF.patch`; it also proves
+    every required hand-written current file appears whole exactly once. It
+    enumerates `git diff --find-renames=50% -z --name-status
+    base..candidate` (NUL-safe — `--name-only`
     was retired because it C-quotes space/unicode paths), classifies each file as
     hand-written source vs DIFF-AUTHORITATIVE (generated schema under
     `packages/schema/generated/`, `docs/reference/endpoints.json`, swift wire
     fixtures `apps/macos/**/Tests/**/Fixtures/wire/**`, harness fixtures
     `packages/harness-*/fixtures/**`, and a small documented generated-artifact
     allowlist), and exits non-zero unless every hand-written file's complete
-    current bytes appear (untruncated) in at least one supplied pack. A file
+    current bytes appear (untruncated) in exactly one supplied prompt. A file
     listed only in an omission note, or present with altered/truncated bytes,
-    counts as NOT covered.
+    counts as NOT covered; every live hand-written path's diff and full text
+    must be assigned to the same sub-wave. Full-text frames length-prefix path
+    and content independently, and invalid UTF-8 fails before network instead
+    of being replacement-decoded. `FILES_TO_READ_WHOLE.txt` is a JSON string
+    array so path bytes are never line-parsed. The transport also refuses before
+    output creation or network access unless its conservative input-token upper
+    bound plus configured max output fits every exact panel model's frozen
+    context/output ceiling; `TRIAD_MAX_OUTPUT_TOKENS` defaults to 60000. The
+    frozen limits come from `https://openrouter.ai/api/v1/models`, verified
+    2026-07-29.
 - **Attestation:** `scripts/run-full-gate-receipt.mjs` runs
   `pnpm release:verify` and seals the hash-bound gate receipt;
   `scripts/seal-owner-review-attestation.mjs` signs the attestation (exact
@@ -529,11 +547,13 @@ itself). The v3 protocol bounds the loop mechanically.
   reports only. A packet-split wave binds one full triad+scope panel PER
   named sub-wave and MUST pass `--coverage-receipt` (the
   `review-coverage-check --receipt` output over the union of sub-wave
-  packs, labels unique, `--pack <subwave>=<file>`); the verifier refuses a
-  packet-split seal without it — a single sub-wave's report can never stand
-  in for all, and each triad slot's prompt digest must equal its sub-wave's
-  receipt pack digest.
-  `verify-release-input.mjs` verifies the signature before semantic
-  validation; older sealed schemas stay verifiable for their releases. An
-  owner override is a distinct recorded fact in the attestation, never a
-  reviewer PASS.
+  triad+scope prompt pairs, labels unique); the verifier refuses a packet-split
+  seal without it — a single sub-wave's report can never stand in for all, and
+  every triad or scope slot's prompt digest must equal its role-specific digest
+  in the receipt.
+  The outer attestation stays schema v4; the signed inner coverage receipt is
+  independently schema v2. `verify-release-input.mjs` verifies the signature
+  before semantic validation. Historical outer-v4/coverage-v1 bytes remain
+  cryptographically verifiable as archives but are rejected by current publish
+  semantics. An owner override is a distinct recorded fact in the attestation,
+  never a reviewer PASS.

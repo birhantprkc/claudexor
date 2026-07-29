@@ -682,16 +682,21 @@ invariant or owner decision before proceeding.
   explicit owner override is a hard error; an override is a distinct recorded
   fact, never a reviewer PASS. When one sealed packet exceeds a single
   reviewable full-text pack, the wave is PACKET-SPLIT — CONCEPT-CHANGE(INV-125)
-  — into named sub-waves: every sub-wave reads the SAME sealed packet and
-  full diff with a partitioned full-text pack, EACH binds its own full
-  triad+scope panel (slot `triad@<subwave>=model`), and the attestation
-  additionally binds the union-coverage receipt — RECOMPUTED by the sealer
-  from disk bytes, never trusted from a caller — mapping every sub-wave to
-  its exact pack digest, with the union proven to cover every changed file
+  — into named sub-waves. The sealed packet still owns one complete binary
+  `DIFF.patch`; every sub-wave receives the full changed-file inventory plus
+  one exact readable diff slice and one partitioned full-current-text subset,
+  and EACH binds its own full triad+scope panel (slot
+  `triad@<subwave>=model`). The attestation additionally binds the
+  union-coverage receipt — RECOMPUTED by the sealer from disk bytes, never
+  trusted from a caller — mapping every sub-wave to its role-specific triad
+  and scope prompt digests. For BOTH roles the slice union must reconstruct
+  the sealed diff byte-for-byte and every required hand-written current file
+  must appear whole exactly once, paired with its diff in the same sub-wave
   (`scripts/review-coverage-check.mjs`); a seal naming ANY sub-wave without
-  that receipt, or whose receipt labels differ from the panel's sub-waves,
-  is refused. Older-schema attestations are REJECTED as publish input;
-  already-sealed ones stay verifiable only for their own archived releases.
+  that receipt, or whose receipt labels differ from the panel's sub-waves, is
+  refused. Older-schema attestations are REJECTED as publish input;
+  already-sealed ones stay cryptographically verifiable only for their own
+  archived releases.
   A whole-tree immune scan (docs-vs-code, dead surface,
   invariants-vs-tree) is a mandatory pre-release checklist step.
   verify: `scripts/seal-owner-review-attestation.mjs` (panel + round
