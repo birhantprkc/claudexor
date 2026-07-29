@@ -108,11 +108,12 @@ terminates through a tool schema that cannot carry Claudexor's mandatory final
 WorkReport; the plan intent still comes from Claudexor's planning prompt. The
 lanes converge on the same shape: research read-only, ask clarifying questions,
 propose, refine — and surface the questions as typed cards the user can answer;
-each answer round continues the planner's own lane natively. A plan that still
-has open questions is not implementable; a plan
-whose questions are resolved freezes on implement into a content-hashed
-contract file delivered to the executor as a file it can re-read at any
-time, not as prompt text pasted into the conversation.
+each answer round continues the planner's own lane natively. Open questions
+block implementation by default; an explicit **Implement anyway** choice may
+override that readiness check, and the resulting turn records the override.
+Otherwise, a plan whose questions are resolved freezes on implement into a
+content-hashed contract file delivered to the executor as a file it can re-read
+at any time, not as prompt text pasted into the conversation.
 
 Multi-harness planning is a council, not a concatenation: members draft in
 parallel lanes, the primary merges into one plan and one question list, the
