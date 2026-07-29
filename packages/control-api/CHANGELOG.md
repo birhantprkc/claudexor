@@ -5,6 +5,7 @@
 ### Patch Changes
 
 - Preserve typed run applicability, Git capability, safe durable refusal context and exact retry remedies, and one canonical terminal presentation across control projections.
+- Preserve the deciding credential profile when projecting telemetry auth-route receipts.
 - @claudexor/delivery@3.2.0
 - @claudexor/event-log@3.2.0
 - @claudexor/schema@3.2.0

@@ -36,6 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { CLAUDE_VENDOR_CLI_VERSION } from "@claudexor/harness-claude";
 import { CODEX_VENDOR_CLI_VERSION } from "@claudexor/harness-codex";
 import { OPENCODE_VENDOR_CLI_VERSION } from "@claudexor/harness-opencode";
+import { composeBaseEnv } from "@claudexor/core";
 import type { PinnedVendorCliVersion } from "@claudexor/util";
 import { flagBool, type ParsedArgs } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
@@ -154,7 +155,9 @@ export function runHarnessInstaller(
     if (json) process.stderr.write(line + "\n");
     else print(line);
   };
-  const environment = { ...process.env, HOME: home };
+  // Vendor-controlled npm/curl/shell children receive the shared minimal
+  // runtime env, never the parent process's provider credentials.
+  const environment = { ...composeBaseEnv("clean"), HOME: home };
   const pin = NPM_PINS[harness];
   if (pin) {
     const vendorRoot = join(home, ".claudexor", "remote", "vendor");

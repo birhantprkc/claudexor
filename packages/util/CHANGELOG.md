@@ -5,6 +5,7 @@
 ### Patch Changes
 
 - Add bounded problem redaction and normalized retry-delay helpers for every control and harness surface.
+- Reject unsigned extension fields in the signed runtime-update manifest.
 
 ## 3.1.2
 

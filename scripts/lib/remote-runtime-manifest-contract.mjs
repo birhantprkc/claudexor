@@ -59,6 +59,20 @@ const REMOTE_RUNTIME_SIGNED_ASSET_FIELDS = Object.freeze([
   "target",
 ]);
 
+const REMOTE_RUNTIME_MANIFEST_FIELDS = Object.freeze([
+  "algorithm",
+  "assets",
+  "buildSha",
+  "keyId",
+  "kind",
+  "minAppVersion",
+  "notes",
+  "protocolMajor",
+  "schemaVersion",
+  "signature",
+  "version",
+]);
+
 function signedAssetProjection(asset) {
   if (!asset || typeof asset !== "object" || Array.isArray(asset)) return asset;
   return {
@@ -97,6 +111,12 @@ export function validateRemoteRuntimeManifestShape(manifest, { expectVersion } =
   const reasons = [];
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     return { ok: false, reasons: ["manifest is not an object"] };
+  }
+  const unknownManifestKeys = Object.keys(manifest)
+    .filter((key) => !REMOTE_RUNTIME_MANIFEST_FIELDS.includes(key))
+    .sort();
+  if (unknownManifestKeys.length > 0) {
+    reasons.push(`manifest has unknown field(s) ${unknownManifestKeys.join(", ")}`);
   }
   if (manifest.schemaVersion !== RUNTIME_MANIFEST_SCHEMA_VERSION) {
     reasons.push(`schemaVersion must be ${RUNTIME_MANIFEST_SCHEMA_VERSION}`);
@@ -214,6 +234,16 @@ export function verifyRemoteRuntimeManifest(manifest, authority, opts = {}) {
 }
 
 export function signRemoteRuntimeManifest(unsigned, privateKeyPem, authority) {
+  const unknownInputKeys = Object.keys(unsigned ?? {})
+    .filter((key) => key !== "signature" && !REMOTE_RUNTIME_MANIFEST_FIELDS.includes(key))
+    .sort();
+  if (unknownInputKeys.length > 0 || Object.hasOwn(unsigned ?? {}, "signature")) {
+    const names = [
+      ...unknownInputKeys,
+      ...(Object.hasOwn(unsigned ?? {}, "signature") ? ["signature"] : []),
+    ];
+    throw new Error(`refusing to sign a remote manifest with unknown field(s) ${names.join(", ")}`);
+  }
   const assets = Array.isArray(unsigned.assets)
     ? [...unsigned.assets].sort(
         (a, b) =>

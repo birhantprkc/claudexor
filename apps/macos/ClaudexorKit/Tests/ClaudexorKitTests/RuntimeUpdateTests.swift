@@ -59,6 +59,14 @@ import Testing
         #expect(RuntimeManifest.verified(data, authority: try testAuthority()) == nil)
     }
 
+    @Test func refusesAnUnsignedExtensionField() throws {
+        var obj =
+            try JSONSerialization.jsonObject(with: fixture("valid-manifest")) as! [String: Any]
+        obj["mirrorUrl"] = "https://evil.example/runtime.tar.gz"
+        let data = try JSONSerialization.data(withJSONObject: obj)
+        #expect(RuntimeManifest.verified(data, authority: try testAuthority()) == nil)
+    }
+
     @Test func refusesAnUnknownSigningKey() throws {
         // The fixture is signed by the TEST key; verifying against the PINNED
         // production authority must refuse it (keyId mismatch).

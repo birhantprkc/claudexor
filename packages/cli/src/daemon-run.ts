@@ -28,6 +28,7 @@ import {
 } from "./run-detail-projections.js";
 export { projectOutcomeBanner, type ApplyEligibilityProjection } from "./run-detail-projections.js";
 import { projectRunOutcomeFacts } from "./daemon-outcome.js";
+import { readRunDetailResponse } from "./run-detail-response.js";
 export { projectRunOutcomeFacts, mergeDaemonRunOutcome } from "./daemon-outcome.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -361,9 +362,9 @@ export async function enqueueAndAwait(
 
 /**
  * Strip the server-owned keys the strict ControlThreadTurnRequest schema
- * rejects (scope/execution/lineage): POST /threads/:id/turns derives them from
- * the thread itself. Everything else the user passed (mode, prompt, harness
- * pool, budget, ...) rides through unchanged.
+ * rejects (scope/execution/lineage/frozen-plan reference):
+ * POST /threads/:id/turns derives them from the thread itself. Everything else
+ * the user passed (mode, prompt, harness pool, budget, ...) rides through.
  */
 function threadTurnBody(body: Record<string, unknown>): Record<string, unknown> {
   const {
@@ -374,6 +375,7 @@ function threadTurnBody(body: Record<string, unknown>): Record<string, unknown> 
     parentRunId: _parentRunId,
     delegatedFromRunId: _delegatedFromRunId,
     retryOf: _retryOf,
+    planRef: _planRef,
     ...rest
   } = body;
   return rest;
@@ -518,11 +520,7 @@ export async function fetchRunDetail(
     const body: unknown = await res.json().catch(() => ({}));
     throw controlProblemError(res.status, body, `run detail failed (HTTP ${res.status})`);
   }
-  try {
-    return (await res.json()) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+  return readRunDetailResponse(res);
 }
 
 export async function fetchApplyEligibility(

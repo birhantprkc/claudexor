@@ -6,6 +6,11 @@ import {
   type ExpectedRunFactsIdentity,
   type RunFacts as RunFactsType,
 } from "@claudexor/schema";
+import {
+  projectApplyEligibility,
+  projectOutcomeBanner,
+  type ApplyEligibilityProjection,
+} from "./run-detail-projections.js";
 
 type RunDetail = Record<string, unknown> | null;
 
@@ -13,13 +18,6 @@ type RunDetail = Record<string, unknown> | null;
 // owner (@claudexor/schema, S2); this module keeps only the CLI's own
 // filesystem guards and detail plumbing.
 export type { ExpectedRunFactsIdentity } from "@claudexor/schema";
-
-export type ApplyEligibilityProjection = {
-  eligible: boolean;
-  state: string | null;
-  reason: string | null;
-  requiredAction: string | null;
-};
 
 /** Exact validated terminal receipt from an already-fetched run detail. */
 export function projectRunFacts(
@@ -30,20 +28,6 @@ export function projectRunFacts(
   const value = detail["runFacts"];
   if (value === null || value === undefined) return null;
   return validateRunFactsReceipt(value, expectedIdentityFromDetail(detail, expected));
-}
-
-/** Pure projection of the delivery-gate verdict from an already-fetched detail. */
-export function projectApplyEligibility(detail: RunDetail): ApplyEligibilityProjection | null {
-  if (!detail) return null;
-  const value = detail["applyEligibility"];
-  return value && typeof value === "object" ? (value as ApplyEligibilityProjection) : null;
-}
-
-/** Pure projection of the server-owned outcome banner from a fetched detail. */
-export function projectOutcomeBanner(detail: RunDetail): string | null {
-  if (!detail) return null;
-  const banner = detail["outcomeBanner"];
-  return typeof banner === "string" && banner.length > 0 ? banner : null;
 }
 
 /**

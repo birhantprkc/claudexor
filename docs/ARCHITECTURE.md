@@ -540,7 +540,8 @@ key; codex: scoped `CODEX_HOME` login / scoped key `auth.json`; cursor,
 opencode, raw-api: secret-ref keys only). Adapters stamp
 `credential_profile_id` beside `credential_route` on stream events so quota
 and retry evidence stays profile-attributable, and the run's `auth_route`
-receipt carries `profile_id`. Vendor sessions record the profile they were
+receipt carries `profile_id`; Control API projects it as `authRoute.profileId`
+without re-deriving it. Vendor sessions record the profile they were
 created under; resume never crosses profiles. `claudexor profiles login
 <harness> <id>` scopes the vendor login to the profile dir: codex rides the
 SAME durable device-code setup job as the default login (D-17); the other
@@ -1870,7 +1871,10 @@ as the exact validated value from `final/run_facts.yaml`; it is null while the
 run is active and for legacy runs without the receipt. Terminal CLI JSON and
 JSON-stream output project that same run-detail value, while artifact-only
 `claudexor inspect --json` reads the canonical file directly. None of these
-surfaces reconstructs shared terminal facts. `summary.webEvidence` and
+surfaces reconstructs shared terminal facts. A malformed HTTP 200 is not a
+legacy/missing detail: the CLI validates the response against `ControlRunDetail`
+and raises a typed retryable service problem; MCP/ACP keep the terminal handle
+and expose a secret-redacted typed detail problem. `summary.webEvidence` and
 tool-error rollups are projections of the engine-owned
 `final/telemetry.yaml` (the orchestrator is the single evidence owner); runs
 that predate that artifact report `available: false` instead of recomputed
@@ -2098,7 +2102,9 @@ protocol major, minimum app version and SHA-256 for four archives:
 `linux-x64`, `linux-arm64`, `darwin-x64`, and `darwin-arm64`. Each archive
 contains the release-built CLI/daemon/setup/browser closure and the exact Node
 version pinned by `.node-version`; official Node archive digests are pinned in
-`scripts/remote-node-sha256.json`. The app verifies Ed25519 and archive SHA-256,
+`scripts/remote-node-sha256.json`. The JS and Swift verifiers reject unknown
+manifest or asset fields before signature verification, so an unsigned extension
+cannot ride beside the explicit cross-language signing projection. The app verifies Ed25519 and archive SHA-256,
 uploads through SSH, probes a staging directory, and atomically switches
 `~/.claudexor/remote/current`, retaining `last-known-good` for rollback. No
 remote installation uses `sudo`. A newer compatible runtime is never
@@ -2145,7 +2151,9 @@ verbatim before opening the terminal sheet, including the typed evidence class
 same honest pin wording as the CLI. Failures are typed and loud — a
 failed or unreadable download refuses without executing, a non-zero installer
 exit never reads as success, and Harness Doctor verifies the result
-afterward.
+afterward. Every npm, curl, and vendor-script child receives the shared minimal
+runtime environment, including proxy and trust settings but no provider or
+operator credential variables.
 
 `claudexor remote bootstrap --json` starts or discovers the remote daemon and
 returns its loopback endpoint. The daemon remains bound to `127.0.0.1`; the app
@@ -2211,7 +2219,9 @@ as an available update. Exact-artifact promotion (A-5): the candidate release
 workflow builds the closure + an UNSIGNED manifest and uploads them as an
 immutable run artifact; the owner signs the manifest OFFLINE against that exact
 digest (`scripts/sign-runtime-manifest.mjs`, external 0600 key, refuses unstamped
-fields); the publish workflow takes the candidate `run id` + the signed manifest
+fields and refuses unsigned extension fields in every verifier); every offline signing ceremony opens its key with no-follow semantics
+and requires a same-user regular file with exact mode 0600 before reading bytes.
+The publish workflow takes the candidate `run id` + the signed manifest
 as inputs, `download-artifact`s the candidate run's EXACT closure bytes (never a
 publish rebuild), verifies their build provenance, and `scripts/verify-signed-
 runtime-manifest.mjs` refuses to ship unless the signature verifies against the

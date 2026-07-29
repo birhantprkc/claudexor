@@ -159,10 +159,12 @@ import Testing
         {"runId":"run-1","state":"succeeded","authRoute":{
           "requested":"auto","effective":"subscription","source":"native_session",
           "reason":"native_first","harnessId":"claude","attemptId":"a01",
+          "profileId":"work",
           "modelMismatch":{"requested":"claude-fable-5","observed":"claude-opus-4-8"}
         }}
         """#.utf8))
         #expect(summary.authRoute?.effective == "subscription")
+        #expect(summary.authRoute?.profileId == "work")
         #expect(summary.authRoute?.modelMismatch == RunAuthRoute.ModelMismatch(
             requested: "claude-fable-5", observed: "claude-opus-4-8"
         ))

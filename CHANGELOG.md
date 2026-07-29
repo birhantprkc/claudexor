@@ -92,7 +92,9 @@ Release history for Claudexor. The current version is declared in the root
   without rewriting the sealed runner manifest.
   Deep Research resets inactivity only for genuine agent progress, while typed
   refusals, Git readiness, retry remedies, terminal output, and final RunFacts
-  retain the same durable reason across UI, CLI, API, MCP, and ACP.
+  retain the same durable reason across UI, CLI, API, MCP, and ACP. Successful
+  run-detail responses are schema-checked, degraded MCP/ACP errors are redacted,
+  and auth-route summaries retain the deciding credential profile.
   Concurrency and upgrade paths are hardened at their owning boundaries. Remote
   setup, install, project, preview, directory, and terminal actions carry exact
   generation-scoped leases; runtime activation commits only after the tunneled
@@ -102,6 +104,10 @@ Release history for Claudexor. The current version is declared in the root
   The packaged app probes the selected local daemon closure and reconciles exact
   version plus build identity before hydrating state, deferring safely while
   work is active.
+  Both local-update and remote-runtime manifests reject unsigned extension
+  fields in every JS, TypeScript, and Swift verifier;
+  installer children receive no provider secrets, and offline signing keys are
+  read only from same-user, non-symlinked 0600 files.
   Accounts and Settings share explicit location-scoped loading truth. File and
   screenshot attachments are admitted from metadata before bounded reads,
   revalidated on publication, and retired on an explicit conversation switch.

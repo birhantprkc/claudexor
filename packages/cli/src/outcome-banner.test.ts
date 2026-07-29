@@ -10,12 +10,16 @@ import { fetchOutcomeBanner, fetchRunDetail, fetchRunOutcomeFacts } from "./daem
 import type { ControlApiAddress } from "./live.js";
 
 const addr = { host: "127.0.0.1", port: 1, token: "t" } as unknown as ControlApiAddress;
+const detail = (fields: Record<string, unknown> = {}): Record<string, unknown> => ({
+  summary: { jobId: "job-1", runId: "run-1", state: "succeeded" },
+  ...fields,
+});
 
 describe("fetchOutcomeBanner (CLI consumer of the server-owned banner, D18)", () => {
   it("returns the server-owned banner string verbatim from the run detail", async () => {
     mocks.controlApiFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({ outcomeBanner: "Candidate ready — NOT APPLIED" }),
+      json: async () => detail({ outcomeBanner: "Candidate ready — NOT APPLIED" }),
     });
     expect(await fetchOutcomeBanner(addr, "run-1")).toBe("Candidate ready — NOT APPLIED");
   });
@@ -23,7 +27,7 @@ describe("fetchOutcomeBanner (CLI consumer of the server-owned banner, D18)", ()
   it("returns null when the run is not terminal (no banner yet)", async () => {
     mocks.controlApiFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({ outcomeBanner: null }),
+      json: async () => detail({ outcomeBanner: null }),
     });
     expect(await fetchOutcomeBanner(addr, "run-1")).toBeNull();
   });
@@ -76,13 +80,39 @@ describe("fetchRunDetail three-state semantics (missing / unavailable / invalid)
     });
   });
 
+  it("raises a typed problem when a successful response is malformed", async () => {
+    mocks.controlApiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("unexpected token");
+      },
+    });
+    await expect(fetchRunDetail(addr, "run-1")).rejects.toMatchObject({
+      code: "invalid_service_response",
+      retryable: true,
+    });
+
+    mocks.controlApiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ outcomeBanner: "missing required summary" }),
+    });
+    await expect(fetchRunDetail(addr, "run-1")).rejects.toMatchObject({
+      code: "invalid_service_response",
+      retryable: true,
+    });
+  });
+
   it("returns the parsed detail body on success", async () => {
     mocks.controlApiFetch.mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ runFacts: null, outcomeBanner: "Done" }),
+      json: async () => detail({ runFacts: null, outcomeBanner: "Done" }),
     });
-    expect(await fetchRunDetail(addr, "run-1")).toEqual({ runFacts: null, outcomeBanner: "Done" });
+    expect(await fetchRunDetail(addr, "run-1")).toEqual(
+      detail({ runFacts: null, outcomeBanner: "Done" }),
+    );
   });
 });
 
@@ -93,18 +123,22 @@ describe("fetchRunOutcomeFacts (three-state, D-16 exit projection)", () => {
   it("projects the outcome facts from the run detail summary", async () => {
     mocks.controlApiFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({
-        summary: {
-          outcomeFacts: {
-            lifecycle: "succeeded",
-            noChanges: false,
-            checks: "not_configured",
-            review: "not_run",
-            reason: null,
-            work_state: { state: "needs_input", source: "validated" },
+      json: async () =>
+        detail({
+          summary: {
+            jobId: "job-1",
+            runId: "run-1",
+            state: "succeeded",
+            outcomeFacts: {
+              lifecycle: "succeeded",
+              noChanges: false,
+              checks: "not_configured",
+              review: "not_run",
+              reason: null,
+              work_state: { state: "needs_input", source: "validated" },
+            },
           },
-        },
-      }),
+        }),
     });
     expect(await fetchRunOutcomeFacts(addr, "run-1")).toMatchObject({
       lifecycle: "succeeded",

@@ -78,6 +78,7 @@ public struct RunAuthRoute: Codable, Sendable, Equatable, Hashable {
     public let reason: String
     public let harnessId: String?
     public let attemptId: String?
+    public let profileId: String?
     public let modelMismatch: ModelMismatch?
 }
 

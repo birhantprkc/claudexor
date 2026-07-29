@@ -29,6 +29,7 @@ import {
   signRuntimeManifest,
   verifyRuntimeManifest,
 } from "./lib/runtime-manifest-contract.mjs";
+import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
 
 const options = {};
 const argv = process.argv.slice(2);
@@ -63,7 +64,7 @@ try {
     unsigned.archiveName = runtimeArchiveName(unsigned.version);
   }
 
-  const privateKeyPem = readFileSync(options["private-key"], "utf8");
+  const privateKeyPem = readPrivateSigningKey(options["private-key"]);
   const signed = signRuntimeManifest(unsigned, privateKeyPem, authority);
 
   // Belt-and-braces: re-verify the exact object we are about to write.

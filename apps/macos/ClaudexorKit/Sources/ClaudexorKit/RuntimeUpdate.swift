@@ -211,6 +211,7 @@ public struct RuntimeManifest: Codable, Sendable, Equatable {
         _ data: Data,
         authority: RuntimeUpdateAuthority = .pinned
     ) -> RuntimeManifest? {
+        guard hasOnlySignedWireFields(data) else { return nil }
         guard let m = parse(data) else { return nil }
         guard m.schemaVersion == 1 else { return nil }
         guard m.algorithm == "Ed25519", authority.algorithm == "Ed25519" else { return nil }
@@ -225,6 +226,18 @@ public struct RuntimeManifest: Codable, Sendable, Equatable {
         guard let sig = Data(base64Encoded: m.signature), sig.count == 64 else { return nil }
         guard key.isValidSignature(sig, for: m.signingBytes()) else { return nil }
         return m
+    }
+
+    private static func hasOnlySignedWireFields(_ data: Data) -> Bool {
+        let fields: Set<String> = [
+            "schemaVersion", "version", "sha256", "minAppVersion", "archiveName", "archiveUrl",
+            "buildSha", "notes", "keyId", "algorithm", "signature",
+        ]
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let manifest = object as? [String: Any],
+              Set(manifest.keys) == fields
+        else { return false }
+        return true
     }
 }
 

@@ -10,7 +10,6 @@ import {
   ProviderFamily,
 } from "./primitives.js";
 import {
-  AuthMode,
   PaidBudget,
   PaidFallback,
   QualityTierSet,
@@ -18,7 +17,6 @@ import {
   RoutingGoal,
 } from "./budget.js";
 export { ControlQuotaResponse } from "./quota.js";
-import { AuthRouteReason, AuthSourceKind } from "./auth.js";
 import { RunOutcomeFacts } from "./decision.js";
 import { EffortHint, HarnessModel, InteractionQuestion } from "./harness.js";
 import { ContinuityKind, ThreadState, ThreadTurnKind, WorkspaceMode } from "./thread.js";
@@ -27,6 +25,7 @@ import { RequestRequirementResolution } from "./request-requirements.js";
 import { ProtectedPathApproval, TestCommandInvocation } from "./task.js";
 import { RunScope } from "./control-run-scope.js";
 import { makeControlRunRetrySchemas } from "./control-run-retry.js";
+import { ControlAuthRoute } from "./control-auth-route.js";
 import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
 import { InteractionTimeoutValue } from "./config.js";
 
@@ -742,23 +741,7 @@ export const ControlRunSummary = z
      * engine telemetry: requested preference, effective route/source the
      * deciding attempt disclosed, and a deterministic typed reason. Null on
      * runs whose telemetry predates the receipt. */
-    authRoute: z
-      .object({
-        requested: AuthPreference,
-        effective: AuthMode.nullable().default(null),
-        source: AuthSourceKind.nullable().default(null),
-        reason: AuthRouteReason,
-        harnessId: z.string().nullable().default(null),
-        attemptId: z.string().nullable().default(null),
-        /** Requested-vs-observed model mismatch on the deciding attempt; null
-         * when they match or either side is unknown. */
-        modelMismatch: z
-          .object({ requested: z.string(), observed: z.string() })
-          .nullable()
-          .default(null)
-          .describe("Requested-vs-observed model mismatch; null when none."),
-      })
-      .nullable()
+    authRoute: ControlAuthRoute.nullable()
       .optional()
       .describe(
         "Auth route receipt (requested/effective/source/reason + disclosing attempt), projected verbatim from telemetry; null when unavailable.",

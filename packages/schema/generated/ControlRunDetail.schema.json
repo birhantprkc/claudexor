@@ -578,6 +578,14 @@
                       ],
                       "default": null
                     },
+                    "profileId": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "default": null,
+                      "description": "Credential profile the deciding attempt ran under; null = engine-default credentials."
+                    },
                     "modelMismatch": {
                       "anyOf": [
                         {

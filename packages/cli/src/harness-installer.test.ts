@@ -111,6 +111,41 @@ describe("pinned versions (issue #89: never @latest)", () => {
 });
 
 describe("runHarnessInstaller", () => {
+  it("uses the shared clean child environment instead of forwarding provider secrets", () => {
+    const names = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "HTTPS_PROXY"];
+    const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    process.env.OPENAI_API_KEY = "secret-openai";
+    process.env.ANTHROPIC_API_KEY = "secret-anthropic";
+    process.env.GITHUB_TOKEN = "secret-github";
+    process.env.HTTPS_PROXY = "https://proxy.example";
+    let environment: NodeJS.ProcessEnv | undefined;
+    const spawn = vi.fn(
+      (_binary: string, _argv: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => {
+        environment = options?.env;
+        return { status: 0 } as never;
+      },
+    );
+    try {
+      runHarnessInstaller("codex", {
+        home: "/tmp/operator",
+        nodePath: "/runtime/node/bin/node",
+        spawn: spawn as never,
+        mkdir: vi.fn(),
+        exists: () => true,
+      });
+      expect(environment?.HOME).toBe("/tmp/operator");
+      expect(environment?.HTTPS_PROXY).toBe("https://proxy.example");
+      expect(environment?.OPENAI_API_KEY).toBeUndefined();
+      expect(environment?.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(environment?.GITHUB_TOKEN).toBeUndefined();
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it("uses typed argv for npm installers with the exact pin under the app-owned prefix", () => {
     const spawn = vi.fn(() => ({ status: 0 }) as never);
     const result = runHarnessInstaller("codex", {

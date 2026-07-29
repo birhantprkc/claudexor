@@ -49,6 +49,19 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA_HEX = /^[0-9a-f]{40}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const RUNTIME_MANIFEST_FIELDS = Object.freeze([
+  "algorithm",
+  "archiveName",
+  "archiveUrl",
+  "buildSha",
+  "keyId",
+  "minAppVersion",
+  "notes",
+  "schemaVersion",
+  "sha256",
+  "signature",
+  "version",
+]);
 
 export function isSemver(value) {
   return typeof value === "string" && SEMVER.test(value);
@@ -109,6 +122,12 @@ export function validateRuntimeManifestShape(manifest, { expectVersion } = {}) {
   const reasons = [];
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     return { ok: false, reasons: ["manifest is not an object"] };
+  }
+  const unknownKeys = Object.keys(manifest)
+    .filter((key) => !RUNTIME_MANIFEST_FIELDS.includes(key))
+    .sort();
+  if (unknownKeys.length > 0) {
+    reasons.push(`manifest has unknown field(s) ${unknownKeys.join(", ")}`);
   }
   if (manifest.schemaVersion !== RUNTIME_MANIFEST_SCHEMA_VERSION) {
     reasons.push(`schemaVersion must be ${RUNTIME_MANIFEST_SCHEMA_VERSION}`);
@@ -196,6 +215,16 @@ export function verifyRuntimeManifest(manifest, authority, opts = {}) {
  * Returns the manifest with `keyId`, `algorithm`, and `signature` populated.
  */
 export function signRuntimeManifest(unsigned, privateKeyPem, authority) {
+  const unknownInputKeys = Object.keys(unsigned ?? {})
+    .filter((key) => key !== "signature" && !RUNTIME_MANIFEST_FIELDS.includes(key))
+    .sort();
+  if (unknownInputKeys.length > 0 || Object.hasOwn(unsigned ?? {}, "signature")) {
+    const names = [
+      ...unknownInputKeys,
+      ...(Object.hasOwn(unsigned ?? {}, "signature") ? ["signature"] : []),
+    ];
+    throw new Error(`refusing to sign a manifest with unknown field(s) ${names.join(", ")}`);
+  }
   const withKey = {
     schemaVersion: RUNTIME_MANIFEST_SCHEMA_VERSION,
     version: unsigned.version,

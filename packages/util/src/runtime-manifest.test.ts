@@ -78,6 +78,12 @@ describe("runtime-update manifest verify (fail-closed)", () => {
     expect(v.reasons.length).toBeGreaterThan(0);
   });
 
+  it("refuses unsigned extension fields across both verifier implementations", () => {
+    const widened = { ...VALID, mirrorUrl: "https://evil.example/runtime.tar.gz" };
+    expect(verifyRuntimeManifest(widened, TEST_AUTHORITY).ok).toBe(false);
+    expect(mjsVerify(widened, TEST_AUTHORITY).ok).toBe(false);
+  });
+
   it("refuses a wrong schemaVersion / bad buildSha / missing signature", () => {
     expect(verifyRuntimeManifest({ ...VALID, schemaVersion: 2 }, TEST_AUTHORITY).ok).toBe(false);
     expect(verifyRuntimeManifest({ ...VALID, buildSha: "unknown" }, TEST_AUTHORITY).ok).toBe(false);
@@ -117,6 +123,12 @@ describe("TS ↔ release-tooling (mjs) parity", () => {
     );
     expect(verifyRuntimeManifest(signed, TEST_AUTHORITY).ok).toBe(true);
     expect(mjsVerify(signed, TEST_AUTHORITY).ok).toBe(true);
+  });
+
+  it("refuses to sign a manifest carrying an unsigned extension field", () => {
+    const { signature: _signature, ...unsigned } = VALID;
+    const widened = { ...unsigned, mirrorUrl: "https://evil.example/runtime.tar.gz" };
+    expect(() => mjsSign(widened, TEST_PRIVATE_KEY_PEM, TEST_AUTHORITY)).toThrow(/unknown field/);
   });
 
   it("canonicalJson matches across a nested value", () => {

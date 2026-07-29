@@ -112,6 +112,23 @@ describe("remote runtime manifest", () => {
     expect(verdict.reasons.join("; ")).toMatch(/unknown field/);
   });
 
+  it("refuses an unknown top-level field that the signing projection would omit", () => {
+    const widenedInput = { ...unsignedManifest(), mirrorUrl: "https://evil.example/manifest.json" };
+    expect(() =>
+      signRemoteRuntimeManifest(widenedInput, TEST_PRIVATE_KEY_PEM, TEST_AUTHORITY),
+    ).toThrow(/unknown field/);
+
+    const signed = signRemoteRuntimeManifest(
+      unsignedManifest(),
+      TEST_PRIVATE_KEY_PEM,
+      TEST_AUTHORITY,
+    );
+    const widened = { ...signed, mirrorUrl: "https://evil.example/manifest.json" };
+    const verdict = verifyRemoteRuntimeManifest(widened, TEST_AUTHORITY);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reasons.join("; ")).toMatch(/unknown field/);
+  });
+
   it("canonicalizes caller-provided asset order before signing", () => {
     const input = unsignedManifest();
     input.assets.reverse();

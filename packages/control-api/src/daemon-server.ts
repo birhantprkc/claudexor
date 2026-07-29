@@ -2583,7 +2583,6 @@ function summarizeRun(
     // The single engine validator's receipt, projected verbatim — surfaces
     // never re-validate the answer (null = no structured-output contract).
     outputConformance: outputConformance?.status ?? null,
-    // Route receipt projected verbatim (INV-061 disclosure); never re-derived.
     authRoute: telemetry?.auth_route
       ? {
           requested: telemetry.auth_route.requested,
@@ -2592,6 +2591,7 @@ function summarizeRun(
           reason: telemetry.auth_route.reason,
           harnessId: telemetry.auth_route.harness_id,
           attemptId: telemetry.auth_route.attempt_id,
+          profileId: telemetry.auth_route.profile_id,
           modelMismatch: telemetry.auth_route.model_mismatch,
         }
       : null,

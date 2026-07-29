@@ -117,6 +117,7 @@ export const ControlThreadTurnRequest = ControlRunStartRequest.omit({
   parentRunId: true,
   delegatedFromRunId: true,
   retryOf: true,
+  planRef: true,
 })
   .extend({
     /** Implement-plan only: explicitly proceed although the plan still has

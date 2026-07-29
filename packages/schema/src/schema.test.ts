@@ -4,12 +4,14 @@ import {
   CredentialProfile,
   ControlCredentialProfilesResponse,
   ControlRunDecisionRequest,
+  ControlRunSummary,
   ControlRunStartRequest,
   ControlSetupJob,
   ControlSetupJobCreateRequest,
   ControlSetupJobEvent,
   ControlSettingsSnapshot,
   ControlThread,
+  ControlThreadTurnRequest,
   ConformanceReport,
   FrozenTaskContractArtifact,
   HarnessManifest,
@@ -273,6 +275,38 @@ describe("EffortHint is an OPEN vocabulary, bounded by shape only", () => {
 });
 
 describe("Control API schemas", () => {
+  it("keeps the frozen plan reference server-owned on the thread-turn boundary", () => {
+    expect(
+      ControlThreadTurnRequest.safeParse({
+        prompt: "implement",
+        planRunId: "run-plan",
+        planRef: {
+          runId: "run-plan",
+          sha256: "a".repeat(64),
+          path: "/tmp/forged-plan.md",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("preserves the deciding credential profile on a run auth-route receipt", () => {
+    const summary = ControlRunSummary.parse({
+      jobId: "job-1",
+      runId: "run-1",
+      state: "succeeded",
+      authRoute: {
+        requested: "auto",
+        effective: "local_session",
+        source: "native_session",
+        reason: "native_first",
+        harnessId: "claude",
+        attemptId: "a01",
+        profileId: "work",
+      },
+    });
+    expect(summary.authRoute?.profileId).toBe("work");
+  });
+
   it("hard-errors every removed portfolio boundary", () => {
     expect(RoutingGoal.safeParse("subscription-first").success).toBe(false);
     expect(() =>

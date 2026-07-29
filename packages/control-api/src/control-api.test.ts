@@ -7590,7 +7590,7 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
-  it("projects a current telemetry Delegate receipt without fabricating legacy state", async () => {
+  it("projects current telemetry receipts without dropping the deciding credential profile", async () => {
     const { daemon, record } = fakeDaemon();
     const telemetryPath = join(record.runDir!, "final", "telemetry.yaml");
     const telemetry = parseYaml(readFileSync(telemetryPath, "utf8")) as Record<string, unknown>;
@@ -7600,20 +7600,34 @@ describe("DaemonControlApiServer", () => {
       used: true,
       reason: "used",
     };
+    telemetry["auth_route"] = {
+      requested: "auto",
+      effective: "local_session",
+      source: "native_session",
+      reason: "native_first",
+      harness_id: "claude",
+      attempt_id: "a01",
+      profile_id: "work",
+      model_mismatch: null,
+    };
     writeFileSync(telemetryPath, stringifyYaml(telemetry));
     await withDaemonServer(daemon, async (base) => {
       const detail = await apiFetch(`${base}/runs/run-d1`, {
         headers: { authorization: `Bearer ${token}` },
       });
-      expect(
-        ((await detail.json()) as { summary: { delegation: unknown } }).summary.delegation,
-      ).toEqual({
+      const summary = (
+        (await detail.json()) as {
+          summary: { delegation: unknown; authRoute: { profileId: string | null } };
+        }
+      ).summary;
+      expect(summary.delegation).toEqual({
         requested: true,
         effective: true,
         used: true,
         reason: "used",
         remediation: null,
       });
+      expect(summary.authRoute.profileId).toBe("work");
     });
   });
 

@@ -32,6 +32,7 @@ import {
   validateReleaseAttestation,
   validateSlotRecord,
 } from "./lib/release-review-contract.mjs";
+import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
 
 const options = { review: [], slotRecord: [] };
 const argv = process.argv.slice(2);
@@ -201,7 +202,7 @@ try {
     algorithm: RELEASE_REVIEW_ATTESTATION_ALGORITHM,
     payload,
   };
-  const key = createPrivateKey(readFileSync(options["private-key"], "utf8"));
+  const key = createPrivateKey(readPrivateSigningKey(options["private-key"]));
   attestation.signature = sign(null, releaseAttestationSigningBytes(attestation), key).toString(
     "base64",
   );

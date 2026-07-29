@@ -79,6 +79,7 @@ public struct RemoteRuntimeManifestV1: Codable, Sendable, Equatable {
         _ data: Data,
         authority: RuntimeUpdateAuthority = .pinned
     ) -> RemoteRuntimeManifestV1? {
+        guard hasOnlySignedWireFields(data) else { return nil }
         guard let manifest = try? JSONDecoder().decode(Self.self, from: data) else { return nil }
         guard manifest.schemaVersion == 1,
               manifest.kind == "claudexor-remote-runtime",
@@ -108,6 +109,23 @@ public struct RemoteRuntimeManifestV1: Codable, Sendable, Equatable {
         }
         guard key.isValidSignature(signature, for: manifest.signingBytes()) else { return nil }
         return manifest
+    }
+
+    private static func hasOnlySignedWireFields(_ data: Data) -> Bool {
+        let manifestFields: Set<String> = [
+            "schemaVersion", "kind", "version", "buildSha", "protocolMajor",
+            "minAppVersion", "notes", "assets", "keyId", "algorithm", "signature",
+        ]
+        let assetFields: Set<String> = [
+            "target", "platform", "arch", "nodeVersion", "archiveName", "archiveUrl", "sha256",
+        ]
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let manifest = object as? [String: Any],
+              Set(manifest.keys) == manifestFields,
+              let assets = manifest["assets"] as? [[String: Any]],
+              assets.allSatisfy({ Set($0.keys) == assetFields })
+        else { return false }
+        return true
     }
 }
 

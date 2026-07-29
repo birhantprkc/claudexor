@@ -8,6 +8,7 @@ import {
   signRemoteRuntimeManifest,
   verifyRemoteRuntimeManifest,
 } from "./lib/remote-runtime-manifest-contract.mjs";
+import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
 
 function option(name) {
   const index = process.argv.indexOf(`--${name}`);
@@ -56,7 +57,7 @@ try {
   }
   const signed = signRemoteRuntimeManifest(
     unsigned,
-    readFileSync(resolve(privateKey), "utf8"),
+    readPrivateSigningKey(resolve(privateKey)),
     authority,
   );
   const verified = verifyRemoteRuntimeManifest(signed, authority);

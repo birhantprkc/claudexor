@@ -65,6 +65,32 @@ describe("daemonOutcomeSummary (P2: a reason on every non-clean daemon terminal,
 });
 
 describe("enqueueAndAwait typed ControlProblem transport", () => {
+  it("never forwards a client-supplied frozen-plan reference to a thread turn", async () => {
+    let posted: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        posted = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ jobId: "job-turn", runId: "run-turn", runDir: "/tmp/run-turn" }),
+          { status: 202 },
+        );
+      }),
+    );
+    const client = { status: vi.fn().mockResolvedValue({ state: "running" }) };
+    await enqueueAndAwait(
+      client as never,
+      { baseUrl: "http://127.0.0.1:1", token: "t" },
+      {
+        threadId: "thread-1",
+        prompt: "implement",
+        planRef: { runId: "forged", sha256: "a".repeat(64), path: "/tmp/forged" },
+      },
+      { waitForTerminal: false },
+    );
+    expect(posted).toEqual({ prompt: "implement" });
+  });
+
   it("preserves Git remediation instead of flattening the failed start to prose", async () => {
     vi.stubGlobal(
       "fetch",

@@ -81,6 +81,19 @@ const SEMVER = /^\d+\.\d+\.\d+$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const GIT_SHA_HEX = /^[0-9a-f]{40}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const RUNTIME_MANIFEST_FIELDS = new Set([
+  "algorithm",
+  "archiveName",
+  "archiveUrl",
+  "buildSha",
+  "keyId",
+  "minAppVersion",
+  "notes",
+  "schemaVersion",
+  "sha256",
+  "signature",
+  "version",
+]);
 
 export function isRuntimeSemver(value: unknown): value is string {
   return typeof value === "string" && SEMVER.test(value);
@@ -148,6 +161,12 @@ export function verifyRuntimeManifest(
     return { ok: false, reasons: ["manifest is not an object"] };
   }
   const m = value as Record<string, unknown>;
+  const unknownKeys = Object.keys(m)
+    .filter((key) => !RUNTIME_MANIFEST_FIELDS.has(key))
+    .sort();
+  if (unknownKeys.length > 0) {
+    reasons.push(`manifest has unknown field(s) ${unknownKeys.join(", ")}`);
+  }
   if (m.schemaVersion !== RUNTIME_MANIFEST_SCHEMA_VERSION) {
     reasons.push(`schemaVersion must be ${RUNTIME_MANIFEST_SCHEMA_VERSION}`);
   }

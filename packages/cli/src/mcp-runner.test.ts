@@ -609,6 +609,9 @@ describe("mcp daemon body mapping", () => {
       ok: true,
       json: async () => ({
         summary: {
+          jobId: "job-child",
+          runId: "run-child",
+          state: "succeeded",
           parentRunId: "run-parent",
           delegatedFromRunId: "run-parent",
           spendUsd: 0.25,
@@ -621,7 +624,12 @@ describe("mcp daemon body mapping", () => {
           },
           outcomeFacts,
         },
-        applyEligibility: { eligible: false, state: "no_op" },
+        applyEligibility: {
+          eligible: false,
+          state: "no_op",
+          reason: null,
+          requiredAction: null,
+        },
         outcomeBanner: "Completed",
         council: null,
       }),

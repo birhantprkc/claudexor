@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { makeOutcomeFacts } from "@claudexor/schema";
 import { projectImmediateRunDetail, projectRecoveryRunDetail } from "./mcp-run-projections.js";
-import { presentRunPrimaryOutput, projectRunPrimaryOutput } from "./run-detail-projections.js";
+import {
+  describeRunDetailProblem,
+  presentRunPrimaryOutput,
+  projectRunPrimaryOutput,
+} from "./run-detail-projections.js";
 
 const failure = {
   phase: "execute",
@@ -18,6 +22,22 @@ const failure = {
 };
 
 describe("MCP run detail projections", () => {
+  it("redacts secrets from degraded post-terminal problem messages", () => {
+    const token = `ghp_${"a".repeat(36)}`;
+    const problem = describeRunDetailProblem(
+      Object.assign(new Error(`provider failed with ${token}`), {
+        code: "provider_failed",
+        retryable: true,
+      }),
+    );
+    expect(problem).toEqual({
+      code: "provider_failed",
+      message: "provider failed with [redacted]",
+      retryable: true,
+    });
+    expect(problem.message).not.toContain(token);
+  });
+
   it("schema-validates primary output and discloses bounded previews", () => {
     const primary = projectRunPrimaryOutput({
       primaryOutput: {

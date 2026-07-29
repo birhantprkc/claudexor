@@ -5,6 +5,7 @@ import {
   type ControlPrimaryOutput as ControlPrimaryOutputType,
   type RunFailure as RunFailureType,
 } from "@claudexor/schema";
+import { redactSecrets } from "@claudexor/util";
 
 export type PrimaryOutputPresentation = Pick<ControlPrimaryOutputType, "kind" | "path" | "text"> & {
   truncated?: boolean;
@@ -104,7 +105,7 @@ export function describeRunDetailProblem(error: unknown): RunDetailProblem {
   const record = error && typeof error === "object" ? (error as Record<string, unknown>) : {};
   return {
     code: typeof record["code"] === "string" && record["code"] ? (record["code"] as string) : null,
-    message: error instanceof Error ? error.message : String(error),
+    message: redactSecrets(error instanceof Error ? error.message : String(error)),
     retryable: typeof record["retryable"] === "boolean" ? (record["retryable"] as boolean) : null,
   };
 }

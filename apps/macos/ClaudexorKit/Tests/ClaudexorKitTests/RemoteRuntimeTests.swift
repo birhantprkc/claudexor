@@ -96,6 +96,24 @@ import Testing
         #expect(RemoteRuntimeManifestV1.verified(data, authority: try testAuthority()) == nil)
     }
 
+    @Test func signatureRejectsUnsignedExtensionFields() throws {
+        var topLevel =
+            try JSONSerialization.jsonObject(with: fixture("valid-manifest")) as! [String: Any]
+        topLevel["mirrorUrl"] = "https://evil.example/manifest.json"
+        #expect(RemoteRuntimeManifestV1.verified(
+            try JSONSerialization.data(withJSONObject: topLevel),
+            authority: try testAuthority()) == nil)
+
+        var nested =
+            try JSONSerialization.jsonObject(with: fixture("valid-manifest")) as! [String: Any]
+        var assets = nested["assets"] as! [[String: Any]]
+        assets[0]["mirrorUrl"] = "https://evil.example/runtime.tar.gz"
+        nested["assets"] = assets
+        #expect(RemoteRuntimeManifestV1.verified(
+            try JSONSerialization.data(withJSONObject: nested),
+            authority: try testAuthority()) == nil)
+    }
+
     @Test func compatibilityNeverDowngradesNewerRuntime() {
         let probe = RemoteRuntimeProbe(
             target: .linuxArm64,
