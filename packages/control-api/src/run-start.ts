@@ -114,6 +114,7 @@ export interface RunCreateRouteContext {
 export function unboundRunStartResponse(
   rec: DaemonRunRecord,
   terminal: boolean,
+  terminalContext: Record<string, unknown> = {},
 ): { status: number; body: Record<string, unknown> } {
   // errorStatus is served verbatim only inside the failure range; anything
   // else (absent, or a non-4xx/5xx value from a defective writer) must not
@@ -125,15 +126,33 @@ export function unboundRunStartResponse(
     rec.errorStatus <= 599
       ? rec.errorStatus
       : 500;
+  const queued = ControlQueuedRunInfo.parse({
+    jobId: rec.id,
+    state: rec.state,
+    error: rec.error,
+  });
+  if (!terminal) return { status: 202, body: queued };
   return {
-    status: terminal ? errorStatus : 202,
+    status: errorStatus,
     body: {
-      ...ControlQueuedRunInfo.parse({ jobId: rec.id, state: rec.state, error: rec.error }),
+      ...queued,
       ...(rec.errorCode ? { code: rec.errorCode } : {}),
-      // Only a TYPED refusal proves non-retryability; an untyped terminal
-      // (e.g. cancelled or interrupted before a run dir bound) makes no
-      // retryability claim, matching the pre-change body.
-      ...(terminal && rec.errorCode ? { retryable: false } : {}),
+      // The daemon producer owns retryability when it supplied the fact. A
+      // legacy typed refusal without the field keeps the prior conservative
+      // non-retryable fallback; an untyped terminal makes no claim.
+      ...(rec.errorRetryable !== undefined
+        ? { retryable: rec.errorRetryable }
+        : rec.errorCode
+          ? { retryable: false }
+          : {}),
+      requiredActions: rec.errorRequiredActions ?? [],
+      context: {
+        ...(rec.errorContext ?? {}),
+        // Server-owned handles override any producer context with the same key.
+        jobId: rec.id,
+        state: rec.state,
+        ...terminalContext,
+      },
     },
   };
 }

@@ -10,6 +10,7 @@ import type {
   DaemonRunRecord,
 } from "./daemon-server.js";
 import { recordTurnEnqueueFailure, turnEnqueueProblemResponse } from "./thread-turn-routes.js";
+import { TERMINAL_STATES } from "./sse-shared.js";
 import * as runStart from "./run-start.js";
 
 type RerunServices = Pick<
@@ -114,15 +115,27 @@ export async function rerunWithFeedback(
       ...(turnId ? { turnId } : {}),
     });
   }
-  ctx.appendAudit(rec, { decision: body.action, new_run_id: run.runId ?? run.id });
+  if (!run.runId && TERMINAL_STATES.has(run.state)) {
+    const refusal = runStart.unboundRunStartResponse(run, true, {
+      ...(threadId ? { threadId } : {}),
+      ...(turnId ? { turnId } : {}),
+    });
+    return ctx.json(res, refusal.status, refusal.body);
+  }
+  ctx.appendAudit(rec, {
+    decision: body.action,
+    ...(run.runId ? { new_run_id: run.runId } : { new_job_id: run.id }),
+  });
   ctx.json(
     res,
     200,
     ControlRunDecisionResponse.parse({
       accepted: true,
       status: "requeued",
-      newRunId: run.runId ?? run.id,
-      message: "follow-up run enqueued with reviewer feedback",
+      ...(run.runId ? { newRunId: run.runId } : {}),
+      message: run.runId
+        ? "follow-up run enqueued with reviewer feedback"
+        : "follow-up job enqueued; run start is still pending",
     }),
   );
 }

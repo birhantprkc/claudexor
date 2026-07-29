@@ -1375,11 +1375,23 @@ describe("DaemonControlApiServer", () => {
         error: "refused",
         errorCode: "invalid_output_schema",
         errorStatus: 400,
+        errorRetryable: true,
+        errorRequiredActions: ["Fix the requested schema"],
+        errorContext: { dialect: "unsupported" },
       },
       true,
     );
     expect(typed.status).toBe(400);
-    expect(typed.body).toMatchObject({ code: "invalid_output_schema", retryable: false });
+    expect(typed.body).toMatchObject({
+      code: "invalid_output_schema",
+      retryable: true,
+      requiredActions: ["Fix the requested schema"],
+      context: {
+        dialect: "unsupported",
+        jobId: "job-schema",
+        state: "failed",
+      },
+    });
   });
 
   it("producedRepoRoot uses the typed scope and NEVER resolves a no-project run to the home dir", () => {
@@ -8232,6 +8244,72 @@ describe("DaemonControlApiServer", () => {
     );
   });
 
+  it("rerun_with_feedback projects a pre-start terminal refusal instead of a job id as newRunId", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      threadId: "th-decision-terminal",
+      turnId: "tn-source",
+    };
+    writeFileSync(
+      join(record.runDir as string, "arbitration", "decision.yaml"),
+      "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
+    );
+    const refusing: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue() {
+        return { id: "job-decision-terminal", state: "queued" };
+      },
+      async status(id: string) {
+        if (id === record.id) return record;
+        return {
+          id: "job-decision-terminal",
+          state: "failed",
+          error: "Git is unavailable on this execution location",
+          errorCode: "git_unavailable",
+          errorStatus: 409,
+          errorRetryable: true,
+          errorRequiredActions: ["Install Git"],
+          errorContext: { capability: "git" },
+        };
+      },
+    };
+    const services: DaemonControlApiOptions["services"] = {
+      createThreadTurn: async () => ({ id: "tn-decision-terminal" }),
+    };
+    await withDaemonServer(
+      refusing,
+      async (base) => {
+        const response = await apiFetch(`${base}/runs/run-d1/decision`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "decision-rerun-terminal",
+          },
+          body: JSON.stringify({ action: "rerun_with_feedback", feedback: "Retry after Git." }),
+        });
+        expect(response.status).toBe(409);
+        const problem = (await response.json()) as Record<string, unknown>;
+        expect(problem).toMatchObject({
+          code: "git_unavailable",
+          retryable: true,
+          requiredActions: ["Install Git"],
+          context: {
+            capability: "git",
+            jobId: "job-decision-terminal",
+            state: "failed",
+            threadId: "th-decision-terminal",
+            turnId: "tn-decision-terminal",
+          },
+        });
+        expect(problem).not.toHaveProperty("newRunId");
+      },
+      undefined,
+      services,
+    );
+  });
+
   it("Exact Retry creates a fresh idempotent command linked to the immutable source request", async () => {
     const { daemon, record } = fakeDaemon();
     let enqueued: Record<string, unknown> | undefined;
@@ -8341,6 +8419,9 @@ describe("DaemonControlApiServer", () => {
           error: "full access is required for this project",
           errorCode: "trust_full_access_required",
           errorStatus: 403,
+          errorRetryable: true,
+          errorRequiredActions: ["Grant Full access"],
+          errorContext: { access: "full" },
         };
       },
     };
@@ -8354,10 +8435,16 @@ describe("DaemonControlApiServer", () => {
       expect(await response.json()).toMatchObject({
         code: "trust_full_access_required",
         message: "full access is required for this project",
-        retryable: false,
+        retryable: true,
+        requiredActions: ["Grant Full access"],
         // The retry's own identity rides as bounded context, so a client knows
         // WHICH replay was refused.
-        context: { jobId: "job-retry-refused", state: "failed", retryOf: "run-d1" },
+        context: {
+          access: "full",
+          jobId: "job-retry-refused",
+          state: "failed",
+          retryOf: "run-d1",
+        },
       });
     });
   });

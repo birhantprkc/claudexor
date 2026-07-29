@@ -162,12 +162,12 @@ async function exactRetry(
     // status-less `trust_full_access_required` to 403, so a trust refusal
     // recorded WITHOUT an errorStatus is mapped differently by the two
     // surfaces. Unifying them is out of scope here.
-    const { status, body } = runStart.unboundRunStartResponse(accepted, true);
-    return ctx.json(res, status, {
-      ...body,
+    const { status, body } = runStart.unboundRunStartResponse(accepted, true, {
       retryOf: sourceRunId,
+      ...(threadId ? { threadId } : {}),
       ...(retryTurnId ? { turnId: retryTurnId } : {}),
     });
+    return ctx.json(res, status, body);
   }
   ctx.json(
     res,
