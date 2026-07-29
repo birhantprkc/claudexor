@@ -1062,7 +1062,13 @@ views in the shared design-system files; screens compose them.
   instead of hardcoded portfolio/cap values.
 - **Connections (remote execution locations).** The Connections tab lists the
   SSH hosts a thread can execute on, read from the user's own `~/.ssh/config`;
-  Claudexor never stores a credential, a key or a password for them. Each row
+  Claudexor never stores a credential, a key or a password for them. The tab
+  can also create a host: an "Add a new host…" disclosure of `OptionRow`
+  fields appends a plain `Host` block to `~/.ssh/config` (append-only, after a
+  timestamped backup) and rescans; a refused write (duplicate or pattern
+  alias, injection-shaped value, bad port) shows its typed reason inline,
+  never silently. The empty state names both paths — add a host here, or edit
+  `~/.ssh/config` yourself and press Rescan. Each row
   carries ONE server-derived status from a fixed ladder — Offline, Connecting,
   Needs authentication, Installing, Connected, Failed — rendered as a status
   dot plus its label, never as a bare color: `role/muted` for Offline,

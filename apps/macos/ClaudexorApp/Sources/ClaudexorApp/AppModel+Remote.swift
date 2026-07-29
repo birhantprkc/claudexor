@@ -77,6 +77,15 @@ extension AppModel {
             (try? SSHConfigScanner().scan(path: "~/.ssh/config")) ?? []
     }
 
+    /// Append a user-authored `Host` block to `~/.ssh/config` through the Kit
+    /// writer, then rescan so the picker sees the new alias immediately. Typed
+    /// refusals propagate to the caller — the form shows them inline.
+    @discardableResult
+    func addSSHConfigHost(_ draft: SSHHostDraft) throws -> SSHConfigWriter.Receipt {
+        defer { refreshSSHHosts() }
+        return try SSHConfigWriter().appendHost(draft)
+    }
+
     func addRemoteConnection(alias: String) {
         guard SSHConfigScanner.isConcreteAlias(alias),
               !remoteConnections.contains(where: { $0.sshAlias == alias })

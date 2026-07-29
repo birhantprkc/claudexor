@@ -1967,10 +1967,16 @@ thread or worktree between daemons.
 The app delegates transport and authentication to `/usr/bin/ssh`. It parses
 concrete `Host` entries (following `Include`), asks `ssh -G` for the effective
 configuration, and creates an app-owned ControlMaster per connected host.
-Batch-mode connection is attempted first. Host-key confirmation, passwords and
-MFA run only in an ephemeral SwiftTerm PTY backed by the same system SSH
-binary. Terminal output, SSH input, bearer tokens and vendor credentials are
-never persisted.
+Settings can also create a host: the app appends a plain `Host` block (alias,
+`HostName`, optional `User`, `Port`, `IdentityFile` path) to `~/.ssh/config` —
+append-only after a timestamped backup, refusing duplicate or pattern aliases
+and any multi-line value, creating the file `0600` (and `~/.ssh` `0700`) only
+when absent and never re-moding an existing one. The block is exactly what the
+user would type by hand; keys, passwords and tokens still never pass through
+Claudexor. Batch-mode connection is attempted first. Host-key confirmation,
+passwords and MFA run only in an ephemeral SwiftTerm PTY backed by the same
+system SSH binary. Terminal output, SSH input, bearer tokens and vendor
+credentials are never persisted.
 
 Each host runs the complete Claudexor engine next to its repository and harness
 CLIs. A signed `remote-runtime-manifest.json` binds the version, build SHA,

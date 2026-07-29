@@ -105,9 +105,11 @@ Settings → Privacy & Security → Open Anyway.)
 ## Remote SSH
 
 The macOS app can run a thread on a Linux or macOS SSH host while keeping the
-UI local. Add a concrete alias from `~/.ssh/config` in **Settings →
-Connections**, connect it, then choose a saved folder or **Browse on
-&lt;host&gt;…** from the project picker. The thread is permanently bound to that
+UI local. In **Settings → Connections**, pick a concrete alias from
+`~/.ssh/config` or create one in-app — the form appends a plain `Host` block
+to `~/.ssh/config` (after a timestamped backup), never a key or password.
+Connect it, then choose a saved folder or **Browse on &lt;host&gt;…** from the
+project picker. The thread is permanently bound to that
 host and folder; changing either creates a new draft.
 
 Claudexor uses the system `/usr/bin/ssh`, so existing keys, ssh-agent,
