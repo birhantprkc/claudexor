@@ -19,9 +19,8 @@
  */
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { verifySealedEvidencePacket } from "../packages/context/dist/evidence.js";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { bindCoverageReceipt } from "./review-coverage-check.mjs";
 import {
   OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
@@ -30,8 +29,15 @@ import {
   releaseAttestationSigningBytes,
   deriveSlotVerdict,
   validateReleaseAttestation,
+  validateFullGateEvidence,
   validateSlotRecord,
+  pathIsWithin,
 } from "./lib/release-review-contract.mjs";
+import {
+  readStableReviewFile,
+  readVerifiedReleaseReviewRuntimeArtifact,
+  releaseReviewRuntimeArtifactRoot,
+} from "./lib/release-review-runtime.mjs";
 import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
 
 const options = { review: [], slotRecord: [] };
@@ -58,14 +64,20 @@ try {
   const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
   const candidateSha = git("rev-parse", "HEAD");
   const candidateTree = git("rev-parse", "HEAD^{tree}");
+  const candidateRoot = realpathSync(git("rev-parse", "--show-toplevel"));
   if (git("status", "--porcelain") !== "") {
     throw new Error("candidate worktree is dirty; the attestation binds a committed tree only");
   }
 
   const sha256File = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
-  const receipt = JSON.parse(readFileSync(options["full-gate-receipt"], "utf8"));
+  const receiptPath = resolve(options["full-gate-receipt"]);
+  if (pathIsWithin(candidateRoot, receiptPath)) {
+    throw new Error("full-gate receipt must be outside the candidate worktree");
+  }
+  const receiptBytes = readStableReviewFile(receiptPath, "full-gate receipt");
+  const receipt = JSON.parse(receiptBytes.toString("utf8"));
   const fullGate = {
-    receiptSha256: sha256File(options["full-gate-receipt"]),
+    receiptSha256: createHash("sha256").update(receiptBytes).digest("hex"),
     program: receipt.program,
     argv: receipt.argv,
     exitCode: receipt.exitCode,
@@ -76,7 +88,26 @@ try {
     afterTree: receipt.after?.tree,
     stdoutSha256: receipt.stdout?.sha256,
     stderrSha256: receipt.stderr?.sha256,
+    reviewRuntimeArtifacts: receipt.reviewRuntimeArtifacts,
   };
+  const gateReasons = validateFullGateEvidence(fullGate, { candidateSha, candidateTree });
+  if (gateReasons.length > 0) {
+    throw new Error(`full-gate receipt is not an exact candidate PASS: ${gateReasons.join("; ")}`);
+  }
+  const runtimeRoot = releaseReviewRuntimeArtifactRoot(receiptPath);
+  if (pathIsWithin(candidateRoot, runtimeRoot)) {
+    throw new Error("release review runtime must be outside the candidate worktree");
+  }
+  const verifiedRuntime = readVerifiedReleaseReviewRuntimeArtifact(
+    runtimeRoot,
+    receipt.reviewRuntimeArtifacts,
+  );
+  const runtime = await import(
+    `data:text/javascript;base64,${verifiedRuntime.bytes.toString("base64")}`
+  );
+  if (typeof runtime.verifySealedEvidencePacket !== "function") {
+    throw new Error("release review runtime lacks verifySealedEvidencePacket");
+  }
   // Non-panel reviews (the owner's fable-subagent reports, internal critics):
   // reviewer=FILE:verdict. These carry NO panel identity — panel slots come
   // ONLY from typed --slot-record wave metadata below, so a CLI label can
@@ -106,7 +137,7 @@ try {
   // SHA/tree, so an altered FREEZE.json (e.g. a narrowed baseSha) beside an
   // authentic manifest text can never become the coverage base authority.
   const sealedPacket = packetDir
-    ? verifySealedEvidencePacket({ evidenceDir: packetDir, candidateSha, candidateTree })
+    ? runtime.verifySealedEvidencePacket({ evidenceDir: packetDir, candidateSha, candidateTree })
     : null;
   const packetManifestSha256 = sealedPacket?.manifestSha256 ?? null;
   let waveId = null;
@@ -118,6 +149,8 @@ try {
       candidateSha,
       candidateTree,
       packetManifestSha256,
+      fullGateReceiptSha256: fullGate.receiptSha256,
+      reviewRuntimeArtifacts: fullGate.reviewRuntimeArtifacts,
       waveId,
     });
     if (reasons.length > 0) {

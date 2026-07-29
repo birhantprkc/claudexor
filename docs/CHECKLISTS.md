@@ -540,14 +540,21 @@ itself). The v3 protocol bounds the loop mechanically.
     reviewers started, so coverage and size are checked before evidence leaves
     the machine. This preparation receipt cannot occupy or satisfy a reviewer
     slot. The later live invocation rebuilds those same bytes into a new output
-    directory. The transport also refuses before
+    directory and requires the prepared triad and scope SHA-256 values; either
+    mismatch is rejected before output creation, progress telemetry, or network
+    access. The transport also refuses before
     output creation or network access unless its conservative input-token upper
     bound plus configured max output fits every exact panel model's frozen
     context/output ceiling; `TRIAD_MAX_OUTPUT_TOKENS` defaults to 60000. The
     frozen limits come from `https://openrouter.ai/api/v1/models`, verified
     2026-07-29.
 - **Attestation:** `scripts/run-full-gate-receipt.mjs` runs
-  `pnpm release:verify` and seals the hash-bound gate receipt;
+  `pnpm release:verify`, then builds one self-contained review runtime beside
+  the external receipt from exact-HEAD tracked inputs. Its build may leave only
+  `node:` imports external, its four-function API is smoke-tested, and its exact
+  bytes and SHA-256 are sealed into the gate receipt. Preparation, live panel
+  transport, and sealing re-read those bytes through a no-follow descriptor and
+  execute that verified buffer, never mutable workspace `dist` output.
   `scripts/seal-owner-review-attestation.mjs` signs the attestation (exact
   candidate SHA/tree, gate receipt digest, every panel reviewer report
   digest + verdict, wave count) with the offline Ed25519 authority. Panel
@@ -558,7 +565,9 @@ itself). The v3 protocol bounds the loop mechanically.
   the sealed-packet manifest binding (`--packet` REQUIRED with slot
   records), and recomputes the raw report digest from disk. CLI
   `--review reviewer=FILE:verdict` entries remain for NON-panel critic
-  reports only. A packet-split wave binds one full triad+scope panel PER
+  reports only. Every slot record also binds the exact full-gate receipt and
+  review-runtime artifact that produced its packet/prompt checks. A packet-split
+  wave binds one full triad+scope panel PER
   named sub-wave and MUST pass `--coverage-receipt` (the
   `review-coverage-check --receipt` output over the union of sub-wave
   triad+scope prompt pairs, labels unique); the verifier refuses a packet-split

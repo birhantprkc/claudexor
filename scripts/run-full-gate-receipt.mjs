@@ -10,6 +10,7 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { buildReleaseReviewRuntimeBundle } from "./lib/release-review-runtime.mjs";
 
 const outDir = resolve(process.argv[2] ?? "");
 if (!outDir || process.argv.length > 3) {
@@ -46,7 +47,20 @@ const run = spawnSync(argv[0], argv.slice(1), {
 });
 writeFileSync(stdoutPath, run.stdout ?? "", { mode: 0o600 });
 writeFileSync(stderrPath, run.stderr ?? "", { mode: 0o600 });
-const exitCode = run.status ?? 1;
+const gateExitCode = run.status ?? 1;
+let reviewRuntimeArtifacts = [];
+let reviewRuntimeArtifactError = null;
+if (gateExitCode === 0) {
+  try {
+    reviewRuntimeArtifacts = buildReleaseReviewRuntimeBundle(
+      git("rev-parse", "--show-toplevel"),
+      outDir,
+    );
+  } catch (error) {
+    reviewRuntimeArtifactError = error instanceof Error ? error.message : String(error);
+  }
+}
+const exitCode = gateExitCode === 0 && reviewRuntimeArtifactError === null ? 0 : gateExitCode || 1;
 
 const after = gitState();
 const sha256File = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -54,12 +68,15 @@ const receipt = {
   program,
   argv,
   exitCode,
+  gateExitCode,
   candidateUnchanged:
     before.head === after.head && before.tree === after.tree && after.status === "",
   before,
   after,
   stdout: { path: stdoutPath, sha256: sha256File(stdoutPath) },
   stderr: { path: stderrPath, sha256: sha256File(stderrPath) },
+  reviewRuntimeArtifacts,
+  reviewRuntimeArtifactError,
   finishedAt: new Date().toISOString(),
 };
 writeFileSync(join(outDir, "full-gate-receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`, {

@@ -19,6 +19,8 @@
  *     --packet-manifest-digest <sha256> # expected identity of MANIFEST.sha256
  *     --candidate-sha <sha>   # exact full commit SHA checked out in cwd
  *     --candidate-tree <sha>  # exact full tree SHA checked out in cwd
+ *     --full-gate-receipt <file> # exact PASS receipt outside the candidate
+ *     --full-gate-receipt-sha256 <sha256> # expected receipt bytes
  *     --panel-lock <path>     # pre-created panel lock outside the candidate worktree
  *     --round <n>             # round number for the output dir
  *     --out <dir>             # output root outside candidate and sealed packet
@@ -39,7 +41,10 @@
  * creates its output directory or calls a reviewer.
  * Add `--prepare-prompts` to run every candidate/packet/context/privacy
  * preflight and persist the exact prompts plus a no-network receipt without
- * starting a reviewer. The later live invocation rebuilds the same bytes.
+ * starting a reviewer. The later live invocation rebuilds the same bytes and
+ * requires both prepared prompt digests via `--expected-triad-prompt-sha256`
+ * and `--expected-scope-prompt-sha256` before it creates output or calls a
+ * reviewer.
  * Environment overrides, substitutions, direct-provider routes, and
  * --skip-scope fail before evidence leaves the machine.
  *
@@ -67,10 +72,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-// Relative dist import: the root package has no workspace dep on util, so the
-// bare specifier does not resolve for repo scripts. Requires `pnpm build` first.
-import { containsSecretLikeToken, redactSecrets } from "../packages/util/dist/index.js";
-import { verifySealedEvidencePacket } from "../packages/context/dist/evidence.js";
+// The gate-derived verifier/redactor runtime is loaded only after its external
+// receipt and exact bytes are revalidated in main.
 import { exactObservedModelMatch } from "./lib/openrouter-panel.mjs";
 import {
   CANONICAL_REVIEW_RENAME_ARG,
@@ -101,9 +104,19 @@ import {
   reviewDecisionLivenessFloors,
   validateChecklistResponse,
   validateFrozenReviewBinding,
+  validateFullGateEvidence,
   validateNewReviewOutput,
   validatePanelLock,
 } from "./lib/release-review-contract.mjs";
+import {
+  readStableReviewFile,
+  readVerifiedReleaseReviewRuntimeArtifact,
+  releaseReviewRuntimeArtifactRoot,
+} from "./lib/release-review-runtime.mjs";
+
+let containsSecretLikeToken;
+let redactSecrets;
+let verifySealedEvidencePacket;
 
 function arg(name, fallback = null) {
   const idx = process.argv.indexOf(`--${name}`);
@@ -203,6 +216,64 @@ function assertExternalPath(candidateRoot, path, label) {
   if (pathIsWithin(candidateRoot, path)) {
     throw new Error(`${label} must be outside the candidate worktree`);
   }
+}
+
+async function loadBoundReviewRuntime(candidateRoot, candidateSha, candidateTree) {
+  const receiptPath = resolve(requiredArg("full-gate-receipt"));
+  const expectedReceiptSha256 = requiredArg("full-gate-receipt-sha256");
+  if (!/^[0-9a-f]{64}$/.test(expectedReceiptSha256)) {
+    throw new Error("--full-gate-receipt-sha256 must be one lowercase SHA-256");
+  }
+  assertExternalPath(candidateRoot, receiptPath, "full-gate receipt");
+  const receiptBytes = readStableReviewFile(receiptPath, "full-gate receipt");
+  const receiptSha256 = createHash("sha256").update(receiptBytes).digest("hex");
+  if (receiptSha256 !== expectedReceiptSha256) {
+    throw new Error("full-gate receipt changed after review preparation");
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(receiptBytes.toString("utf8"));
+  } catch {
+    throw new Error("full-gate receipt is not valid JSON");
+  }
+  const fullGate = {
+    receiptSha256,
+    program: receipt.program,
+    argv: receipt.argv,
+    exitCode: receipt.exitCode,
+    candidateUnchanged: receipt.candidateUnchanged,
+    beforeSha: receipt.before?.head,
+    beforeTree: receipt.before?.tree,
+    afterSha: receipt.after?.head,
+    afterTree: receipt.after?.tree,
+    stdoutSha256: receipt.stdout?.sha256,
+    stderrSha256: receipt.stderr?.sha256,
+    reviewRuntimeArtifacts: receipt.reviewRuntimeArtifacts,
+  };
+  const gateReasons = validateFullGateEvidence(fullGate, { candidateSha, candidateTree });
+  if (gateReasons.length > 0) {
+    throw new Error(`full-gate receipt is not an exact candidate PASS: ${gateReasons.join("; ")}`);
+  }
+  const artifactRoot = releaseReviewRuntimeArtifactRoot(receiptPath);
+  assertExternalPath(candidateRoot, artifactRoot, "release review runtime");
+  const verifiedRuntime = readVerifiedReleaseReviewRuntimeArtifact(
+    artifactRoot,
+    receipt.reviewRuntimeArtifacts,
+  );
+  const runtime = await import(
+    `data:text/javascript;base64,${verifiedRuntime.bytes.toString("base64")}`
+  );
+  verifySealedEvidencePacket = runtime.verifySealedEvidencePacket;
+  containsSecretLikeToken = runtime.containsSecretLikeToken;
+  redactSecrets = runtime.redactSecrets;
+  if (
+    typeof verifySealedEvidencePacket !== "function" ||
+    typeof containsSecretLikeToken !== "function" ||
+    typeof redactSecrets !== "function"
+  ) {
+    throw new Error("release-review runtime artifacts do not expose the required verifier API");
+  }
+  return { receiptPath, receiptSha256, artifacts: verifiedRuntime.artifacts };
 }
 
 function loadFrozenPacket(candidateRoot, candidateSha, candidateTree, packetManifestDigest) {
@@ -818,6 +889,7 @@ async function main() {
     throw new Error("--candidate-sha and --candidate-tree must be full lowercase Git object ids");
   }
   const candidateRoot = realpathSync(git(["rev-parse", "--show-toplevel"]).trim());
+  const reviewRuntime = await loadBoundReviewRuntime(candidateRoot, candidateSha, candidateTree);
   const frozen = loadFrozenPacket(candidateRoot, candidateSha, candidateTree, packetManifestDigest);
   const base = frozen.base;
   const panelLockPath = resolve(requiredArg("panel-lock"));
@@ -916,6 +988,28 @@ async function main() {
     subsetSelectors,
     diffSelectors,
   );
+  const promptSha256 = {
+    triad: createHash("sha256").update(triadPrompt, "utf8").digest("hex"),
+    scope: createHash("sha256").update(scopePrompt, "utf8").digest("hex"),
+  };
+  const expectedPromptSha256 = {
+    triad: arg("expected-triad-prompt-sha256"),
+    scope: arg("expected-scope-prompt-sha256"),
+  };
+  if (preparePrompts) {
+    if (expectedPromptSha256.triad !== null || expectedPromptSha256.scope !== null) {
+      throw new Error("prepared prompt digests are live-review inputs, not preparation inputs");
+    }
+  } else {
+    for (const [role, expected] of Object.entries(expectedPromptSha256)) {
+      if (typeof expected !== "string" || !/^[0-9a-f]{64}$/.test(expected)) {
+        throw new Error(`--expected-${role}-prompt-sha256 must be one lowercase SHA-256`);
+      }
+      if (expected !== promptSha256[role]) {
+        throw new Error(`${role} prompt bytes differ from the prepared prompt digest`);
+      }
+    }
+  }
   const contextPreflight = [
     ...TRIAD_MODELS.map((model) => ({
       role: "triad",
@@ -958,20 +1052,28 @@ async function main() {
     join(outDir, "prompt-context-preflight.json"),
     `${JSON.stringify({ authority: RELEASE_REVIEW_LIMITS_AUTHORITY, checks: contextPreflight }, null, 2)}\n`,
   );
-  const promptSha256 = {
+  const persistedPromptSha256 = {
     triad: createHash("sha256").update(readFileSync(triadPromptPath)).digest("hex"),
     scope: createHash("sha256").update(readFileSync(scopePromptPath)).digest("hex"),
   };
+  if (
+    persistedPromptSha256.triad !== promptSha256.triad ||
+    persistedPromptSha256.scope !== promptSha256.scope
+  ) {
+    throw new Error("persisted review prompt digests differ from the preflighted prompts");
+  }
   if (preparePrompts) {
     writeFileSync(
       join(outDir, "PREPARE_PROMPTS_RECEIPT.json"),
       `${JSON.stringify(
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           candidateSha,
           candidateTree,
           base,
           packetManifestSha256: frozen.manifestSha256,
+          fullGateReceiptSha256: reviewRuntime.receiptSha256,
+          reviewRuntimeArtifacts: reviewRuntime.artifacts,
           subWave: subWaveName,
           promptSha256,
           promptBytes: {
@@ -1144,6 +1246,8 @@ async function main() {
       candidateSha,
       candidateTree,
       packetManifestSha256: frozen.manifestSha256,
+      fullGateReceiptSha256: reviewRuntime.receiptSha256,
+      reviewRuntimeArtifacts: reviewRuntime.artifacts,
       promptSha256: promptSha256.triad,
       reviewRunId,
       reviewWaveId,
@@ -1209,6 +1313,8 @@ async function main() {
       candidateSha,
       candidateTree,
       packetManifestSha256: frozen.manifestSha256,
+      fullGateReceiptSha256: reviewRuntime.receiptSha256,
+      reviewRuntimeArtifacts: reviewRuntime.artifacts,
       promptSha256: promptSha256.scope,
       reviewRunId,
       reviewWaveId,
@@ -1313,6 +1419,8 @@ async function main() {
     candidate_sha: candidateSha,
     candidate_tree: candidateTree,
     packet_manifest_sha256: frozen.manifestSha256,
+    full_gate_receipt_sha256: reviewRuntime.receiptSha256,
+    review_runtime_artifacts: reviewRuntime.artifacts,
     generated_at: new Date().toISOString(),
     panel: { triad: TRIAD_MODELS, scope: SCOPE_MODEL },
     panel_source: "built_in_exact",

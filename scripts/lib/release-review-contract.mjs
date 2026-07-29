@@ -491,6 +491,14 @@ export function validateSlotRecord(record, expected) {
   ) {
     reasons.push("slot record reviewed a different sealed packet");
   }
+  if (record.fullGateReceiptSha256 !== expected.fullGateReceiptSha256) {
+    reasons.push("slot record is bound to a different full-gate receipt");
+  }
+  if (
+    canonicalJson(record.reviewRuntimeArtifacts) !== canonicalJson(expected.reviewRuntimeArtifacts)
+  ) {
+    reasons.push("slot record is bound to different release-review runtime bytes");
+  }
   if (expected.waveId && record.reviewWaveId !== expected.waveId) {
     reasons.push(`slot record mixes wave ${record.reviewWaveId} into wave ${expected.waveId}`);
   }
@@ -701,6 +709,35 @@ const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const RELEASE_REVIEW_ATTESTATION_ALGORITHM = "Ed25519";
 
+/** The one self-contained runtime that executes inside the formal review trust
+ * boundary. It is built beside the external full-gate receipt from exact-HEAD
+ * tracked inputs; prepare, live transport, and sealing recheck the same bytes. */
+export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS = Object.freeze(["release-review-runtime.mjs"]);
+
+export function validateReleaseReviewRuntimeArtifacts(artifacts) {
+  const reasons = [];
+  if (!Array.isArray(artifacts)) {
+    return ["release review runtime artifacts are missing"];
+  }
+  if (artifacts.length !== RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.length) {
+    reasons.push("release review runtime artifact allowlist is incomplete or has extra entries");
+  }
+  for (const [index, expectedPath] of RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.entries()) {
+    const artifact = artifacts[index];
+    if (!artifact || artifact.path !== expectedPath) {
+      reasons.push(`release review runtime artifact ${index + 1} must be ${expectedPath}`);
+      continue;
+    }
+    if (!Number.isSafeInteger(artifact.bytes) || artifact.bytes <= 0) {
+      reasons.push(`release review runtime artifact ${expectedPath} has invalid byte length`);
+    }
+    if (!SHA256.test(artifact.sha256 ?? "")) {
+      reasons.push(`release review runtime artifact ${expectedPath} has invalid SHA-256`);
+    }
+  }
+  return reasons;
+}
+
 // Owner-review attestation (schemaVersion 4): the signed publishing proof.
 // The retired schemaVersion-2 six-slot contract was removed in v3.0.0;
 // already-sealed v2 artifacts remain archived with valid signatures, but
@@ -802,6 +839,7 @@ export function verifyReleaseAttestationSignature(
 /** ONE owner for the signed full-deterministic-gate evidence shape, shared by
  * the v2 panel attestation and the v3 owner-review attestation. */
 export function validateFullGateEvidence(gate, expected) {
+  const reasons = [];
   if (
     !gate ||
     !SHA256.test(gate.receiptSha256 ?? "") ||
@@ -816,9 +854,10 @@ export function validateFullGateEvidence(gate, expected) {
     !SHA256.test(gate.stdoutSha256 ?? "") ||
     !SHA256.test(gate.stderrSha256 ?? "")
   ) {
-    return ["review attestation full deterministic gate is invalid"];
+    reasons.push("review attestation full deterministic gate is invalid");
   }
-  return [];
+  reasons.push(...validateReleaseReviewRuntimeArtifacts(gate?.reviewRuntimeArtifacts));
+  return reasons;
 }
 
 /**

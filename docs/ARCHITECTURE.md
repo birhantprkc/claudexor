@@ -1854,6 +1854,16 @@ with or be mistaken for release authority. Product command `claudexor review
 --diff <file>` remains a normal engine capability; it is not this repository's
 release attestation.
 
+Formal review executes one gate-derived runtime bundle rather than mutable
+workspace build output. The full gate bundles the packet verifier, packet
+writer, and secret scanner/redactor from exact tracked candidate inputs into a
+single external ESM artifact with only `node:` imports, smoke-checks its exact
+API, and records its bytes and SHA-256. Preparation, live transport, and sealing
+read that artifact once through a no-follow descriptor and import the verified
+buffer; every live slot carries the same gate-receipt and runtime binding into
+the seal. Prepared and live prompt digests must also match before any remote
+request begins.
+
 Runtime resilience is typed. Adapters translate native transient failures
 (network lookup failures, stream disconnects, retryable HTTP statuses, timeouts)
 into typed `transient` `HarnessEvent`s; the orchestrator may retry only within the bounded

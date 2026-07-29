@@ -38,6 +38,8 @@ export const OWNER_REVIEW_PROTOCOL: "owner-fable-subagents-v1";
 export const OWNER_REVIEW_MIN_REVIEWS: 2;
 export const OWNER_REVIEW_MAX_ROUNDS: 24;
 export const OWNER_REVIEW_VERDICTS: readonly string[];
+export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS: readonly string[];
+export function validateReleaseReviewRuntimeArtifacts(artifacts: unknown): string[];
 
 export interface ChecklistFinding {
   item: string;
@@ -232,6 +234,8 @@ export function validateSlotRecord(
     candidateSha: string;
     candidateTree: string;
     packetManifestSha256?: string | null;
+    fullGateReceiptSha256: string;
+    reviewRuntimeArtifacts: unknown;
     waveId?: string | null;
   },
 ): string[];

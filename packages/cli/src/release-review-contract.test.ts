@@ -8,6 +8,7 @@ import {
   OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
   OWNER_REVIEW_MAX_ROUNDS,
   OWNER_REVIEW_PROTOCOL,
+  RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS,
   REQUIRED_SCOPE_MODEL,
   REQUIRED_TRIAD_MODELS,
   TRIAD_ITEMS,
@@ -30,11 +31,16 @@ import {
   validateNewReviewOutput,
   validatePanelLock,
   validateReleaseAttestation,
+  validateReleaseReviewRuntimeArtifacts,
   verifyReleaseAttestationSignature,
   validateReleaseInput,
   validateSlotRecord,
   validateChecklistResponse,
 } from "../../../scripts/lib/release-review-contract.mjs";
+import {
+  snapshotReleaseReviewRuntimeArtifacts,
+  verifyReleaseReviewRuntimeArtifacts,
+} from "../../../scripts/lib/release-review-runtime.mjs";
 
 function cleanRows() {
   return TRIAD_ITEMS.map((item) => ({
@@ -68,6 +74,39 @@ function liveScope(findings: ChecklistFinding[] = []): SlotRecord {
 }
 
 describe("release review fail-closed contract", () => {
+  it("binds the exact ordered release-review runtime artifacts and detects drift", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-review-runtime-"));
+    try {
+      for (const [index, path] of RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.entries()) {
+        const absolute = join(root, path);
+        mkdirSync(join(absolute, ".."), { recursive: true });
+        writeFileSync(absolute, `artifact-${index}\n`);
+      }
+      const snapshot = snapshotReleaseReviewRuntimeArtifacts(root);
+      expect(validateReleaseReviewRuntimeArtifacts(snapshot)).toEqual([]);
+      expect(verifyReleaseReviewRuntimeArtifacts(root, snapshot)).toEqual(snapshot);
+      expect(
+        validateReleaseReviewRuntimeArtifacts([{ ...snapshot[0], path: "other-runtime.mjs" }]).join(
+          " ",
+        ),
+      ).toContain(RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS[0]);
+      expect(validateReleaseReviewRuntimeArtifacts([...snapshot, snapshot[0]]).join(" ")).toContain(
+        "extra entries",
+      );
+
+      const runtimePath = join(root, RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS[0]);
+      writeFileSync(runtimePath, "mutated\n");
+      expect(() => verifyReleaseReviewRuntimeArtifacts(root, snapshot)).toThrow(/drifted/);
+      rmSync(runtimePath);
+      const target = join(root, "runtime-target.mjs");
+      writeFileSync(target, "artifact-0\n");
+      symlinkSync(target, runtimePath);
+      expect(() => verifyReleaseReviewRuntimeArtifacts(root, snapshot)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("serializes every repository-atlas path compactly without delimiter ambiguity", () => {
     const rows = [
       { path: "plain.ts", bytes: 12 },
@@ -548,6 +587,11 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
         afterTree: candidateTree,
         stdoutSha256: digest,
         stderrSha256: digest,
+        reviewRuntimeArtifacts: RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.map((path) => ({
+          path,
+          bytes: 1,
+          sha256: digest,
+        })),
       },
       reviews: [
         {
@@ -951,6 +995,12 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
     const candidateSha = "a".repeat(40);
     const candidateTree = "b".repeat(40);
     const manifest = "c".repeat(64);
+    const gateReceipt = "f".repeat(64);
+    const reviewRuntimeArtifacts = RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.map((path) => ({
+      path,
+      bytes: 12,
+      sha256: "9".repeat(64),
+    }));
     const good = {
       status: "responded",
       error: null,
@@ -961,6 +1011,8 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
       candidateSha,
       candidateTree,
       packetManifestSha256: manifest,
+      fullGateReceiptSha256: gateReceipt,
+      reviewRuntimeArtifacts,
       reviewWaveId: "wave-1",
       panel_slot: "triad",
       sub_wave: "macos",
@@ -971,7 +1023,14 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
       promptSha256: "e".repeat(64),
       raw_file: "triad-x.raw.txt",
     };
-    const expected = { candidateSha, candidateTree, packetManifestSha256: manifest, waveId: null };
+    const expected = {
+      candidateSha,
+      candidateTree,
+      packetManifestSha256: manifest,
+      fullGateReceiptSha256: gateReceipt,
+      reviewRuntimeArtifacts,
+      waveId: null,
+    };
     expect(validateSlotRecord(good, expected)).toEqual([]);
     // Off-panel model in a triad slot.
     expect(
@@ -1006,6 +1065,18 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
     expect(
       validateSlotRecord({ ...good, packetManifestSha256: "0".repeat(64) }, expected).join(" "),
     ).toContain("different sealed packet");
+    expect(
+      validateSlotRecord({ ...good, fullGateReceiptSha256: "0".repeat(64) }, expected).join(" "),
+    ).toContain("different full-gate receipt");
+    expect(
+      validateSlotRecord(
+        {
+          ...good,
+          reviewRuntimeArtifacts: [{ ...reviewRuntimeArtifacts[0], sha256: "0".repeat(64) }],
+        },
+        expected,
+      ).join(" "),
+    ).toContain("different release-review runtime bytes");
     expect(validateSlotRecord(good, { ...expected, waveId: "wave-2" }).join(" ")).toContain(
       "mixes wave",
     );
@@ -1145,5 +1216,15 @@ describe("owner-review attestation (current schema, owner protocol)", () => {
       },
     });
     expect(validateReleaseAttestation(failedGate, authority, expected).ok).toBe(false);
+    const missingRuntime = resign({
+      ...attestation,
+      payload: {
+        ...attestation.payload,
+        fullGate: { ...attestation.payload.fullGate, reviewRuntimeArtifacts: undefined },
+      },
+    });
+    const runtimeVerdict = validateReleaseAttestation(missingRuntime, authority, expected);
+    expect(runtimeVerdict.ok).toBe(false);
+    expect(runtimeVerdict.reasons.join(" ")).toContain("runtime artifacts are missing");
   });
 });
