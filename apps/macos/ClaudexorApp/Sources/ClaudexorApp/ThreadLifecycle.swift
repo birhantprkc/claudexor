@@ -47,8 +47,10 @@ extension AppModel {
             selectedExecutionLocation = locationID
             selectedThreadId = id
             if !keepsVisibleDetail { selectedThreadDetail = nil }
-            pendingRemoteThreadSelection = (locationID, id)
-            await connectRemote(connectionID)
+            if mayReconnect {
+                pendingRemoteThreadSelection = (locationID, id)
+                await connectRemote(connectionID)
+            }
         }
         guard let requestClient = gateway(for: locationID) else {
             selectedExecutionLocation = locationID

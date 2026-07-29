@@ -66,29 +66,12 @@ import Testing
     }
 
     @MainActor
-    @Test func retiringOneLocationDropsOnlyItsCancelMemory() async throws {
-        defer { RemoteEpochURLProtocol.handler = nil }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [RemoteEpochURLProtocol.self]
-        let requestClient = GatewayClient(
-            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
-            session: URLSession(configuration: config))
+    @Test func retiringOneLocationDropsOnlyItsCancelMemory() {
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         let locationA = ExecutionLocationID.remote(UUID())
         let locationB = ExecutionLocationID.remote(UUID())
-        model.remoteClients[locationA] = requestClient
-        model.remoteClients[locationB] = requestClient
-        RemoteEpochURLProtocol.handler = { request in
-            guard request.url?.path.hasSuffix("/control") == true else {
-                throw RemoteEpochError.badRequest
-            }
-            return (RemoteEpochURLProtocol.response(for: request), Data())
-        }
-
-        model.selectedExecutionLocation = locationA
-        await model.cancel("run-a")
-        model.selectedExecutionLocation = locationB
-        await model.cancel("run-b")
+        model.rememberRunCancelled("run-a", at: locationA)
+        model.rememberRunCancelled("run-b", at: locationB)
         model.discardRemoteDaemonProjections(at: locationA)
 
         #expect(!model.wasRunCancelled("run-a", at: locationA))

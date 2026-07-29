@@ -448,6 +448,10 @@ final class AppModel {
         cancelledRunIds = Set(cancelledRunIds.filter { !$0.hasPrefix(prefix) })
     }
 
+    func rememberRunCancelled(_ id: String, at locationID: ExecutionLocationID) {
+        cancelledRunIds.insert(locatedRunKey(id, at: locationID))
+    }
+
     func wasRunCancelled(_ id: String, at locationID: ExecutionLocationID) -> Bool {
         cancelledRunIds.contains(locatedRunKey(id, at: locationID))
     }
@@ -883,7 +887,7 @@ final class AppModel {
             // composer would stay stuck on Stop after a successful cancel. Remember the
             // cancelled located id so `composerTurnState` reports it inactive
             // immediately until the owning daemon's row hydrates.
-            cancelledRunIds.insert(locatedRunKey(id, at: locationID))
+            rememberRunCancelled(id, at: locationID)
             mutateTask(id, at: locationID) {
                 $0.phase = .cancelled
                 $0.updatedAt = .now
