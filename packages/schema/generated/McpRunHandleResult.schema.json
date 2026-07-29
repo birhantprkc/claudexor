@@ -702,6 +702,45 @@
           ],
           "description": "Typed Delegate receipt; null when unavailable or legacy.",
           "default": null
+        },
+        "detailProblem": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Stable machine code of the detail problem, if any."
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Human-readable description of the detail problem."
+                },
+                "retryable": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Whether retrying the detail read may help."
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "additionalProperties": false,
+              "description": "Typed failure of a post-run detail read whose durable run result still survives."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Typed post-terminal detail-read problem (the durable run handle survives); null when the detail read succeeded.",
+          "default": null
         }
       },
       "required": [

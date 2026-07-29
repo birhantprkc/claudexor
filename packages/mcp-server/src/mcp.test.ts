@@ -508,6 +508,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
       outcomeBanner: "Applied",
       applyEligibility: { eligible: true, state: "verified", reason: null, requiredAction: null },
       planReadiness: null,
+      detailProblem: { code: "detail_unavailable", message: "retry later", retryable: true },
     };
     const tools = defaultClaudexorTools(async () => handle);
     const list = tools.filter((t) =>
@@ -532,6 +533,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
       const sc = res?.structuredContent as Record<string, any>;
       expect(sc?.runId).toBe("r-h1");
       expect(sc?.applyEligibility?.eligible).toBe(true);
+      expect(sc?.detailProblem?.code).toBe("detail_unavailable");
     }
   });
 

@@ -431,14 +431,15 @@
                 "message",
                 "retryable"
               ],
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "Typed failure of a post-run detail read whose durable run result still survives."
             },
             {
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "Typed post-terminal detail-read problem (the run result survives; its detail projections are absent for this reason); null when the detail read succeeded."
+          "description": "Typed post-terminal detail-read problem (the run result survives; its detail projections are absent for this reason); null when the detail read succeeded.",
+          "default": null
         },
         "council": {
           "anyOf": [

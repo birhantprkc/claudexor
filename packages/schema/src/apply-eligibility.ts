@@ -39,6 +39,16 @@ export const ApplyEligibility = z
   );
 export type ApplyEligibility = z.infer<typeof ApplyEligibility>;
 
+export const RunDetailProblem = z
+  .object({
+    code: z.string().nullable().describe("Stable machine code of the detail problem, if any."),
+    message: z.string().describe("Human-readable description of the detail problem."),
+    retryable: z.boolean().nullable().describe("Whether retrying the detail read may help."),
+  })
+  .strict()
+  .describe("Typed failure of a post-run detail read whose durable run result still survives.");
+export type RunDetailProblem = z.infer<typeof RunDetailProblem>;
+
 /**
  * The structured result shape MCP run tools return (structuredContent).
  * Text content mirrors it for hosts without structured-output support.
@@ -86,13 +96,7 @@ export const McpRunToolResult = z
     /** Typed disclosure that the post-terminal detail read DEGRADED: the run
      * finished and its result survived, but the detail projections above are
      * absent for this machine-readable reason (e.g. run_facts_invalid). */
-    detailProblem: z
-      .object({
-        code: z.string().nullable().describe("Stable machine code of the detail problem, if any."),
-        message: z.string().describe("Human-readable description of the detail problem."),
-        retryable: z.boolean().nullable().describe("Whether retrying the detail read may help."),
-      })
-      .nullable()
+    detailProblem: RunDetailProblem.nullable()
       .default(null)
       .describe(
         "Typed post-terminal detail-read problem (the run result survives; its detail projections are absent for this reason); null when the detail read succeeded.",
@@ -187,6 +191,11 @@ export const McpRunHandleResult = z
     delegation: RunDelegationInfo.nullable()
       .default(null)
       .describe("Typed Delegate receipt; null when unavailable or legacy."),
+    detailProblem: RunDetailProblem.nullable()
+      .default(null)
+      .describe(
+        "Typed post-terminal detail-read problem (the durable run handle survives); null when the detail read succeeded.",
+      ),
   })
   .strict()
   .describe("Structured MCP result for Claudexor durable-run read tools (inspect/status/result).");
