@@ -521,10 +521,12 @@ The orchestrator is the ONE resolve owner. There is no user-settable "Active"
 account — enabling/disabling a profile is the only routing control. The
 per-harness EFFECTIVE account is resolved by an owner-locked ladder (INV-135
 accounts authority): an explicit per-run/per-thread pin (`credentialProfileId`)
-wins; else null — POOL AUTO, the native/CLI login default subject. Enabled
-profiles route ONLY by explicit pin or as quota-rotation targets, never as a
-silent auto-default. The resolved account becomes the typed `credential_profile`
-on every `HarnessRunSpec` the run builds (and keys the lane's read-only home),
+wins; else null means POOL AUTO, the unprofiled/default subject. That subject
+may use a verified native/CLI login or the policy-governed API-key fallback.
+Enabled profiles route ONLY by explicit pin or as quota-rotation targets, never
+as a silent auto-default. The resolved profile pin, when present, becomes the
+typed `credential_profile` on every `HarnessRunSpec` the run builds (and keys
+the lane's read-only home),
 so the pin flows to the spec, preflight, continuity, and session recording. An
 unknown/disabled/harness-mismatched explicit id is a typed refusal before spawn.
 When the native/CLI login is EXCLUDED
@@ -559,20 +561,33 @@ id is recreated. Dependent journal
 invalidation happens before registry removal; any unhealthy project partition
 returns typed 409/recovery-required, leaving the profile retryable.
 
-Selection precedence is turn > thread-sticky > native/CLI login: a turn's
-explicit `credentialProfileId` (CLI `--profile`) beats the thread's durable
-`credential_profile_id` (PATCH /v2/threads/:id), which — when null — resolves to
-POOL AUTO (the native login default subject). Accounts are SYMMETRIC (D25): the
+Selection precedence is turn > thread-sticky > the unprofiled/default subject:
+a turn's explicit `credentialProfileId` (CLI `--profile`) beats the thread's
+durable `credential_profile_id` (PATCH /v2/threads/:id), which — when null —
+resolves to POOL AUTO. That subject can resolve to the verified native login or
+the policy-governed API-key fallback. The fallback is a route, not a synthetic
+account row or count. Accounts are SYMMETRIC (D25): the
 listing (`GET /v2/credential-profiles`, `claudexor profiles`) projects, per
 harness, every credential profile with its `enabled` flag (the only routing
 control), the native "CLI login" pseudo-row state (`native_credentials_enabled`
 + a detected native login), and the server-computed informational `next_up`
-identity (profile | native | none-with-reason) — who an unpinned run would route
-to next, computed by the routing owner — ONE projection so no surface re-derives
-the symmetry. A profile's `enabled` toggle is `PATCH
+selection — who an unpinned run would route to next, computed by the routing
+owner. Its `kind` is `profile | native | none`; `profileId`, `route`, and
+`reason` remain fields of their respective variants. This is ONE projection so
+no surface re-derives the symmetry. A profile's `enabled` toggle is `PATCH
 /v2/credential-profiles/:harness/:id` (CLI `profiles enable|disable`); the
 CLI-login toggle is a per-harness setting
 (`harness.<id>.native_credentials_enabled`).
+
+Opening Accounts or pressing Refresh requests the opt-in atomic form, `GET
+/v2/credential-profiles` with the `snapshot=true` query. One server-authored
+epoch contains the profiles, per-profile readiness, harness readiness, Workspace
+Git capability, quota, `next_up`, and an opaque quota-event cursor. The app
+begins a dedicated quota observer from exactly that cursor. A later quota
+projection marker, a rejected cursor, stream error, or premature EOF expires
+only quota-derived authority (`next_up` and quota) and stops the observer;
+profile identity, Enabled state, and readiness remain. Recovery is one explicit
+Accounts Refresh, not an automatic resnapshot loop.
 External thread create/PATCH calls with an explicit pool are rejected unless
 the profile id exists for every pool lane. Run preflight probes the selected profile for every lane even when the
 default harness doctor is already OK, before any adapter starts:
@@ -687,15 +702,28 @@ declared run artifact, or an explicitly verified host side-effect. Absolute
 `/tmp/...` writes are host side effects and are not project diffs; project tmp
 requests default to `tmp/...` inside the project/envelope or to run artifacts.
 
-Write modes need a git boundary for that isolation. A NON-GIT project folder is
-initialized automatically before any candidate spawns: `git init` plus a
+Git admission follows the semantic run shape, not a blanket mode rule.
+`GET /v2/run-applicability` (with the absolute `repoRoot` query) returns the
+live Git capability plus the engine-owned `in_place | isolated` × `read_only |
+agent_convergence | agent_other` matrix computed by the same predicate the run
+preflight uses. Every explicitly isolated thread needs a persistent Git
+worktree, so selecting Isolated authorizes a NON-GIT project folder to be
+initialized for Ask, Plan, or Agent before the worktree materializes. Git-backed
+Agent envelopes use the same idempotent initializer: `git init` plus a
 deterministic baseline commit (author `Claudexor`) make worktree diffs honest
 from the first run. Claudexor never creates or edits the project's `.gitignore`;
 repo `.claudexor/` is user-owned config and runtime stays external. The action
 is announced via a `project.git.initialized` run event in the timeline — never
-a refusal (comparator: Codex CLI refuses outside git; Claudexor creates the
-boundary itself), never a silent mutation. Read-only modes and `--in-place`
-stateful targets are untouched.
+a refusal, never a silent mutation.
+
+Supported in-place non-Git shapes remain available: Ask and Plan do not require
+Git there, and the existing live Agent convergence path can use its copied
+baseline. A Git-backed shape instead refuses before a provider starts when the
+executable is missing, is Apple's developer-tools launcher stub, or fails its
+probe. Direct `/v2/runs` keeps eager admission. A thread turn is persisted first,
+then runs the same preflight in the durable daemon job immediately before
+provider execution, so its typed problem survives reload and Exact Retry can
+replay the unchanged target and options after Git becomes available.
 
 Read-only turns provision a scoped harness HOME (no worktree) so native state —
 plan files, session rollouts, transcripts — never lands in the operator's real
@@ -844,6 +872,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/recovery/partitions/:id/export`
 - `POST /v2/recovery/partitions/:id/quarantine`
 - `POST /v2/recovery/partitions/:id/validate`
+- `GET /v2/run-applicability`
 - `GET /v2/runs`
 - `POST /v2/runs`
 - `GET /v2/runs/:id`
@@ -927,11 +956,16 @@ Endpoint semantics beyond the inventory:
   (the trust gate refusing `access: full`, preflight validation, an enqueue
   throw, or an Implement whose plan still has open questions and no explicit
   override — a typed `plan_not_ready`), the daemon persists the reason on the
-  turn (`ThreadTurn.enqueue_error`, projected as `enqueueError`) so every
-  surface renders the refusal inline instead of an eternally-empty bubble. The
-  readiness refusal is enforced at run-start (not by a bespoke early return in
-  the control API), so it rides this exact mechanism and stays durable,
-  idempotent, and replayable. `POST /v2/threads/:id/turns/:turnId/retry`
+  turn (`ThreadTurn.enqueue_error`, projected as `enqueueError`) as one typed,
+  sanitized problem: message, machine code, retryability, bounded required
+  actions, bounded structured context, and failure time. String leaves are
+  redacted before bounded persistence; arbitrary provider output and environment
+  values are not admitted. Surfaces render the message and recovery actions,
+  not the context object wholesale, so every refusal stays useful without
+  becoming a raw-data disclosure. The readiness refusal is enforced at
+  run-start (not by a bespoke early return in the control API), so it rides this
+  exact mechanism and stays durable, idempotent, and replayable. `POST
+  /v2/threads/:id/turns/:turnId/retry`
   creates a new command attempt for that SAME turn by replaying the immutable
   original command params through fresh preflight (no duplicate turn); a
   successful run binding clears the error, a repeat refusal replaces it.
@@ -1129,6 +1163,15 @@ clean axes normalizes to `run.completed` even when the engine emitted
 cause would demand a decision no axis can justify. The wire type is therefore
 a projection of the receipt; consumers read the axes in the payload and never
 pattern-match the producer's intent.
+
+Lifecycle and terminal reason remain separate. Reaching a configured hard
+wall-clock limit stops the process and therefore commits lifecycle `cancelled`
+with reason `wall_clock_exceeded`; the shared presentation owner labels that
+"Time limit reached", and ACP returns `refusal` because the user did not cancel
+the turn. An explicit Stop commits `user_cancelled` and projects cancelled.
+Control API, CLI, MCP, ACP, and macOS consume those typed facts rather than
+rewriting every cancellation as user intent; a legacy cancellation with no
+reason stays unknown/cancelled instead of receiving a fabricated cause.
 
 Cancellation wins only until the synchronous terminal commit starts. An abort
 observed before the terminal barrier replaces the prepared outcome with
@@ -1515,16 +1558,18 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    scan refuses the patch; delivery reuses `verifyAndDeliver` with a fresh
    verifier and exact target preimage. Success advances the persistent thread
    branch and watermark with journaled thread state.
-5. **Automatic git init** — a NON-GIT project folder is initialized before any
-   write candidate spawns (`git init`,
-   deterministic baseline commit). Fence: the mutation is announced via a typed
-   `project.git.initialized` run event — never silent.
+5. **Automatic git init** — a NON-GIT project folder is initialized before a
+   Git-backed run shape crosses its boundary (`git init`, deterministic baseline
+   commit). This includes an explicitly isolated Ask, Plan, or Agent thread and
+   Agent envelope paths; supported non-Git in-place shapes do not initialize.
+   Fence: the mutation is announced via a typed `project.git.initialized` run
+   event — never silent.
 6. **`revert_run`** — the server-owned in-place revert reads the immutable
    external patch anchor and reverses only bytes still equal to the recorded
    Claudexor postimage; a conflicting user edit is refused and left untouched.
-7. **Thin `CLAUDE.md` bridge** — at the same write-mode run-prep stage as the
-   automatic git init (INV-075), a project root that has `AGENTS.md` and no
-   `CLAUDE.md` gets a thin `CLAUDE.md` whose body is the official Anthropic
+7. **Thin `CLAUDE.md` bridge** — under its own write-envelope preparation rule
+   (INV-113), a project root that has `AGENTS.md`
+   and no `CLAUDE.md` gets a thin `CLAUDE.md` whose body is the official Anthropic
    import form (`@AGENTS.md`) plus a Claudexor ownership marker, so a Claude Code
    route reads the same instruction file Codex/Cursor/OpenCode read natively
    (Codex additionally gets `CLAUDE.md` as a project-doc fallback via config, and
@@ -1549,9 +1594,10 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    and NO-FOLLOW, so a hand-written `CLAUDE.md`, a symlink (even dangling), or a
    directory at that path is never overwritten or written through; it is
    idempotent, so a second or concurrent prep is a no-op; the project-root write
-   is skipped for read-only modes and `--in-place` stateful targets exactly as
-   the git boundary excludes them. A bridge failure never fails the run (it is a
-   convenience, not a precondition).
+   is skipped for read-only modes and `--in-place` stateful targets. Git
+   admission is determined independently by the semantic run-shape predicate
+   above. A bridge failure never fails the run (it is a convenience, not a
+   precondition).
 
 Reviewer selection is Agent-only and schema-owned. Ask and Plan reject reviewer
 panels and protected-path approvals; Council is Plan's critique path. The
@@ -1773,12 +1819,18 @@ no deliverable. Reviewer panels use `runtime.reviewer_timeout_ms` (default 10
 minutes). A timed-out reviewer still records any observed model/route proof that
 streamed before timeout. Candidate/planner/read-only harness streams carry an
 INACTIVITY watchdog (`runtime.harness_inactivity_timeout_ms`, default 20
-minutes; env `CLAUDEXOR_HARNESS_INACTIVITY_TIMEOUT_MS`): no events for the
-window means the vendor CLI is wedged — the stream is aborted (process-group
-kill) and the attempt fails with a typed message instead of parking the run in
-`running` forever. The timer resets on every harness event, so long runs are
-fine as long as they keep talking; a tool call that streams nothing for the
-whole window is indistinguishable from a hang and is killed.
+minutes; env `CLAUDEXOR_HARNESS_INACTIVITY_TIMEOUT_MS`): no useful agent
+progress for the window means the vendor CLI is wedged — the stream is aborted
+(process-group kill) and the attempt fails with a typed message instead of
+parking the run in `running` forever. One closed typed policy resets the window
+for non-empty thinking/message deltas, tool calls/results, file or patch
+changes, plan progress, and completed context compaction. Starts, status/retry/
+reconnect/keepalive chatter, usage-only updates, transient errors, terminal
+frames, and unknown future event kinds stay observable but do not extend the
+lease. Waiting on a typed user interaction suspends the watchdog under the
+separate finite-or-disabled interaction policy. Long active runs therefore stay
+alive while they make real progress; a tool call that streams nothing for the
+whole window remains indistinguishable from a hang and is killed.
 
 Run detail includes terminal state and output-ready state. `summary.state` is the
 daemon terminal/lifecycle state. `summary.outputReadyState` is
@@ -1905,7 +1957,9 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   delivery, decisions, and control (`/v2/runs/:id/apply/check`, `/v2/runs/:id/apply`,
   `/v2/runs/:id/decision`, `/v2/runs/:id/control`,
   `/v2/runs/:id/interactions/:id/answer`), harness status (`/v2/harnesses`,
-  `/v2/harnesses/:id/models`), setup jobs (`/v2/setup/jobs`), settings and secrets
+  `/v2/harnesses/:id/models`), root-scoped Git applicability
+  (`/v2/run-applicability`), Accounts/quota (`/v2/credential-profiles`,
+  `/v2/quota`), setup jobs (`/v2/setup/jobs`), settings and secrets
   (`/v2/settings`, `/v2/secrets`), and journal recovery
   (`/v2/recovery/partitions/:id` and validate/export/quarantine actions). The
   plan lifecycle rides the normal thread/turn endpoints — a `plan` run surfaces
@@ -1915,6 +1969,19 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   routing readiness, setup progress, and budget truth are projections of
   control-api DTOs and run artifacts, never app-local logic. Read-only modes
   expose no patch/apply controls.
+- Every app action that can start a turn first freezes one immutable
+  `TurnStartTarget`: execution location, project root, existing-thread versus
+  draft-create identity, and workspace mode; the effective turn options are
+  captured alongside it before the first await. Mouse Send, keyboard Send,
+  Implement/Implement anyway, and Plan-answer submission share one admission
+  boundary. The attempt then leases one exact
+  `GatewayClient` through applicability, thread creation, attachment upload, and
+  turn POST; a selection change during an await cannot redirect any later step.
+  Remote disconnect/reconnect advances the location generation and atomically
+  retires the old client, control forward, streams, and daemon-authored
+  projections. Within that turn-start path, each post-await result is accepted
+  only for that client/generation, while the explicitly offline thread-summary
+  cache remains a separate lifetime.
 - Delegate readiness comes from each harness row's engine-owned `delegation`
   projection. Run summaries carry the requested/effective/used/reason/remediation outcome
   and the narrow `delegatedFromRunId` child link. The exact composer and run-row
@@ -1927,7 +1994,11 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   `capability_profile.attachment_inputs`; every explicitly selected lane must
   support every mandatory attachment. The daemon revalidates finalized bytes at
   enqueue and adapters recheck the digest immediately before vendor serialization.
-- The agent-driven browser is an engine capability the app merely arms: the
+- The agent-driven browser is an engine capability the app merely arms. The
+  composer preserves user-selected access and web policy separately from the
+  effective request: Browser derives Full access and upgrades selected `off` to
+  effective `auto`; disarming it restores the selections, and only selected
+  values may persist as sticky thread preferences. The
   adapter injects the exact lockfile-pinned Microsoft Playwright MCP (codex via stateless
   `-c mcp_servers.browser.*` overrides, claude via `--mcp-config` inline JSON —
   the agent gets the Playwright navigate / screenshot / snapshot browser
@@ -2263,12 +2334,15 @@ code touching one of these areas must honor it or change it explicitly here.
   separate did-this-task-NEED-web resolver does not exist yet, so web-required
   enforcement applies only to explicit `cached`/`live` policies (the WHITEPAPER
   documents the rationale).
-- READ-ONLY flows on non-git folders get a best-effort copied baseline for
-  diffing (write modes auto-initialize git per INV-075). If exact capture or
-  reversal cannot be proven for an explicit in-place run, Claudexor fails
-  closed with a sanitized `manual_cleanup` receipt; it never substitutes an
-  empty diff and asks reviewers to trust the live tree. Presentation remains
-  capped at 200 kB only after the full text diff has crossed the secret fence.
+- In-place READ-ONLY flows on non-git folders get a best-effort copied baseline
+  for diffing. An explicitly isolated read-only thread initializes the Git
+  boundary first, while Git-backed write envelopes initialize per INV-075 and
+  the implemented live Agent convergence path keeps its non-Git copied baseline.
+  If exact capture or reversal cannot be proven for an explicit in-place run,
+  Claudexor fails closed with a sanitized `manual_cleanup` receipt; it never
+  substitutes an empty diff and asks reviewers to trust the live tree.
+  Presentation remains capped at 200 kB only after the full text diff has crossed
+  the secret fence.
 - Isolated-thread worktrees are pinned by persistent `claudexor/thread-*`
   branches. Journal SHA is a checked cache; successful apply advances the
   branch, and explicit trash/restore/purge owns its retention lifecycle.

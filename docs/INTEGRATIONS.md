@@ -56,7 +56,10 @@ exemptions):
   synthesis judge).
 - `--max-seconds <n>`: hard wall-clock deadline for the whole run; on expiry
   the run ends `cancelled` with reason `wall_clock_exceeded` and partial
-  artifacts (diagnostic `final/summary.md`) are kept.
+  artifacts (diagnostic `final/summary.md`) are kept. Consumers must use both
+  facts: the process lifecycle is cancelled, while user-facing presentation is
+  "Time limit reached" and ACP reports a refusal; an explicit Stop remains
+  `user_cancelled` / cancelled.
 - `--max-turns <n>`: per-run turn cap; beats per-harness settings, and a lane
   without native support discloses the ignored knob.
 - `--deny-path <glob>` (repeatable): globs no candidate may touch at all;
@@ -129,6 +132,27 @@ readiness. The status-line collector stays as a secondary source: an explicit
 documented windows and provenance in the Claudexor-owned v3 root and does not
 read Claude credential or session files. See the official
 [Claude Code status-line contract](https://code.claude.com/docs/en/statusline).
+
+`GET /v2/credential-profiles` with the `snapshot=true` query is the opt-in
+Accounts read for interactive clients. It returns profiles/readiness,
+per-harness `next_up`, Workspace Git, quota, and an opaque quota-event cursor
+from one server-authored epoch. Resume the dedicated quota observer from that
+cursor. A quota marker or a rejected/lost cursor invalidates the quota and
+`next_up` projection; clients keep identity/Enabled/readiness, stop observing,
+and wait for an explicit Accounts Refresh rather than automatically fetching a
+new snapshot. The engine-default API-key fallback can appear as the native
+`next_up` route, but it never becomes an account row or changes the account
+count.
+
+`GET /v2/run-applicability` takes an absolute `repoRoot` query and returns the
+live Workspace Git status plus the engine-owned in-place/isolated run-shape
+matrix. Every isolated Ask/Plan/Agent thread needs Git and may initialize a
+non-Git project when explicitly selected; supported in-place non-Git paths stay
+available. Direct runs use eager Git admission. Thread turns persist first and
+run the same canonical preflight in the durable job before provider execution,
+so a refusal is inspectable and Exact Retry replays the unchanged request after
+Git is repaired.
+
 Native login commands are server allowlisted and run as setup jobs with
 typed phase/deadline/outcome. An awaiting-user login SURVIVES an ordinary
 daemon restart — the successor adopts the identity-proven runner; only an
@@ -198,7 +222,9 @@ fsynced in the run's journal partition; daemon restart terminalizes unresolved
 questions instead of presenting a stale prompt as live.
 
 A thread turn whose run is refused before it starts (trust gate, preflight)
-carries the persisted reason in its projection (`enqueueError`);
+carries a persisted sanitized problem in its projection (`enqueueError`):
+message, code, retryability, bounded required actions, and bounded structured
+context. Clients present the message/actions and do not dump context wholesale;
 `POST /v2/threads/:id/turns/:turnId/retry` re-enqueues that same turn.
 `GET /v2/trust` / `POST /v2/trust` are the sole CLI/app trust boundary for the
 user-level full-access grant and `readonly|workspace_write` access default.
@@ -422,6 +448,9 @@ authority; no second in-memory session catalog exists. Images and embedded
 resources are uploaded/finalized into immutable daemon resource IDs before the
 turn enqueues. Blocked/failed daemon outcomes return ACP `refusal` plus typed
 `_meta.claudexor` run/status/apply evidence rather than a false `end_turn`.
+The same projection distinguishes deadline exhaustion from user cancellation:
+a terminal `cancelled` lifecycle with `wall_clock_exceeded` returns ACP
+`refusal`, while an explicit ACP/session Stop returns `cancelled`.
 
 `session/load` replays the conversation on reopen by fetching one run detail
 per turn. That fan-out is bounded to the most recent 50 turns: an older thread

@@ -148,9 +148,10 @@ Every mutating result carries a `runId`. The decision tree:
   stays failed after a login you believe completed.
 - The daemon errors with an unknown/unrecognized config key (version skew, not
   a value to edit).
-- A write-mode run targets a large non-git folder: write modes auto-initialize
-  git there with a full baseline commit (announced, by design), so confirm
-  with the human before running it on a big directory.
+- A run against a large non-git folder selects Isolated or another Git-backed
+  shape: Claudexor may create a deterministic, announced baseline commit, so
+  confirm with the human first. Supported in-place non-Git shapes do not trigger
+  that mutation.
 
 ## Using Claudexor vs changing Claudexor
 

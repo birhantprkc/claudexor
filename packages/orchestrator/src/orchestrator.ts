@@ -2869,10 +2869,11 @@ export class Orchestrator {
    * `CLAUDE.md` (`@AGENTS.md` import + Claudexor ownership marker) so a Claude
    * Code route reads the same instruction file codex/cursor read natively.
    *
-   * Fenced exactly where the automatic git-init boundary is: read-only modes
-   * never reach this run-prep stage; `--in-place` stateful targets are left
-   * untouched; the write targets the PROJECT root (`repoRoot`), never a worktree
-   * envelope. The workspace helper adds exclusive-create + no-follow +
+   * The project-root bridge has its own narrower fence: read-only modes never
+   * reach this run-prep stage and `--in-place` stateful targets are left
+   * untouched. Git admission is independently owned by `runStartRequiresGit`.
+   * The write targets the PROJECT root (`repoRoot`), never a worktree envelope.
+   * The workspace helper adds exclusive-create + no-follow +
    * idempotency, so a hand-written or symlinked `CLAUDE.md` is never overwritten
    * and a concurrent/second prep is a no-op. Announced via a typed
    * `project.claude_bridge.created` event on an actual create only — the git-init

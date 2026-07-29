@@ -33,8 +33,21 @@
       "summary": "List credential profiles per harness.",
       "auth": "loopback_bearer",
       "request_schema": null,
-      "parameters": [],
-      "response_schema": "ControlCredentialProfilesResponse",
+      "parameters": [
+        {
+          "name": "snapshot",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": [
+            "true",
+            "false"
+          ],
+          "schema_ref": null,
+          "description": "Return one fresh server-authored Accounts snapshot epoch."
+        }
+      ],
+      "response_schema": "ControlCredentialProfilesQueryResponse",
       "error_schema": "ControlProblem"
     },
     {
@@ -422,6 +435,28 @@
       "request_schema": null,
       "parameters": [],
       "response_schema": "ControlJournalValidation",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/run-applicability",
+      "mutating": false,
+      "applicability": "project",
+      "summary": "Project the root-scoped Git prerequisite for every run/workspace shape.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [
+        {
+          "name": "repoRoot",
+          "in": "query",
+          "required": true,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": null,
+          "description": "Absolute existing project root whose protected-path policy and Git prerequisite should be projected."
+        }
+      ],
+      "response_schema": "ControlRunApplicabilityResponse",
       "error_schema": "ControlProblem"
     },
     {

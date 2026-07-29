@@ -66,7 +66,9 @@ composer](docs/assets/app-agent-run.jpg)
 
 - Node.js >= 20.19 (the daemon, CLI, and every surface run on Node)
 - pnpm (via corepack: `corepack enable pnpm`)
-- git (worktrees, envelopes, and delivery all use it)
+- Git for isolated workspaces, candidate envelopes, and delivery. Supported
+  in-place non-Git paths remain available; Doctor reports Git availability, and
+  the app's Workspace Git check explains whether the selected shape is admitted.
 - At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`, or
   `opencode` — OR a provider API key (adapters accept `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, ... as fallbacks; the raw-API route needs only a key).
@@ -92,15 +94,17 @@ warnings:
 1. Download `Claudexor-<version>.dmg` from
    [Releases](https://github.com/razzant/claudexor/releases).
 2. Drag `Claudexor.app` into `Applications`.
-3. Open it — that's the whole install.
+3. Open it. The app starts its bundled Claudexor engine, then onboarding checks
+   the external Git and harness route needed by the work you select.
 
 ![Installing the macOS app: the mounted DMG window with Claudexor.app being
 dragged into the Applications folder](docs/assets/app-install-dmg.png)
 
-The app is self-contained: it bundles its own daemon runtime and starts it
-on launch; installing the CLI is only needed for terminal use. (The v1.0.0
-DMG was unsigned — if you kept it, either upgrade or approve it via System
-Settings → Privacy & Security → Open Anyway.)
+The app bundles its own daemon runtime and starts it on launch; installing the
+Claudexor CLI is only needed for terminal use. Git and vendor harnesses remain
+separate capabilities checked before a run starts. (The v1.0.0 DMG was unsigned
+— if you kept it, either upgrade or approve it via System Settings → Privacy &
+Security → Open Anyway.)
 
 ## Remote SSH
 
@@ -402,6 +406,10 @@ routing never silently creates a pin from an unpinned run; a run's
 `--profile` overrides it. Selection is turn/thread pin `--profile` > POOL AUTO
 (the enabled ladder led by the native/CLI login), and an explicit profile is
 STRICT — exactly its transport or a typed refusal, never a silent fallback.
+The engine-default API-key fallback is a credential route, not a synthetic
+account: it adds no Accounts row and does not change the account count. When it
+is the effective unprofiled route, the existing Next up/composer/footer
+disclosure says **API key**; key management stays in Auth.
 Vendor-session resume never crosses profiles. Subscription quota is tracked
 per profile from the vendor's own `oauth/usage` endpoint (proactive
 five-hour/seven-day/per-model percentages in the app's quota footer, one chip

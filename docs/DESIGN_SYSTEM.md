@@ -515,10 +515,10 @@ frequency and volume are. The contracts:
     quota line (worst window % + reset), one "Log in" / "Manage" action, an
     **Enabled** toggle that includes/excludes the account from the harness's
     routing pool (a disabled account is never routable; there is NO user-settable
-    "active" account — an unpinned run uses the harness's CLI login by default,
-    or the opt-in quota rotation's next ready account, and `next-up` is the
-    server-computed INFORMATIONAL identity that policy would pick, not an
-    auto-default over every enabled account), and — on
+    "active" account — an unpinned run uses the server-owned default route,
+    normally the harness's CLI login, or the opt-in quota rotation's next ready
+    account, and `next-up` is the server-computed INFORMATIONAL identity that
+    policy would pick, not an auto-default over every enabled account), and — on
     registered profiles only — a confirmed Remove (trash) that deletes the
     registration plus the account's own login/key
     (`DELETE /v2/credential-profiles/:harness/:id`; the default vendor login
@@ -542,6 +542,18 @@ frequency and volume are. The contracts:
     per-thread account PIN lives in the composer's account chip, not this popover;
     its "automatic account routing" option clears the pin back to automatic routing,
     and the choice persists through the thread DTO, never local-only UI state.
+    An engine-default API-key fallback is a ROUTE, never a synthetic account:
+    it adds no row and does not increase "N accounts". When that route is next,
+    the existing composer/footer disclosure says "API key"; Auth remains the key
+    management surface.
+
+    Accounts open and explicit Refresh consume ONE location-scoped server
+    snapshot containing profiles, readiness, Workspace Git, quota, `next_up`,
+    and the exact quota-event cursor. A later quota marker or invalid/lost cursor
+    expires the quota line and `next_up` once, leaves identity/Enabled/readiness
+    intact, and visibly requires Refresh. It never starts an automatic
+    resnapshot loop, and a failed foreground refresh replaces stale Ready truth
+    with unavailable/unknown presentation instead of preserving it indefinitely.
   - **Conversation (a message feed; code solid):** each turn is a right-aligned
     accent USER BUBBLE over the assistant's frosted card (Chat-V2, F2.5). The
     user bubble and the assistant's answer bubble MUST differ by HUE, not just
@@ -713,6 +725,11 @@ views in the shared design-system files; screens compose them.
   The "⋯" popover holds the per-turn engine knobs as clean SOLID
   `OptionSection`/`OptionRow` rows — every one a projection of a typed run/DTO
   field, never UI-invented state:
+  - the **Agent strategy** picker. `Single` means one candidate lane carried
+    through up to three real repair attempts by default (`maxAttempts: 3` on
+    the wire), not one provider invocation. Best-of, Until clean, and Create
+    use their own controls; the canonical strategy normalizer drops hidden
+    Single attempt values whenever they do not apply;
   - the **harness pool** multiselect chips (the eligible pool Best-of runs — one
     candidate per harness; the primary answers in chat);
   - the **per-harness model rows** (`Models — per harness for THIS turn`): one
@@ -746,7 +763,11 @@ views in the shared design-system files; screens compose them.
   - the **browser** toggle (see below);
   - the **Workspace** section with the **isolated-workspace toggle** (a draft
     thread can choose `isolated` — turns accumulate in a persistent thread
-    worktree — instead of the default in-place execution);
+    worktree — instead of the default in-place execution). On a non-Git project,
+    that explicit choice authorizes the server's one-time Git initialization for
+    Ask, Plan, or Agent; the composer's enabled state and reason come from the
+    exact-root run-applicability matrix, while supported in-place non-Git shapes
+    remain selectable;
   - **repair strategies** (until-clean / max-attempts) for agent turns.
   - **Delegate** remains visible for every Agent turn. It is enabled only from
     the selected route's engine-owned Delegate capability projection (Auto may
@@ -791,7 +812,11 @@ views in the shared design-system files; screens compose them.
   capability (hidden otherwise — never a dead switch). It is live egress and is
   disclosed as such: arming it forces Full access and lifts a `web: off` policy
   to `auto` — never a silent escalation ("Agent browses in a real window · runs
-  at Full access" renders under the switch). The hover help explains that the
+  at Full access" renders under the switch). Access and web policy retain their
+  separately selected values underneath this effective override: disarming
+  Browser restores both selections, and only those selected values may PATCH a
+  sticky thread preference. Switching to Ask/Plan or losing the last capable
+  lane disarms Browser before Send. The hover help explains that the
   agent drives a real HEADED browser window (navigate / screenshot / read) and
   that navigation snapshots are recorded in the run's artifacts. The run
   inspector projects engine receipts for mixed pools: each lane says whether
@@ -937,7 +962,11 @@ views in the shared design-system files; screens compose them.
 - **Refused-turn card + one-click trust.** A turn whose run was refused before
   it started (server-persisted `enqueueError` — e.g. the trust gate rejecting
   `access: full`) renders an inline "Not started" card with the engine's exact
-  refusal text. The TRUST refusal carries a one-click remedy — "Allow full
+  sanitized refusal text and up to three server-provided required actions. The
+  bounded typed context remains recovery evidence and is never dumped wholesale
+  into the card. A non-retryable problem explains that a new message is needed;
+  Retry is shown only when the durable job can replay the exact turn. The TRUST
+  refusal carries a one-click remedy — "Allow full
   access & Retry": no confirmation sheet by design; the button label + hover
   help state the persistent user-level grant it performs, then the SAME turn is
   retried (`POST /trust` → `POST /threads/:id/turns/:turnId/retry`, no
@@ -975,6 +1004,11 @@ views in the shared design-system files; screens compose them.
   Manifest auth modes are source availability only; nothing renders as ready
   unless doctor/smoke checks pass. Swift renders the typed rows verbatim and
   never parses id substrings or joined prose.
+  Settings and Onboarding additionally show a separate **Workspace Git** row for
+  the location: Available, Missing, Apple developer-tools stub, Failed, or
+  stale/unknown, with the server's recovery action. Exact-root run admission
+  uses the corresponding run-applicability matrix. Git readiness is never
+  folded into a harness or account row.
 - **AuthSheet (state-driven, F4 V21a).** ONE primary CTA derived from the
   cause in a severity ladder (Reconnect > observe-the-active-job/Done >
   Log in > Store key > Retry check), rendered prominent in the footer with
@@ -1056,13 +1090,24 @@ views in the shared design-system files; screens compose them.
   section; delivery is server-owned via the run decision/apply endpoints.)
   Settings groups are flat, solid, and shadowless. Settings does NOT own
   project selection — there is no Current Project field; the working directory
-  is picked only in the chat composer's `ProjectChip`. The Per-Harness Defaults
-  editor (enable/disable, model override, effort, web policy, tool allow/deny
-  lists, fallback model) **auto-saves** PARTIAL
-  patches to the engine config via `/settings` — there is no Save button; an
-  empty field is an explicit "clear the override", and in-flight saves must not
-  clobber the user's typing. Quick-launch and Retry honor saved engine defaults
-  instead of hardcoded portfolio/cap values.
+  is picked only in the chat composer's `ProjectChip`. Global and per-harness
+  Settings **auto-save** exact partial `/settings` patches by logical field lane;
+  there is no Save button. Discrete controls save immediately. Text and numeric
+  drafts wait for 600 ms of stability and flush on Return, blur, or Settings
+  disappearance; invalid drafts never reach the wire. Each edit captures its
+  execution location and settings epoch before debounce, so a stale local,
+  remote, or superseded response cannot settle another lane or clobber newer
+  typing. A failure stays field-local with Retry and no hot retry loop. An empty
+  per-harness override explicitly clears it. Quick-launch and Retry honor saved
+  engine defaults instead of hardcoded portfolio/cap values.
+
+  The interaction-wait setting is one explicit choice: **15 minutes by default**
+  (or another positive finite number of minutes), or **No automatic expiry**.
+  The latter persists the existing `interaction_timeout_ms` as `null`; it has no
+  blank/reset or magic-duration representation. A pending `InteractionCard`
+  shows its finite countdown or the literal "No automatic expiry". Answer,
+  Stop/cancel, an outer run deadline, terminal cleanup, or daemon restart can
+  still end an unbounded wait.
 - **Connections (remote execution locations).** The Connections tab lists the
   SSH hosts a thread can execute on, read from the user's own `~/.ssh/config`;
   Claudexor never stores a credential, a key or a password for them. Adding a
@@ -1220,7 +1265,7 @@ DesignSystemComponents.swift, DesignTokens.swift.)
 - **`HarnessAccountChip`** — a single shared view (one instance in the composer controls row):
   ONE capsule with two menu segments. The harness segment (brand mark + label + chevron `Menu`)
   switches the thread's sticky primary harness (a change applies from the next turn); the
-  account segment shows the thread's pinned account or the harness's computed next-up account, and
+  account segment shows the thread's pinned profile or the harness's computed next-up selection, and
   picking pins the thread's credential profile (the per-thread override — the accounts popover owns
   the global Enabled set that next-up routing draws from).
 

@@ -69,9 +69,9 @@ Two axes that must never share a control:
   (credential profile) + model. Manually, or policy-driven — including
   quota-aware selection across multiple subscriptions, which is the practical
   reason multi-account support exists at all.
-- **Strategy** picks HOW MANY units run and how their results combine: a
-  single attempt, N racing candidates, a planning council, a scout swarm, or
-  delegated sub-runs.
+- **Strategy** picks HOW work is multiplied and combined: one candidate lane
+  (repair attempts stay inside that lane), N racing candidates, a planning
+  council, a scout swarm, or delegated sub-runs.
 
 Accounts are symmetric citizens: the vendor CLI's own login and every added
 profile appear in one list with the same controls; the only asymmetry is
@@ -233,8 +233,10 @@ the login's own 15-minute deadline (extendable) are what end a pending login.
 Chat write turns run in-place on the live tree (the way local coding agents
 work), with snapshots and a fenced revert as the safety net; candidates,
 scouts, and delegated sub-runs run in isolated envelopes outside the repo.
-Write access needs a git boundary — a non-git folder is initialized loudly,
-never mutated silently. Vendor homes and scoped auth state live outside every
+Git admission follows the execution shape, not read versus write alone:
+explicitly isolated workspaces and Git-backed candidate envelopes may initialize
+a non-git project loudly, while supported in-place paths remain available
+without initialization. Vendor homes and scoped auth state live outside every
 worktree so `git add -A` can never capture credentials.
 
 Instruction files stay unified. The recommendation is one `AGENTS.md` at the

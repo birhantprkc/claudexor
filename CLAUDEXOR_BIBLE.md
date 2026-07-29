@@ -416,12 +416,16 @@ invariant or owner decision before proceeding.
   project-local `tmp/...` or run artifacts unless the user explicitly
   selects a verified host-side-effect mode. verify: tmp-semantics telemetry
   tests.
-- **INV-075** Write modes need a git boundary. A non-git project folder is
-  initialized automatically (`git init` + a deterministic baseline commit),
-  announced via a typed `project.git.initialized` event — never a refusal,
-  never a silent mutation. Claudexor never creates or edits the project's
-  `.gitignore`; repo `.claudexor/` is user-owned state and runtime stays
-  external. verify: git-init and gitignore non-interference workspace tests.
+- **INV-075** Git-backed run shapes need a Git boundary. A non-git project
+  folder is initialized automatically (`git init` + a deterministic baseline
+  commit) when the user selects an isolated Ask, Plan, or Agent workspace, or
+  another Git-backed envelope path. The mutation is announced via a typed
+  `project.git.initialized` event — never a refusal, never silent. Supported
+  in-place paths that do not cross a Git boundary remain available without
+  initialization. Claudexor never creates or edits the project's `.gitignore`;
+  repo `.claudexor/` is user-owned state and runtime stays external. verify:
+  git-init, isolated-thread, run-applicability, and gitignore non-interference
+  workspace tests.
 
 ## 8. Plan-Driven Work Is First-Class
 
@@ -563,12 +567,12 @@ invariant or owner decision before proceeding.
   race adoption applies only on a verified clean terminal; `revert_run` is
   content/preimage-fenced; thread apply considers every run not yet recorded
   as delivered and is serialized against active turns; the thin `CLAUDE.md`
-  bridge (an `AGENTS.md`-only project root, same write-prep stage as the
-  automatic git init, CONCEPT-CHANGE(INV-113)) is exclusive-create + no-follow
+  bridge (an `AGENTS.md`-only project-root mutation independently fenced from
+  Git admission, CONCEPT-CHANGE(INV-113)) is exclusive-create + no-follow
   so it never overwrites a hand-written file or writes through a symlink, and is
   written in TWO places — the durable project root (announced via a typed
   `project.claude_bridge.created` event; skipped for read-only modes AND
-  `--in-place` targets, where the git boundary by contrast still runs) and each
+  `--in-place` targets) and each
   git-mode ENVELOPE worktree (an envelope materializes only the committed tree,
   so an untracked project-root bridge never reaches a candidate; the envelope
   write emits no event and is EXCLUDED from the candidate patch ONLY when
@@ -614,10 +618,15 @@ invariant or owner decision before proceeding.
   non-applyable, labels "Needs input"/"Incomplete", and exits non-zero through
   the outcome-aware exit projection beside `processExitCode`. A blocked
   read-only run that delivered nothing is a failure, never a succeeded "needs
-  review" (QA-036). Every announced run reaches a terminal event on every path —
-  crash, cancel, pre-loop failure — so no observer waits forever. CLI and UI
-  show the axes through the one projection owner (labels, exit code, needs
-  decision). verify: canaries `[INV-116:output-ready-before-terminal]`,
+  review" (QA-036). A hard wall-clock deadline keeps lifecycle `cancelled`
+  because the process was stopped, but its typed `wall_clock_exceeded` reason
+  presents as "Time limit reached" and as an ACP refusal; an explicit Stop
+  remains `user_cancelled` and presents as cancelled. Surfaces never collapse
+  those two reasons or rewrite the lifecycle to express presentation. Every
+  announced run reaches a terminal event on every path — crash, cancel,
+  pre-loop failure — so no observer waits forever. CLI and UI show the axes
+  through the one projection owner (labels, exit code, needs decision). verify:
+  canaries `[INV-116:output-ready-before-terminal]`,
   `[INV-116:cancel-fast]`, `[INV-116:stream-watchdog]`,
   `[INV-116:blockers-visible]`, `[INV-116:work-complete]`,
   `[INV-116:work-state-veto]`, `[INV-116:work-report-contract]`,
@@ -748,7 +757,11 @@ invariant or owner decision before proceeding.
   account: enabling/disabling a profile (the toggle) is the only routing
   control. ONE resolve owner (the orchestrator) resolves the per-harness
   EFFECTIVE account by an owner-locked ladder: an explicit per-run/per-thread
-  profile pin wins; else POOL AUTO — the native/CLI login default subject.
+  profile pin wins; else POOL AUTO — the unprofiled/default subject. That
+  subject may use a verified native/CLI login or the policy-governed API-key
+  fallback from INV-061. The fallback route is not a credential profile or an
+  account identity: it never creates a synthetic Accounts row or increments an
+  account count, and its effective `next_up`/route disclosure remains visible.
   Enabled profiles route ONLY by explicit pin or as quota-rotation targets,
   never as a silent auto-default. Unknown, disabled, or harness-mismatched
   explicit ids refuse — an explicit profile never silently becomes the default
@@ -756,13 +769,14 @@ invariant or owner decision before proceeding.
   typed. When the native/CLI login is excluded (`native_credentials_enabled:
   false`) and no pin exists, an unpinned run has nothing routable: it refuses
   (explicit) or drops (auto) and never silently falls back INTO the disabled
-  login. Accounts are SYMMETRIC: every account is a row with an Enabled toggle
-  (the only routing control), the native login is a "CLI login" row with the
-  same toggle semantics minus Delete, and ONE server projection owns the
-  informational `next_up` identity — who an unpinned run would route to next,
-  computed by the routing owner from enabled profiles + native readiness +
-  quota — so no surface re-derives it. Native-session resume never crosses
-  profiles. Selecting a named profile makes its harness/pool coherent and every
+  login. Accounts are SYMMETRIC across real identities: every account is a row
+  with an Enabled toggle (the only routing control), the native login is a
+  "CLI login" row with the same toggle semantics minus Delete, and ONE server
+  projection owns the informational `next_up` identity — who an unpinned run
+  would route to next, computed by the routing owner from enabled profiles +
+  default-route readiness + quota — so no surface re-derives it.
+  Native-session resume never crosses profiles. Selecting a named profile makes
+  its harness/pool coherent and every
   selected lane probes the profile before spawn; deletion clears durable pins
   (any harness's `rotation_eligible` entry), matching native-session caches, and
   quota subjects so an id cannot dangle or resurrect stale auth. verify: schema

@@ -347,6 +347,8 @@ const RETIRED_CONTRACT_CLAIMS = [
   ["docs/CHECKLISTS.md", "reviewSubject=plan"],
   ["docs/WHITEPAPER.md", "every member critiques the merged plan from its own lane"],
   ["docs/ARCHITECTURE.md", "the run never hangs forever"],
+  ["docs/ARCHITECTURE.md", "Read-only modes and `--in-place` stateful targets are untouched"],
+  ["docs/ARCHITECTURE.md", "The timer resets on every harness event"],
   [
     "docs/INTEGRATIONS.md",
     "an unanswered question declines benignly after the configurable `interaction_timeout_ms`",
@@ -370,6 +372,21 @@ for (const [targetPath, claim] of RETIRED_CONTRACT_CLAIMS) {
   const normalized = readFileSync(targetPath, "utf8").replace(/\s+/g, " ");
   if (normalized.includes(claim)) {
     failures.push(`${targetPath} restores retired contract claim '${claim}'`);
+  }
+}
+
+// One narrow guard for the two sentences that formed the same unqualified DMG
+// install promise. Exact literals deliberately allow scoped uses of
+// "self-contained" and the separately disclosed remote setup/installer contract.
+const RETIRED_README_INSTALL_CLAIMS = [
+  "Open it — that's the whole install.",
+  "The app is self-contained: it bundles its own daemon runtime and starts it on launch",
+];
+{
+  const normalized = readFileSync("README.md", "utf8").replace(/\s+/g, " ");
+  const restored = RETIRED_README_INSTALL_CLAIMS.filter((claim) => normalized.includes(claim));
+  if (restored.length > 0) {
+    failures.push(`README.md restores unqualified install claim(s): ${restored.join(" | ")}`);
   }
 }
 
