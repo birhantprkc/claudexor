@@ -24,6 +24,12 @@ export interface CliCommandSpec {
   readonly summary: string;
   readonly extraUsageLines?: readonly { readonly text: string; readonly help: string }[];
   readonly flags: readonly string[];
+  /** Per-subcommand flag ownership for a multi-verb command whose verbs own
+   * DISJOINT flags (e.g. `harness list --all` vs `harness install --yes`).
+   * `flags` stays the union (the global preflight scope); dispatchers call
+   * `subcommandFlagScopeError` (command-scope.ts) so a flag outside its
+   * verb's set fails loudly (INV-021) instead of being silently ignored. */
+  readonly subcommandFlags?: Readonly<Record<string, readonly string[]>>;
   readonly mutability: CliMutability;
   readonly stability: "stable" | "experimental";
   readonly recovery?: boolean;
@@ -277,6 +283,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
     summary: "List harnesses, or install one pinned vendor CLI after disclosure",
     flags: ["all", "dry-run", "yes", "json"],
+    subcommandFlags: { list: ["all"], install: ["dry-run", "yes"] },
     mutability: "ops",
     stability: "stable",
   },
@@ -336,18 +343,6 @@ export const REPL_COMMANDS: readonly {
   { name: "/help", help: "this help" },
   { name: "/quit", help: "exit" },
 ];
-
-export function commandFlagScopeError(
-  commandId: string,
-  flagNames: readonly string[],
-): string | null {
-  const cmd = CLI_COMMANDS.find((c) => c.id === commandId || (c.aliases ?? []).includes(commandId));
-  if (!cmd) return null;
-  const allowed = new Set([...cmd.flags, "json", "help", "version"]);
-  const unexpected = flagNames.filter((flag) => !allowed.has(flag));
-  if (unexpected.length === 0) return null;
-  return `claudexor: flag(s) not valid for the ${cmd.id} command: ${unexpected.map((flag) => `--${flag}`).join(", ")} (see \`claudexor help\`)`;
-}
 
 export function hostFallbackExamples(): readonly string[] {
   const tier = (m: CliMutability): number => (m === "read" ? 0 : 1);

@@ -60,6 +60,21 @@ Release history for Claudexor. The current version is declared in the root
   the shared `SettingsGroup` shell, `AlignedListRow` row headers, and the
   documented status ladder (Connecting/Installing accent, Needs authentication
   caution, Failed danger).
+  The remote harness installer returns from the PR #82 cut as a disclosed,
+  exact-pinned flow (issue #89): a `claudexor harness install
+  <claude|codex|cursor|opencode>` CLI verb plus a Settings → Harnesses entry
+  point for connected hosts. Claude, Codex, and OpenCode install one exact
+  npm version aliased from each harness package's vendor-version SSOT (never
+  `@latest`; npm verifies the registry integrity checksum; the OpenCode pin
+  is a deterministic install target with no recorded verification fixture).
+  Cursor cannot be pinned and is not pretended to be: its vendor script is
+  downloaded in full (never piped to a shell), its size and SHA-256 print,
+  and it runs in the visible embedded terminal where the operator watches
+  it. Nothing executes before disclosure — the CLI prints the exact command
+  and destination and requires a TTY confirmation or `--yes`, and the macOS
+  dialog shows the remote CLI's own `--dry-run --json` disclosure verbatim
+  before opening the terminal sheet; Harness Doctor verifies the result
+  afterward.
   Toolchain: `@modelcontextprotocol/server` 2.0.0 GA with the
   2026-07-28 discover envelope pinned by regression, TypeScript 7.0.2 with a
   sidecar for the one compiler-API consumer, and zod 4.4.3 with the schema

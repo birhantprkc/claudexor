@@ -43,13 +43,8 @@ import { print, printJson, printJsonLine, printUsageError, statusGlyph } from ".
 import { controlProblemError, minIntError, renderCliFailure, usageError } from "./cli-error.js";
 import { handleHelpRequest } from "./command-help.js";
 import { pickResumableThread } from "./thread-select.js";
-import {
-  KNOWN_FLAGS,
-  VALUE_FLAGS,
-  commandFlagScopeError,
-  helpJson,
-  renderHelp,
-} from "./command-registry.js";
+import { KNOWN_FLAGS, VALUE_FLAGS, helpJson, renderHelp } from "./command-registry.js";
+import { commandFlagScopeError } from "./command-scope.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
 import { aboutJson, renderAbout } from "./about-command.js";
 import { dispatchOpsCommand } from "./ops-commands.js";

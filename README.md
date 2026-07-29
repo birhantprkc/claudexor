@@ -116,11 +116,17 @@ Claudexor uses the system `/usr/bin/ssh`, so existing keys, ssh-agent,
 `known_hosts`, MFA and `ProxyJump` remain OpenSSH's responsibility. On first
 connection the app verifies and installs a signed, no-`sudo` runtime under
 `~/.claudexor/remote/`, then reaches its loopback-only control API through an
-SSH local forward. Vendor CLIs and their credentials remain on the server;
-Claudexor never installs a vendor CLI for you — install them on the host
-yourself, then sign in from the app, which runs each vendor's own login in an
-embedded SSH terminal (Codex uses device auth). Remote threads include an
-embedded SSH terminal and an explicit-port preview tunnel.
+SSH local forward. Vendor CLIs and their credentials remain on the server and
+with the vendors. Claudexor can install a harness CLI on the host for you
+through a disclosed, exact-pinned flow — `claudexor harness install`, or
+Settings → Harnesses for a connected host: Claude, Codex, and OpenCode
+install one exact pinned npm version, and Cursor's vendor script is
+downloaded in full and runs in the visible terminal where you watch it;
+nothing executes before the exact command is disclosed and confirmed.
+(Installing them on the host yourself works too.) Then sign in from the app,
+which runs each vendor's own login in an embedded SSH terminal (Codex uses
+device auth). Remote threads include an embedded SSH terminal and an
+explicit-port preview tunnel.
 
 ### Updates
 

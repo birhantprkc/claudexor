@@ -6,9 +6,11 @@ import ClaudexorKit
 /// `harness install --dry-run --json` disclosure — exact command, install
 /// destination, and version pin — and the installer itself runs in the
 /// visible embedded terminal, where the user watches it like interactive
-/// SSH auth. npm harnesses install the exact pinned version this release
-/// was verified against; Cursor's script is downloaded in full and executed
-/// under the user's eyes because it cannot be pinned.
+/// SSH auth. Claude and Codex install the exact pinned npm version this
+/// release was verified against; OpenCode installs its exact pin as a
+/// deterministic install target (no recorded verification fixture covers
+/// it); Cursor's script is downloaded in full and executed under the
+/// user's eyes because it cannot be pinned.
 struct RemoteHarnessInstallSection: View {
     @Environment(AppModel.self) private var model
 
@@ -18,14 +20,14 @@ struct RemoteHarnessInstallSection: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 SectionLabel("Remote Harness Install", systemImage: "arrow.down.circle")
                 Text(
-                    "Puts a vendor CLI on an SSH host. Claude, Codex, and OpenCode install the exact npm version this Claudexor release was verified against; Cursor's installer script is downloaded in full and runs in the embedded terminal where you watch it. Nothing runs before you confirm the exact command.")
+                    "Puts a vendor CLI on an SSH host. Claude and Codex install the exact npm version this Claudexor release was verified against; OpenCode installs its exact pinned version as a deterministic target (not covered by recorded verification fixtures); Cursor's installer script is downloaded in full and runs in the embedded terminal where you watch it. Nothing runs before you confirm the exact command.")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(model.remoteConnections) { connection in
                     HStack {
                         Text(connection.displayName)
                         Spacer()
                         Menu("Install…") {
-                            ForEach(["claude", "codex", "cursor", "opencode"], id: \.self) {
+                            ForEach(installableRemoteHarnesses, id: \.self) {
                                 harness in
                                 Button(harness.capitalized) {
                                     Task {

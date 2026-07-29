@@ -42,6 +42,30 @@ describe("harnessCommand", () => {
     expect(mocks.printJson).not.toHaveBeenCalled();
   });
 
+  it("rejects flags the dispatched subcommand does not own with a loud exit-2 usage error", () => {
+    // INV-021: `harness list --yes` and `harness install --all` must never
+    // silently ignore the stray flag; the usage line names it.
+    expect(harnessCommand(parseArgs(["harness", "list", "--yes"]), false)).toBe(2);
+    expect(mocks.printUsageError).toHaveBeenLastCalledWith(false, expect.stringContaining("--yes"));
+    expect(harnessCommand(parseArgs(["harness", "list", "--dry-run"]), true)).toBe(2);
+    expect(mocks.printUsageError).toHaveBeenLastCalledWith(
+      true,
+      expect.stringContaining("--dry-run"),
+    );
+    expect(harnessCommand(parseArgs(["harness", "install", "codex", "--all"]), false)).toBe(2);
+    expect(mocks.printUsageError).toHaveBeenLastCalledWith(false, expect.stringContaining("--all"));
+    // Nothing was listed or installed on any of the refused paths.
+    expect(mocks.print).not.toHaveBeenCalled();
+    expect(mocks.printJson).not.toHaveBeenCalled();
+  });
+
+  it("still accepts each subcommand's own flags after the ownership check", () => {
+    expect(harnessCommand(parseArgs(["harness", "list", "--all"]), true)).toBe(0);
+    expect(mocks.printUsageError).not.toHaveBeenCalled();
+    expect(harnessCommand(parseArgs(["harness", "install", "codex", "--dry-run"]), true)).toBe(0);
+    expect(mocks.printUsageError).not.toHaveBeenCalled();
+  });
+
   it("rejects unknown verbs with the usage error", () => {
     expect(harnessCommand(parseArgs(["harness", "bogus"]), false)).toBe(2);
     expect(mocks.printUsageError).toHaveBeenCalledWith(

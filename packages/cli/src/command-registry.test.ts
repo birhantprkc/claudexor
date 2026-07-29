@@ -7,13 +7,13 @@ import {
   KNOWN_FLAGS,
   REPL_COMMANDS,
   VALUE_FLAGS,
-  commandFlagScopeError,
   helpJson,
   hostFallbackExamples,
   recoveryVerbs,
   renderHelp,
   renderReplHelp,
 } from "./command-registry.js";
+import { commandFlagScopeError, subcommandFlagScopeError } from "./command-scope.js";
 import { commandHelpJson, findCommand, renderCommandHelp } from "./command-help.js";
 import { reviewCommand } from "./review-command.js";
 
@@ -80,6 +80,29 @@ describe("command registry — the one owner of the CLI surface", () => {
     // not the scope check's.
     expect(commandFlagScopeError("run", ["harness"])).toBeNull();
     expect(commandFlagScopeError("spec", ["model"])).toBeNull();
+  });
+
+  it("subcommand flag ownership declares only flags the command itself owns", () => {
+    for (const cmd of CLI_COMMANDS) {
+      for (const [sub, owned] of Object.entries(cmd.subcommandFlags ?? {})) {
+        for (const flag of owned)
+          expect(cmd.flags.includes(flag), `${cmd.id} ${sub} -> --${flag}`).toBe(true);
+      }
+    }
+  });
+
+  it("a flag owned by the command but not the dispatched subcommand fails loudly (INV-021)", () => {
+    // `harness list --yes` / `harness install --all` must never be silently
+    // ignored — the error names the stray flag.
+    expect(subcommandFlagScopeError("harness", "list", ["yes"])).toContain("--yes");
+    expect(subcommandFlagScopeError("harness", "list", ["dry-run"])).toContain("--dry-run");
+    expect(subcommandFlagScopeError("harness", "install", ["all"])).toContain("--all");
+    // The verb's own flags plus the global affordances still pass.
+    expect(subcommandFlagScopeError("harness", "list", ["all", "json"])).toBeNull();
+    expect(subcommandFlagScopeError("harness", "install", ["dry-run", "yes", "json"])).toBeNull();
+    // No ownership map declared = nothing for this check to say.
+    expect(subcommandFlagScopeError("project", "list", ["json"])).toBeNull();
+    expect(subcommandFlagScopeError("harness", "bogus", ["yes"])).toBeNull();
   });
 
   it("host fallback examples and recovery verbs project the registry, not hand lists", () => {

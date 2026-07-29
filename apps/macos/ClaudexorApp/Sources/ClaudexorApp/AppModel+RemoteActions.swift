@@ -6,6 +6,13 @@ struct RemoteNativeLoginReadiness: Equatable {
     let harnessRoutable: Bool
 }
 
+/// The installable-harness allowlist — the ONE Swift copy, mirroring the
+/// CLI SSOT (`INSTALLABLE_HARNESSES` in
+/// packages/cli/src/harness-installer.ts). The remote CLI re-enforces the
+/// allowlist itself (usage exit 2 for anything else); this constant only
+/// feeds the Settings install menu and the pre-flight guard.
+let installableRemoteHarnesses = ["claude", "codex", "cursor", "opencode"]
+
 /// A pending remote harness install, awaiting the user's confirmation. The
 /// command/location/pin fields are the remote CLI's own `--dry-run --json`
 /// disclosure verbatim (issue #89): the app never re-derives the install
@@ -152,10 +159,17 @@ extension AppModel {
     /// from `confirmRemoteHarnessInstall`. A missing runtime or an
     /// unparseable disclosure is a loud typed message, never a silent no-op.
     func startRemoteHarnessInstall(connectionID: UUID, harness: String) async {
-        let allowed = ["claude", "codex", "cursor", "opencode"]
-        guard allowed.contains(harness),
-              let connection = remoteConnections.first(where: { $0.id == connectionID })
-        else { return }
+        guard installableRemoteHarnesses.contains(harness) else {
+            remoteConnectionMessages[connectionID] =
+                "\(harness) is not an installable harness; nothing was installed."
+            return
+        }
+        guard let connection = remoteConnections.first(where: { $0.id == connectionID })
+        else {
+            remoteConnectionMessages[connectionID] =
+                "That connection no longer exists; nothing was installed."
+            return
+        }
         if remoteClients[.remote(connectionID)] == nil {
             await connectRemote(connectionID)
         }
@@ -214,7 +228,11 @@ extension AppModel {
         remoteHarnessInstallPrompt = nil
         guard let connection = remoteConnections.first(where: {
             $0.id == prompt.connectionID
-        }) else { return }
+        }) else {
+            remoteConnectionMessages[prompt.connectionID] =
+                "That connection no longer exists; nothing was installed."
+            return
+        }
         do {
             let factory = try await sshConnectionManager.factory(for: connection)
             let command =

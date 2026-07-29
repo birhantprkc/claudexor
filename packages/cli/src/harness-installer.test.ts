@@ -28,6 +28,30 @@ const captureStdout = (): { lines: () => string; restore: () => void } => {
   return { lines: () => chunks.join(""), restore: () => spy.mockRestore() };
 };
 
+const captureStderr = (): { lines: () => string; restore: () => void } => {
+  const chunks: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    chunks.push(String(chunk));
+    return true;
+  });
+  return { lines: () => chunks.join(""), restore: () => spy.mockRestore() };
+};
+
+/** A hostile child: writes vendor noise onto whatever fd its stdout was
+ * routed to (fd 2 in json mode, the caller's stdout otherwise) — exactly
+ * what real npm/curl/install.sh interleaving looks like. */
+const noisySpawn = (status: number) =>
+  vi.fn((binary: string, argv: string[], options?: { stdio?: unknown }) => {
+    if (binary === "curl") {
+      const target = argv.at(-1) ?? "";
+      writeFileSync(target, "#!/bin/sh\necho fake-installer\n");
+    }
+    const stdio = options?.stdio;
+    const stdoutTarget = Array.isArray(stdio) && stdio[1] === 2 ? process.stderr : process.stdout;
+    stdoutTarget.write("vendor noise: added 42 packages in 3s\n");
+    return { status } as never;
+  });
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote harness installer allowlist", () => {
@@ -85,6 +109,7 @@ describe("runHarnessInstaller", () => {
       nodePath: "/runtime/node/bin/node",
       spawn: spawn as never,
       mkdir: vi.fn(),
+      exists: () => true,
     });
     expect(result).toEqual({ exitCode: 0 });
     expect(spawn).toHaveBeenCalledWith(
@@ -99,6 +124,23 @@ describe("runHarnessInstaller", () => {
       ],
       expect.objectContaining({ stdio: "inherit" }),
     );
+  });
+
+  it("refuses loudly, naming the expected path, when the bundled npm entrypoint is missing", () => {
+    // A Node closure without the bundled npm tree must be a typed refusal
+    // BEFORE any spawn — never node's raw "Cannot find module" crash.
+    const spawn = vi.fn(() => ({ status: 0 }) as never);
+    const result = runHarnessInstaller("codex", {
+      home: "/tmp/operator",
+      nodePath: "/runtime/node/bin/node",
+      spawn: spawn as never,
+      mkdir: vi.fn(),
+      exists: () => false,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.refusal).toContain("/runtime/node/lib/node_modules/npm/bin/npm-cli.js");
+    expect(result.refusal).toContain("nothing was executed");
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("downloads the Cursor installer, prints its sha256, executes it, and always cleans up", () => {
@@ -198,5 +240,79 @@ describe("harnessInstallCommand disclosure/confirmation gate", () => {
     expect(harnessInstallCommand(args(["harness", "install"]), false)).toBe(2);
     expect(harnessInstallCommand(args(["harness", "install", "codex", "extra"]), false)).toBe(2);
     stderr.mockRestore();
+  });
+
+  it("the opencode disclosure names its pin a deterministic target, not a verified version", () => {
+    const stdout = captureStdout();
+    const stderr = captureStderr();
+    harnessInstallCommand(args(["harness", "install", "opencode"], { "dry-run": true }), false);
+    harnessInstallCommand(args(["harness", "install", "claude"], { "dry-run": true }), false);
+    stdout.restore();
+    stderr.restore();
+    const lines = stdout.lines();
+    expect(lines).toContain(
+      "deterministic install target — not covered by recorded verification fixtures",
+    );
+    expect(lines).toContain(
+      `${CLAUDE_VENDOR_CLI_VERSION} (exact; the version this release was verified against`,
+    );
+  });
+});
+
+describe("--json stdout purity on the execute path (--yes)", () => {
+  const jsonYesInstall = (
+    harness: string,
+    status: number,
+  ): { code: number; stdout: string; stderr: string } => {
+    const stdout = captureStdout();
+    const stderr = captureStderr();
+    const code = harnessInstallCommand(args(["harness", "install", harness], { yes: true }), true, {
+      home: "/tmp/operator",
+      nodePath: "/runtime/node/bin/node",
+      spawn: noisySpawn(status) as never,
+      mkdir: vi.fn(),
+      exists: () => true,
+    });
+    stdout.restore();
+    stderr.restore();
+    return { code, stdout: stdout.lines(), stderr: stderr.lines() };
+  };
+
+  it("a successful npm install emits EXACTLY one JSON object on stdout; vendor noise lands on stderr", () => {
+    const result = jsonYesInstall("codex", 0);
+    expect(result.code).toBe(0);
+    // The whole stdout parses as one object — a machine caller's JSON.parse
+    // must survive a child that sprays garbage at its own stdout.
+    const payload = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(payload).toMatchObject({ ok: true, dryRun: false, exitCode: 0, harness: "codex" });
+    expect(result.stdout).not.toContain("vendor noise");
+    expect(result.stderr).toContain("vendor noise");
+  });
+
+  it("a failed install keeps stdout to the single {ok:false} envelope", () => {
+    const result = jsonYesInstall("codex", 7);
+    expect(result.code).toBe(7);
+    const payload = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(payload).toMatchObject({ ok: false, dryRun: false, exitCode: 7 });
+    expect(result.stdout).not.toContain("vendor noise");
+  });
+
+  it("the cursor path routes its sha256/running progress lines to stderr under --json", () => {
+    const result = jsonYesInstall("cursor", 0);
+    expect(result.code).toBe(0);
+    const payload = JSON.parse(result.stdout) as Record<string, unknown>;
+    expect(payload).toMatchObject({ ok: true, dryRun: false, exitCode: 0, harness: "cursor" });
+    expect(result.stdout).not.toContain("cursor installer downloaded");
+    expect(result.stderr).toMatch(/cursor installer downloaded: \d+ bytes, sha256 [0-9a-f]{64}/);
+    expect(result.stderr).toContain("running: /bin/sh ");
+  });
+
+  it("human (non-json) mode keeps the cursor progress lines on stdout", () => {
+    const stdout = captureStdout();
+    const spawn = noisySpawn(0);
+    runHarnessInstaller("cursor", { home: "/tmp/operator", spawn: spawn as never });
+    stdout.restore();
+    expect(stdout.lines()).toMatch(/cursor installer downloaded: \d+ bytes, sha256 [0-9a-f]{64}/);
+    expect(stdout.lines()).toContain("vendor noise");
   });
 });

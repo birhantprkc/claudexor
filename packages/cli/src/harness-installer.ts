@@ -5,9 +5,12 @@
  *
  * Contract:
  * - npm-distributed harnesses (claude/codex/opencode) install ONE exact
- *   version — the per-package vendor-version SSOT the model/effort freshness
- *   gates read — never `@latest`. npm verifies the registry integrity
- *   checksum for an exact version, so the pin is a real guarantee.
+ *   version — the per-package vendor-version SSOT — never `@latest`. npm
+ *   verifies the registry integrity checksum for an exact version, so the
+ *   pin is a real guarantee. For claude/codex that SSOT is the value the
+ *   model/effort freshness gates verified; the opencode pin is a
+ *   deterministic install target, NOT a verification claim (no recorded
+ *   fixture yet — see packages/harness-opencode vendor-cli-version.ts).
  * - cursor has no npm artifact and CANNOT be pinned. Instead of pretending,
  *   the HUMAN is the verifier: the complete vendor script is downloaded first
  *   (never piped to a shell), its size and sha256 are printed, and it runs in
@@ -20,10 +23,14 @@
  * - failures are typed and loud; a failed download or non-zero installer exit
  *   never reads as success, and the temp download dir is removed on every
  *   path.
+ * - `--json` keeps stdout pure: exactly ONE JSON object. In json mode every
+ *   human progress line goes to stderr and child processes (npm/curl/the
+ *   vendor script) run with their stdout routed onto stderr, so vendor
+ *   output stays visible without corrupting the machine envelope.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CLAUDE_VENDOR_CLI_VERSION } from "@claudexor/harness-claude";
@@ -41,9 +48,12 @@ export function isInstallableHarness(value: string): value is InstallableHarness
 }
 
 /** Exact npm pins. Each version ALIASES the harness package's vendor-version
- * SSOT (vendor-cli-version.ts there), so the installer can only ever install
- * the version this release's freshness gates vouch for. Cursor is absent
- * deliberately: it ships no npm artifact (see the cursor branch below). */
+ * SSOT (vendor-cli-version.ts there). For claude/codex that is the version
+ * this release's freshness gates verified; the opencode pin is a
+ * deterministic install target only — no recorded verification fixture
+ * vouches for it (its vendor-cli-version.ts discloses this). Cursor is
+ * absent deliberately: it ships no npm artifact (see the cursor branch
+ * below). */
 const NPM_PINS: Partial<
   Record<InstallableHarness, { npmPackage: string; version: PinnedVendorCliVersion }>
 > = {
@@ -102,10 +112,23 @@ export function runHarnessInstaller(
     nodePath?: string;
     spawn?: typeof spawnSync;
     mkdir?: typeof mkdirSync;
+    exists?: typeof existsSync;
+    /** `--json` stdout purity: route human progress lines AND child stdout
+     * to stderr, so stdout carries exactly one JSON object (the caller's
+     * final envelope). Human mode keeps everything on stdout as before. */
+    json?: boolean;
   } = {},
 ): HarnessInstallRunResult {
   const home = resolve(options.home ?? homedir());
   const spawn = options.spawn ?? spawnSync;
+  const json = options.json === true;
+  // stdin inherited; child stdout -> OUR stderr (fd 2) in json mode so
+  // vendor/npm output stays visible but never pollutes the JSON envelope.
+  const childStdio: "inherit" | [number, number, number] = json ? [0, 2, 2] : "inherit";
+  const note = (line: string): void => {
+    if (json) process.stderr.write(line + "\n");
+    else print(line);
+  };
   const environment = { ...process.env, HOME: home };
   const pin = NPM_PINS[harness];
   if (pin) {
@@ -121,10 +144,18 @@ export function runHarnessInstaller(
       "bin",
       "npm-cli.js",
     );
+    if (!(options.exists ?? existsSync)(npmCLI)) {
+      return {
+        exitCode: 1,
+        refusal:
+          `the bundled npm entrypoint is missing at ${npmCLI} ` +
+          "(expected inside the pinned Node runtime next to this CLI); nothing was executed",
+      };
+    }
     const result = spawn(
       nodePath,
       [npmCLI, "install", "--global", "--prefix", vendorRoot, `${pin.npmPackage}@${pin.version}`],
-      { stdio: "inherit", env: environment },
+      { stdio: childStdio, env: environment },
     );
     return { exitCode: result.status ?? 1 };
   }
@@ -146,7 +177,7 @@ export function runHarnessInstaller(
         "--output",
         installerPath,
       ],
-      { stdio: "inherit", env: environment },
+      { stdio: childStdio, env: environment },
     );
     if (downloaded.status !== 0) {
       return {
@@ -163,12 +194,12 @@ export function runHarnessInstaller(
         refusal: "the downloaded installer script could not be read back; nothing was executed",
       };
     }
-    print(
+    note(
       `cursor installer downloaded: ${script.length} bytes, ` +
         `sha256 ${createHash("sha256").update(script).digest("hex")}`,
     );
-    print(`running: /bin/sh ${installerPath}`);
-    const executed = spawn("/bin/sh", [installerPath], { stdio: "inherit", env: environment });
+    note(`running: /bin/sh ${installerPath}`);
+    const executed = spawn("/bin/sh", [installerPath], { stdio: childStdio, env: environment });
     return { exitCode: executed.status ?? 1 };
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -178,15 +209,24 @@ export function runHarnessInstaller(
 const INSTALL_USAGE =
   "usage: claudexor harness install <claude|codex|cursor|opencode> [--dry-run] [--yes]";
 
+function pinDisclosureLine(disclosure: HarnessInstallerDisclosure): string {
+  if (disclosure.pinnedVersion === null) {
+    return "Version pin:      none — Cursor ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it";
+  }
+  // opencode's pin is honest but weaker: a deterministic install target, not
+  // a verification claim (no recorded fixture — its vendor-cli-version.ts
+  // discloses this). claude/codex pins are the gate-verified versions.
+  if (disclosure.harness === "opencode") {
+    return `Version pin:      ${disclosure.pinnedVersion} (exact; deterministic install target — not covered by recorded verification fixtures; npm verifies its registry integrity checksum)`;
+  }
+  return `Version pin:      ${disclosure.pinnedVersion} (exact; the version this release was verified against — npm verifies its registry integrity checksum)`;
+}
+
 function printHumanDisclosure(disclosure: HarnessInstallerDisclosure): void {
   print(`Harness:          ${disclosure.harness}`);
   print(`Command:          ${disclosure.command}`);
   print(`Install location: ${disclosure.installLocation}`);
-  print(
-    disclosure.pinnedVersion !== null
-      ? `Version pin:      ${disclosure.pinnedVersion} (exact; npm verifies this version's registry integrity checksum)`
-      : "Version pin:      none — Cursor ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it",
-  );
+  print(pinDisclosureLine(disclosure));
 }
 
 /** Blocking y/N read on the controlling TTY (fd 0). Anything but an explicit
@@ -208,7 +248,12 @@ function confirmOnTty(question: string): boolean {
   return /^y(es)?$/i.test(input.trim());
 }
 
-export function harnessInstallCommand(args: ParsedArgs, json: boolean): number {
+export function harnessInstallCommand(
+  args: ParsedArgs,
+  json: boolean,
+  /** Test seam: forwarded to `runHarnessInstaller` (spawn/home/... fakes). */
+  runnerOptions: Omit<NonNullable<Parameters<typeof runHarnessInstaller>[1]>, "json"> = {},
+): number {
   const harness = args._[2] ?? "";
   if (!isInstallableHarness(harness) || args._.length !== 3) {
     return printUsageError(json, INSTALL_USAGE);
@@ -242,7 +287,7 @@ export function harnessInstallCommand(args: ParsedArgs, json: boolean): number {
       return 1;
     }
   }
-  const result = runHarnessInstaller(harness);
+  const result = runHarnessInstaller(harness, { ...runnerOptions, json });
   const ok = result.exitCode === 0 && result.refusal === undefined;
   if (json) {
     printJson({

@@ -1994,10 +1994,13 @@ Vendor harness CLIs land on a host only through the disclosed installer
 (`claudexor harness install`, reachable from Settings → Harnesses for a
 connected host). The npm-distributed harnesses (claude, codex, opencode)
 install one EXACT pinned version — each pin aliases that harness package's
-vendor-version constant, the same value the model-hints and effort freshness
-gates read, so the installed CLI is the version this release was verified
-against and npm checks the registry integrity checksum for that exact version;
-`@latest` is never used. Cursor ships no npm artifact and cannot be pinned:
+vendor-version constant, and npm checks the registry integrity checksum for
+that exact version; `@latest` is never used. For claude and codex that
+constant is the same value the model-hints and effort freshness gates read,
+so the installed CLI is the version this release was verified against; the
+opencode pin is a deterministic install target, not a verification claim —
+no recorded fixture covers it yet, as its `vendor-cli-version.ts` discloses.
+Cursor ships no npm artifact and cannot be pinned:
 its vendor script is downloaded in full (`curl --fail`, never piped to a
 shell), its size and SHA-256 are printed, and it executes in the visible
 embedded PTY where the operator watches it — the human is the verifier, the
