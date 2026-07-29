@@ -52,7 +52,7 @@ let reviewRuntimeArtifacts = [];
 let reviewRuntimeArtifactError = null;
 if (gateExitCode === 0) {
   try {
-    reviewRuntimeArtifacts = buildReleaseReviewRuntimeBundle(
+    reviewRuntimeArtifacts = await buildReleaseReviewRuntimeBundle(
       git("rev-parse", "--show-toplevel"),
       outDir,
     );

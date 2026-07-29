@@ -7,7 +7,7 @@ export interface ReleaseReviewRuntimeArtifact {
 export function buildReleaseReviewRuntimeBundle(
   repoRoot: string,
   artifactRoot: string,
-): ReleaseReviewRuntimeArtifact[];
+): Promise<ReleaseReviewRuntimeArtifact[]>;
 export function readStableReviewFile(path: string, label: string): Buffer;
 
 export function snapshotReleaseReviewRuntimeArtifacts(

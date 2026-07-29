@@ -12,7 +12,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { buildSync } from "esbuild";
 import {
   RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS,
   pathIsWithin,
@@ -94,7 +93,7 @@ function smokeRuntimeApi(bytes) {
 }
 
 /** Build one transparent, self-contained runtime beside the external gate receipt. */
-export function buildReleaseReviewRuntimeBundle(repoRoot, artifactRoot) {
+export async function buildReleaseReviewRuntimeBundle(repoRoot, artifactRoot) {
   const root = realpathSync(resolve(repoRoot));
   const outputRoot = realpathSync(resolve(artifactRoot));
   const entryPath = join(root, "scripts/lib/release-review-runtime-entry.ts");
@@ -102,7 +101,11 @@ export function buildReleaseReviewRuntimeBundle(repoRoot, artifactRoot) {
   if (existsSync(outputPath)) {
     throw new Error("release review runtime bundle already exists");
   }
-  const result = buildSync({
+  // Build tooling is intentionally outside the live verifier import graph.
+  // Only the post-gate receipt builder loads esbuild; prepare/live/seal paths
+  // execute this tracked helper plus the already-bound runtime bytes.
+  const { build } = await import("esbuild");
+  const result = await build({
     absWorkingDir: root,
     alias: {
       "@claudexor/core": join(root, "packages/core/src/diff.ts"),
