@@ -55,7 +55,7 @@ struct AdvancedReviewControls: View {
     }
 
     var body: some View {
-        DisclosureGroup("Advanced", isExpanded: $expanded) {
+        DisclosureRow("Advanced", isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 reviewersSection
                 Divider()

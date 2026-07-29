@@ -89,7 +89,7 @@ struct AuthSheetJobPanel: View {
 
                 primaryActionsRow
                 if job.command != nil || job.canRetry || job.guideUrl != nil {
-                    DisclosureGroup("Advanced — terminal command & guide", isExpanded: $showAdvanced) {
+                    DisclosureRow("Advanced — terminal command & guide", isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                             if let command = job.command {
                                 Text(command)

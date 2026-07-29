@@ -5,21 +5,21 @@ import SwiftUI
 struct ConnectionsSettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var selectedAlias = ""
-    @State private var showNewHostForm = false
+    @State private var showNewHostSheet = false
+    @State private var addFailure: String?
+    @State private var creationReceipt: SSHHostCreationReceipt?
 
-    private var addableHosts: [SSHHost] {
-        model.availableSSHHosts.filter { host in
-            !model.remoteConnections.contains { $0.sshAlias == host.alias }
-        }
+    private var picker: SSHHostPickerPresentation {
+        SSHHostPickerPresentation.present(
+            scan: model.sshHostScan,
+            addedAliases: Set(model.remoteConnections.map(\.sshAlias)))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-            // Same shell every other Settings section uses (SectionLabel on a
-            // raised surface): this pane used to hand-roll a title2 header and
-            // read as a different app.
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                SectionLabel("SSH Connections", systemImage: "network")
+            // The same shell every other Settings section uses (SettingsGroup):
+            // this pane used to hand-copy the recipe and read as a different app.
+            SettingsGroup("SSH Connections", systemImage: "network") {
                 Text(
                     "Hosts come from ~/.ssh/config. Claudexor delegates keys, ssh-agent, known_hosts, MFA, ProxyJump, and ProxyCommand to /usr/bin/ssh.")
                     .font(.caption)
@@ -27,29 +27,32 @@ struct ConnectionsSettingsView: View {
                     // Wrap instead of clipping: this sentence is longer than the
                     // Settings column, and clipped text is a visual-QA blocker.
                     .fixedSize(horizontal: false, vertical: true)
-                OptionRow(label: "SSH host", labelWidth: 72) {
+                // Two paths, one mental model: add an EXISTING alias directly
+                // (app-local, immediate), or create a NEW host in a sheet (a
+                // five-field ~/.ssh/config mutation). Never one behind the other.
+                OptionRow(label: "From config", labelWidth: 84) {
                     Picker("SSH host", selection: $selectedAlias) {
-                        Text(addableHosts.isEmpty ? "No hosts to add" : "Choose an alias").tag("")
-                        ForEach(addableHosts) { host in
+                        Text(picker.placeholder).tag("")
+                        ForEach(picker.addable) { host in
                             Text(host.alias).tag(host.alias)
                         }
                     }
                     .labelsHidden()
                     .frame(width: Theme.Layout.modelPickerWidth, alignment: .leading)
-                    .disabled(addableHosts.isEmpty)
+                    .disabled(picker.addable.isEmpty)
+                    .help(picker.help)
                     Button {
-                        model.addRemoteConnection(alias: selectedAlias)
-                        selectedAlias = ""
+                        addFailure = model.addRemoteConnection(alias: selectedAlias)
+                        if addFailure == nil { selectedAlias = "" }
                     } label: {
                         Label("Add", systemImage: "plus")
                     }
                     .buttonStyle(.bordered)
                     .disabled(selectedAlias.isEmpty)
-                    // A disabled control must say why it is disabled.
-                    .help(
-                        addableHosts.isEmpty
-                            ? "Every concrete Host alias in ~/.ssh/config is already added."
-                            : "Choose an alias first, then add it as an execution location.")
+                    // A disabled control must say why it is disabled — and the
+                    // reason must be the REAL scan state, not a guess.
+                    .help(picker.addable.isEmpty ? picker.help
+                        : "Choose an alias first, then add it as an execution location.")
                     Button {
                         model.refreshSSHHosts()
                     } label: {
@@ -58,142 +61,110 @@ struct ConnectionsSettingsView: View {
                     .buttonStyle(.bordered)
                     .help("Re-read ~/.ssh/config.")
                 }
-                DisclosureGroup("Add a new host…", isExpanded: $showNewHostForm) {
-                    NewSSHHostForm { alias in
-                        selectedAlias = alias
-                        showNewHostForm = false
-                    }
+                OptionRow(label: "New host", labelWidth: 84) {
+                    Button("New SSH Host…") { showNewHostSheet = true }
+                        .buttonStyle(.bordered)
+                        .help(
+                            "Create a Host entry in ~/.ssh/config and add it as a connection in one step.")
+                }
+                if let failure = picker.inlineFailure ?? addFailure {
+                    // A failed scan or a refused add is a visible error, never
+                    // a silently quieter picker.
+                    Text(failure)
+                        .font(.caption)
+                        .foregroundStyle(Theme.status(.negative))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(Theme.Spacing.lg)
-            .background(
-                Theme.surfaceRaised,
-                in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .stroke(Theme.separator, lineWidth: 1))
+
+            if let creationReceipt {
+                SSHHostReceiptCard(receipt: creationReceipt) {
+                    self.creationReceipt = nil
+                }
+            }
 
             if model.remoteConnections.isEmpty {
-                // Empty states name the ACTION, not the constraint: both real
-                // paths to a first host, with the pattern note secondary.
-                ContentUnavailableView(
-                    "No remote connections",
-                    systemImage: "network.slash",
-                    description: Text(
-                        "Create one with “Add a new host…” above, or add a Host block to ~/.ssh/config yourself and press Rescan. Pattern hosts (wildcards) stay hidden — only concrete aliases can become connections."))
+                // Empty states name the ACTION: the same primary CTA as above,
+                // so the first useful step is never visually remote.
+                ContentUnavailableView {
+                    Label("No remote connections", systemImage: "network.slash")
+                } description: {
+                    Text(
+                        "Create one here, or add a Host block to ~/.ssh/config yourself and press Rescan. Pattern hosts (wildcards) stay hidden — only concrete aliases can become connections.")
+                } actions: {
+                    Button("New SSH Host…") { showNewHostSheet = true }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accentSolid)
+                }
             } else {
                 ForEach(model.remoteConnections) { connection in
                     RemoteConnectionSettingsRow(connectionID: connection.id)
                 }
             }
         }
+        .sheet(isPresented: $showNewHostSheet) {
+            NewSSHHostSheet { receipt in
+                creationReceipt = receipt
+                addFailure = nil
+            }
+        }
     }
 }
 
-/// "Add a new host…": writes exactly the `Host` block the user would type into
-/// ~/.ssh/config, through the Kit writer's typed fences (duplicate/pattern
-/// alias, injection-shaped value, bad port — all refused, all shown inline).
-/// Success rescans and hands the fresh alias to the picker above.
-private struct NewSSHHostForm: View {
-    @Environment(AppModel.self) private var model
-    let onCreated: (String) -> Void
-    @State private var draft = SSHHostDraft()
-    @State private var failure: String?
-
-    private var requiredFieldsFilled: Bool {
-        !draft.alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !draft.hostName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
+/// The dismissible post-creation receipt: exactly which file was written,
+/// whether a backup existed (never claimed when the config was just created),
+/// and — explicitly — a written-but-not-added partial outcome.
+private struct SSHHostReceiptCard: View {
+    let receipt: SSHHostCreationReceipt
+    let dismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text(
-                "Writes a plain Host entry to ~/.ssh/config (after a timestamped backup). Keys and passwords stay with OpenSSH — Claudexor never stores them.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            OptionRow(label: "Alias", labelWidth: 72) {
-                TextField("for example prod", text: $draft.alias)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: Theme.Layout.modelPickerWidth)
-            }
-            OptionRow(label: "Host name", labelWidth: 72) {
-                TextField("server.example.com", text: $draft.hostName)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: Theme.Layout.modelPickerWidth)
-            }
-            OptionRow(label: "User", labelWidth: 72) {
-                TextField("Optional", text: $draft.user)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: Theme.Layout.modelPickerWidth)
-            }
-            OptionRow(label: "Port", labelWidth: 72) {
-                TextField("22", text: $draft.port)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: Theme.Layout.modelPickerWidth)
-            }
-            OptionRow(label: "Identity file", labelWidth: 72) {
-                TextField("Optional key path", text: $draft.identityFile)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: Theme.Layout.modelPickerWidth)
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Image(
+                    systemName: receipt.connectionFailure == nil
+                        ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(
+                        receipt.connectionFailure == nil
+                            ? Theme.status(.positive) : Theme.status(.caution))
+                Text(receipt.headline).font(.callout.weight(.medium))
+                Spacer()
                 Button {
-                    pickIdentityFile()
+                    copyBlock()
                 } label: {
-                    Label("Choose…", systemImage: "folder")
+                    Label("Copy Block", systemImage: "doc.on.doc")
                 }
-                .buttonStyle(.bordered)
-                .help("Pick a private key; only its PATH is written, never its contents.")
-            }
-            OptionRow(label: "", labelWidth: 72) {
+                .buttonStyle(.borderless)
+                .help("Copy the exact appended Host block.")
                 Button {
-                    save()
+                    dismiss()
                 } label: {
-                    Label("Save host", systemImage: "plus")
+                    Image(systemName: "xmark")
                 }
-                .buttonStyle(.bordered)
-                .disabled(!requiredFieldsFilled)
-                .help(
-                    requiredFieldsFilled
-                        ? "Append this Host block to ~/.ssh/config."
-                        : "Alias and host name are required.")
+                .buttonStyle(.borderless)
+                .help("Dismiss this receipt.")
             }
-            if let failure {
-                Text(failure)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+            ForEach(receipt.detailLines, id: \.self) { line in
+                Text(line)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.top, Theme.Spacing.sm)
+        .padding(Theme.Spacing.lg)
+        .background(
+            Theme.surfaceRaised,
+            in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .stroke(Theme.separator, lineWidth: 1))
     }
 
-    private func save() {
-        do {
-            let receipt = try model.addSSHConfigHost(draft)
-            failure = nil
-            draft = SSHHostDraft()
-            onCreated(receipt.alias)
-        } catch {
-            // The writer's refusals are typed and user-legible — show them
-            // verbatim, never swallow them.
-            failure = error.localizedDescription
-        }
-    }
-
-    private func pickIdentityFile() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Identity File"
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        // Identity keys live in the hidden ~/.ssh directory.
-        panel.showsHiddenFiles = true
-        panel.directoryURL = URL(
-            fileURLWithPath: NSString(string: "~/.ssh").expandingTildeInPath, isDirectory: true)
-        panel.prompt = "Choose"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        draft.identityFile = url.path
+    private func copyBlock() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(receipt.appendedBlock, forType: .string)
     }
 }
 
@@ -211,20 +182,37 @@ private struct RemoteConnectionSettingsRow: View {
     var body: some View {
         if let connection {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(connection.displayName).font(.headline)
-                        Text(connection.sshAlias)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
+                // The identity+status+control header is the row class the SSOT
+                // assigns to AlignedListRow (§2.8) — dot + title + single-line
+                // details, controls on a shared trailing edge, no Spacer() push.
+                AlignedList {
+                    AlignedListRow(
+                        identity: AlignedRowIdentity(
+                            dotColor: statusColor(connection.status),
+                            dotHelp: statusLabel(connection.status),
+                            title: connection.displayName,
+                            badges: [
+                                AlignedRowBadge(statusLabel(connection.status)),
+                            ],
+                            details: [AlignedRowDetail(0, connection.sshAlias)])
+                    ) {
+                        if connection.status == .connected {
+                            Button("Disconnect") {
+                                Task { await model.disconnectRemote(connectionID) }
+                            }
+                            .alignedControlColumn(minWidth: 96, alignment: .trailing)
+                        } else {
+                            Button("Connect") {
+                                Task { await model.connectRemote(connectionID) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.accentSolid)
+                            .disabled(
+                                connection.status == .connecting
+                                    || connection.status == .installing)
+                            .alignedControlColumn(minWidth: 96, alignment: .trailing)
+                        }
                     }
-                    Spacer()
-                    Circle()
-                        .fill(statusColor(connection.status))
-                        .frame(width: 8, height: 8)
-                    Text(statusLabel(connection.status))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 HStack {
                     TextField("Nickname", text: $nickname)
@@ -234,19 +222,6 @@ private struct RemoteConnectionSettingsRow: View {
                         }
                     Button("Save name") {
                         model.setRemoteNickname(connectionID, nickname: nickname)
-                    }
-                    if connection.status == .connected {
-                        Button("Disconnect") {
-                            Task { await model.disconnectRemote(connectionID) }
-                        }
-                    } else {
-                        Button("Connect") {
-                            Task { await model.connectRemote(connectionID) }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(
-                            connection.status == .connecting
-                                || connection.status == .installing)
                     }
                 }
                 Toggle(
@@ -302,7 +277,9 @@ private struct RemoteConnectionSettingsRow: View {
                 if let message = model.remoteConnectionMessages[connectionID] {
                     Text(message)
                         .font(.caption)
-                        .foregroundStyle(connection.status == .failed ? .orange : .secondary)
+                        .foregroundStyle(
+                            connection.status == .failed
+                                ? Theme.status(.negative) : Color.secondary)
                         .textSelection(.enabled)
                         // ssh failure text is server-influenced and arbitrarily
                         // long; wrap it rather than clipping the one line that
@@ -311,7 +288,9 @@ private struct RemoteConnectionSettingsRow: View {
                 }
             }
             .padding()
-            .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 12))
+            .background(
+                Theme.surfaceRaised,
+                in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
             .onAppear { nickname = connection.nickname ?? "" }
             .confirmationDialog(
                 "Install the signed Claudexor runtime on \(connection.displayName)?",
@@ -349,12 +328,17 @@ private struct RemoteConnectionSettingsRow: View {
         }
     }
 
+    /// The documented Connections status ladder (DESIGN_SYSTEM §5): muted for
+    /// Offline, accent while Connecting/Installing, warning for Needs
+    /// authentication, success for Connected, danger for Failed — always a dot
+    /// PLUS its label, never a bare color.
     private func statusColor(_ state: RemoteConnectionState) -> SwiftUI.Color {
         switch state {
+        case .offline: Color.secondary
+        case .connecting, .installing: Theme.accent
+        case .needsInteraction: Theme.status(.caution)
         case .connected: Theme.status(.positive)
-        case .connecting, .installing: Theme.status(.caution)
-        case .needsInteraction, .failed: SwiftUI.Color.orange
-        case .offline: SwiftUI.Color.secondary
+        case .failed: Theme.status(.negative)
         }
     }
 }

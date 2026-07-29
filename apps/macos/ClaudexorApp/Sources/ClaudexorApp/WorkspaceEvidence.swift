@@ -51,9 +51,10 @@ struct RunEvidenceSection: View {
                     await loadDetailOnce()
                 }
         } else {
-            DisclosureGroup(isExpanded: $expanded) {
-                if expanded { content }
-            } label: {
+            DisclosureRow(
+                accessibilityName: "Run \(String(runId.suffix(6))) evidence",
+                isExpanded: $expanded
+            ) {
                 HStack(spacing: Theme.Spacing.sm) {
                     Image(systemName: "stethoscope").foregroundStyle(.secondary)
                     Text("Run \(String(runId.suffix(6)))").font(.callout.weight(.medium))
@@ -61,8 +62,9 @@ struct RunEvidenceSection: View {
                         Circle().fill(phase.color).frame(width: 7, height: 7)
                         Text(phase.label).font(.caption2).foregroundStyle(.secondary)
                     }
-                    Spacer()
                 }
+            } content: {
+                content
             }
             .task(id: expanded) { if expanded { await loadDetailOnce() } }
         }

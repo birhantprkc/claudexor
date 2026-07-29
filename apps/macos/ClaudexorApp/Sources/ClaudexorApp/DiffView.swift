@@ -32,8 +32,16 @@ private struct FileDiff: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-            if expanded {
+            // The whole file header toggles the hunks (DisclosureRow) — the old
+            // chevron-only 12px button was the same dead-label defect class as
+            // the platform DisclosureGroup.
+            DisclosureRow(
+                accessibilityName: "Diff of \(file.path)",
+                isExpanded: $expanded,
+                headerBackground: Theme.surfaceRaised
+            ) {
+                header
+            } content: {
                 ForEach(file.hunks) { hunk in
                     hunkHeader(hunk.header)
                     ForEach(hunk.lines) { line in DiffLineRow(line: line) }
@@ -47,9 +55,6 @@ private struct FileDiff: View {
 
     private var header: some View {
         HStack(spacing: Theme.Spacing.md) {
-            Button { withAnimation(.snappy) { expanded.toggle() } } label: {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right").imageScale(.small).foregroundStyle(.secondary)
-            }.buttonStyle(.plain)
             Image(systemName: "doc.text").foregroundStyle(.secondary)
             Text(file.path).font(.system(.callout, design: .monospaced)).lineLimit(1).truncationMode(.middle)
             Spacer()
@@ -60,9 +65,6 @@ private struct FileDiff: View {
                 .foregroundStyle(.secondary)
                 .help("Apply uses the server patch artifact. Per-file apply is not exposed yet.")
         }
-        .padding(.horizontal, Theme.Spacing.md)
-        .padding(.vertical, Theme.Spacing.sm)
-        .background(Theme.surfaceRaised)
     }
 
     private func hunkHeader(_ text: String) -> some View {

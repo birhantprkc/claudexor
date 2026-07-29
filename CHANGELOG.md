@@ -43,6 +43,23 @@ Release history for Claudexor. The current version is declared in the root
   Skill and GitHub Copilot plugin artifacts, official MCP Registry
   distribution metadata, experimental ACP Terminal Auth for Codex, and
   repository-configured protected path gates.
+  Settings → Connections can create an SSH host without leaving the app: a
+  `New SSH Host…` sheet (replacing the short-lived disclosure whose label was
+  inert — only the chevron toggled) with live field-local validation, a
+  writer-rendered "Will append to ~/.ssh/config" preview that is byte-identical
+  to the actual append, and a one-step `Create & Add` that writes the block,
+  rescans, and adds the connection, leaving a dismissible receipt naming the
+  config and backup paths (a freshly created config honestly reports that no
+  backup existed) and surfacing a written-but-not-added partial outcome. The
+  config scan is typed — missing config, no concrete aliases, all aliases
+  already added, and scan failed each get their own picker copy instead of one
+  silent empty list. The dead-label disclosure class is fixed app-wide by a
+  shared `DisclosureRow` (whole-header button, rotating chevron, hover and
+  keyboard/VoiceOver support) adopted by every Advanced disclosure, the
+  Workspace Evidence rows, and the diff file headers; Connections also adopts
+  the shared `SettingsGroup` shell, `AlignedListRow` row headers, and the
+  documented status ladder (Connecting/Installing accent, Needs authentication
+  caution, Failed danger).
   Toolchain: `@modelcontextprotocol/server` 2.0.0 GA with the
   2026-07-28 discover envelope pinned by regression, TypeScript 7.0.2 with a
   sidecar for the one compiler-API consumer, and zod 4.4.3 with the schema

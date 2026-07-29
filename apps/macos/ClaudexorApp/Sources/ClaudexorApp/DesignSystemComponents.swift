@@ -202,6 +202,177 @@ struct OptionRow<Content: View>: View {
     }
 }
 
+// MARK: - Settings group (the ONE flat settings-section shell)
+
+/// The flat, solid, shadowless Settings section shell (DESIGN_SYSTEM §5):
+/// `SectionLabel` over the content on a raised surface with a hairline. Every
+/// Settings tab composes THIS — the recipe was previously a private helper in
+/// OpsScreens and Connections hand-copied it, which is exactly how shells drift.
+struct SettingsGroup<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder var content: () -> Content
+
+    init(_ title: String, systemImage: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            SectionLabel(title, systemImage: systemImage)
+            content()
+        }
+        .padding(Theme.Spacing.lg)
+        .background(
+            Theme.surfaceRaised,
+            in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                .stroke(Theme.separator, lineWidth: 1))
+    }
+}
+
+// MARK: - DisclosureRow — the ONE disclosure header (whole-row click target)
+
+/// The app's disclosure control. The platform `DisclosureGroup` makes ONLY the
+/// ~12px chevron the toggle target on macOS (its label is inert) — correct per
+/// HIG for a bare disclosure triangle, wrong for every labeled "Advanced …" row
+/// we ship (the owner clicked the label and nothing happened). This component
+/// wraps `DisclosureGroup` in a custom `DisclosureGroupStyle` whose header is
+/// one full-width native `Button`:
+///
+/// - the WHOLE header — chevron, label, trailing whitespace — is clickable
+///   (`contentShape(Rectangle())` inside the button label);
+/// - row height comes from token padding (≥28pt), never a fixed frame;
+/// - the chevron points right collapsed, rotates down expanded; ONLY the
+///   chevron animates, and Reduce Motion snaps it;
+/// - hover/pressed states on the header; keyboard focus uses the native
+///   button ring (no extra `.focusable()`);
+/// - Space/Return toggle; Right Arrow expands, Left Arrow collapses; focus
+///   stays on the header so the next Tab enters the revealed content;
+/// - VoiceOver gets ONE button named `accessibilityName` with value
+///   Collapsed/Expanded; the chevron is hidden from accessibility;
+/// - collapsed content is REMOVED from layout/focus/accessibility (never
+///   hidden with opacity);
+/// - the label must not contain nested buttons, links, menus, or toggles.
+struct DisclosureRow<Label: View, Content: View>: View {
+    let accessibilityName: String
+    @Binding var isExpanded: Bool
+    /// Full-bleed header fill (the diff file header keeps its raised strip);
+    /// nil = transparent, hover highlight only.
+    var headerBackground: Color?
+    @ViewBuilder var label: () -> Label
+    @ViewBuilder var content: () -> Content
+
+    init(
+        accessibilityName: String,
+        isExpanded: Binding<Bool>,
+        headerBackground: Color? = nil,
+        @ViewBuilder label: @escaping () -> Label,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.accessibilityName = accessibilityName
+        self._isExpanded = isExpanded
+        self.headerBackground = headerBackground
+        self.label = label
+        self.content = content
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            content()
+        } label: {
+            label()
+        }
+        .disclosureGroupStyle(
+            RowDisclosureGroupStyle(
+                accessibilityName: accessibilityName, headerBackground: headerBackground))
+    }
+}
+
+extension DisclosureRow where Label == Text {
+    /// The common titled row: the title is both the visible label and the
+    /// accessible name.
+    init(
+        _ title: String,
+        isExpanded: Binding<Bool>,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.init(
+            accessibilityName: title, isExpanded: isExpanded,
+            label: { Text(title) }, content: content)
+    }
+}
+
+private struct RowDisclosureGroupStyle: DisclosureGroupStyle {
+    let accessibilityName: String
+    let headerBackground: Color?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                configuration.isExpanded.toggle()
+            } label: {
+                HStack(spacing: Theme.Spacing.sm) {
+                    Image(systemName: "chevron.right")
+                        .imageScale(.small)
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
+                        // ONLY the chevron animates; Reduce Motion snaps it.
+                        .animation(
+                            reduceMotion ? nil : .easeOut(duration: 0.15),
+                            value: configuration.isExpanded)
+                        .accessibilityHidden(true)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }
+                // The whole header, trailing whitespace included, is the target.
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(DisclosureRowHeaderButtonStyle())
+            .background(headerBackground ?? Color.clear)
+            .accessibilityLabel(accessibilityName)
+            .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(configuration.isExpanded ? "Collapses the section." : "Expands the section.")
+            // Right expands, Left collapses. `onKeyPress` (not `onMoveCommand`)
+            // so an already-satisfied press and Up/Down PROPAGATE — in-group
+            // arrow navigation keeps working.
+            .onKeyPress(.rightArrow) {
+                guard !configuration.isExpanded else { return .ignored }
+                configuration.isExpanded = true
+                return .handled
+            }
+            .onKeyPress(.leftArrow) {
+                guard configuration.isExpanded else { return .ignored }
+                configuration.isExpanded = false
+                return .handled
+            }
+            // Collapsed content is OUT of layout, focus, and accessibility.
+            if configuration.isExpanded { configuration.content }
+        }
+    }
+}
+
+private struct DisclosureRowHeaderButtonStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            // Token padding, not a fixed height: text + 2×sm ≈ 28pt+.
+            .padding(.vertical, Theme.Spacing.sm)
+            .padding(.horizontal, Theme.Spacing.sm)
+            .background(
+                configuration.isPressed
+                    ? Theme.surfaceRaisedHi
+                    : hovering ? Theme.surfaceRaisedHi.opacity(0.6) : Color.clear,
+                in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+            .onHover { hovering = $0 }
+    }
+}
+
 extension View {
     /// The shared CLOSED-control contract for a catalog-fed model picker
     /// (composer models rows + Settings model override). Vendor catalogs are

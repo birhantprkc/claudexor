@@ -337,14 +337,10 @@ struct SettingsScreen: View {
         .padding(.vertical, 1)
     }
 
-    private func settingsGroup<Content: View>(_ title: String, _ systemImage: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            SectionLabel(title, systemImage: systemImage)
-            content()
-        }
-        .padding(Theme.Spacing.lg)
-        .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).stroke(Theme.separator, lineWidth: 1))
+    // Thin local shim over the shared SettingsGroup shell (kept so the many
+    // call sites in this file stay diff-quiet; the recipe lives in ONE place).
+    private func settingsGroup<Content: View>(_ title: String, _ systemImage: String, @ViewBuilder content: @escaping () -> Content) -> some View {
+        SettingsGroup(title, systemImage: systemImage, content: content)
     }
 
     private func refreshAll() async {

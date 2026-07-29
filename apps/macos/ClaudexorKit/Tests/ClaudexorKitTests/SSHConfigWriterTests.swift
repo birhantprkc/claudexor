@@ -113,6 +113,79 @@ import Testing
         #expect(!written.contains("IdentityFile"))
     }
 
+    @Test func previewBytesEqualAppendedBytes() throws {
+        let config = try makeTempDirectory() + "/config"
+        try "Host old\n  HostName o.internal\n".write(
+            toFile: config, atomically: true, encoding: .utf8)
+        let writer = SSHConfigWriter(now: { Date(timeIntervalSince1970: 1_785_000_000) })
+        let draft = SSHHostDraft(
+            alias: "preview", hostName: "p.internal", user: "deploy",
+            port: "022", identityFile: "~/.ssh/id_ed25519")
+        // ONE formatting owner: the sheet preview (render) and the appended
+        // bytes must be identical — and the receipt must carry that block.
+        let preview = writer.render(draft)
+        let receipt = try writer.appendHost(draft, toConfigAt: config)
+        #expect(receipt.appendedBlock == preview)
+        let written = try String(contentsOfFile: config, encoding: .utf8)
+        #expect(written.hasSuffix(preview))
+        // Port normalization ("022" → 22) happens in the shared renderer, so
+        // the preview shows exactly what lands in the file.
+        #expect(preview.contains("  Port 22\n"))
+    }
+
+    @Test func receiptIsHonestAboutBackups() throws {
+        let config = try makeTempDirectory() + "/config"
+        let writer = SSHConfigWriter()
+        // Creating the config: no previous file, so no backup may be claimed.
+        let first = try writer.appendHost(
+            SSHHostDraft(alias: "first", hostName: "f.internal"), toConfigAt: config)
+        #expect(first.createdConfig)
+        #expect(first.backupPath == nil)
+        // Appending to the now-existing config: a real backup, not "created".
+        let second = try writer.appendHost(
+            SSHHostDraft(alias: "second", hostName: "s.internal"), toConfigAt: config)
+        #expect(!second.createdConfig)
+        #expect(second.backupPath != nil)
+    }
+
+    @Test func liveFieldErrorsMirrorAppendRules() {
+        let empty = SSHHostDraft()
+        #expect(SSHConfigWriter.liveFieldError(.alias, draft: empty) == "Alias is required.")
+        #expect(SSHConfigWriter.liveFieldError(.hostName, draft: empty) == "Host name is required.")
+        // Optional fields are quiet while empty.
+        for field in [SSHHostDraftField.user, .port, .identityFile] {
+            #expect(SSHConfigWriter.liveFieldError(field, draft: empty) == nil)
+        }
+        let bad = SSHHostDraft(
+            alias: "prod*", hostName: "h\nHost evil", user: "a b",
+            port: "65536", identityFile: "/k\"x")
+        for field in SSHHostDraftField.allCases {
+            #expect(SSHConfigWriter.liveFieldError(field, draft: bad) != nil)
+        }
+        // A known duplicate warns before the write refuses.
+        let dup = SSHHostDraft(alias: "prod", hostName: "h")
+        #expect(SSHConfigWriter.liveFieldError(.alias, draft: dup, knownAliases: ["prod"]) != nil)
+        #expect(SSHConfigWriter.liveFieldError(.alias, draft: dup, knownAliases: ["other"]) == nil)
+        let good = SSHHostDraft(
+            alias: "prod", hostName: "server.example.com", user: "deploy",
+            port: "22", identityFile: "~/.ssh/id ed25519")
+        for field in SSHHostDraftField.allCases {
+            #expect(SSHConfigWriter.liveFieldError(field, draft: good) == nil)
+        }
+    }
+
+    @Test func writerRefusalsMapToOwningFields() {
+        #expect(SSHConfigWriter.owningField(of: .invalidAlias("x")) == .alias)
+        #expect(SSHConfigWriter.owningField(of: .duplicateAlias("x", existingSource: "y")) == .alias)
+        #expect(SSHConfigWriter.owningField(of: .emptyHostName) == .hostName)
+        #expect(SSHConfigWriter.owningField(of: .unsafeValue(field: "Host name")) == .hostName)
+        #expect(SSHConfigWriter.owningField(of: .unsafeValue(field: "User")) == .user)
+        #expect(SSHConfigWriter.owningField(of: .unsafeValue(field: "Identity file")) == .identityFile)
+        #expect(SSHConfigWriter.owningField(of: .invalidPort("0")) == .port)
+        // Only I/O belongs at form level.
+        #expect(SSHConfigWriter.owningField(of: .writeFailed("disk")) == nil)
+    }
+
     @Test func writtenHostRoundTripsThroughTheScanner() throws {
         let config = try makeTempDirectory() + "/config"
         try SSHConfigWriter().appendHost(

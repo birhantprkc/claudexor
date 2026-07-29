@@ -22,6 +22,7 @@ struct AuthSheet: View {
     @State private var closeAfterCancellation = false
     @State private var lastRefreshedTerminalJobId: String?
     @State private var didAutoStartLogin = false
+    @State private var showTerminalCaveat = false
 
     private var secretName: String? {
         switch family {
@@ -48,8 +49,7 @@ struct AuthSheet: View {
     /// engine's verification predicate: available AND a PASSED probe — a
     /// present-but-wrong login (available + failed) is not "verified".
     private var targetVerified: Bool {
-        guard let profileId else { return nativeReady }
-        _ = profileId
+        guard profileId != nil else { return nativeReady }
         return profileStatus?.availability == "available" && profileStatus?.verification == "passed"
     }
     private var nativeHarness: SetupHarness? { SetupHarness(rawValue: family.setupHarnessId) }
@@ -266,7 +266,7 @@ struct AuthSheet: View {
                     Spacer(minLength: 0)
                 }
                 // The daemon-owned "run in terminal" caveat is secondary — collapsed.
-                DisclosureGroup("Advanced — run in terminal") {
+                DisclosureRow("Advanced — run in terminal", isExpanded: $showTerminalCaveat) {
                     Text(profileId == nil
                         ? "Native login is daemon-owned. Completing its Terminal command is not readiness: only the exact native probe and same-harness smoke mark the session ready."
                         : "Native login is daemon-owned and scoped to this account's own store. Its doctor probe is the verification truth; the default-route capability smoke does not apply.")

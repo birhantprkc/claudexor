@@ -25,6 +25,13 @@ public struct SSHHostDraft: Sendable, Equatable {
     }
 }
 
+/// The form field that owns a draft value — the key both live (as-you-type)
+/// validation and writer-refusal mapping use, so an error always lands under
+/// the control that caused it instead of in an anonymous form-level pile.
+public enum SSHHostDraftField: String, Sendable, Equatable, CaseIterable {
+    case alias, hostName, user, port, identityFile
+}
+
 public enum SSHConfigWriteError: Error, LocalizedError, Equatable {
     case invalidAlias(String)
     case duplicateAlias(String, existingSource: String)
@@ -71,6 +78,15 @@ public struct SSHConfigWriter: Sendable {
         public let configPath: String
         /// Where the pre-write copy went; nil when the config was just created.
         public let backupPath: String?
+        /// True when the config file did not exist and this write created it.
+        /// The receipt UI must then say "no previous file to back up" — it may
+        /// NEVER claim a backup was made when none existed.
+        public let createdConfig: Bool
+        /// The exact block bytes appended (excluding the separator glue that
+        /// joins it to a pre-existing file) — carried so the UI can offer
+        /// "Copy Block" without regenerating, and so tests can pin
+        /// preview == appended.
+        public let appendedBlock: String
     }
 
     private let scanner: SSHConfigScanner
@@ -102,12 +118,10 @@ public struct SSHConfigWriter: Sendable {
         guard user.isEmpty || Self.isPlainToken(user) else {
             throw SSHConfigWriteError.unsafeValue(field: "User")
         }
-        var portNumber: Int?
         if !port.isEmpty {
             guard let value = Int(port), (1 ... 65_535).contains(value) else {
                 throw SSHConfigWriteError.invalidPort(port)
             }
-            portNumber = value
         }
         guard identityFile.isEmpty || Self.isPlainToken(identityFile, allowingSpaces: true) else {
             throw SSHConfigWriteError.unsafeValue(field: "Identity file")
@@ -126,15 +140,18 @@ public struct SSHConfigWriter: Sendable {
             }
         }
 
-        var block = ""
+        // ONE formatting owner: the block the sheet previews and the block this
+        // append writes are the same `render` bytes — they cannot diverge.
+        let renderedBlock = render(draft)
+        var glue = ""
         var backupPath: String?
         do {
             if configExists {
                 let existing = try String(contentsOfFile: configPath, encoding: .utf8)
                 backupPath = try backUp(configPath, manager: manager)
                 if !existing.isEmpty {
-                    if !existing.hasSuffix("\n") { block += "\n" }
-                    block += "\n"
+                    if !existing.hasSuffix("\n") { glue += "\n" }
+                    glue += "\n"
                 }
             } else {
                 let directory = (configPath as NSString).deletingLastPathComponent
@@ -153,15 +170,6 @@ public struct SSHConfigWriter: Sendable {
                     throw SSHConfigWriteError.writeFailed("could not create \(configPath)")
                 }
             }
-            block += "# Added by Claudexor on \(dayStamp(now()))\n"
-            block += "Host \(alias)\n"
-            block += "  HostName \(hostName)\n"
-            if !user.isEmpty { block += "  User \(user)\n" }
-            if let portNumber { block += "  Port \(portNumber)\n" }
-            if !identityFile.isEmpty {
-                let value = identityFile.contains(" ") ? "\"\(identityFile)\"" : identityFile
-                block += "  IdentityFile \(value)\n"
-            }
             // Appending through a handle never rewrites, reorders, or re-modes
             // the user's existing bytes.
             guard let handle = FileHandle(forWritingAtPath: configPath) else {
@@ -169,13 +177,110 @@ public struct SSHConfigWriter: Sendable {
             }
             defer { try? handle.close() }
             try handle.seekToEnd()
-            try handle.write(contentsOf: Data(block.utf8))
+            try handle.write(contentsOf: Data((glue + renderedBlock).utf8))
         } catch let error as SSHConfigWriteError {
             throw error
         } catch {
             throw SSHConfigWriteError.writeFailed(error.localizedDescription)
         }
-        return Receipt(alias: alias, configPath: configPath, backupPath: backupPath)
+        return Receipt(
+            alias: alias,
+            configPath: configPath,
+            backupPath: backupPath,
+            createdConfig: !configExists,
+            appendedBlock: renderedBlock)
+    }
+
+    /// Render the exact `Host` block a draft would append — the SINGLE
+    /// formatting owner shared by the sheet's always-visible preview and
+    /// `appendHost` itself (DESIGN doctrine: the preview must be the writer's
+    /// bytes, never a SwiftUI re-implementation that can drift). Pure
+    /// formatting: it trims and emits whatever is typed, so the preview always
+    /// tells the truth about the current draft; validity is enforced separately
+    /// (`liveFieldError` while typing, the typed guards on append).
+    public func render(_ draft: SSHHostDraft) -> String {
+        let alias = trimmed(draft.alias)
+        let hostName = trimmed(draft.hostName)
+        let user = trimmed(draft.user)
+        let port = trimmed(draft.port)
+        let identityFile = trimmed(draft.identityFile)
+        var block = "# Added by Claudexor on \(dayStamp(now()))\n"
+        block += "Host \(alias)\n"
+        block += "  HostName \(hostName)\n"
+        if !user.isEmpty { block += "  User \(user)\n" }
+        if !port.isEmpty {
+            // A parseable port is emitted normalized ("022" → 22), matching the
+            // append-path validation; an unparseable one is shown verbatim so
+            // the preview mirrors the field error instead of hiding the value.
+            block += "  Port \(Int(port).map(String.init) ?? port)\n"
+        }
+        if !identityFile.isEmpty {
+            let value = identityFile.contains(" ") ? "\"\(identityFile)\"" : identityFile
+            block += "  IdentityFile \(value)\n"
+        }
+        return block
+    }
+
+    // MARK: Field-local validation (shared by the sheet's live checks)
+
+    /// The live, field-local verdict for one draft field — the SAME rules
+    /// `appendHost` enforces, so as-you-type validation and the authoritative
+    /// save can never disagree. `knownAliases` lets the alias field warn about
+    /// a duplicate before the write refuses it.
+    public static func liveFieldError(
+        _ field: SSHHostDraftField,
+        draft: SSHHostDraft,
+        knownAliases: Set<String> = []
+    ) -> String? {
+        switch field {
+        case .alias:
+            let alias = draft.alias.trimmingCharacters(in: .whitespacesAndNewlines)
+            if alias.isEmpty { return "Alias is required." }
+            guard SSHConfigScanner.isConcreteAlias(alias), isPlainToken(alias) else {
+                return SSHConfigWriteError.invalidAlias(alias).errorDescription
+            }
+            if knownAliases.contains(alias) {
+                return "Host '\(alias)' already exists in ~/.ssh/config. Pick another alias, or add the existing one from the picker."
+            }
+            return nil
+        case .hostName:
+            let hostName = draft.hostName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if hostName.isEmpty { return SSHConfigWriteError.emptyHostName.errorDescription }
+            return isPlainToken(hostName)
+                ? nil : SSHConfigWriteError.unsafeValue(field: "Host name").errorDescription
+        case .user:
+            let user = draft.user.trimmingCharacters(in: .whitespacesAndNewlines)
+            return user.isEmpty || isPlainToken(user)
+                ? nil : SSHConfigWriteError.unsafeValue(field: "User").errorDescription
+        case .port:
+            let port = draft.port.trimmingCharacters(in: .whitespacesAndNewlines)
+            if port.isEmpty { return nil }
+            guard let value = Int(port), (1 ... 65_535).contains(value) else {
+                return SSHConfigWriteError.invalidPort(port).errorDescription
+            }
+            return nil
+        case .identityFile:
+            let identityFile = draft.identityFile.trimmingCharacters(in: .whitespacesAndNewlines)
+            return identityFile.isEmpty || isPlainToken(identityFile, allowingSpaces: true)
+                ? nil : SSHConfigWriteError.unsafeValue(field: "Identity file").errorDescription
+        }
+    }
+
+    /// Which field a typed writer refusal belongs under. `writeFailed` is the
+    /// only genuinely form-level failure (I/O, backup, permissions).
+    public static func owningField(of error: SSHConfigWriteError) -> SSHHostDraftField? {
+        switch error {
+        case .invalidAlias, .duplicateAlias: return .alias
+        case .emptyHostName: return .hostName
+        case .invalidPort: return .port
+        case let .unsafeValue(field):
+            switch field {
+            case "Host name": return .hostName
+            case "User": return .user
+            default: return .identityFile
+            }
+        case .writeFailed: return nil
+        }
     }
 
     private func backUp(_ configPath: String, manager: FileManager) throws -> String {

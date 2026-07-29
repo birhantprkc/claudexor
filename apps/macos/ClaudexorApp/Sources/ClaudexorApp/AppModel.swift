@@ -77,7 +77,9 @@ final class AppModel {
     var draftExecutionLocation: ExecutionLocationID = .local
     var draftRemoteProjectRoot: String?
     var remoteConnections: [RemoteConnection] = []
-    var availableSSHHosts: [SSHHost] = []
+    /// Typed ~/.ssh/config scan outcome (never a silent empty array — the
+    /// Connections copy distinguishes missing/empty/all-added/failed).
+    var sshHostScan: SSHHostScanState = .configMissing
     var remoteThreadCache: [RemoteThreadCacheEntry] = []
     var remoteConnectionMessages: [UUID: String] = [:]
     var remoteDirectoryBrowser: RemoteDirectoryBrowserRequest?
@@ -342,8 +344,7 @@ final class AppModel {
                 return value
             }
         remoteThreadCache = (try? RemoteThreadCacheStore.applicationSupport().load()) ?? []
-        availableSSHHosts =
-            (try? SSHConfigScanner().scan(path: "~/.ssh/config")) ?? []
+        sshHostScan = SSHHostScanState.scan()
     }
 
     // MARK: Connection

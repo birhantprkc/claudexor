@@ -1062,18 +1062,43 @@ views in the shared design-system files; screens compose them.
   instead of hardcoded portfolio/cap values.
 - **Connections (remote execution locations).** The Connections tab lists the
   SSH hosts a thread can execute on, read from the user's own `~/.ssh/config`;
-  Claudexor never stores a credential, a key or a password for them. The tab
-  can also create a host: an "Add a new host…" disclosure of `OptionRow`
-  fields appends a plain `Host` block to `~/.ssh/config` (append-only, after a
-  timestamped backup) and rescans; a refused write (duplicate or pattern
-  alias, injection-shaped value, bad port) shows its typed reason inline,
-  never silently. The empty state names both paths — add a host here, or edit
-  `~/.ssh/config` yourself and press Rescan. Each row
+  Claudexor never stores a credential, a key or a password for them. Adding a
+  connection has two visible paths with one mental model: a "From config"
+  `OptionRow` (alias picker + Add + Rescan) for aliases that already exist,
+  and a "New host" `OptionRow` whose `New SSH Host…` button opens a SHEET —
+  a short transactional five-field task (sheet per HIG; the earlier
+  disclosure hid this primary action behind a chevron-only toggle). The sheet
+  validates field-locally and LIVE (required errors only after the field is
+  touched, a stale error clears on edit, typed writer refusals map to their
+  owning field via `SSHConfigWriter.owningField`; only I/O failures render at
+  form level; errors use `status/failed`, never raw orange). Port stays
+  string-backed with monospaced digits; Identity file is free text plus
+  `Choose…` (hidden files visible). The sheet shows an ALWAYS-VISIBLE
+  preview — "Will append to ~/.ssh/config" plus the exact block — rendered by
+  the writer's own `SSHConfigWriter.render` (the same bytes the append
+  writes; block formatting is never re-implemented in SwiftUI). The footer is
+  `Cancel / Create & Add`; Return submits when valid, Escape cancels, and
+  `Create & Add` performs the WHOLE outcome in one step: write the block
+  (append-only, timestamped backup when the file exists), rescan, and create
+  the connection. Success closes the sheet and leaves a dismissible RECEIPT in
+  Connections naming the config path, the backup path (or "Created a new
+  config; there was no previous file to back up" — never a claimed backup
+  that did not happen), a `Copy Block` control fed by the receipt's carried
+  block, and — explicitly — a written-but-not-added partial outcome. The
+  `~/.ssh/config` scan is TYPED (`SSHHostScanState`): config missing, no
+  concrete aliases, all aliases already added, and scan failed are four
+  distinct states with their own picker copy and help text (a failed scan is
+  also inline-visible), never a silent empty picker. The empty state names
+  the action with the same `New SSH Host…` CTA — plus the manual path (edit
+  `~/.ssh/config` yourself and press Rescan). Each row
   carries ONE server-derived status from a fixed ladder — Offline, Connecting,
   Needs authentication, Installing, Connected, Failed — rendered as a status
   dot plus its label, never as a bare color: `role/muted` for Offline,
   `role/accent` while Connecting or Installing, `role/warning` for Needs
   authentication, `role/success` for Connected, `role/danger` for Failed. The
+  saved-connection row header (identity + status + Connect/Disconnect) is an
+  `AlignedListRow` (§2.8), and the section shell is the shared
+  `SettingsGroup`, not a hand-copied recipe. The
   ladder is a projection of the daemon's connection state; the app never
   invents a state, and an unknown state renders as Offline with its reason in
   hover help. Installing and removing a remote runtime are destructive-adjacent
@@ -1151,6 +1176,35 @@ DesignSystemComponents.swift, DesignTokens.swift.)
 - **`OptionSection` / `OptionRow`** — the "⋯" popover building blocks: a caption-titled
   section, and a `labelWidth`-aligned label+control row (replaces ad-hoc `.fixedSize()` /
   magic-width pickers so every option lines up). Solid surface, token spacing.
+- **`SettingsGroup`** — the ONE flat Settings section shell: `SectionLabel` over the
+  content, `Spacing.lg` padding, `surfaceRaised` fill at `Radius.control` with a
+  `separator` hairline, no shadow. Every Settings tab composes it; hand-copying the
+  recipe is how the Connections pane drifted.
+- **`DisclosureRow`** — the ONE disclosure control; raw `DisclosureGroup` is
+  forbidden in app surfaces (on macOS its label is inert — only the ~12px
+  chevron toggles, the dead-label defect the owner hit on the Connections
+  "Add a new host…" row). It wraps `DisclosureGroup` in a custom
+  `DisclosureGroupStyle` whose header is ONE full-width native `Button`.
+  Contract (all points binding):
+  - the entire rendered header — chevron, label, trailing whitespace — is
+    clickable (`contentShape(Rectangle())` inside the button label);
+  - row height ≥ ~28pt via token padding, never a brittle fixed frame;
+  - the chevron points right collapsed and rotates down expanded; ONLY the
+    chevron animates, and Reduce Motion snaps it;
+  - hover and pressed states on the header; keyboard focus uses the native
+    button ring (no extra `.focusable()`);
+  - Space/Return toggle; Right Arrow expands, Left Arrow collapses; opening
+    leaves focus on the header so the next Tab enters the revealed content;
+  - VoiceOver gets ONE button named by a product-owned `accessibilityName`
+    with value Collapsed/Expanded and a hint; the chevron is
+    accessibility-hidden;
+  - collapsed content is REMOVED from layout, focus, and the accessibility
+    tree (never hidden with opacity);
+  - the label must not contain nested buttons, links, menus, or toggles.
+  Ports: AuthSheet "Advanced — run in terminal", AuthSheetJobPanel
+  "Advanced — terminal command & guide", the composer review "Advanced"
+  block, Workspace Evidence run rows, and the Diff file header (whole-header
+  toggle with `headerBackground: surfaceRaised`).
 - **`catalogModelPicker()` + `Layout.modelPickerWidth`** — the catalog-fed model picker
   contract (composer models rows, Settings model override). Vendor catalogs are free text
   with no length limit, so the CLOSED control pins to the 180pt token and truncates

@@ -167,6 +167,23 @@ pnpm test
   never re-parses plan text. Implement freezes the plan (sha256 on the turn);
   a tampered or unreadable plan must fail loudly, and implementing with open
   questions must be an explicit, recorded choice — never a silent default.
+- Disclosure rows (`DisclosureRow`, DESIGN_SYSTEM §5.1): on every "Advanced …"
+  row, the Workspace Evidence run rows, and the Diff file headers, click the
+  LABEL and the trailing whitespace — the whole header must toggle, never just
+  the chevron. Hover shows a highlight; Reduce Motion snaps the chevron; with
+  keyboard navigation Space/Return toggle and Right/Left arrows expand/collapse;
+  VoiceOver announces one button with a Collapsed/Expanded value.
+- Connections (Settings → Connections): the New SSH Host sheet — Return submits
+  only when valid, Escape cancels, field errors appear under their own field
+  after touch and clear on edit, the preview block matches the appended bytes,
+  and the post-create receipt names the config path and either the real backup
+  path or "Created a new config; there was no previous file to back up" (a
+  fresh config must NEVER claim a backup). Exercise all four picker states —
+  config missing, no concrete aliases, every alias already added, scan failed
+  (e.g. an unreadable Include) — and confirm the picker placeholder + hover
+  help name the REAL state, with the scan failure also visible inline. Verify
+  the row status ladder: Offline muted, Connecting/Installing accent,
+  Needs authentication warning, Connected success, Failed danger — dot + label.
 - Check the inline per-turn review/diff surfaces and other dense content (in the
   run inspector and on turn cards) do not force the whole app window to a wide
   fixed minimum.

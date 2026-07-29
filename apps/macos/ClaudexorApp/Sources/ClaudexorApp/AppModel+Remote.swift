@@ -74,31 +74,47 @@ extension AppModel {
     }
 
     func refreshSSHHosts() {
-        availableSSHHosts =
-            (try? SSHConfigScanner().scan(path: "~/.ssh/config")) ?? []
+        sshHostScan = SSHHostScanState.scan()
     }
 
-    /// Append a user-authored `Host` block to `~/.ssh/config` through the Kit
-    /// writer, then rescan so the picker sees the new alias immediately. Typed
-    /// refusals propagate to the caller — the form shows them inline.
+    /// "Create & Add" in ONE step: append the `Host` block through the Kit
+    /// writer, rescan, and immediately create the `RemoteConnection`. Typed
+    /// writer refusals propagate to the sheet (mapped to their owning field);
+    /// a write-succeeded-but-add-failed partial outcome is carried on the
+    /// receipt explicitly — never silently lost.
+    func createSSHHostConnection(_ draft: SSHHostDraft) throws -> SSHHostCreationReceipt {
+        let receipt = try SSHConfigWriter().appendHost(draft)
+        refreshSSHHosts()
+        let failure = addRemoteConnection(alias: receipt.alias)
+        return SSHHostCreationReceipt(
+            alias: receipt.alias,
+            configPath: receipt.configPath,
+            backupPath: receipt.backupPath,
+            createdConfig: receipt.createdConfig,
+            appendedBlock: receipt.appendedBlock,
+            connectionFailure: failure)
+    }
+
+    /// Add an execution location for a config alias. Returns nil on success or
+    /// the user-facing refusal reason — callers surface it (the old Void
+    /// signature parked the OpenSSH resolve failure under a random UUID key
+    /// that no view ever read).
     @discardableResult
-    func addSSHConfigHost(_ draft: SSHHostDraft) throws -> SSHConfigWriter.Receipt {
-        defer { refreshSSHHosts() }
-        return try SSHConfigWriter().appendHost(draft)
-    }
-
-    func addRemoteConnection(alias: String) {
-        guard SSHConfigScanner.isConcreteAlias(alias),
-              !remoteConnections.contains(where: { $0.sshAlias == alias })
-        else { return }
+    func addRemoteConnection(alias: String) -> String? {
+        guard SSHConfigScanner.isConcreteAlias(alias) else {
+            return "“\(alias)” is not a concrete Host alias."
+        }
+        guard !remoteConnections.contains(where: { $0.sshAlias == alias }) else {
+            return "“\(alias)” is already added as a connection."
+        }
         // Resolve with OpenSSH before persisting. This catches misspelled aliases
         // while preserving all key/agent/ProxyJump semantics in ssh itself.
         guard (try? OpenSSHResolver().resolve(alias: alias)) != nil else {
-            remoteConnectionMessages[UUID()] = "OpenSSH could not resolve \(alias)."
-            return
+            return "OpenSSH could not resolve “\(alias)”."
         }
         remoteConnections.append(RemoteConnection(sshAlias: alias))
         persistRemoteConnections()
+        return nil
     }
 
     func removeRemoteConnection(_ id: UUID) async {
