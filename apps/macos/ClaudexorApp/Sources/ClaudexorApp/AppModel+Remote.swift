@@ -43,6 +43,13 @@ struct RemoteDeviceLoginRequest: Identifiable, Equatable {
     let jobID: String
 }
 
+/// Ownership receipt for the local port forward serving one remote daemon
+/// epoch. A stale cleanup may close its own forward, never a newer generation's.
+struct RemoteControlForwardLease: Sendable {
+    let generation: Int
+    let forward: SSHForward
+}
+
 extension AppModel {
     var locatedThreads: [LocatedThread] {
         let local = threads.map { LocatedThread(locationID: .local, thread: $0) }
@@ -71,6 +78,13 @@ extension AppModel {
 
     func gateway(for locationID: ExecutionLocationID) -> GatewayClient? {
         locationID == .local ? client : remoteClients[locationID]
+    }
+
+    /// One lease check for every response that wants to mutate a
+    /// location-scoped daemon projection after an await. Removing/replacing the
+    /// exact client retires the whole epoch; a late response is then inert.
+    func isCurrentGateway(_ requestClient: GatewayClient, at locationID: ExecutionLocationID) -> Bool {
+        gateway(for: locationID) === requestClient
     }
 
     func refreshSSHHosts() {
@@ -135,16 +149,19 @@ extension AppModel {
         mutateRemoteConnection(id) { $0.enabled = enabled }
     }
 
-    func connectRemote(_ id: UUID, allowInteraction: Bool = true) async {
+    @discardableResult
+    func connectRemote(_ id: UUID, allowInteraction: Bool = true) async -> GatewayClient? {
         if let existing = remoteConnectTasks[id] {
+            let generation = remoteConnectionGenerations[id] ?? 0
             await existing.value
+            guard remoteConnectionGenerations[id] == generation else { return nil }
             if allowInteraction,
                remoteConnections.first(where: { $0.id == id })?.status == .needsInteraction
             {
                 remoteConnectTasks.removeValue(forKey: id)
-                await connectRemote(id, allowInteraction: true)
+                return await connectRemote(id, allowInteraction: true)
             }
-            return
+            return remoteClients[.remote(id)]
         }
         let generation = (remoteConnectionGenerations[id] ?? 0) + 1
         remoteConnectionGenerations[id] = generation
@@ -158,6 +175,8 @@ extension AppModel {
         if remoteConnectionGenerations[id] == generation {
             remoteConnectTasks.removeValue(forKey: id)
         }
+        guard remoteConnectionGenerations[id] == generation else { return nil }
+        return remoteClients[.remote(id)]
     }
 
     private func connectRemoteOnce(
@@ -168,6 +187,13 @@ extension AppModel {
         guard remoteConnectionGenerations[id] == generation,
               var connection = remoteConnections.first(where: { $0.id == id })
         else { return }
+        let locationID = connection.locationID
+        // A new connection generation replaces one daemon epoch. Retire its
+        // client first, then every volatile projection; persisted thread titles
+        // and connection preferences intentionally survive for offline UI.
+        remoteClients.removeValue(forKey: locationID)
+        cancelRemoteStreams(locationID)
+        discardRemoteDaemonProjections(at: locationID)
         var switchedRuntime = false
         setRemoteState(id, .connecting, message: "Connecting with OpenSSH…")
         do {
@@ -206,10 +232,8 @@ extension AppModel {
 
         do {
             guard remoteConnectionGenerations[id] == generation else {
-                // A disconnect may have raced the initially blocking ssh launch
-                // before the actor had recorded the new master. Close the master
-                // that just became live instead of leaving an orphan socket.
-                await sshConnectionManager.disconnect(id)
+                // A later disconnect/connect generation owns this id now. A
+                // generic cleanup here could tear down its newer SSH master.
                 return
             }
             connection = remoteConnections.first(where: { $0.id == id }) ?? connection
@@ -251,7 +275,7 @@ extension AppModel {
             }
 
             guard remoteConnectionGenerations[id] == generation else { return }
-            var activeClient = try await bootstrapRemoteClient(connection)
+            var activeClient = try await bootstrapRemoteClient(connection, generation: generation)
             if let manifest, let currentProbe = try? await remoteRuntimeInstaller.probe(on: connection) {
                 let hasActive = (try? await activeClient.engineHasActiveWork()) ?? true
                 switch decideRemoteRuntime(
@@ -262,12 +286,13 @@ extension AppModel {
                 {
                 case .updateAvailable:
                     setRemoteState(id, .installing, message: "Updating the remote runtime…")
-                    await closeRemoteControlForward(id)
+                    await closeRemoteControlForward(id, through: generation)
                     try await remoteRuntimeInstaller.install(
                         manifest, target: detectedTarget, on: connection,
                         appVersion: Self.appVersionString())
                     switchedRuntime = true
-                    activeClient = try await bootstrapRemoteClient(connection)
+                    activeClient = try await bootstrapRemoteClient(
+                        connection, generation: generation)
                 case .useCurrentAndOfferUpdate:
                     remoteConnectionMessages[id] =
                         "Connected. A compatible runtime update will be offered after active tasks finish."
@@ -284,7 +309,7 @@ extension AppModel {
                 switchedRuntime = false
             }
             guard remoteConnectionGenerations[id] == generation else {
-                await closeRemoteControlForward(id)
+                await closeRemoteControlForward(id, through: generation)
                 return
             }
             async let harnessRows = activeClient.listHarnesses(fresh: true)
@@ -305,7 +330,7 @@ extension AppModel {
             guard !Task.isCancelled,
                   remoteConnectionGenerations[id] == generation
             else {
-                await closeRemoteControlForward(id)
+                await closeRemoteControlForward(id, through: generation)
                 return
             }
             remoteClients[connection.locationID] = activeClient
@@ -353,8 +378,10 @@ extension AppModel {
                 await remoteRuntimeInstaller.rollbackOrDeactivate(on: connection)
             }
             guard remoteConnectionGenerations[id] == generation else { return }
-            await closeRemoteControlForward(id)
+            await closeRemoteControlForward(id, through: generation)
             remoteClients.removeValue(forKey: connection.locationID)
+            cancelRemoteStreams(connection.locationID)
+            discardRemoteDaemonProjections(at: connection.locationID)
             setRemoteState(id, .failed, message: userMessageForRemote(error))
         }
     }
@@ -387,14 +414,19 @@ extension AppModel {
         }
     }
 
-    func disconnectRemote(_ id: UUID) async {
-        remoteConnectionGenerations[id, default: 0] += 1
+    @discardableResult
+    func disconnectRemote(_ id: UUID) async -> Int? {
+        let generation = (remoteConnectionGenerations[id] ?? 0) + 1
+        remoteConnectionGenerations[id] = generation
         remoteConnectTasks.removeValue(forKey: id)?.cancel()
-        if let purpose = remoteTerminalSheet?.purpose,
-           case .authentication(let sheetID, _) = purpose,
-           sheetID == id
-        {
-            remoteTerminalSheet = nil
+        if let purpose = remoteTerminalSheet?.purpose {
+            switch purpose {
+            case .authentication(let sheetID, _) where sheetID == id,
+                 .setup(let sheetID, _) where sheetID == id:
+                remoteTerminalSheet = nil
+            default:
+                break
+            }
         }
         if let purpose = settingsRemoteTerminalSheet?.purpose,
            case .install(let sheetID, _) = purpose,
@@ -405,21 +437,24 @@ extension AppModel {
         if remoteHarnessInstallPrompt?.connectionID == id {
             remoteHarnessInstallPrompt = nil
         }
-        cancelRemoteStreams(.remote(id))
-        await closeRemoteControlForward(id)
-        if let forward = remotePreviewForwards.removeValue(forKey: id) {
-            await sshConnectionManager.closeForward(forward)
+        if remoteDeviceLogin?.connectionID == id { remoteDeviceLogin = nil }
+        if remoteDirectoryBrowser?.connectionID == id { remoteDirectoryBrowser = nil }
+        if pendingRemoteThreadSelection?.locationID == .remote(id) {
+            pendingRemoteThreadSelection = nil
         }
         remoteClients.removeValue(forKey: .remote(id))
-        remoteHarnesses.removeValue(forKey: .remote(id))
-        remoteSettingsSnapshots.removeValue(forKey: .remote(id))
-        remoteQuotaResponses.removeValue(forKey: .remote(id))
-        remoteSecretBackends.removeValue(forKey: .remote(id))
-        remoteStoredSecrets.removeValue(forKey: .remote(id))
-        remoteProjects.removeValue(forKey: .remote(id))
-        remoteTasks.removeValue(forKey: .remote(id))
+        cancelRemoteStreams(.remote(id))
+        discardRemoteDaemonProjections(at: .remote(id))
+        await closeRemoteControlForward(id, through: generation)
+        guard remoteConnectionGenerations[id] == generation else { return nil }
+        if let forward = remotePreviewForwards.removeValue(forKey: id) {
+            await sshConnectionManager.closeForward(forward)
+            guard remoteConnectionGenerations[id] == generation else { return nil }
+        }
         await sshConnectionManager.disconnect(id)
+        guard remoteConnectionGenerations[id] == generation else { return nil }
         setRemoteState(id, .offline, message: "Disconnected. Cached thread titles remain available.")
+        return generation
     }
 
     func shutdownRemoteConnections() async {
@@ -429,20 +464,23 @@ extension AppModel {
         let connectTasks = Array(remoteConnectTasks.values)
         remoteConnectTasks.removeAll()
         for task in connectTasks { task.cancel() }
-        for task in connectTasks { await task.value }
+        let locationIDs = Set(remoteConnections.map(\.locationID)).union(remoteClients.keys)
+        // Retire every client/projection synchronously before the first await.
+        // Cancellation is cooperative; an old request may otherwise complete
+        // while shutdown is waiting for a connection task and repaint state.
+        remoteClients.removeAll()
+        for locationID in locationIDs {
+            cancelRemoteStreams(locationID)
+            discardRemoteDaemonProjections(at: locationID)
+        }
         for task in remoteGlobalStreamTasks.values { task.cancel() }
         for task in remoteRunStreamTasks.values { task.cancel() }
         remoteGlobalStreamTasks.removeAll()
+        remoteGlobalStreamTokens.removeAll()
         remoteGlobalEventCursors.removeAll()
         remoteRunStreamTasks.removeAll()
-        remoteClients.removeAll()
-        remoteHarnesses.removeAll()
-        remoteSettingsSnapshots.removeAll()
-        remoteQuotaResponses.removeAll()
-        remoteSecretBackends.removeAll()
-        remoteStoredSecrets.removeAll()
-        remoteProjects.removeAll()
-        remoteTasks.removeAll()
+        remoteRunStreamTokens.removeAll()
+        for task in connectTasks { await task.value }
         remoteControlForwards.removeAll()
         remotePreviewForwards.removeAll()
         remoteTerminalSheet = nil
@@ -461,6 +499,7 @@ extension AppModel {
         else { return }
         do {
             let list = try await client.listThreads()
+            guard isCurrentGateway(client, at: locationID) else { return }
             let now = Date()
             remoteThreadCache.removeAll { $0.locationID == locationID }
             remoteThreadCache.append(contentsOf: list.threads.map {
@@ -468,6 +507,7 @@ extension AppModel {
             })
             persistRemoteThreadCache()
             await refreshRemoteRuns(locationID)
+            guard isCurrentGateway(client, at: locationID) else { return }
             for thread in list.threads {
                 guard let runID = thread.headRunId,
                       remoteTasks[locationID]?.first(where: {
@@ -482,6 +522,7 @@ extension AppModel {
                 ? "Synced \(list.threads.count) thread(s)."
                 : "Synced with \(list.droppedThreads) incompatible thread row(s) hidden."
         } catch {
+            guard isCurrentGateway(client, at: locationID) else { return }
             remoteConnectionMessages[remote.id] =
                 "Could not sync; showing cached thread summaries."
         }
@@ -534,22 +575,37 @@ extension AppModel {
         return (project.id, relative)
     }
 
-    private func bootstrapRemoteClient(_ connection: RemoteConnection) async throws
+    private func bootstrapRemoteClient(
+        _ connection: RemoteConnection,
+        generation: Int
+    ) async throws
         -> GatewayClient
     {
-        await closeRemoteControlForward(connection.id)
+        await closeRemoteControlForward(connection.id, through: generation)
+        guard remoteConnectionGenerations[connection.id] == generation else {
+            throw CancellationError()
+        }
         let bootstrap = try await remoteRuntimeInstaller.bootstrap(on: connection)
+        guard remoteConnectionGenerations[connection.id] == generation else {
+            throw CancellationError()
+        }
         let forward = try await sshConnectionManager.openForward(
             connection, remotePort: bootstrap.endpoint.port)
-        remoteControlForwards[connection.id] = forward
+        guard remoteConnectionGenerations[connection.id] == generation else {
+            await sshConnectionManager.closeForward(forward)
+            throw CancellationError()
+        }
+        remoteControlForwards[connection.id] = RemoteControlForwardLease(
+            generation: generation, forward: forward)
         return GatewayClient(
             baseURL: URL(string: "http://127.0.0.1:\(forward.localPort)")!,
             token: bootstrap.endpoint.token)
     }
 
-    private func closeRemoteControlForward(_ id: UUID) async {
-        guard let forward = remoteControlForwards.removeValue(forKey: id) else { return }
-        await sshConnectionManager.closeForward(forward)
+    private func closeRemoteControlForward(_ id: UUID, through generation: Int) async {
+        guard let lease = remoteControlForwards[id], lease.generation <= generation else { return }
+        remoteControlForwards.removeValue(forKey: id)
+        await sshConnectionManager.closeForward(lease.forward)
     }
 
     func setRemoteState(

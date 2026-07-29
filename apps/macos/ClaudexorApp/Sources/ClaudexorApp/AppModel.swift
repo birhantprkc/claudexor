@@ -232,11 +232,13 @@ final class AppModel {
     /// Tokens only live inside these in-memory clients. Persistence stores
     /// connection labels and thread summaries, never credentials or endpoints.
     @ObservationIgnored var remoteClients: [ExecutionLocationID: GatewayClient] = [:]
-    @ObservationIgnored var remoteControlForwards: [UUID: SSHForward] = [:]
+    @ObservationIgnored var remoteControlForwards: [UUID: RemoteControlForwardLease] = [:]
     @ObservationIgnored var remotePreviewForwards: [UUID: SSHForward] = [:]
     @ObservationIgnored var remoteGlobalStreamTasks: [ExecutionLocationID: Task<Void, Never>] = [:]
+    @ObservationIgnored var remoteGlobalStreamTokens: [ExecutionLocationID: UUID] = [:]
     @ObservationIgnored var remoteGlobalEventCursors: [ExecutionLocationID: String] = [:]
     @ObservationIgnored var remoteRunStreamTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var remoteRunStreamTokens: [String: UUID] = [:]
     @ObservationIgnored var remoteConnectTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored var remoteConnectionGenerations: [UUID: Int] = [:]
     @ObservationIgnored var pendingRemoteThreadSelection:
@@ -424,6 +426,17 @@ final class AppModel {
         storedSecrets.removeAll()
         trustEntries.removeAll()
         trustStatus = nil
+    }
+
+    /// A daemon replacement cannot inherit a local cancel verdict for a reused
+    /// run id. Keep cancellation memory scoped to the exact location epoch.
+    func discardCancelledRunMemory(at locationID: ExecutionLocationID) {
+        let prefix = "\(locationID.rawValue)|"
+        cancelledRunIds = Set(cancelledRunIds.filter { !$0.hasPrefix(prefix) })
+    }
+
+    func wasRunCancelled(_ id: String, at locationID: ExecutionLocationID) -> Bool {
+        cancelledRunIds.contains(locatedRunKey(id, at: locationID))
     }
 
     /// Retire every per-run detail owner at a connection boundary. Tests may
@@ -984,7 +997,7 @@ final class AppModel {
         // composer would stay on Stop after a successful cancel in the not-yet-
         // hydrated window (the embedded card still says "running").
         let hydratedRowActive: Bool? = headRunId.flatMap { id in
-            cancelledRunIds.contains(locatedRunKey(id, at: selectedExecutionLocation))
+            wasRunCancelled(id, at: selectedExecutionLocation)
                 ? false
                 : task(id, at: selectedExecutionLocation)?.phase.isActive
         }
@@ -1023,7 +1036,7 @@ final class AppModel {
         // by the per-thread server turn serialization, which rejects a real overlap.
         let locationID = activeExecutionLocation
         guard let headRunId = threadSummary(id, at: locationID)?.headRunId else { return false }
-        if cancelledRunIds.contains(locatedRunKey(headRunId, at: locationID)) { return false }
+        if wasRunCancelled(headRunId, at: locationID) { return false }
         return task(headRunId, at: locationID)?.phase.isActive ?? false
     }
 

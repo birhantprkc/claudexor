@@ -385,38 +385,62 @@ extension AppModel {
     }
 
     func startRemoteGlobalStream(_ locationID: ExecutionLocationID) {
+        guard let requestClient = remoteClients[locationID] else { return }
         remoteGlobalStreamTasks[locationID]?.cancel()
+        let token = UUID()
+        remoteGlobalStreamTokens[locationID] = token
         remoteGlobalStreamTasks[locationID] = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                guard let self, let requestClient = self.remoteClients[locationID] else { break }
+                guard let self,
+                      self.isCurrentGateway(requestClient, at: locationID),
+                      self.remoteGlobalStreamTokens[locationID] == token
+                else { break }
                 do {
                     for try await event in requestClient.globalEvents(
                         lastEventId: self.remoteGlobalEventCursors[locationID])
                     {
-                        guard self.remoteClients[locationID] === requestClient else { return }
+                        guard self.isCurrentGateway(requestClient, at: locationID),
+                              self.remoteGlobalStreamTokens[locationID] == token
+                        else { return }
                         self.remoteGlobalEventCursors[locationID] = event.cursor
-                        await self.handleRemoteGlobalEvent(event, locationID: locationID)
+                        await self.handleRemoteGlobalEvent(
+                            event,
+                            locationID: locationID,
+                            requestClient: requestClient,
+                            streamToken: token)
                     }
                 } catch let GatewayError.http(status, _)
                     where status == 400 || status == 409 || status == 410
                 {
+                    guard self.isCurrentGateway(requestClient, at: locationID),
+                          self.remoteGlobalStreamTokens[locationID] == token
+                    else { break }
                     self.remoteGlobalEventCursors[locationID] = nil
                     await self.refreshRemoteThreads(locationID)
                 } catch is DecodingError {
+                    guard self.isCurrentGateway(requestClient, at: locationID),
+                          self.remoteGlobalStreamTokens[locationID] == token
+                    else { break }
                     self.remoteGlobalEventCursors[locationID] = nil
                     await self.refreshRemoteThreads(locationID)
                 } catch GatewayError.decoding {
+                    guard self.isCurrentGateway(requestClient, at: locationID),
+                          self.remoteGlobalStreamTokens[locationID] == token
+                    else { break }
                     self.remoteGlobalEventCursors[locationID] = nil
                     await self.refreshRemoteThreads(locationID)
                 } catch {
                     if Task.isCancelled { break }
                 }
                 guard !Task.isCancelled,
-                      self.remoteClients[locationID] === requestClient
+                      self.isCurrentGateway(requestClient, at: locationID),
+                      self.remoteGlobalStreamTokens[locationID] == token
                 else { break }
                 try? await Task.sleep(for: .seconds(3))
             }
-            self?.remoteGlobalStreamTasks[locationID] = nil
+            guard let self, self.remoteGlobalStreamTokens[locationID] == token else { return }
+            self.remoteGlobalStreamTokens.removeValue(forKey: locationID)
+            self.remoteGlobalStreamTasks.removeValue(forKey: locationID)
         }
     }
 
@@ -429,6 +453,8 @@ extension AppModel {
         guard remoteRunStreamTasks[key] == nil,
               let requestClient = remoteClients[locationID]
         else { return }
+        let token = UUID()
+        remoteRunStreamTokens[key] = token
         remoteRunStreamTasks[key] = Task { @MainActor [weak self] in
             var lastEventID: Int?
             var lastDetailRefresh = Date.distantPast
@@ -439,7 +465,8 @@ extension AppModel {
                         runId: runID, lastEventId: lastEventID)
                     {
                         guard let self,
-                              self.remoteClients[locationID] === requestClient
+                              self.isCurrentGateway(requestClient, at: locationID),
+                              self.remoteRunStreamTokens[key] == token
                         else { return }
                         if envelope.seq > 0 { lastEventID = envelope.seq }
                         attempt = 0
@@ -449,7 +476,8 @@ extension AppModel {
                         {
                             lastDetailRefresh = .now
                             await self.refreshOpenThread(
-                                locationID: locationID, id: threadID)
+                                locationID: locationID, id: threadID,
+                                mayReconnect: false)
                         }
                     }
                     break
@@ -460,21 +488,31 @@ extension AppModel {
                     try? await Task.sleep(for: .seconds(min(Double(attempt) * 2, 10)))
                 }
             }
-            guard let self else { return }
+            guard let self,
+                  self.isCurrentGateway(requestClient, at: locationID),
+                  self.remoteRunStreamTokens[key] == token
+            else { return }
             await self.refreshRemoteThreads(locationID)
+            guard self.isCurrentGateway(requestClient, at: locationID),
+                  self.remoteRunStreamTokens[key] == token
+            else { return }
             if self.selectedExecutionLocation == locationID,
                self.selectedThreadId == threadID
             {
                 await self.refreshOpenThread(
-                    locationID: locationID, id: threadID)
+                    locationID: locationID, id: threadID, mayReconnect: false)
             }
-            self.remoteRunStreamTasks[key] = nil
+            guard self.remoteRunStreamTokens[key] == token else { return }
+            self.remoteRunStreamTokens.removeValue(forKey: key)
+            self.remoteRunStreamTasks.removeValue(forKey: key)
         }
     }
 
     private func handleRemoteGlobalEvent(
         _ event: JournalEvent,
-        locationID: ExecutionLocationID
+        locationID: ExecutionLocationID,
+        requestClient: GatewayClient,
+        streamToken: UUID
     ) async {
         if event.type == "quota.snapshot.upserted" {
             guard let requestClient = remoteClients[locationID] else { return }
@@ -485,18 +523,23 @@ extension AppModel {
         }
         guard event.type == "thread.head.updated" else { return }
         await refreshRemoteThreads(locationID)
-        guard selectedExecutionLocation == locationID,
+        guard isCurrentGateway(requestClient, at: locationID),
+              remoteGlobalStreamTokens[locationID] == streamToken,
+              selectedExecutionLocation == locationID,
               let selectedThreadId,
               event.payload["thread_id"]?.stringValue == selectedThreadId
         else { return }
-        await refreshOpenThread(locationID: locationID, id: selectedThreadId)
+        await refreshOpenThread(
+            locationID: locationID, id: selectedThreadId, mayReconnect: false)
     }
 
     func cancelRemoteStreams(_ locationID: ExecutionLocationID) {
+        remoteGlobalStreamTokens.removeValue(forKey: locationID)
         remoteGlobalStreamTasks.removeValue(forKey: locationID)?.cancel()
         remoteGlobalEventCursors.removeValue(forKey: locationID)
         let prefix = "\(locationID.rawValue)|"
         for key in Array(remoteRunStreamTasks.keys) where key.hasPrefix(prefix) {
+            remoteRunStreamTokens.removeValue(forKey: key)
             remoteRunStreamTasks.removeValue(forKey: key)?.cancel()
         }
     }

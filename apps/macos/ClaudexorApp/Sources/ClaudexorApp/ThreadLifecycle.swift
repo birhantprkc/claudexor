@@ -20,11 +20,15 @@ extension AppModel {
     /// with the empty/loading state. Remote run streams call this repeatedly,
     /// so clearing `selectedThreadDetail` here would make the whole feed flash
     /// on every event.
-    func refreshOpenThread(locationID: ExecutionLocationID, id: String) async {
+    func refreshOpenThread(
+        locationID: ExecutionLocationID,
+        id: String,
+        mayReconnect: Bool = false
+    ) async {
         await loadThread(
             locationID: locationID,
             id: id,
-            mayReconnect: true,
+            mayReconnect: mayReconnect,
             preserveExistingDetail: true)
     }
 
