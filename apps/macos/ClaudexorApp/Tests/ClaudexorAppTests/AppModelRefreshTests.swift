@@ -717,6 +717,559 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func laterSettingsSaveMakesHeldSameClientHarnessResponseInert() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let client = appTestGateway(port: 41101)
+        let model = AppModel(client: client, requestNotificationAuthorization: false)
+        let harnessCalls = AppRefreshCallCounter()
+        let firstArrived = AppRefreshCallCounter()
+        let secondArrived = AppRefreshCallCounter()
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let releaseSecond = DispatchSemaphore(value: 0)
+        defer { releaseFirst.signal(); releaseSecond.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/settings"):
+                return (appResponse(for: request), appSettingsSnapshotData)
+            case ("GET", "/v2/harnesses"):
+                if harnessCalls.incrementAndGet() == 1 {
+                    firstArrived.increment()
+                    _ = releaseFirst.wait(timeout: .now() + 5)
+                    return (appResponse(for: request), appHarnessSnapshot(
+                        version: "held-old", status: "degraded"))
+                }
+                secondArrived.increment()
+                _ = releaseSecond.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "latest", status: "ok"))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        #expect(await model.writeSettings(
+            SettingsUpdateRequest(routingGoal: "economy"),
+            at: .local,
+            admittedGeneration: model.executionLocationGeneration(for: .local)) == .saved)
+        try await waitForAppTest(firstArrived, message: "first harness GET never started")
+        #expect(await model.writeSettings(
+            SettingsUpdateRequest(paidFallback: "never"),
+            at: .local,
+            admittedGeneration: model.executionLocationGeneration(for: .local)) == .saved)
+
+        releaseFirst.signal()
+        try await waitForAppTest(secondArrived, message: "trailing harness GET never started")
+        #expect(model.liveHarnesses.first?.version != "held-old")
+        releaseSecond.signal()
+        try await waitForAppTest(
+            { model.liveHarnesses.first?.version == "latest" },
+            message: "latest harness snapshot never projected")
+        #expect(harnessCalls.count == 2)
+    }
+
+    @MainActor
+    @Test func accountsClaimsHarnessProjectionBeforeItsRequestAwaits() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41102), requestNotificationAuthorization: false)
+        let harnessArrived = AppRefreshCallCounter()
+        let accountsArrived = AppRefreshCallCounter()
+        let releaseHarness = DispatchSemaphore(value: 0)
+        let releaseAccounts = DispatchSemaphore(value: 0)
+        defer { releaseHarness.signal(); releaseAccounts.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/harnesses":
+                harnessArrived.increment()
+                _ = releaseHarness.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "held-old", status: "degraded"))
+            case "/v2/credential-profiles":
+                accountsArrived.increment()
+                _ = releaseAccounts.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "accounts", displayName: "Accounts",
+                    observedAt: "2026-07-29T00:00:00Z"))
+            case "/v2/global/events":
+                throw AppRefreshTestError.badRequest
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let oldHarness = Task { await model.refreshHarnesses(fresh: true) }
+        try await waitForAppTest(harnessArrived, message: "held harness GET never started")
+        let accounts = Task { await model.refreshAccounts() }
+        try await waitForAppTest(accountsArrived, message: "Accounts request never started")
+
+        releaseHarness.signal()
+        _ = await oldHarness.value
+        #expect(model.liveHarnesses.isEmpty)
+
+        releaseAccounts.signal()
+        #expect(await accounts.value == nil)
+        model.suspendAccountsQuotaObserver(at: .local)
+        #expect(model.liveHarnesses.first?.health == .ok)
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("accounts") == true)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+    }
+
+    @MainActor
+    @Test func foregroundAccountsSuccessSupersededByHarnessRefreshSettlesOnlyAccountsSlices()
+        async throws
+    {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41114), requestNotificationAuthorization: false)
+        try seedAppAccounts(model, profileID: "seed", observedAt: "2026-07-29T00:00:00Z")
+        let accountsArrived = AppRefreshCallCounter()
+        let releaseAccounts = DispatchSemaphore(value: 0)
+        defer { releaseAccounts.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/credential-profiles":
+                accountsArrived.increment()
+                _ = releaseAccounts.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "incoming", displayName: "Incoming",
+                    observedAt: "2026-07-29T00:00:01Z"))
+            case "/v2/harnesses":
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "newer-harness", status: "ok", gitVersion: "git newer"))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let accounts = Task { await model.refreshAccounts() }
+        try await waitForAppTest(accountsArrived, message: "Accounts request never started")
+        #expect(await model.refreshHarnesses(fresh: true))
+        releaseAccounts.signal()
+
+        let accountsError = await accounts.value
+        #expect(accountsError?.contains("Retry Accounts") == true)
+        #expect(model.credentialProfiles.isEmpty)
+        #expect(model.harnessAccounts.isEmpty)
+        #expect(model.quotaResponse == nil)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.accountsQuotaEventCursors[.local] == nil)
+        #expect(model.accountsQuotaStreamTokens[.local] == nil)
+        #expect(model.liveHarnesses.first?.version == "newer-harness")
+        #expect(model.harnessReadinessFresh == true)
+        #expect(model.gitCapability?.version == "git newer")
+    }
+
+    @MainActor
+    @Test func backgroundAccountsSupersededByHarnessRefreshResumesPriorCursor()
+        async throws
+    {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41115), requestNotificationAuthorization: false)
+        try seedAppAccounts(model, profileID: "seed", observedAt: "2026-07-29T00:00:02Z")
+        let accountsArrived = AppRefreshCallCounter()
+        let observerArrived = AppRefreshCallCounter()
+        let releaseAccounts = DispatchSemaphore(value: 0)
+        let releaseObserver = DispatchSemaphore(value: 0)
+        defer { releaseAccounts.signal(); releaseObserver.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/credential-profiles":
+                accountsArrived.increment()
+                _ = releaseAccounts.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "incoming", displayName: "Incoming",
+                    observedAt: "2026-07-29T00:00:03Z"))
+            case "/v2/harnesses":
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "newer-harness", status: "ok", gitVersion: "git newer"))
+            case "/v2/global/events":
+                guard request.value(forHTTPHeaderField: "Last-Event-ID") == "seed-cursor" else {
+                    throw AppRefreshTestError.badRequest
+                }
+                observerArrived.increment()
+                _ = releaseObserver.wait(timeout: .now() + 5)
+                return (appResponse(for: request), Data())
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let accounts = Task { await model.loadCredentialProfiles() }
+        try await waitForAppTest(accountsArrived, message: "Accounts request never started")
+        #expect(await model.refreshHarnesses(fresh: true))
+        releaseAccounts.signal()
+
+        let accountsError = await accounts.value
+        #expect(accountsError?.contains("Retry Accounts") == true)
+        try await waitForAppTest(observerArrived, message: "prior quota cursor was not resumed")
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["seed"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("seed") == true)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:02Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.accountsQuotaEventCursors[.local] == "seed-cursor")
+        #expect(model.accountsQuotaStreamTokens[.local] != nil)
+        #expect(model.liveHarnesses.first?.version == "newer-harness")
+        #expect(model.harnessReadinessFresh == true)
+        #expect(model.gitCapability?.version == "git newer")
+        model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
+    }
+
+    @MainActor
+    @Test func foregroundAccountsFailureCannotStaleANewerHarnessProjection() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41116), requestNotificationAuthorization: false)
+        try seedAppAccounts(model, profileID: "seed", observedAt: "2026-07-29T00:00:04Z")
+        let accountsArrived = AppRefreshCallCounter()
+        let releaseAccounts = DispatchSemaphore(value: 0)
+        defer { releaseAccounts.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/credential-profiles":
+                accountsArrived.increment()
+                _ = releaseAccounts.wait(timeout: .now() + 5)
+                return (appResponse(for: request, status: 503), Data(#"{"error":"failed"}"#.utf8))
+            case "/v2/harnesses":
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "newer-harness", status: "ok", gitVersion: "git newer"))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let accounts = Task { await model.refreshAccounts() }
+        try await waitForAppTest(accountsArrived, message: "Accounts request never started")
+        #expect(await model.refreshHarnesses(fresh: true))
+        releaseAccounts.signal()
+
+        let accountsError = await accounts.value
+        #expect(accountsError?.contains("Retry Accounts") == true)
+        #expect(model.credentialProfiles.isEmpty)
+        #expect(model.harnessAccounts.isEmpty)
+        #expect(model.quotaResponse == nil)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.liveHarnesses.first?.version == "newer-harness")
+        #expect(model.harnessReadinessFresh == true)
+        #expect(model.gitCapability?.version == "git newer")
+    }
+
+    @MainActor
+    @Test func standaloneHarnessSnapshotExpiresNextUpAuthority() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41103), requestNotificationAuthorization: false)
+        model.accountsNextUpAuthorityFresh[.local] = true
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/harnesses" else {
+                throw AppRefreshTestError.badRequest
+            }
+            return (appResponse(for: request), appHarnessSnapshot(
+                version: "standalone", status: "ok"))
+        }
+
+        #expect(await model.refreshHarnesses(fresh: true))
+        #expect(model.liveHarnesses.first?.version == "standalone")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+    }
+
+    @MainActor
+    @Test func blockedRemoteSettingsProjectionDoesNotBlockLocalProjection() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let localClient = appTestGateway(port: 41104)
+        let remoteClient = appTestGateway(port: 41105)
+        let model = AppModel(client: localClient, requestNotificationAuthorization: false)
+        let remote = ExecutionLocationID.remote(UUID())
+        model.remoteClients[remote] = remoteClient
+        let remoteArrived = AppRefreshCallCounter()
+        let localArrived = AppRefreshCallCounter()
+        let releaseRemote = DispatchSemaphore(value: 0)
+        defer { releaseRemote.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path, request.url?.port) {
+            case ("POST", "/v2/settings", _):
+                return (appResponse(for: request), appSettingsSnapshotData)
+            case ("GET", "/v2/harnesses", 41105):
+                remoteArrived.increment()
+                _ = releaseRemote.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "remote", status: "ok"))
+            case ("GET", "/v2/harnesses", 41104):
+                localArrived.increment()
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "local", status: "ok"))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        #expect(await model.writeSettings(
+            SettingsUpdateRequest(routingGoal: "economy"),
+            at: remote,
+            admittedGeneration: model.executionLocationGeneration(for: remote)) == .saved)
+        try await waitForAppTest(remoteArrived, message: "remote harness GET never started")
+        #expect(await model.writeSettings(
+            SettingsUpdateRequest(routingGoal: "economy"),
+            at: .local,
+            admittedGeneration: model.executionLocationGeneration(for: .local)) == .saved)
+
+        let localWasIndependent = await appTestEventually { localArrived.count == 1 }
+        #expect(localWasIndependent)
+        releaseRemote.signal()
+        try await waitForAppTest(
+            { model.liveHarnesses.first?.version == "local" },
+            message: "local harness snapshot never projected")
+    }
+
+    @MainActor
+    @Test func harnessRefreshBurstCoalescesToOneLeadAndOneLatestTrailing() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41106), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        let leadArrived = AppRefreshCallCounter()
+        let releaseLead = DispatchSemaphore(value: 0)
+        defer { releaseLead.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/harnesses" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let call = calls.incrementAndGet()
+            if call == 1 {
+                leadArrived.increment()
+                _ = releaseLead.wait(timeout: .now() + 5)
+            }
+            return (appResponse(for: request), appHarnessSnapshot(
+                version: "call-\(call)", status: "ok"))
+        }
+
+        let lead = Task { await model.refreshHarnesses(fresh: false) }
+        try await waitForAppTest(leadArrived, message: "lead harness GET never started")
+        let second = Task { await model.refreshHarnesses(fresh: false) }
+        let third = Task { await model.refreshHarnesses(fresh: true) }
+        let latest = Task { await model.refreshHarnesses(fresh: true) }
+        for _ in 0..<200 { await Task.yield() }
+        #expect(calls.count == 1)
+
+        releaseLead.signal()
+        #expect(await lead.value)
+        #expect(await second.value)
+        #expect(await third.value)
+        #expect(await latest.value)
+        #expect(calls.count == 2)
+        #expect(model.liveHarnesses.first?.version == "call-2")
+    }
+
+    @MainActor
+    @Test func laterWeakRefreshCannotDropPendingFreshRequirement() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41111), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        let leadArrived = AppRefreshCallCounter()
+        let releaseLead = DispatchSemaphore(value: 0)
+        defer { releaseLead.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/harnesses" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let call = calls.incrementAndGet()
+            if call == 1 {
+                leadArrived.increment()
+                _ = releaseLead.wait(timeout: .now() + 5)
+            } else if request.url?.query != "fresh=true" {
+                throw AppRefreshTestError.badRequest
+            }
+            return (appResponse(for: request), appHarnessSnapshot(
+                version: "call-\(call)", status: "ok"))
+        }
+
+        let lead = Task { await model.refreshHarnesses(fresh: false) }
+        try await waitForAppTest(leadArrived, message: "lead harness GET never started")
+        let strong = Task { await model.refreshHarnesses(fresh: true) }
+        await Task.yield()
+        let laterWeak = Task { await model.refreshHarnesses(fresh: false) }
+        for _ in 0..<100 { await Task.yield() }
+
+        releaseLead.signal()
+        #expect(await lead.value)
+        #expect(await strong.value)
+        #expect(await laterWeak.value)
+        #expect(calls.count == 2)
+        #expect(model.liveHarnesses.first?.version == "call-2")
+    }
+
+    @MainActor
+    @Test func laterWeakRefreshCannotDropPendingStaleOnFailureRequirement() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41112), requestNotificationAuthorization: false)
+        model.harnessReadinessFresh = true
+        let calls = AppRefreshCallCounter()
+        let leadArrived = AppRefreshCallCounter()
+        let releaseLead = DispatchSemaphore(value: 0)
+        defer { releaseLead.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/harnesses" else {
+                throw AppRefreshTestError.badRequest
+            }
+            if calls.incrementAndGet() == 1 {
+                leadArrived.increment()
+                _ = releaseLead.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "superseded", status: "ok"))
+            }
+            throw AppRefreshTestError.badRequest
+        }
+
+        let lead = Task { await model.refreshHarnesses(markStaleOnFailure: false) }
+        try await waitForAppTest(leadArrived, message: "lead harness GET never started")
+        let strong = Task {
+            await model.refreshHarnesses(markStaleOnFailure: true)
+        }
+        await Task.yield()
+        let laterWeak = Task {
+            await model.refreshHarnesses(markStaleOnFailure: false)
+        }
+        for _ in 0..<100 { await Task.yield() }
+
+        releaseLead.signal()
+        #expect(!(await lead.value))
+        #expect(!(await strong.value))
+        #expect(!(await laterWeak.value))
+        #expect(calls.count == 2)
+        #expect(model.harnessReadinessFresh == false)
+    }
+
+    @MainActor
+    @Test func preAdoptionConnectLeaseSurvivesFirstRemoteClientAdoption() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let location = ExecutionLocationID.remote(UUID())
+        let client = appTestGateway(port: 41113)
+        let lease = try #require(model.claimHarnessProjection(
+            at: location, client: client, requireCurrentClient: false))
+        #expect(!model.harnessProjectionIsCurrent(lease))
+
+        model.adoptRemoteClientForReconnect(client, at: location)
+
+        #expect(model.harnessProjectionIsCurrent(lease))
+        let snapshot = try JSONDecoder().decode(
+            HarnessListResponse.self,
+            from: appHarnessSnapshot(version: "connect", status: "ok"))
+        #expect(model.acceptHarnessSnapshot(
+            snapshot.harnesses, git: snapshot.git, lease: lease))
+        #expect(model.remoteHarnesses[location]?.first?.version == "connect")
+    }
+
+    @MainActor
+    @Test func reconnectRetiresOnlyItsOwnHarnessProjectionLane() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let locationA = ExecutionLocationID.remote(UUID())
+        let locationB = ExecutionLocationID.remote(UUID())
+        let oldAClient = appTestGateway(port: 41107)
+        let clientB = appTestGateway(port: 41108)
+        let newAClient = appTestGateway(port: 41109)
+        model.remoteClients[locationA] = oldAClient
+        model.remoteClients[locationB] = clientB
+        let oldAArrived = AppRefreshCallCounter()
+        let bArrived = AppRefreshCallCounter()
+        let newAArrived = AppRefreshCallCounter()
+        let releaseOldA = DispatchSemaphore(value: 0)
+        let releaseB = DispatchSemaphore(value: 0)
+        let releaseNewA = DispatchSemaphore(value: 0)
+        defer { releaseOldA.signal(); releaseB.signal(); releaseNewA.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.port {
+            case 41107:
+                oldAArrived.increment()
+                _ = releaseOldA.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "old-a", status: "degraded"))
+            case 41108:
+                bArrived.increment()
+                _ = releaseB.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "b", status: "ok"))
+            case 41109:
+                newAArrived.increment()
+                _ = releaseNewA.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appHarnessSnapshot(
+                    version: "new-a", status: "ok"))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let oldA = Task { await model.refreshHarnesses(locationID: locationA) }
+        let b = Task { await model.refreshHarnesses(locationID: locationB) }
+        try await waitForAppTest(oldAArrived, message: "old A refresh never started")
+        try await waitForAppTest(bArrived, message: "B refresh never started")
+
+        let idA = try #require(locationA.remoteConnectionID)
+        model.remoteConnectionGenerations[idA, default: 0] += 1
+        model.adoptRemoteClientForReconnect(newAClient, at: locationA)
+        let replacementA = Task { await model.refreshHarnesses(locationID: locationA) }
+        try await waitForAppTest(newAArrived, message: "replacement A refresh never started")
+        let replacementRunnerID = try #require(
+            model.harnessProjectionLanes[locationA]?.runnerID)
+
+        // Let the detached old URL load finish only after the replacement lane
+        // exists. Its late cleanup must not clear that lane's task or identity.
+        releaseOldA.signal()
+        #expect(!(await oldA.value))
+        #expect(model.harnessProjectionLanes[locationA]?.runnerID == replacementRunnerID)
+        #expect(model.harnessProjectionLanes[locationA]?.task != nil)
+
+        releaseNewA.signal()
+        #expect(await replacementA.value)
+        #expect(newAArrived.count == 1)
+        #expect(model.remoteHarnesses[locationA]?.first?.version == "new-a")
+
+        releaseB.signal()
+        #expect(await b.value)
+        #expect(model.remoteHarnesses[locationA]?.first?.version == "new-a")
+        #expect(model.remoteHarnesses[locationB]?.first?.version == "b")
+    }
+
+    @MainActor
+    @Test func pointAuthReadinessCannotPatchANewerHarnessSnapshot() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41110), requestNotificationAuthorization: false)
+        model.accountsNextUpAuthorityFresh[.local] = true
+        let pointArrived = AppRefreshCallCounter()
+        let releasePoint = DispatchSemaphore(value: 0)
+        defer { releasePoint.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/harnesses/claude/auth-readiness"):
+                pointArrived.increment()
+                _ = releasePoint.wait(timeout: .now() + 5)
+                return (appResponse(for: request), Data(#"{"harnessId":"claude","authRequest":"subscription","requestedSource":"native_session","observedAt":"2026-07-29T00:00:00Z","readiness":{"source":"native_session","availability":"available","verification":"passed","detail":"old point probe"}}"#.utf8))
+            case ("GET", "/v2/harnesses"):
+                return (appResponse(for: request), Data(#"{"harnesses":[{"id":"claude","status":"degraded","manifest":{"version":"new-full"},"authSources":[{"source":"native_session","availability":"unavailable","verification":"failed","detail":"new full snapshot"}]}]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let point = Task { await model.refreshAuthReadiness(
+            for: .claude,
+            request: AuthReadinessRefreshRequest(
+                authRequest: .subscription, source: .nativeSession)) }
+        try await waitForAppTest(pointArrived, message: "point readiness request never started")
+        #expect(await model.refreshHarnesses(fresh: true))
+        releasePoint.signal()
+        #expect(!(await point.value))
+
+        let source = model.authSource(for: .claude, source: .nativeSession)
+        #expect(source?.verification == "failed")
+        #expect(source?.detail == "new full snapshot")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+    }
+
+    @MainActor
     @Test func accountsRefreshUsesFreshReadinessProfilesAndQuotaInOneCycle() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
@@ -3111,6 +3664,76 @@ private func appAccountsSnapshot(
       "quota":\(String(decoding: appQuotaResponse(
           subjectID: profileID, observedAt: observedAt), as: UTF8.self))}
     """.utf8)
+}
+
+@MainActor
+private func seedAppAccounts(
+    _ model: AppModel,
+    profileID: String,
+    observedAt: String
+) throws {
+    let snapshot = try JSONDecoder().decode(
+        CredentialProfilesResponse.self,
+        from: appAccountsSnapshot(
+            profileID: profileID,
+            displayName: profileID.capitalized,
+            observedAt: observedAt,
+            quotaEventCursor: "seed-cursor"))
+    model.credentialProfiles = snapshot.profiles
+    model.harnessAccounts = snapshot.harnessAccounts
+    model.quotaResponse = snapshot.quota
+    model.accountsNextUpAuthorityFresh[.local] = true
+    model.accountsQuotaEventCursors[.local] = "seed-cursor"
+}
+
+private let appSettingsSnapshotData = Data(#"{"sources":[],"routing":{"goal":"economy","paidFallback":"never","qualityTiers":{},"primaryHarness":null,"eligibleHarnesses":[],"envInheritance":"mirror_native","authPreference":"auto"},"budget":{"paidBudgetPerRun":{"kind":"unlimited"}},"runtime":null,"harnesses":{},"interactionTimeoutMs":900000}"#.utf8)
+
+private func appHarnessSnapshot(
+    version: String,
+    status: String,
+    gitVersion: String? = nil
+) -> Data {
+    let git = gitVersion.map {
+        #", "git":{"status":"available","version":"\#($0)","detail":null,"remediation":null}"#
+    } ?? ""
+    return Data(
+        #"{"harnesses":[{"id":"claude","status":"\#(status)","manifest":{"version":"\#(version)"}}]\#(git)}"#.utf8)
+}
+
+private func appTestGateway(port: Int) -> GatewayClient {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [AppRequestStubURLProtocol.self]
+    return GatewayClient(
+        baseURL: URL(string: "http://127.0.0.1:\(port)")!, token: "test",
+        session: URLSession(configuration: config))
+}
+
+@MainActor
+private func appTestEventually(
+    timeout: Duration = .seconds(1),
+    _ predicate: @escaping @MainActor () -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    while !predicate(), ContinuousClock.now <= deadline { await Task.yield() }
+    return predicate()
+}
+
+@MainActor
+private func waitForAppTest(
+    _ counter: AppRefreshCallCounter,
+    message: String
+) async throws {
+    try await waitForAppTest({ counter.count > 0 }, message: message)
+}
+
+@MainActor
+private func waitForAppTest(
+    _ predicate: @escaping @MainActor () -> Bool,
+    message: String
+) async throws {
+    try #require(
+        await appTestEventually(timeout: .seconds(5), predicate),
+        Comment(rawValue: message))
 }
 
 /// Thread-safe request counter (the URLProtocol handler runs off the main actor).

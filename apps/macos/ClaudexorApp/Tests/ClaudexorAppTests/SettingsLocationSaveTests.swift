@@ -37,7 +37,7 @@ struct SettingsLocationSaveTests {
             return (response, Data(body.utf8))
         }
 
-        let capturedGeneration = model.settingsGeneration(for: remote)
+        let capturedGeneration = model.executionLocationGeneration(for: remote)
         let ok = await model.saveSettings(
             SettingsUpdateRequest(routingGoal: "economy"),
             at: remote,
@@ -57,7 +57,7 @@ struct SettingsLocationSaveTests {
         defer { SettingsLocationURLProtocol.handler = nil }
         let (model, remote, requestedPorts) = makeRemoteModel()
         SettingsLocationURLProtocol.handler = successfulSettingsHandler(recording: requestedPorts)
-        let captured = model.settingsGeneration(for: remote)
+        let captured = model.executionLocationGeneration(for: remote)
 
         model.enterHardOffline()
         model.settingsStatus = "Visible remote status"
@@ -77,7 +77,7 @@ struct SettingsLocationSaveTests {
         defer { SettingsLocationURLProtocol.handler = nil }
         let (model, remote, requestedPorts) = makeRemoteModel()
         SettingsLocationURLProtocol.handler = successfulSettingsHandler(recording: requestedPorts)
-        let captured = model.settingsGeneration(for: remote)
+        let captured = model.executionLocationGeneration(for: remote)
         model.settingsStatus = "Visible location status"
         let id = try #require(remote.remoteConnectionID)
         model.remoteConnectionGenerations[id, default: 0] += 1
@@ -112,7 +112,7 @@ struct SettingsLocationSaveTests {
                 Data(Self.settingsSnapshotJSON.utf8)
             )
         }
-        let captured = model.settingsGeneration(for: remote)
+        let captured = model.executionLocationGeneration(for: remote)
         let save = Task { @MainActor in
             await model.writeSettings(
                 SettingsUpdateRequest(routingGoal: "economy"),
@@ -136,6 +136,182 @@ struct SettingsLocationSaveTests {
         #expect(requestedPorts.values == [41002])
         #expect(model.remoteSettingsSnapshots[remote] == nil)
         #expect(model.settingsStatus == "Visible location status")
+    }
+
+    @MainActor
+    @Test func acknowledgedSaveSettlesBeforeDerivedHarnessRefreshAndRetirementFencesIt() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        let refreshArrived = SettingsLocationCallCounter()
+        let refreshFinished = SettingsLocationCallCounter()
+        let settingsWrites = SettingsLocationCallCounter()
+        let releaseRefresh = DispatchSemaphore(value: 0)
+        defer { releaseRefresh.signal() }
+        SettingsLocationURLProtocol.handler = { request in
+            let body: String
+            if request.url?.path.hasSuffix("/harnesses") == true {
+                refreshArrived.increment()
+                _ = releaseRefresh.wait(timeout: .now() + 5)
+                refreshFinished.increment()
+                body = #"{"harnesses":[{"id":"claude","status":"ok","manifest":null}]}"#
+            } else {
+                settingsWrites.increment()
+                body = Self.settingsSnapshotJSON
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(body.utf8)
+            )
+        }
+
+        let captured = model.executionLocationGeneration(for: remote)
+        let resultBox = SettingsLocationResultBox()
+        let save = Task { @MainActor in
+            let result = await model.writeSettings(
+                SettingsUpdateRequest(routingGoal: "economy"),
+                at: remote,
+                admittedGeneration: captured
+            )
+            resultBox.value = result
+            return result
+        }
+        let refreshDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while refreshArrived.count == 0 {
+            try #require(ContinuousClock.now <= refreshDeadline, "harness refresh never started")
+            await Task.yield()
+        }
+        let settlementDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while resultBox.value == nil, ContinuousClock.now <= settlementDeadline {
+            await Task.yield()
+        }
+
+        #expect(resultBox.value == .saved)
+
+        // The derived projection has its own per-location lane. A second POST
+        // must not queue behind the blocked readiness GET either.
+        let secondSave = Task { @MainActor in
+            await model.writeSettings(
+                SettingsUpdateRequest(routingGoal: "economy"),
+                at: remote,
+                admittedGeneration: captured
+            )
+        }
+        let secondWriteDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while settingsWrites.count < 2, ContinuousClock.now <= secondWriteDeadline {
+            await Task.yield()
+        }
+        #expect(settingsWrites.count == 2)
+        #expect(await secondSave.value == .saved)
+
+        let id = try #require(remote.remoteConnectionID)
+        model.remoteConnectionGenerations[id, default: 0] += 1
+        model.remoteClients.removeValue(forKey: remote)
+        releaseRefresh.signal()
+        #expect(await save.value == .saved)
+
+        let finishDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while refreshFinished.count == 0 {
+            try #require(ContinuousClock.now <= finishDeadline, "harness refresh never finished")
+            await Task.yield()
+        }
+        await Task.yield()
+        #expect(model.remoteHarnesses[remote] == nil)
+    }
+
+    @MainActor
+    @Test func acknowledgedSaveExpiresNextUpBeforeAFailingDerivedRefresh() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        model.accountsNextUpAuthorityFresh[remote] = true
+        model.remoteHarnessReadinessFresh[remote] = true
+        let refreshArrived = SettingsLocationCallCounter()
+        let refreshFinished = SettingsLocationCallCounter()
+        let releaseRefresh = DispatchSemaphore(value: 0)
+        defer { releaseRefresh.signal() }
+        SettingsLocationURLProtocol.handler = { request in
+            if request.url?.path.hasSuffix("/harnesses") == true {
+                refreshArrived.increment()
+                _ = releaseRefresh.wait(timeout: .now() + 5)
+                refreshFinished.increment()
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!,
+                    Data(#"{"error":"refresh failed"}"#.utf8)
+                )
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(Self.settingsSnapshotJSON.utf8)
+            )
+        }
+
+        let result = await model.writeSettings(
+            SettingsUpdateRequest(routingGoal: "economy"),
+            at: remote,
+            admittedGeneration: model.executionLocationGeneration(for: remote))
+        #expect(result == .saved)
+        let arrivalDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while refreshArrived.count == 0 {
+            try #require(ContinuousClock.now <= arrivalDeadline, "harness refresh never started")
+            await Task.yield()
+        }
+
+        #expect(model.accountsNextUpAuthorityFresh[remote] == false)
+        #expect(model.remoteHarnessReadinessFresh[remote] == true)
+
+        releaseRefresh.signal()
+        let finishDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while refreshFinished.count == 0 || model.harnessProjectionLanes[remote]?.task != nil {
+            try #require(ContinuousClock.now <= finishDeadline, "failed harness refresh never settled")
+            await Task.yield()
+        }
+        #expect(model.accountsNextUpAuthorityFresh[remote] == false)
+        #expect(model.remoteHarnessReadinessFresh[remote] == true)
+    }
+
+    @MainActor
+    @Test func acknowledgedSaveStillRefreshesHarnessesForTheCurrentContext() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        let refreshFinished = SettingsLocationCallCounter()
+        SettingsLocationURLProtocol.handler = { request in
+            let body: String
+            if request.url?.path.hasSuffix("/harnesses") == true {
+                refreshFinished.increment()
+                body = #"{"harnesses":[{"id":"claude","status":"ok","manifest":null}]}"#
+            } else {
+                body = Self.settingsSnapshotJSON
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(body.utf8)
+            )
+        }
+
+        let result = await model.writeSettings(
+            SettingsUpdateRequest(routingGoal: "economy"),
+            at: remote,
+            admittedGeneration: model.executionLocationGeneration(for: remote)
+        )
+        #expect(result == .saved)
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while model.remoteHarnesses[remote]?.contains(where: { $0.family == .claude }) != true {
+            try #require(ContinuousClock.now <= deadline, "current-context harness refresh did not project")
+            await Task.yield()
+        }
+        #expect(refreshFinished.count == 1)
     }
 
     @MainActor
@@ -197,6 +373,11 @@ private final class SettingsLocationCallCounter: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return storage
     }
+}
+
+@MainActor
+private final class SettingsLocationResultBox {
+    var value: SettingsWriteResult?
 }
 
 private final class SettingsLocationURLProtocol: URLProtocol {

@@ -24,10 +24,10 @@ struct SettingsWriteResult: Sendable, Equatable {
 // (INV-002), and a superseded save can never overwrite a newer failure status.
 
 extension AppModel {
-    /// Existing connection lifecycle owners, projected through one settings
-    /// fence. Local daemon loss retires local work only; each remote reconnect
-    /// retires only writes admitted against that remote connection instance.
-    func settingsGeneration(for locationID: ExecutionLocationID) -> Int {
+    /// Existing connection lifecycle owners, projected through one execution-
+    /// location fence. Local daemon loss retires local work only; each remote
+    /// reconnect retires only work admitted against that connection instance.
+    func executionLocationGeneration(for locationID: ExecutionLocationID) -> Int {
         if locationID == .local { return settingsEpoch }
         guard let id = locationID.remoteConnectionID else { return 0 }
         return remoteConnectionGenerations[id] ?? 0
@@ -51,9 +51,9 @@ extension AppModel {
 
     func refreshSettings() async {
         let locationID = activeExecutionLocation
-        let generation = settingsGeneration(for: locationID)
+        let generation = executionLocationGeneration(for: locationID)
         await enqueueSettingsOperation { [weak self] in
-            guard let self, self.settingsGeneration(for: locationID) == generation,
+            guard let self, self.executionLocationGeneration(for: locationID) == generation,
                   let requestClient = self.gateway(for: locationID)
             else { return }
             do {
@@ -61,14 +61,14 @@ extension AppModel {
                 // Re-check AFTER the await (X24): the location's connection
                 // generation may have changed while the request was in flight;
                 // a late answer must not repopulate retired state.
-                guard self.settingsGeneration(for: locationID) == generation else { return }
+                guard self.executionLocationGeneration(for: locationID) == generation else { return }
                 if locationID == .local {
                     self.settingsSnapshot = answer
                 } else {
                     self.remoteSettingsSnapshots[locationID] = answer
                 }
             } catch {
-                guard self.settingsGeneration(for: locationID) == generation else { return }
+                guard self.executionLocationGeneration(for: locationID) == generation else { return }
                 self.settingsStatus = "Could not load settings: \(error)"
             }
         }
@@ -76,7 +76,7 @@ extension AppModel {
 
     func saveSettings(_ patch: SettingsUpdateRequest) async -> Bool {
         let locationID = activeExecutionLocation
-        let generation = settingsGeneration(for: locationID)
+        let generation = executionLocationGeneration(for: locationID)
         return await saveSettings(patch, at: locationID, admittedGeneration: generation)
     }
 
@@ -98,7 +98,7 @@ extension AppModel {
         // directly and never publishes here, so a hidden location cannot paint
         // status into the currently visible location.
         if activeExecutionLocation == locationID,
-           settingsGeneration(for: locationID) == generation
+           executionLocationGeneration(for: locationID) == generation
         {
             settingsStatus = result.succeeded
                 ? "Saved engine defaults."
@@ -117,7 +117,7 @@ extension AppModel {
     ) async -> SettingsWriteResult {
         return await enqueueSettingsOperation { [weak self] in
             guard let self,
-                  self.settingsGeneration(for: locationID) == generation
+                  self.executionLocationGeneration(for: locationID) == generation
             else {
                 return .failed("Settings context changed before this save could start.")
             }
@@ -129,7 +129,9 @@ extension AppModel {
                 let answer = try await requestClient.updateSettings(patch)
                 // Re-check AFTER the await (X24): a response landing past a
                 // local outage or remote reconnect must not write retired state.
-                guard self.settingsGeneration(for: locationID) == generation else {
+                guard self.executionLocationGeneration(for: locationID) == generation,
+                      self.isCurrentGateway(requestClient, at: locationID)
+                else {
                     return .failed("Settings context changed while this save was in flight.")
                 }
                 if locationID == .local {
@@ -137,11 +139,18 @@ extension AppModel {
                 } else {
                     self.remoteSettingsSnapshots[locationID] = answer
                 }
-                await self.refreshHarnesses(locationID: locationID)
+                // The POST response is the settings authority and settles this
+                // lane now. Harness readiness is a derived projection: refresh
+                // it on the per-location latest-wins lane under its own
+                // ticket, client, and location-generation fence, without
+                // holding the autosave result open.
+                _ = self.scheduleHarnessRefresh(locationID: locationID)
                 return .saved
             } catch {
                 let message = "Could not save settings: \(error)"
-                guard self.settingsGeneration(for: locationID) == generation else {
+                guard self.executionLocationGeneration(for: locationID) == generation,
+                      self.isCurrentGateway(requestClient, at: locationID)
+                else {
                     return .failed("Settings context changed while this save was in flight.")
                 }
                 return .failed(message)

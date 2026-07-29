@@ -224,7 +224,7 @@ struct HarnessDefaultsRow: View {
             patch: patch,
             target: SettingsSaveTarget(
                 locationID: scope.locationID,
-                generation: model.settingsGeneration(for: scope.locationID)
+                generation: model.executionLocationGeneration(for: scope.locationID)
             ),
             generation: generation
         )

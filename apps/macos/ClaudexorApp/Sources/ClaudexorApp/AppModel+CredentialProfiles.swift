@@ -70,6 +70,11 @@ extension AppModel {
             }
             return "Engine offline — reconnect to load accounts."
         }
+        guard let harnessLease = claimHarnessProjection(
+            at: locationID, client: requestClient)
+        else {
+            return "The engine connection changed before Accounts could refresh. Retry Accounts."
+        }
         do {
             let response = try await requestClient.credentialProfilesSnapshot()
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
@@ -81,43 +86,41 @@ extension AppModel {
                    in: .whitespacesAndNewlines),
                !quotaEventCursor.isEmpty
             {
+                guard acceptHarnessSnapshot(
+                    harnesses, git: git, lease: harnessLease)
+                else {
+                    return settleAccountsAfterSupersededHarnessProjection(
+                        at: locationID,
+                        client: requestClient,
+                        previousQuotaCursor: previousQuotaCursor,
+                        discardOnFailure: discardOnFailure)
+                }
                 storeCredentialProfiles(
                     response.profiles, harnessAccounts: response.harnessAccounts,
                     at: locationID)
-                storeHarnessSnapshot(harnesses, git: git, at: locationID)
                 storeAccountsQuotaSnapshot(quota, at: locationID)
-                accountsNextUpAuthorityFresh[locationID] = true
                 startAccountsQuotaObserver(
                     at: locationID, client: requestClient, after: quotaEventCursor)
+                // Reassert only after the complete profiles + harness + Git +
+                // quota + cursor tuple has committed without an intervening await.
+                accountsNextUpAuthorityFresh[locationID] = true
                 return nil
             }
             // A daemon that ignored/omitted the complete opt-in response cannot
             // prove that next_up, harness rows, and quota share one epoch. Keep
             // profile readiness, drop that informational authority and quota,
             // and fetch one fresh harness list for honest compatibility.
-            let fallbackHarnesses: HarnessListResponse?
-            do {
-                fallbackHarnesses = try await requestClient.listHarnessStatus(fresh: true)
-            } catch {
-                fallbackHarnesses = nil
-            }
+            let fallbackRefreshed = await refreshHarnesses(
+                fresh: true,
+                locationID: locationID,
+                markStaleOnFailure: discardOnFailure)
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
             else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
             storeCredentialProfiles(response.profiles, harnessAccounts: [], at: locationID)
             discardAccountsQuotaSnapshot(at: locationID)
             accountsNextUpAuthorityFresh[locationID] = false
             suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
-            if let fallbackHarnesses {
-                storeHarnessSnapshot(
-                    fallbackHarnesses.harnesses, git: fallbackHarnesses.git, at: locationID)
-                return nil
-            }
-            if discardOnFailure {
-                if locationID == .local { harnessReadinessFresh = false }
-                else { remoteHarnessReadinessFresh[locationID] = false }
-            }
-            if locationID == .local { gitCapability = nil }
-            else { remoteGitCapabilities.removeValue(forKey: locationID) }
+            if fallbackRefreshed { return nil }
             return "Could not refresh account readiness. Retry Accounts."
         } catch {
             // Background callers keep the last snapshot. Accounts' explicit
@@ -125,6 +128,13 @@ extension AppModel {
             // remain presented as current after the authoritative fetch failed.
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
             else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            guard harnessProjectionIsCurrent(harnessLease) else {
+                return settleAccountsAfterSupersededHarnessProjection(
+                    at: locationID,
+                    client: requestClient,
+                    previousQuotaCursor: previousQuotaCursor,
+                    discardOnFailure: discardOnFailure)
+            }
             if discardOnFailure { discardCompleteAccountsSnapshot(at: locationID) }
             else if let previousQuotaCursor {
                 startAccountsQuotaObserver(
@@ -192,11 +202,15 @@ extension AppModel {
         else { remoteQuotaResponses.removeValue(forKey: locationID) }
     }
 
-    private func discardCompleteAccountsSnapshot(at locationID: ExecutionLocationID) {
+    private func discardAccountsOwnedSnapshot(at locationID: ExecutionLocationID) {
         discardCredentialProfiles(at: locationID)
         discardAccountsQuotaSnapshot(at: locationID)
         accountsNextUpAuthorityFresh[locationID] = false
         suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
+    }
+
+    private func discardCompleteAccountsSnapshot(at locationID: ExecutionLocationID) {
+        discardAccountsOwnedSnapshot(at: locationID)
         if locationID == .local {
             harnessReadinessFresh = false
             gitCapability = nil
@@ -204,6 +218,27 @@ extension AppModel {
             remoteHarnessReadinessFresh[locationID] = false
             remoteGitCapabilities.removeValue(forKey: locationID)
         }
+    }
+
+    /// A newer harness projection ticket superseded Accounts while it awaited
+    /// its tuple. Settle only Accounts-owned slices; the newer harness/Git owner
+    /// must remain untouched.
+    private func settleAccountsAfterSupersededHarnessProjection(
+        at locationID: ExecutionLocationID,
+        client requestClient: GatewayClient,
+        previousQuotaCursor: String?,
+        discardOnFailure: Bool
+    ) -> String {
+        accountsNextUpAuthorityFresh[locationID] = false
+        if discardOnFailure {
+            discardAccountsOwnedSnapshot(at: locationID)
+        } else if let previousQuotaCursor,
+                  isCurrentGateway(requestClient, at: locationID)
+        {
+            startAccountsQuotaObserver(
+                at: locationID, client: requestClient, after: previousQuotaCursor)
+        }
+        return "A newer harness refresh superseded Accounts. Retry Accounts."
     }
 
     /// One event-driven Accounts refresh, pinned to one execution location for

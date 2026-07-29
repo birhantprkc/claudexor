@@ -1,6 +1,28 @@
 import Foundation
 import ClaudexorKit
 
+struct HarnessProjectionLease {
+    let locationID: ExecutionLocationID
+    let ticket: UInt64
+    let locationGeneration: Int
+    let client: GatewayClient
+}
+
+private struct HarnessRefreshRequest {
+    let lease: HarnessProjectionLease
+    let fresh: Bool
+    let markStaleOnFailure: Bool
+}
+
+@MainActor
+final class HarnessProjectionLane {
+    var ticket: UInt64 = 0
+    fileprivate var pending: HarnessRefreshRequest?
+    fileprivate var inFlight: HarnessRefreshRequest?
+    var runnerID: UUID?
+    var task: Task<Bool, Never>?
+}
+
 // MARK: - Harness readiness refresh (INV-124 split from AppModel.swift)
 //
 // The harness-list refresh (typed readiness rows included), the exact
@@ -9,7 +31,81 @@ import ClaudexorKit
 // module internals only where the extension boundary required it.
 
 extension AppModel {
-    func storeHarnessSnapshot(
+    private func harnessProjectionLane(at locationID: ExecutionLocationID)
+        -> HarnessProjectionLane
+    {
+        if let lane = harnessProjectionLanes[locationID] { return lane }
+        let lane = HarnessProjectionLane()
+        harnessProjectionLanes[locationID] = lane
+        return lane
+    }
+
+    /// Claim the next location-local harness projection before starting I/O.
+    /// `requireCurrentClient=false` is only for connectRemote's not-yet-adopted
+    /// client; acceptance still requires that exact client to own the location.
+    func claimHarnessProjection(
+        at locationID: ExecutionLocationID,
+        client explicitClient: GatewayClient? = nil,
+        requireCurrentClient: Bool = true
+    ) -> HarnessProjectionLease? {
+        guard let requestClient = explicitClient ?? gateway(for: locationID),
+              !requireCurrentClient || isCurrentGateway(requestClient, at: locationID)
+        else { return nil }
+        let lane = harnessProjectionLane(at: locationID)
+        lane.ticket &+= 1
+        // A newer harness projection is now admitted, so the Accounts tuple's
+        // derived next_up can no longer be presented as current while I/O waits.
+        accountsNextUpAuthorityFresh[locationID] = false
+        return HarnessProjectionLease(
+            locationID: locationID,
+            ticket: lane.ticket,
+            locationGeneration: executionLocationGeneration(for: locationID),
+            client: requestClient)
+    }
+
+    func harnessProjectionIsCurrent(_ lease: HarnessProjectionLease) -> Bool {
+        harnessProjectionLanes[lease.locationID]?.ticket == lease.ticket
+            && executionLocationGeneration(for: lease.locationID) == lease.locationGeneration
+            && isCurrentGateway(lease.client, at: lease.locationID)
+    }
+
+    /// One accept gate for full Doctor snapshots and point-readiness patches.
+    @discardableResult
+    func acceptHarnessProjection(
+        _ lease: HarnessProjectionLease,
+        apply: () -> Void
+    ) -> Bool {
+        guard harnessProjectionIsCurrent(lease) else { return false }
+        apply()
+        return true
+    }
+
+    @discardableResult
+    func acceptHarnessSnapshot(
+        _ harnesses: [HarnessStatus],
+        git: WorkspaceGitCapability?,
+        lease: HarnessProjectionLease
+    ) -> Bool {
+        acceptHarnessProjection(lease) {
+            storeHarnessSnapshot(harnesses, git: git, at: lease.locationID)
+        }
+    }
+
+    /// A reconnect/disconnect cancels and detaches only this location's lane.
+    /// A replacement request can start immediately even if old URL loading is
+    /// non-cooperative; runner identity keeps its late cleanup from touching it.
+    func retireHarnessProjection(at locationID: ExecutionLocationID) {
+        guard let lane = harnessProjectionLanes[locationID] else { return }
+        lane.ticket &+= 1
+        lane.pending = nil
+        lane.inFlight = nil
+        lane.runnerID = nil
+        let oldTask = lane.task
+        lane.task = nil
+        oldTask?.cancel()
+    }
+
+    private func storeHarnessSnapshot(
         _ harnesses: [HarnessStatus],
         git: WorkspaceGitCapability?,
         at locationID: ExecutionLocationID
@@ -37,45 +133,107 @@ extension AppModel {
     }
 
     @discardableResult
+    func scheduleHarnessRefresh(
+        fresh: Bool = false,
+        locationID requestedLocationID: ExecutionLocationID? = nil,
+        markStaleOnFailure: Bool = false
+    ) -> Task<Bool, Never>? {
+        let locationID = requestedLocationID ?? activeExecutionLocation
+        guard let lease = claimHarnessProjection(at: locationID) else {
+            markHarnessRefreshFailure(at: locationID, stale: markStaleOnFailure)
+            return nil
+        }
+        let lane = harnessProjectionLane(at: locationID)
+        // The latest lease owns acceptance, while stronger read/failure
+        // requirements already admitted to this coalesced pass stay monotone.
+        let inheritedFresh =
+            (lane.pending?.fresh ?? false) || (lane.inFlight?.fresh ?? false)
+        let inheritedStaleOnFailure =
+            (lane.pending?.markStaleOnFailure ?? false)
+            || (lane.inFlight?.markStaleOnFailure ?? false)
+        lane.pending = HarnessRefreshRequest(
+            lease: lease,
+            fresh: fresh || inheritedFresh,
+            markStaleOnFailure: markStaleOnFailure || inheritedStaleOnFailure)
+        if let task = lane.task { return task }
+
+        let runnerID = UUID()
+        lane.runnerID = runnerID
+        let task = Task { @MainActor [weak self] in
+            await self?.runHarnessRefreshLane(at: locationID, runnerID: runnerID) ?? false
+        }
+        lane.task = task
+        return task
+    }
+
+    @discardableResult
     func refreshHarnesses(
         fresh: Bool = false,
         locationID requestedLocationID: ExecutionLocationID? = nil,
         markStaleOnFailure: Bool = false
     ) async -> Bool {
         let locationID = requestedLocationID ?? activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else {
-            if locationID == .local { gitCapability = nil }
-            else { remoteGitCapabilities.removeValue(forKey: locationID) }
-            if markStaleOnFailure {
-                if locationID == .local {
-                    harnessReadinessFresh = false
-                } else {
-                    remoteHarnessReadinessFresh[locationID] = false
-                }
+        guard let task = scheduleHarnessRefresh(
+            fresh: fresh,
+            locationID: locationID,
+            markStaleOnFailure: markStaleOnFailure)
+        else { return false }
+        return await task.value
+    }
+
+    private func runHarnessRefreshLane(
+        at locationID: ExecutionLocationID,
+        runnerID: UUID
+    ) async -> Bool {
+        var lastResult = false
+        while !Task.isCancelled,
+              let lane = harnessProjectionLanes[locationID],
+              lane.runnerID == runnerID,
+              let request = lane.pending
+        {
+            lane.pending = nil
+            lane.inFlight = request
+            lastResult = await performHarnessRefresh(request)
+            if let currentLane = harnessProjectionLanes[locationID],
+               currentLane.runnerID == runnerID
+            {
+                currentLane.inFlight = nil
             }
-            return false
         }
+        if let lane = harnessProjectionLanes[locationID], lane.runnerID == runnerID {
+            lane.runnerID = nil
+            lane.task = nil
+        }
+        return lastResult
+    }
+
+    private func performHarnessRefresh(_ request: HarnessRefreshRequest) async -> Bool {
+        guard harnessProjectionIsCurrent(request.lease) else { return false }
         do {
-            let response = try await requestClient.listHarnessStatus(fresh: fresh)
-            guard gateway(for: locationID) === requestClient else { return false }
-            storeHarnessSnapshot(response.harnesses, git: response.git, at: locationID)
-            return true
+            let response = try await request.lease.client.listHarnessStatus(
+                fresh: request.fresh)
+            return acceptHarnessSnapshot(
+                response.harnesses, git: response.git, lease: request.lease)
         } catch {
-            guard gateway(for: locationID) === requestClient else { return false }
-            // Keep the last server-authored rows unchanged. An explicit
-            // Accounts refresh expires their CLIENT freshness instead of
-            // fabricating a synthetic server health verdict.
-            if markStaleOnFailure {
-                if locationID == .local {
-                    harnessReadinessFresh = false
-                } else {
-                    remoteHarnessReadinessFresh[locationID] = false
-                }
-            }
-            if locationID == .local { gitCapability = nil }
-            else { remoteGitCapabilities.removeValue(forKey: locationID) }
+            guard harnessProjectionIsCurrent(request.lease) else { return false }
+            markHarnessRefreshFailure(
+                at: request.lease.locationID, stale: request.markStaleOnFailure)
             return false
         }
+    }
+
+    private func markHarnessRefreshFailure(
+        at locationID: ExecutionLocationID,
+        stale: Bool
+    ) {
+        // Keep the last server-authored rows unchanged. An explicit Accounts
+        // refresh expires client freshness instead of inventing a health verdict.
+        if stale {
+            if locationID == .local { harnessReadinessFresh = false }
+            else { remoteHarnessReadinessFresh[locationID] = false }
+        }
+        if locationID == .local { gitCapability = nil }
+        else { remoteGitCapabilities.removeValue(forKey: locationID) }
     }
 
     static func mapHarnessStatuses(_ statuses: [HarnessStatus]) -> [HarnessInfo] {
@@ -138,41 +296,38 @@ extension AppModel {
     @discardableResult
     func refreshAuthReadiness(for family: HarnessFamily, request: AuthReadinessRefreshRequest) async -> Bool {
         let locationID = activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else { return false }
+        guard let lease = claimHarnessProjection(at: locationID) else { return false }
         do {
-            let response = try await requestClient.refreshAuthReadiness(
+            let response = try await lease.client.refreshAuthReadiness(
                 harnessId: family.rawValue, request: request)
-            guard gateway(for: locationID) === requestClient else { return false }
             let source = HarnessAuthSource(
                 source: response.readiness.source.rawValue,
                 availability: response.readiness.availability.rawValue,
                 verification: response.readiness.verification.rawValue,
                 detail: response.readiness.detail
             )
-            if locationID == .local {
-                exactAuthSources[family, default: [:]][response.requestedSource] = source
-            } else {
-                remoteExactAuthSources[locationID, default: [:]][family, default: [:]][
-                    response.requestedSource] = source
-            }
-            var rows = locationID == .local
-                ? liveHarnesses
-                : (remoteHarnesses[locationID] ?? [])
-            if let index = rows.firstIndex(where: { $0.family == family }) {
-                if let sourceIndex = rows[index].authSources.firstIndex(where: {
-                    $0.source == source.source
-                }) {
-                    rows[index].authSources[sourceIndex] = source
+            return acceptHarnessProjection(lease) {
+                if locationID == .local {
+                    exactAuthSources[family, default: [:]][response.requestedSource] = source
                 } else {
-                    rows[index].authSources.append(source)
+                    remoteExactAuthSources[locationID, default: [:]][family, default: [:]][
+                        response.requestedSource] = source
                 }
+                var rows = locationID == .local
+                    ? liveHarnesses
+                    : (remoteHarnesses[locationID] ?? [])
+                if let index = rows.firstIndex(where: { $0.family == family }) {
+                    if let sourceIndex = rows[index].authSources.firstIndex(where: {
+                        $0.source == source.source
+                    }) {
+                        rows[index].authSources[sourceIndex] = source
+                    } else {
+                        rows[index].authSources.append(source)
+                    }
+                }
+                if locationID == .local { liveHarnesses = rows }
+                else { remoteHarnesses[locationID] = rows }
             }
-            if locationID == .local {
-                liveHarnesses = rows
-            } else {
-                remoteHarnesses[locationID] = rows
-            }
-            return true
         } catch {
             return false
         }

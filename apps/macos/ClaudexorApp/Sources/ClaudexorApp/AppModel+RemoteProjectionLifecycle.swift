@@ -14,6 +14,7 @@ extension AppModel {
         suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
         accountsNextUpAuthorityFresh.removeValue(forKey: locationID)
 
+        retireHarnessProjection(at: locationID)
         remoteHarnesses.removeValue(forKey: locationID)
         remoteHarnessReadinessFresh.removeValue(forKey: locationID)
         remoteGitCapabilities.removeValue(forKey: locationID)

@@ -292,7 +292,7 @@ struct SettingsScreen: View {
             edit: edit,
             target: SettingsSaveTarget(
                 locationID: locationID,
-                generation: model.settingsGeneration(for: locationID)
+                generation: model.executionLocationGeneration(for: locationID)
             ),
             generation: generation
         )

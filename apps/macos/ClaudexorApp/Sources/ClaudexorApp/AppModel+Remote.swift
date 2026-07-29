@@ -94,8 +94,9 @@ extension AppModel {
         _ newClient: GatewayClient,
         at locationID: ExecutionLocationID
     ) {
-        if remoteClients[locationID] !== newClient {
+        if let currentClient = remoteClients[locationID], currentClient !== newClient {
             retireRunApplicability(at: locationID)
+            retireHarnessProjection(at: locationID)
         }
         remoteClients[locationID] = newClient
     }
@@ -325,6 +326,11 @@ extension AppModel {
                 await closeRemoteControlForward(id, through: generation)
                 return
             }
+            guard let harnessLease = claimHarnessProjection(
+                at: connection.locationID,
+                client: activeClient,
+                requireCurrentClient: false)
+            else { return }
             async let settings = activeClient.settings()
             async let projects = activeClient.listProjects()
             async let trust = activeClient.trustList()
@@ -358,15 +364,18 @@ extension AppModel {
                 return
             }
             adoptRemoteClientForReconnect(activeClient, at: connection.locationID)
+            let harnessSnapshotAccepted: Bool
             if let harnesses = credentialValue?.harnesses,
                let git = credentialValue?.git {
-                storeHarnessSnapshot(harnesses, git: git, at: connection.locationID)
+                harnessSnapshotAccepted = acceptHarnessSnapshot(
+                    harnesses, git: git, lease: harnessLease)
             } else if let fallbackHarnessValue {
-                storeHarnessSnapshot(
+                harnessSnapshotAccepted = acceptHarnessSnapshot(
                     fallbackHarnessValue.harnesses,
                     git: fallbackHarnessValue.git,
-                    at: connection.locationID)
+                    lease: harnessLease)
             } else {
+                harnessSnapshotAccepted = false
                 remoteHarnessReadinessFresh[connection.locationID] = false
                 remoteGitCapabilities.removeValue(forKey: connection.locationID)
             }
@@ -380,18 +389,20 @@ extension AppModel {
                 remoteTrustEntries[connection.locationID] = trustValue.entries
             }
             var installedQuotaEventCursor: String?
+            var completeAccountsTupleAccepted = false
             if let credentialValue,
                credentialValue.harnesses != nil,
                credentialValue.git != nil,
                credentialValue.quota != nil,
+               harnessSnapshotAccepted,
                let quotaEventCursor = credentialValue.quotaEventCursor?.trimmingCharacters(
                    in: .whitespacesAndNewlines),
                !quotaEventCursor.isEmpty
             {
                 remoteCredentialProfiles[connection.locationID] = credentialValue.profiles
                 remoteHarnessAccounts[connection.locationID] = credentialValue.harnessAccounts
-                accountsNextUpAuthorityFresh[connection.locationID] = true
                 installedQuotaEventCursor = quotaEventCursor
+                completeAccountsTupleAccepted = true
             } else if let credentialValue {
                 // Legacy daemon: profiles remain useful, but it cannot bind
                 // next_up to an event boundary.
@@ -407,6 +418,11 @@ extension AppModel {
                     at: connection.locationID,
                     client: activeClient,
                     after: installedQuotaEventCursor)
+            }
+            if completeAccountsTupleAccepted {
+                // Reassert only after profiles + harness + Git + quota + cursor
+                // have committed together under the pre-I/O projection lease.
+                accountsNextUpAuthorityFresh[connection.locationID] = true
             }
             if let secretValue {
                 remoteSecretBackends[connection.locationID] = secretValue.backend

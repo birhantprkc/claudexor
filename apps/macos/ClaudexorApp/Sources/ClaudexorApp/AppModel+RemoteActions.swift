@@ -143,18 +143,19 @@ extension AppModel {
         let location = ExecutionLocationID.remote(connectionID)
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return }
-        do {
-            let snapshot = try await client.listHarnessStatus(fresh: true)
-            let harnesses = snapshot.harnesses
-            storeHarnessSnapshot(harnesses, git: snapshot.git, at: location)
-            let ready = harnesses.filter { !$0.routableIntents.isEmpty }.count
-            remoteConnectionMessages[connectionID] =
-                "Harness Doctor: \(ready) of \(harnesses.count) harnesses ready."
-        } catch {
-            remoteHarnessReadinessFresh[location] = false
-            remoteGitCapabilities.removeValue(forKey: location)
-            remoteConnectionMessages[connectionID] = userMessageForRemote(error)
+        guard await refreshHarnesses(
+            fresh: true, locationID: location, markStaleOnFailure: true),
+            isCurrentGateway(client, at: location)
+        else {
+            if isCurrentGateway(client, at: location) {
+                remoteConnectionMessages[connectionID] = "Harness Doctor could not refresh. Retry."
+            }
+            return
         }
+        let harnesses = remoteHarnesses[location] ?? []
+        let ready = harnesses.filter { !$0.routableIntents.isEmpty }.count
+        remoteConnectionMessages[connectionID] =
+            "Harness Doctor: \(ready) of \(harnesses.count) harnesses ready."
     }
 
     /// Fetch the remote runtime's own install disclosure and surface it for
@@ -308,33 +309,28 @@ extension AppModel {
         let location = ExecutionLocationID.remote(connectionID)
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return nil }
-        do {
-            let snapshot = try await client.listHarnessStatus(fresh: true)
-            let harnesses = snapshot.harnesses
-            storeHarnessSnapshot(harnesses, git: snapshot.git, at: location)
-            guard let harness = harnesses.first(where: { $0.id == harnessID }) else {
-                remoteConnectionMessages[connectionID] =
-                    "Harness Doctor did not return \(harnessID)."
-                return nil
-            }
-            let readiness = RemoteNativeLoginReadiness(
-                nativeSessionVerified:
-                    harness.authSources.contains(where: \.isVerifiedNativeSession),
-                harnessRoutable: !harness.routableIntents.isEmpty)
-            if readiness.nativeSessionVerified && readiness.harnessRoutable {
-                remoteConnectionMessages[connectionID] =
-                    "\(harnessID.capitalized) is signed in and ready."
-            } else {
-                remoteConnectionMessages[connectionID] =
-                    harness.reasons?.first ?? "\(harnessID.capitalized) is not ready yet."
-            }
-            return readiness
-        } catch {
-            remoteHarnessReadinessFresh[location] = false
-            remoteGitCapabilities.removeValue(forKey: location)
-            remoteConnectionMessages[connectionID] = userMessageForRemote(error)
+        guard await refreshHarnesses(
+            fresh: true, locationID: location, markStaleOnFailure: true),
+            isCurrentGateway(client, at: location)
+        else { return nil }
+        guard let harness = remoteHarnesses[location]?.first(where: {
+            $0.family.rawValue == harnessID
+        }) else {
+            remoteConnectionMessages[connectionID] =
+                "Harness Doctor did not return \(harnessID)."
             return nil
         }
+        let readiness = RemoteNativeLoginReadiness(
+            nativeSessionVerified: harness.nativeSessionReady,
+            harnessRoutable: !harness.routableIntents.isEmpty)
+        if readiness.nativeSessionVerified && readiness.harnessRoutable {
+            remoteConnectionMessages[connectionID] =
+                "\(harnessID.capitalized) is signed in and ready."
+        } else {
+            remoteConnectionMessages[connectionID] =
+                harness.reasons.first ?? "\(harnessID.capitalized) is not ready yet."
+        }
+        return readiness
     }
 
     func installRemoteRuntime(connectionID: UUID) async {

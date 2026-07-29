@@ -340,7 +340,10 @@ final class AppModel {
     /// Reconnect seam (X30 test fence): adopt a client exactly as tryConnect
     /// does after discovery, without the discovery I/O.
     func adoptClientForReconnect(_ newClient: GatewayClient) {
-        if client !== newClient { retireRunApplicability(at: .local) }
+        if client !== newClient {
+            retireRunApplicability(at: .local)
+            retireHarnessProjection(at: .local)
+        }
         client = newClient
     }
 
@@ -419,6 +422,7 @@ final class AppModel {
         // settings requests overlap on the wire and break the X14 single-chain
         // criterion. Old ops retire inert through their epoch guards.
         settingsEpoch += 1
+        retireHarnessProjection(at: .local)
 
         if !keepRemoteSelection { route = .threads }
         liveTasks.removeAll()
@@ -635,6 +639,9 @@ final class AppModel {
     /// extensions). enterHardOffline bumps the epoch so already-queued ops
     /// retire instead of firing against a reconnected client (X20).
     var settingsChain: Task<Void, Never>?
+    /// One latest-wins harness projection lane per local/remote daemon.
+    @ObservationIgnored var harnessProjectionLanes:
+        [ExecutionLocationID: HarnessProjectionLane] = [:]
     var settingsEpoch = 0
 
     var normalizedProjectRoot: String {
