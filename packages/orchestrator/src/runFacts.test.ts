@@ -172,25 +172,72 @@ describe("RunFacts canonical artifact projection (GH #29)", () => {
     });
   });
 
-  it("preserves a mode-primary artifact only when that artifact was diagnostic", () => {
-    const { store, paths, log, ctx } = runFixture([], "ask");
-    store.writeText(join(paths.finalDir, "answer.md"), "Unverified partial answer\n");
-    store.writeText(join(paths.finalDir, "summary.md"), "Failure summary\n");
-    log.emit("output.ready", {
-      kind: "answer",
-      path: "final/answer.md",
-      state: "diagnostic",
-    });
+  it.each(["ask", "agent"] as const)(
+    "preserves a %s mode-primary artifact only when that artifact was diagnostic",
+    (mode) => {
+      const { store, paths, log, ctx } = runFixture([], mode);
+      store.writeText(join(paths.finalDir, "answer.md"), "Unverified partial answer\n");
+      store.writeText(join(paths.finalDir, "summary.md"), "Failure summary\n");
+      log.emit("output.ready", {
+        kind: "answer",
+        path: "final/answer.md",
+        state: "diagnostic",
+      });
+      log.emit("output.ready", {
+        kind: "summary",
+        path: "final/summary.md",
+        state: "diagnostic",
+      });
+      expect(
+        buildRunFacts(ctx, makeOutcomeFacts("failed", { reason: "harness_failed" })).presentation,
+      ).toEqual({
+        state: "diagnostic",
+        primary: { kind: "answer", path: "final/answer.md" },
+      });
+    },
+  );
+
+  it.each([
+    ["plan", "cancelled", "user_cancelled", "plan", "final/plan.md"],
+    ["plan", "failed", "harness_failed", "plan", "final/plan.md"],
+    ["agent", "cancelled", "user_cancelled", "answer", "final/answer.md"],
+    ["agent", "failed", "harness_failed", "answer", "final/answer.md"],
+  ] as const)(
+    "keeps a late %s %s reason diagnostic instead of reviving earlier ready output",
+    (mode, lifecycle, reason, primaryKind, primaryPath) => {
+      const { store, paths, log, ctx } = runFixture([], mode);
+      store.writeText(join(paths.root, primaryPath), "Earlier ready output\n");
+      store.writeText(join(paths.finalDir, "summary.md"), `Terminal reason: ${reason}\n`);
+      log.emit("output.ready", { kind: primaryKind, path: primaryPath, state: "ready" });
+      log.emit("output.ready", {
+        kind: "summary",
+        path: "final/summary.md",
+        state: "diagnostic",
+      });
+
+      const presentation = buildRunFacts(ctx, makeOutcomeFacts(lifecycle, { reason })).presentation;
+      expect(presentation).toEqual({
+        state: "diagnostic",
+        primary: { kind: "diagnostic", path: "final/summary.md" },
+      });
+      expect(readFileSync(join(paths.finalDir, "summary.md"), "utf8")).toContain(reason);
+    },
+  );
+
+  it("represents a successful no-change Agent as ready with no primary output", () => {
+    const { store, paths, log, ctx } = runFixture([]);
+    store.writeText(join(paths.finalDir, "summary.md"), "No changes were needed.\n");
     log.emit("output.ready", {
       kind: "summary",
       path: "final/summary.md",
-      state: "diagnostic",
+      state: "ready",
     });
+
     expect(
-      buildRunFacts(ctx, makeOutcomeFacts("failed", { reason: "harness_failed" })).presentation,
+      buildRunFacts(ctx, makeOutcomeFacts("succeeded", { noChanges: true })).presentation,
     ).toEqual({
-      state: "diagnostic",
-      primary: { kind: "answer", path: "final/answer.md" },
+      state: "ready",
+      primary: null,
     });
   });
 
