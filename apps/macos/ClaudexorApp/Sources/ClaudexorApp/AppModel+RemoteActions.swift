@@ -159,15 +159,17 @@ extension AppModel {
     /// from `confirmRemoteHarnessInstall`. A missing runtime or an
     /// unparseable disclosure is a loud typed message, never a silent no-op.
     func startRemoteHarnessInstall(connectionID: UUID, harness: String) async {
+        // Both refusals go to threadStatus, the connection-INDEPENDENT
+        // surface: a message keyed to a vanished connection would render
+        // under a ForEach row that no longer exists — silently.
         guard installableRemoteHarnesses.contains(harness) else {
-            remoteConnectionMessages[connectionID] =
+            threadStatus =
                 "\(harness) is not an installable harness; nothing was installed."
             return
         }
         guard let connection = remoteConnections.first(where: { $0.id == connectionID })
         else {
-            remoteConnectionMessages[connectionID] =
-                "That connection no longer exists; nothing was installed."
+            threadStatus = "That connection no longer exists; nothing was installed."
             return
         }
         if remoteClients[.remote(connectionID)] == nil {
@@ -229,8 +231,9 @@ extension AppModel {
         guard let connection = remoteConnections.first(where: {
             $0.id == prompt.connectionID
         }) else {
-            remoteConnectionMessages[prompt.connectionID] =
-                "That connection no longer exists; nothing was installed."
+            // threadStatus, not remoteConnectionMessages: the row that would
+            // render a per-connection message is exactly what vanished.
+            threadStatus = "That connection no longer exists; nothing was installed."
             return
         }
         do {

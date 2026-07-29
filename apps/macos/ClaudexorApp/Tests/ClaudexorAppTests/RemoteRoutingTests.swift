@@ -77,6 +77,33 @@ import Testing
             Data("not json".utf8), connectionID: id, harness: "codex") == nil)
     }
 
+    /// The install guards refuse on a surface that does not need the
+    /// connection's own row: a connection deleted between the disclosure
+    /// dialog and the confirmation has no ForEach row left to render a
+    /// per-connection message, so the refusal goes to threadStatus.
+    @MainActor @Test func installGuardRefusalsSurviveTheConnectionVanishing() async {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let vanished = UUID()
+
+        await model.confirmRemoteHarnessInstall(
+            RemoteHarnessInstallPrompt(
+                connectionID: vanished, harness: "codex",
+                command: "npm install --global x", installLocation: "~/.claudexor",
+                pinnedVersion: "0.144.1"))
+        #expect(model.threadStatus == "That connection no longer exists; nothing was installed.")
+        #expect(model.remoteConnectionMessages[vanished] == nil)
+
+        model.threadStatus = nil
+        await model.startRemoteHarnessInstall(connectionID: vanished, harness: "codex")
+        #expect(model.threadStatus == "That connection no longer exists; nothing was installed.")
+
+        model.threadStatus = nil
+        await model.startRemoteHarnessInstall(connectionID: vanished, harness: "not-a-harness")
+        #expect(
+            model.threadStatus
+                == "not-a-harness is not an installable harness; nothing was installed.")
+    }
+
     @Test func onlyConnectionFailuresTriggerRemoteReadReconnect() {
         #expect(isRecoverableRemoteTransportFailure(
             URLError(.cannotConnectToHost)))
