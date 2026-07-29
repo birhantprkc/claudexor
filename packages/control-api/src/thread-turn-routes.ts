@@ -117,13 +117,15 @@ export function recordTurnEnqueueFailure(
   setTurnEnqueueError: ((turnId: string, problem: TurnEnqueueProblem) => void) | undefined,
   turnId: string | undefined,
   err: unknown,
-): void {
-  if (!turnId || !setTurnEnqueueError) return;
+): TurnEnqueueProblem {
+  const problem = problemFromError(err, false);
+  if (!turnId || !setTurnEnqueueError) return problem;
   try {
-    setTurnEnqueueError(turnId, problemFromError(err, false));
+    setTurnEnqueueError(turnId, problem);
   } catch {
     /* recording the refusal must not mask the original error */
   }
+  return problem;
 }
 
 function problemFromError(err: unknown, retryable: boolean): TurnEnqueueProblem {
@@ -141,6 +143,29 @@ function problemFromError(err: unknown, retryable: boolean): TurnEnqueueProblem 
       !Array.isArray(source["context"])
         ? (source["context"] as Record<string, unknown>)
         : {},
+  };
+}
+
+/**
+ * Project the same typed refusal used by durable thread storage onto the HTTP
+ * problem boundary. Durable storage uses snake_case while ControlProblem uses
+ * camelCase; keeping this conversion here prevents one surface from silently
+ * dropping remediation or recovery context.
+ */
+export function turnEnqueueProblemResponse(
+  problem: TurnEnqueueProblem,
+  identifiers: { threadId?: string; turnId?: string },
+): Record<string, unknown> {
+  return {
+    error: problem.message,
+    ...(problem.code ? { code: problem.code } : {}),
+    retryable: problem.retryable,
+    requiredActions: problem.required_actions,
+    context: {
+      ...problem.context,
+      ...(identifiers.threadId ? { threadId: identifiers.threadId } : {}),
+      ...(identifiers.turnId ? { turnId: identifiers.turnId } : {}),
+    },
   };
 }
 
@@ -395,32 +420,31 @@ export function handleThreadTurnCreate(
           },
         );
       } catch (err) {
-        const message = err instanceof Error ? err.message : "enqueue failed";
+        const problem = problemFromError(err, false);
         try {
-          ctx.setTurnEnqueueError?.(turn.id, problemFromError(err, false));
+          ctx.setTurnEnqueueError?.(turn.id, problem);
         } catch {
           /* recording the refusal must not mask the original error */
         }
         // Untyped enqueue throws are INFRA failures (daemon socket down) —
         // 500, matching POST /runs; typed statuses pass through.
-        return ctx.json(res, errStatus(err, 500), {
-          error: message,
-          turnId: turn.id,
-          retryable: false,
-        });
+        return ctx.json(
+          res,
+          errStatus(err, 500),
+          turnEnqueueProblemResponse(problem, { threadId, turnId: turn.id }),
+        );
       }
       return respondToTurnJob(ctx, res, job.id, threadId, turn.id);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "bad request";
       // PRE-ENQUEUE failures only reach here (plan read, param validation,
       // turn creation) — the enqueue and status-wait phases return from
       // their own catches above. When the turn was already recorded, persist
       // the refusal so a thread reload still shows it (no silent orphan);
       // no job exists -> retryable:false.
-      const code = errCode(err);
+      const problem = problemFromError(err, false);
       if (createdTurnId) {
         try {
-          ctx.setTurnEnqueueError?.(createdTurnId, problemFromError(err, false));
+          ctx.setTurnEnqueueError?.(createdTurnId, problem);
         } catch {
           /* recording the refusal must not mask the original error */
         }
@@ -428,11 +452,14 @@ export function handleThreadTurnCreate(
       // Pre-enqueue failures are client errors (validation, preflight refusal) —
       // errStatus keeps its 400 default; the inline card keys its remedy on the
       // typed `code` when one is present.
-      return ctx.json(res, errStatus(err), {
-        error: message,
-        ...(createdTurnId ? { turnId: createdTurnId, retryable: false } : {}),
-        ...(code ? { code } : {}),
-      });
+      return ctx.json(
+        res,
+        errStatus(err),
+        turnEnqueueProblemResponse(problem, {
+          threadId,
+          ...(createdTurnId ? { turnId: createdTurnId } : {}),
+        }),
+      );
     }
   });
 }
@@ -544,13 +571,17 @@ export function handleThreadTurnRetry(
         // A failed replay ENQUEUE is a fresh refusal — but the ORIGINAL job
         // params remain in the registry, so the turn STAYS replayable.
         // Untyped throws are infra failures — 500 (matching POST /runs).
-        const message = err instanceof Error ? err.message : "enqueue failed";
+        const problem = problemFromError(err, true);
         try {
-          ctx.setTurnEnqueueError?.(turnId, problemFromError(err, true));
+          ctx.setTurnEnqueueError?.(turnId, problem);
         } catch {
           /* recording the refusal must not mask the original error */
         }
-        return ctx.json(res, errStatus(err, 500), { error: message, turnId, threadId });
+        return ctx.json(
+          res,
+          errStatus(err, 500),
+          turnEnqueueProblemResponse(problem, { threadId, turnId }),
+        );
       }
       return respondToTurnJob(ctx, res, job.id, threadId, turnId);
     } catch (err) {

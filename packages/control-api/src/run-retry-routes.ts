@@ -14,7 +14,7 @@ import type {
   DaemonFacadeClient,
   DaemonRunRecord,
 } from "./daemon-server.js";
-import { recordTurnEnqueueFailure } from "./thread-turn-routes.js";
+import { recordTurnEnqueueFailure, turnEnqueueProblemResponse } from "./thread-turn-routes.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
 import * as runStart from "./run-start.js";
 
@@ -133,8 +133,19 @@ async function exactRetry(
       idempotencyRequest: { retryOf: sourceRunId },
     });
   } catch (error) {
-    recordTurnEnqueueFailure(ctx.services?.setTurnEnqueueError, retryTurnId, error);
-    return ctx.requestError(res, error);
+    const problem = recordTurnEnqueueFailure(ctx.services?.setTurnEnqueueError, retryTurnId, error);
+    const status =
+      error && typeof error === "object" && "status" in error
+        ? Number((error as { status: number }).status)
+        : 500;
+    return ctx.json(
+      res,
+      status,
+      turnEnqueueProblemResponse(problem, {
+        ...(threadId ? { threadId } : {}),
+        ...(retryTurnId ? { turnId: retryTurnId } : {}),
+      }),
+    );
   }
   const accepted = await ctx.waitForRunStart(job.id);
   if (!accepted.runId && TERMINAL_STATES.has(accepted.state)) {

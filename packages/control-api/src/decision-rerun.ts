@@ -9,7 +9,7 @@ import type {
   DaemonFacadeClient,
   DaemonRunRecord,
 } from "./daemon-server.js";
-import { recordTurnEnqueueFailure } from "./thread-turn-routes.js";
+import { recordTurnEnqueueFailure, turnEnqueueProblemResponse } from "./thread-turn-routes.js";
 import * as runStart from "./run-start.js";
 
 type RerunServices = Pick<
@@ -90,15 +90,19 @@ export async function rerunWithFeedback(
       },
     );
   } catch (error) {
-    recordTurnEnqueueFailure(ctx.services?.setTurnEnqueueError, turnId, error);
+    const problem = recordTurnEnqueueFailure(ctx.services?.setTurnEnqueueError, turnId, error);
     const status =
       error && typeof error === "object" && "status" in error
         ? Number((error as { status: number }).status)
         : 500;
-    return ctx.json(res, status, {
-      error: error instanceof Error ? error.message : "rerun enqueue failed",
-      ...(turnId ? { turnId, retryable: false } : {}),
-    });
+    return ctx.json(
+      res,
+      status,
+      turnEnqueueProblemResponse(problem, {
+        ...(threadId ? { threadId } : {}),
+        ...(turnId ? { turnId } : {}),
+      }),
+    );
   }
   let run: DaemonRunRecord;
   try {

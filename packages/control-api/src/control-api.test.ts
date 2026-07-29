@@ -2210,7 +2210,10 @@ describe("DaemonControlApiServer", () => {
     const refusing: DaemonFacadeClient = {
       ...daemon,
       async enqueue() {
-        throw new Error("daemon socket is gone");
+        throw Object.assign(new Error("daemon socket is gone"), {
+          requiredActions: ["Restart the local daemon"],
+          context: { transport: "daemon" },
+        });
       },
     };
     const services: DaemonControlApiOptions["services"] = {
@@ -2247,12 +2250,16 @@ describe("DaemonControlApiServer", () => {
         expect(res.status).toBe(500);
         const body = (await res.json()) as {
           message: string;
-          context: { turnId?: string };
+          requiredActions: string[];
+          context: { threadId?: string; turnId?: string; transport?: string };
           retryable?: boolean;
         };
         // The error response names the recorded turn (no silent orphan) and
         // discloses that retry has nothing to replay (no job was recorded).
         expect(body.context.turnId).toBe("tn-refused");
+        expect(body.context.threadId).toBe("th-r");
+        expect(body.context.transport).toBe("daemon");
+        expect(body.requiredActions).toEqual(["Restart the local daemon"]);
         expect(body.retryable).toBe(false);
         expect(body.message).toContain("daemon socket is gone");
         // The projection renders the refusal so a reloading client sees it.
@@ -2265,6 +2272,8 @@ describe("DaemonControlApiServer", () => {
               message: string;
               code: string | null;
               retryable: boolean;
+              requiredActions: string[];
+              context: { transport?: string };
               failedAt: string;
             } | null;
           }[];
@@ -2272,6 +2281,10 @@ describe("DaemonControlApiServer", () => {
         expect(detail.turns[0]?.enqueueError?.message).toContain("daemon socket is gone");
         expect(detail.turns[0]?.enqueueError?.code).toBeNull(); // untyped throw
         expect(detail.turns[0]?.enqueueError?.retryable).toBe(false); // nothing to replay
+        expect(detail.turns[0]?.enqueueError?.requiredActions).toEqual([
+          "Restart the local daemon",
+        ]);
+        expect(detail.turns[0]?.enqueueError?.context.transport).toBe("daemon");
         expect(detail.turns[0]?.enqueueError?.failedAt).toBeTruthy();
       },
       undefined,
@@ -2559,6 +2572,8 @@ describe("DaemonControlApiServer", () => {
       preflightRunRequirements: async () => {
         throw Object.assign(new Error("browser was requested but no lane can receive it"), {
           code: "browser_unavailable",
+          requiredActions: ["Choose a browser-capable route"],
+          context: { capability: "browser" },
         });
       },
     };
@@ -2574,10 +2589,28 @@ describe("DaemonControlApiServer", () => {
         // never happened, and the refusal is persisted ON the turn (inline card).
         expect(res.status).toBeGreaterThanOrEqual(400);
         expect(res.status).toBeLessThan(500);
-        const raw = await res.text();
-        expect(raw).toContain("tn-pf");
+        const problem = (await res.json()) as {
+          code: string;
+          requiredActions: string[];
+          context: {
+            capability?: string;
+            threadId?: string;
+            turnId?: string;
+          };
+        };
+        expect(problem.code).toBe("browser_unavailable");
+        expect(problem.requiredActions).toEqual(["Choose a browser-capable route"]);
+        expect(problem.context).toMatchObject({
+          capability: "browser",
+          threadId: "th-pf",
+          turnId: "tn-pf",
+        });
         expect(enqueueCalled).toBe(false);
-        expect(turns[0]?.["enqueue_error"]).toMatchObject({ code: "browser_unavailable" });
+        expect(turns[0]?.["enqueue_error"]).toMatchObject({
+          code: "browser_unavailable",
+          required_actions: ["Choose a browser-capable route"],
+          context: { capability: "browser" },
+        });
       },
       undefined,
       services,
@@ -8135,6 +8168,70 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("rerun_with_feedback preserves one typed enqueue refusal across HTTP and the durable turn", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      threadId: "th-decision",
+      turnId: "tn-source",
+    };
+    writeFileSync(
+      join(record.runDir as string, "arbitration", "decision.yaml"),
+      "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
+    );
+    const refusing: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue() {
+        throw Object.assign(new Error("the selected harness is unavailable"), {
+          status: 503,
+          code: "harness_unavailable",
+          requiredActions: ["Refresh Accounts and retry"],
+          context: { harness: "claude" },
+        });
+      },
+    };
+    let durable: Record<string, unknown> | null = null;
+    const services: DaemonControlApiOptions["services"] = {
+      createThreadTurn: async () => ({ id: "tn-decision" }),
+      setTurnEnqueueError: (_turnId, problem) => {
+        durable = problem as unknown as Record<string, unknown>;
+      },
+    };
+    await withDaemonServer(
+      refusing,
+      async (base) => {
+        const response = await apiFetch(`${base}/runs/run-d1/decision`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "decision-rerun-refused",
+          },
+          body: JSON.stringify({ action: "rerun_with_feedback", feedback: "Try once more." }),
+        });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({
+          code: "harness_unavailable",
+          retryable: false,
+          requiredActions: ["Refresh Accounts and retry"],
+          context: {
+            harness: "claude",
+            threadId: "th-decision",
+            turnId: "tn-decision",
+          },
+        });
+        expect(durable).toMatchObject({
+          code: "harness_unavailable",
+          retryable: false,
+          required_actions: ["Refresh Accounts and retry"],
+          context: { harness: "claude" },
+        });
+      },
+      undefined,
+      services,
+    );
+  });
+
   it("Exact Retry creates a fresh idempotent command linked to the immutable source request", async () => {
     const { daemon, record } = fakeDaemon();
     let enqueued: Record<string, unknown> | undefined;
@@ -8165,6 +8262,65 @@ describe("DaemonControlApiServer", () => {
       });
       expect(record.params).not.toHaveProperty("retryOf");
     });
+  });
+
+  it("Exact Retry preserves one typed enqueue refusal across HTTP and the durable turn", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      threadId: "th-retry",
+      turnId: "tn-source",
+    };
+    const refusing: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue() {
+        throw Object.assign(new Error("workspace recovery is required"), {
+          status: 409,
+          code: "journal_recovery_required",
+          requiredActions: ["Inspect recovery state"],
+          context: { recoveryId: "recovery-1" },
+        });
+      },
+    };
+    let durable: Record<string, unknown> | null = null;
+    const services: DaemonControlApiOptions["services"] = {
+      createThreadTurn: async () => ({ id: "tn-retry-enqueue" }),
+      setTurnEnqueueError: (_turnId, problem) => {
+        durable = problem as unknown as Record<string, unknown>;
+      },
+    };
+    await withDaemonServer(
+      refusing,
+      async (base) => {
+        const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "exact-retry-enqueue-refused",
+          },
+          body: "{}",
+        });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({
+          code: "journal_recovery_required",
+          retryable: false,
+          requiredActions: ["Inspect recovery state"],
+          context: {
+            recoveryId: "recovery-1",
+            threadId: "th-retry",
+            turnId: "tn-retry-enqueue",
+          },
+        });
+        expect(durable).toMatchObject({
+          code: "journal_recovery_required",
+          retryable: false,
+          required_actions: ["Inspect recovery state"],
+          context: { recoveryId: "recovery-1" },
+        });
+      },
+      undefined,
+      services,
+    );
   });
 
   it("Exact Retry projects a pre-start terminal as its typed refusal, not a 202 handle", async () => {
