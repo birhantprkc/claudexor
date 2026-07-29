@@ -103,6 +103,38 @@ function abortingReducerAdapter(finalText: string, outer: AbortController): Harn
   } as unknown as HarnessAdapter;
 }
 
+/** A reducer that has already produced a valid report when the inactivity
+ * watchdog fires. The adapter reacts to the watchdog's INTERNAL abort by
+ * emitting its terminal drain event, mirroring the native process-reap path. */
+function timeoutDrainingReducerAdapter(finalText: string): HarnessAdapter {
+  async function* run(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
+    const s = spec.session_id;
+    const abortSignal = spec.extra["abortSignal"] as AbortSignal;
+    yield { type: "started", session_id: s, ts: nowIso() };
+    yield {
+      type: "message",
+      session_id: s,
+      ts: nowIso(),
+      text: finalText,
+      final: true,
+      payload: { final_source: "test" },
+    };
+    await new Promise<void>((resolve) => {
+      if (abortSignal.aborted) resolve();
+      else abortSignal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    yield { type: "completed", session_id: s, ts: nowIso() };
+  }
+  return {
+    id: "fake-reducer",
+    discover: () => Promise.reject(new Error("unused")),
+    doctor: () => Promise.reject(new Error("unused")),
+    run,
+    review: run,
+    cancel: () => Promise.resolve(),
+  } as unknown as HarnessAdapter;
+}
+
 function makeDeps(mode: WorkReportEnvelopeMode): DeepScanReducerDeps {
   return {
     newReadOnlyHome: () => ({ env: {}, dispose: () => {} }),
@@ -230,6 +262,44 @@ describe("runDeepScanReducer WorkReport contract parity (D-16)", () => {
       });
       expect(result.status).toBe("cancelled");
       // The (partial) synthesis output is discarded — never surfaced as a report.
+      expect(result).not.toHaveProperty("report");
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("an INTERNAL inactivity timeout wins over a valid buffered report after the adapter drains", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
+    __dirs.push(root);
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-reducer");
+    const log = new EventLog(paths.eventsPath, "run-reducer", "task-reducer");
+    const ledger = new BudgetLedger({ kind: "unlimited" });
+    const routed = {
+      adapter: timeoutDrainingReducerAdapter("Valid merged synthesis before the stall."),
+    } as unknown as RoutedAdapter;
+    const drained: HarnessEvent[] = [];
+    try {
+      const result = await runDeepScanReducer(
+        { ...makeDeps(inactiveMode), inactivityTimeoutMs: 20 },
+        {
+          taskId: "task-reducer",
+          goal: "merge the scout reports",
+          routed,
+          scoutReports: [],
+          ledger,
+          log,
+          paths,
+          onHarnessEvent: (event) => drained.push(event),
+          attemptTelemetries: [],
+        },
+      );
+
+      expect(drained.some((event) => event.type === "completed")).toBe(true);
+      expect(result.status).toBe("failed");
+      if (result.status === "failed") {
+        expect(result.error).toMatch(/inactivity watchdog/i);
+      }
       expect(result).not.toHaveProperty("report");
     } finally {
       log.dispose();

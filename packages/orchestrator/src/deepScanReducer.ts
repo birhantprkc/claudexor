@@ -255,7 +255,11 @@ export async function runDeepScanReducer(
       isSuspended: () => false,
     });
     for await (const ev of watched) {
-      if (reducerAbort.signal.aborted) break;
+      // Outer cancellation and the separately tracked hard deadline may stop
+      // consumption. `reducerAbort` alone is ambiguous: the inactivity
+      // watchdog also aborts it, and that path must finish its terminal drain
+      // and throw the typed timeout before buffered report text can be accepted.
+      if (args.signal?.aborted || timedOut) break;
       const safeEv = redactHarnessEvent(ev);
       safeInvoke(args.onHarnessEvent, safeEv);
       log.emit("harness.event", harnessEventPayload(adapter.id, attemptId, safeEv));
