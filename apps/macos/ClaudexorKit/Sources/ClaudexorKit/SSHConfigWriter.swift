@@ -128,67 +128,34 @@ public struct SSHConfigWriter: Sendable {
         }
 
         let configPath = NSString(string: path).expandingTildeInPath
-        let manager = FileManager.default
-        let configExists = manager.fileExists(atPath: configPath)
-        if configExists {
-            // The scanner follows Include, so an alias defined in any reachable
-            // file refuses the write — never a silent duplicate or overwrite.
-            let hosts = try scanner.scan(path: configPath)
-            if let existing = hosts.first(where: { $0.alias == alias }) {
-                throw SSHConfigWriteError.duplicateAlias(
-                    alias, existingSource: existing.sourcePath)
-            }
-        }
-
         // ONE formatting owner: the block the sheet previews and the block this
         // append writes are the same `render` bytes — they cannot diverge.
         let renderedBlock = render(draft)
-        var glue = ""
-        var backupPath: String?
         do {
-            if configExists {
-                let existing = try String(contentsOfFile: configPath, encoding: .utf8)
-                backupPath = try backUp(configPath, manager: manager)
-                if !existing.isEmpty {
-                    if !existing.hasSuffix("\n") { glue += "\n" }
-                    glue += "\n"
-                }
-            } else {
-                let directory = (configPath as NSString).deletingLastPathComponent
-                if !manager.fileExists(atPath: directory) {
-                    try manager.createDirectory(
-                        atPath: directory,
-                        withIntermediateDirectories: true,
-                        attributes: [.posixPermissions: 0o700])
-                }
-                guard
-                    manager.createFile(
-                        atPath: configPath,
-                        contents: Data(),
-                        attributes: [.posixPermissions: 0o600])
-                else {
-                    throw SSHConfigWriteError.writeFailed("could not create \(configPath)")
-                }
-            }
-            // Appending through a handle never rewrites, reorders, or re-modes
-            // the user's existing bytes.
-            guard let handle = FileHandle(forWritingAtPath: configPath) else {
-                throw SSHConfigWriteError.writeFailed("could not open \(configPath) for appending")
-            }
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: Data((glue + renderedBlock).utf8))
+            let result = try SSHConfigFileTransaction.append(
+                Data(renderedBlock.utf8),
+                to: configPath,
+                backupDate: now(),
+                validateExisting: { existing in
+                    // Includes remain scanner-owned, while the root bytes come
+                    // from the same locked descriptor the transaction appends.
+                    let hosts = try scanner.scan(path: configPath, rootContents: existing)
+                    if let duplicate = hosts.first(where: { $0.alias == alias }) {
+                        throw SSHConfigWriteError.duplicateAlias(
+                            alias, existingSource: duplicate.sourcePath)
+                    }
+                })
+            return Receipt(
+                alias: alias,
+                configPath: configPath,
+                backupPath: result.backupPath,
+                createdConfig: result.createdConfig,
+                appendedBlock: renderedBlock)
         } catch let error as SSHConfigWriteError {
             throw error
         } catch {
             throw SSHConfigWriteError.writeFailed(error.localizedDescription)
         }
-        return Receipt(
-            alias: alias,
-            configPath: configPath,
-            backupPath: backupPath,
-            createdConfig: !configExists,
-            appendedBlock: renderedBlock)
     }
 
     /// Render the exact `Host` block a draft would append — the SINGLE
@@ -281,21 +248,6 @@ public struct SSHConfigWriter: Sendable {
             }
         case .writeFailed: return nil
         }
-    }
-
-    private func backUp(_ configPath: String, manager: FileManager) throws -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let base = "\(configPath).claudexor-backup-\(formatter.string(from: now()))"
-        var candidate = base
-        var counter = 2
-        while manager.fileExists(atPath: candidate) {
-            candidate = "\(base)-\(counter)"
-            counter += 1
-        }
-        try manager.copyItem(atPath: configPath, toPath: candidate)
-        return candidate
     }
 
     private func dayStamp(_ date: Date) -> String {

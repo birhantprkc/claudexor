@@ -2,11 +2,14 @@ import Foundation
 
 public enum RemotePersistenceError: Error, LocalizedError {
     case insecureDirectory(String)
+    case insecureFile(String)
 
     public var errorDescription: String? {
         switch self {
         case let .insecureDirectory(path):
-            "Refusing to store remote metadata outside a private directory: \(path)"
+            "Refusing remote metadata outside a private directory: \(path)"
+        case let .insecureFile(path):
+            "Refusing to load remote metadata from an insecure file: \(path)"
         }
     }
 }
@@ -29,9 +32,9 @@ public struct RemoteConnectionStore: Sendable {
     }
 
     public func load() throws -> [RemoteConnection] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        guard let data = try secureRead(fileURL) else { return [] }
         return try JSONDecoder.remoteMetadata.decode(
-            [RemoteConnection].self, from: Data(contentsOf: fileURL))
+            [RemoteConnection].self, from: data)
     }
 
     public func save(_ connections: [RemoteConnection]) throws {
@@ -59,9 +62,9 @@ public struct RemoteThreadCacheStore: Sendable {
     }
 
     public func load() throws -> [RemoteThreadCacheEntry] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        guard let data = try secureRead(fileURL) else { return [] }
         return try JSONDecoder.remoteMetadata.decode(
-            [RemoteThreadCacheEntry].self, from: Data(contentsOf: fileURL))
+            [RemoteThreadCacheEntry].self, from: data)
     }
 
     public func save(_ entries: [RemoteThreadCacheEntry]) throws {
@@ -117,4 +120,17 @@ private func secureWrite(_ data: Data, to url: URL) throws {
     try data.write(to: url, options: .atomic)
     try FileManager.default.setAttributes(
         [.posixPermissions: 0o600], ofItemAtPath: url.path)
+}
+
+private func secureRead(_ url: URL) throws -> Data? {
+    do {
+        return try SecureLocalFile.readPrivateData(at: url)
+    } catch let error as SecureLocalFileError {
+        switch error {
+        case let .insecureDirectory(path):
+            throw RemotePersistenceError.insecureDirectory(path)
+        case let .insecureFile(path):
+            throw RemotePersistenceError.insecureFile(path)
+        }
+    }
 }

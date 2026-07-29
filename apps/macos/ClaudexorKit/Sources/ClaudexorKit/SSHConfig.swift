@@ -58,9 +58,26 @@ public struct SSHConfigScanner: Sendable {
     }
 
     public func scan(path: String) throws -> [SSHHost] {
+        try scan(path: path, rootContents: nil)
+    }
+
+    /// Scan one already-open root snapshot while preserving the ordinary
+    /// Include reader. The writer uses this overload so duplicate validation
+    /// and the later append concern the same root inode and bytes.
+    func scan(path: String, rootContents: String) throws -> [SSHHost] {
+        try scan(path: path, rootContents: Optional(rootContents))
+    }
+
+    private func scan(path: String, rootContents: String?) throws -> [SSHHost] {
         var visited = Set<String>()
         var discovered = [String: SSHHost]()
-        try scanFile(path: Self.normalized(path), depth: 0, visited: &visited, output: &discovered)
+        let rootPath = URL(fileURLWithPath: Self.normalized(path)).standardizedFileURL.path
+        try scanFile(
+            path: rootPath,
+            depth: 0,
+            rootSnapshot: rootContents.map { (rootPath, $0) },
+            visited: &visited,
+            output: &discovered)
         return discovered.values.sorted {
             $0.alias.localizedCaseInsensitiveCompare($1.alias) == .orderedAscending
         }
@@ -69,6 +86,7 @@ public struct SSHConfigScanner: Sendable {
     private func scanFile(
         path: String,
         depth: Int,
+        rootSnapshot: (path: String, contents: String)?,
         visited: inout Set<String>,
         output: inout [String: SSHHost]
     ) throws {
@@ -76,11 +94,15 @@ public struct SSHConfigScanner: Sendable {
         let canonical = URL(fileURLWithPath: path).standardizedFileURL.path
         guard visited.insert(canonical).inserted else { return }
         let contents: String
-        do {
-            contents = try readFile(canonical)
-        } catch {
-            if depth == 0 { throw SSHConfigError.unreadable(canonical) }
-            return
+        if let rootSnapshot, canonical == rootSnapshot.path {
+            contents = rootSnapshot.contents
+        } else {
+            do {
+                contents = try readFile(canonical)
+            } catch {
+                if depth == 0 { throw SSHConfigError.unreadable(canonical) }
+                return
+            }
         }
         for line in contents.split(whereSeparator: \.isNewline) {
             let words = Self.words(in: String(line))
@@ -91,6 +113,7 @@ public struct SSHConfigScanner: Sendable {
                         try scanFile(
                             path: includePath,
                             depth: depth + 1,
+                            rootSnapshot: rootSnapshot,
                             visited: &visited,
                             output: &output)
                     }

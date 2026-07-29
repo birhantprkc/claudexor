@@ -113,6 +113,86 @@ import Testing
         #expect(!written.contains("IdentityFile"))
     }
 
+    @Test func refusesDanglingConfigSymlinkWithoutMaterializingItsTarget() throws {
+        let root = try makeTempDirectory()
+        let config = "\(root)/config"
+        let target = "\(root)/missing-target"
+        try manager.createSymbolicLink(
+            atPath: config,
+            withDestinationPath: target)
+
+        #expect(throws: SSHConfigWriteError.self) {
+            try SSHConfigWriter().appendHost(
+                SSHHostDraft(alias: "prod", hostName: "prod.internal"),
+                toConfigAt: config)
+        }
+        #expect(!manager.fileExists(atPath: target))
+    }
+
+    @Test func refusesDanglingConfigDirectorySymlinkWithoutMaterializingItsTarget() throws {
+        let root = try makeTempDirectory()
+        let directory = "\(root)/ssh"
+        let targetDirectory = "\(root)/missing-ssh"
+        try manager.createSymbolicLink(
+            atPath: directory,
+            withDestinationPath: targetDirectory)
+
+        #expect(throws: SSHConfigWriteError.self) {
+            try SSHConfigWriter().appendHost(
+                SSHHostDraft(alias: "prod", hostName: "prod.internal"),
+                toConfigAt: "\(directory)/config")
+        }
+        #expect(!manager.fileExists(atPath: targetDirectory))
+    }
+
+    @Test func liveConfigSymlinkGetsARealSnapshotBackup() throws {
+        let root = try makeTempDirectory()
+        let target = "\(root)/managed-config"
+        let config = "\(root)/config"
+        let original = "Host old\n  HostName old.internal\n"
+        try original.write(toFile: target, atomically: true, encoding: .utf8)
+        try manager.createSymbolicLink(atPath: config, withDestinationPath: target)
+
+        let receipt = try SSHConfigWriter().appendHost(
+            SSHHostDraft(alias: "fresh", hostName: "fresh.internal"),
+            toConfigAt: config)
+        let backup = try #require(receipt.backupPath)
+        #expect(try String(contentsOfFile: backup, encoding: .utf8) == original)
+        let backupValues = try URL(fileURLWithPath: backup).resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        #expect(backupValues.isRegularFile == true)
+        #expect(backupValues.isSymbolicLink != true)
+        #expect(try String(contentsOfFile: target, encoding: .utf8).contains("Host fresh\n"))
+    }
+
+    @Test func refusesWhenConfigIdentityChangesAfterTheScannedSnapshot() throws {
+        let root = try makeTempDirectory()
+        let config = "\(root)/config"
+        let include = "\(root)/included.conf"
+        let replacement = "\(root)/replacement"
+        let original = "Include \(include)\nHost old\n  HostName old.internal\n"
+        let replacementBytes = "Host replacement\n  HostName replacement.internal\n"
+        try original.write(toFile: config, atomically: true, encoding: .utf8)
+        try "# included\n".write(toFile: include, atomically: true, encoding: .utf8)
+        try replacementBytes.write(toFile: replacement, atomically: true, encoding: .utf8)
+        let scanner = SSHConfigScanner(readFile: { path in
+            if path == include {
+                try FileManager.default.removeItem(atPath: config)
+                try FileManager.default.createSymbolicLink(
+                    atPath: config,
+                    withDestinationPath: replacement)
+            }
+            return try String(contentsOfFile: path, encoding: .utf8)
+        })
+
+        #expect(throws: SSHConfigWriteError.self) {
+            try SSHConfigWriter(scanner: scanner).appendHost(
+                SSHHostDraft(alias: "fresh", hostName: "fresh.internal"),
+                toConfigAt: config)
+        }
+        #expect(try String(contentsOfFile: replacement, encoding: .utf8) == replacementBytes)
+    }
+
     @Test func previewBytesEqualAppendedBytes() throws {
         let config = try makeTempDirectory() + "/config"
         try "Host old\n  HostName o.internal\n".write(

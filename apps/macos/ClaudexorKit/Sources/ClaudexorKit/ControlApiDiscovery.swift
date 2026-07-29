@@ -15,7 +15,11 @@ public struct ControlApiDiscovery: Codable, Sendable, Equatable {
     }
 
     public func readToken(fileManager: FileManager = .default) throws -> String {
-        let data = try Data(contentsOf: URL(fileURLWithPath: tokenPath))
+        guard let data = try SecureLocalFile.readPrivateData(
+            at: URL(fileURLWithPath: tokenPath))
+        else {
+            throw CocoaError(.fileNoSuchFile)
+        }
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -34,7 +38,9 @@ public struct ControlApiDiscovery: Codable, Sendable, Equatable {
     }
 
     public static func load(from path: URL = defaultPath()) throws -> ControlApiDiscovery {
-        let data = try Data(contentsOf: path)
+        guard let data = try SecureLocalFile.readPrivateData(at: path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
         return try JSONDecoder().decode(ControlApiDiscovery.self, from: data)
     }
 }
