@@ -114,9 +114,7 @@ import {
   releaseReviewRuntimeArtifactRoot,
 } from "./lib/release-review-runtime.mjs";
 
-let containsSecretLikeToken;
-let redactSecrets;
-let verifySealedEvidencePacket;
+let boundReviewRuntime;
 
 function arg(name, fallback = null) {
   const idx = process.argv.indexOf(`--${name}`);
@@ -263,21 +261,19 @@ async function loadBoundReviewRuntime(candidateRoot, candidateSha, candidateTree
   const runtime = await import(
     `data:text/javascript;base64,${verifiedRuntime.bytes.toString("base64")}`
   );
-  verifySealedEvidencePacket = runtime.verifySealedEvidencePacket;
-  containsSecretLikeToken = runtime.containsSecretLikeToken;
-  redactSecrets = runtime.redactSecrets;
   if (
-    typeof verifySealedEvidencePacket !== "function" ||
-    typeof containsSecretLikeToken !== "function" ||
-    typeof redactSecrets !== "function"
+    typeof runtime.verifySealedEvidencePacket !== "function" ||
+    typeof runtime.containsSecretLikeToken !== "function" ||
+    typeof runtime.redactSecrets !== "function"
   ) {
     throw new Error("release-review runtime artifacts do not expose the required verifier API");
   }
+  boundReviewRuntime = runtime;
   return { receiptPath, receiptSha256, artifacts: verifiedRuntime.artifacts };
 }
 
 function loadFrozenPacket(candidateRoot, candidateSha, candidateTree, packetManifestDigest) {
-  const sealed = verifySealedEvidencePacket({
+  const sealed = boundReviewRuntime.verifySealedEvidencePacket({
     evidenceDir: requiredArg("packet"),
     candidateSha,
     candidateTree,
@@ -1031,10 +1027,10 @@ async function main() {
   // Fail BEFORE remote submission if the evidence contains a token-like value:
   // a leaked secret must not reach OpenRouter or the persisted artifacts.
   if (
-    containsSecretLikeToken(triadPrompt) ||
-    containsSecretLikeToken(scopePrompt) ||
-    redactSecrets(triadPrompt) !== triadPrompt ||
-    redactSecrets(scopePrompt) !== scopePrompt
+    boundReviewRuntime.containsSecretLikeToken(triadPrompt) ||
+    boundReviewRuntime.containsSecretLikeToken(scopePrompt) ||
+    boundReviewRuntime.redactSecrets(triadPrompt) !== triadPrompt ||
+    boundReviewRuntime.redactSecrets(scopePrompt) !== scopePrompt
   ) {
     throw new Error("review evidence contains a secret-like token; scrub the sealed packet");
   }
@@ -1206,7 +1202,10 @@ async function main() {
   const findings = [];
   for (const [idx, result] of triadResults.entries()) {
     const slug = result.model.replace(/[^a-z0-9.-]+/gi, "_");
-    writeFileSync(join(outDir, `triad-${slug}.raw.txt`), redactSecrets(result.raw ?? ""));
+    writeFileSync(
+      join(outDir, `triad-${slug}.raw.txt`),
+      boundReviewRuntime.redactSecrets(result.raw ?? ""),
+    );
     let status = result.status;
     let parsed = [];
     let parseError = result.error ?? null;
@@ -1224,7 +1223,7 @@ async function main() {
         missingItems = validation.missingItems;
         writeFileSync(
           join(outDir, `triad-${slug}.parsed-json-blocks.json`),
-          redactSecrets(JSON.stringify(arr, null, 2)) + "\n",
+          boundReviewRuntime.redactSecrets(JSON.stringify(arr, null, 2)) + "\n",
         );
       }
     }
@@ -1260,7 +1259,7 @@ async function main() {
       live: status === "responded",
       liveness_floor_ms: livenessFloorMs(submittedTriadPrompt.length),
       report_sha256: createHash("sha256")
-        .update(redactSecrets(result.raw ?? ""))
+        .update(boundReviewRuntime.redactSecrets(result.raw ?? ""))
         .digest("hex"),
       verdict: slotVerdict(status, parsed),
       model_id: result.model,
@@ -1304,7 +1303,10 @@ async function main() {
 
   let scope = null;
   {
-    writeFileSync(join(outDir, "scope.raw.txt"), redactSecrets(scopeResult.raw ?? ""));
+    writeFileSync(
+      join(outDir, "scope.raw.txt"),
+      boundReviewRuntime.redactSecrets(scopeResult.raw ?? ""),
+    );
     let scopeStatus = scopeResult.status;
     let scopeFindings = [];
     let scopeError = scopeResult.error ?? null;
@@ -1324,7 +1326,7 @@ async function main() {
       live: scopeStatus === "responded",
       liveness_floor_ms: livenessFloorMs(submittedScopePrompt.length),
       report_sha256: createHash("sha256")
-        .update(redactSecrets(scopeResult.raw ?? ""))
+        .update(boundReviewRuntime.redactSecrets(scopeResult.raw ?? ""))
         .digest("hex"),
       model_id: SCOPE_MODEL,
       requested_model: SCOPE_MODEL,
@@ -1360,7 +1362,7 @@ async function main() {
         scopeMissing = validation.missingItems;
         writeFileSync(
           join(outDir, "scope.parsed-json-blocks.json"),
-          redactSecrets(JSON.stringify(arr, null, 2)) + "\n",
+          boundReviewRuntime.redactSecrets(JSON.stringify(arr, null, 2)) + "\n",
         );
         scopeMeta.status = scopeStatus;
         scopeMeta.error = scopeError;
@@ -1459,7 +1461,7 @@ async function main() {
     ...rows,
     "",
   ].join("\n");
-  writeFileSync(join(outDir, "summary.md"), redactSecrets(table));
+  writeFileSync(join(outDir, "summary.md"), boundReviewRuntime.redactSecrets(table));
   console.log(table);
 
   if (!decision.passed) {
