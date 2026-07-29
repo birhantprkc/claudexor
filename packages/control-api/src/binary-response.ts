@@ -26,6 +26,15 @@ export function writeBinaryResponse(
   contentType: string,
   fileName: string,
 ): void {
+  if (
+    !Buffer.isBuffer(body) ||
+    typeof contentType !== "string" ||
+    contentType.length === 0 ||
+    typeof fileName !== "string" ||
+    fileName.length === 0
+  ) {
+    throw new TypeError("binary response is invalid");
+  }
   response.writeHead(status, {
     "content-type": contentType,
     "content-length": body.length,

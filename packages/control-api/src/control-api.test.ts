@@ -1869,6 +1869,12 @@ describe("DaemonControlApiServer", () => {
       relinkProject: async () => {
         throw new Error("must not reach service");
       },
+      fetchProjectFile: async (_projectId, path) => {
+        if (path === "bad-body") {
+          return { data: "NOT_A_BUFFER" as never, contentType: "text/plain", fileName: "x.txt" };
+        }
+        return { data: Buffer.from("x"), contentType: 42 as never, fileName: "x.txt" };
+      },
     };
     await withDaemonServer(
       daemon,
@@ -1904,6 +1910,14 @@ describe("DaemonControlApiServer", () => {
         });
         expect(invalid.status).toBe(500);
         expect(await invalid.json()).toMatchObject({ code: "invalid_service_response" });
+
+        for (const path of ["bad-body", "bad-content-type"]) {
+          const invalidFile = await apiFetch(`${base}/projects/prj-1/file?path=${path}`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          expect(invalidFile.status).toBe(500);
+          expect(await invalidFile.json()).toMatchObject({ code: "invalid_service_response" });
+        }
       },
       undefined,
       services,
