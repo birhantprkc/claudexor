@@ -47,7 +47,7 @@ enum SecureLocalFile {
             throw SecureLocalFileError.insecureFile(url.path)
         }
         let fileFD = leaf.withCString {
-            openat(directoryFD, $0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            openat(directoryFD, $0, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         }
         if fileFD < 0 {
             if errno == ENOENT { return nil }

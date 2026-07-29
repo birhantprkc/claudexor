@@ -150,6 +150,17 @@ import Testing
         }
     }
 
+    @Test func loadRefusesAFifoWithoutBlocking() throws {
+        let root = try makePrivateDirectory("remote-store-fifo")
+        defer { try? manager.removeItem(at: root) }
+        let file = root.appendingPathComponent("connections.json")
+        #expect(file.path.withCString { mkfifo($0, 0o600) } == 0)
+
+        #expect(throws: RemotePersistenceError.self) {
+            try RemoteConnectionStore(fileURL: file).load()
+        }
+    }
+
     @Test func missingStoreStillLoadsAsEmpty() throws {
         let root = manager.temporaryDirectory
             .appendingPathComponent("remote-store-missing-\(UUID().uuidString)")
