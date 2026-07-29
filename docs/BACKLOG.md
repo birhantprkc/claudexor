@@ -6,6 +6,40 @@ Silent drops are the failure mode this file exists to prevent — the 2.1.0
 audit found ten F2.5 leftovers that were neither shipped nor consciously
 deferred; they are recorded here now.
 
+## v3.2.0 post-dogfood adjudication deferrals
+
+- PDR-01: make the local `events.jsonl` append of `run.created` transactional
+  with a rejecting external durable sink. The caller-visible INV-116 contract
+  is fixed, writer ownership is released, and no run is announced, but the
+  local line remains after this rare infrastructure failure. A truncation or
+  two-phase EventLog redesign is disproportionate to the release repair.
+- PDR-02: warn ordinary CLI commands when a same-version daemon has no matching
+  build SHA. Development and release procedure already requires rebuilding,
+  restarting and checking the handshake SHA; extending skew policy beyond that
+  gate needs a separate compatibility decision.
+- PDR-03: migrate the remaining pre-existing Control API route families
+  (security, recovery, simple thread lifecycle, and the journal's initial SSE
+  read) onto the shared request/service/response staging owner. Project,
+  upload, and retention routes now fail closed at the correct boundary; the
+  remaining families need a focused contract migration rather than expanding
+  this dogfood repair into every unrelated endpoint.
+- PDR-04: harden the RunFacts invariant validator against duplicate participant
+  attempt ids and impossible mode/role/deliverable combinations (GitHub #87).
+  Current engine producers emit unique, coherent receipts, so this is
+  corruption or hand-edited artifact hardening rather than a default-reachable
+  release failure.
+- PDR-05: give the embedded OpenSSH process family a minimal,
+  provider-secret-scrubbed child environment. Today Process and SwiftTerm
+  inherit the app environment. OpenSSH does not forward arbitrary variables to
+  the remote host without explicit SendEnv, so no default-reachable remote
+  disclosure was reproduced; however, same-user ProxyCommand/LocalCommand and
+  launchd-injected provider variables remain visible to local SSH children.
+  Reuse a compact shared allowlist rather than another secret-name denylist.
+- PDR-06: surface local remote-metadata load/save failures instead of reducing
+  them to an empty projection through `try?`. The hardened store now refuses
+  unsafe files, but disk, permission, or tamper failures are rare and need a
+  deliberate user-facing state/error owner rather than a release-loop patch.
+
 ## v3.2.0 wave-4 review deferrals
 
 - C3: project each command's per-subcommand flag ownership in
@@ -398,26 +432,13 @@ revision/etag, already logged above), are intentionally not duplicated.
 
 - [F45] openai/gpt-5.6-sol | runtime_behavior_changes | apps/macos/ClaudexorApp/Sources/ClaudexorApp/AppRuntimeDaemonControl.swift, runNodeJSON(_:node:timeout:): the documented hard timeout only schedules Process.terminate(), then blocks in readDataToEndOfFile() and waitUntilExit(). A child that ignores SIGTERM, or a descendant retaining stdout, can block the installer indefinitely; there is no bounded KILL fallback.
 - [F45] openai/gpt-5.6-sol | security_and_secrets | apps/macos/ClaudexorApp/Sources/ClaudexorApp/RuntimeInstaller.swift, unpack(_:version:): the signed tarball is passed directly to /usr/bin/tar without validating entry paths, hard links, or symlink targets.
-- [F45] anthropic/claude-fable-5 | review_protocol | scripts/triad-scope-review.mjs (candidate commit 805095d9, loadFrozenPacket): the reviewer prompt's operative diff now excludes packages/schema/generated (alongside site/assets, docs/assets, pnpm-lock.yaml) and lists them only by path in the 'Diff view note'. Under the A-8 coverage model those generated schema files are classified DIFF-AUTHORITATIVE — i.e.
 - [F45] anthropic/claude-fable-5 | runtime_behavior_changes | apps/macos/ClaudexorApp/Sources/ClaudexorApp/RuntimeInstaller.swift, RuntimeInstallError.daemonBusy errorDescription: "The engine is busy running jobs; the update will retry when idle." is dishonest — nothing retries automatically.
-- [F45] anthropic/claude-fable-5 | runtime_behavior_changes | apps/macos/ClaudexorKit/Sources/ClaudexorKit/SetupLifecycleController.swift: performAction() and adoptAndObserve() call publish(...) WITHOUT passing deviceCode (the parameter defaults to nil), so pressing 'Extend login wait (15 min)' (or any other action) while a codex device-code login is awaiting_user momentarily clears SetupLifecycleSnapshot.deviceCode — AuthSheetDeviceCodeCard disappears until the next snapshot fence in observe() restores it.
 - [F45] anthropic/claude-fable-5 | runtime_behavior_changes | apps/macos/ClaudexorApp/Sources/ClaudexorApp/RuntimeInstallCoordinator.swift install(): failure paths at steps 5/6 (probe mismatch, busy) clean up with removeVersionDir, but a throw from step 7 (`try await daemon.stop()`), the pointer-write catch, the relaunch-throw path, and the handshake-mismatch rollback all leave the freshly unpacked, quarantine-stripped versions/<v> directory on disk with no pointer referencing it.
-- [F45] anthropic/claude-fable-5 | forgotten_touchpoints | .github/workflows/repo-metrics.yml pauses the daily cron 'for the v3.1.0 release freeze' and says RE-ENABLE is the 'release runbook final step', but docs/CHECKLISTS.md — per CLAUDEXOR_BIBLE.md the SOLE home of the release protocol — is not touched anywhere in this diff, so the re-enable step exists only as a workflow comment and can be silently forgotten after publish.
-- [F45] anthropic/claude-fable-5 | prompt_doc_sync | README.md Metrics section states the charts are 'refreshed daily by a scheduled workflow that commits the charts back into the repo', but .github/workflows/repo-metrics.yml ships with the schedule COMMENTED OUT for the freeze (workflow_dispatch only) — until the runbook re-enable happens, the public README describes a cadence that is not running.
 - [F45] anthropic/claude-fable-5 | implicit_contracts | GatewayClient.engineHasActiveWork (ClaudexorKit/GatewayClient.swift) hardcodes the state-filter values ["running", "queued"] for GET /v2/runs, but the daemon's `state` query is STRICT ('a typoed or malformed value is a typed 400' per the ARCHITECTURE run-list contract / packages/control-api/src/run-list.ts), and the only tests (RuntimeBusyGateTests) run against BusyStubURLProtocol, never the real enum.
-- [F45] openai/gpt-5.6-sol | runtime_behavior_changes | packages/cli/src/claudexord-probe.test.ts imports runProbeIfRequested from packages/cli/src/claudexord.ts, but claudexord.ts unconditionally invokes main() at module evaluation. Running this focused test therefore also starts durable daemon initialization, writer-lease acquisition, journal/setup services, and socket/control startup in the test worker.
-- [F45] anthropic/claude-fable-5 | runtime_behavior_changes | packages/cli/src/claudexord.ts `runStopIfRequested` (the identity-proven `claudexord --stop` the macOS RuntimeInstallCoordinator drives before the atomic pointer swap) ships with NO test at the package boundary: packages/cli/src/claudexord-probe.test.ts covers only `runProbeIfRequested`, and the Swift AppRuntimeDaemonControlTests exercise a fake script, not this TS logic.
-- [F45] anthropic/claude-fable-5 | runtime_behavior_changes | packages/cli/src/setup-login-inline.ts `TerminalLoginNextAction` (the typed `--json` nextAction for a device_auth_unsupported miss) carries only {kind, reason, loginFlow} and omits the profile target: for `claudexor profiles login codex <id> --json`, a machine consumer that follows nextAction verbatim would construct a DEFAULT-STORE browser_redirect login instead of the profile-scoped one (the TTY path handles this correctly via createTerminalFallbackJob's profileId, and the enclosing job object does carry profileId, but the typed action itself is incomplete).
-- [F45] anthropic/claude-fable-5 | runtime_behavior_changes | packages/cli/src/repo-asset-authority.ts `parseCsv` performs no validation: a malformed or hand-edited ledger row (missing columns, non-numeric field) yields Number(undefined)=NaN which then propagates silently into `prior.npm_total + delta` in scripts/update-repo-metrics.mjs, poisoning the cumulative npm_total for every subsequent day, contrary to the module's own 'never poison the count' doctrine (which is enforced only on the network-payload side).
-- [F45] anthropic/claude-fable-5 | prompt_doc_sync | docs/DEVELOPMENT.md's owner signing-ceremony example is a broken shell snippet: the line '--in runtime-manifest.json # the candidate's unsigned manifest' carries an inline comment and NO trailing backslash, so the multi-line 'pnpm sign:runtime-manifest' command terminates after --in and the following '--sha256 ...' lines run as separate commands.
-- [F45] anthropic/claude-fable-5 | cross_module_bugs | Authorization-header inconsistency in the new D-17 CLI stream: setup-login-inline.ts's default fetchImpl calls controlApiFetch(addr, path, init) with NO Authorization header (the snapshot GET passes no headers at all; createTerminalFallbackJob passes only Content-Type), while EVERY sibling production call site in this same sub-wave explicitly adds 'Authorization: Bearer addr.token' (daemonGet and gcCommand in ops-commands.ts, the setup-job create in credential-commands.ts, secrets/profiles PATCH/DELETE).
 - [F45] anthropic/claude-fable-5 | implicit_contracts | The --json failure-envelope contract (ARCHITECTURE 'Design constraints': every FAILURE class is normalized by the ONE projector in packages/cli/src/cli-error.ts into {ok:false, exitCode, code?, message, ...}) is bypassed by new code: setup-login-inline.ts streamDurableCodexLogin in --json mode prints ad-hoc failure objects — {ok:false, error:'snapshot_unavailable', status, jobId} lacks both 'message' and 'exitCode', and the not_supported terminal object {ok:false, job, nextAction} likewise carries no canonical envelope fields — so a machine consumer keying on the documented projector shape gets an unrecognized failure form on the auth-login path.
 - [F45] openai/gpt-5.6-sol | security_and_secrets | packages/schema/src/setup.ts, ControlSetupJobEvent and ControlSetupJobSnapshot: deviceCode is an unconstrained optional field. The schemas accept and serialize a one-time userCode for a non-Codex job, a terminal job, or a phase other than awaiting_user, despite the contract saying this sensitive disclosure exists only transiently while Codex awaits the user.
 - [F45] openai/gpt-5.6-sol | security_and_secrets | packages/secrets/package.json, description: the published metadata claims "OS keychain where available, else a 0600 file", while the current architecture and DEVELOPMENT.md explicitly state that the managed secret store is file-only and has no System Keychain backend. This is misleading public security metadata in the touched 3.1.0 package release.
-- [F45] anthropic/claude-fable-5 | review_protocol | scripts/triad-scope-review.mjs (candidate commit 805095d9, loadFrozenPacket): the new READABLE diff view excludes 'packages/schema/generated' bodies from the reviewer prompt, but the deterministic coverage checker (per the packet-split contract) classifies exactly those files as DIFF-AUTHORITATIVE — i.e. files whose review channel IS the diff and which are exempt from full-text pack coverage.
 - [F45] anthropic/claude-fable-5 | runtime_behavior_changes | packages/util/CHANGELOG.md: the 3.1.0 entry is completely empty ('## 3.1.0' with no bullets) even though this release adds an entire new public API surface to @claudexor/util — packages/util/src/runtime-manifest.ts (RUNTIME_UPDATE_AUTHORITY, SignedRuntimeManifest, verifyRuntimeManifest, isMonotonicRuntimeUpgrade, canonicalJson, runtimeArchiveUrl) re-exported from index.ts and consumed by the CLI's fail-closed release check.
-- [F45] anthropic/claude-fable-5 | forgotten_touchpoints | docs/CHECKLISTS.md — the Bible-designated sole home of the release protocol (INV-130 hierarchy) — is NOT in the changed-file list, yet the publish flow gained two new mandatory operator inputs (release.yml runtime_manifest_b64 + candidate_run_id, validated fail-closed in the prepare job) and .github/workflows/repo-metrics.yml explicitly defers its schedule re-enable to a 'release runbook final step'.
-- [F45] anthropic/claude-fable-5 | prompt_doc_sync | docs/DEVELOPMENT.md, the new sign:runtime-manifest example: the line '--in       runtime-manifest.json           # the candidate's unsigned manifest' has NO trailing backslash (and an inline comment) inside a multi-line continuation command, so the documented owner signing command breaks after the --in line when pasted — the remaining --sha256/--private-key/--authority/--out flags are lost and the signer exits with usage.
 
 - [post-3.1.0] Re-run the full post-release program audit (codex gpt-5.6-sol, deep-scan) after the claude weekly quota resets — the 2026-07-24 attempt died at the reducer stage with 96% quota used; its scout findings are ledgered as X237-X239.
 
@@ -489,15 +510,11 @@ authoritative for each exact disposition.
   same F4/noChanges semantics as Git-mode capture.
 - Consolidate the duplicated environment-scoped Git invocation helper shared
   by workspace capture and revert logic.
-- Resolve the duplicated historical X227 ledger identifier while preserving
-  both original wave references and dispositions.
 - Distinguish a belt runner throw before daemon child creation from a response
   failure after the server-owned child exists before releasing the local count
   slot; the daemon family authority remains the hard eight-child owner.
 - Extract one small route-certainty interval primitive shared by candidate and
   reviewer accounting after 3.1.2, without changing the current fail-closed
   semantics.
-- Restore complete historical X194 and X200 finding summaries in the ledger
-  and backlog from retained reports.
 - Add explicit finite-cap route-disclosure pins for every optional adapter lane
   so route-silent streams remain an intentional typed refusal.

@@ -2152,8 +2152,8 @@ same honest pin wording as the CLI. Failures are typed and loud — a
 failed or unreadable download refuses without executing, a non-zero installer
 exit never reads as success, and Harness Doctor verifies the result
 afterward. Every npm, curl, and vendor-script child receives the shared minimal
-runtime environment, including proxy and trust settings but no provider or
-operator credential variables.
+runtime environment, including proxy and trust settings but no provider
+credential variables.
 
 `claudexor remote bootstrap --json` starts or discovers the remote daemon and
 returns its loopback endpoint. The daemon remains bound to `127.0.0.1`; the app
@@ -2161,8 +2161,8 @@ opens a local SSH forward and keeps the bearer token only in the in-memory
 `GatewayClient` for that location. Every thread/run/settings/setup request and
 both global/run SSE streams use that owning client. The unified sidebar stores
 only location-tagged thread summaries with a last-sync timestamp under
-`~/Library/Application Support/Claudexor/` (mode `0600`); transcripts and
-artifacts are fetched after reconnect.
+`~/Library/Application Support/Claudexor/` (directory mode `0700`; metadata
+files mode `0600`); transcripts and artifacts are fetched after reconnect.
 
 Remote project browsing uses the home-contained directory endpoint, which
 lists only visible (non-hidden) directories and refuses to descend into dot
