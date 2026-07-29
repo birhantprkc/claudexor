@@ -473,10 +473,17 @@ struct RemoteScopedProjectImage: View {
     @Environment(AppModel.self) private var model
     let target: String
     let alt: String
+    var locationID: ExecutionLocationID? = nil
+    var repoRoot: String? = nil
     @State private var image: NSImage?
     @State private var status: String?
 
     private struct ImageBox: @unchecked Sendable { let image: NSImage }
+    private var loadIdentity: String {
+        let location = locationID ?? model.selectedExecutionLocation
+        let root = repoRoot ?? model.currentThread?.repoRoot ?? ""
+        return "\(location.rawValue)|\(root)|\(target)"
+    }
 
     var body: some View {
         Group {
@@ -498,9 +505,16 @@ struct RemoteScopedProjectImage: View {
                 ProgressView().controlSize(.small)
             }
         }
-        .task(id: "\(model.selectedExecutionLocation.rawValue)|\(target)") {
-            guard let reference = model.remoteProjectFileReference(target: target),
-                  let client = model.gateway(for: model.selectedExecutionLocation)
+        .task(id: loadIdentity) {
+            let scopeLocationID = locationID ?? model.selectedExecutionLocation
+            let scopeRoot = repoRoot ?? model.currentThread?.repoRoot
+            image = nil
+            status = nil
+            guard let reference = model.remoteProjectFileReference(
+                      target: target,
+                      locationID: scopeLocationID,
+                      repoRoot: scopeRoot),
+                  let client = model.gateway(for: scopeLocationID)
             else {
                 status = "Remote image path is outside this project's scope."
                 return
@@ -509,6 +523,7 @@ struct RemoteScopedProjectImage: View {
                 let response = try await client.fetchProjectFile(
                     projectID: reference.projectID,
                     relativePath: reference.relativePath)
+                guard !Task.isCancelled else { return }
                 guard response.contentType.hasPrefix("image/") else {
                     status = "The remote file is not an image."
                     return
@@ -517,6 +532,7 @@ struct RemoteScopedProjectImage: View {
                 let decoded = await Task.detached(priority: .userInitiated) {
                     Self.thumbnail(data)
                 }.value
+                guard !Task.isCancelled else { return }
                 guard let decoded else {
                     status = "The remote image could not be decoded."
                     return

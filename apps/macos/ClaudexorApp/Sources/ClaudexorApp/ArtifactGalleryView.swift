@@ -96,7 +96,10 @@ struct ArtifactGalleryView: View {
         var out: [String] = []
         for runId in runIds {
             guard let run = model.task(runId, at: locationID) else { continue }
-            for path in Self.runImagePaths(diffPaths: run.diff.map(\.path), repoRoot: run.repoRoot)
+            for path in Self.runImagePaths(
+                diffPaths: run.diff.map(\.path),
+                repoRoot: run.repoRoot,
+                locationID: locationID)
             where seen.insert(path).inserted { out.append(path) }
         }
         return out
@@ -107,10 +110,25 @@ struct ArtifactGalleryView: View {
         runIds.compactMap { model.task($0, at: locationID)?.repoRoot }
     }
 
-    /// Pure derivation (unit-tested): diff-relative paths -> absolute image
-    /// paths that pass the thread-scope gate on the real filesystem.
-    static func runImagePaths(diffPaths: [String], repoRoot: String?) -> [String] {
+    /// Pure derivation (unit-tested): local diffs resolve through the host
+    /// filesystem scope gate; remote diffs stay contained and project-relative
+    /// for the remote file service to resolve on its own filesystem.
+    static func runImagePaths(
+        diffPaths: [String],
+        repoRoot: String?,
+        locationID: ExecutionLocationID = .local
+    ) -> [String] {
         guard let root = repoRoot, !root.isEmpty else { return [] }
+        if locationID != .local {
+            return diffPaths
+                .compactMap {
+                    AppModel.containedProjectRelativePath(target: $0, repoRoot: root)
+                }
+                .filter {
+                    ScopedInlineImage.imageExtensions.contains(
+                        URL(fileURLWithPath: $0).pathExtension.lowercased())
+                }
+        }
         return diffPaths
             .map { ($0 as NSString).isAbsolutePath ? $0 : (root as NSString).appendingPathComponent($0) }
             .compactMap { ScopedInlineImage.scopedImagePath($0, roots: [root]) }
@@ -125,9 +143,7 @@ struct ArtifactGalleryView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: Theme.Spacing.md)],
                               alignment: .leading, spacing: Theme.Spacing.md) {
                         ForEach(runChangedImages, id: \.self) { path in
-                            ScopedInlineImage(target: path,
-                                              alt: (path as NSString).lastPathComponent,
-                                              roots: changedImageRoots)
+                            changedImage(path)
                         }
                     }
                 }
@@ -180,6 +196,22 @@ struct ArtifactGalleryView: View {
         // identity keying (D15) drops the previous run's list the instant `runId`
         // changes, so a stale artifact list can never render under a new run.
         .task(id: identity) { await load() }
+    }
+
+    @ViewBuilder
+    private func changedImage(_ path: String) -> some View {
+        if locationID == .local {
+            ScopedInlineImage(
+                target: path,
+                alt: (path as NSString).lastPathComponent,
+                roots: changedImageRoots)
+        } else {
+            RemoteScopedProjectImage(
+                target: path,
+                alt: (path as NSString).lastPathComponent,
+                locationID: locationID,
+                repoRoot: changedImageRoots.first)
+        }
     }
 
     /// A disclosure banner over the shown snapshot: an orange warning with a title,
@@ -277,7 +309,7 @@ struct ArtifactGalleryView: View {
             // the snapshot silently. All state writes are synchronous after the
             // awaits, under the identity guard baked into `existingNonEmpty`.
             refreshFailed = !failedRuns.isEmpty
-            if !failedRuns.isEmpty { failedRunIds = failedRuns }
+            failedRunIds = failedRuns
         case .commit(let failedRuns):
             // Commit under the slot's identity guard; only when the snapshot
             // actually painted do we adopt its failed-run disclosure (a raced late

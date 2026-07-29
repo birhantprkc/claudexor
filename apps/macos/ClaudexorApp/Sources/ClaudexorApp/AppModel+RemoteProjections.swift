@@ -103,22 +103,48 @@ extension AppModel {
     func remoteProjectFileReference(
         target: String
     ) -> (projectID: String, relativePath: String)? {
-        let locationID = selectedExecutionLocation
+        remoteProjectFileReference(
+            target: target,
+            locationID: selectedExecutionLocation,
+            repoRoot: currentThread?.repoRoot)
+    }
+
+    func remoteProjectFileReference(
+        target: String,
+        locationID: ExecutionLocationID,
+        repoRoot: String?
+    ) -> (projectID: String, relativePath: String)? {
         guard locationID != .local,
-              let root = currentThread?.repoRoot,
+              let root = repoRoot,
               let project = remoteProjects[locationID]?.first(where: {
                   $0.root == root
               })
         else { return nil }
+        guard let relative = Self.containedProjectRelativePath(
+            target: target, repoRoot: root)
+        else { return nil }
+        return (project.id, relative)
+    }
+
+    /// Convert an absolute or project-relative UI target into one lexical,
+    /// contained project path. The remote file service performs the canonical
+    /// filesystem/symlink check; this client-side owner prevents a host
+    /// FileManager lookup and keeps every remote image caller on the same scope
+    /// derivation.
+    nonisolated static func containedProjectRelativePath(
+        target: String,
+        repoRoot: String
+    ) -> String? {
+        guard !repoRoot.isEmpty else { return nil }
         var path = target
         if path.hasPrefix("file://") { path.removeFirst("file://".count) }
         let absolute: String
         if path.hasPrefix("/") {
             absolute = path
         } else {
-            absolute = (root as NSString).appendingPathComponent(path)
+            absolute = (repoRoot as NSString).appendingPathComponent(path)
         }
-        let normalizedRoot = URL(fileURLWithPath: root).standardized.path
+        let normalizedRoot = URL(fileURLWithPath: repoRoot).standardized.path
         let normalized = URL(fileURLWithPath: absolute).standardized.path
         let prefix = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
         guard normalized.hasPrefix(prefix) else { return nil }
@@ -126,7 +152,7 @@ extension AppModel {
         guard !relative.isEmpty,
               !relative.split(separator: "/").contains("..")
         else { return nil }
-        return (project.id, relative)
+        return relative
     }
 
     func persistRemoteThreadCache() {

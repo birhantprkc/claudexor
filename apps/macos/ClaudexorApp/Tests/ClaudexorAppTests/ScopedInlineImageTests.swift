@@ -1,4 +1,5 @@
 import AppKit
+import ClaudexorKit
 import Foundation
 import Testing
 @testable import ClaudexorApp
@@ -66,6 +67,22 @@ import Testing
         #expect(paths.first?.hasSuffix("/shots/action.png") == true)
         // No root = no derivation at all.
         #expect(ArtifactGalleryView.runImagePaths(diffPaths: ["shots/action.png"], repoRoot: nil).isEmpty)
+    }
+
+    @Test func remoteRunImagePathsStayRelativeAndDoNotReadTheHostFilesystem() {
+        let remote = ExecutionLocationID.remote(UUID())
+        let paths = ArtifactGalleryView.runImagePaths(
+            diffPaths: [
+                "shots/action.png",
+                "/Users/anka/project/shots/absolute.jpg",
+                "../escape.png",
+                "/Users/anton/secret.png",
+                "notes.txt",
+            ],
+            repoRoot: "/Users/anka/project",
+            locationID: remote)
+
+        #expect(paths == ["shots/action.png", "shots/absolute.jpg"])
     }
 
     /// sol #11/#14: a scoped file-link opens ONLY safe document/image types;
