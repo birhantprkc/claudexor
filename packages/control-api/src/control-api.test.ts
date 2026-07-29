@@ -1858,6 +1858,58 @@ describe("DaemonControlApiServer", () => {
     );
   });
 
+  it("keeps project request errors distinct from service and response failures", async () => {
+    const { daemon } = fakeDaemon();
+    const root = reapMk(join(tmpdir(), "claudexor-project-errors-"));
+    const services: DaemonControlApiOptions["services"] = {
+      listProjects: async () => {
+        throw new Error("registry unavailable");
+      },
+      registerProject: async () => ({ unexpected: true }),
+      relinkProject: async () => {
+        throw new Error("must not reach service");
+      },
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const malformed = await apiFetch(`${base}/projects`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ root: 42 }),
+        });
+        expect(malformed.status).toBe(400);
+        expect(await malformed.json()).toMatchObject({ code: "invalid_request" });
+
+        const malformedId = await apiFetch(`${base}/projects/%C0%AF/relink`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ root }),
+        });
+        expect(malformedId.status).toBe(400);
+
+        const failed = await apiFetch(`${base}/projects`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(failed.status).toBe(500);
+        expect(await failed.json()).toMatchObject({
+          code: "internal_error",
+          message: "registry unavailable",
+        });
+
+        const invalid = await apiFetch(`${base}/projects`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ root }),
+        });
+        expect(invalid.status).toBe(500);
+        expect(await invalid.json()).toMatchObject({ code: "invalid_service_response" });
+      },
+      undefined,
+      services,
+    );
+  });
+
   it("threads: create -> list -> turn (enqueued with threadId + native resume anchors) -> detail", async () => {
     const { daemon, record } = fakeDaemon();
     const repo = reapMk(join(tmpdir(), "claudexor-thread-"));

@@ -30,7 +30,7 @@ export interface ProjectRouteContext {
   services?: ProjectRouteServices;
   readBody(req: IncomingMessage): Promise<unknown>;
   json(res: ServerResponse, status: number, body: unknown): void;
-  requestError(res: ServerResponse, error: unknown): void;
+  requestError(res: ServerResponse, error: unknown, fallbackStatus?: 400 | 500): void;
   binary(
     res: ServerResponse,
     status: number,
@@ -50,6 +50,7 @@ export async function handleProjectRoute(
   if (method === "GET" && path === "/filesystem/directories") {
     const service = ctx.services?.listDirectory;
     if (!service) return unsupported(ctx, res);
+    let requestedPath: string | undefined;
     try {
       const url = new URL(req.url ?? "", "http://localhost");
       for (const key of url.searchParams.keys()) {
@@ -58,10 +59,22 @@ export async function handleProjectRoute(
       if (url.searchParams.getAll("path").length > 1) {
         throw new Error("path may be specified only once");
       }
-      const listing = await service(url.searchParams.get("path") ?? undefined);
-      ctx.json(res, 200, ControlDirectoryListing.parse(listing));
+      requestedPath = url.searchParams.get("path") ?? undefined;
     } catch (error) {
       ctx.requestError(res, error);
+      return true;
+    }
+    let listing: unknown;
+    try {
+      listing = await service(requestedPath);
+    } catch (error) {
+      ctx.requestError(res, error, 500);
+      return true;
+    }
+    try {
+      ctx.json(res, 200, ControlDirectoryListing.parse(listing));
+    } catch {
+      invalidServiceResponse(ctx, res, "listDirectory");
     }
     return true;
   }
@@ -69,11 +82,21 @@ export async function handleProjectRoute(
   if (method === "GET" && path === "/projects") {
     const service = ctx.services?.listProjects;
     if (!service) return unsupported(ctx, res);
+    let response: { projects: unknown[] };
     try {
-      const { projects } = await service();
-      ctx.json(res, 200, ControlProjectListResponse.parse({ projects: projects.map(projectWire) }));
+      response = await service();
     } catch (error) {
-      ctx.requestError(res, error);
+      ctx.requestError(res, error, 500);
+      return true;
+    }
+    try {
+      ctx.json(
+        res,
+        200,
+        ControlProjectListResponse.parse({ projects: response.projects.map(projectWire) }),
+      );
+    } catch {
+      invalidServiceResponse(ctx, res, "listProjects");
     }
     return true;
   }
@@ -81,15 +104,28 @@ export async function handleProjectRoute(
   if (method === "POST" && path === "/projects") {
     const service = ctx.services?.registerProject;
     if (!service) return unsupported(ctx, res);
+    let input: { root: string; idempotencyKey: string; clientId: string };
     try {
       const idempotencyKey = requiredIdempotencyKey(req);
       const raw = await ctx.readBody(req);
       assertNoInlineSecretValues(raw);
       const body = ControlProjectRegisterRequest.parse(raw);
-      const project = await service({ root: body.root, idempotencyKey, clientId: "control-api" });
-      ctx.json(res, 200, projectWire(project));
+      input = { root: body.root, idempotencyKey, clientId: "control-api" };
     } catch (error) {
       ctx.requestError(res, error);
+      return true;
+    }
+    let project: unknown;
+    try {
+      project = await service(input);
+    } catch (error) {
+      ctx.requestError(res, error, 500);
+      return true;
+    }
+    try {
+      ctx.json(res, 200, projectWire(project));
+    } catch {
+      invalidServiceResponse(ctx, res, "registerProject");
     }
     return true;
   }
@@ -98,14 +134,28 @@ export async function handleProjectRoute(
   if (method === "POST" && projectRelinkMatch) {
     const service = ctx.services?.relinkProject;
     if (!service) return unsupported(ctx, res);
+    let projectId: string;
+    let root: string;
     try {
+      projectId = decodeURIComponent(projectRelinkMatch[1] as string);
       const raw = await ctx.readBody(req);
       assertNoInlineSecretValues(raw);
-      const body = ControlProjectRelinkRequest.parse(raw);
-      const project = await service(decodeURIComponent(projectRelinkMatch[1] as string), body.root);
-      ctx.json(res, 200, projectWire(project));
+      root = ControlProjectRelinkRequest.parse(raw).root;
     } catch (error) {
       ctx.requestError(res, error);
+      return true;
+    }
+    let project: unknown;
+    try {
+      project = await service(projectId, root);
+    } catch (error) {
+      ctx.requestError(res, error, 500);
+      return true;
+    }
+    try {
+      ctx.json(res, 200, projectWire(project));
+    } catch {
+      invalidServiceResponse(ctx, res, "relinkProject");
     }
     return true;
   }
@@ -114,7 +164,10 @@ export async function handleProjectRoute(
   if (method === "GET" && projectFileMatch) {
     const service = ctx.services?.fetchProjectFile;
     if (!service) return unsupported(ctx, res);
+    let projectId: string;
+    let requestedPath: string;
     try {
+      projectId = decodeURIComponent(projectFileMatch[1] as string);
       const url = new URL(req.url ?? "", "http://localhost");
       for (const key of url.searchParams.keys()) {
         if (key !== "path") throw new Error(`unexpected query parameter: ${key}`);
@@ -122,13 +175,22 @@ export async function handleProjectRoute(
       if (url.searchParams.getAll("path").length !== 1) {
         throw new Error("one path query parameter is required");
       }
-      const file = await service(
-        decodeURIComponent(projectFileMatch[1] as string),
-        url.searchParams.get("path") ?? "",
-      );
-      ctx.binary(res, 200, file.data, file.contentType, file.fileName);
+      requestedPath = url.searchParams.get("path") ?? "";
     } catch (error) {
       ctx.requestError(res, error);
+      return true;
+    }
+    let file: { data: Buffer; contentType: string; fileName: string };
+    try {
+      file = await service(projectId, requestedPath);
+    } catch (error) {
+      ctx.requestError(res, error, 500);
+      return true;
+    }
+    try {
+      ctx.binary(res, 200, file.data, file.contentType, file.fileName);
+    } catch {
+      invalidServiceResponse(ctx, res, "fetchProjectFile");
     }
     return true;
   }
@@ -140,11 +202,24 @@ export async function handleProjectRoute(
   if (method === "DELETE" && projectDeleteMatch) {
     const service = ctx.services?.removeProject;
     if (!service) return unsupported(ctx, res);
+    let projectId: string;
     try {
-      const receipt = await service(decodeURIComponent(projectDeleteMatch[1] as string));
-      ctx.json(res, 200, ControlProjectRemoveReceipt.parse(receipt));
+      projectId = decodeURIComponent(projectDeleteMatch[1] as string);
     } catch (error) {
       ctx.requestError(res, error);
+      return true;
+    }
+    let receipt: unknown;
+    try {
+      receipt = await service(projectId);
+    } catch (error) {
+      ctx.requestError(res, error, 500);
+      return true;
+    }
+    try {
+      ctx.json(res, 200, ControlProjectRemoveReceipt.parse(receipt));
+    } catch {
+      invalidServiceResponse(ctx, res, "removeProject");
     }
     return true;
   }
@@ -154,6 +229,21 @@ export async function handleProjectRoute(
 function unsupported(ctx: ProjectRouteContext, res: ServerResponse): true {
   ctx.json(res, 501, { error: "projects are not supported by this build" });
   return true;
+}
+
+function invalidServiceResponse(
+  ctx: ProjectRouteContext,
+  res: ServerResponse,
+  service: string,
+): void {
+  ctx.requestError(
+    res,
+    Object.assign(new Error(`${service} returned a response that violates its schema`), {
+      status: 500,
+      code: "invalid_service_response",
+    }),
+    500,
+  );
 }
 
 function projectWire(input: unknown): ControlProject {

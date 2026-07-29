@@ -584,18 +584,16 @@ export class DaemonControlApiServer {
     return this.tokenMatches(bearerCredential(req.headers.authorization));
   }
 
-  private requestError(res: ServerResponse, err: unknown): void {
-    // QA-053: at the request boundary, project a raw ZodError into structured
-    // fieldErrors + a single-line human message (see normalizeRequestValidationError).
-    // Typed errors and non-Zod errors pass through unchanged.
-    const normalized = normalizeRequestValidationError(err);
+  private requestError(res: ServerResponse, err: unknown, fallbackStatus: 400 | 500 = 400): void {
+    // QA-053: normalize raw Zod issues only at the client-request boundary.
+    const normalized = fallbackStatus === 400 ? normalizeRequestValidationError(err) : err;
     this.problem(
       res,
-      finiteHttpStatus(normalized, 400),
+      finiteHttpStatus(normalized, fallbackStatus),
       normalized,
-      "invalid_request",
+      fallbackStatus === 400 ? "invalid_request" : "internal_error",
       false,
-      "bad request",
+      fallbackStatus === 400 ? "bad request" : "service failed",
     );
   }
 
@@ -769,7 +767,7 @@ export class DaemonControlApiServer {
           services: this.opts.services,
           readBody: (request) => this.readBody(request),
           json: (response, status, body) => this.json(response, status, body),
-          requestError: (response, error) => this.requestError(response, error),
+          requestError: (response, error, fallback) => this.requestError(response, error, fallback),
           binary: writeBinaryResponse,
         },
         method,
