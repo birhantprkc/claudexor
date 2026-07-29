@@ -58,6 +58,24 @@ status after`),
 ]`),
     ).toEqual([[{ severity: "WARN", category: "test_gap", claim: "array contract" }]]);
   });
+
+  it("returns no payload for a long unclosed fence", () => {
+    expect(extractJsonBlocks("```" + " ".repeat(128 * 1024))).toEqual([]);
+  });
+
+  it("bounds fallback work across many unclosed line-start candidates", () => {
+    expect(extractJsonBlocks(Array.from({ length: 4_096 }, () => "[").join("\n"))).toEqual([]);
+  });
+
+  it("still finds the newest valid payload inside the fallback candidate budget", () => {
+    const text = [
+      ...Array.from({ length: 4_096 }, () => "["),
+      '[{"severity":"WARN","category":"correctness","claim":"late payload"}]',
+    ].join("\n");
+    expect(extractJsonBlocks(text)).toEqual([
+      [{ severity: "WARN", category: "correctness", claim: "late payload" }],
+    ]);
+  });
 });
 
 describe("parseFindingsDetailed", () => {

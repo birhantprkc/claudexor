@@ -89,6 +89,7 @@ import {
   type ResolvedThreadWorkspace,
 } from "./artifact-serve-routes.js";
 import { requiredGateSpecsFromTaskArtifact } from "./task-contract-gates.js";
+import { bearerCredential } from "./authorization.js";
 import { assertOnlyQueryParams, singleQuery } from "./query.js";
 import {
   parseCredentialProfilesSnapshotQuery,
@@ -580,8 +581,7 @@ export class DaemonControlApiServer {
       !originIsLoopback(req.headers.origin as string | undefined)
     )
       return false;
-    const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
-    return this.tokenMatches(m?.[1]?.trim());
+    return this.tokenMatches(bearerCredential(req.headers.authorization));
   }
 
   private requestError(res: ServerResponse, err: unknown): void {

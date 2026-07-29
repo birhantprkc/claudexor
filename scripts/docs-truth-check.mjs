@@ -453,8 +453,11 @@ function collectSourceHaystack() {
   // underscore, or dotted identifiers. Plain words, flags, paths, and
   // env-style ALLCAPS with dashes are skipped (flags/env are covered by
   // their own checks).
-  const codeShaped =
-    /^(?:[A-Za-z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+|[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+)$/;
+  const codeShapes = [
+    /^[A-Za-z][a-z0-9]+[A-Z][A-Za-z0-9]*$/,
+    /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/,
+    /^[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+$/,
+  ];
   // Terms that are conceptual vocabulary, wire values, or external names —
   // not identifiers this repo's source must contain.
   const allow = new Set([
@@ -524,7 +527,7 @@ function collectSourceHaystack() {
       const token = m[1].trim();
       if (seen.has(token)) continue;
       seen.add(token);
-      if (!codeShaped.test(token)) continue;
+      if (!codeShapes.some((pattern) => pattern.test(token))) continue;
       if (allow.has(token)) continue;
       if (
         token.endsWith(".md") ||

@@ -211,6 +211,25 @@ describe("sealed release native reviewer contract", () => {
   });
 });
 
+describe("reviewer artifact paths", () => {
+  it("trims a long sanitized suffix before creating reviewer artifact paths", async () => {
+    const { cwd, evidenceDir } = makeReviewWorkspace("claudexor-reviewer-slug-");
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-reviewer-slug-artifacts-"));
+    const reviewerId = `a${"-".repeat(16 * 1024)}!`;
+
+    await reviewCandidate({
+      candidateLabel: "Reviewer slug candidate",
+      diff: "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      evidenceDir,
+      artifactsDir,
+      cwd,
+      reviewers: [makeReviewer(reviewerId, "openai", [])],
+    });
+
+    expect(existsSync(join(artifactsDir, "01-a", "metadata.json"))).toBe(true);
+  });
+});
+
 function sameObservedModelReviewer(
   id: string,
   family: ProviderFamily,

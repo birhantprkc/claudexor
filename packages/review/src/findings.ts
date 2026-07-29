@@ -2,6 +2,8 @@ import type { ReviewFinding, RouteProofStatus, Severity } from "@claudexor/schem
 import { ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
 import { newId } from "@claudexor/util";
 
+const MAX_BALANCED_JSON_CANDIDATES = 64;
+
 /** Extract JSON payloads from a reviewer's free-text output (fenced or bare). */
 export function extractJsonBlocks(text: string): unknown[] {
   const results: unknown[] = [];
@@ -86,17 +88,27 @@ export function extractJsonBlocks(text: string): unknown[] {
     }
     return starts;
   };
-  const fence = /```(?:json)?\s*([\s\S]*?)```/g;
-  let m: RegExpExecArray | null;
+  const fence = "```";
+  let cursor = 0;
   let found = false;
-  while ((m = fence.exec(text)) !== null) {
-    found = tryParse(m[1] ?? "", true) || found;
+  while (cursor < text.length) {
+    const start = text.indexOf(fence, cursor);
+    if (start < 0) break;
+    const bodyStart = start + fence.length;
+    const end = text.indexOf(fence, bodyStart);
+    if (end < 0) break;
+    let candidate = text.slice(bodyStart, end);
+    if (candidate.startsWith("json")) candidate = candidate.slice("json".length);
+    found = tryParse(candidate, true) || found;
+    cursor = end + fence.length;
   }
   if (!found) {
     const trimmed = text.trim();
     if (!tryParse(trimmed, true)) {
       const arrayStarts = jsonLineStarts(trimmed, "[");
-      const starts = arrayStarts.length > 0 ? arrayStarts : jsonLineStarts(trimmed, "{");
+      const candidateStarts = arrayStarts.length > 0 ? arrayStarts : jsonLineStarts(trimmed, "{");
+      // Bound adversarial fallback work while preserving the newest-payload policy.
+      const starts = candidateStarts.slice(-MAX_BALANCED_JSON_CANDIDATES);
       for (let i = starts.length - 1; i >= 0; i -= 1) {
         const start = starts[i] ?? 0;
         const end = findBalancedJsonEnd(trimmed, start);

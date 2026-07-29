@@ -1297,8 +1297,8 @@ function createReviewerArtifactContext(
 }
 
 function safeFilePart(value: string): string {
-  const safe = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return safe || "reviewer";
+  const safe = value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+/, "");
+  return safe.replace(/-+$/, "") || "reviewer";
 }
 
 function emitReviewerProgress(
