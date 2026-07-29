@@ -102,14 +102,47 @@ struct ThreadsScreen: View {
     }
 
     var composerSelectionContext: ComposerSelectionContext {
-        let repoRoot = model.selectedThreadId == nil
-            ? model.normalizedProjectRoot
-            : (model.currentThread?.repoRoot ?? model.normalizedProjectRoot)
+        let target = model.composerTurnStartTarget
         return .init(
-            locationID: model.activeExecutionLocation.rawValue,
-            threadID: model.selectedThreadId,
-            repoRoot: repoRoot
+            locationID: target.locationID.rawValue,
+            threadID: target.threadID,
+            repoRoot: target.repoRoot
         )
+    }
+
+    var resolvedComposerStrategy: ComposerStrategyResolution {
+        resolveComposerStrategy(
+            intent: composerMode,
+            agentStrategy: agentStrategy,
+            delegate: DelegationPresentation.requestedForWire(
+                isOn: delegate, control: delegateControlState),
+            councilEnabled: councilEnabled,
+            councilMembers: councilMembers)
+    }
+
+    /// The exact options `send()` passes to AppModel. Availability reads this
+    /// same value, so hidden strategy fields cannot classify a different request.
+    var resolvedComposerOptions: TurnOptions {
+        var options = currentOptions
+        options.untilClean = resolvedComposerStrategy.untilClean
+        options.delegate = resolvedComposerStrategy.delegate
+        options.council = resolvedComposerStrategy.council
+        options.councilN = resolvedComposerStrategy.councilN
+        return options
+    }
+
+    var composerApplicabilityBlocker: String? {
+        model.turnStartAdmission(
+            target: model.composerTurnStartTarget,
+            mode: resolvedComposerStrategy.mode,
+            options: resolvedComposerOptions).interactionBlocker
+    }
+
+    var isolatedWorkspaceApplicabilityBlocker: String? {
+        model.turnStartAdmission(
+            target: model.composerTurnStartTarget.replacingDraftWorkspace(.isolated),
+            mode: resolvedComposerStrategy.mode,
+            options: resolvedComposerOptions).finalBlocker
     }
 
     var browserPolicy: ComposerBrowserPolicy {
@@ -233,6 +266,9 @@ struct ThreadsScreen: View {
                     ?? "Change the harness pool or remove incompatible attachments"
             ))
         }
+        if let composerApplicabilityBlocker {
+            blockers.append(.applicability(composerApplicabilityBlocker))
+        }
         return .resolve(message: composerText, blockers: blockers)
     }
 
@@ -262,6 +298,9 @@ struct ThreadsScreen: View {
             for connection in model.remoteConnections where connection.enabled {
                 await model.connectRemote(connection.id, allowInteraction: false)
             }
+        }
+        .task(id: model.runApplicabilityRefreshKey) {
+            await model.refreshRunApplicability()
         }
         .navigationTitle(navTitle)
         .navigationSubtitle(navSubtitle)
@@ -373,7 +412,11 @@ struct ThreadsScreen: View {
                                 // — a sidebar drag / width change no longer relayouts the
                                 // entire scrolled column as one framed unit; each row
                                 // measures independently (scroll position stays anchored).
-                                TurnCard(turn: turn)
+                                TurnCard(
+                                    turn: turn,
+                                    target: model.turnStartTarget(
+                                        locationID: model.selectedExecutionLocation,
+                                        thread: detail.thread))
                                     .conversationMeasure()
                                     .id(turn.id)
                             }

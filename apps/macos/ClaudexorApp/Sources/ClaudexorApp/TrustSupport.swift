@@ -11,11 +11,17 @@ import ClaudexorKit
 
 extension AppModel {
     /// Load the per-repo user-level trust files (Settings trust section).
-    func refreshTrust(locationID requestedLocation: ExecutionLocationID? = nil) async {
+    func refreshTrust(
+        locationID requestedLocation: ExecutionLocationID? = nil,
+        using preparedClient: GatewayClient? = nil
+    ) async {
         let locationID = requestedLocation ?? activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else { return }
+        guard let requestClient = preparedClient ?? gateway(for: locationID),
+              isCurrentGateway(requestClient, at: locationID)
+        else { return }
         do {
             let entries = try await requestClient.trustList().entries
+            guard isCurrentGateway(requestClient, at: locationID) else { return }
             if locationID == .local {
                 trustEntries = entries
             } else {
@@ -80,21 +86,7 @@ extension AppModel {
     /// the SAME turn — no duplicate bubble). Mirrors sendTurn's post-accept
     /// wiring: refresh, reload the thread, and stream the started run.
     @discardableResult
-    func retryTurn(threadId: String, turnId: String) async -> Bool {
-        let locationID = selectedExecutionLocation
-        guard !isThreadBusy(threadId) else {
-            threadStatus = "Wait for the running turn to finish, or Stop it, before retrying."
-            return false
-        }
-        return await withTurnSubmission {
-            await retryTurnCore(
-                locationID: locationID, threadId: threadId, turnId: turnId)
-        }
-    }
-
-    /// The retry body WITHOUT the busy guard/bracket — composed by retryTurn
-    /// and grantFullAccessAndRetry, which own their own busy bracketing.
-    private func retryTurnCore(
+    func retryTurn(
         locationID: ExecutionLocationID,
         threadId: String,
         turnId: String
@@ -103,24 +95,64 @@ extension AppModel {
             threadStatus = "Engine offline — reconnect before retrying."
             return false
         }
+        guard !isThreadBusy(threadId, at: locationID) else {
+            threadStatus = "Wait for the running turn to finish, or Stop it, before retrying."
+            return false
+        }
+        return await withTurnSubmission {
+            await retryTurnCore(
+                using: requestClient,
+                locationID: locationID,
+                threadId: threadId,
+                turnId: turnId)
+        }
+    }
+
+    /// The retry body WITHOUT the busy guard/bracket — composed by retryTurn
+    /// and grantFullAccessAndRetry, which own their own busy bracketing.
+    private func retryTurnCore(
+        using requestClient: GatewayClient,
+        locationID: ExecutionLocationID,
+        threadId: String,
+        turnId: String
+    ) async -> Bool {
+        guard isCurrentGateway(requestClient, at: locationID) else {
+            threadStatus = Self.turnStartConnectionChangedMessage
+            return false
+        }
         let result: RunStartResult
         do {
             result = try await requestClient.retryTurn(
                 threadId: threadId, turnId: turnId)
         } catch {
-            threadStatus = userMessage(for: error)
+            threadStatus = isCurrentGateway(requestClient, at: locationID)
+                ? userMessage(for: error)
+                : Self.turnStartConnectionChangedMessage
             // The retry itself may have been refused AGAIN (fresh enqueue_error
             // persisted server-side) — reload so the card shows the new reason.
-            await openThread(locationID: locationID, id: threadId)
+            if isCurrentGateway(requestClient, at: locationID),
+               selectedExecutionLocation == locationID,
+               selectedThreadId == threadId {
+                await openThread(locationID: locationID, id: threadId)
+            }
             return false
         }
         threadStatus = nil
+        guard isCurrentGateway(requestClient, at: locationID) else {
+            threadStatus =
+                "Retry accepted, but the engine connection changed before it could be refreshed."
+            return true
+        }
         if locationID == .local {
             await refreshRuns()
         } else {
-            await refreshRemoteThreads(locationID)
+            await refreshRemoteThreads(locationID, using: requestClient)
         }
-        await openThread(locationID: locationID, id: threadId)
+        guard isCurrentGateway(requestClient, at: locationID) else { return true }
+        if selectedExecutionLocation == locationID, selectedThreadId == threadId {
+            await openThread(locationID: locationID, id: threadId)
+        }
+        guard isCurrentGateway(requestClient, at: locationID) else { return true }
         if case .started(let info) = result {
             if locationID == .local {
                 stream(runId: info.runId)
@@ -139,13 +171,17 @@ extension AppModel {
     /// grant+retry runs inside ONE busy bracket: a concurrent send during the
     /// trust write would advance the thread tail and 409 the promised retry.
     @discardableResult
-    func grantFullAccessAndRetry(threadId: String, turnId: String, repoRoot: String) async -> Bool {
-        let locationID = selectedExecutionLocation
+    func grantFullAccessAndRetry(
+        locationID: ExecutionLocationID,
+        threadId: String,
+        turnId: String,
+        repoRoot: String
+    ) async -> Bool {
         guard let requestClient = gateway(for: locationID) else {
             threadStatus = "Engine offline — reconnect before granting access."
             return false
         }
-        guard !isThreadBusy(threadId) else {
+        guard !isThreadBusy(threadId, at: locationID) else {
             threadStatus = "Wait for the running turn to finish, or Stop it, before retrying."
             return false
         }
@@ -157,11 +193,22 @@ extension AppModel {
                 threadStatus = userMessage(for: error)
                 return false
             }
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                threadStatus = Self.turnStartConnectionChangedMessage
+                return false
+            }
             // Keep the Settings trust list truthful if it is already open: the
             // one-click grant is the same write the Settings section audits.
-            await refreshTrust(locationID: locationID)
+            await refreshTrust(locationID: locationID, using: requestClient)
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                threadStatus = Self.turnStartConnectionChangedMessage
+                return false
+            }
             return await retryTurnCore(
-                locationID: locationID, threadId: threadId, turnId: turnId)
+                using: requestClient,
+                locationID: locationID,
+                threadId: threadId,
+                turnId: turnId)
         }
     }
 }
@@ -238,6 +285,7 @@ struct TurnRefusalCard: View {
     @Environment(AppModel.self) private var model
     let turn: ThreadTurnInfo
     let refusal: TurnEnqueueErrorInfo
+    let target: TurnStartTarget
     /// True while a retry (or grant+retry) is in flight, so the remedy button
     /// can't be double-clicked.
     @State private var retrying = false
@@ -263,14 +311,18 @@ struct TurnRefusalCard: View {
                     // Retry would 409 — say so instead of offering it.
                     Text("This turn cannot be retried in place — send a new message instead.")
                         .font(.caption2).foregroundStyle(.tertiary)
-                } else if isTrustRefusal, let repoRoot = model.selectedThreadDetail?.thread.repoRoot {
+                } else if isTrustRefusal, !target.repoRoot.isEmpty {
                     remedyButton(
                         label: "Allow full access & Retry",
                         systemImage: "lock.open.fill",
                         prominent: true,
-                        help: "Permanently allows unsandboxed full access for \(repoRoot) (stored user-level, outside the repo; revoke any time in Settings → Secrets → Trust or `claudexor trust --revoke-full-access`), then retries this exact turn."
+                        help: "Permanently allows unsandboxed full access for \(target.repoRoot) (stored user-level, outside the repo; revoke any time in Settings → Secrets → Trust or `claudexor trust --revoke-full-access`), then retries this exact turn."
                     ) {
-                        await model.grantFullAccessAndRetry(threadId: turn.threadId, turnId: turn.id, repoRoot: repoRoot)
+                        await model.grantFullAccessAndRetry(
+                            locationID: target.locationID,
+                            threadId: turn.threadId,
+                            turnId: turn.id,
+                            repoRoot: target.repoRoot)
                     }
                 } else {
                     remedyButton(
@@ -279,7 +331,10 @@ struct TurnRefusalCard: View {
                         prominent: false,
                         help: "Re-enqueue this same turn (same prompt and options). If the refusal persists, the fresh reason replaces this card."
                     ) {
-                        await model.retryTurn(threadId: turn.threadId, turnId: turn.id)
+                        await model.retryTurn(
+                            locationID: target.locationID,
+                            threadId: turn.threadId,
+                            turnId: turn.id)
                     }
                 }
             }

@@ -16,6 +16,7 @@ import ClaudexorKit
 struct TurnCard: View {
     @Environment(AppModel.self) private var model
     let turn: ThreadTurnInfo
+    let target: TurnStartTarget
     @State private var actionError: String?
     /// Set after a successful accept-risk decision so the apply affordance appears
     /// immediately; the SERVER gate still owns whether apply succeeds.
@@ -30,7 +31,14 @@ struct TurnCard: View {
     /// W22: a LONG final answer starts height-collapsed with a Show more toggle.
     @State private var answerExpanded = false
 
-    private var run: TaskRun? { turn.runId.flatMap { model.task($0) } }
+    private var run: TaskRun? {
+        turn.runId.flatMap { model.task($0, at: target.locationID) }
+    }
+
+    private var planImplementBlocker: String? {
+        model.turnStartAdmission(
+            target: target, mode: .agent, options: .init()).interactionBlocker
+    }
 
     /// A decision-flow run applies from its CHAT RECEIPT (decide → apply inline);
     /// a clean run applies from the thread workspace. Split so apply renders once.
@@ -135,7 +143,7 @@ struct TurnCard: View {
                 // D17: a plan that came back needs_answers surfaces its open
                 // questions inline; answering submits a follow-up plan turn.
                 if run.mode == .plan, run.planReadiness?.state == "needs_answers", !run.planQuestions.isEmpty {
-                    PlanQuestionCard(questions: run.planQuestions, threadId: turn.threadId)
+                    PlanQuestionCard(questions: run.planQuestions, target: target)
                 }
                 // The interactive "Implement plan" affordance stays inline (owner).
                 if let result = turn.run?.result, result.kind == "plan" {
@@ -152,7 +160,7 @@ struct TurnCard: View {
                 // Inline failure card: a terminal-FAILED turn with nothing to show.
                 if isSilentFailure(run) { failureCard(run) }
             } else if let refusal = turn.enqueueError {
-                TurnRefusalCard(turn: turn, refusal: refusal)
+                TurnRefusalCard(turn: turn, refusal: refusal, target: target)
             } else if let state = turn.run?.state {
                 Text(state).font(.caption).foregroundStyle(.secondary)
             }
@@ -273,13 +281,20 @@ struct TurnCard: View {
             if run?.planReadiness?.state == "needs_answers" {
                 Button(implementingPlan ? "Implementing…" : "Implement anyway") { implementPlan(override: true) }
                     .buttonStyle(.bordered).controlSize(.small).tint(.red)
-                    .disabled(implementingPlan || model.selectedThreadBusy)
-                    .help("Override the plan-readiness gate and implement with questions still open")
+                    .disabled(
+                        implementingPlan
+                            || model.isThreadBusy(target.threadID, at: target.locationID)
+                            || planImplementBlocker != nil)
+                    .help(planImplementBlocker
+                        ?? "Override the plan-readiness gate and implement with questions still open")
             } else {
                 Button(implementingPlan ? "Implementing…" : "Implement plan") { implementPlan(override: false) }
                     .buttonStyle(.borderedProminent).controlSize(.small)
-                    .disabled(implementingPlan || model.selectedThreadBusy)
-                    .help("Run an agent turn that implements this plan")
+                    .disabled(
+                        implementingPlan
+                            || model.isThreadBusy(target.threadID, at: target.locationID)
+                            || planImplementBlocker != nil)
+                    .help(planImplementBlocker ?? "Run an agent turn that implements this plan")
             }
         }
     }
@@ -432,7 +447,7 @@ struct TurnCard: View {
         options.overridePlanReadiness = override
         Task {
             await model.composerSend(prompt: "Implement this plan.", mode: .agent,
-                                     planRunId: runId, options: options, onThread: turn.threadId)
+                                     planRunId: runId, options: options, target: target)
             implementingPlan = false
         }
     }

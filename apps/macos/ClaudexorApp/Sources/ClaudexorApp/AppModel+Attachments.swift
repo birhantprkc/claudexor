@@ -40,7 +40,8 @@ extension AppModel {
 
     func uploadAttachments(
         _ attachments: [PendingAttachment],
-        client: GatewayClient
+        client: GatewayClient,
+        locationID: ExecutionLocationID
     ) async throws -> [ResourceAttachmentRef] {
         var references: [ResourceAttachmentRef] = []
         for attachment in attachments {
@@ -50,6 +51,7 @@ extension AppModel {
                 name: attachment.name,
                 data: attachment.data
             ))
+            guard isCurrentGateway(client, at: locationID) else { break }
         }
         return references
     }

@@ -68,11 +68,12 @@ enum ComposerSendBlocker: Equatable {
     case approvals(String)
     case testCommand(String)
     case attachments(String)
+    case applicability(String)
 
     var reason: String {
         switch self {
         case .budget(let value), .reviewer(let value), .approvals(let value),
-             .testCommand(let value), .attachments(let value):
+             .testCommand(let value), .attachments(let value), .applicability(let value):
             return value
         }
     }

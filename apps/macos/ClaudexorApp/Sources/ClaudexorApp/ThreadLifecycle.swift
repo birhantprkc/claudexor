@@ -89,7 +89,8 @@ extension AppModel {
             runListReconciliationNeeded = true
             let refreshSuccesses = successfulRunsRefreshes
             await refreshRuns()
-            guard selectedExecutionLocation == locationID,
+            guard isCurrentGateway(requestClient, at: locationID),
+                  selectedExecutionLocation == locationID,
                   selectedThreadId == id,
                   threadLoadGeneration == generation
             else { return }
@@ -99,12 +100,14 @@ extension AppModel {
         }
         do {
             let detail = try await detailLoad.value
-            guard selectedExecutionLocation == locationID,
+            guard isCurrentGateway(requestClient, at: locationID),
+                  selectedExecutionLocation == locationID,
                   selectedThreadId == id,
                   threadLoadGeneration == generation
             else { return }
             selectedThreadDetail = detail
-            guard selectedExecutionLocation == locationID,
+            guard isCurrentGateway(requestClient, at: locationID),
+                  selectedExecutionLocation == locationID,
                   selectedThreadId == id, threadLoadGeneration == generation else { return }
             evictBackgroundRunData()
             // Existing run projection is local-daemon scoped. Remote chat cards
@@ -112,7 +115,10 @@ extension AppModel {
             // the remote poller, avoiding daemon-id collisions.
             if locationID == .local {
                 for turn in detail.turns.suffix(5) {
-                    guard selectedThreadId == id, threadLoadGeneration == generation else { return }
+                    guard isCurrentGateway(requestClient, at: locationID),
+                          selectedThreadId == id,
+                          threadLoadGeneration == generation
+                    else { return }
                     if let runId = turn.runId {
                         let missing = !liveTasks.contains(where: { $0.id == runId })
                         if !missing || turn.run?.delegation?.requested == true {
@@ -124,7 +130,8 @@ extension AppModel {
                 // Match local bounded hydration: completed remote turns carry
                 // detail-only apply/evidence fields that the runs list omits.
                 for turn in detail.turns.suffix(5) {
-                    guard selectedExecutionLocation == locationID,
+                    guard isCurrentGateway(requestClient, at: locationID),
+                          selectedExecutionLocation == locationID,
                           selectedThreadId == id,
                           threadLoadGeneration == generation
                     else { return }
@@ -144,7 +151,8 @@ extension AppModel {
                 }
             }
         } catch {
-            guard selectedExecutionLocation == locationID,
+            guard isCurrentGateway(requestClient, at: locationID),
+                  selectedExecutionLocation == locationID,
                   selectedThreadId == id, threadLoadGeneration == generation else { return }
             if mayReconnect,
                isRecoverableRemoteTransportFailure(error),
@@ -226,19 +234,37 @@ extension AppModel {
         locationID requestedLocationID: ExecutionLocationID? = nil
     ) async -> String? {
         let locationID = requestedLocationID ?? selectedExecutionLocation
+        let selectionWasAtTarget = selectedExecutionLocation == locationID
+        let targetThreadID = selectedThreadId
         guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
             let result = try await requestClient.apply(
                 runId: runId, body: ApplyRunRequest(mode: mode))
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                return Self.turnStartConnectionChangedMessage
+            }
             mutateTask(runId, at: locationID) { $0.deliveryReceipt = result }
             guard result.applied else { return result.detail ?? "Apply was refused." }
+            guard selectionWasAtTarget,
+                  selectedExecutionLocation == locationID,
+                  selectedThreadId == targetThreadID
+            else { return nil }
             if locationID == .local {
-                await loadRunDetail(runId)
-            } else if let threadId = selectedThreadId {
-                await refreshRemoteThreads(locationID)
-                await openThread(locationID: locationID, id: threadId)
+                await loadRunDetail(runId, locationID: locationID)
+            } else {
+                await refreshRemoteThreads(locationID, using: requestClient)
+                if isCurrentGateway(requestClient, at: locationID),
+                   selectedExecutionLocation == locationID,
+                   selectedThreadId == targetThreadID,
+                   let targetThreadID {
+                    await openThread(locationID: locationID, id: targetThreadID)
+                }
             }
-            route = .task(runId)
+            if isCurrentGateway(requestClient, at: locationID),
+               selectedExecutionLocation == locationID,
+               selectedThreadId == targetThreadID {
+                route = .task(runId)
+            }
             return nil
         } catch { return "Apply failed: \(error)" }
     }
@@ -248,20 +274,37 @@ extension AppModel {
         locationID requestedLocationID: ExecutionLocationID? = nil
     ) async -> String? {
         let locationID = requestedLocationID ?? selectedExecutionLocation
+        let selectionWasAtTarget = selectedExecutionLocation == locationID
+        let targetThreadID = selectedThreadId
         guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
             let retry = try await requestClient.retryRun(runId: runId)
-            if locationID == .local {
-                await refreshRuns()
-            } else {
-                await refreshRemoteThreads(locationID)
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                return Self.turnStartConnectionChangedMessage
             }
             if locationID == .local, let id = retry.runId {
-                route = .task(id)
                 stream(runId: id)
             }
-            if let threadId = selectedThreadId {
-                await openThread(locationID: locationID, id: threadId)
+            guard selectionWasAtTarget,
+                  selectedExecutionLocation == locationID,
+                  selectedThreadId == targetThreadID
+            else { return nil }
+            if locationID == .local {
+                await refreshRuns()
+                if isCurrentGateway(requestClient, at: locationID),
+                   selectedExecutionLocation == locationID,
+                   selectedThreadId == targetThreadID,
+                   let id = retry.runId {
+                    route = .task(id)
+                }
+            } else {
+                await refreshRemoteThreads(locationID, using: requestClient)
+                if isCurrentGateway(requestClient, at: locationID),
+                   selectedExecutionLocation == locationID,
+                   selectedThreadId == targetThreadID,
+                   let targetThreadID {
+                    await openThread(locationID: locationID, id: targetThreadID)
+                }
             }
             return nil
         } catch { return "Retry failed: \(userMessage(for: error))" }
@@ -275,20 +318,35 @@ extension AppModel {
         return try? await requestClient.runAgainDraft(runId: runId)
     }
 
-    func startRunAgain(_ draft: RunAgainDraft, prompt: String) async -> String? {
-        let locationID = selectedExecutionLocation
+    func startRunAgain(
+        _ draft: RunAgainDraft,
+        prompt: String,
+        locationID: ExecutionLocationID
+    ) async -> String? {
+        let selectionWasAtTarget = selectedExecutionLocation == locationID
+        let targetThreadID = selectedThreadId
         guard let requestClient = gateway(for: locationID) else { return "Engine offline." }
         do {
             let result = try await requestClient.startRunAgain(
                 request: draft.request, prompt: prompt)
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                threadStatus =
+                    "Run Again was accepted, but the engine connection changed before it could be refreshed."
+                return nil
+            }
             if locationID == .local {
                 await refreshRuns()
             } else {
-                await refreshRemoteThreads(locationID)
+                await refreshRemoteThreads(locationID, using: requestClient)
             }
+            guard isCurrentGateway(requestClient, at: locationID) else { return nil }
             if locationID == .local, case .started(let info) = result {
-                route = .task(info.runId)
                 stream(runId: info.runId)
+                if selectionWasAtTarget,
+                   selectedExecutionLocation == locationID,
+                   selectedThreadId == targetThreadID {
+                    route = .task(info.runId)
+                }
             }
             return nil
         } catch { return "Run Again failed: \(userMessage(for: error))" }

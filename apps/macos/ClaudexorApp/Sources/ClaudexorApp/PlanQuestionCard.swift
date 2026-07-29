@@ -54,8 +54,8 @@ enum PlanAnswerComposer {
 struct PlanQuestionCard: View {
     @Environment(AppModel.self) private var model
     let questions: [PlanQuestion]
-    /// The plan turn's owning thread — answers bind here, not to live selection.
-    let threadId: String?
+    /// The plan turn's owning thread/location/workspace, frozen by its card.
+    let target: TurnStartTarget
 
     @State private var selections: [String: Set<String>] = [:]
     @State private var freeText: [String: String] = [:]
@@ -64,6 +64,11 @@ struct PlanQuestionCard: View {
 
     private var complete: Bool {
         PlanAnswerComposer.isComplete(questions, selections: selections, freeText: freeText)
+    }
+
+    private var applicabilityBlocker: String? {
+        model.turnStartAdmission(
+            target: target, mode: .plan, options: .init()).interactionBlocker
     }
 
     var body: some View {
@@ -89,10 +94,13 @@ struct PlanQuestionCard: View {
                 Button(sending ? "Sending…" : "Submit answers") { submit() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(!complete || sending || model.selectedThreadBusy)
-                    .help(complete
+                    .disabled(
+                        !complete || sending
+                            || model.isThreadBusy(target.threadID, at: target.locationID)
+                            || applicabilityBlocker != nil)
+                    .help(applicabilityBlocker ?? (complete
                         ? "Send your answers as a follow-up plan turn"
-                        : "Answer every question first")
+                        : "Answer every question first"))
             }
         }
         .padding(Theme.Spacing.md)
@@ -156,7 +164,8 @@ struct PlanQuestionCard: View {
         sending = true
         errorMessage = nil
         Task {
-            let ok = await model.composerSend(prompt: prompt, mode: .plan, onThread: threadId)
+            let ok = await model.composerSend(
+                prompt: prompt, mode: .plan, target: target)
             sending = false
             if !ok { errorMessage = model.threadStatus ?? "The plan turn was not accepted." }
         }

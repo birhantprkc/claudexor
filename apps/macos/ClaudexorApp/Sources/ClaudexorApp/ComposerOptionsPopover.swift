@@ -251,7 +251,18 @@ extension ThreadsScreen {
                         set: { model.draftIsolatedWorkspace = $0 }
                     ))
                     .toggleStyle(.switch).tint(Theme.accent)
-                    .help("Turns accumulate in a separate worktree; apply them to the project later with “Apply thread”. Off = in-place (the next turn sees prior edits).")
+                    .disabled(
+                        !model.draftIsolatedWorkspace
+                            && isolatedWorkspaceApplicabilityBlocker != nil)
+                    .help(isolatedWorkspaceApplicabilityBlocker
+                        ?? "Turns accumulate in a separate worktree; apply them to the project later with “Apply thread”. Off = in-place (the next turn sees prior edits).")
+                    if !model.draftIsolatedWorkspace,
+                       let blocker = isolatedWorkspaceApplicabilityBlocker {
+                        Label(blocker, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.status(.caution))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             // Agent STRATEGY knob (D24): Single / Best-of / Until-clean / Create

@@ -1,4 +1,5 @@
 import Foundation
+import ClaudexorKit
 
 /// Agent execution strategy knob (D24): Agent mode offers these as KNOBS
 /// (Single is the default), replacing the old distinct Best-of / Create /
@@ -86,4 +87,36 @@ func resolveComposerStrategy(
         // Ask (and any other read-only intent) carries no strategy.
         return .init(mode: intent, delegate: false, council: false, councilN: nil, untilClean: false)
     }
+}
+
+/// The repair fields that actually survive serialization for one resolved
+/// composer mode. Hidden/stale controls must pass through this owner too: a
+/// Best-of or Create turn, for example, cannot accidentally look convergent to
+/// an availability gate when `sendTurn` will omit its stale attempts value.
+struct ComposerRepairWire: Equatable {
+    var attempts: Int?
+    var untilClean: Bool?
+}
+
+func composerRepairWire(
+    mode: RunMode,
+    requestedAttempts: Int?,
+    requestedUntilClean: Bool
+) -> ComposerRepairWire {
+    let flags = mode.strategyFlags
+    let isPlainAgent = mode == .agent
+    let untilClean = (isPlainAgent && requestedUntilClean) || flags.untilClean
+    return ComposerRepairWire(
+        attempts: isPlainAgent && !untilClean ? requestedAttempts : nil,
+        untilClean: untilClean ? true : nil)
+}
+
+/// Select a server-projected Git cell from the exact repair fields that will
+/// ride the wire. This classifies; it never decides whether Git is required.
+func composerRunApplicabilityShape(
+    mode: RunMode,
+    repair: ComposerRepairWire
+) -> RunApplicabilityShape {
+    guard mode.apiValue == "agent" else { return .readOnly }
+    return repair.untilClean == true || repair.attempts != nil ? .agentConvergence : .agentOther
 }

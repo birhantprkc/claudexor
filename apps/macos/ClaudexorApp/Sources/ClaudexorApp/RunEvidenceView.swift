@@ -175,7 +175,8 @@ struct RunEvidenceView: View {
                     guard let draft = runAgainDraft else { return }
                     runningAgain = true
                     Task {
-                        actionError = await model.startRunAgain(draft, prompt: runAgainPrompt)
+                        actionError = await model.startRunAgain(
+                            draft, prompt: runAgainPrompt, locationID: locationID)
                         runningAgain = false
                         if actionError == nil { showRunAgain = false }
                     }

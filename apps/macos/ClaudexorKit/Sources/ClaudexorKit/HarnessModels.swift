@@ -128,8 +128,27 @@ public struct HarnessCheck: Codable, Sendable, Equatable {
     public let detail: String?
 }
 
+/// Execution-location Git readiness returned beside the fresh harness snapshot.
+public struct WorkspaceGitCapability: Codable, Sendable, Equatable, Hashable {
+    public let status: String
+    public let version: String?
+    public let detail: String?
+    public let remediation: String?
+
+    public init(status: String, version: String?, detail: String?, remediation: String?) {
+        self.status = status
+        self.version = version
+        self.detail = detail
+        self.remediation = remediation
+    }
+
+    public var available: Bool { status == "available" }
+}
+
 public struct HarnessListResponse: Codable, Sendable {
     public let harnesses: [HarnessStatus]
+    /// nil when connected to a daemon predating Git-capability projection.
+    public let git: WorkspaceGitCapability?
 }
 
 /// One enumerable model a harness offers. Mirrors the control-api `HarnessModel`

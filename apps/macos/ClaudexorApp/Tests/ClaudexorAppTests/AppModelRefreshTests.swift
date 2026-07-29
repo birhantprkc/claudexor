@@ -720,13 +720,22 @@ struct AppModelRefreshTests {
             }
         }
 
+        let target = TurnStartTarget.existing(
+            locationID: .local,
+            threadID: "thread-plan",
+            repoRoot: "/tmp/project",
+            workspaceMode: "in_place",
+            eligibleHarnesses: [])
+        model.runApplicabilityProjections[.local] = .ready(
+            try testRunApplicabilityResponse(root: "/tmp/project"))
+
         let sent = await model.composerSend(
             prompt: "Use the attached planning context",
             mode: .plan,
             attachments: [PendingAttachment(
                 kind: "file", mime: "text/plain", name: "plan-note.txt", data: payload
             )],
-            onThread: "thread-plan"
+            target: target
         )
 
         #expect(sent)
@@ -770,10 +779,19 @@ struct AppModelRefreshTests {
             }
         }
 
+        let target = TurnStartTarget.existing(
+            locationID: .local,
+            threadID: "thread-race",
+            repoRoot: "/tmp/project",
+            workspaceMode: "in_place",
+            eligibleHarnesses: ["claude", "cursor"])
+        model.runApplicabilityProjections[.local] = .ready(
+            try testRunApplicabilityResponse(root: "/tmp/project"))
+
         let sent = await model.composerSend(
             prompt: "Race the selected pool",
             mode: .bestOfN,
-            onThread: "thread-race"
+            target: target
         )
 
         let request = try JSONDecoder().decode(

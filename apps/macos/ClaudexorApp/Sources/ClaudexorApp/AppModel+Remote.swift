@@ -87,6 +87,19 @@ extension AppModel {
         gateway(for: locationID) === requestClient
     }
 
+    /// The only reconnect-time remote client-slot mutation. Applicability is a
+    /// receipt from one daemon epoch and must be retired before another client
+    /// can occupy the same logical location.
+    func adoptRemoteClientForReconnect(
+        _ newClient: GatewayClient,
+        at locationID: ExecutionLocationID
+    ) {
+        if remoteClients[locationID] !== newClient {
+            retireRunApplicability(at: locationID)
+        }
+        remoteClients[locationID] = newClient
+    }
+
     func refreshSSHHosts() {
         sshHostScan = SSHHostScanState.scan()
     }
@@ -333,7 +346,7 @@ extension AppModel {
                 await closeRemoteControlForward(id, through: generation)
                 return
             }
-            remoteClients[connection.locationID] = activeClient
+            adoptRemoteClientForReconnect(activeClient, at: connection.locationID)
             if let harnessValue {
                 remoteHarnesses[connection.locationID] =
                     Self.mapHarnessStatuses(harnessValue)
@@ -416,6 +429,7 @@ extension AppModel {
 
     @discardableResult
     func disconnectRemote(_ id: UUID) async -> Int? {
+        let locationID = ExecutionLocationID.remote(id)
         let generation = (remoteConnectionGenerations[id] ?? 0) + 1
         remoteConnectionGenerations[id] = generation
         remoteConnectTasks.removeValue(forKey: id)?.cancel()
@@ -439,12 +453,12 @@ extension AppModel {
         }
         if remoteDeviceLogin?.connectionID == id { remoteDeviceLogin = nil }
         if remoteDirectoryBrowser?.connectionID == id { remoteDirectoryBrowser = nil }
-        if pendingRemoteThreadSelection?.locationID == .remote(id) {
+        if pendingRemoteThreadSelection?.locationID == locationID {
             pendingRemoteThreadSelection = nil
         }
-        remoteClients.removeValue(forKey: .remote(id))
-        cancelRemoteStreams(.remote(id))
-        discardRemoteDaemonProjections(at: .remote(id))
+        remoteClients.removeValue(forKey: locationID)
+        cancelRemoteStreams(locationID)
+        discardRemoteDaemonProjections(at: locationID)
         await closeRemoteControlForward(id, through: generation)
         guard remoteConnectionGenerations[id] == generation else { return nil }
         if let forward = remotePreviewForwards.removeValue(forKey: id) {
@@ -493,9 +507,13 @@ extension AppModel {
         await sshConnectionManager.shutdown()
     }
 
-    func refreshRemoteThreads(_ locationID: ExecutionLocationID) async {
+    func refreshRemoteThreads(
+        _ locationID: ExecutionLocationID,
+        using preparedClient: GatewayClient? = nil
+    ) async {
         guard let remote = remoteConnection(for: locationID),
-              let client = remoteClients[locationID]
+              let client = preparedClient ?? remoteClients[locationID],
+              isCurrentGateway(client, at: locationID)
         else { return }
         do {
             let list = try await client.listThreads()
@@ -506,7 +524,7 @@ extension AppModel {
                 RemoteThreadCacheEntry(locationID: locationID, thread: $0, syncedAt: now)
             })
             persistRemoteThreadCache()
-            await refreshRemoteRuns(locationID)
+            await refreshRemoteRuns(locationID, using: client)
             guard isCurrentGateway(client, at: locationID) else { return }
             for thread in list.threads {
                 guard let runID = thread.headRunId,
@@ -528,8 +546,13 @@ extension AppModel {
         }
     }
 
-    func refreshRemoteRuns(_ locationID: ExecutionLocationID) async {
-        guard let client = remoteClients[locationID] else { return }
+    func refreshRemoteRuns(
+        _ locationID: ExecutionLocationID,
+        using preparedClient: GatewayClient? = nil
+    ) async {
+        guard let client = preparedClient ?? remoteClients[locationID],
+              isCurrentGateway(client, at: locationID)
+        else { return }
         do {
             let summaries = try await client.listRuns()
             guard remoteClients[locationID] === client else { return }

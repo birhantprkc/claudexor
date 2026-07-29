@@ -17,6 +17,12 @@ extension AppModel {
             : (remoteHarnesses[activeExecutionLocation] ?? [])
     }
 
+    var activeGitCapability: WorkspaceGitCapability? {
+        activeExecutionLocation == .local
+            ? gitCapability
+            : remoteGitCapabilities[activeExecutionLocation]
+    }
+
     var activeSettingsSnapshot: SettingsSnapshot? {
         activeExecutionLocation == .local
             ? settingsSnapshot

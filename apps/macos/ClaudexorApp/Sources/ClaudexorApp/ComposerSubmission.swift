@@ -19,6 +19,13 @@ extension ThreadsScreen {
         } else if let testCommandMessage = testCommandErrorMessage {
             Label(testCommandMessage, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption).foregroundStyle(.orange).lineLimit(1)
+        } else if let blocker = composerApplicabilityBlocker, threadHasProject {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+                Label(blocker, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).lineLimit(2)
+                Button("Recheck") { Task { await model.refreshRunApplicability() } }
+                    .buttonStyle(.link).font(.caption)
+            }
         } else if !threadHasProject {
             Text("Pick a project to use Agent · Plan · Best-of")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -67,19 +74,9 @@ extension ThreadsScreen {
             }
             return
         }
-        // Resolve the composer's intent + strategy knobs (D24/D31/D32) into the
-        // effective wire mode + delegate/council/until-clean facts.
-        let resolution = resolveComposerStrategy(
-            intent: composerMode, agentStrategy: agentStrategy,
-            delegate: DelegationPresentation.requestedForWire(
-                isOn: delegate, control: delegateControlState),
-            councilEnabled: councilEnabled, councilMembers: councilMembers)
-        let mode = resolution.mode
-        var options = currentOptions
-        options.untilClean = resolution.untilClean
-        options.delegate = resolution.delegate
-        options.council = resolution.council
-        options.councilN = resolution.councilN
+        let target = model.composerTurnStartTarget
+        let mode = resolvedComposerStrategy.mode
+        let options = resolvedComposerOptions
         let chosenModel = primaryFamily.flatMap { composerModels[$0.rawValue] } ?? ""
         let atts = composerAttachments
         let materializingFirstTurn = model.selectedThreadId == nil
@@ -93,6 +90,7 @@ extension ThreadsScreen {
                 model: chosenModel,
                 attachments: atts,
                 options: options,
+                target: target,
                 onMaterializedThread: { threadID in
                     composerSubmissions.registerMaterializedThread(
                         threadID,

@@ -196,6 +196,14 @@ final class AppModel {
     var draftIsolatedWorkspace = false
     var liveHarnesses: [HarnessInfo] = []
     var remoteHarnesses: [ExecutionLocationID: [HarnessInfo]] = [:]
+    /// Location-wide Git probe from /harnesses. It can trigger a root-scoped
+    /// applicability refresh, but never decides a strategy itself.
+    var gitCapability: WorkspaceGitCapability?
+    var remoteGitCapabilities: [ExecutionLocationID: WorkspaceGitCapability] = [:]
+    /// Root-scoped, Git-only run applicability. One projection per execution
+    /// location; each value is tagged with its exact request root.
+    var runApplicabilityProjections: [ExecutionLocationID: RunApplicabilityProjection] = [:]
+    var runApplicabilityGenerations: [ExecutionLocationID: Int] = [:]
     var remoteSettingsSnapshots: [ExecutionLocationID: SettingsSnapshot] = [:]
     var remoteProjects: [ExecutionLocationID: [RegisteredProject]] = [:]
     var exactAuthSources: [HarnessFamily: [AuthSourceKind: HarnessAuthSource]] = [:]
@@ -314,7 +322,10 @@ final class AppModel {
 
     /// Reconnect seam (X30 test fence): adopt a client exactly as tryConnect
     /// does after discovery, without the discovery I/O.
-    func adoptClientForReconnect(_ newClient: GatewayClient) { client = newClient }
+    func adoptClientForReconnect(_ newClient: GatewayClient) {
+        if client !== newClient { retireRunApplicability(at: .local) }
+        client = newClient
+    }
 
     init(client: GatewayClient? = nil, requestNotificationAuthorization: Bool = true) {
         let sshManager = SSHConnectionManager()
@@ -412,6 +423,8 @@ final class AppModel {
         }
 
         liveHarnesses.removeAll()
+        gitCapability = nil
+        retireRunApplicability(at: .local)
         // X140 class: the credential-profile + harness-account registries load on
         // connect and feed the sessions footer/accounts surfaces — leaving them
         // presents the last daemon's registry as truth. Reconnect repopulates.
@@ -462,7 +475,7 @@ final class AppModel {
             let discovery = try ControlApiDiscovery.load()
             let client = try discovery.makeClient()
             endpoint = "\(discovery.host):\(discovery.port)"
-            self.client = client
+            adoptClientForReconnect(client)
             // One handshake serves both the connectivity verdict AND the engine
             // build identity (QA-002): retain what the daemon discloses instead
             // of a bare Bool that drops version/sha on the floor.
@@ -1014,13 +1027,15 @@ final class AppModel {
     /// current) is judged from its thread-summary head run via the global `liveTasks`
     /// list (refreshRuns loads all runs), honoring a pending cancel — so the client
     /// busy gate holds for those too, not only the per-thread server serialization.
-    func isThreadBusy(_ id: String?) -> Bool {
+    func isThreadBusy(_ id: String?, at locationID: ExecutionLocationID) -> Bool {
         if turnSubmitting { return true }
         guard let id else { return false }
         // Rich state ONLY when this thread's detail is actually loaded (the selected
         // thread, post-hydration). During openThread's load window the detail is the
         // previous thread's, so fall through to the summary head run below.
-        if id == selectedThreadId, selectedThreadDetail?.thread.id == id {
+        if locationID == selectedExecutionLocation,
+           id == selectedThreadId,
+           selectedThreadDetail?.thread.id == id {
             return composerTurnState != .idle
         }
         // Non-selected target, OR the selected thread whose detail hasn't loaded yet:
@@ -1034,10 +1049,13 @@ final class AppModel {
         // a thread whose head run already finished. This transient, self-correcting
         // window (it resolves the instant the detail/live row hydrates) is backstopped
         // by the per-thread server turn serialization, which rejects a real overlap.
-        let locationID = activeExecutionLocation
         guard let headRunId = threadSummary(id, at: locationID)?.headRunId else { return false }
         if wasRunCancelled(headRunId, at: locationID) { return false }
         return task(headRunId, at: locationID)?.phase.isActive ?? false
+    }
+
+    func isThreadBusy(_ id: String?) -> Bool {
+        isThreadBusy(id, at: activeExecutionLocation)
     }
 
     /// True while the selected thread's head turn is live (a submit is in flight,
@@ -1243,41 +1261,49 @@ final class AppModel {
         shouldSelectCreatedThread: ((String) -> Bool)? = nil,
         completionIsRelevant: (() -> Bool)? = nil
     ) async -> String? {
-        let locationID = draftExecutionLocation
-        if gateway(for: locationID) == nil, let connectionID = locationID.remoteConnectionID {
+        let target = composerTurnStartTarget.replacingDraftTitle(title)
+        guard target.createRequest != nil else {
+            applyComposerCompletionStatus(
+                "Start a new draft before creating another thread.",
+                isRelevant: completionIsRelevant)
+            return nil
+        }
+        return await materializeThread(
+            target: target,
+            shouldSelectCreatedThread: shouldSelectCreatedThread,
+            completionIsRelevant: completionIsRelevant)
+    }
+
+    private func materializeThread(
+        target: TurnStartTarget,
+        using preparedClient: GatewayClient? = nil,
+        shouldSelectCreatedThread: ((String) -> Bool)?,
+        completionIsRelevant: (() -> Bool)?
+    ) async -> String? {
+        guard let createRequest = target.createRequest else { return nil }
+        let locationID = target.locationID
+        if preparedClient == nil,
+           gateway(for: locationID) == nil,
+           let connectionID = locationID.remoteConnectionID {
             await connectRemote(connectionID)
         }
-        guard let requestClient = gateway(for: locationID) else {
+        guard let requestClient = preparedClient ?? gateway(for: locationID),
+              isCurrentGateway(requestClient, at: locationID)
+        else {
             applyComposerCompletionStatus(
                 "Engine offline: reconnect before creating a thread.",
                 isRelevant: completionIsRelevant
             )
             return nil
         }
-        let scope: RunScope = normalizedProjectRoot.isEmpty ? .none : .project(root: normalizedProjectRoot)
         do {
-            // Materialize the draft routing onto the new thread (sticky from turn one).
-            // Send the GUARDED primary (`effectivePrimaryHarness` already returns nil
-            // when the resolved primary — including the global-settings fallback —
-            // falls outside the effective pool), so an inconsistent global config can't
-            // persist a primary the engine's pool-fallback would reject on the first
-            // turn. The empty draft pool stays omitted (engine inherits the global pool,
-            // the same pool the guard checked against).
-            let thread = try await requestClient.createThread(CreateThreadRequest(
-                title: title,
-                scope: scope,
-                // Isolated => turns accumulate in a thread worktree (applied later);
-                // in_place is the engine default, so omit it rather than send it.
-                workspace: draftIsolatedWorkspace ? "isolated" : nil,
-                primaryHarness: effectivePrimaryHarness,
-                eligibleHarnesses: draftEligiblePool.isEmpty ? nil : draftEligiblePool,
-                // Per-thread account pinning UI was removed (INV-135): runs use the
-                // default account unless engine auto-balance rotates at a quota limit.
-                credentialProfileId: draftCredentialProfileId,
-                // D26: carry the draft's sticky write scope onto the thread from
-                // turn one (nil => the engine applies the repo trust default).
-                access: draftThreadAccess
-            ))
+            let thread = try await requestClient.createThread(createRequest)
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                applyComposerCompletionStatus(
+                    Self.turnStartConnectionChangedMessage,
+                    isRelevant: completionIsRelevant)
+                return nil
+            }
             if locationID == .local {
                 threads.insert(thread, at: 0)
             } else {
@@ -1287,9 +1313,16 @@ final class AppModel {
                 remoteThreadCache.append(RemoteThreadCacheEntry(
                     locationID: locationID, thread: thread, syncedAt: .now))
                 try? RemoteThreadCacheStore.applicationSupport().save(remoteThreadCache)
-                if let projectList = try? await requestClient.listProjects() {
+                if let projectList = try? await requestClient.listProjects(),
+                   isCurrentGateway(requestClient, at: locationID) {
                     remoteProjects[locationID] = projectList.projects
                 }
+            }
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                applyComposerCompletionStatus(
+                    Self.turnStartConnectionChangedMessage,
+                    isRelevant: completionIsRelevant)
+                return nil
             }
             // First-turn send registers this exact server-created id with the
             // composer's generation fence before selection. If the user selected
@@ -1297,6 +1330,12 @@ final class AppModel {
             let shouldSelect = shouldSelectCreatedThread?(thread.id) ?? true
             if shouldSelect {
                 await openThread(locationID: locationID, id: thread.id)
+                guard isCurrentGateway(requestClient, at: locationID) else {
+                    applyComposerCompletionStatus(
+                        Self.turnStartConnectionChangedMessage,
+                        isRelevant: completionIsRelevant)
+                    return nil
+                }
             }
             return thread.id
         } catch {
@@ -1315,12 +1354,8 @@ final class AppModel {
     /// clear its text). A POST-send thread reload failure does NOT make this false
     /// (the turn is already on the server) — that would risk a duplicate send.
     @discardableResult
-    /// `onThread` binds the turn to a SPECIFIC owning thread (Implement-plan /
-    /// Implement-spec capture their card's thread at tap time). When nil, the turn
-    /// targets the current selection and materializes a draft thread if needed.
-    /// Binding the target removes the thread-selection race: an action begun on one
-    /// thread can't be re-pointed at a different thread the user switched to during
-    /// the async send.
+    /// `target` is an immutable existing-thread identity or complete draft-create
+    /// request. When omitted it is captured synchronously from the composer.
     func composerSend(
         prompt: String,
         mode: RunMode,
@@ -1328,39 +1363,65 @@ final class AppModel {
         model: String? = nil,
         attachments: [PendingAttachment] = [],
         options: TurnOptions = .init(),
-        onThread explicitThreadId: String? = nil,
+        target explicitTarget: TurnStartTarget? = nil,
         onMaterializedThread: ((String) -> Bool)? = nil,
         completionIsRelevant: (() -> Bool)? = nil
     ) async -> Bool {
-        let targetId = explicitThreadId ?? selectedThreadId
-        let targetLocation = explicitThreadId == nil
-            ? (selectedThreadId == nil ? draftExecutionLocation : selectedExecutionLocation)
-            : selectedExecutionLocation
+        let target = explicitTarget ?? composerTurnStartTarget
+        guard mode != .unknown else {
+            applyComposerCompletionStatus(
+                "Unknown mode — pick an intent from the composer.",
+                isRelevant: completionIsRelevant)
+            return false
+        }
         // Single busy gate for EVERY turn-start path (composer, Implement-plan,
-        // Implement-spec all funnel through here), so none can start a turn over a
+        // plan answers all funnel through here), so none can start a turn over a
         // live one — gated on the TARGET thread, not live selection. `isThreadBusy`
         // folds in `turnSubmitting`, so this also blocks a double-submit during the
         // pre-detail window (checked synchronously before `turnSubmitting = true`, so
         // concurrent main-actor calls can't both pass). The composer's send() also
         // routes ⌘↩→Stop while busy; non-composer buttons rely on this guard.
-        guard !isThreadBusy(targetId) else {
+        guard !isThreadBusy(target.threadID, at: target.locationID) else {
             threadStatus = "Wait for the running turn to finish, or Stop it, before starting another."
             return false
         }
         turnSubmitting = true
         defer { turnSubmitting = false }
-        var threadId = targetId
+
+        let prepared: PreparedTurnStart
+        switch await prepareTurnStart(target) {
+        case .ready(let value):
+            prepared = value
+        case .blocked(let message):
+            applyComposerCompletionStatus(message, isRelevant: completionIsRelevant)
+            return false
+        }
+        // Defense-in-depth immediately before ANY create/upload/turn mutation.
+        // Backend preflight remains authoritative; this is the thin UI
+        // projection of the same server-authored matrix.
+        if let blocker = turnStartAdmission(
+            target: target,
+            mode: mode,
+            options: options,
+            applicability: prepared.applicability).finalBlocker {
+            applyComposerCompletionStatus(blocker, isRelevant: completionIsRelevant)
+            return false
+        }
+
+        var threadId = target.threadID
         if threadId == nil {
-            threadId = await newThread(
-                title: nil,
+            threadId = await materializeThread(
+                target: target,
+                using: prepared.client,
                 shouldSelectCreatedThread: onMaterializedThread,
                 completionIsRelevant: completionIsRelevant
             )
-            guard threadId != nil else { return false } // newThread set threadStatus on failure
+            guard threadId != nil else { return false }
         }
         guard let tid = threadId else { return false }
         return await sendTurn(
-            locationID: targetLocation,
+            target: target,
+            using: prepared.client,
             threadId: tid,
             prompt: prompt,
             mode: mode,
@@ -1380,24 +1441,10 @@ final class AppModel {
         return cleaned.isEmpty ? nil : cleaned
     }
 
-    /// Send a follow-up turn; returns true if the engine ACCEPTED it. The native
-    /// session resumes (plan -> implement is one conversation).
     @discardableResult
-    func sendTurn(threadId: String, prompt: String, mode: RunMode, planRunId: String? = nil, model: String? = nil, attachments: [PendingAttachment] = [], options: TurnOptions = .init()) async -> Bool {
-        await sendTurn(
-            locationID: selectedExecutionLocation,
-            threadId: threadId,
-            prompt: prompt,
-            mode: mode,
-            planRunId: planRunId,
-            model: model,
-            attachments: attachments,
-            options: options)
-    }
-
-    @discardableResult
-    func sendTurn(
-        locationID: ExecutionLocationID,
+    private func sendTurn(
+        target: TurnStartTarget,
+        using requestClient: GatewayClient,
         threadId: String,
         prompt: String,
         mode: RunMode,
@@ -1407,16 +1454,10 @@ final class AppModel {
         options: TurnOptions = .init(),
         completionIsRelevant: (() -> Bool)? = nil
     ) async -> Bool {
-        guard let requestClient = gateway(for: locationID) else {
+        let locationID = target.locationID
+        guard isCurrentGateway(requestClient, at: locationID) else {
             applyComposerCompletionStatus(
-                "Engine offline — reconnect before sending.",
-                isRelevant: completionIsRelevant
-            )
-            return false
-        }
-        guard mode != .unknown else {
-            applyComposerCompletionStatus(
-                "Unknown mode — pick an intent from the composer.",
+                Self.turnStartConnectionChangedMessage,
                 isRelevant: completionIsRelevant
             )
             return false
@@ -1429,7 +1470,7 @@ final class AppModel {
         // thread's sticky pool server-side (primary too).
         var racePool: [String] = []
         if mode == .bestOfN {
-            racePool = effectiveEligiblePool
+            racePool = target.eligibleHarnesses
         }
         // Best-of width = one candidate per harness in the pool (≥2). A SINGLE-harness
         // pool can't race against itself: send n=1 so the engine single-routes that
@@ -1449,10 +1490,22 @@ final class AppModel {
         // engine routes them to convergence (ignoring n), so they only make sense
         // for a plain agent turn, never for Best-of. access/web/budget are per-turn.
         let writeMode = !mode.isReadOnly
-        let repairMode = mode == .agent
+        let repair = composerRepairWire(
+            mode: mode,
+            requestedAttempts: options.maxAttempts,
+            requestedUntilClean: options.untilClean)
         let result: RunStartResult
         do {
-            let attachmentRefs = try await uploadAttachments(attachments, client: requestClient)
+            let attachmentRefs = try await uploadAttachments(
+                attachments,
+                client: requestClient,
+                locationID: locationID)
+            guard isCurrentGateway(requestClient, at: locationID) else {
+                applyComposerCompletionStatus(
+                    Self.turnStartConnectionChangedMessage,
+                    isRelevant: completionIsRelevant)
+                return false
+            }
             result = try await requestClient.sendTurn(threadId: threadId, body: ThreadTurnRequest(
                 prompt: prompt,
                 mode: mode.apiValue,
@@ -1461,8 +1514,8 @@ final class AppModel {
                 // "Until clean" and "Max attempts" are mutually exclusive repair
                 // strategies (no-fixed-cap vs hard-cap) — never send both. Until-clean
                 // wins: drop the attempts cap when it's on.
-                attempts: (repairMode && !options.untilClean) ? options.maxAttempts : nil,
-                untilClean: (repairMode && options.untilClean) ? true : (flags.untilClean ? true : nil),
+                attempts: repair.attempts,
+                untilClean: repair.untilClean,
                 // Ask deep-scan rides the wire's `deepScan` (was `swarm`); the
                 // engine accepts either, prefer the v3 name.
                 deepScan: flags.swarm ? true : nil,
@@ -1495,13 +1548,17 @@ final class AppModel {
             // refusal on a recorded turn (the error body carries its turnId),
             // reload the thread so the inline card shows IMMEDIATELY.
             if let refusal = Self.refusedTurn(from: error) {
-                if locationID == .local {
-                    await refreshRuns()
-                } else {
-                    await refreshRemoteThreads(locationID)
-                }
-                if selectedExecutionLocation == locationID, selectedThreadId == threadId {
-                    await openThread(locationID: locationID, id: threadId)
+                if isCurrentGateway(requestClient, at: locationID) {
+                    if locationID == .local {
+                        await refreshRuns()
+                    } else {
+                        await refreshRemoteThreads(locationID, using: requestClient)
+                    }
+                    if isCurrentGateway(requestClient, at: locationID),
+                       selectedExecutionLocation == locationID,
+                       selectedThreadId == threadId {
+                        await openThread(locationID: locationID, id: threadId)
+                    }
                 }
                 if refusal.retryable {
                     // The prompt lives on the refused turn and Retry replays
@@ -1517,6 +1574,12 @@ final class AppModel {
                 )
                 return false
             }
+            if !isCurrentGateway(requestClient, at: locationID) {
+                applyComposerCompletionStatus(
+                    Self.turnStartConnectionChangedMessage,
+                    isRelevant: completionIsRelevant)
+                return false
+            }
             applyComposerCompletionStatus(
                 userMessage(for: error), isRelevant: completionIsRelevant
             )
@@ -1525,14 +1588,22 @@ final class AppModel {
         // The turn is ACCEPTED here. Anything below (refresh/reload) is best-effort
         // presentation; its failure must NOT be read as a send failure.
         applyComposerCompletionStatus(nil, isRelevant: completionIsRelevant)
+        guard isCurrentGateway(requestClient, at: locationID) else {
+            applyComposerCompletionStatus(
+                "Turn accepted, but the engine connection changed before it could be refreshed.",
+                isRelevant: completionIsRelevant)
+            return true
+        }
         if locationID == .local {
             await refreshRuns()
         } else {
-            await refreshRemoteThreads(locationID)
+            await refreshRemoteThreads(locationID, using: requestClient)
         }
+        guard isCurrentGateway(requestClient, at: locationID) else { return true }
         if selectedExecutionLocation == locationID, selectedThreadId == threadId {
             await refreshOpenThread(locationID: locationID, id: threadId)
         }
+        guard isCurrentGateway(requestClient, at: locationID) else { return true }
         if case .started(let info) = result {
             if locationID == .local {
                 stream(runId: info.runId)
