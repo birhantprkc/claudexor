@@ -5037,6 +5037,34 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("QA-035: freezes Settings routes for a pure Auto pool without materializing an explicit pool", async () => {
+    const repo = await initRepo();
+    const registry = new Map<string, HarnessAdapter>([
+      ["codex", realLikeAdapter("codex", "openai")],
+    ]);
+    const configDir = reapMk(join(tmpdir(), "claudexor-qa035-auto-freeze-"));
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      "harnesses:\n  codex:\n    default_model: auto-model\n    effort: high\n",
+    );
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    try {
+      const orch = new Orchestrator({ registry, reviewers: [] });
+      const res = await orch.run({ repoRoot: repo, prompt: "x", mode: "agent", n: 1 });
+      const task = new ArtifactStore(repo).readYaml<{
+        routing_models: Record<string, string>;
+        routing_efforts: Record<string, string>;
+      }>(join(res.runDir, "context", "task.yaml"));
+
+      expect(task?.routing_models).toEqual({ codex: "auto-model" });
+      expect(task?.routing_efforts).toEqual({ codex: "high" });
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+    }
+  });
+
   it("lifts readiness-preferred auth route disclosures into typed run events", async () => {
     const repo = await initRepo();
     const adapter = askAdapter("authy", function* (sessionId) {

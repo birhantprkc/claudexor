@@ -28,6 +28,7 @@ import {
   dedupeFindings,
   extractJsonBlocks,
   parseFindingsDetailed,
+  parseSealedReviewEnvelopeDetailed,
   type ReviewerInfo,
 } from "./findings.js";
 import { buildReviewPrompt } from "./reviewPrompt.js";
@@ -421,7 +422,10 @@ ${runtimePrompt}
     routeProofs[index] = proof;
 
     const info = reviewerInfo(reviewer, proof.status, streamObservedModel ?? null);
-    const jsonBlocks = extractJsonBlocks(text);
+    const sealedParse = input.evidenceReadOnly
+      ? parseSealedReviewEnvelopeDetailed(text, info)
+      : null;
+    const jsonBlocks = sealedParse?.blocks ?? extractJsonBlocks(text);
     writeJson(artifact.parsedPath, redactValue(jsonBlocks));
     if (reviewerError && (text.trim() === "" || jsonBlocks.length === 0)) {
       findingsByReviewer[index]?.push(
@@ -436,7 +440,7 @@ ${runtimePrompt}
       );
       return;
     }
-    const parsed = parseFindingsDetailed(text, info);
+    const parsed = sealedParse ?? parseFindingsDetailed(text, info);
     const parseError: Record<string, unknown> = {};
     let parsedFindingsRecorded = false;
     const recordParsedFindings = () => {
@@ -444,7 +448,19 @@ ${runtimePrompt}
       findingsByReviewer[index]?.push(...parsed.findings);
       parsedFindingsRecorded = true;
     };
-    if (parsed.malformed > 0) {
+    if (sealedParse?.error) {
+      Object.assign(parseError, {
+        error: "invalid_sealed_review_envelope",
+        detail: sealedParse.error,
+        malformed: sealedParse.malformed,
+        text_sha256: sha256(text),
+      });
+      recordParsedFindings();
+      findingsByReviewer[index]?.push(
+        insufficientEvidenceFinding(info, `Invalid sealed review envelope: ${sealedParse.error}.`),
+      );
+    }
+    if (parsed.malformed > 0 && !sealedParse?.error) {
       Object.assign(parseError, {
         error: "malformed_findings",
         malformed: parsed.malformed,

@@ -1,4 +1,4 @@
-import type { ResolvedConfig, RoutingGoal } from "@claudexor/schema";
+import type { EffortHint, ResolvedConfig, RoutingGoal } from "@claudexor/schema";
 import { HarnessUnavailableError } from "@claudexor/core";
 import { noProjectRepoRoot } from "@claudexor/util";
 import type { RunInput } from "./orchestrator.js";
@@ -46,15 +46,15 @@ export function resolveRunInputDefaults(input: RunInput, deps: RunInputResolutio
     );
   }
   const web = input.web ?? input.externalContextPolicy ?? "auto";
-  const knownHarnessIds = new Set(deps.registryIds);
-  for (const key of Object.keys(input.models ?? {})) {
-    if (!knownHarnessIds.has(key)) {
-      throw new Error(
-        `models map names unknown harness '${key}' (registered: ${[...knownHarnessIds].sort().join(", ")}); ` +
-          `run \`claudexor harness list --all\``,
-      );
-    }
-  }
+  // Materialize this iterable exactly once: registry.keys() is repeatable, but
+  // embedders are allowed to supply any Iterable. The same frozen universe is
+  // also the lane snapshot for a pure Auto pool, whose eventual lanes are not
+  // known until routing but whose Settings defaults must already be immutable.
+  const knownHarnessIds = [...new Set(deps.registryIds)];
+  const knownHarnessIdSet = new Set(knownHarnessIds);
+  validateHarnessMap("models", input.models, knownHarnessIds, knownHarnessIdSet);
+  validateHarnessMap("efforts", input.efforts, knownHarnessIds, knownHarnessIdSet);
+  const snapshotLaneIds = harnesses ?? knownHarnessIds;
   const models: Record<string, string> = { ...input.models };
   if (input.model) {
     const scalarTarget = primaryHarness ?? (harnesses?.length === 1 ? harnesses[0] : undefined);
@@ -68,9 +68,14 @@ export function resolveRunInputDefaults(input: RunInput, deps: RunInputResolutio
     models[scalarTarget] ??= input.model;
   }
   const harnessCfg = cfg.global.harnesses;
-  for (const harnessId of harnesses ?? []) {
+  for (const harnessId of snapshotLaneIds) {
     const defaultModel = harnessCfg[harnessId]?.default_model;
     if (defaultModel) models[harnessId] ??= defaultModel;
+  }
+  const efforts: Record<string, EffortHint> = { ...input.efforts };
+  for (const harnessId of snapshotLaneIds) {
+    const effort = input.effort ?? harnessCfg[harnessId]?.effort;
+    if (effort) efforts[harnessId] ??= effort;
   }
   return {
     ...input,
@@ -79,6 +84,8 @@ export function resolveRunInputDefaults(input: RunInput, deps: RunInputResolutio
     primaryHarnessExplicit: explicitPrimary !== undefined,
     model: undefined,
     models,
+    effort: undefined,
+    efforts,
     routingGoal:
       input.routingGoal ??
       deps.routingGoal ??
@@ -88,4 +95,19 @@ export function resolveRunInputDefaults(input: RunInput, deps: RunInputResolutio
     web,
     externalContextPolicy: web,
   };
+}
+
+function validateHarnessMap(
+  name: "models" | "efforts",
+  values: Readonly<Record<string, unknown>> | undefined,
+  knownHarnessIds: readonly string[],
+  knownHarnessIdSet: ReadonlySet<string>,
+): void {
+  for (const key of Object.keys(values ?? {})) {
+    if (knownHarnessIdSet.has(key)) continue;
+    throw new Error(
+      `${name} map names unknown harness '${key}' (registered: ${[...knownHarnessIds].sort().join(", ")}); ` +
+        `run \`claudexor harness list --all\``,
+    );
+  }
 }

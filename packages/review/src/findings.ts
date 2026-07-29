@@ -1,6 +1,7 @@
 import type { ReviewFinding, RouteProofStatus, Severity } from "@claudexor/schema";
 import { ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
-import { newId } from "@claudexor/util";
+import { newId, stableStringify } from "@claudexor/util";
+import { RELEASE_NATIVE_CHECKLIST_ITEMS } from "./reviewPrompt.js";
 
 const MAX_BALANCED_JSON_CANDIDATES = 64;
 
@@ -201,6 +202,188 @@ export function parseFindingsDetailed(
     }
   }
   return { findings: out, malformed };
+}
+
+export interface SealedReviewEnvelopeParse {
+  findings: ReviewFinding[];
+  malformed: number;
+  error: string | null;
+  blocks: unknown[];
+}
+
+/** Strict parser for a frozen release review. Generic/diff review intentionally
+ * remains lenient; a sealed verdict is authority only when its completion
+ * envelope proves every required checklist row and agrees with its findings. */
+export function parseSealedReviewEnvelopeDetailed(
+  text: string,
+  reviewer: ReviewerInfo,
+): SealedReviewEnvelopeParse {
+  const blocks = extractAllReviewPayloads(text);
+  if (blocks.length === 0) {
+    return { findings: [], malformed: 0, error: "no sealed review envelope", blocks };
+  }
+  const unique = new Map(blocks.map((block) => [stableStringify(block), block]));
+  if (unique.size !== 1) {
+    return {
+      findings: [],
+      malformed: 0,
+      error: "reviewer emitted divergent or mixed JSON review payloads",
+      blocks,
+    };
+  }
+  const envelope = unique.values().next().value as unknown;
+  if (!isRecord(envelope) || !hasExactKeys(envelope, ["completion", "findings"])) {
+    return { findings: [], malformed: 0, error: "invalid sealed review envelope shape", blocks };
+  }
+  const completion = envelope["completion"];
+  const rawFindings = envelope["findings"];
+  if (
+    !isRecord(completion) ||
+    !hasExactKeys(completion, ["checklist", "findingCount", "verdict"]) ||
+    !Array.isArray(rawFindings)
+  ) {
+    return { findings: [], malformed: 0, error: "invalid sealed completion shape", blocks };
+  }
+  const checklist = completion["checklist"];
+  if (
+    !Array.isArray(checklist) ||
+    checklist.length !== RELEASE_NATIVE_CHECKLIST_ITEMS.length ||
+    checklist.some((row, index) => {
+      if (!isRecord(row) || !hasOnlyKeys(row, ["item", "completed", "note"])) return true;
+      if (row["item"] !== RELEASE_NATIVE_CHECKLIST_ITEMS[index] || row["completed"] !== true)
+        return true;
+      return row["note"] !== undefined && typeof row["note"] !== "string";
+    })
+  ) {
+    return {
+      findings: [],
+      malformed: 0,
+      error: "sealed checklist must contain the four exact completed items in order",
+      blocks,
+    };
+  }
+  const findingCount = completion["findingCount"];
+  if (!Number.isSafeInteger(findingCount) || (findingCount as number) < 0) {
+    return {
+      findings: [],
+      malformed: 0,
+      error: "findingCount must be a non-negative integer",
+      blocks,
+    };
+  }
+  if (findingCount !== rawFindings.length) {
+    return {
+      findings: [],
+      malformed: 0,
+      error: "findingCount does not match findings.length",
+      blocks,
+    };
+  }
+  const parsed = parseFindingsDetailed(JSON.stringify({ findings: rawFindings }), reviewer);
+  if (parsed.malformed > 0 || parsed.findings.length !== rawFindings.length) {
+    return {
+      findings: parsed.findings,
+      malformed: parsed.malformed,
+      error: "sealed findings contain malformed items",
+      blocks,
+    };
+  }
+  const expectedVerdict = parsed.findings.some((finding) =>
+    ["BLOCK", "FIX_FIRST", "NEEDS_HUMAN", "INSUFFICIENT_EVIDENCE"].includes(finding.severity),
+  )
+    ? "FAIL"
+    : "PASS";
+  if (completion["verdict"] !== expectedVerdict) {
+    return {
+      findings: parsed.findings,
+      malformed: 0,
+      error: `completion verdict must be ${expectedVerdict} for these findings`,
+      blocks,
+    };
+  }
+  return { findings: parsed.findings, malformed: 0, error: null, blocks };
+}
+
+function extractAllReviewPayloads(text: string): unknown[] {
+  const out: unknown[] = [];
+  let cursor = 0;
+  let attempts = 0;
+  while (cursor < text.length) {
+    const lineEnd = text.indexOf("\n", cursor);
+    const end = lineEnd < 0 ? text.length : lineEnd;
+    let start = cursor;
+    while (start < end && (text[start] === " " || text[start] === "\t")) start += 1;
+    const opener = text[start];
+    if (opener !== "{" && opener !== "[") {
+      cursor = lineEnd < 0 ? text.length : lineEnd + 1;
+      continue;
+    }
+    attempts += 1;
+    if (attempts > MAX_BALANCED_JSON_CANDIDATES) break;
+    const jsonEnd = balancedJsonEnd(text, start);
+    if (jsonEnd === null) {
+      cursor = lineEnd < 0 ? text.length : lineEnd + 1;
+      continue;
+    }
+    try {
+      const value = JSON.parse(text.slice(start, jsonEnd));
+      if (isReviewPayload(value)) {
+        out.push(value);
+        cursor = jsonEnd;
+        continue;
+      }
+    } catch {
+      // Continue at the next line; a later complete payload may still exist.
+    }
+    cursor = lineEnd < 0 ? text.length : lineEnd + 1;
+  }
+  return out;
+}
+
+function balancedJsonEnd(source: string, start: number): number | null {
+  const first = source[start];
+  if (first !== "{" && first !== "[") return null;
+  const stack = [first];
+  let inString = false;
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const character = source[index] ?? "";
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{" || character === "[") stack.push(character);
+    else if (character === "}" || character === "]") {
+      if (stack.pop() !== (character === "}" ? "{" : "[")) return null;
+      if (stack.length === 0) return index + 1;
+    }
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isReviewPayload(value: unknown): boolean {
+  if (Array.isArray(value)) return true;
+  if (!isRecord(value)) return false;
+  return (
+    Array.isArray(value["findings"]) ||
+    ("severity" in value && ("claim" in value || "message" in value || "evidence" in value))
+  );
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length && hasOnlyKeys(value, keys);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
 }
 
 const SEVERITY_ORDER: Severity[] = [

@@ -162,6 +162,19 @@ describe("sealed release native reviewer contract", () => {
     writeFileSync(join(evidenceDir, "MANIFEST.sha256"), "sealed fixture\n");
     initGitFixture(cwd);
     let prompt = "";
+    let reviewPayload = {
+      completion: {
+        verdict: "PASS",
+        checklist: [
+          "sealed_evidence",
+          "intent_and_scope",
+          "runtime_and_security",
+          "tests_and_release",
+        ].map((item) => ({ item, completed: true })),
+        findingCount: 1,
+      },
+      findings: [{ severity: "WARN", category: "test_gap", claim: "release wrapper finding" }],
+    };
     const adapter: HarnessAdapter = {
       id: "release-reviewer",
       async discover() {
@@ -188,21 +201,7 @@ describe("sealed release native reviewer contract", () => {
           session_id: spec.session_id,
           ts,
           observed_model: "release-model",
-          text: JSON.stringify({
-            completion: {
-              verdict: "PASS",
-              checklist: [
-                "sealed_evidence",
-                "intent_and_scope",
-                "runtime_and_security",
-                "tests_and_release",
-              ].map((item) => ({ item, completed: true })),
-              findingCount: 1,
-            },
-            findings: [
-              { severity: "WARN", category: "test_gap", claim: "release wrapper finding" },
-            ],
-          }),
+          text: JSON.stringify(reviewPayload),
         };
       },
     };
@@ -247,6 +246,50 @@ describe("sealed release native reviewer contract", () => {
       expect(readFileSync(join(artifactsDir, "reviewer-progress.jsonl"), "utf8")).toContain(
         '"review_wave_id":"11111111-1111-4111-8111-111111111111"',
       );
+
+      // A parseable clean-looking object is not release evidence unless its
+      // checklist is the exact completed contract. Preserve the parse error
+      // and fail closed instead of turning malformed output into a false PASS.
+      reviewPayload = {
+        completion: {
+          verdict: "PASS",
+          checklist: [{ item: "sealed_evidence", completed: true }],
+          findingCount: 0,
+        },
+        findings: [],
+      };
+      const invalidArtifactsDir = reapMk(
+        join(tmpdir(), "claudexor-invalid-release-review-artifacts-"),
+      );
+      try {
+        const invalid = await reviewCandidate({
+          candidateLabel: "Release candidate",
+          diff,
+          evidenceDir,
+          evidenceReadOnly: true,
+          frozenIdentity: {
+            candidateSha: "a".repeat(40),
+            candidateTree: "b".repeat(40),
+            packetManifestSha256: "c".repeat(64),
+          },
+          env: { CLAUDEXOR_REVIEW_WAVE_ID: "22222222-2222-4222-8222-222222222222" },
+          artifactsDir: invalidArtifactsDir,
+          cwd,
+          reviewers: [{ adapter, providerFamily: "openai", requestedModel: "release-model" }],
+        });
+        expect(invalid.findings).toHaveLength(1);
+        expect(invalid.findings[0]?.severity).toBe("INSUFFICIENT_EVIDENCE");
+        expect(
+          JSON.parse(
+            readFileSync(
+              join(invalidArtifactsDir, "01-release-reviewer", "parse-error.json"),
+              "utf8",
+            ),
+          ),
+        ).toMatchObject({ error: "invalid_sealed_review_envelope" });
+      } finally {
+        rmSync(invalidArtifactsDir, { recursive: true, force: true });
+      }
     } finally {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(artifactsDir, { recursive: true, force: true });

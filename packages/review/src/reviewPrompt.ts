@@ -1,6 +1,6 @@
 import type { DiffEvidence } from "@claudexor/context";
 
-const RELEASE_NATIVE_CHECKLIST_ITEMS = [
+export const RELEASE_NATIVE_CHECKLIST_ITEMS = [
   "sealed_evidence",
   "intent_and_scope",
   "runtime_and_security",
@@ -24,6 +24,7 @@ export function buildReviewPrompt(
         '{"completion":{"verdict":"PASS","checklist":[{"item":"...","completed":true}],"findingCount":0},"findings":[]}',
         `The completion.checklist must contain exactly these items in this order: ${RELEASE_NATIVE_CHECKLIST_ITEMS.join(", ")}.`,
         "Every checklist row must set completed=true. findingCount must exactly equal findings.length.",
+        'A checklist row may add one string "note"; no other envelope fields are allowed.',
         "Use completion.verdict=FAIL for BLOCK, FIX_FIRST, NEEDS_HUMAN, or INSUFFICIENT_EVIDENCE; otherwise PASS.",
         "findings uses the finding schema below. A clean review is the completed envelope with findings=[], never a bare [] or [{}].",
       ]

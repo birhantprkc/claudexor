@@ -40,8 +40,6 @@ interface TaskContractBuildInput {
   credentialProfileId?: string | null;
   maxTurns?: number | null;
   models?: Record<string, string>;
-  harnesses?: string[];
-  effort?: EffortHint;
   efforts?: Record<string, EffortHint>;
 }
 
@@ -166,23 +164,10 @@ export function buildTaskContract(
     // primary by resolveRunInput). The contract is what route spec building
     // reads — there is no run-global model (INV-103).
     routing_models: input.models ?? {},
-    // QA-035: freeze the RESOLVED reasoning-effort per known lane so Exact
-    // Retry replays it instead of re-resolving current settings. Precedence
-    // (specific beats general): the harness-scoped `efforts` map entry, then a
-    // per-turn scalar `input.effort`, then the harness settings default — the
-    // same map that Exact Retry replays so a NON-PRIMARY lane keeps its own
-    // frozen effort (QA-035 completeness). Only known-pool lanes are frozen
-    // here (a pure auto pool's lanes resolve later — documented seam).
-    routing_efforts: Object.fromEntries(
-      [...new Set([...(input.harnesses ?? []), ...Object.keys(input.efforts ?? {})])]
-        .map((hid) => [
-          hid,
-          input.efforts?.[hid] ??
-            input.effort ??
-            resolvedCfg.global.harnesses?.[hid]?.effort ??
-            null,
-        ])
-        .filter((entry): entry is [string, string] => entry[1] !== null),
-    ),
+    // QA-035: resolveRunInputDefaults has already expanded explicit, scalar,
+    // and Settings-derived effort into a frozen per-lane map. Persist that map
+    // verbatim so TaskContract construction cannot re-read a later Settings
+    // state or leave pure Auto routing as a drift seam.
+    routing_efforts: input.efforts ?? {},
   });
 }

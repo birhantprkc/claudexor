@@ -8911,6 +8911,58 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("QA-035: Exact Retry replays a frozen pure-Auto route without inventing an explicit pool", async () => {
+    const { daemon, record } = fakeDaemon();
+    writeFileSync(
+      join(record.runDir as string, "context", "task.yaml"),
+      [
+        "schema_version: 2",
+        "task_id: task-d1",
+        "created_at: 2026-07-15T00:00:00.000Z",
+        "repo:",
+        `  root: ${JSON.stringify(record.runDir)}`,
+        "  base_ref: HEAD",
+        "mode:",
+        "  kind: agent",
+        "user_intent:",
+        "  raw: test run",
+        "routing_models:",
+        "  codex: auto-model",
+        "routing_efforts:",
+        "  codex: high",
+        "tests:",
+        "  commands: []",
+        "",
+      ].join("\n"),
+    );
+    record.params = {
+      prompt: "hello",
+      mode: "agent",
+      scope: { kind: "project", root: record.runDir, context: "auto" },
+      routingGoal: "auto",
+    };
+    let enqueued: Record<string, unknown> | undefined;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue(params, options) {
+        enqueued = params as Record<string, unknown>;
+        return daemon.enqueue(params, options);
+      },
+    };
+
+    await withDaemonServer(wrapped, async (base) => {
+      const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "qa035-auto-retry" },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      expect(enqueued?.["harnesses"]).toBeUndefined();
+      expect(enqueued?.["models"]).toEqual({ codex: "auto-model" });
+      expect(enqueued?.["efforts"]).toEqual({ codex: "high" });
+    });
+  });
+
   it("Exact Retry and Run Again restore threaded attachment references from the durable turn", async () => {
     const { daemon, record } = fakeDaemon();
     const attachmentPath = join(record.runDir as string, "context", "attached.txt");

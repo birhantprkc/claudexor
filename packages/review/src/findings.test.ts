@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ReviewFinding } from "@claudexor/schema";
-import { dedupeFindings, extractJsonBlocks, parseFindingsDetailed } from "./findings.js";
+import {
+  dedupeFindings,
+  extractJsonBlocks,
+  parseFindingsDetailed,
+  parseSealedReviewEnvelopeDetailed,
+} from "./findings.js";
+import { RELEASE_NATIVE_CHECKLIST_ITEMS } from "./reviewPrompt.js";
 
 describe("extractJsonBlocks", () => {
   it("accepts a final bare JSON array after explanatory reviewer text", () => {
@@ -109,6 +115,149 @@ describe("parseFindingsDetailed", () => {
     );
     expect(parsed.malformed).toBe(0);
     expect(parsed.findings.map((finding) => finding.claim)).toEqual(["wrapped release finding"]);
+  });
+});
+
+function sealedEnvelope(
+  findings: unknown[] = [],
+  verdict: "PASS" | "FAIL" = findings.some(
+    (finding) =>
+      !!finding &&
+      typeof finding === "object" &&
+      ["BLOCK", "FIX_FIRST", "NEEDS_HUMAN", "INSUFFICIENT_EVIDENCE"].includes(
+        String((finding as { severity?: unknown }).severity),
+      ),
+  )
+    ? "FAIL"
+    : "PASS",
+) {
+  return {
+    completion: {
+      verdict,
+      checklist: RELEASE_NATIVE_CHECKLIST_ITEMS.map((item) => ({ item, completed: true })),
+      findingCount: findings.length,
+    },
+    findings,
+  };
+}
+
+const sealedReviewer = { harness_id: "release-reviewer" };
+
+describe("parseSealedReviewEnvelopeDetailed", () => {
+  it("accepts an exact clean envelope and an optional checklist note", () => {
+    const envelope = sealedEnvelope();
+    envelope.completion.checklist[0] = {
+      ...envelope.completion.checklist[0]!,
+      note: "manifest verified",
+    } as (typeof envelope.completion.checklist)[number];
+    const parsed = parseSealedReviewEnvelopeDetailed(JSON.stringify(envelope), sealedReviewer);
+    expect(parsed).toMatchObject({ findings: [], malformed: 0, error: null });
+  });
+
+  it("accepts a FAIL envelope whose count and verdict match a blocker", () => {
+    const parsed = parseSealedReviewEnvelopeDetailed(
+      JSON.stringify(
+        sealedEnvelope([{ severity: "BLOCK", category: "correctness", claim: "real blocker" }]),
+      ),
+      sealedReviewer,
+    );
+    expect(parsed.error).toBeNull();
+    expect(parsed.findings.map((finding) => finding.claim)).toEqual(["real blocker"]);
+  });
+
+  it("collapses repeated semantically identical envelopes", () => {
+    const envelope = sealedEnvelope([
+      { severity: "WARN", category: "test_gap", claim: "same warning" },
+    ]);
+    const reordered = { findings: envelope.findings, completion: envelope.completion };
+    const parsed = parseSealedReviewEnvelopeDetailed(
+      `${JSON.stringify(envelope)}\n${JSON.stringify(reordered)}`,
+      sealedReviewer,
+    );
+    expect(parsed.error).toBeNull();
+    expect(parsed.blocks).toHaveLength(2);
+    expect(parsed.findings).toHaveLength(1);
+  });
+
+  it("rejects divergent or mixed semantic payloads", () => {
+    const envelope = sealedEnvelope();
+    expect(
+      parseSealedReviewEnvelopeDetailed(
+        `${JSON.stringify(envelope)}\n${JSON.stringify(sealedEnvelope([{ severity: "WARN", claim: "later" }]))}`,
+        sealedReviewer,
+      ).error,
+    ).toMatch(/divergent or mixed/);
+    expect(
+      parseSealedReviewEnvelopeDetailed(`${JSON.stringify(envelope)}\n[]`, sealedReviewer).error,
+    ).toMatch(/divergent or mixed/);
+  });
+
+  it.each([
+    ["missing row", (value: ReturnType<typeof sealedEnvelope>) => value.completion.checklist.pop()],
+    [
+      "wrong order",
+      (value: ReturnType<typeof sealedEnvelope>) => value.completion.checklist.reverse(),
+    ],
+    [
+      "incomplete row",
+      (value: ReturnType<typeof sealedEnvelope>) => {
+        value.completion.checklist[0]!.completed = false;
+      },
+    ],
+    [
+      "unknown row field",
+      (value: ReturnType<typeof sealedEnvelope>) => {
+        Object.assign(value.completion.checklist[0]!, { extra: true });
+      },
+    ],
+  ])("rejects a %s in the exact checklist", (_name, mutate) => {
+    const envelope = sealedEnvelope();
+    mutate(envelope);
+    expect(
+      parseSealedReviewEnvelopeDetailed(JSON.stringify(envelope), sealedReviewer).error,
+    ).toMatch(/exact completed items/);
+  });
+
+  it.each([
+    ["negative", -1],
+    ["fractional", 0.5],
+    ["mismatched", 2],
+  ])("rejects a %s findingCount", (_name, findingCount) => {
+    const envelope = sealedEnvelope();
+    envelope.completion.findingCount = findingCount;
+    expect(
+      parseSealedReviewEnvelopeDetailed(JSON.stringify(envelope), sealedReviewer).error,
+    ).toMatch(/findingCount/);
+  });
+
+  it("rejects PASS with a blocker and FAIL without one", () => {
+    expect(
+      parseSealedReviewEnvelopeDetailed(
+        JSON.stringify(
+          sealedEnvelope(
+            [{ severity: "FIX_FIRST", category: "regression", claim: "must fix" }],
+            "PASS",
+          ),
+        ),
+        sealedReviewer,
+      ).error,
+    ).toMatch(/must be FAIL/);
+    expect(
+      parseSealedReviewEnvelopeDetailed(JSON.stringify(sealedEnvelope([], "FAIL")), sealedReviewer)
+        .error,
+    ).toMatch(/must be PASS/);
+  });
+
+  it("rejects malformed findings and extra envelope fields", () => {
+    const malformed = sealedEnvelope([{ category: "correctness", claim: "missing severity" }]);
+    expect(
+      parseSealedReviewEnvelopeDetailed(JSON.stringify(malformed), sealedReviewer).error,
+    ).toMatch(/malformed/);
+
+    const extra = { ...sealedEnvelope(), explanation: "not part of the contract" };
+    expect(parseSealedReviewEnvelopeDetailed(JSON.stringify(extra), sealedReviewer).error).toMatch(
+      /envelope shape/,
+    );
   });
 });
 
