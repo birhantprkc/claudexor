@@ -388,6 +388,7 @@ export function validateRunFactsInvariants(value: unknown): RunFacts {
       "not_converged",
       "stuck_no_progress",
       "work_report_contract",
+      "workspace_unavailable",
     ]),
     cancelled: new Set(["user_cancelled", "wall_clock_exceeded"]),
     interrupted: new Set(["crash_interrupted", "context_capacity_exhausted"]),

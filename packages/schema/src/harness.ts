@@ -988,11 +988,12 @@ export const HarnessEvent = z
             "model_not_found",
             "server_error",
             "max_output_tokens",
+            "timeout",
             "unknown",
           ])
           .optional()
           .describe(
-            "Vendor's error category mapped onto the documented enum; unrecognized values collapse to 'unknown' (never free-form prose).",
+            "Vendor error category mapped onto the normalized enum; unrecognized values collapse to 'unknown' (never free-form prose).",
           ),
       })
       .optional()

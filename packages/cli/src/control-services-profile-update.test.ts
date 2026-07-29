@@ -5,11 +5,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, updateGlobalConfig } from "@claudexor/config";
 import { noProjectRepoRoot } from "@claudexor/util";
 import {
+  ControlQuotaResponse,
   ControlCredentialProfilesResponse,
+  ControlCredentialProfilesSnapshotResponse,
   ControlCredentialProfileUpdateResponse,
+  type QuotaSnapshot,
 } from "@claudexor/schema";
 import { controlServices } from "./control-services.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
+
+const gatewayMock = vi.hoisted(() => ({
+  statuses: [] as unknown[],
+  calls: [] as Array<{ fresh?: boolean }>,
+  profileReadiness: {
+    availability: "unknown",
+    verification: "not_run",
+  } as {
+    availability: "available" | "unavailable" | "unknown";
+    verification: "passed" | "failed" | "not_run";
+  },
+  profileReadinessById: {} as Record<
+    string,
+    {
+      availability: "available" | "unavailable" | "unknown";
+      verification: "passed" | "failed" | "not_run";
+    }
+  >,
+}));
 
 vi.mock("./registry.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./registry.js")>();
@@ -21,20 +43,28 @@ vi.mock("./registry.js", async (importOriginal) => {
         if (!adapter.probeCredentialProfile) continue;
         registry.set(id, {
           ...adapter,
-          probeCredentialProfile: async (profile) => ({
-            profile_id: profile.profile_id,
-            harness_id: profile.harness_id,
-            availability: "unknown",
-            verification: "not_run",
-            detail: "live profile probe disabled in projection unit test",
-            last_verified_at: null,
-          }),
+          probeCredentialProfile: async (profile) => {
+            const readiness =
+              gatewayMock.profileReadinessById[profile.profile_id] ??
+              gatewayMock.profileReadiness;
+            return {
+              profile_id: profile.profile_id,
+              harness_id: profile.harness_id,
+              availability: readiness.availability,
+              verification: readiness.verification,
+              detail: "live profile probe disabled in projection unit test",
+              last_verified_at: null,
+            };
+          },
         });
       }
       return registry;
     },
     buildGateway: () => ({
-      statusAll: async () => [],
+      statusAll: async (input: { fresh?: boolean }) => {
+        gatewayMock.calls.push(input);
+        return gatewayMock.statuses;
+      },
     }),
   };
 });
@@ -43,12 +73,64 @@ vi.mock("./registry.js", async (importOriginal) => {
 // symmetry, INV-135) + the per-harness accounts-authority projection served on
 // the listing so no surface re-derives Active/native truth.
 
-function services() {
+function quotaSnapshot(subjectId: string | null, usedRatio: number): QuotaSnapshot {
+  return {
+    subject: {
+      harness: "claude",
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: subjectId,
+    },
+    constraints: [
+      {
+        id: "five_hour",
+        label: "5 hour",
+        used_ratio: usedRatio,
+        window_seconds: 18_000,
+        resets_at: null,
+        cooldown_until: null,
+      },
+    ],
+    source: "claude_oauth_usage",
+    observed_at: "2026-07-28T00:00:00Z",
+    freshness: "fresh",
+  };
+}
+
+function services(
+  options: {
+    refreshedQuota?: ControlQuotaResponse;
+    refreshError?: Error;
+    quotaEventCursor?: string;
+  } = {},
+) {
   const threads = {
     invalidateCredentialProfile: () => ({ clearedThreads: 0, invalidatedSessions: 0 }),
     listThreads: () => [] as unknown[],
   };
-  const quota = { removeSubject: () => 0, read: () => ({ snapshots: [] }) };
+  const emptyQuota = ControlQuotaResponse.parse({
+    snapshots: [],
+    absences: [],
+    refreshed_at: null,
+  });
+  const refreshQuota = async () => {
+    if (options.refreshError) throw options.refreshError;
+    return (
+      options.refreshedQuota ?? {
+        ...emptyQuota,
+        refreshed_at: "2026-07-28T00:00:00Z",
+      }
+    );
+  };
+  const quota = {
+    removeSubject: () => 0,
+    read: () => emptyQuota,
+    refresh: refreshQuota,
+    refreshWithCursor: async () => ({
+      response: await refreshQuota(),
+      quotaEventCursor: options.quotaEventCursor ?? "quota-fence-default",
+    }),
+  };
   return controlServices(
     undefined as never,
     undefined as never,
@@ -74,6 +156,25 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     // These are projection tests, not live harness integration tests. Keep
     // them hermetic even when the developer machine has vendor CLIs installed.
     process.env.PATH = dir;
+    gatewayMock.calls = [];
+    gatewayMock.profileReadiness = { availability: "unknown", verification: "not_run" };
+    gatewayMock.profileReadinessById = {};
+    gatewayMock.statuses = [
+      {
+        id: "claude",
+        available: true,
+        status: "ok",
+        manifest: null,
+        authSources: [
+          { source: "native_session", availability: "available", verification: "passed" },
+        ],
+        enabledIntents: ["explain", "implement"],
+        routableIntents: ["explain", "implement"],
+        disabledIntents: [],
+        checks: [],
+        reasons: [],
+      },
+    ];
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
   afterEach(() => {
@@ -122,13 +223,15 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(claudeBase).not.toHaveProperty("active_profile_id");
     expect(claudeBase).not.toHaveProperty("active_identity");
     expect(claudeBase?.native_credentials_enabled).toBe(true);
-    expect(claudeBase?.next_up).toEqual({ kind: "native" });
+    expect(claudeBase?.next_up).toEqual({ kind: "native", route: "local_session" });
+    expect(gatewayMock.calls.at(-1)?.fresh).toBe(true);
 
     // An enabled profile does NOT become an auto-default: unpinned runs still
     // route to the native login (profiles route only by explicit pin / rotation).
     const withProfile = ControlCredentialProfilesResponse.parse(await svc.credentialProfiles());
     expect(withProfile.harnessAccounts.find((h) => h.harness_id === "claude")?.next_up).toEqual({
       kind: "native",
+      route: "local_session",
     });
 
     // Disable the CLI login → an unpinned run has nothing routable (next_up none).
@@ -145,6 +248,197 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     const claudeNone = none.harnessAccounts.find((h) => h.harness_id === "claude");
     expect(claudeNone?.native_credentials_enabled).toBe(false);
     expect(claudeNone?.next_up.kind).toBe("none");
+  });
+
+  it("does not project an enabled default as next_up when fresh doctor truth is unavailable", async () => {
+    gatewayMock.statuses = [
+      {
+        id: "claude",
+        status: "unavailable",
+        authSources: [
+          { source: "native_session", availability: "unknown", verification: "not_run" },
+        ],
+        enabledIntents: [],
+        routableIntents: [],
+      },
+    ];
+    const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
+    const claude = listing.harnessAccounts.find((value) => value.harness_id === "claude");
+    expect(claude?.native_credentials_enabled).toBe(true);
+    expect(claude?.native_login_detected).toBe(false);
+    expect(claude?.next_up).toMatchObject({ kind: "none" });
+  });
+
+  it("returns one opt-in snapshot whose rows and next_up share one fresh doctor read", async () => {
+    gatewayMock.calls = [];
+    const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
+      await services().credentialProfiles({ snapshot: true }),
+    );
+    expect(gatewayMock.calls).toEqual([{ cwd: noProjectRepoRoot(), fresh: true }]);
+    expect(snapshot.harnesses.map((status) => status.id)).toEqual(["claude"]);
+    expect(
+      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
+    ).toEqual({ kind: "native", route: "local_session" });
+    expect(snapshot.git.status).toBe("missing");
+    expect(snapshot.quota.refreshed_at).toBe("2026-07-28T00:00:00Z");
+    const { quotaEventCursor, ...unfenced } = snapshot;
+    expect(quotaEventCursor).toBe("quota-fence-default");
+    expect(() => ControlCredentialProfilesSnapshotResponse.parse(unfenced)).toThrow();
+    expect(ControlCredentialProfilesResponse.parse({ profiles: [], harnessAccounts: [] })).toEqual({
+      profiles: [],
+      harnessAccounts: [],
+    });
+  });
+
+  it("projects the API-key fallback route instead of naming an unavailable CLI login", async () => {
+    gatewayMock.statuses = [
+      {
+        id: "claude",
+        available: true,
+        status: "ok",
+        manifest: null,
+        authSources: [
+          { source: "native_session", availability: "unavailable", verification: "failed" },
+          { source: "api_key_env", availability: "available", verification: "passed" },
+        ],
+        enabledIntents: ["explain", "implement"],
+        routableIntents: ["explain", "implement"],
+        disabledIntents: [],
+        checks: [],
+        reasons: [],
+      },
+    ];
+    const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
+    const claude = listing.harnessAccounts.find((value) => value.harness_id === "claude");
+    expect(claude?.native_login_detected).toBe(false);
+    expect(claude?.next_up).toEqual({ kind: "native", route: "api_key" });
+  });
+
+  it("derives next_up and returns quota from one refreshed snapshot epoch", async () => {
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: {
+          ...(config.harnesses.claude ?? {}),
+          profile_policy: {
+            limit_action: "rotate",
+            rotation_eligible: ["work"],
+            headroom_threshold: 0.9,
+          },
+        },
+      },
+    }));
+    const refreshedQuota = ControlQuotaResponse.parse({
+      snapshots: [quotaSnapshot(null, 0.95), quotaSnapshot("work", 0.1)],
+      absences: [],
+      refreshed_at: "2026-07-28T01:02:03Z",
+    });
+    const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
+      await services({ refreshedQuota, quotaEventCursor: "quota-fence-exact" }).credentialProfiles({
+        snapshot: true,
+      }),
+    );
+    expect(snapshot.quota).toEqual(refreshedQuota);
+    expect(snapshot.quotaEventCursor).toBe("quota-fence-exact");
+    expect(
+      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
+    ).toEqual({ kind: "profile", profileId: "work" });
+  });
+
+  it("next_up skips an unready rotation target and matches the next ready profile", async () => {
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    registerConfigDirProfile({ harnessId: "claude", profileId: "spare" });
+    gatewayMock.profileReadinessById = {
+      work: { availability: "unavailable", verification: "failed" },
+      spare: { availability: "available", verification: "passed" },
+    };
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: {
+          ...(config.harnesses.claude ?? {}),
+          profile_policy: {
+            limit_action: "rotate",
+            rotation_eligible: ["work", "spare"],
+            headroom_threshold: 0.9,
+          },
+        },
+      },
+    }));
+    const refreshedQuota = ControlQuotaResponse.parse({
+      snapshots: [quotaSnapshot(null, 0.95)],
+      absences: [],
+      refreshed_at: "2026-07-28T01:02:03Z",
+    });
+
+    const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
+      await services({ refreshedQuota }).credentialProfiles({ snapshot: true }),
+    );
+    expect(
+      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
+    ).toEqual({ kind: "profile", profileId: "spare" });
+  });
+
+  it("keeps an API-key default on quota breach instead of changing payment class", async () => {
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    gatewayMock.statuses = [
+      {
+        id: "claude",
+        available: true,
+        status: "ok",
+        manifest: null,
+        authSources: [
+          { source: "native_session", availability: "unavailable", verification: "failed" },
+          { source: "api_key_env", availability: "available", verification: "passed" },
+        ],
+        enabledIntents: ["explain", "implement"],
+        routableIntents: ["explain", "implement"],
+        disabledIntents: [],
+        checks: [],
+        reasons: [],
+      },
+    ];
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: {
+          ...(config.harnesses.claude ?? {}),
+          profile_policy: {
+            limit_action: "rotate",
+            rotation_eligible: ["work"],
+            headroom_threshold: 0.9,
+          },
+        },
+      },
+    }));
+    const refreshedQuota = ControlQuotaResponse.parse({
+      snapshots: [quotaSnapshot(null, 0.95)],
+      absences: [],
+      refreshed_at: "2026-07-28T01:02:03Z",
+    });
+
+    const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
+      await services({ refreshedQuota }).credentialProfiles({ snapshot: true }),
+    );
+    expect(
+      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
+    ).toEqual({ kind: "native", route: "api_key" });
+  });
+
+  it("fails the complete snapshot when its quota epoch cannot refresh", async () => {
+    const error = Object.assign(new Error("quota refresh unavailable"), {
+      code: "quota_refresh_unavailable",
+      status: 503,
+    });
+    await expect(
+      services({ refreshError: error }).credentialProfiles({ snapshot: true }),
+    ).rejects.toBe(error);
   });
 
   it("projects the non-secret {email, plan} identity from each account's OWN owned store (INV-067)", async () => {

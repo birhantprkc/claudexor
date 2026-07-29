@@ -1,4 +1,4 @@
-import { redactSecrets } from "@claudexor/util";
+import { redactSecrets, safeProblemContext } from "@claudexor/util";
 
 /** Bounds for the request-validation projection (QA-053). Redact-first, then
  *  truncate; never split a redaction marker; disclose omitted counts. */
@@ -212,6 +212,7 @@ const RESERVED_FIELDS = new Set([
   "fieldErrors",
   "requiredActions",
   "evidenceRefs",
+  "context",
 ]);
 
 export type ControlProblemError = Error & {
@@ -232,9 +233,11 @@ export function controlProblemError(status: number, body: unknown): ControlProbl
         ? source["message"]
         : `request failed with status ${status}`;
   const code = typeof source["code"] === "string" ? source["code"] : `http_${status}`;
-  const context = Object.fromEntries(
-    Object.entries(source).filter(([key]) => !RESERVED_FIELDS.has(key)),
+  const extras = safeProblemContext(
+    Object.fromEntries(Object.entries(source).filter(([key]) => !RESERVED_FIELDS.has(key))),
   );
+  const explicit = safeProblemContext(source["context"]);
+  const context = { ...extras, ...explicit };
   return Object.assign(new Error(message), {
     code,
     retryable: source["retryable"] === true,

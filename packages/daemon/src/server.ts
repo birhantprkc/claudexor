@@ -33,6 +33,10 @@ import {
 } from "./job-record.js";
 import { settleJobError } from "./job-settlement.js";
 import { socketAlive } from "./socket-probe.js";
+import {
+  TurnEnqueueProblem,
+  type TurnEnqueueProblem as TurnEnqueueProblemValue,
+} from "@claudexor/schema";
 export { JOB_STATES, jobStateFromResult, socketAlive, type JobRecord };
 
 export interface RunContext {
@@ -60,15 +64,9 @@ export interface DaemonOptions {
   /** Called when a job that carried a pre-created thread turn (params.turnId)
    * settles failure-shaped WITHOUT ever binding a run — i.e. the refusal
    * happened before the run materialized (trust gate, preflight validation).
-   * The observer persists the reason on the turn so it is never a silent
-   * orphan bubble. `code` is the typed throw's machine code (null if none);
-   * `retryable` is its explicit retryability claim (undefined = no claim). */
-  onTurnEnqueueFailed?: (
-    turnId: string,
-    error: string,
-    code: string | null,
-    retryable?: boolean,
-  ) => void;
+   * The observer persists one sanitized typed problem on the turn so it is
+   * never a silent orphan bubble and no recovery field is dropped. */
+  onTurnEnqueueFailed?: (turnId: string, problem: TurnEnqueueProblemValue) => void;
   /** Composition-root shutdown hook. When present, RPC shutdown must drain
    * every daemon-owned subsystem, not only this socket queue. */
   onShutdownRequested?: () => Promise<void>;
@@ -594,9 +592,13 @@ export class DaemonServer {
           try {
             this.opts.onTurnEnqueueFailed?.(
               turnId,
-              rec.error,
-              rec.errorCode ?? null,
-              rec.errorRetryable,
+              TurnEnqueueProblem.parse({
+                message: rec.error,
+                code: rec.errorCode ?? null,
+                retryable: rec.errorRetryable ?? true,
+                required_actions: rec.errorRequiredActions ?? [],
+                context: rec.errorContext ?? {},
+              }),
             );
           } catch {
             /* observer failure must not corrupt terminal bookkeeping */

@@ -14,7 +14,7 @@ import {
   ControlThreadTurnResponse,
   TRUST_FULL_ACCESS_CODE,
 } from "@claudexor/schema";
-import type { ResourceAttachmentRef } from "@claudexor/schema";
+import type { ResourceAttachmentRef, TurnEnqueueProblem } from "@claudexor/schema";
 import type { DaemonFacadeClient, DaemonRunRecord } from "./daemon-server.js";
 
 export interface ThreadTurnRouteCtx {
@@ -25,6 +25,8 @@ export interface ThreadTurnRouteCtx {
   /** The server's single run-start normalizer (scope/prompt/policy validation). */
   normalizeStart(parsed: ControlRunStartRequest): ControlRunStartRequest;
   preflightRunRequirements?: (request: ControlRunStartRequest) => Promise<void>;
+  /** Non-durable request checks for a thread turn; Git runs inside its daemon job. */
+  preflightThreadRunRequirements?: (request: ControlRunStartRequest) => Promise<void>;
   /** True for terminal job states (the server's TERMINAL_STATES set). */
   isTerminalState(state: string): boolean;
   daemon: DaemonFacadeClient;
@@ -41,12 +43,7 @@ export interface ThreadTurnRouteCtx {
       idempotency?: { key: string; client: string; request: unknown };
     },
   ): Promise<unknown>;
-  setTurnEnqueueError?: (
-    turnId: string,
-    message: string,
-    code: string | null,
-    retryable?: boolean,
-  ) => void;
+  setTurnEnqueueError?: (turnId: string, problem: TurnEnqueueProblem) => void;
   /** Per-thread promise chain (owned by the server; shared with turn creation). */
   threadTurnChains: Map<string, Promise<void>>;
 }
@@ -117,23 +114,34 @@ export function errCode(err: unknown): string | null {
  * return it), and errCode yields null for absent/non-string codes.
  */
 export function recordTurnEnqueueFailure(
-  setTurnEnqueueError:
-    | ((turnId: string, message: string, code: string | null, retryable?: boolean) => void)
-    | undefined,
+  setTurnEnqueueError: ((turnId: string, problem: TurnEnqueueProblem) => void) | undefined,
   turnId: string | undefined,
   err: unknown,
 ): void {
   if (!turnId || !setTurnEnqueueError) return;
   try {
-    setTurnEnqueueError(
-      turnId,
-      err instanceof Error ? err.message : String(err),
-      errCode(err),
-      false,
-    );
+    setTurnEnqueueError(turnId, problemFromError(err, false));
   } catch {
     /* recording the refusal must not mask the original error */
   }
+}
+
+function problemFromError(err: unknown, retryable: boolean): TurnEnqueueProblem {
+  const source = err && typeof err === "object" ? (err as Record<string, unknown>) : {};
+  return {
+    message: err instanceof Error ? err.message : String(err),
+    code: errCode(err),
+    retryable,
+    required_actions: Array.isArray(source["requiredActions"])
+      ? source["requiredActions"].filter((value): value is string => typeof value === "string")
+      : [],
+    context:
+      source["context"] &&
+      typeof source["context"] === "object" &&
+      !Array.isArray(source["context"])
+        ? (source["context"] as Record<string, unknown>)
+        : {},
+  };
 }
 
 async function respondToTurnJob(
@@ -183,6 +191,14 @@ async function respondToTurnJob(
       state: rec.state,
       error: rec.error ?? `run ended pre-start: ${rec.state}`,
       ...(rec.errorCode ? { code: rec.errorCode } : {}),
+      retryable: rec.errorRetryable ?? true,
+      requiredActions: rec.errorRequiredActions ?? [],
+      context: {
+        ...(rec.errorContext ?? {}),
+        jobId: rec.id,
+        turnId,
+        threadId,
+      },
     });
   }
   return ctx.json(
@@ -362,7 +378,7 @@ export function handleThreadTurnCreate(
       // refusal now has a turnId to land on, so the outer catch persists it via
       // setTurnEnqueueError and the app renders an inline refusal card instead
       // of raw JSON with no turn to attach to.
-      await ctx.preflightRunRequirements?.(params);
+      await (ctx.preflightThreadRunRequirements ?? ctx.preflightRunRequirements)?.(params);
       // The turn stores resolved immutable resources; enqueue carries no duplicate refs.
       const { attachments: _att, ...enqueueParams } = params;
       // ENQUEUE phase: a throw here means NO job was recorded — persist the
@@ -381,7 +397,7 @@ export function handleThreadTurnCreate(
       } catch (err) {
         const message = err instanceof Error ? err.message : "enqueue failed";
         try {
-          ctx.setTurnEnqueueError?.(turn.id, message, errCode(err), false);
+          ctx.setTurnEnqueueError?.(turn.id, problemFromError(err, false));
         } catch {
           /* recording the refusal must not mask the original error */
         }
@@ -404,7 +420,7 @@ export function handleThreadTurnCreate(
       const code = errCode(err);
       if (createdTurnId) {
         try {
-          ctx.setTurnEnqueueError?.(createdTurnId, message, code, false);
+          ctx.setTurnEnqueueError?.(createdTurnId, problemFromError(err, false));
         } catch {
           /* recording the refusal must not mask the original error */
         }
@@ -530,7 +546,7 @@ export function handleThreadTurnRetry(
         // Untyped throws are infra failures — 500 (matching POST /runs).
         const message = err instanceof Error ? err.message : "enqueue failed";
         try {
-          ctx.setTurnEnqueueError?.(turnId, message, errCode(err), true);
+          ctx.setTurnEnqueueError?.(turnId, problemFromError(err, true));
         } catch {
           /* recording the refusal must not mask the original error */
         }

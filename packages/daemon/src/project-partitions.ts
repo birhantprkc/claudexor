@@ -426,13 +426,8 @@ export class ProjectPartitions implements CommandAuthority {
     this.requireTurnStore(id).bindTurnRun(id, runId);
   }
 
-  setTurnEnqueueError(
-    id: string,
-    message: string,
-    code: string | null = null,
-    retryable = true,
-  ): void {
-    this.requireTurnStore(id).setTurnEnqueueError(id, message, code, retryable);
+  setTurnEnqueueError(id: string, problem: import("@claudexor/schema").TurnEnqueueProblem): void {
+    this.requireTurnStore(id).setTurnEnqueueError(id, problem);
   }
 
   resumeMap(

@@ -22,6 +22,7 @@ import {
 import { namespacedSecretRefBase, resolveSecret } from "@claudexor/secrets";
 import {
   CLAUDEXOR_VERSION,
+  normalizeRetryDelayMs,
   nowIso,
   redactSecrets,
   sensitiveResourcePolicy,
@@ -414,8 +415,9 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
           const body = await res.text().catch(() => "");
           const retryAfter = res.headers.get("retry-after");
           const resetsAt = retryAfter ? resetsAtFromRetryAfter(retryAfter) : null;
-          const retryDelayMs =
-            retryAfter && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : null;
+          const retryDelayMs = normalizeRetryDelayMs(
+            retryAfter && Number.isFinite(Number(retryAfter)) ? Number(retryAfter) * 1000 : null,
+          );
           yield {
             type: "error",
             session_id: spec.session_id,

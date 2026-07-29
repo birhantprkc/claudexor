@@ -71,6 +71,7 @@ export function turnRunCard(
     strategy: summary.strategy ?? null,
     n: summary.n,
     result: summary.result,
+    outcomeFacts: summary.outcomeFacts,
     spendUsd: summary.spendUsd ?? null,
     outputReadyState: summary.outputReadyState,
     waitingOnUser: summary.waitingOnUser,
@@ -104,7 +105,14 @@ export function projectTurn(
   const t = raw as Record<string, unknown>;
   const runId = (t["run_id"] as string | null) ?? null;
   const enqueueError = t["enqueue_error"] as
-    | { message?: unknown; code?: unknown; retryable?: unknown; failed_at?: unknown }
+    | {
+        message?: unknown;
+        code?: unknown;
+        retryable?: unknown;
+        required_actions?: unknown;
+        context?: unknown;
+        failed_at?: unknown;
+      }
     | null
     | undefined;
   const continuity = t["continuity"] as
@@ -143,6 +151,15 @@ export function projectTurn(
             // Legacy records (pre-retryable) default to true — they came from
             // the runner-hook path, where a job exists to replay.
             retryable: enqueueError.retryable !== false,
+            requiredActions: Array.isArray(enqueueError.required_actions)
+              ? enqueueError.required_actions
+              : [],
+            context:
+              enqueueError.context &&
+              typeof enqueueError.context === "object" &&
+              !Array.isArray(enqueueError.context)
+                ? enqueueError.context
+                : {},
             failedAt: String(enqueueError.failed_at ?? ""),
           }
         : null,

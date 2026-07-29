@@ -13,7 +13,12 @@ import {
   renderHelp,
   renderReplHelp,
 } from "./command-registry.js";
-import { commandFlagScopeError, subcommandFlagScopeError } from "./command-scope.js";
+import {
+  commandFlagScopeError,
+  commandPositionalError,
+  runModeFlagScopeError,
+  subcommandFlagScopeError,
+} from "./command-scope.js";
 import { commandHelpJson, findCommand, renderCommandHelp } from "./command-help.js";
 import { reviewCommand } from "./review-command.js";
 
@@ -28,6 +33,16 @@ describe("command registry — the one owner of the CLI surface", () => {
     for (const cmd of CLI_COMMANDS) {
       for (const flag of cmd.flags)
         expect(KNOWN_FLAGS.has(flag), `${cmd.id} -> --${flag}`).toBe(true);
+    }
+  });
+
+  it("every command owns at least one declarative positional shape", () => {
+    for (const command of CLI_COMMANDS) {
+      expect(command.positionalPatterns.length, command.id).toBeGreaterThan(0);
+      for (const pattern of command.positionalPatterns) {
+        expect(pattern.min).toBeGreaterThanOrEqual(pattern.prefix?.length ?? 0);
+        if (pattern.max !== null) expect(pattern.max).toBeGreaterThanOrEqual(pattern.min);
+      }
     }
   });
 
@@ -60,6 +75,9 @@ describe("command registry — the one owner of the CLI surface", () => {
     expect(outputSchema?.description).toContain("https://json-schema.org/draft/2020-12/schema");
     expect(j.repl_commands.length).toBe(REPL_COMMANDS.length);
     expect(j.commands.find((command) => command.id === "acp")?.stability).toBe("experimental");
+    expect(j.commands.find((command) => command.id === "inspect")?.positional_patterns).toEqual([
+      { prefix: [], min: 1, max: 1 },
+    ]);
     // Descriptions with help-layout newlines are flattened for machines.
     for (const f of j.flags) if (f.description !== null) expect(f.description).not.toContain("\n");
     // Mutability vocabulary is closed.
@@ -103,6 +121,115 @@ describe("command registry — the one owner of the CLI surface", () => {
     // No ownership map declared = nothing for this check to say.
     expect(subcommandFlagScopeError("project", "list", ["json"])).toBeNull();
     expect(subcommandFlagScopeError("harness", "bogus", ["yes"])).toBeNull();
+  });
+
+  it("projects the complete dedicated run-verb flag matrix into scoped help", () => {
+    const common = [
+      "harness",
+      "primary-harness",
+      "max-usd",
+      "max-seconds",
+      "max-turns",
+      "prompt-file",
+      "thread",
+      "resume",
+      "json-stream",
+      "access",
+      "web",
+      "model",
+      "effort",
+      "portfolio",
+      "routing-goal",
+      "profile",
+      "instructions",
+      "instructions-file",
+      "attach",
+      "image",
+      "json",
+    ];
+    const agentMode = [
+      "n",
+      "attempts",
+      "until-clean",
+      "create",
+      "delegate",
+      "synthesis",
+      "test",
+      "allow-protected-path",
+      "deny-path",
+      "output-schema",
+      "reviewer-panel",
+      "reviewer-model",
+      "reviewer-effort",
+      "in-place",
+    ];
+    const askMode = ["n", "deep-scan", "output-schema"];
+    const planMode = ["n", "council"];
+    const matrix: Record<string, string[]> = {
+      ask: [...common, ...askMode],
+      agent: [...new Set([...common, ...agentMode, ...askMode, ...planMode]), "mode"],
+      "best-of": [...common, ...agentMode],
+      plan: [...common, ...planMode],
+      create: [...common, ...agentMode],
+    };
+    const allRunFlags = new Set([...common, ...agentMode, ...askMode, ...planMode, "mode"]);
+
+    for (const [command, expected] of Object.entries(matrix)) {
+      const spec = findCommand(command) as CliCommandSpec;
+      expect(new Set(spec.flags), command).toEqual(new Set(expected));
+      const text = renderCommandHelp(spec);
+      const machine = commandHelpJson("0.0.0-test", spec);
+      expect(new Set(machine.command.flags), command).toEqual(new Set(expected));
+      expect(new Set(machine.flags.map((entry) => entry.name)), command).toEqual(
+        new Set([...expected, "help"]),
+      );
+      for (const flag of allRunFlags) {
+        if (expected.includes(flag)) continue;
+        expect(text, `${command} --${flag}`).not.toMatch(new RegExp(`--${flag}(?=\\s|$)`));
+        expect(commandFlagScopeError(command, [flag]), `${command} --${flag}`).toContain(
+          `--${flag}`,
+        );
+      }
+    }
+
+    // The cross-mode data controls that motivated the audit stay explicit.
+    expect(findCommand("ask")?.flags).toEqual(expect.arrayContaining(["deep-scan", "n", "attach"]));
+    expect(findCommand("plan")?.flags).toEqual(expect.arrayContaining(["council", "n", "attach"]));
+  });
+
+  it("applies the same matrix to the dynamic agent --mode entrypoint", () => {
+    expect(runModeFlagScopeError("agent", ["attempts", "reviewer-panel", "in-place"])).toBeNull();
+    expect(runModeFlagScopeError("agent", ["deep-scan", "council"])).toContain("--deep-scan");
+    expect(runModeFlagScopeError("ask", ["deep-scan", "n", "output-schema"])).toBeNull();
+    expect(runModeFlagScopeError("ask", ["attempts", "council", "test"])).toContain("--attempts");
+    expect(runModeFlagScopeError("plan", ["council", "n", "attach"])).toBeNull();
+    expect(runModeFlagScopeError("plan", ["deep-scan", "output-schema", "in-place"])).toContain(
+      "--deep-scan",
+    );
+  });
+
+  it("rejects every confirmed surplus read operand before dispatch", () => {
+    const confirmed: Array<[string, string[]]> = [
+      ["about", ["unexpected"]],
+      ["help", ["unexpected"]],
+      ["daemon", ["status", "unexpected"]],
+      ["quota", ["unexpected"]],
+      ["settings", ["show", "unexpected"]],
+      ["harness", ["list", "unexpected"]],
+      ["inspect", ["run-1", "unexpected"]],
+      ["run-again", ["run-1", "unexpected"]],
+      ["follow", ["run-1", "unexpected"]],
+    ];
+    for (const [command, values] of confirmed) {
+      expect(commandPositionalError(command, values), command).toContain(
+        "invalid positional arguments",
+      );
+    }
+    expect(commandPositionalError("inspect", ["run-1"])).toBeNull();
+    expect(commandPositionalError("settings", ["show"])).toBeNull();
+    expect(commandPositionalError("remote", [])).toBeNull();
+    expect(commandPositionalError("remote", ["probe"])).toBeNull();
+    expect(commandPositionalError("project", ["list", "unexpected"])).toContain("usage:");
   });
 
   it("host fallback examples and recovery verbs project the registry, not hand lists", () => {
@@ -212,5 +339,15 @@ describe("scoped command help + registry completeness (GH #28 / QA-057/057b/059)
     expect(project?.usageArgs).toContain("outputs");
     const help = renderHelp("0.0.0-test");
     expect(help).toContain("outputs");
+  });
+
+  it("documents the optional release check-name argument and its default-compatible arity", () => {
+    const release = findCommand("release");
+    expect(release?.usageArgs).toContain("check-name [name]");
+    expect(release?.positionalPatterns).toContainEqual({
+      prefix: ["check-name"],
+      min: 1,
+      max: 2,
+    });
   });
 });

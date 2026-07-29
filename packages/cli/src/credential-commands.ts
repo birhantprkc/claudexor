@@ -296,7 +296,13 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     }
     // Informational: who an UNPINNED run routes to next (never a user setting).
     const nextUp = authority?.next_up;
-    if (nextUp?.kind === "native") print(`  next up: CLI login [native]`);
+    if (nextUp?.kind === "native") {
+      print(
+        nextUp.route === "api_key"
+          ? `  next up: API key [default]`
+          : `  next up: CLI login [native]`,
+      );
+    }
     else if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
     else if (nextUp?.kind === "none") print(`  next up: nothing routable (${nextUp.reason})`);
   }

@@ -452,6 +452,19 @@ describe("AcpServer official SDK projection", () => {
     // D8: a needs-review run has a SUCCEEDED lifecycle and ends end_turn (the
     // process completed); only failed/interrupted lifecycles are a refusal.
     const cwd = project();
+    const failure = {
+      phase: "execute",
+      category: "auth",
+      code: null,
+      harnessId: "claude",
+      attemptId: "a01",
+      safeMessage: "Authentication expired",
+      rawDetailRef: "attempts/a01/failure.json",
+      logRefs: ["attempts/a01/stderr.log"],
+      eventRefs: ["events.jsonl#42"],
+      runDir: "/tmp/run-failed",
+      nextActions: ["Log in again"],
+    };
     await withClient(
       async (params) =>
         params.mode === "__acp_session_new"
@@ -460,6 +473,7 @@ describe("AcpServer official SDK projection", () => {
               runId: "run-failed",
               status: "failed",
               summary: "harness failed",
+              failure,
               applyEligibility: { eligible: false, requiredAction: "accept_risk" },
             },
       async (agent) => {
@@ -469,12 +483,15 @@ describe("AcpServer official SDK projection", () => {
           prompt: [{ type: "text", text: "go" }],
         });
         expect(response.stopReason).toBe("refusal");
-        expect(response._meta?.["claudexor"]).toMatchObject({ status: "failed" });
+        expect(response._meta?.["claudexor"]).toMatchObject({
+          status: "failed",
+          failure,
+        });
       },
     );
   });
 
-  it("maps a daemon-cancelled terminal to cancelled without requiring a local abort", async () => {
+  it("maps a daemon hard deadline to refusal without requiring a local abort", async () => {
     const cwd = project();
     await withClient(
       async (params) =>
@@ -483,7 +500,15 @@ describe("AcpServer official SDK projection", () => {
           : {
               runId: "run-daemon-cancelled",
               status: "cancelled",
-              summary: "cancelled by daemon policy",
+              summary: "Time limit reached",
+              outcomeFacts: {
+                lifecycle: "cancelled",
+                noChanges: false,
+                checks: "not_configured",
+                review: "not_run",
+                reason: "wall_clock_exceeded",
+              },
+              outcomeBanner: "Time limit reached",
               applyEligibility: null,
             },
       async (agent) => {
@@ -492,8 +517,12 @@ describe("AcpServer official SDK projection", () => {
           sessionId: session.sessionId,
           prompt: [{ type: "text", text: "go" }],
         });
-        expect(response.stopReason).toBe("cancelled");
-        expect(response._meta?.["claudexor"]).toMatchObject({ status: "cancelled" });
+        expect(response.stopReason).toBe("refusal");
+        expect(response._meta?.["claudexor"]).toMatchObject({
+          status: "cancelled",
+          outcomeFacts: { reason: "wall_clock_exceeded" },
+          outcomeBanner: "Time limit reached",
+        });
       },
     );
   });

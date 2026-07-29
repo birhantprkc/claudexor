@@ -166,6 +166,26 @@ describe("parseClaudeEvent", () => {
     expect(() => HarnessEvent.parse(out)).not.toThrow();
   });
 
+  it("normalizes fractional retry delays upward and rejects malformed retry counters", () => {
+    const out = parseClaudeEvent(
+      {
+        type: "system",
+        subtype: "api_retry",
+        error: "overloaded",
+        attempt: 1.5,
+        max_retries: Number.POSITIVE_INFINITY,
+        retry_delay_ms: 572.5484158884485,
+      },
+      "s-fractional-retry",
+    )?.[0];
+    expect(out?.status).toMatchObject({ kind: "api_retry", retry_delay_ms: 573 });
+    expect(out?.status?.attempt).toBeUndefined();
+    expect(out?.status?.max_retries).toBeUndefined();
+    expect(out?.rate_limit?.retry_delay_ms).toBe(573);
+    expect(out?.transient?.retry_delay_ms).toBe(573);
+    expect(() => HarnessEvent.parse(out)).not.toThrow();
+  });
+
   it("collapses an unrecognized api_retry error to the 'unknown' category (sol #7)", () => {
     const out = parseClaudeEvent(
       { type: "system", subtype: "api_retry", error: "SOME-NEW-VENDOR-STRING sk-secret" },
@@ -796,37 +816,40 @@ describe("plan progress", () => {
     // A status-less update is still a no-op (nothing to record).
     const noop = call("TaskUpdate", { taskId: "1" });
     expect(noop?.plan_progress).toBeUndefined();
+    const duplicate = call("TaskUpdate", { taskId: "1", status: "completed" });
+    expect(duplicate?.plan_progress).toBeUndefined();
   });
 
   it("maps TodoWrite todos to the TYPED plan_progress field on the tool_call event", () => {
-    const out = parseClaudeEvent(
-      {
-        type: "assistant",
-        message: {
-          content: [
-            {
-              type: "tool_use",
-              id: "toolu_1",
-              name: "TodoWrite",
-              input: {
-                todos: [
-                  { content: "write tests", status: "completed", activeForm: "writing tests" },
-                  { content: "fix bug", status: "in_progress", activeForm: "fixing bug" },
-                  { content: "ship", status: "pending", activeForm: "shipping" },
-                ],
-              },
+    const sid = `s-todo-${Math.random()}`;
+    const raw = {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "TodoWrite",
+            input: {
+              todos: [
+                { content: "write tests", status: "completed", activeForm: "writing tests" },
+                { content: "fix bug", status: "in_progress", activeForm: "fixing bug" },
+                { content: "ship", status: "pending", activeForm: "shipping" },
+              ],
             },
-          ],
-        },
+          },
+        ],
       },
-      "s1",
-    );
+    };
+    const out = parseClaudeEvent(raw, sid);
     const ev = out?.find((e) => e.type === "tool_call");
     expect(ev?.plan_progress?.items).toEqual([
       { id: "claude-0", title: "write tests", status: "completed" },
       { id: "claude-1", title: "fix bug", status: "in_progress" },
       { id: "claude-2", title: "ship", status: "pending" },
     ]);
+    const replay = parseClaudeEvent(raw, sid)?.find((e) => e.type === "tool_call");
+    expect(replay?.plan_progress).toBeUndefined();
   });
 });
 

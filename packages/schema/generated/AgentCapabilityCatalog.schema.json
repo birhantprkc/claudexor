@@ -17,6 +17,46 @@
           "type": "string",
           "description": "ISO timestamp when the catalog was composed."
         },
+        "git": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "available",
+                "missing",
+                "developer_tools_stub",
+                "failed"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remediation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "version",
+            "detail",
+            "remediation"
+          ],
+          "additionalProperties": false,
+          "description": "Execution-location Git readiness. Read-only and valid non-Git in-place flows do not require it."
+        },
         "harnesses": {
           "type": "array",
           "items": {
@@ -480,6 +520,7 @@
         "ok",
         "version",
         "generatedAt",
+        "git",
         "harnesses",
         "availableHarnesses",
         "modes",

@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { CredentialProfile } from "@claudexor/schema";
 import {
+  defaultCredentialRoute,
+  effectiveAuthPreference,
   nextEligibleProfile,
+  nextUpIdentity,
   planReactiveRotation,
   preflightDefaultSubject,
+  probeCredentialProfileStatus,
   profileHeadroomBreach,
   resolveCredentialProfile,
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
   selectedProfileAvailability,
+  profileStatusAdmits,
 } from "./credential-profiles.js";
 import { HarnessRunSpec as HarnessRunSpecSchema } from "@claudexor/schema";
 import type { QuotaSnapshot } from "@claudexor/schema";
@@ -88,6 +93,99 @@ describe("selectedProfileAvailability", () => {
   });
 });
 
+describe("profileStatusAdmits", () => {
+  it("shares the run-admission verification rule with account projection", () => {
+    expect(profileStatusAdmits(work, { availability: "available", verification: "passed" })).toBe(
+      true,
+    );
+    expect(profileStatusAdmits(work, { availability: "available", verification: "not_run" })).toBe(
+      false,
+    );
+    expect(
+      profileStatusAdmits(
+        { credential_kind: "api_key" },
+        { availability: "available", verification: "not_run" },
+      ),
+    ).toBe(true);
+    expect(profileStatusAdmits(work, { availability: "unknown", verification: "not_run" })).toBe(
+      false,
+    );
+  });
+
+  it("turns a throwing profile probe into fail-closed readiness", async () => {
+    const status = await probeCredentialProfileStatus(work, async () => {
+      throw new Error("token=secret probe failed");
+    });
+    expect(profileStatusAdmits(work, status)).toBe(false);
+    expect(status.availability).toBe("unknown");
+    expect(status.detail).toContain("profile readiness probe failed");
+  });
+});
+
+describe("defaultCredentialRoute", () => {
+  const base = {
+    status: "ok" as const,
+    routableIntents: ["implement"],
+  };
+
+  it("projects a doctor-routable API-key-only default subject", () => {
+    expect(
+      defaultCredentialRoute(
+        {
+          ...base,
+          authSources: [
+            { source: "api_key_env", availability: "available", verification: "not_run" },
+          ],
+        },
+        "auto",
+      ),
+    ).toBe("api_key");
+  });
+
+  it("follows canonical preference and API-key fallback instead of native-source presence", () => {
+    const mixed = {
+      ...base,
+      authSources: [
+        { source: "native_session" as const, availability: "unavailable" as const, verification: "failed" as const },
+        { source: "api_key_env" as const, availability: "available" as const, verification: "passed" as const },
+      ],
+    };
+    expect(defaultCredentialRoute(mixed, "auto")).toBe("api_key");
+    expect(defaultCredentialRoute(mixed, "api_key")).toBe("api_key");
+    expect(defaultCredentialRoute(mixed, "subscription")).toBeNull();
+
+    expect(
+      defaultCredentialRoute(
+        {
+          ...base,
+          authSources: [
+            { source: "native_session", availability: "available", verification: "passed" },
+          ],
+        },
+        "auto",
+      ),
+    ).toBe("local_session");
+  });
+
+  it("never promotes an aggregate degraded or unroutable status", () => {
+    expect(
+      defaultCredentialRoute(
+        { status: "degraded", routableIntents: ["implement"], authSources: [] },
+        "auto",
+      ),
+    ).toBeNull();
+    expect(
+      defaultCredentialRoute({ ...base, routableIntents: [], authSources: [] }, "auto"),
+    ).toBeNull();
+  });
+
+  it("shares run-admission preference precedence", () => {
+    expect(effectiveAuthPreference("auto", "api_key", "subscription")).toBe("api_key");
+    expect(effectiveAuthPreference(undefined, "auto", "subscription")).toBe("subscription");
+    expect(effectiveAuthPreference("auto", undefined, "auto")).toBe("auto");
+  });
+});
+
 function snap(profileId: string | null, usedRatio: number | null): QuotaSnapshot {
   return {
     subject: {
@@ -113,6 +211,7 @@ function snap(profileId: string | null, usedRatio: number | null): QuotaSnapshot
 }
 
 const policy = { limit_action: "rotate" as const, rotation_eligible: [], headroom_threshold: 0.9 };
+const ready = (...ids: string[]): ReadonlySet<string> => new Set(ids);
 
 describe("profileHeadroomBreach (W5.4 preflight)", () => {
   it("flags a window at/over the threshold with typed evidence", () => {
@@ -134,15 +233,19 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
   const c = { ...work, profile_id: "c", enabled: false };
 
   it("registry order by default; skips current, disabled, excluded, and spent profiles", () => {
-    expect(nextEligibleProfile([a, b, c], "claude", policy, a, [])?.profile_id).toBe("b");
-    expect(nextEligibleProfile([a, b], "claude", policy, a, [], new Set(["b"]))).toBeNull();
-    expect(nextEligibleProfile([a, b], "claude", policy, a, [snap("b", 0.95)])).toBeNull();
-    expect(nextEligibleProfile([c, a], "claude", policy, a, [])).toBeNull();
+    expect(nextEligibleProfile([a, b, c], "claude", policy, a, [], ready("a", "b"))?.profile_id).toBe("b");
+    expect(
+      nextEligibleProfile([a, b], "claude", policy, a, [], ready("a", "b"), new Set(["b"])),
+    ).toBeNull();
+    expect(
+      nextEligibleProfile([a, b], "claude", policy, a, [snap("b", 0.95)], ready("a", "b")),
+    ).toBeNull();
+    expect(nextEligibleProfile([c, a], "claude", policy, a, [], ready("a"))).toBeNull();
   });
 
   it("policy order wins over registry order", () => {
     const ordered = { ...policy, rotation_eligible: ["b", "a"] };
-    expect(nextEligibleProfile([a, b], "claude", ordered, null, [])?.profile_id).toBe("b");
+    expect(nextEligibleProfile([a, b], "claude", ordered, null, [], ready("a", "b"))?.profile_id).toBe("b");
   });
 
   it("rotation NEVER crosses credential kinds (round-16 BLOCK): a subscription→API-key swap would misvalue metered usage under the attempt's first-wins route receipt", () => {
@@ -154,15 +257,25 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
       secret_ref: "anthropic:k",
     };
     // The only remaining candidate pays with a different transport: no target.
-    expect(nextEligibleProfile([a, keyed], "claude", policy, a, [])).toBeNull();
+    expect(nextEligibleProfile([a, keyed], "claude", policy, a, [], ready("a", "k"))).toBeNull();
     // A same-kind candidate later in the order wins over an earlier cross-kind one.
     const ordered = { ...policy, rotation_eligible: ["k", "b"] };
-    expect(nextEligibleProfile([a, keyed, b], "claude", ordered, a, [])?.profile_id).toBe("b");
+    expect(
+      nextEligibleProfile([a, keyed, b], "claude", ordered, a, [], ready("a", "k", "b"))
+        ?.profile_id,
+    ).toBe("b");
     // Kind symmetry: an api_key profile rotates only to api_key profiles.
     const keyed2 = { ...keyed, profile_id: "k2", secret_ref: "anthropic:k2" };
-    expect(nextEligibleProfile([keyed, keyed2, b], "claude", policy, keyed, [])?.profile_id).toBe(
-      "k2",
-    );
+    expect(
+      nextEligibleProfile(
+        [keyed, keyed2, b],
+        "claude",
+        policy,
+        keyed,
+        [],
+        ready("k", "k2", "b"),
+      )?.profile_id,
+    ).toBe("k2");
   });
 
   it("the kind guard FAILS CLOSED when the current profile vanished from the reloaded pool (round-17 hardening)", () => {
@@ -175,8 +288,15 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
     };
     // The current profile was disabled/removed mid-attempt: it is absent from
     // the registry, but its TYPED kind still forbids a cross-kind swap.
-    expect(nextEligibleProfile([keyed], "claude", policy, a, [])).toBeNull();
-    expect(nextEligibleProfile([keyed, b], "claude", policy, a, [])?.profile_id).toBe("b");
+    expect(nextEligibleProfile([keyed], "claude", policy, a, [], ready("k"))).toBeNull();
+    expect(nextEligibleProfile([keyed, b], "claude", policy, a, [], ready("k", "b"))?.profile_id).toBe("b");
+  });
+
+  it("skips an enabled but unready target and selects the next ready sibling", () => {
+    expect(
+      nextEligibleProfile([a, b], "claude", policy, null, [], ready("b"))?.profile_id,
+    ).toBe("b");
+    expect(nextEligibleProfile([a], "claude", policy, null, [], ready())).toBeNull();
   });
 });
 
@@ -200,8 +320,8 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
   };
 
   it("null current (default subject) never rotates INTO an api_key profile — the round-16 BLOCK generalized", () => {
-    expect(nextEligibleProfile([keyed], "claude", policy, null, [])).toBeNull();
-    expect(nextEligibleProfile([keyed, a], "claude", policy, null, [])?.profile_id).toBe("a");
+    expect(nextEligibleProfile([keyed], "claude", policy, null, [], ready("k"))).toBeNull();
+    expect(nextEligibleProfile([keyed, a], "claude", policy, null, [], ready("k", "a"))?.profile_id).toBe("a");
   });
 
   it("preflightDefaultSubject: rotate + fresh default breach starts on the next subscription profile with full provenance", () => {
@@ -211,6 +331,8 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
       policy,
       registry: [a, b],
       snapshots: [snap(null, 0.95)],
+      readyProfileIds: ready("a", "b"),
+      defaultRoute: "local_session",
       emit: (type, payload) => events.push([type, payload]),
     });
     expect(next?.profile_id).toBe("a");
@@ -229,6 +351,8 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
       policy,
       registry: [a, b],
       snapshots: [snap(null, 0.97), snap("a", 0.97), snap("b", 1)],
+      readyProfileIds: ready("a", "b"),
+      defaultRoute: "local_session",
       emit: (type, payload) => events.push([type, payload]),
     });
     expect(next).toBeNull();
@@ -246,6 +370,23 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
     });
   });
 
+  it("names not-ready targets in rotation exhaustion evidence", () => {
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const next = preflightDefaultSubject({
+      harnessId: "claude",
+      policy,
+      registry: [a],
+      snapshots: [snap(null, 0.97)],
+      readyProfileIds: ready(),
+      defaultRoute: "local_session",
+      emit: (type, payload) => events.push([type, payload]),
+    });
+    expect(next).toBeNull();
+    expect(events.at(-1)?.[1]).toMatchObject({
+      candidates: [{ profile_id: "a", rejected: "not_ready" }],
+    });
+  });
+
   it("preflightDefaultSubject is strictly opt-in: fail/ask keep the default user untouched (no events, no selection)", () => {
     for (const limit_action of ["fail", "ask"] as const) {
       const events: string[] = [];
@@ -254,6 +395,8 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
         policy: { ...policy, limit_action },
         registry: [a],
         snapshots: [snap(null, 0.99)],
+        readyProfileIds: ready("a"),
+        defaultRoute: "local_session",
         emit: (type) => events.push(type),
       });
       expect(next).toBeNull();
@@ -265,11 +408,34 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
     const emit = () => {
       throw new Error("no event expected");
     };
-    const base = { harnessId: "claude", policy, registry: [a], emit };
+    const base = {
+      harnessId: "claude",
+      policy,
+      registry: [a],
+      readyProfileIds: ready("a"),
+      defaultRoute: "local_session" as const,
+      emit,
+    };
     expect(preflightDefaultSubject({ ...base, snapshots: [] })).toBeNull();
     expect(preflightDefaultSubject({ ...base, snapshots: [snap(null, 0.5)] })).toBeNull();
     // Profile "a" being spent says nothing about the DEFAULT subject.
     expect(preflightDefaultSubject({ ...base, snapshots: [snap("a", 0.99)] })).toBeNull();
+  });
+
+  it("never rotates an API-key default into a subscription profile", () => {
+    const events: string[] = [];
+    expect(
+      preflightDefaultSubject({
+        harnessId: "claude",
+        policy,
+        registry: [a],
+        snapshots: [snap(null, 0.99)],
+        readyProfileIds: ready("a"),
+        defaultRoute: "api_key",
+        emit: (type) => events.push(type),
+      }),
+    ).toBeNull();
+    expect(events).toEqual([]);
   });
 
   it("planReactiveRotation from the default subject REQUIRES the vendor_native route proof", () => {
@@ -280,6 +446,7 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
       policy,
       registry: [a],
       snapshots: [],
+      readyProfileIds: ready("a"),
       triedProfiles: new Set<string>(),
       sawTypedLimit: true,
       deliverableEmpty: true,
@@ -314,6 +481,7 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
       policy,
       registry: [a],
       snapshots: [],
+      readyProfileIds: ready("a"),
       triedProfiles: new Set<string>(),
       sawTypedLimit: true,
       deliverableEmpty: true,
@@ -334,6 +502,7 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
         policy,
         registry: [a],
         snapshots: [],
+        readyProfileIds: ready("a"),
         triedProfiles: new Set<string>(),
         sawTypedLimit: true,
         deliverableEmpty: true,
@@ -342,5 +511,55 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
         newSessionId: () => "se-2",
       }),
     ).toBeNull();
+  });
+});
+
+describe("nextUpIdentity readiness parity", () => {
+  const a = { ...work, profile_id: "a" };
+  const b = { ...work, profile_id: "b" };
+
+  it("never names an enabled but unavailable default subject", () => {
+    expect(
+      nextUpIdentity({
+        registry: [a],
+        harnessId: "claude",
+        policy,
+        snapshots: [],
+        defaultEnabled: true,
+        defaultReady: false,
+        defaultRoute: null,
+        readyProfileIds: new Set(["a"]),
+      }),
+    ).toMatchObject({ kind: "none" });
+  });
+
+  it("uses the same complete snapshot when quota rotation selects a profile", () => {
+    expect(
+      nextUpIdentity({
+        registry: [a, b],
+        harnessId: "claude",
+        policy,
+        snapshots: [snap(null, 0.95)],
+        defaultEnabled: true,
+        defaultReady: true,
+        defaultRoute: "local_session",
+        readyProfileIds: new Set(["b"]),
+      }),
+    ).toEqual({ kind: "profile", profileId: "b" });
+  });
+
+  it("keeps the ready default when every configured rotation target is unavailable", () => {
+    expect(
+      nextUpIdentity({
+        registry: [a, b],
+        harnessId: "claude",
+        policy,
+        snapshots: [snap(null, 0.95)],
+        defaultEnabled: true,
+        defaultReady: true,
+        defaultRoute: "api_key",
+        readyProfileIds: new Set(),
+      }),
+    ).toEqual({ kind: "native", route: "api_key" });
   });
 });

@@ -1,4 +1,9 @@
-import { nowIso, redactSecrets } from "@claudexor/util";
+import {
+  nowIso,
+  redactSecrets,
+  safeProblemContext,
+  safeProblemRequiredActions,
+} from "@claudexor/util";
 import { commandStoreForId, type CommandAuthority } from "./command-authority.js";
 import type { JobRecord } from "./job-record.js";
 
@@ -24,6 +29,8 @@ export function settleJobError({
   const code = thrownField(thrown, "code");
   const status = thrownField(thrown, "status");
   const retryable = thrownField(thrown, "retryable");
+  const requiredActions = safeProblemRequiredActions(thrownField(thrown, "requiredActions"));
+  const context = safeProblemContext(thrownField(thrown, "context"));
   const typedStatus =
     typeof status === "number" && Number.isInteger(status) && status >= 400 && status <= 599
       ? status
@@ -45,6 +52,8 @@ export function settleJobError({
         errorCode: code,
         ...(typedStatus !== undefined ? { errorStatus: typedStatus } : {}),
         ...(typeof retryable === "boolean" ? { errorRetryable: retryable } : {}),
+        errorRequiredActions: requiredActions,
+        errorContext: context,
         finishedAt: nowIso(),
       });
     }
@@ -58,6 +67,8 @@ export function settleJobError({
     // Only an explicit boolean is a retryability claim. In particular, an
     // untyped refusal must preserve the refused-turn recorder's default.
     ...(typeof retryable === "boolean" ? { errorRetryable: retryable } : {}),
+    errorRequiredActions: requiredActions,
+    errorContext: context,
     finishedAt: nowIso(),
   });
 }

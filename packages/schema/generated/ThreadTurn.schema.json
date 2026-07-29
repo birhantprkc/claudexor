@@ -159,6 +159,23 @@
                   "default": true,
                   "description": "True when retry can replay this turn (a job was recorded before the failure); false when no job exists to replay."
                 },
+                "required_actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "maxItems": 16,
+                  "default": [],
+                  "description": "Bounded user actions that may make an exact retry succeed."
+                },
+                "context": {
+                  "type": "object",
+                  "additionalProperties": {},
+                  "default": {},
+                  "description": "Bounded typed recovery context; never arbitrary provider or environment output."
+                },
                 "failed_at": {
                   "type": "string",
                   "minLength": 1,

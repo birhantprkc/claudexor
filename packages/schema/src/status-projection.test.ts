@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  acpStopReason,
   makeOutcomeFacts,
   needsDecision,
   needsOperatorAttention,
@@ -23,6 +24,20 @@ const incompleteState: WorkState = { state: "incomplete", source: "constrained" 
 
 const patch = { applyState: "not_applied" as const, hasApplyableChange: true };
 const answer = { applyState: "not_applied" as const, hasApplyableChange: false };
+
+describe("ACP stop-reason projection", () => {
+  it("distinguishes a hard deadline from user and legacy cancellation", () => {
+    expect(acpStopReason("cancelled", "wall_clock_exceeded")).toBe("refusal");
+    expect(acpStopReason("cancelled", "user_cancelled")).toBe("cancelled");
+    expect(acpStopReason("cancelled", null)).toBe("cancelled");
+  });
+
+  it("preserves failed/interrupted refusal and successful end-turn buckets", () => {
+    expect(acpStopReason("failed")).toBe("refusal");
+    expect(acpStopReason("interrupted")).toBe("refusal");
+    expect(acpStopReason("succeeded")).toBe("end_turn");
+  });
+});
 
 describe("outcomeBanner (D18 server-owned headline)", () => {
   it("is null while the run is not terminal", () => {
@@ -88,6 +103,12 @@ describe("outcomeBanner (D18 server-owned headline)", () => {
     expect(outcomeBanner(failed, patch)).toBe("Failed (harness failed)");
     const cancelled = makeOutcomeFacts("cancelled");
     expect(outcomeBanner(cancelled, patch)).toBe("Cancelled");
+    expect(
+      outcomeBanner(makeOutcomeFacts("cancelled", { reason: "wall_clock_exceeded" }), patch),
+    ).toBe("Time limit reached");
+    expect(outcomeBanner(makeOutcomeFacts("cancelled", { reason: "user_cancelled" }), patch)).toBe(
+      "Cancelled",
+    );
   });
 });
 

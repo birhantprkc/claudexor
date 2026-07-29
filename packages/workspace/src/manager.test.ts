@@ -716,6 +716,26 @@ describe("WorkspaceManager", () => {
     expect(existsSync(join(repo, ".claudexor"))).toBe(false);
   });
 
+  it("explicit isolated work initializes a non-git project once and reuses its baseline", async () => {
+    const project = reapMk(join(tmpdir(), "claudexor-isolated-init-"));
+    writeFileSync(join(project, "README.md"), "# uninitialized project\n");
+
+    const first = await ensureThreadWorktree(project, "th-init");
+    const initializedHead = await revParse(project, "HEAD");
+    expect(first.created).toBe(true);
+    expect(first.baseSha).toBe(initializedHead);
+    expect(readFileSync(join(first.path, "README.md"), "utf8")).toBe("# uninitialized project\n");
+
+    const second = await ensureThreadWorktree(project, "th-init");
+    expect(second).toEqual({
+      path: first.path,
+      baseSha: first.baseSha,
+      created: false,
+      projectGitInitialization: null,
+    });
+    expect(await revParse(project, "HEAD")).toBe(initializedHead);
+  });
+
   it("advances the persistent thread branch so its delivered base survives git gc", async () => {
     const repo = await initRepo();
     const wt = await ensureThreadWorktree(repo, "th-gc");

@@ -2,6 +2,8 @@ import { SCHEMA_VERSION, Thread as ThreadSchema, type Thread } from "@claudexor/
 import { describe, expect, it, vi } from "vitest";
 import {
   resolveThreadExecutionWorkspace,
+  threadExecutionRequiresWorktree,
+  threadRunStartRequiresGit,
   type ThreadWorkspaceAuthority,
 } from "./thread-execution-workspace.js";
 
@@ -150,4 +152,104 @@ describe("resolveThreadExecutionWorkspace", () => {
     });
     expect(threads.setThreadWorktree).not.toHaveBeenCalled();
   });
+
+  it.each(["ask", "plan"] as const)(
+    "resolves an isolated %s turn through the persistent thread worktree",
+    async (mode) => {
+      const threads = authority(thread("isolated"));
+      const ensureWorktree = vi.fn(async () => ({
+        path: "/runtime/thread/tree",
+        baseSha: "base-1",
+        created: false,
+      }));
+      await expect(
+        resolveThreadExecutionWorkspace({
+          threadId: "th-test",
+          repoRoot: "/repo",
+          mode,
+          requestedInPlace: false,
+          protectedPaths: [],
+          threads,
+          ensureWorktree,
+        }),
+      ).resolves.toEqual({
+        executionRoot: "/runtime/thread/tree",
+        inPlace: true,
+        promoted: false,
+      });
+      expect(ensureWorktree).toHaveBeenCalledOnce();
+    },
+  );
+});
+
+describe("thread workspace Git admission", () => {
+  const liveConvergence = {
+    prompt: "repair",
+    mode: "agent" as const,
+    scope: { kind: "project" as const, root: "/repo", context: "auto" as const },
+    untilClean: true,
+    execution: { isolation: "live" as const },
+  };
+
+  it("uses the same worktree predicate for isolated and protected-path turns", () => {
+    const isolated = thread("isolated");
+    const inPlace = thread("in_place");
+    expect(
+      threadExecutionRequiresWorktree({
+        thread: isolated,
+        mode: "agent",
+        protectedPaths: [],
+      }),
+    ).toBe(true);
+    expect(threadRunStartRequiresGit(liveConvergence, isolated, [])).toBe(true);
+
+    expect(
+      threadExecutionRequiresWorktree({
+        thread: inPlace,
+        mode: "agent",
+        protectedPaths: ["protected/**"],
+      }),
+    ).toBe(true);
+    expect(threadRunStartRequiresGit(liveConvergence, inPlace, ["protected/**"])).toBe(true);
+  });
+
+  it("preserves the implemented non-Git live convergence path", () => {
+    const inPlace = thread("in_place");
+    expect(
+      threadExecutionRequiresWorktree({
+        thread: inPlace,
+        mode: "agent",
+        protectedPaths: [],
+      }),
+    ).toBe(false);
+    expect(threadRunStartRequiresGit(liveConvergence, inPlace, [])).toBe(false);
+  });
+
+  it("never promotes a read-only turn solely because protected paths exist", () => {
+    const inPlace = thread("in_place");
+    expect(
+      threadExecutionRequiresWorktree({
+        thread: inPlace,
+        mode: "plan",
+        protectedPaths: ["protected/**"],
+      }),
+    ).toBe(false);
+  });
+
+  it.each(["ask", "plan"] as const)(
+    "requires Git for an isolated %s turn because the resolver uses its worktree",
+    (mode) => {
+      const isolated = thread("isolated");
+      const request = {
+        prompt: "read",
+        mode,
+        scope: { kind: "project" as const, root: "/repo", context: "auto" as const },
+        execution: { isolation: "envelope" as const },
+      };
+      expect(threadExecutionRequiresWorktree({ thread: isolated, mode, protectedPaths: [] })).toBe(
+        true,
+      );
+      expect(threadRunStartRequiresGit(request, isolated, [])).toBe(true);
+    },
+  );
 });

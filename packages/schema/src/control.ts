@@ -26,7 +26,6 @@ import { ResourceAttachmentRef } from "./attachment.js";
 import { RequestRequirementResolution } from "./request-requirements.js";
 import { ProtectedPathApproval, TestCommandInvocation } from "./task.js";
 import { RunScope } from "./control-run-scope.js";
-import { HarnessStatusDto } from "./readiness.js";
 import { makeControlRunRetrySchemas } from "./control-run-retry.js";
 import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
 import { InteractionTimeoutValue } from "./config.js";
@@ -1321,6 +1320,15 @@ export const ControlThreadTurn = z
           .describe(
             "False when no recorded job exists to replay — surfaces offer a new message instead of a doomed retry.",
           ),
+        requiredActions: z
+          .array(z.string().min(1).max(512))
+          .max(16)
+          .default([])
+          .describe("Bounded user actions that may make an exact retry succeed."),
+        context: z
+          .record(z.string(), z.unknown())
+          .default({})
+          .describe("Bounded typed recovery context for exact retry."),
         failedAt: z.string().describe("When the enqueue failed."),
       })
       .nullable()
@@ -1451,16 +1459,6 @@ export const ControlThreadDetail = z
     "Full thread detail served by GET /threads/:id: the thread, its vendor sessions, and its turns.",
   );
 export type ControlThreadDetail = z.infer<typeof ControlThreadDetail>;
-
-export const ControlHarnessListResponse = z
-  .object({
-    harnesses: z
-      .array(HarnessStatusDto)
-      .default([])
-      .describe("Status rows for all known harnesses."),
-  })
-  .describe("Response for GET /harnesses.");
-export type ControlHarnessListResponse = z.infer<typeof ControlHarnessListResponse>;
 
 /**
  * Models enumerable for one harness. `source` is honest about provenance:

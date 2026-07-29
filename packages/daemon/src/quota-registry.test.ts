@@ -6,7 +6,147 @@ import { DurableJournal } from "@claudexor/journal";
 import { JournalManager } from "./journal-manager.js";
 import { QuotaRegistry, quotaProjection } from "./quota-registry.js";
 
+function quotaSnapshot(harness: string, subjectId: string | null, usedRatio: number) {
+  return {
+    subject: {
+      harness,
+      credential_route: "vendor_native" as const,
+      plan_label: null,
+      subject_id: subjectId,
+    },
+    constraints: [
+      {
+        id: "five_hour",
+        label: "5 hour",
+        used_ratio: usedRatio,
+        window_seconds: 18_000,
+        resets_at: null,
+        cooldown_until: null,
+      },
+    ],
+    source: "claude_oauth_usage" as const,
+    observed_at: "2026-07-28T00:00:00.000Z",
+    freshness: "fresh" as const,
+  };
+}
+
 describe("QuotaRegistry", () => {
+  it("fences one refresh marker after the whole batch and replays only later direct mutations", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-fence-")));
+    const manager = new JournalManager(root, {
+      now: () => new Date("2026-07-28T00:00:01.000Z"),
+    });
+    const slot = manager.registerProjection(
+      quotaProjection([
+        async () => ({
+          snapshots: [quotaSnapshot("claude", null, 0.2), quotaSnapshot("claude", "work", 0.4)],
+        }),
+      ]),
+    );
+    manager.start();
+
+    const fenced = await slot.current().refreshWithCursor();
+    expect(fenced.response.snapshots).toHaveLength(2);
+    const refreshEvents = manager.events();
+    expect(refreshEvents.map((event) => event.type)).toEqual([
+      "quota.snapshot.upserted",
+      "quota.snapshot.upserted",
+      "quota.projection.updated",
+    ]);
+    expect(refreshEvents.at(-1)?.payload).toMatchObject({ reason: "refresh" });
+    expect(manager.events(fenced.quotaEventCursor)).toEqual([]);
+
+    slot.current().upsert(quotaSnapshot("claude", "later", 0.6));
+    const laterEvents = manager.events(fenced.quotaEventCursor);
+    expect(laterEvents.map((event) => event.type)).toEqual([
+      "quota.snapshot.upserted",
+      "quota.projection.updated",
+    ]);
+    expect(laterEvents.at(-1)?.payload).toMatchObject({ reason: "direct_mutation" });
+    const afterUpsertCursor = manager.events().at(-1)?.cursor;
+    expect(afterUpsertCursor).toBeTruthy();
+
+    slot.current().removeSubject("claude", "later");
+    expect(manager.events(afterUpsertCursor).map((event) => event.type)).toEqual([
+      "quota.subject.removed",
+      "quota.projection.updated",
+    ]);
+
+    manager.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("emits a fenced projection marker for an absence-only successful refresh", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-absence-fence-")));
+    const subject = {
+      harness: "claude",
+      credential_route: "vendor_native" as const,
+      plan_label: null,
+      subject_id: null,
+    };
+    const manager = new JournalManager(root, {
+      now: () => new Date("2026-07-28T00:00:02.000Z"),
+    });
+    const slot = manager.registerProjection(
+      quotaProjection(
+        [
+          async () => ({
+            snapshots: [],
+            absences: [
+              {
+                subject,
+                reason: "not_logged_in" as const,
+                detail: null,
+                observed_at: "2026-07-28T00:00:02.000Z",
+              },
+            ],
+          }),
+        ],
+        () => [subject],
+      ),
+    );
+    manager.start();
+
+    const fenced = await slot.current().refreshWithCursor();
+    expect(fenced.response.snapshots).toEqual([]);
+    expect(fenced.response.absences).toHaveLength(1);
+    const events = manager.events();
+    expect(events.map((event) => event.type)).toEqual(["quota.projection.updated"]);
+    expect(events[0]?.payload).toMatchObject({ reason: "refresh" });
+    expect(manager.events(fenced.quotaEventCursor)).toEqual([]);
+
+    manager.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("closes a recovered raw-mutation gap with one projection marker", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-recovery-marker-")));
+    const first = new DurableJournal({ rootDir: root, partition: "global" });
+    first.append("quota.snapshot.upserted", quotaSnapshot("claude", "work", 0.4));
+    first.close();
+
+    const afterUpsert = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(afterUpsert);
+    expect(recovered.read().snapshots).toHaveLength(1);
+    expect(afterUpsert.records().map((record) => record.type)).toEqual([
+      "quota.snapshot.upserted",
+      "quota.projection.updated",
+    ]);
+    expect(afterUpsert.records().at(-1)?.payload).toMatchObject({ reason: "recovery" });
+
+    // A separately durable removal has the same crash boundary. Restart must
+    // publish its recovered empty projection instead of leaving subscribers at
+    // the preceding marker forever.
+    afterUpsert.append("quota.subject.removed", { harness: "claude", subject_id: "work" });
+    afterUpsert.close();
+    const afterRemove = new DurableJournal({ rootDir: root, partition: "global" });
+    const recoveredRemoval = new QuotaRegistry(afterRemove);
+    expect(recoveredRemoval.read().snapshots).toEqual([]);
+    expect(afterRemove.records().at(-1)?.payload).toMatchObject({ reason: "recovery" });
+    afterRemove.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("ingests a typed harness quota event with its exact credential route", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-ingest-")));
     const manager = new JournalManager(root);
@@ -221,6 +361,33 @@ describe("QuotaRegistry", () => {
     expect(calls).toBe(2);
     await expect(registry.pollStale()).resolves.toBe(false);
     expect(calls).toBe(2);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("publishes a clock-derived freshness transition even when refresh fails", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-clock-marker-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    let nowMs = Date.parse("2026-07-28T00:00:00.000Z");
+    const registry = new QuotaRegistry(
+      journal,
+      [async () => Promise.reject(new Error("vendor offline"))],
+      () => new Date(nowMs),
+    );
+    registry.upsert(quotaSnapshot("claude", "work", 0.8));
+    const before = journal.records().length;
+
+    nowMs += 6 * 60_000;
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(registry.read().snapshots[0]?.freshness).toBe("stale");
+    expect(journal.records()).toHaveLength(before + 1);
+    expect(journal.records().at(-1)?.payload).toMatchObject({ reason: "clock_transition" });
+
+    // The logical projection did not change again; the failed-refresh backoff
+    // and signature fence prevent marker chatter.
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(journal.records()).toHaveLength(before + 1);
 
     journal.close();
     rmSync(root, { recursive: true, force: true });

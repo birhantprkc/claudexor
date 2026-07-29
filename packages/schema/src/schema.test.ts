@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EffortHint, mergeEffortLadders } from "./effort.js";
 import {
   CredentialProfile,
+  ControlCredentialProfilesResponse,
   ControlRunDecisionRequest,
   ControlRunStartRequest,
   ControlSetupJob,
@@ -62,6 +63,34 @@ describe("AuthSourceReadiness compatibility", () => {
         ],
       }),
     ).toThrow();
+  });
+});
+
+describe("Control credential next-up route compatibility", () => {
+  it("accepts both current route-aware and legacy native projections", () => {
+    const base = {
+      profiles: [],
+      harnessAccounts: [
+        {
+          harness_id: "claude",
+          native_credentials_enabled: true,
+          native_login_detected: true,
+          next_up: { kind: "native" as const },
+        },
+      ],
+    };
+    expect(ControlCredentialProfilesResponse.safeParse(base).success).toBe(true);
+    expect(
+      ControlCredentialProfilesResponse.safeParse({
+        ...base,
+        harnessAccounts: [
+          {
+            ...base.harnessAccounts[0],
+            next_up: { kind: "native", route: "api_key" },
+          },
+        ],
+      }).success,
+    ).toBe(true);
   });
 });
 

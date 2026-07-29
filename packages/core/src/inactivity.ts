@@ -2,16 +2,17 @@
  * Inactivity watchdog for harness event streams: a wedged vendor CLI
  * that stops emitting events would otherwise park the run in `running`
  * forever — only reviewers had a timeout. The combinator pumps the source
- * iterator and re-arms a timer on EVERY event; when the window elapses with
- * no event, `onTimeout` fires exactly once (the caller aborts its per-attempt
- * controller, which kills the process group through the existing abort
- * plumbing) and the pump stops waiting for the source.
+ * iterator and re-arms a timer only when the caller's typed progress policy
+ * accepts an event. Transport/status chatter remains observable without
+ * turning into an unlimited lease on the child process.
  *
  * This is an INACTIVITY window, not a wall-clock cap: long runs are fine as
  * long as they keep talking. Distinct from cancellation by construction —
  * the caller decides what the timeout means (typed harness_timeout failure),
  * and a user cancel still routes through the run signal.
  */
+import type { HarnessEvent } from "@claudexor/schema";
+
 /** QA-027: how long to await the source's cleanup after an inactivity timeout
  * (or an early caller break) before the watchdog gives up and lets the terminal
  * proceed anyway. This MUST exceed spawnProcess's own whole-tree death-proof
@@ -37,19 +38,64 @@ export class HarnessInactivityTimeoutError extends Error {
   }
 }
 
+function unknownEventKindIsNotProgress(_kind: never): false {
+  // Runtime adapters are schema-validated, but fail closed if an untyped future
+  // value reaches this boundary. The `never` parameter also makes a newly added
+  // HarnessEvent kind a compile error until this policy is reviewed.
+  return false;
+}
+
+/**
+ * The one closed policy for the 20-minute no-agent-progress window.
+ * Lifecycle, transport, retry, usage, error, and interaction events stay in
+ * telemetry/UI but cannot postpone the watchdog. Interaction waiting is
+ * handled separately by `isSuspended`: the interaction policy may impose a
+ * finite answer deadline or disable it until answer/cancel/terminal/restart.
+ */
+export function countsAsAgentProgress(event: HarnessEvent): boolean {
+  if (event.plan_progress !== undefined) return true;
+  switch (event.type) {
+    case "thinking":
+    case "message":
+      return (event.text?.trim().length ?? 0) > 0;
+    case "tool_call":
+    case "tool_result":
+    case "file_change":
+    case "patch_produced":
+      return true;
+    case "context":
+      return event.context?.kind === "compaction_completed";
+    case "started":
+    case "interaction_requested":
+    case "usage":
+    case "error":
+    case "status":
+    case "completed":
+      return false;
+    default:
+      return unknownEventKindIsNotProgress(event.type);
+  }
+}
+
 export async function* withInactivityWatchdog<T>(
   source: AsyncIterable<T>,
   opts: {
     timeoutMs: number;
+    /** Closed typed policy deciding which values prove useful progress. */
+    countsAsProgress: (value: T) => boolean;
     /** Called once when the window elapses; abort the stream here. */
     onTimeout: () => void;
     /**
      * Legitimate-silence probe. When the window elapses while this returns
      * true (e.g. a question is awaiting the USER's answer), the watchdog
      * RE-ARMS instead of firing — waiting on a human is not a wedged harness,
-     * and the interaction channel enforces its own answer-wait budget.
+     * while the interaction channel applies its configured finite deadline or
+     * remains suspended until answer/cancel/terminal/restart when disabled.
      */
     isSuspended?: () => boolean;
+    /** Monotonic suspension transition counter. This closes the polling gap
+     * where a wait begins and ends entirely between inactivity timer ticks. */
+    suspensionVersion?: () => number;
     /**
      * How long to drain the aborted source's cleanup after a timeout (or await
      * iterator.return on an early caller break) before giving up. MUST exceed
@@ -63,13 +109,39 @@ export async function* withInactivityWatchdog<T>(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let timedOut = false;
   let wake: (() => void) | null = null;
+  // A suspension can begin and end between timer callbacks. Remember that the
+  // event pump observed it so the first unsuspended boundary starts a fresh
+  // useful-progress window instead of charging the user-wait interval to the
+  // harness and firing immediately after an answer.
+  let suspensionObserved = false;
+  let observedSuspensionVersion = opts.suspensionVersion?.() ?? 0;
   const cleanupDeadlineMs = opts.cleanupDeadlineMs ?? REAP_PROOF_DEADLINE_MS;
-  const arm = (): void => {
+  const arm = (resetSuspension = true): void => {
+    if (resetSuspension) {
+      suspensionObserved = false;
+      observedSuspensionVersion = opts.suspensionVersion?.() ?? observedSuspensionVersion;
+    }
     if (timer) clearTimeout(timer);
     timer = setTimeout(
       () => {
+        const currentSuspensionVersion =
+          opts.suspensionVersion?.() ?? observedSuspensionVersion;
         if (opts.isSuspended?.()) {
-          arm();
+          suspensionObserved = true;
+          observedSuspensionVersion = currentSuspensionVersion;
+          arm(false);
+          return;
+        }
+        if (
+          suspensionObserved ||
+          currentSuspensionVersion !== observedSuspensionVersion
+        ) {
+          // Resume has no guaranteed harness event of its own. The first timer
+          // boundary that proves the interaction is over starts a full new
+          // window; the next boundary may time out if no agent progress follows.
+          suspensionObserved = false;
+          observedSuspensionVersion = currentSuspensionVersion;
+          arm(false);
           return;
         }
         timedOut = true;
@@ -95,10 +167,13 @@ export async function* withInactivityWatchdog<T>(
       // aborts the child, the source SHOULD end on its own, but a stuck
       // iterator must not keep the run parked — the sentinel wakes the pump.
       const raced = await Promise.race([
-        pending.then((result): { kind: "next"; result: IteratorResult<T> } => ({
-          kind: "next",
-          result,
-        })),
+        pending.then<
+          { kind: "next"; result: IteratorResult<T> } | { kind: "source_error"; error: unknown },
+          { kind: "next"; result: IteratorResult<T> } | { kind: "source_error"; error: unknown }
+        >(
+          (result) => ({ kind: "next", result }),
+          (error) => ({ kind: "source_error", error }),
+        ),
         new Promise<{ kind: "timeout" }>((resolve) => {
           wake = () => resolve({ kind: "timeout" });
           if (timedOut) resolve({ kind: "timeout" });
@@ -118,9 +193,11 @@ export async function* withInactivityWatchdog<T>(
         yield* drainAfterTimeout(iterator, pending, cleanupDeadlineMs);
         throw new HarnessInactivityTimeoutError(opts.timeoutMs);
       }
+      if (raced.kind === "source_error") throw raced.error;
       pending = null;
       if (raced.result.done) return;
-      arm();
+      if (opts.countsAsProgress(raced.result.value)) arm();
+      else if (opts.isSuspended?.()) suspensionObserved = true;
       yield raced.result.value;
     }
   } finally {
@@ -176,12 +253,23 @@ async function* drainAfterTimeout<T>(
   let cur = pending;
   for (;;) {
     const drained = await Promise.race([
-      cur.then((result): { kind: "next"; result: IteratorResult<T> } => ({ kind: "next", result })),
+      cur.then<
+        { kind: "next"; result: IteratorResult<T> } | { kind: "source_error" },
+        { kind: "next"; result: IteratorResult<T> } | { kind: "source_error" }
+      >(
+        (result) => ({ kind: "next", result }),
+        () => ({ kind: "source_error" }),
+      ),
       deadline,
     ]);
     // Source could not prove death within the reap deadline — give up draining;
     // the outer `finally` runs iterator.return() (also bounded) as a last resort.
     if (drained === "deadline") return;
+    // Abort commonly rejects the in-flight native iterator. The watchdog has
+    // already established the terminal cause, so stop draining and let the
+    // caller receive the typed inactivity timeout instead of misclassifying
+    // this cleanup rejection as a process crash.
+    if (drained.kind === "source_error") return;
     if (drained.result.done) return;
     yield drained.result.value;
     cur = iterator.next();

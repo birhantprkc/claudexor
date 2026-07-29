@@ -137,6 +137,36 @@ describe("CLI projector (D-7 / GH #28): one envelope, one exit-code table", () =
     expect(code).toBe(2);
   });
 
+  it("GIT PREREQUISITE: a 503 ControlProblem is operational exit 1 with remediation", () => {
+    let code = -1;
+    const env = captureJson(() => {
+      code = renderCliFailure(
+        true,
+        controlProblemError(
+          503,
+          {
+            code: "git_developer_tools_stub",
+            message: "Git is required for this workspace strategy.",
+            retryable: false,
+            fieldErrors: {},
+            requiredActions: ["Install Apple Command Line Tools with xcode-select --install."],
+            evidenceRefs: [],
+            context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+          },
+          "workspace prerequisite unavailable",
+        ),
+      );
+    });
+    expect(code).toBe(1);
+    expect(env).toMatchObject({
+      exitCode: 1,
+      code: "git_developer_tools_stub",
+      retryable: false,
+      requiredActions: [expect.stringContaining("xcode-select --install")],
+      context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+    });
+  });
+
   it("INLINE SECRET: the typed code survives and the token is never echoed", () => {
     // Assembled at runtime so the source (and any sealed review diff of it)
     // never contains a contiguous secret-like token at rest.

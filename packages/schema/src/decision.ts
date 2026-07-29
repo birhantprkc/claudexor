@@ -55,6 +55,7 @@ export const RunReason = z
     "wall_clock_exceeded",
     "user_cancelled",
     "crash_interrupted",
+    "workspace_unavailable",
     // D-16 work_state / context reasons.
     "input_required",
     "work_incomplete",

@@ -35,4 +35,42 @@ describe("primaryOutputForCli", () => {
       "final/patch.diff",
     ]);
   });
+
+  it("promotes a cancelled Ask summary as a diagnostic without promoting successful summaries", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-cli-primary-output-"));
+    tempRoots.push(root);
+    const finalDir = join(root, "final");
+    mkdirSync(finalDir, { recursive: true });
+    writeFileSync(join(finalDir, "summary.md"), "Ask was cancelled while waiting for input.\n");
+
+    expect(primaryOutputForCli(root, "ask", { lifecycle: "cancelled" })).toMatchObject({
+      kind: "diagnostic",
+      path: "final/summary.md",
+    });
+    expect(primaryOutputForCli(root, "ask", { lifecycle: "succeeded" })).toBeNull();
+  });
+
+  it("renders a typed RunFailure using its safe message", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-cli-primary-output-"));
+    tempRoots.push(root);
+    mkdirSync(join(root, "final"), { recursive: true });
+
+    expect(
+      primaryOutputForCli(root, "agent", {
+        failure: {
+          phase: "execute",
+          category: "auth",
+          code: null,
+          harnessId: "claude",
+          attemptId: "a01",
+          safeMessage: "Authentication expired",
+          rawDetailRef: null,
+          logRefs: [],
+          eventRefs: [],
+          runDir: root,
+          nextActions: ["Run claudexor auth login claude"],
+        },
+      }),
+    ).toMatchObject({ kind: "diagnostic", text: "Authentication expired" });
+  });
 });

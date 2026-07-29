@@ -89,6 +89,9 @@ export class DaemonClient {
       error?: string;
       errorCode?: string;
       errorStatus?: number;
+      errorRetryable?: boolean;
+      errorRequiredActions?: string[];
+      errorContext?: Record<string, unknown>;
       createdAt?: string;
       startedAt?: string;
       finishedAt?: string;
@@ -117,6 +120,9 @@ export class DaemonClient {
         error?: string;
         errorCode?: string;
         errorStatus?: number;
+        errorRetryable?: boolean;
+        errorRequiredActions?: string[];
+        errorContext?: Record<string, unknown>;
         createdAt?: string;
         startedAt?: string;
         finishedAt?: string;

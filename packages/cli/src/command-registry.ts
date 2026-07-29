@@ -1,9 +1,14 @@
 import { REMOTE_COMMAND_SPECS } from "./remote-command-specs.js";
 import { RETRY_COMMAND_SPECS } from "./retry-command-specs.js";
 import {
+  OPS_COMMAND_SPECS_AFTER_REMOTE,
+  OPS_COMMAND_SPECS_BEFORE_REMOTE,
+} from "./ops-command-specs.js";
+import {
   CLI_FLAGS,
   FROZEN_REVIEW_FLAG_NAMES,
   RUN_FLAGS,
+  RUN_FLAGS_BY_MODE,
   type CliFlagKind,
 } from "./command-flags.js";
 export {
@@ -17,10 +22,20 @@ export {
 
 export type CliMutability = "read" | "write" | "delivery" | "ops";
 
+export interface CliPositionalPattern {
+  /** Exact leading tokens for action-shaped commands; omitted = any values. */
+  readonly prefix?: readonly string[];
+  /** Counts exclude the command id itself. */
+  readonly min: number;
+  /** null = intentionally variadic (run prompts). */
+  readonly max: number | null;
+}
+
 export interface CliCommandSpec {
   readonly id: string;
   readonly aliases?: readonly string[];
   readonly usageArgs?: string;
+  readonly positionalPatterns: readonly CliPositionalPattern[];
   readonly summary: string;
   readonly extraUsageLines?: readonly { readonly text: string; readonly help: string }[];
   readonly flags: readonly string[];
@@ -39,6 +54,7 @@ export interface CliCommandSpec {
 export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   {
     id: "init",
+    positionalPatterns: [{ min: 0, max: 0 }],
     summary: "Scaffold repo-local config (.claudexor/config.yaml)",
     flags: ["json"],
     mutability: "ops",
@@ -46,6 +62,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "doctor",
+    positionalPatterns: [{ min: 0, max: 0 }],
     usageArgs: "[--harness <id>] [--all]",
     summary: "Detect + conformance-test harnesses",
     flags: ["harness", "all", "json"],
@@ -54,6 +71,14 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "project",
+    positionalPatterns: [
+      { min: 0, max: 0 },
+      { prefix: ["list"], min: 1, max: 1 },
+      { prefix: ["register"], min: 2, max: 2 },
+      { prefix: ["relink"], min: 3, max: 3 },
+      { prefix: ["remove"], min: 2, max: 2 },
+      { prefix: ["outputs"], min: 2, max: 3 },
+    ],
     usageArgs: "list | register <root> | relink <id> <root> | remove <id> | outputs <id> [path]",
     summary: "Manage the durable v2 project registry",
     flags: ["json"],
@@ -62,16 +87,18 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "ask",
+    positionalPatterns: [{ min: 0, max: null }],
     usageArgs: '"<question>" [opts]',
     summary:
       "Read-only answer/explanation route (--deep-scan widens to a multi-scout research sweep)",
-    flags: [...RUN_FLAGS, "deep-scan"],
+    flags: [...RUN_FLAGS_BY_MODE.ask],
     mutability: "read",
     stability: "stable",
     hostFallbackExample: 'claudexor ask "..."',
   },
   {
     id: "agent",
+    positionalPatterns: [{ min: 0, max: null }],
     usageArgs: '"<prompt>" [opts]',
     summary: "Run a task (default mode: agent)",
     flags: [...RUN_FLAGS, "mode"],
@@ -81,32 +108,36 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "best-of",
+    positionalPatterns: [{ min: 0, max: null }],
     usageArgs: '"<prompt>" [--n N]',
     summary: "Best-of-N run (agent --n) with cross-family review",
-    flags: [...RUN_FLAGS],
+    flags: [...RUN_FLAGS_BY_MODE.agent],
     mutability: "write",
     stability: "stable",
     hostFallbackExample: 'claudexor best-of "..." --n 4',
   },
   {
     id: "plan",
+    positionalPatterns: [{ min: 0, max: null }],
     usageArgs: '"<prompt>" [--council [--n 2..4]]',
     summary: "Read-only planning report (--council: multi-harness drafts merged into one plan)",
-    flags: [...RUN_FLAGS],
+    flags: [...RUN_FLAGS_BY_MODE.plan],
     mutability: "read",
     stability: "stable",
     hostFallbackExample: 'claudexor plan "..."',
   },
   {
     id: "create",
+    positionalPatterns: [{ min: 0, max: null }],
     usageArgs: '"<prompt>"',
     summary: "Create-from-scratch (agent --create)",
-    flags: [...RUN_FLAGS],
+    flags: [...RUN_FLAGS_BY_MODE.agent],
     mutability: "write",
     stability: "stable",
   },
   {
     id: "review",
+    positionalPatterns: [{ min: 0, max: 0 }],
     usageArgs: "--diff <file> | --evidence-dir <path> --artifacts-dir <path> ...",
     summary: "Reviewer-panel review of a diff or sealed frozen packet",
     flags: ["diff", "intent", "tests", ...FROZEN_REVIEW_FLAG_NAMES, "reviewer-panel", "json"],
@@ -115,6 +146,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "inspect",
+    positionalPatterns: [{ min: 1, max: 1 }],
     usageArgs: "<run_id>",
     summary: "Inspect a run's decision + artifacts",
     flags: ["json"],
@@ -124,6 +156,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "follow",
+    positionalPatterns: [{ min: 1, max: 1 }],
     usageArgs: "<run_id> [--json]",
     summary: "Live-tail a daemon run (replay + push; answer questions in the TTY)",
     flags: ["json"],
@@ -134,6 +167,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   ...RETRY_COMMAND_SPECS,
   {
     id: "apply",
+    positionalPatterns: [{ min: 1, max: 1 }],
     usageArgs: "<run_id> [--mode ...]",
     summary: "Apply a run's WorkProduct (apply|commit|branch|pr|--dry-run)",
     flags: ["mode", "dry-run", "json"],
@@ -143,7 +177,8 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "decision",
-    usageArgs: "<run_id> <action>",
+    positionalPatterns: [{ min: 1, max: 1 }],
+    usageArgs: "<run_id> <action-flags>",
     summary:
       'Decide a blocked run: --accept-risk|--override|--revert|--accept-clean-patch [--apply-mode m]|--rerun --feedback "<text>"',
     flags: [
@@ -160,102 +195,15 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     stability: "stable",
     recovery: true,
   },
-  {
-    id: "quota",
-    usageArgs: "[--json] [--refresh]",
-    summary: "Show every vendor-owned quota window with provenance and freshness",
-    flags: ["json", "refresh"],
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "settings",
-    usageArgs: "show|set",
-    summary: "Show/update user defaults",
-    flags: ["json"],
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "trust",
-    summary: "Show/update this repo's user-local trust",
-    extraUsageLines: [
-      { text: "--allow-full-access", help: "Permit access=full (unsandboxed) for this repo" },
-      { text: "--revoke-full-access", help: "Revoke the full-access allow" },
-      {
-        text: "--access-default <profile>",
-        help: "readonly|workspace_write default for write modes",
-      },
-      { text: "--grant-test '<json-argv>'", help: "Grant one exact typed-argv project gate" },
-      { text: "--revoke-test <digest>", help: "Revoke an exact project gate grant" },
-    ],
-    flags: "allow-full-access,revoke-full-access,access-default,grant-test,revoke-test,json".split(
-      ",",
-    ),
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "auth",
-    usageArgs: "status|login",
-    summary: "Inspect native harness auth",
-    flags: ["all", "json", "browser-redirect"],
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "secrets",
-    usageArgs: "list|set|delete",
-    summary: "Manage stored API-key refs (v2 0600 file store)",
-    flags: ["from-env", "json"],
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "recovery",
-    usageArgs:
-      "inspect|validate|export <partition> | quarantine <partition> <fingerprint> quarantine_and_start_fresh",
-    summary: "Inspect or recover a durable journal partition",
-    flags: ["json"],
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "release",
-    usageArgs: "check-name <name> | check | stats",
-    summary: "Naming gate, engine runtime update check, and owner-facing install counter",
-    flags: ["json"],
-    mutability: "read",
-    stability: "experimental",
-  },
-  {
-    id: "daemon",
-    usageArgs: "start|status|stop|logs|rotate-token",
-    summary: "Optional local daemon (claudexord)",
-    flags: ["json"],
-    mutability: "ops",
-    stability: "stable",
-  },
+  ...OPS_COMMAND_SPECS_BEFORE_REMOTE,
   ...REMOTE_COMMAND_SPECS,
-  {
-    id: "gc",
-    usageArgs: "[--dry-run]",
-    summary: "Reclaim expired run/review artifact trees (daemon retention pass)",
-    flags: ["dry-run", "json"],
-    mutability: "ops",
-    stability: "stable",
-  },
-  {
-    id: "profiles",
-    usageArgs: "[list | add|login|enable|disable|remove <harness> <profile-id>]",
-    summary:
-      "Credential profiles: registry + doctor readiness, per-profile toggle, and vendor login",
-    flags: ["json", "display-name"],
-    mutability: "ops",
-    stability: "stable",
-  },
+  ...OPS_COMMAND_SPECS_AFTER_REMOTE,
   {
     id: "mcp",
+    positionalPatterns: [
+      { prefix: ["serve"], min: 1, max: 1 },
+      { prefix: ["serve-belt"], min: 1, max: 1 },
+    ],
     usageArgs: "serve",
     summary: "Expose Claudexor as an MCP server (stdio)",
     flags: [],
@@ -264,6 +212,10 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "acp",
+    positionalPatterns: [
+      { prefix: ["serve"], min: 1, max: 1 },
+      { prefix: ["serve", "auth", "login", "codex"], min: 4, max: 4 },
+    ],
     usageArgs: "serve [auth login codex]",
     summary: "Expose Claudexor as an ACP agent (stdio; Terminal Auth is experimental)",
     flags: [],
@@ -272,6 +224,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "plugin",
+    positionalPatterns: [{ min: 2, max: 2 }],
     usageArgs: "install|status|doctor|repair|uninstall <host|all>",
     summary: "Manage host integrations (cursor|claude|codex|opencode|all)",
     flags: ["json", "dry-run", "force", "help", "version"],
@@ -280,6 +233,10 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "harness",
+    positionalPatterns: [
+      { prefix: ["list"], min: 1, max: 1 },
+      { prefix: ["install"], min: 2, max: 2 },
+    ],
     usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
     summary: "List harnesses, or install one pinned vendor CLI after disclosure",
     flags: ["all", "dry-run", "yes", "json"],
@@ -289,6 +246,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "models",
+    positionalPatterns: [{ min: 0, max: 0 }],
     usageArgs: "[--harness <id>] [--route <local_session|api_key>] [--all]",
     summary:
       "List a harness's enumerable models (raw-api: OpenAI GET /v1/models; --route filters route-annotated manifest models; --all includes fakes)",
@@ -298,6 +256,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "capabilities",
+    positionalPatterns: [{ min: 0, max: 0 }],
     summary: "Machine-readable capability catalog (harnesses, modes, mutability matrix) for agents",
     flags: ["json"],
     mutability: "read",
@@ -305,6 +264,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "about",
+    positionalPatterns: [{ min: 0, max: 0 }],
     summary: "Product identity: version, author, license, and links",
     flags: ["json"],
     mutability: "read",
@@ -312,6 +272,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "help",
+    positionalPatterns: [{ min: 0, max: 0 }],
     summary: "Show this help",
     flags: ["json"],
     mutability: "read",
@@ -420,6 +381,11 @@ export interface HelpJson {
     readonly id: string;
     readonly aliases: readonly string[];
     readonly usage: string;
+    readonly positional_patterns: readonly {
+      readonly prefix: readonly string[];
+      readonly min: number;
+      readonly max: number | null;
+    }[];
     readonly summary: string;
     readonly flags: readonly string[];
     readonly mutability: CliMutability;
@@ -448,6 +414,11 @@ export function helpJson(version: string): HelpJson {
       id: c.id,
       aliases: c.aliases ?? [],
       usage: usageLabel(c),
+      positional_patterns: c.positionalPatterns.map((pattern) => ({
+        prefix: pattern.prefix ?? [],
+        min: pattern.min,
+        max: pattern.max,
+      })),
       summary: c.summary,
       flags: c.flags,
       mutability: c.mutability,

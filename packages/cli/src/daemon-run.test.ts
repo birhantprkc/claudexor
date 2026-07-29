@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { daemonOutcomeSummary, exitCodeForState } from "./daemon-run.js";
 import { makeOutcomeFacts } from "@claudexor/schema";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { daemonOutcomeSummary, enqueueAndAwait, exitCodeForState } from "./daemon-run.js";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("exitCodeForState (D8: the lifecycle IS the exit code)", () => {
   it("maps a succeeded lifecycle to 0 and every other lifecycle to 1", () => {
@@ -54,5 +56,41 @@ describe("daemonOutcomeSummary (P2: a reason on every non-clean daemon terminal,
         outcomeFacts: makeOutcomeFacts("failed", { reason: "stuck_no_progress" }),
       }),
     ).toBe("run failed (stuck_no_progress)");
+  });
+});
+
+describe("enqueueAndAwait typed ControlProblem transport", () => {
+  it("preserves Git remediation instead of flattening the failed start to prose", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: "git_developer_tools_stub",
+              message: "Git is unavailable because Apple Command Line Tools are not installed.",
+              retryable: false,
+              fieldErrors: {},
+              requiredActions: ["Install Apple Command Line Tools with `xcode-select --install`."],
+              evidenceRefs: [],
+              context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+            }),
+            { status: 503, headers: { "content-type": "application/problem+json" } },
+          ),
+      ),
+    );
+    await expect(
+      enqueueAndAwait(
+        {} as never,
+        { baseUrl: "http://127.0.0.1:1", token: "t" },
+        { prompt: "go", mode: "agent" },
+        { waitForTerminal: false },
+      ),
+    ).rejects.toMatchObject({
+      code: "git_developer_tools_stub",
+      retryable: false,
+      requiredActions: [expect.stringContaining("xcode-select --install")],
+      context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+    });
   });
 });

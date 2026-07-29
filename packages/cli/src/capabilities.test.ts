@@ -14,6 +14,12 @@ describe("AgentCapabilityCatalog surfaces", () => {
       ok: true,
       version: "0.0.0",
       generatedAt: new Date().toISOString(),
+      git: {
+        status: "developer_tools_stub",
+        version: null,
+        detail: "xcode-select: no developer tools",
+        remediation: "Install Apple Command Line Tools with xcode-select --install.",
+      },
       harnesses: [],
       availableHarnesses: [],
       modes: ["ask", "plan", "agent"],
@@ -50,6 +56,7 @@ describe("AgentCapabilityCatalog surfaces", () => {
     };
     expect(AgentCapabilityCatalog.parse(minimal).ok).toBe(true);
     expect(AgentCapabilityCatalog.parse(minimal).outputSchemaDialects).toHaveLength(2);
+    expect(AgentCapabilityCatalog.parse(minimal).git.status).toBe("developer_tools_stub");
     // An invented isolation kind must be refused, not passed through.
     expect(() =>
       AgentCapabilityCatalog.parse({

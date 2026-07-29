@@ -21,6 +21,23 @@ export function validateAbsoluteRepoRoot(repoRoot: string): string | null {
   return isAbsolute(repoRoot) ? null : "project root must be an absolute path";
 }
 
+/**
+ * The one admission rule for a user-supplied project root. Run start and
+ * read-only root-scoped projections must accept and echo the same spelling.
+ */
+export function normalizeExistingProjectRoot(requestedRoot: string): string {
+  const repoRoot = requestedRoot.trim();
+  const absoluteRepoError = validateAbsoluteRepoRoot(repoRoot);
+  if (absoluteRepoError) throw Object.assign(new Error(absoluteRepoError), { status: 400 });
+  if (!existsSync(repoRoot) || !lstatSync(repoRoot).isDirectory()) {
+    throw Object.assign(
+      new Error(`project root does not exist or is not a directory: ${repoRoot}`),
+      { status: 400 },
+    );
+  }
+  return repoRoot;
+}
+
 export function normalizeRunStart(parsed: ControlRunStartRequest): ControlRunStartRequest {
   const mode = parsed.mode ?? "agent";
   // Empty chat is never a silent no-op (Bible): reject a blank prompt at the
@@ -58,18 +75,10 @@ export function normalizeRunStart(parsed: ControlRunStartRequest): ControlRunSta
     );
   }
   if (parsed.scope.kind === "project") {
-    const repoRoot = parsed.scope.root.trim();
-    const absoluteRepoError = validateAbsoluteRepoRoot(repoRoot);
-    if (absoluteRepoError) throw Object.assign(new Error(absoluteRepoError), { status: 400 });
     // Existence is the only filesystem precondition here: a NON-GIT folder is
     // fine — write modes initialize the git boundary themselves (announced via
     // the project.git.initialized run event).
-    if (!existsSync(repoRoot) || !lstatSync(repoRoot).isDirectory()) {
-      throw Object.assign(
-        new Error(`project root does not exist or is not a directory: ${repoRoot}`),
-        { status: 400 },
-      );
-    }
+    const repoRoot = normalizeExistingProjectRoot(parsed.scope.root);
     return {
       ...parsed,
       scope: { kind: "project", root: repoRoot, context: parsed.scope.context ?? "auto" },

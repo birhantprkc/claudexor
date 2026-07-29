@@ -90,7 +90,12 @@ import {
   type ResolvedThreadWorkspace,
 } from "./artifact-serve-routes.js";
 import { requiredGateSpecsFromTaskArtifact } from "./task-contract-gates.js";
-import { assertOnlyQueryParams, optionalBooleanQuery, singleQuery } from "./query.js";
+import { assertOnlyQueryParams, singleQuery } from "./query.js";
+import {
+  parseCredentialProfilesSnapshotQuery,
+  parseHarnessListQuery,
+  parseRunApplicabilityQuery,
+} from "./catalog-query.js";
 import {
   lruGet,
   lruSet,
@@ -146,7 +151,6 @@ import {
   ControlSettingsSnapshot,
   ControlSettingsUpdateRequest,
   ControlQuotaResponse,
-  ControlCredentialProfilesResponse,
   ControlCredentialProfileCreateRequest,
   ControlCredentialProfileCreateResponse,
   ControlCredentialProfileUpdateRequest,
@@ -159,6 +163,7 @@ import {
   type ControlRouteInfo,
   ControlRunDecisionRequest,
   ControlRunDecisionResponse,
+  ControlRunApplicabilityResponse,
   ControlThreadCreateRequest,
   ControlThreadTurnRequest,
   ControlThreadUpdateRequest,
@@ -196,6 +201,8 @@ import {
   noProjectRepoRoot,
   nowIso,
   redactSecrets,
+  safeProblemContext,
+  safeProblemRequiredActions,
   sha256,
 } from "@claudexor/util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -220,6 +227,7 @@ export interface DaemonControlApiOptions {
       }) => Promise<unknown>;
       agentCapabilities?: () => Promise<unknown>;
       preflightRunRequirements?: (request: ControlRunStartRequest) => Promise<void>;
+      preflightThreadRunRequirements?: (request: ControlRunStartRequest) => Promise<void>;
       harnessModels?: (input: {
         harnessId: string;
         route?: "local_session" | "api_key";
@@ -249,7 +257,8 @@ export interface DaemonControlApiOptions {
       updateSettings?: (patch: unknown) => Promise<unknown>;
       quota?: () => Promise<unknown>;
       refreshQuota?: () => Promise<unknown>;
-      credentialProfiles?: () => Promise<unknown>;
+      credentialProfiles?: (input?: { snapshot?: boolean }) => Promise<unknown>;
+      runApplicability?: (input: { repoRoot: string }) => Promise<unknown>;
       createCredentialProfile?: (input: unknown) => Promise<unknown>;
       updateCredentialProfile?: (input: unknown) => Promise<unknown>;
       deleteCredentialProfile?: (input: unknown) => Promise<unknown>;
@@ -312,9 +321,7 @@ export interface DaemonControlApiOptions {
       ) => Promise<unknown>;
       setTurnEnqueueError?: (
         turnId: string,
-        message: string,
-        code: string | null,
-        retryable?: boolean,
+        problem: import("@claudexor/schema").TurnEnqueueProblem,
       ) => void;
       listTrust?: (input?: { repoRoot?: string }) => Promise<unknown>;
       updateTrust?: (input: ControlTrustUpdateRequest) => Promise<unknown>;
@@ -355,6 +362,7 @@ function finiteHttpStatus(error: unknown, fallback: number): number {
 function stringArrayProperty(error: unknown, key: "requiredActions" | "evidenceRefs"): string[] {
   if (!error || typeof error !== "object" || !(key in error)) return [];
   const value = (error as Record<string, unknown>)[key];
+  if (key === "requiredActions") return safeProblemRequiredActions(value);
   return Array.isArray(value)
     ? value
         .filter((item): item is string => typeof item === "string" && item.length > 0)
@@ -399,7 +407,7 @@ function problemBody(
     evidenceRefs: stringArrayProperty(error, "evidenceRefs"),
     context:
       error && typeof error === "object" && "context" in error
-        ? ((error as { context: Record<string, unknown> }).context ?? {})
+        ? safeProblemContext((error as { context: unknown }).context)
         : {},
   });
 }
@@ -899,15 +907,7 @@ export class DaemonControlApiServer {
         const idempotencyKey = runStart.requiredIdempotencyKey(req);
         let repoRoot: string | null = null;
         if (parsed.scope.kind === "project") {
-          repoRoot = parsed.scope.root.trim();
-          const absoluteRepoError = runStart.validateAbsoluteRepoRoot(repoRoot);
-          if (absoluteRepoError) throw Object.assign(new Error(absoluteRepoError), { status: 400 });
-          if (!existsSync(repoRoot) || !lstatSync(repoRoot).isDirectory()) {
-            throw Object.assign(
-              new Error(`project root does not exist or is not a directory: ${repoRoot}`),
-              { status: 400 },
-            );
-          }
+          repoRoot = runStart.normalizeExistingProjectRoot(parsed.scope.root);
         }
         const thread = await svc({
           title: parsed.title,
@@ -1302,21 +1302,10 @@ export class DaemonControlApiServer {
 
     if (method === "GET" && path === "/harnesses") {
       try {
-        assertOnlyQueryParams(url, ["fresh", "all", "harness"]);
-        const fresh = optionalBooleanQuery(url, "fresh");
-        const includeFakes = optionalBooleanQuery(url, "all");
-        const harnessIds = url.searchParams
-          .getAll("harness")
-          .map((id) => id.trim())
-          .filter(Boolean);
         return this.service(
           res,
           "harnesses",
-          {
-            ...(fresh === undefined ? {} : { fresh }),
-            ...(includeFakes === undefined ? {} : { includeFakes }),
-            ...(harnessIds.length === 0 ? {} : { harnessIds }),
-          },
+          parseHarnessListQuery(url),
           ControlHarnessListResponse,
         );
       } catch (err) {
@@ -1325,6 +1314,18 @@ export class DaemonControlApiServer {
     }
     if (method === "GET" && path === "/agent-capabilities")
       return this.service(res, "agentCapabilities", undefined, AgentCapabilityCatalog);
+    if (method === "GET" && path === "/run-applicability") {
+      try {
+        return this.service(
+          res,
+          "runApplicability",
+          parseRunApplicabilityQuery(url),
+          ControlRunApplicabilityResponse,
+        );
+      } catch (error) {
+        return this.requestError(res, error);
+      }
+    }
     const harnessModelsMatch = /^\/harnesses\/([^/]+)\/models$/.exec(path);
     if (method === "GET" && harnessModelsMatch) {
       try {
@@ -1513,8 +1514,14 @@ export class DaemonControlApiServer {
       return this.service(res, "quota", undefined, ControlQuotaResponse);
     if (method === "POST" && path === "/quota")
       return this.service(res, "refreshQuota", undefined, ControlQuotaResponse);
-    if (method === "GET" && path === "/credential-profiles")
-      return this.service(res, "credentialProfiles", undefined, ControlCredentialProfilesResponse);
+    if (method === "GET" && path === "/credential-profiles") {
+      try {
+        const query = parseCredentialProfilesSnapshotQuery(url);
+        return this.service(res, "credentialProfiles", query.input, query.schema);
+      } catch (error) {
+        return this.requestError(res, error);
+      }
+    }
     if (method === "POST" && path === "/credential-profiles") {
       let body: ControlCredentialProfileCreateRequest;
       try {
@@ -2042,6 +2049,7 @@ export class DaemonControlApiServer {
       resolveRunArtifactPath: async (runId, rel) => this.resolveRunArtifactPath(runId, rel),
       normalizeStart: runStart.normalizeRunStart,
       preflightRunRequirements: services.preflightRunRequirements,
+      preflightThreadRunRequirements: services.preflightThreadRunRequirements,
       isTerminalState: (state) => TERMINAL_STATES.has(state),
       daemon: this.opts.daemon,
       threadDetail: services.threadDetail as NonNullable<typeof services.threadDetail>,

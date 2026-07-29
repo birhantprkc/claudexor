@@ -1,8 +1,12 @@
 import { existsSync } from "node:fs";
 import {
+  effectiveAuthPreference,
   observeNativeSessionEvent,
   preflightCredentialProfile,
   preflightDefaultSubject,
+  probeCredentialProfileStatus,
+  profileHeadroomBreach,
+  profileStatusAdmits,
   resolveCredentialProfile,
   resumeSessionForProfile,
   rotateSpecOnTypedLimit,
@@ -44,7 +48,7 @@ import type {
   ExternalContextPolicy,
   HarnessEvent,
   Intent,
-  InteractionAnswerSet,
+  InteractionHandlerResult,
   InteractionRequest,
   ModeKind,
   PaidBudget,
@@ -94,6 +98,7 @@ import {
   AnswerAssembly,
   CLAUDEXOR_ARTIFACT_DIR,
   CLAUDEXOR_BROWSER_ARTIFACT_SUBDIR,
+  countsAsAgentProgress,
   HarnessUnavailableError,
   summarizeDiffPaths as diffStats,
   withInactivityWatchdog,
@@ -151,6 +156,7 @@ import {
   type ResolvedRouteContext,
 } from "./routeContext.js";
 import { resolveAutoReviewerPanel, resolveExplicitReviewerPanel } from "./reviewerPanel.js";
+import { ensureWriteModeGitBoundary } from "./git-precondition.js";
 import {
   buildContinuation,
   type ContinuityDisclosureResult,
@@ -219,9 +225,9 @@ import {
   createRevertAnchorFromPatchOrNull,
   createRevertAnchorOrNull,
   ensureClaudeBridge,
-  ensureGitRepository,
   consumeRawPatchEnvelope,
   snapshotTree,
+  type EnsureGitRepositoryResult,
 } from "@claudexor/workspace";
 import {
   blockedDecisionOverride,
@@ -322,6 +328,9 @@ export interface RunInput {
    * Defaults to `repoRoot` (in-place threads and ordinary runs).
    */
   executionRoot?: string;
+  /** Project Git initialization that had to happen before an isolated thread
+   * worktree could be materialized. Announced immediately after run.created. */
+  projectGitInitialization?: EnsureGitRepositoryResult | null;
   prompt: string;
   /** Caller-supplied system-level instructions layered onto every task-producing
    *  lane (primary, candidate, planner, explorer, orchestrate-planner) — never
@@ -454,13 +463,14 @@ export interface RunInput {
   /**
    * Interactive answer surface (waiting_on_user). When a harness raises a
    * question, the orchestrator emits `interaction.requested`, calls this
-   * handler, and blocks ONLY that attempt's tool until answers arrive or the
-   * timeout elapses (then a benign decline lets the model continue with
-   * assumptions). When absent, runs are non-interactive end to end.
+   * handler, and blocks ONLY that attempt's tool until answers arrive, a finite
+   * configured timeout elapses (then a benign decline), or run termination.
+   * A disabled timeout waits until answer/cancel/terminal/restart. When the
+   * handler is absent, runs are non-interactive end to end.
    */
-  onInteraction?: (ctx: PendingInteractionContext) => Promise<InteractionAnswerSet | null>;
-  /** Wait budget for one interactive answer (default 900000 ms = 15 min). */
-  interactionTimeoutMs?: number;
+  onInteraction?: (ctx: PendingInteractionContext) => Promise<InteractionHandlerResult>;
+  /** Answer timeout: finite milliseconds, or null to wait until external release. */
+  interactionTimeoutMs?: number | null;
   /** Cancellation: aborts the run and cancels in-flight harness work. */
   signal?: AbortSignal;
   /**
@@ -496,6 +506,18 @@ export interface RunInput {
   maxTurns?: number | null;
 }
 
+function announcePreparedProjectGitInitialization(input: RunInput, log: EventLog): void {
+  const result = input.projectGitInitialization;
+  if (!result || (!result.initialized && !result.baselineCommitted)) return;
+  log.emit("project.git.initialized", {
+    repo_root: input.repoRoot,
+    initialized: result.initialized,
+    baseline_committed: result.baselineCommitted,
+    gitignore_seeded: result.gitignoreSeeded,
+    head_sha: result.headSha,
+  });
+}
+
 /** Context handed to RunInput.onInteraction for one pending question. */
 export interface PendingInteractionContext {
   runId: string;
@@ -504,7 +526,7 @@ export interface PendingInteractionContext {
   harnessId: string;
   request: InteractionRequest;
   requestedAt: string;
-  timeoutAt: string;
+  timeoutAt: string | null;
 }
 
 export interface OrchestratorResult {
@@ -757,7 +779,7 @@ export class Orchestrator {
       );
     }
     // Reviewer panels are validated only inside Agent strategies that actually
-    // review (race/convergence) — AFTER run-dir
+    // review (race/convergence; Plan Council is the plan critique path) — AFTER run-dir
     // creation, so a doomed explicit panel yields typed failure ARTIFACTS
     // (failure.yaml naming the refusal) instead of a bare pre-run throw.
     // Ask and Plan never spawn code reviewers, so a panel there never spends doctor/
@@ -920,13 +942,10 @@ export class Orchestrator {
     runAuthPreference?: AuthPreference,
   ): AuthPreference {
     const cfg = this.config(repoRoot)?.global;
-    const explicit = (v?: AuthPreference): "subscription" | "api_key" | undefined =>
-      v && v !== "auto" ? v : undefined;
-    return (
-      explicit(runAuthPreference) ??
-      explicit(cfg?.harnesses?.[harnessId]?.auth_preference) ??
-      explicit(cfg?.routing?.auth_preference) ??
-      "auto"
+    return effectiveAuthPreference(
+      runAuthPreference,
+      cfg?.harnesses?.[harnessId]?.auth_preference,
+      cfg?.routing?.auth_preference,
     );
   }
 
@@ -958,24 +977,22 @@ export class Orchestrator {
     return input.executionRoot ?? input.repoRoot;
   }
 
-  private sessionSpecFields(
+  private async sessionSpecFields(
     input: RunInput,
     harnessId: string,
     log?: EventLog,
-  ): Pick<HarnessRunSpec, "auth_preference" | "resume_session_id" | "credential_profile"> {
+    defaultRoute: "local_session" | "api_key" | null = null,
+  ): Promise<Pick<HarnessRunSpec, "auth_preference" | "resume_session_id" | "credential_profile">> {
     const cfg = this.config(input.repoRoot)?.global;
-    const profile = this.preflightProfile(input, harnessId, log);
-    const explicit = (
-      v?: "subscription" | "api_key" | "auto",
-    ): "subscription" | "api_key" | undefined => (v && v !== "auto" ? v : undefined);
+    const profile = await this.preflightProfile(input, harnessId, log, defaultRoute);
     return {
       // "auto" at ANY level falls through (thread turns send the thread default
       // "auto" as a per-run value; it must not shadow a configured preference).
-      auth_preference:
-        explicit(input.authPreference) ??
-        explicit(cfg?.harnesses?.[harnessId]?.auth_preference) ??
-        explicit(cfg?.routing?.auth_preference) ??
-        "auto",
+      auth_preference: effectiveAuthPreference(
+        input.authPreference,
+        cfg?.harnesses?.[harnessId]?.auth_preference,
+        cfg?.routing?.auth_preference,
+      ),
       resume_session_id: resumeSessionForProfile(input.resumeSessions?.[harnessId], profile),
       credential_profile: profile,
     };
@@ -1061,20 +1078,79 @@ export class Orchestrator {
     return policy ?? { limit_action: "fail", rotation_eligible: [], headroom_threshold: 0.9 };
   }
 
-  private preflightProfile(input: RunInput, harnessId: string, log?: EventLog) {
+  /** Fresh profile readiness for one rotation decision epoch. Accounts uses
+   * the same probe wrapper + admission predicate when projecting next_up. */
+  private async readyProfileIdsForRotation(
+    input: RunInput,
+    harnessId: string,
+  ): Promise<ReadonlySet<string>> {
+    const profiles = (this.config(input.repoRoot)?.global.credential_profiles ?? []).filter(
+      (profile) => profile.enabled && profile.harness_id === harnessId,
+    );
+    const adapter = this.deps.registry.get(harnessId);
+    const entries = await Promise.all(
+      profiles.map(async (profile) => ({
+        profile,
+        status: await probeCredentialProfileStatus(
+          profile,
+          adapter?.probeCredentialProfile?.bind(adapter),
+        ),
+      })),
+    );
+    return new Set(
+      entries
+        .filter(({ profile, status }) => profileStatusAdmits(profile, status))
+        .map(({ profile }) => profile.profile_id),
+    );
+  }
+
+  private async preflightProfile(
+    input: RunInput,
+    harnessId: string,
+    log: EventLog | undefined,
+    defaultRoute: "local_session" | "api_key" | null,
+  ): Promise<CredentialProfile | null> {
     const profile = this.resolveCredentialProfile(input, harnessId);
     const policy = this.profilePolicy(input.repoRoot, harnessId);
     const registry = this.config(input.repoRoot)?.global.credential_profiles ?? [];
     const snapshots = this.deps.quotaSnapshots?.() ?? [];
     const emit: Parameters<typeof preflightCredentialProfile>[0]["emit"] = (type, payload) =>
       log?.emit(type, payload);
+    const breach = profileHeadroomBreach(
+      snapshots,
+      harnessId,
+      profile?.profile_id ?? null,
+      policy.headroom_threshold,
+    );
+    const readyProfileIds =
+      policy.limit_action === "rotate" &&
+      breach !== null &&
+      (profile !== null || defaultRoute === "local_session")
+        ? await this.readyProfileIdsForRotation(input, harnessId)
+        : new Set<string>();
     if (!profile) {
       // Unpinned runs (INV-135 auto-balance): under `rotate`, a fresh
       // default-subject headroom breach starts on the next eligible
       // subscription profile instead; `fail`/`ask` change nothing.
-      return preflightDefaultSubject({ harnessId, policy, registry, snapshots, emit });
+      return preflightDefaultSubject({
+        harnessId,
+        policy,
+        registry,
+        snapshots,
+        readyProfileIds,
+        defaultRoute,
+        emit,
+      });
     }
-    return preflightCredentialProfile({ profile, harnessId, policy, registry, snapshots, emit });
+    return preflightCredentialProfile({
+      profile,
+      harnessId,
+      policy,
+      registry,
+      snapshots,
+      readyProfileIds,
+      emit,
+    });
   }
 
   /**
@@ -2123,6 +2199,10 @@ export class Orchestrator {
     harnessId: string,
     resolvedProfileId: string | null,
     nativeResumeAvailable: boolean,
+    sessionFields: Pick<
+      HarnessRunSpec,
+      "auth_preference" | "resume_session_id" | "credential_profile"
+    >,
     store: ArtifactStore,
     paths: RunPaths,
     repoRoot: string,
@@ -2166,7 +2246,6 @@ export class Orchestrator {
       // summary. Same credential route + scoped lane home a real read-only
       // thread turn uses (INV-034/135). Best-effort in its OWN guard — a summary
       // failure keeps the full mechanical packet, never drops it.
-      const sessionFields = this.sessionSpecFields(runInput, harnessId);
       req.cachedSummary = await resolveContinuitySummary({
         req,
         threadId: runInput.threadId,
@@ -2257,7 +2336,9 @@ export class Orchestrator {
     // Isolated scoped-home sessions are never retained after disposal.
     const inPlaceEnvelope = envelope.worktree_path === envelope.repo_root;
     const rawContextPacket = await rawContextForEnvelope(routed.implementationTransport, envelope);
-    const sessionFields = runInput ? this.sessionSpecFields(runInput, adapter.id, log) : undefined;
+    const sessionFields = runInput
+      ? await this.sessionSpecFields(runInput, adapter.id, log, routed.authRouteEstimate)
+      : undefined;
     // Continuity (INV-137): once the lane (harness + resolved profile) is known,
     // build the continuation packet, materialize context/THREAD.md, and point
     // the prompt at it — never embed the packet body in the prompt. Replaces the
@@ -2268,6 +2349,7 @@ export class Orchestrator {
           adapter.id,
           sessionFields?.credential_profile?.profile_id ?? runInput.credentialProfileId ?? null,
           inPlaceEnvelope && !!sessionFields?.resume_session_id,
+          sessionFields!,
           store,
           paths,
           envelope.repo_root,
@@ -2398,13 +2480,16 @@ export class Orchestrator {
         try {
           const watched = withInactivityWatchdog(adapter.run(runSpec), {
             timeoutMs: inactivityMs,
+            countsAsProgress: countsAsAgentProgress,
             onTimeout: () => {
               attemptAbort.abort();
               void adapter.cancel?.(activeSessionId)?.catch(() => {});
             },
-            // Waiting on the USER (pending interaction) is legitimate
-            // silence — the interaction channel enforces its own wait budget.
+            // Waiting on the USER is legitimate silence. The interaction policy
+            // either enforces a finite deadline or waits until answer/cancel/
+            // terminal/restart when the timeout is disabled.
             isSuspended: () => (interaction?.pendingCount?.() ?? 0) > 0,
+            suspensionVersion: () => interaction?.suspensionVersion?.() ?? 0,
           });
           for await (const ev of watched) {
             if (signal?.aborted) break;
@@ -2534,13 +2619,19 @@ export class Orchestrator {
         // W5.4 failover: a typed-limit hit rebuilds the spec on a NEW vendor
         // session under the next profile with provenance (vendor_limit_rejected).
         if (harnessErrored && runInput && !signal?.aborted) {
+          const rotationPolicy = this.profilePolicy(contract.repo.root, adapter.id);
+          const readyProfileIds =
+            sawTypedLimit && deliverableEmpty && rotationPolicy.limit_action === "rotate"
+              ? await this.readyProfileIdsForRotation(runInput, adapter.id)
+              : new Set<string>();
           const rotated = rotateSpecOnTypedLimit({
             spec,
             harnessId: adapter.id,
             attemptId,
-            policy: this.profilePolicy(contract.repo.root, adapter.id),
+            policy: rotationPolicy,
             registry: this.config(contract.repo.root)?.global.credential_profiles ?? [],
             snapshots: this.deps.quotaSnapshots?.() ?? [],
+            readyProfileIds,
             triedProfiles,
             sawTypedLimit,
             deliverableEmpty,
@@ -2773,65 +2864,6 @@ export class Orchestrator {
   }
 
   /**
-   * Guarantee a git boundary for write-mode runs. Non-git project folders are
-   * initialized in place (`git init`, deterministic baseline commit) without
-   * creating or editing `.gitignore`, and the action is announced via a
-   * `project.git.initialized` event. Returns the failure message when the
-   * boundary cannot be established (the terminal failure events are already
-   * emitted); null on success.
-   */
-  private async ensureWriteModeGitBoundary(
-    repoRoot: string,
-    log: EventLog,
-    store: ArtifactStore,
-    paths: ReturnType<ArtifactStore["runPaths"]>,
-    runId: string,
-    mode: ModeKind,
-  ): Promise<string | null> {
-    if (repoRoot === NO_PROJECT_ROOT) return null;
-    try {
-      const result = await ensureGitRepository(repoRoot);
-      if (result.initialized || result.baselineCommitted) {
-        log.emit("project.git.initialized", {
-          repo_root: repoRoot,
-          initialized: result.initialized,
-          baseline_committed: result.baselineCommitted,
-          gitignore_seeded: result.gitignoreSeeded,
-          head_sha: result.headSha,
-        });
-      }
-      return null;
-    } catch (err) {
-      const message = safeErrorMessage(err);
-      writeFailure(store, paths, {
-        phase: "workspace",
-        category: "project",
-        safeMessage: message,
-        runDir: paths.root,
-        nextActions: [
-          "Check the project folder permissions",
-          "Initialize git manually (git init)",
-          "Retry the run",
-        ],
-      });
-      store.writeText(
-        join(paths.finalDir, "summary.md"),
-        `# Run ${runId} (${mode})\n\n- Lifecycle: failed\n- Phase: workspace\n\n${message}\n`,
-      );
-      log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
-      log.emit("run.failed", {
-        lifecycle: "failed",
-        facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
-        reason: "harness_failed",
-        phase: "workspace",
-        error: message,
-        failure_ref: "final/failure.yaml",
-      });
-      return message;
-    }
-  }
-
-  /**
    * D-14 layer 3 (AGENTS.md unification, INV-113): the ONE new live-tree write.
    * When the PROJECT root has `AGENTS.md` and no `CLAUDE.md`, drop a thin
    * `CLAUDE.md` (`@AGENTS.md` import + Claudexor ownership marker) so a Claude
@@ -2884,6 +2916,7 @@ export class Orchestrator {
       const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
       safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
       log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
+      announcePreparedProjectGitInitialization(input, log);
       return preparedLedger;
     });
     announce?.(
@@ -2911,7 +2944,7 @@ export class Orchestrator {
     // silent mutation (user-locked decision, comparator: Codex requires git).
     // For an isolated thread the execution root is already a git worktree, so
     // this is a no-op there; for in-place it ensures the live project is git.
-    const gitPreconditionError = await this.ensureWriteModeGitBoundary(
+    const gitPreconditionError = await ensureWriteModeGitBoundary(
       execRoot,
       log,
       store,
@@ -2925,10 +2958,10 @@ export class Orchestrator {
         taskId,
         mode,
         lifecycle: "failed",
-        facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
+        facts: makeOutcomeFacts("failed", { reason: gitPreconditionError.reason }),
         winner: null,
         runDir: paths.root,
-        summary: gitPreconditionError,
+        summary: gitPreconditionError.message,
         candidates: [],
       };
     }
@@ -4629,6 +4662,7 @@ export class Orchestrator {
       const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
       safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
       log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
+      announcePreparedProjectGitInitialization(input, log);
       return preparedLedger;
     });
     announce?.(
@@ -4652,7 +4686,7 @@ export class Orchestrator {
     // Live (in-place) isolation deliberately tolerates non-git stateful
     // environments; only envelope isolation needs the git boundary.
     if (!input.inPlace) {
-      const gitPreconditionError = await this.ensureWriteModeGitBoundary(
+      const gitPreconditionError = await ensureWriteModeGitBoundary(
         execRoot,
         log,
         store,
@@ -4667,10 +4701,10 @@ export class Orchestrator {
           taskId,
           mode,
           lifecycle: "failed",
-          facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
+          facts: makeOutcomeFacts("failed", { reason: gitPreconditionError.reason }),
           winner: null,
           runDir: paths.root,
-          summary: gitPreconditionError,
+          summary: gitPreconditionError.message,
           candidates: [],
         };
       }
@@ -5684,7 +5718,12 @@ export class Orchestrator {
     }
     const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
     const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
-    const planSessionFields = this.sessionSpecFields(input, adapter.id, log);
+    const planSessionFields = await this.sessionSpecFields(
+      input,
+      adapter.id,
+      log,
+      routed.authRouteEstimate,
+    );
     // Continuity (INV-137): a thread PLAN turn is a chat turn — hydrate a
     // lane switch/gap with a packet and disclose it.
     const laneContinuity = args.laneRun
@@ -5693,6 +5732,7 @@ export class Orchestrator {
           adapter.id,
           planSessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
           planSessionFields.resume_session_id !== null,
+          planSessionFields,
           store,
           paths,
           this.execRootOf(input),
@@ -5770,11 +5810,13 @@ export class Orchestrator {
       if (!input.signal?.aborted) {
         const watchedPlan = withInactivityWatchdog(adapter.run(spec), {
           timeoutMs: harnessInactivityTimeoutMs(this.config(input.repoRoot)),
+          countsAsProgress: countsAsAgentProgress,
           onTimeout: () => {
             plannerAbort.abort();
             void adapter.cancel?.(spec.session_id)?.catch(() => {});
           },
           isSuspended: () => (planInteraction?.pendingCount?.() ?? 0) > 0,
+          suspensionVersion: () => planInteraction?.suspensionVersion?.() ?? 0,
         });
         for await (const ev of watchedPlan) {
           if (input.signal?.aborted) break;
@@ -5935,6 +5977,7 @@ export class Orchestrator {
       const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
       safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
       log.emit("run.created", { mode: "plan", prompt: redactSecrets(input.prompt) });
+      announcePreparedProjectGitInitialization(input, log);
       return preparedLedger;
     });
     announce?.(
@@ -6399,10 +6442,15 @@ export class Orchestrator {
           this.estimateUsdFloor(input.repoRoot),
           this.routeBillingKnowledge(input, harnessId),
         ),
-      buildSpec: (routed, homeEnv, prompt, attemptId) => {
+      buildSpec: async (routed, homeEnv, prompt, attemptId) => {
         const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
         const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
-        const sessionFields = this.sessionSpecFields(input, routed.adapter.id, log);
+        const sessionFields = await this.sessionSpecFields(
+          input,
+          routed.adapter.id,
+          log,
+          routed.authRouteEstimate,
+        );
         const spec = HarnessRunSpec.parse({
           session_id: newId("ses"),
           intent: "synthesize",
@@ -6471,6 +6519,7 @@ export class Orchestrator {
       const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
       safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
       log.emit("run.created", { mode: opts.mode, prompt: redactSecrets(prompt) });
+      announcePreparedProjectGitInitialization(input, log);
       return preparedLedger;
     });
     announce?.(
@@ -6715,7 +6764,12 @@ export class Orchestrator {
         (opts.deepScan
           ? `${prompt}\n\nExplorer ${idx + 1}/${adapters.length}: focus on a distinct slice. Emit evidence-cited findings, explicit unknowns/omissions, and follow-up questions. Do not edit files.`
           : prompt) + contextSection;
-      const sessionFields = this.sessionSpecFields(input, adapter.id, log);
+      const sessionFields = await this.sessionSpecFields(
+        input,
+        adapter.id,
+        log,
+        routed.authRouteEstimate,
+      );
       const grantResume =
         sessionFields.resume_session_id !== null && !resumeGranted.has(adapter.id);
       if (grantResume) resumeGranted.add(adapter.id);
@@ -6729,6 +6783,7 @@ export class Orchestrator {
             adapter.id,
             sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
             grantResume,
+            sessionFields,
             store,
             paths,
             this.execRootOf(input),
@@ -6835,11 +6890,13 @@ export class Orchestrator {
           try {
             const watchedReport = withInactivityWatchdog(adapter.run(runSpec), {
               timeoutMs: harnessInactivityTimeoutMs(this.config(input.repoRoot)),
+              countsAsProgress: countsAsAgentProgress,
               onTimeout: () => {
                 reportAbort.abort();
                 void adapter.cancel?.(activeSessionId)?.catch(() => {});
               },
               isSuspended: () => (reportInteraction?.pendingCount?.() ?? 0) > 0,
+              suspensionVersion: () => reportInteraction?.suspensionVersion?.() ?? 0,
             });
             for await (const ev of watchedReport) {
               if (input.signal?.aborted) break;
@@ -6902,13 +6959,19 @@ export class Orchestrator {
           // W5.4 reactive failover, READ-ONLY lane (same contract as the
           // candidate lane; typed limits only, never plain transients).
           if (harnessError && !input.signal?.aborted) {
+            const rotationPolicy = this.profilePolicy(input.repoRoot, adapter.id);
+            const readyProfileIds =
+              sawTypedLimit && reportSoFar.length === 0 && rotationPolicy.limit_action === "rotate"
+                ? await this.readyProfileIdsForRotation(input, adapter.id)
+                : new Set<string>();
             const rotated = rotateSpecOnTypedLimit({
               spec,
               harnessId: adapter.id,
               attemptId,
-              policy: this.profilePolicy(input.repoRoot, adapter.id),
+              policy: rotationPolicy,
               registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
               snapshots: this.deps.quotaSnapshots?.() ?? [],
+              readyProfileIds,
               triedProfiles,
               sawTypedLimit,
               deliverableEmpty: reportSoFar.length === 0,

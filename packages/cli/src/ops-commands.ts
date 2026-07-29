@@ -28,6 +28,7 @@ import {
   ControlJournalQuarantineRequest,
   ControlJournalValidation,
   ControlSetupJob,
+  GitCapability,
 } from "@claudexor/schema";
 import { type ParsedArgs, flagBool, flagStr } from "./args.js";
 import { controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
@@ -252,7 +253,8 @@ function unknownHarnesses(requested: string[] | undefined, observed: string[]): 
 }
 
 export async function doctorCommand(args: ParsedArgs, json: boolean): Promise<number> {
-  const response = ControlHarnessListResponse.parse(await daemonGet(harnessListPath(args)));
+  const raw = await daemonGet(harnessListPath(args));
+  const response = ControlHarnessListResponse.parse(raw);
   const unknown = unknownHarnesses(
     requestedHarnesses(args),
     response.harnesses.map((status) => status.id),
@@ -263,11 +265,27 @@ export async function doctorCommand(args: ParsedArgs, json: boolean): Promise<nu
       `claudexor: unknown harness(es): ${unknown.join(", ")} (run \`claudexor harness list --all\`)`,
     );
   }
+  // Additive/optional for old-daemon compatibility. Parsing from the raw
+  // response preserves omission/null without a second catalog request (and
+  // therefore without repeating harness discovery/model probes).
+  const parsedGit = GitCapability.nullable()
+    .optional()
+    .safeParse(
+      raw && typeof raw === "object" ? (raw as Record<string, unknown>)["git"] : undefined,
+    );
+  const git = parsedGit.success ? (parsedGit.data ?? null) : null;
   const advisory = atRiskNodeAdvisory();
   if (json) {
-    printJson({ harnesses: response.harnesses, node_advisory: advisory });
+    printJson({ harnesses: response.harnesses, git, node_advisory: advisory });
     return 0;
   }
+  print(
+    git?.status === "available"
+      ? `✓ git${git.version ? ` ${git.version}` : ""}`
+      : git
+        ? `✗ git: ${git.status}${git.remediation ? ` — ${git.remediation}` : ""}`
+        : "? git: readiness unavailable from this engine version",
+  );
   for (const status of response.harnesses) {
     const version = status.manifest?.version ? ` ${status.manifest.version}` : "";
     print(`${statusGlyph(status.status)} ${status.id}${version}`);

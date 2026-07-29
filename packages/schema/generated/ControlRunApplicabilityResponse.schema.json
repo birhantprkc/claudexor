@@ -1,0 +1,217 @@
+{
+  "$ref": "#/definitions/ControlRunApplicabilityResponse",
+  "definitions": {
+    "ControlRunApplicabilityResponse": {
+      "type": "object",
+      "properties": {
+        "repoRoot": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact absolute project root for which this projection was computed."
+        },
+        "git": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "available",
+                "missing",
+                "developer_tools_stub",
+                "failed"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remediation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "version",
+            "detail",
+            "remediation"
+          ],
+          "additionalProperties": false,
+          "description": "Live Git readiness used for every applicability cell."
+        },
+        "matrix": {
+          "type": "object",
+          "properties": {
+            "in_place": {
+              "type": "object",
+              "properties": {
+                "read_only": {
+                  "type": "object",
+                  "properties": {
+                    "applicable": {
+                      "type": "boolean",
+                      "description": "Whether the current Git capability admits this shape; other run preconditions are out of scope."
+                    },
+                    "requiresGit": {
+                      "type": "boolean",
+                      "description": "Whether this run/workspace shape crosses a Git-backed engine boundary."
+                    },
+                    "code": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "git_missing",
+                            "git_developer_tools_stub",
+                            "git_failed"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Stable refusal code when not applicable; null when applicable."
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Human causal explanation when not applicable; null when applicable."
+                    },
+                    "remediation": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Exact recovery action when not applicable; null when applicable."
+                    }
+                  },
+                  "required": [
+                    "applicable",
+                    "requiresGit",
+                    "code",
+                    "reason",
+                    "remediation"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Ask or Plan."
+                },
+                "agent_convergence": {
+                  "type": "object",
+                  "properties": {
+                    "applicable": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/applicable"
+                    },
+                    "requiresGit": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/requiresGit"
+                    },
+                    "code": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/code"
+                    },
+                    "reason": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/reason"
+                    },
+                    "remediation": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/remediation"
+                    }
+                  },
+                  "required": [
+                    "applicable",
+                    "requiresGit",
+                    "code",
+                    "reason",
+                    "remediation"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Agent with an actual attempts cap or until-clean flag on the wire."
+                },
+                "agent_other": {
+                  "type": "object",
+                  "properties": {
+                    "applicable": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/applicable"
+                    },
+                    "requiresGit": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/requiresGit"
+                    },
+                    "code": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/code"
+                    },
+                    "reason": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/reason"
+                    },
+                    "remediation": {
+                      "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only/properties/remediation"
+                    }
+                  },
+                  "required": [
+                    "applicable",
+                    "requiresGit",
+                    "code",
+                    "reason",
+                    "remediation"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Plain Agent, Best-of, Create, or any other Agent wire shape."
+                }
+              },
+              "required": [
+                "read_only",
+                "agent_convergence",
+                "agent_other"
+              ],
+              "additionalProperties": false,
+              "description": "An in-place thread workspace."
+            },
+            "isolated": {
+              "type": "object",
+              "properties": {
+                "read_only": {
+                  "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/read_only"
+                },
+                "agent_convergence": {
+                  "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/agent_convergence"
+                },
+                "agent_other": {
+                  "$ref": "#/definitions/ControlRunApplicabilityResponse/properties/matrix/properties/in_place/properties/agent_other"
+                }
+              },
+              "required": [
+                "read_only",
+                "agent_convergence",
+                "agent_other"
+              ],
+              "additionalProperties": false,
+              "description": "A persistent isolated thread worktree."
+            }
+          },
+          "required": [
+            "in_place",
+            "isolated"
+          ],
+          "additionalProperties": false,
+          "description": "Root-scoped Git applicability for every composer run/workspace shape."
+        }
+      },
+      "required": [
+        "repoRoot",
+        "git",
+        "matrix"
+      ],
+      "additionalProperties": false,
+      "description": "Root-scoped Git applicability projected by the engine; this is not total run readiness."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -8,6 +8,7 @@ import {
   WorkspaceError,
 } from "@claudexor/core";
 import { containsSecretLikeToken } from "@claudexor/util";
+import { probeGitCapability, requireGitCapability } from "./git-capability.js";
 
 /** BYTE-FAITHFUL git capture: raw buffers, never readline — CR
  * bytes in CRLF diff content survive, and no trailing newline is fabricated
@@ -73,6 +74,7 @@ export interface EnsureGitRepositoryResult {
  * tool-created commit and must not depend on (or pollute) user git identity.
  */
 export async function ensureGitRepository(repo: string): Promise<EnsureGitRepositoryResult> {
+  requireGitCapability(await probeGitCapability());
   const isRepo = await isGitRepo(repo);
   const hasHead = isRepo && (await git(repo, ["rev-parse", "--verify", "HEAD"])).code === 0;
   if (isRepo && hasHead) {

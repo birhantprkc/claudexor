@@ -65,14 +65,17 @@ export function interactionChannelFor(
   // Waiting on a human is legitimate stream silence: the inactivity watchdog
   // consults this count and re-arms instead of killing the "wedged" harness.
   let pending = 0;
+  let suspensionVersion = 0;
   return {
     pendingCount: () => pending,
+    suspensionVersion: () => suspensionVersion,
     request: async (request: InteractionRequest): Promise<InteractionAnswerSet | null> => {
       const requestedAt = nowIso();
       const deadlineAtMs =
         timeoutPolicy.kind === "finite" ? finiteDeadline(timeoutPolicy.timeoutMs) : null;
       const timeoutAt = deadlineAtMs === null ? null : new Date(deadlineAtMs).toISOString();
       pending += 1;
+      suspensionVersion += 1;
       try {
         // Invoke the answer surface BEFORE announcing the event: handlers
         // register the pending question synchronously (daemon
@@ -188,6 +191,7 @@ export function interactionChannelFor(
         // ALWAYS release the suspension: a synchronous handler throw or a
         // log.emit failure must not leave the watchdog suspended forever.
         pending -= 1;
+        suspensionVersion += 1;
       }
     },
   };

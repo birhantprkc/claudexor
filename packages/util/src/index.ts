@@ -4,6 +4,8 @@ export * from "./secret-names.js";
 export * from "./sensitive-resource.js";
 export * from "./delegation-env.js";
 export * from "./runtime-manifest.js";
+export * from "./retry-delay.js";
+export * from "./problem-safety.js";
 import { sensitiveResourcePolicy } from "./sensitive-resource.js";
 import { createHash, randomUUID } from "node:crypto";
 import {

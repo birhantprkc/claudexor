@@ -16,11 +16,14 @@ const update = (record: JobRecord, patch: Partial<JobRecord>): JobRecord => ({
 
 describe("settleJobError", () => {
   it("preserves typed metadata on an ordinary runner failure", () => {
+    const secret = `sk-${"a".repeat(32)}`;
     const settled = settleJobError({
       thrown: Object.assign(new Error("preflight refused"), {
         code: "trust_required",
         status: 409,
         retryable: false,
+        requiredActions: [`replace ${secret}`, "retry"],
+        context: { turnId: "tn-1", detail: secret },
       }),
       record: runningRecord,
       aborted: false,
@@ -34,7 +37,10 @@ describe("settleJobError", () => {
       errorCode: "trust_required",
       errorStatus: 409,
       errorRetryable: false,
+      errorRequiredActions: [expect.stringContaining("[redacted]"), "retry"],
+      errorContext: { turnId: "tn-1", detail: expect.stringContaining("[redacted]") },
     });
+    expect(JSON.stringify(settled)).not.toContain(secret);
   });
 
   it("keeps a failed immediate terminal recovery provisional and redacts both errors", () => {

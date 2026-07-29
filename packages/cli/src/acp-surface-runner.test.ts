@@ -1,12 +1,37 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { makeOutcomeFacts } from "@claudexor/schema";
 import {
   ACP_MAX_REPLAY_TURNS,
+  acpTerminalRecordMode,
+  acpTerminalSummary,
   projectTerminalTurnDetail,
   selectReplayTurns,
   typedFetchReason,
 } from "./acp-surface-runner.js";
 
+const tempDirs: string[] = [];
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 const addr = { baseUrl: "http://127.0.0.1:1", token: "t" } as never;
+
+const typedFailure = {
+  phase: "execute",
+  category: "auth",
+  code: null,
+  harnessId: "claude",
+  attemptId: "a01",
+  safeMessage: "Authentication expired",
+  rawDetailRef: "attempts/a01/failure.json",
+  logRefs: ["attempts/a01/stderr.log"],
+  eventRefs: ["events.jsonl#42"],
+  runDir: "/tmp/run-1",
+  nextActions: ["Log in again"],
+};
 
 // The post-terminal detail read DEGRADES: a finished ACP turn must never become
 // a JSON-RPC error that loses the runId — the terminal answer survives and the
@@ -25,6 +50,10 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
+        failure: null,
+        primaryOutput: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
         detailProblem: {
           code: "run_facts_invalid",
           message: "canonical RunFacts receipt is invalid",
@@ -36,7 +65,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
     }
   });
 
-  it("projects eligibility, readiness, and questions from ONE detail read", async () => {
+  it("projects eligibility, readiness, questions, and typed failure from ONE detail read", async () => {
     const daemonRun = await import("./daemon-run.js");
     const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
       applyEligibility: {
@@ -47,6 +76,18 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
       },
       planReadiness: { state: "needs_answers", questionCount: 1 },
       planQuestions: [{ id: "q1" }],
+      failure: typedFailure,
+      summary: {
+        outcomeFacts: makeOutcomeFacts("cancelled", { reason: "wall_clock_exceeded" }),
+      },
+      outcomeBanner: "Time limit reached",
+      primaryOutput: {
+        kind: "plan",
+        path: "final/plan.md",
+        text: "# Plan",
+        bytes: 6,
+        truncated: false,
+      },
     });
     try {
       await expect(projectTerminalTurnDetail(addr, "run-1")).resolves.toEqual({
@@ -58,8 +99,38 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         },
         planReadiness: { state: "needs_answers", questionCount: 1 },
         planQuestions: [{ id: "q1" }],
+        failure: typedFailure,
+        outcomeFacts: makeOutcomeFacts("cancelled", { reason: "wall_clock_exceeded" }),
+        outcomeBanner: "Time limit reached",
+        primaryOutput: {
+          kind: "plan",
+          path: "final/plan.md",
+          text: "# Plan",
+          bytes: 6,
+          truncated: false,
+        },
       });
       expect(detailSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      detailSpy.mockRestore();
+    }
+  });
+
+  it("does not forward a malformed failure-shaped object", async () => {
+    const daemonRun = await import("./daemon-run.js");
+    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      failure: { category: "invented", safeMessage: 42 },
+    });
+    try {
+      await expect(projectTerminalTurnDetail(addr, "run-1")).resolves.toEqual({
+        applyEligibility: null,
+        planReadiness: null,
+        planQuestions: [],
+        failure: null,
+        primaryOutput: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
+      });
     } finally {
       detailSpy.mockRestore();
     }
@@ -73,16 +144,117 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
+        failure: null,
+        primaryOutput: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
       });
       await expect(projectTerminalTurnDetail(addr, "")).resolves.toEqual({
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
+        failure: null,
+        primaryOutput: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
       });
       expect(detailSpy).toHaveBeenCalledTimes(1);
     } finally {
       detailSpy.mockRestore();
     }
+  });
+});
+
+describe("ACP terminal primary-output projection", () => {
+  const unavailableDetail = {
+    applyEligibility: null,
+    planReadiness: null,
+    planQuestions: [],
+    failure: null,
+    primaryOutput: null,
+    outcomeFacts: null,
+    outcomeBanner: null,
+    detailProblem: { code: "detail_unavailable", message: "offline", retryable: true },
+  };
+
+  it.each([
+    ["wall_clock_exceeded", "Time limit reached"],
+    ["user_cancelled", "Cancelled"],
+  ] as const)("uses the server outcome banner for a cancelled %s terminal", (reason, banner) => {
+    expect(
+      acpTerminalSummary({
+        runId: `run-${reason}`,
+        runDir: "",
+        record: { state: "cancelled", params: { mode: "agent" } },
+        detail: {
+          ...unavailableDetail,
+          detailProblem: undefined,
+          outcomeFacts: makeOutcomeFacts("cancelled", { reason }),
+          outcomeBanner: banner,
+        },
+      }),
+    ).toBe(banner);
+  });
+
+  it("uses the canonical Control API primary output when detail succeeds", () => {
+    expect(
+      acpTerminalSummary({
+        runId: "run-plan",
+        runDir: "",
+        record: { state: "succeeded", params: { mode: "agent" } },
+        detail: {
+          ...unavailableDetail,
+          detailProblem: undefined,
+          primaryOutput: {
+            kind: "plan",
+            path: "final/plan.md",
+            text: "Canonical plan\n",
+            bytes: 15,
+            truncated: false,
+          },
+        },
+      }),
+    ).toBe("Canonical plan");
+  });
+
+  it.each([
+    { mode: "plan" as const, file: "plan.md", text: "Fallback plan" },
+    { mode: "ask" as const, file: "report.md", text: "Fallback research report" },
+  ])("uses the durable $mode mode only when detail is unavailable", ({ mode, file, text }) => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-acp-output-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "final"), { recursive: true });
+    writeFileSync(join(root, "final", file), `${text}\n`);
+    expect(
+      acpTerminalSummary({
+        runId: `run-${mode}`,
+        runDir: root,
+        record: { state: "succeeded", params: { mode } },
+        detail: unavailableDetail,
+      }),
+    ).toBe(text);
+  });
+
+  it("recovers a cancelled Ask diagnostic without guessing Agent", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-acp-cancelled-"));
+    tempDirs.push(root);
+    mkdirSync(join(root, "final"), { recursive: true });
+    writeFileSync(join(root, "final", "summary.md"), "Stopped after deadline\n");
+    expect(
+      acpTerminalSummary({
+        runId: "run-ask-cancelled",
+        runDir: root,
+        record: { state: "cancelled", params: { mode: "ask" } },
+        detail: unavailableDetail,
+      }),
+    ).toBe("Stopped after deadline");
+  });
+
+  it("accepts only the canonical mode vocabulary from daemon params", () => {
+    expect(acpTerminalRecordMode({ params: { mode: "ask" } })).toBe("ask");
+    expect(acpTerminalRecordMode({ params: { mode: "plan" } })).toBe("plan");
+    expect(acpTerminalRecordMode({ params: { mode: "legacy-audit" } })).toBeUndefined();
+    expect(acpTerminalRecordMode({ params: null })).toBeUndefined();
   });
 });
 

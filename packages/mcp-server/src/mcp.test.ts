@@ -168,13 +168,30 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(succeeded?.isError).not.toBe(true);
     expect(succeeded?.content?.[0]?.text).toContain("status: succeeded");
 
+    const failure = {
+      phase: "execute",
+      category: "auth",
+      code: null,
+      harnessId: "claude",
+      attemptId: "a01",
+      safeMessage: "Authentication expired",
+      rawDetailRef: null,
+      logRefs: [],
+      eventRefs: [],
+      runDir: "/tmp/child-failed",
+      nextActions: ["Log in again"],
+    };
     const failedRead = await wireToolCall(
-      beltClaudexorTools(async () => ({ runId: "child-failed", status: "failed" }), policy),
+      beltClaudexorTools(
+        async () => ({ runId: "child-failed", status: "failed", failure }),
+        policy,
+      ),
       "claudexor_run_result",
       { runId: "child-failed" },
     );
     expect(failedRead?.isError).not.toBe(true);
     expect(failedRead?.content?.[0]?.text).toContain("status: failed");
+    expect(failedRead?.structuredContent?.failure).toEqual(failure);
   });
 
   it("no-argument tools (status/capabilities) are callable with {} — prompt is required only where the schema requires it", async () => {
@@ -185,6 +202,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
       ok: true,
       version: "0.0.0-test",
       generatedAt: new Date().toISOString(),
+      git: { status: "available", version: "git version 2.51.0", detail: null, remediation: null },
       harnesses: [],
       availableHarnesses: [],
       modes: ["ask", "plan", "agent"],
@@ -417,6 +435,35 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(byName["claudexor_run"]?.outputSchema).toBeTruthy();
   });
 
+  it("an immediate failed run tool preserves typed failure detail on the MCP wire", async () => {
+    const failure = {
+      phase: "execute",
+      category: "auth",
+      code: null,
+      harnessId: "claude",
+      attemptId: "a01",
+      safeMessage: "Authentication expired",
+      rawDetailRef: null,
+      logRefs: [],
+      eventRefs: [],
+      runDir: "/tmp/r-failed",
+      nextActions: ["Log in again"],
+    };
+    const tools = defaultClaudexorTools(async () => ({
+      runId: "r-failed",
+      runDir: "/tmp/r-failed",
+      status: "failed",
+      summary: "Run failed.",
+      failure,
+    }));
+
+    const result = await wireToolCall(tools, "claudexor_run", { prompt: "go" });
+
+    expect(result?.isError).not.toBe(true);
+    expect(result?.structuredContent?.status).toBe("failed");
+    expect(result?.structuredContent?.failure).toEqual(failure);
+  });
+
   it("plan run tools carry the outcome banner + plan readiness in structuredContent", async () => {
     const tools = defaultClaudexorTools(async () => ({
       runId: "r-plan",
@@ -485,6 +532,43 @@ describe("Claudexor MCP server (SDK v2)", () => {
       const sc = res?.structuredContent as Record<string, any>;
       expect(sc?.runId).toBe("r-h1");
       expect(sc?.applyEligibility?.eligible).toBe(true);
+    }
+  });
+
+  it("inspect/status/result preserve typed failed-handle detail on the MCP wire", async () => {
+    const failure = {
+      phase: "execute",
+      category: "harness_error",
+      code: null,
+      harnessId: "codex",
+      attemptId: "a02",
+      safeMessage: "Harness exited before producing a result",
+      rawDetailRef: "attempts/a02/failure.json",
+      logRefs: ["attempts/a02/stderr.log"],
+      eventRefs: ["evt-failed"],
+      runDir: "/tmp/r-handle-failed",
+      nextActions: ["Inspect the attempt log"],
+    };
+    const handle = {
+      summary: "run r-handle-failed: failed",
+      runId: "r-handle-failed",
+      runDir: "/tmp/r-handle-failed",
+      status: "failed",
+      decisionStatus: null,
+      pendingInteractions: 0,
+      outcomeFacts: null,
+      failure,
+      outcomeBanner: "Harness failed",
+      applyEligibility: null,
+      planReadiness: null,
+    };
+    const tools = defaultClaudexorTools(async () => handle);
+
+    for (const name of ["claudexor_inspect", "claudexor_run_status", "claudexor_run_result"]) {
+      const result = await wireToolCall(tools, name, { runId: "r-handle-failed" });
+      expect(result?.isError, `${name} failure should conform to its outputSchema`).not.toBe(true);
+      expect(result?.structuredContent?.status).toBe("failed");
+      expect(result?.structuredContent?.failure).toEqual(failure);
     }
   });
 

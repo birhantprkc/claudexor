@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import process from "node:process";
-import { createReadStream, existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { Readable, Transform } from "node:stream";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { CLAUDEXOR_VERSION, noProjectRepoRoot, readTextSafe, userConfigDir } from "@claudexor/util";
@@ -23,6 +21,7 @@ import {
   type ModeKind,
   type ProviderFamily,
   ControlThreadListResponse,
+  RunFailure,
   RunTelemetry,
   StructuredOutputConformance,
   TaskContract,
@@ -41,10 +40,22 @@ import {
 } from "./args.js";
 import { print, printJson, printJsonLine, printUsageError, statusGlyph } from "./cli-io.js";
 import { controlProblemError, minIntError, renderCliFailure, usageError } from "./cli-error.js";
+import {
+  cliOutputMode,
+  type CliOutputMode,
+  outputModeIsMachine,
+  outputModeIsStream,
+  renderOutputFailure,
+  renderOutputUsageFailure,
+} from "./output-mode.js";
 import { handleHelpRequest } from "./command-help.js";
 import { pickResumableThread } from "./thread-select.js";
 import { KNOWN_FLAGS, VALUE_FLAGS, helpJson, renderHelp } from "./command-registry.js";
-import { commandFlagScopeError } from "./command-scope.js";
+import {
+  commandFlagScopeError,
+  commandPositionalError,
+  runModeFlagScopeError,
+} from "./command-scope.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
 import { aboutJson, renderAbout } from "./about-command.js";
 import { dispatchOpsCommand } from "./ops-commands.js";
@@ -52,11 +63,8 @@ import { reviewCommand } from "./review-command.js";
 import { controlApiFetch, followRun } from "./live.js";
 import { retryCommand, runAgainCommand } from "./retry-command.js";
 import { assertCliRunParamsHaveNoInlineSecrets } from "./run-secret-scan.js";
-import {
-  openLocalAttachment,
-  resolveLocalAttachment,
-  type LocalAttachment,
-} from "./local-attachment.js";
+import { resolveLocalAttachment, type LocalAttachment } from "./local-attachment.js";
+import { uploadLocalAttachment } from "./attachment-upload.js";
 import {
   connectDaemonIfRunning,
   daemonOutcomeSummary,
@@ -242,66 +250,6 @@ function attachmentInputs(args: ParsedArgs): LocalAttachment[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
-async function uploadLocalAttachment(
-  addr: Awaited<ReturnType<typeof ensureDaemon>>["addr"],
-  attachment: LocalAttachment,
-): Promise<ResourceAttachmentRef> {
-  const created = (await controlJson(addr, "/uploads", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      kind: attachment.kind,
-      mime: attachment.mime,
-      name: attachment.name,
-      sizeBytes: attachment.sizeBytes,
-    }),
-  })) as { uploadId: string };
-  try {
-    const source = createReadStream(attachment.path, {
-      fd: openLocalAttachment(attachment),
-      autoClose: true,
-    });
-    const hash = createHash("sha256");
-    const hashingStream = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        hash.update(chunk);
-        callback(null, chunk);
-      },
-    });
-    source.pipe(hashingStream);
-    const response = await controlApiFetch(
-      addr,
-      `/uploads/${encodeURIComponent(created.uploadId)}/bytes`,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/octet-stream" },
-        body: Readable.toWeb(hashingStream) as unknown as RequestInit["body"],
-        duplex: "half",
-      } as RequestInit & { duplex: "half" },
-    );
-    if (!response.ok) {
-      const detail = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-      throw new Error(String(detail["message"] ?? detail["error"] ?? `HTTP ${response.status}`));
-    }
-    const expectedSha256 = `sha256:${hash.digest("hex")}`;
-    const resource = (await controlJson(
-      addr,
-      `/uploads/${encodeURIComponent(created.uploadId)}/finalize`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expectedSha256 }),
-      },
-    )) as { resourceId: string };
-    return { resourceId: resource.resourceId };
-  } catch (error) {
-    await controlApiFetch(addr, `/uploads/${encodeURIComponent(created.uploadId)}`, {
-      method: "DELETE",
-    }).catch(() => undefined);
-    throw error;
-  }
-}
-
 /** Per-family reviewer model map from `--reviewer-model "openai=gpt-4o-mini,anthropic=claude-haiku"`. Fails loudly on malformed input. */
 function reviewerModels(args: ParsedArgs): Partial<Record<ProviderFamily, string>> | undefined {
   return parseReviewerModelFlags(flagValues(args, "reviewer-model"));
@@ -322,7 +270,7 @@ function reviewerPanel(args: ParsedArgs): ControlReviewerPanelEntry[] | undefine
 async function orchestrate(
   args: ParsedArgs,
   mode: ModeKind,
-  json: boolean,
+  outputMode: CliOutputMode,
   forced: { deepScan?: boolean; create?: boolean; race?: boolean } = {},
 ): Promise<number> {
   let rawPrompt = args._.slice(1).join(" ").trim();
@@ -332,33 +280,33 @@ async function orchestrate(
   const promptFile = flagStr(args, "prompt-file");
   if (promptFile !== undefined) {
     if (rawPrompt && rawPrompt !== "-") {
-      return printUsageError(
-        json,
+      return renderOutputUsageFailure(
+        outputMode,
         "claudexor: pass either an inline prompt or --prompt-file, not both",
       );
     }
     try {
       rawPrompt = readFileSync(promptFile, "utf8").trim();
     } catch (err) {
-      return printUsageError(
-        json,
+      return renderOutputUsageFailure(
+        outputMode,
         `claudexor: --prompt-file: cannot read ${promptFile}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   } else if (rawPrompt === "-") {
     rawPrompt = readFileSync(0, "utf8").trim();
     if (!rawPrompt) {
-      return printUsageError(json, "claudexor: stdin prompt (`-`) was empty");
+      return renderOutputUsageFailure(outputMode, "claudexor: stdin prompt (`-`) was empty");
     }
   }
   const prompt = rawPrompt;
   if (!prompt) {
-    return printUsageError(json, "claudexor: missing prompt");
+    return renderOutputUsageFailure(outputMode, "claudexor: missing prompt");
   }
   const portfolioRaw = flagStr(args, "portfolio");
   if (portfolioRaw !== undefined) {
-    return printUsageError(
-      json,
+    return renderOutputUsageFailure(
+      outputMode,
       "claudexor: --portfolio was removed in v2; use --routing-goal auto|quality|economy",
     );
   }
@@ -366,7 +314,10 @@ async function orchestrate(
   const routingGoalRaw = flagStr(args, "routing-goal");
   const routingGoal = routingGoalRaw !== undefined ? RoutingGoal.safeParse(routingGoalRaw) : null;
   if (routingGoalRaw !== undefined && !routingGoal?.success) {
-    return printUsageError(json, `claudexor: unknown --routing-goal '${routingGoalRaw}'`);
+    return renderOutputUsageFailure(
+      outputMode,
+      `claudexor: unknown --routing-goal '${routingGoalRaw}'`,
+    );
   }
   let reviewerEffortOverrides: Partial<Record<ProviderFamily, EffortHint>> | undefined;
   let resolvedReviewerModels: Partial<Record<ProviderFamily, string>> | undefined;
@@ -440,7 +391,10 @@ async function orchestrate(
     }
   } catch (err) {
     // Projector: typed field errors / domain codes survive; a plain flag-parse Error is usage (exit 2).
-    return renderCliFailure(json, err, { defaultCategory: "usage", messagePrefix: "claudexor:" });
+    return renderOutputFailure(outputMode, err, {
+      defaultCategory: "usage",
+      messagePrefix: "claudexor:",
+    });
   }
   let tests: TestCommandInvocation[] | undefined;
   try {
@@ -468,16 +422,25 @@ async function orchestrate(
     });
   } catch (err) {
     // Preserves the typed `inline_secret_rejected` code (never echoing the token).
-    return renderCliFailure(json, err, { defaultCategory: "usage", messagePrefix: "claudexor:" });
+    return renderOutputFailure(outputMode, err, {
+      defaultCategory: "usage",
+      messagePrefix: "claudexor:",
+    });
   }
 
   if (delegate && mode !== "agent") {
-    return printUsageError(json, `claudexor: --delegate is an agent strategy (got mode '${mode}')`);
+    return renderOutputUsageFailure(
+      outputMode,
+      `claudexor: --delegate is an agent strategy (got mode '${mode}')`,
+    );
   }
   if (council && mode !== "plan") {
-    return printUsageError(json, `claudexor: --council is a plan strategy (got mode '${mode}')`);
+    return renderOutputUsageFailure(
+      outputMode,
+      `claudexor: --council is a plan strategy (got mode '${mode}')`,
+    );
   }
-  return daemonRun(args, json, {
+  return daemonRun(args, outputMode, {
     mode,
     delegate,
     council,
@@ -544,15 +507,14 @@ interface DaemonRunParams {
  * All five product modes enter through the managed daemon and control API.
  * `--json` prints one stable `{ runId, runDir, status }` machine envelope.
  */
-async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): Promise<number> {
+async function daemonRun(
+  args: ParsedArgs,
+  outputMode: CliOutputMode,
+  p: DaemonRunParams,
+): Promise<number> {
   const inPlace = flagBool(args, "in-place");
-  const jsonStream = flagBool(args, "json-stream");
-  if (json && jsonStream) {
-    return printUsageError(
-      json,
-      "claudexor: --json prints exactly one object and --json-stream prints NDJSON; pass one, not both",
-    );
-  }
+  const json = outputModeIsMachine(outputMode);
+  const jsonStream = outputModeIsStream(outputMode);
   let client: Awaited<ReturnType<typeof ensureDaemon>>["client"];
   let addr: Awaited<ReturnType<typeof ensureDaemon>>["addr"];
   try {
@@ -689,8 +651,9 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
       const final = started.jobId ? await client.status(started.jobId) : null;
       const out = mergeDaemonRunOutcome(started, final);
       const status = out.status;
-      const reason = daemonOutcomeSummary({ ...started, status, error: out.error });
       const detail = await fetchRunDetail(addr, out.runId);
+      const facts = projectRunOutcomeFacts(detail);
+      const reason = daemonOutcomeSummary({ ...out, outcomeFacts: facts ?? undefined });
       printJsonLine(
         projectTerminalRunOutput(out, p.mode, detail, {
           frame: "run.terminal",
@@ -703,13 +666,17 @@ async function daemonRun(args: ParsedArgs, json: boolean, p: DaemonRunParams): P
       // Pure machine surface: await the terminal outcome and print one JSON object.
       const out = await enqueueAndAwait(client, addr, body, { waitForTerminal: true });
       terminalRunId = out.runId;
-      // Preserve bench keys while adding mode and honest non-success detail.
-      const reason = daemonOutcomeSummary(out);
       // ADD-ONLY key (bench contract keeps {runId,runDir,status}): the derived
       // apply-gate verdict, so machine callers act on truth instead of
       // re-implying eligibility from status. ONE GET /runs/:id feeds all three
       // terminal projections (INV-120/122).
       const detail = await fetchRunDetail(addr, out.runId);
+      // Preserve bench keys while deriving the human summary from the same
+      // canonical receipt that feeds the machine terminal fields.
+      const reason = daemonOutcomeSummary({
+        ...out,
+        outcomeFacts: projectRunOutcomeFacts(detail) ?? undefined,
+      });
       printJson(projectTerminalRunOutput(out, p.mode, detail, { summary: reason }));
       return exitCodeForState(out.status, projectRunOutcomeFacts(detail));
     }
@@ -904,25 +871,12 @@ async function resolveRunStore(
   return null;
 }
 
-async function controlJson(
-  addr: Awaited<ReturnType<typeof ensureDaemon>>["addr"],
-  path: string,
-  init: RequestInit = {},
-): Promise<unknown> {
-  const response = await controlApiFetch(addr, path, init);
-  const text = await response.text();
-  const body = text ? (JSON.parse(text) as unknown) : {};
-  if (response.ok) return body;
-  const detail = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-  throw new Error(String(detail["message"] ?? detail["error"] ?? `HTTP ${response.status}`));
-}
-
-function printPreflightError(args: ParsedArgs, json: boolean, error: string): number {
-  if (json && (args._[0] ?? "help") === "plugin") {
+function printPreflightError(args: ParsedArgs, outputMode: CliOutputMode, error: string): number {
+  if (outputMode === "json" && (args._[0] ?? "help") === "plugin") {
     printJson(pluginCommandErrorResult(args._[1], args._[2], flagBool(args, "dry-run"), 2, error));
     return 2;
   }
-  return printUsageError(json, error);
+  return renderOutputUsageFailure(outputMode, error);
 }
 
 function listCliArtifacts(root: string): string[] {
@@ -945,24 +899,33 @@ function listCliArtifacts(root: string): string[] {
 // are projections of the command registry. Unknown flags FAIL LOUDLY: `--harnes
 // codex` must never silently run all harnesses.
 
-async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
+async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<number> {
   const cmd = args._[0] ?? "help";
+  if (outputMode === "conflict") {
+    return renderOutputUsageFailure(
+      outputMode,
+      "claudexor: --json prints exactly one object and --json-stream prints NDJSON; pass one, not both",
+    );
+  }
+  const json = outputModeIsMachine(outputMode);
   // `--help` resolves the COMMAND first (QA-057): scoped usage for a known verb,
   // global help for a bare/`help` verb, a usage error (exit 2) for a typo.
   if (flagBool(args, "help")) return handleHelpRequest(cmd, args._.length, json, CLI_VERSION);
   const unknownFlags = Object.keys(args.flags).filter((f) => !KNOWN_FLAGS.has(f));
   if (unknownFlags.length > 0) {
     const error = `claudexor: unknown flag(s): ${unknownFlags.map((f) => `--${f}`).join(", ")} (see \`claudexor help\`)`;
-    return printPreflightError(args, json, error);
+    return printPreflightError(args, outputMode, error);
   }
   const valueFlagError = requiredStringFlagError(args, VALUE_FLAGS);
-  if (valueFlagError) return printPreflightError(args, json, valueFlagError);
+  if (valueFlagError) return printPreflightError(args, outputMode, valueFlagError);
   // Registry-enforced per-command flag scope: a KNOWN flag outside the
   // command's declared set (e.g. `plan --create`, `ask --force`) fails loudly
   // instead of being silently ignored. Data-driven from CLI_COMMANDS for
   // every verb (this replaced the old hand-listed plugin/--force special cases).
   const scopeError = commandFlagScopeError(cmd, Object.keys(args.flags));
-  if (scopeError) return printPreflightError(args, json, scopeError);
+  if (scopeError) return printPreflightError(args, outputMode, scopeError);
+  const positionalError = commandPositionalError(cmd, args._.slice(1));
+  if (positionalError) return printPreflightError(args, outputMode, positionalError);
   // No arguments at all = the interactive REPL: a thread of turns over the
   // current project with native session continuity (chat is the normal loop).
   if (args._.length === 0 && process.stdin.isTTY) {
@@ -997,21 +960,23 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
       if (modeStr !== undefined) {
         const mode = normalizeMode(modeStr);
         if (!MODES.has(mode)) {
-          return printUsageError(
-            json,
+          return renderOutputUsageFailure(
+            outputMode,
             `claudexor: unknown --mode '${modeStr}'. valid: ${[...MODES].join(", ")}`,
           );
         }
-        return orchestrate(args, mode, json);
+        const modeScopeError = runModeFlagScopeError(mode, Object.keys(args.flags));
+        if (modeScopeError) return printPreflightError(args, outputMode, modeScopeError);
+        return orchestrate(args, mode, outputMode);
       }
-      return orchestrate(args, "agent", json);
+      return orchestrate(args, "agent", outputMode);
     }
 
     case "ask":
-      return orchestrate(args, "ask", json);
+      return orchestrate(args, "ask", outputMode);
 
     case "best-of":
-      return orchestrate(args, "agent", json, { race: true });
+      return orchestrate(args, "agent", outputMode, { race: true });
 
     // RETIRED verb spellings hard-error with the new spelling — no silent
     // aliases (same doctrine as retired mode ids: stale scripts fail loudly).
@@ -1034,16 +999,16 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
                 : "claudexor ask --deep-scan <prompt>";
       return printPreflightError(
         args,
-        json,
+        outputMode,
         `claudexor: the '${cmd}' verb was retired; use ${replacement}`,
       );
     }
 
     case "plan":
-      return orchestrate(args, "plan", json);
+      return orchestrate(args, "plan", outputMode);
 
     case "create":
-      return orchestrate(args, "agent", json, { create: true });
+      return orchestrate(args, "agent", outputMode, { create: true });
 
     case "settings":
       return settingsCommand(args, json);
@@ -1100,10 +1065,10 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
       const decision = store.readYaml(join(paths.arbitrationDir, "decision.yaml"));
       const workProduct = store.readYaml(join(paths.finalDir, "work_product.yaml"));
       const contract = TaskContract.safeParse(store.readYaml(join(paths.contextDir, "task.yaml")));
-      const primary = primaryOutputForCli(
-        paths.root,
-        contract.success ? contract.data.mode.kind : undefined,
+      const parsedFailure = RunFailure.safeParse(
+        store.readYaml(join(paths.finalDir, "failure.yaml")),
       );
+      const failure = parsedFailure.success ? parsedFailure.data : null;
       // The CLI projects the orchestrator-owned telemetry artifact and NEVER
       // recomputes evidence from raw events (single-owner rule); a missing
       // artifact (legacy run) renders "telemetry unavailable".
@@ -1116,6 +1081,11 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
         runId,
         ...(contract.success ? { taskId: contract.data.task_id } : {}),
       });
+      const primary = primaryOutputForCli(
+        paths.root,
+        contract.success ? contract.data.mode.kind : undefined,
+        { failure, lifecycle: runFacts?.outcome.lifecycle },
+      );
       const toolErrors = telemetry
         ? telemetry.attempts.flatMap((a) =>
             a.tool_errors
@@ -1146,7 +1116,7 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
           ? "diagnostic"
           : primary?.text.trim()
             ? "ready"
-            : readTextSafe(join(paths.finalDir, "failure.yaml"))
+            : (failure ?? readTextSafe(join(paths.finalDir, "failure.yaml")))
               ? "diagnostic"
               : "finalizing";
       const parsedDecision = DecisionRecord.safeParse(decision);
@@ -1159,6 +1129,7 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
           contract: contract.success ? contract.data : null,
           telemetry,
           runFacts,
+          failure,
           toolErrors,
           toolWarnings,
           primaryOutput: primary,
@@ -1192,6 +1163,13 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
         );
       }
       print(`output: ${outputReadyState}${primary ? ` ${primary.path}` : ""}`);
+      if (failure) {
+        print(
+          `failure: ${failure.category}${failure.code ? `/${failure.code}` : ""} phase=${failure.phase}${failure.harnessId ? ` harness=${failure.harnessId}` : ""}`,
+        );
+        print(`failure message: ${failure.safeMessage}`);
+        for (const action of failure.nextActions) print(`next action: ${action}`);
+      }
       {
         // Structured-output contract receipt (only present when the run was
         // started with --output-schema); projected, never re-validated here.
@@ -1393,6 +1371,9 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
       else {
         print(`claudexor ${catalog.version} — capability catalog`);
         print(`modes: ${catalog.modes.join(", ")}`);
+        print(
+          `git: ${catalog.git.status}${catalog.git.version ? ` (${catalog.git.version})` : ""}${catalog.git.remediation ? ` — ${catalog.git.remediation}` : ""}`,
+        );
         print(`available harnesses: ${catalog.availableHarnesses.join(", ") || "(none)"}`);
         for (const h of catalog.harnesses) {
           const model = h.configuredModel
@@ -1432,8 +1413,8 @@ async function dispatch(args: ParsedArgs, json: boolean): Promise<number> {
       // callers get the ONE projector envelope (with message/code shape, no
       // longer a partial {ok,exitCode,error}); text mode prints the full help.
       if (json) {
-        return renderCliFailure(
-          true,
+        return renderOutputFailure(
+          outputMode,
           usageError(`claudexor: unknown command '${cmd}' (see \`claudexor help --json\`)`),
           {},
         );
@@ -1453,17 +1434,26 @@ async function main(): Promise<number> {
     process.stdout.write(`${CLI_VERSION}\n`);
     return 0;
   }
-  const json = flagBool(args, "json");
+  const outputMode = cliOutputMode(args);
   try {
-    return await dispatch(args, json);
+    return await dispatch(args, outputMode);
   } catch (err) {
-    return renderCliFailure(json, err);
+    return renderOutputFailure(outputMode, err);
   }
 }
 
 main()
   .then((code) => process.exit(code))
   .catch((err: unknown) => {
-    // Last-resort projector: still emit ONE envelope if the parse threw before json was known.
-    process.exit(renderCliFailure(process.argv.includes("--json"), err));
+    // Last-resort projector: infer the complete mode even if parsing itself threw.
+    const json = process.argv.includes("--json");
+    const stream = process.argv.includes("--json-stream");
+    const outputMode: CliOutputMode = json
+      ? stream
+        ? "conflict"
+        : "json"
+      : stream
+        ? "json-stream"
+        : "human";
+    process.exit(renderOutputFailure(outputMode, err));
   });

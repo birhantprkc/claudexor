@@ -1,15 +1,8 @@
 import { WorkReport, type HarnessEvent, type ToolRef } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
+import { applyCodexRateLimit, applyCodexTransient, codexReconnectStatus } from "./retry-signals.js";
 
 type Json = any;
-
-// Native codex error phrasing that indicates a rate-limit / quota condition.
-// This regex lives in the ADAPTER (native-output translation is its job), not
-// in the budget/governance layer.
-const CODEX_RATE_LIMIT_RE =
-  /rate.?limit|usage.?limit|usagelimitexceeded|too many requests|quota[ _-]?(?:exceeded|exhausted|reached)|(?:http|status|code)[ :/]?429|429 too many/i;
-const CODEX_TRANSIENT_RE =
-  /stream disconnected|failed to lookup address information|nodename nor servname|eai_again|enotfound|econnreset|etimedout|temporar(?:y|ily) unavailable|network/i;
 
 /**
  * Per-run finality state: codex's `exec --json` stream has NO typed marker of
@@ -21,6 +14,9 @@ const CODEX_TRANSIENT_RE =
  */
 export interface CodexParseState {
   lastAgentMessage?: string;
+  /** Last whole-list plan snapshot; repeated native replays are observable
+   * transport noise, not new progress. */
+  lastPlanProgressKey?: string;
   /** Engine-injected MCP servers whose startup Codex was told to require. */
   requiredMcpServers?: string[];
   /**
@@ -209,6 +205,8 @@ export function parseCodexEvent(
   if (type === "error") {
     const message =
       typeof obj.message === "string" ? obj.message : (obj.error?.message ?? "codex error");
+    const reconnect = codexReconnectStatus(message, sessionId, ts, obj);
+    if (reconnect) return [reconnect];
     const ev: HarnessEvent = {
       type: "error",
       session_id: sessionId,
@@ -401,6 +399,14 @@ export function parseCodexEvent(
         // live checklist from the typed field while the prose stays available
         // to plan-extraction. Verified shape: item.items[].{text,completed}.
         const items = Array.isArray(item.items) ? item.items : [];
+        const planItems = items.map((t: { text?: string; completed?: boolean }, i: number) => ({
+          id: `codex-${i}`,
+          title: String(t.text ?? ""),
+          status: t.completed ? ("completed" as const) : ("pending" as const),
+        }));
+        const progressKey = JSON.stringify(planItems);
+        if (state?.lastPlanProgressKey === progressKey) return [];
+        if (state) state.lastPlanProgressKey = progressKey;
         const lines = items.map(
           (t: { text?: string; completed?: boolean }) =>
             `${t.completed ? "[x]" : "[ ]"} ${String(t.text ?? "")}`,
@@ -412,11 +418,7 @@ export function parseCodexEvent(
             ts,
             text: lines.length ? `Plan:\n${lines.join("\n")}` : "Plan updated",
             plan_progress: {
-              items: items.map((t: { text?: string; completed?: boolean }, i: number) => ({
-                id: `codex-${i}`,
-                title: String(t.text ?? ""),
-                status: t.completed ? ("completed" as const) : ("pending" as const),
-              })),
+              items: planItems,
             },
           },
         ];
@@ -470,29 +472,6 @@ export function parseCodexStderrFailure(
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Set the TYPED `rate_limit` signal on an error event when codex's native error
- * text indicates a 429 / quota / overload. Fires for BOTH `error` and
- * `turn.failed` (the two ways codex surfaces a rate limit). The budget layer
- * reads `ev.rate_limit` instead of regex-matching prose; this adapter-local
- * recognition of its OWN CLI's native error phrasing is the allowed knowledge.
- */
-function applyCodexRateLimit(ev: HarnessEvent, message: string, resetsAt: unknown): void {
-  if (!CODEX_RATE_LIMIT_RE.test(message)) return;
-  ev.rate_limit = {
-    resets_at: typeof resetsAt === "string" ? resetsAt : null,
-    retry_delay_ms: null,
-  };
-}
-
-function applyCodexTransient(ev: HarnessEvent, message: string): void {
-  if (!CODEX_TRANSIENT_RE.test(message)) return;
-  ev.transient = {
-    kind: /stream disconnected/i.test(message) ? "stream_disconnect" : "network",
-    retry_delay_ms: null,
-  };
 }
 
 function commandToolRef(item: Json): ToolRef {

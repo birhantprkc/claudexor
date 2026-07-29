@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { revertRefusedProblem } from "./problem-response.js";
+import { controlProblemError, revertRefusedProblem } from "./problem-response.js";
+
+describe("controlProblemError context projection", () => {
+  it("keeps explicit context flat and merges legacy top-level recovery ids", () => {
+    const error = controlProblemError(503, {
+      code: "git_missing",
+      message: "Git unavailable",
+      retryable: true,
+      context: { turnId: "tn-1", capability: "git" },
+      threadId: "th-1",
+    });
+    expect(error.context).toEqual({
+      threadId: "th-1",
+      turnId: "tn-1",
+      capability: "git",
+    });
+    expect(error.context).not.toHaveProperty("context");
+  });
+});
 
 // W3 / QA-051: the revert-refusal CLASS comes from the producer's typed
 // reasonCode, not from regexing the English message.

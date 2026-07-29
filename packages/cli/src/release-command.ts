@@ -24,7 +24,7 @@ async function resolveRunningEngineVersion(): Promise<string | null> {
 /**
  * `claudexor release <sub>` dispatch, kept out of cli.ts so the top-level
  * switch stays thin (complexity ratchet). Three read-only subcommands:
- *   check-name <name>  naming gate across public registries
+ *   check-name [name]  naming gate across public registries (defaults to Claudexor)
  *   check              engine-runtime update check (M7 D22 — same manifest the
  *                      macOS app auto-updater reads; npm users update via npm)
  *   stats              owner-facing install counter (M7 D23 — GitHub asset
@@ -90,5 +90,5 @@ export async function releaseCommand(args: ParsedArgs, json: boolean): Promise<n
     return 0;
   }
 
-  return printUsageError(json, "usage: claudexor release check-name <name> | check | stats");
+  return printUsageError(json, "usage: claudexor release check-name [name] | check | stats");
 }

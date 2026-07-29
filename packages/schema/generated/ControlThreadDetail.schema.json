@@ -533,6 +533,7 @@
                                       "wall_clock_exceeded",
                                       "user_cancelled",
                                       "crash_interrupted",
+                                      "workspace_unavailable",
                                       "input_required",
                                       "work_incomplete",
                                       "context_capacity_exhausted",
@@ -767,6 +768,23 @@
                         "type": "boolean",
                         "default": true,
                         "description": "False when no recorded job exists to replay — surfaces offer a new message instead of a doomed retry."
+                      },
+                      "requiredActions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 512
+                        },
+                        "maxItems": 16,
+                        "default": [],
+                        "description": "Bounded user actions that may make an exact retry succeed."
+                      },
+                      "context": {
+                        "type": "object",
+                        "additionalProperties": {},
+                        "default": {},
+                        "description": "Bounded typed recovery context for exact retry."
                       },
                       "failedAt": {
                         "type": "string",

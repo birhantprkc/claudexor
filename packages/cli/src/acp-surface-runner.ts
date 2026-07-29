@@ -1,14 +1,26 @@
 import { createHash, randomUUID } from "node:crypto";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { TERMINAL_LIFECYCLES } from "@claudexor/schema";
+import {
+  TERMINAL_LIFECYCLES,
+  type ControlPrimaryOutput,
+  type ModeKind,
+  type RunFailure,
+  type RunOutcomeFacts,
+} from "@claudexor/schema";
 import { daemonOutcomeSummary, ensureDaemon, fetchRunDetail } from "./daemon-run.js";
+import { controlProblemError } from "./cli-error.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
 import { primaryOutputForCli } from "./primary-output.js";
 import {
   describeRunDetailProblem,
+  presentRunPrimaryOutput,
   projectApplyEligibility,
+  projectOutcomeBanner,
+  projectRunPrimaryOutput,
+  projectRunFailure,
   type RunDetailProblem,
 } from "./run-detail-projections.js";
+import { projectRunOutcomeFacts } from "./daemon-outcome.js";
 
 // Daemon job state IS the run lifecycle (D8): terminal set = the ONE
 // projection-owned TERMINAL_LIFECYCLES, never a local re-derivation.
@@ -46,9 +58,21 @@ export async function projectTerminalTurnDetail(
   applyEligibility: unknown;
   planReadiness: unknown;
   planQuestions: unknown[];
+  failure: RunFailure | null;
+  primaryOutput: ControlPrimaryOutput | null;
+  outcomeFacts: RunOutcomeFacts | null;
+  outcomeBanner: string | null;
   detailProblem?: RunDetailProblem;
 }> {
-  const empty = { applyEligibility: null, planReadiness: null, planQuestions: [] };
+  const empty = {
+    applyEligibility: null,
+    planReadiness: null,
+    planQuestions: [],
+    failure: null,
+    primaryOutput: null,
+    outcomeFacts: null,
+    outcomeBanner: null,
+  };
   if (!runId) return empty;
   let detail: Record<string, unknown> | null = null;
   try {
@@ -65,7 +89,63 @@ export async function projectTerminalTurnDetail(
     planQuestions: Array.isArray(detail?.["planQuestions"])
       ? (detail["planQuestions"] as unknown[])
       : [],
+    failure: projectRunFailure(detail),
+    primaryOutput: projectRunPrimaryOutput(detail),
+    outcomeFacts: projectRunOutcomeFacts(detail),
+    outcomeBanner: projectOutcomeBanner(detail),
   };
+}
+
+type AcpTerminalRecord = {
+  state: string;
+  error?: string;
+  params?: unknown;
+};
+
+/** Effective mode persisted on the daemon job after the thread-turn funnel. */
+export function acpTerminalRecordMode(
+  record: Pick<AcpTerminalRecord, "params">,
+): ModeKind | undefined {
+  if (!record.params || typeof record.params !== "object" || Array.isArray(record.params)) {
+    return undefined;
+  }
+  const value = (record.params as Record<string, unknown>)["mode"];
+  return value === "ask" || value === "plan" || value === "agent" ? value : undefined;
+}
+
+/**
+ * ACP terminal text consumes the Control API's canonical bounded/redacted
+ * primaryOutput. Local artifact discovery exists only as a degrading fallback
+ * when that one detail read failed; its mode comes from the durable daemon job,
+ * never from an ACP default or a hard-coded Agent assumption.
+ */
+export function acpTerminalSummary(input: {
+  runId: string;
+  runDir: string;
+  record: AcpTerminalRecord;
+  detail: Awaited<ReturnType<typeof projectTerminalTurnDetail>>;
+}): string {
+  const localFallback =
+    input.detail.detailProblem && input.runDir
+      ? primaryOutputForCli(input.runDir, acpTerminalRecordMode(input.record), {
+          failure: input.detail.failure,
+          lifecycle: TERMINALS.has(input.record.state)
+            ? (input.record.state as RunOutcomeFacts["lifecycle"])
+            : undefined,
+        })
+      : null;
+  const primary = input.detail.primaryOutput ?? localFallback;
+  const presented = presentRunPrimaryOutput(primary);
+  return presented
+    ? presented
+    : (input.detail.outcomeBanner ??
+        daemonOutcomeSummary({
+          runId: input.runId,
+          status: input.record.state,
+          error: input.record.error,
+          outcomeFacts: input.detail.outcomeFacts ?? undefined,
+        }) ??
+        `run ${input.record.state}`);
 }
 
 /** A machine-ish reason for a failed per-turn run-detail fetch: prefer the
@@ -110,20 +190,10 @@ export async function acpSessionQuery(
     const response = await controlApiFetch(addr, path, init);
     const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {
-      // Preserve the typed code/status on the throwable so callers can disclose
-      // a MACHINE reason (e.g. run_expired_by_retention) rather than only prose.
-      throw Object.assign(
-        new Error(
-          typeof body["message"] === "string"
-            ? (body["message"] as string)
-            : typeof body["error"] === "string"
-              ? (body["error"] as string)
-              : `control API ${path} failed (HTTP ${response.status})`,
-        ),
-        {
-          status: response.status,
-          ...(typeof body["code"] === "string" ? { code: body["code"] as string } : {}),
-        },
+      throw controlProblemError(
+        response.status,
+        body,
+        `control API ${path} failed (HTTP ${response.status})`,
       );
     }
     return body;
@@ -280,24 +350,21 @@ export async function acpSessionQuery(
       if (interactions) await interactions({ runId });
     }
     if (TERMINALS.has(record.state)) {
-      const primary = runDir ? primaryOutputForCli(runDir, "agent") : null;
-      const summary =
-        primary && primary.kind !== "patch"
-          ? primary.text.trim()
-          : (daemonOutcomeSummary({ runId, status: record.state, error: record.error }) ??
-            `run ${record.state}`);
+      const detail = await projectTerminalTurnDetail(addr, runId);
+      const summary = acpTerminalSummary({ runId, runDir, record, detail });
+      const { primaryOutput: _primaryOutput, ...terminalProjection } = detail;
       // Plan lifecycle (D17): a plan turn that ends needs_answers carries its
       // derived readiness + the ENGINE-parsed open questions so the ACP surface
       // renders them as TURN TEXT (the user answers in an ordinary follow-up
       // plan turn — the same server path, no typed-form faking the protocol
       // lacks). Empty/null for non-plan turns and ready plans. ONE degrading
-      // detail read feeds all three projections (projectTerminalTurnDetail).
+      // detail read feeds all terminal projections (projectTerminalTurnDetail).
       return {
         runId,
         runDir,
         status: record.state,
         summary,
-        ...(await projectTerminalTurnDetail(addr, runId)),
+        ...terminalProjection,
       };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));

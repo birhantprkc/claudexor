@@ -3003,6 +3003,76 @@ describe("Orchestrator", () => {
     expect(observedAttachments).toEqual([attachment]);
   });
 
+  it("forwards Plan attachments to the planner HarnessRunSpec with readable source bytes", async () => {
+    const repo = await initRepo();
+    const brief = join(repo, "brief.txt");
+    const bytes = "PLAN_ATTACHMENT_SENTINEL\n";
+    writeFileSync(brief, bytes);
+    const attachment = {
+      resource_id: "res-plan-1",
+      kind: "file" as const,
+      mime: "text/plain",
+      name: "brief.txt",
+      sha256: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+      size_bytes: Buffer.byteLength(bytes),
+      path: brief,
+    };
+    let observedAttachments: unknown;
+    let observedBytes = "";
+    const planner: HarnessAdapter = {
+      id: "planner",
+      async discover() {
+        return HarnessManifest.parse({
+          id: "planner",
+          display_name: "planner",
+          kind: "local_cli",
+          provider_family: "openai",
+          capabilities: { plan: true, read_files: true },
+          capability_profile: {
+            attachment_inputs: [
+              {
+                kind: "file",
+                mime_types: ["text/plain"],
+                max_bytes: 1024,
+                max_count: 1,
+                transport: "text_inline",
+              },
+            ],
+          },
+          access_profiles_supported: ["readonly"],
+        });
+      },
+      async doctor() {
+        return ConformanceReport.parse({
+          harness_id: "planner",
+          status: "ok",
+          enabled_intents: ["plan"],
+        });
+      },
+      async *run(spec) {
+        observedAttachments = spec.attachments;
+        observedBytes = readFileSync(spec.attachments[0]!.path, "utf8");
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield { type: "message", session_id: spec.session_id, ts, text: "Plan from brief" };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    const res = await new Orchestrator({
+      registry: new Map([["planner", planner]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "Plan from the attached brief",
+      mode: "plan",
+      harnesses: ["planner"],
+      attachments: [attachment],
+    });
+    expect(legacyOutcome(res)).toBe("success");
+    expect(observedAttachments).toEqual([attachment]);
+    expect(observedBytes).toBe(bytes);
+  });
+
   it("refuses an unknown or disabled --profile LOUDLY instead of falling into the default auto-pool", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-profile-config-"));
@@ -3290,6 +3360,11 @@ describe("Orchestrator", () => {
         "    display_name: B",
         "    credential_kind: api_key",
         "    secret_ref: 'openai:b'",
+        "  - profile_id: c",
+        "    harness_id: limited",
+        "    display_name: C",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:c'",
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -3322,9 +3397,10 @@ describe("Orchestrator", () => {
           return {
             profile_id: profile.profile_id,
             harness_id: "limited",
-            availability: "available",
-            verification: "passed",
-            detail: "fixture profile verified",
+            availability: profile.profile_id === "b" ? "unavailable" : "available",
+            verification: profile.profile_id === "b" ? "failed" : "passed",
+            detail:
+              profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
             last_verified_at: new Date().toISOString(),
           };
         },
@@ -3380,7 +3456,7 @@ describe("Orchestrator", () => {
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).not.toBe("failed");
-      expect(spawns.map((s) => s.profile)).toEqual(["a", "b"]);
+      expect(spawns.map((s) => s.profile)).toEqual(["a", "c"]);
       // Failover is a NEW vendor session under the new credential.
       expect(new Set(spawns.map((s) => s.session)).size).toBe(2);
       expect(events).toContain("route.profile.rotated");
@@ -3390,7 +3466,7 @@ describe("Orchestrator", () => {
       const telemetry = new ArtifactStore(repo).readYaml<{
         auth_route?: { profile_id?: string | null };
       }>(join(res.runDir, "final", "telemetry.yaml"));
-      expect(telemetry?.auth_route?.profile_id).toBe("b");
+      expect(telemetry?.auth_route?.profile_id).toBe("c");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -3830,6 +3906,11 @@ describe("Orchestrator", () => {
         "    display_name: B",
         "    credential_kind: api_key",
         "    secret_ref: 'openai:b'",
+        "  - profile_id: c",
+        "    harness_id: asker",
+        "    display_name: C",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:c'",
         "harnesses:",
         "  asker:",
         "    profile_policy:",
@@ -3858,6 +3939,14 @@ describe("Orchestrator", () => {
         yield { type: "message", session_id: sessionId, ts, text: "4" };
         yield { type: "completed", session_id: sessionId, ts };
       });
+      asker.probeCredentialProfile = async (profile) => ({
+        profile_id: profile.profile_id,
+        harness_id: "asker",
+        availability: profile.profile_id === "b" ? "unavailable" : "available",
+        verification: profile.profile_id === "b" ? "failed" : "passed",
+        detail: profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
+        last_verified_at: new Date().toISOString(),
+      });
       const askerRun = asker.run.bind(asker);
       asker.run = (spec) => {
         profilesSeen.push(spec.credential_profile?.profile_id ?? null);
@@ -3876,7 +3965,7 @@ describe("Orchestrator", () => {
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).toBe("success");
-      expect(profilesSeen).toEqual(["a", "b"]);
+      expect(profilesSeen).toEqual(["a", "c"]);
       expect(events).toContain("route.profile.rotated");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
@@ -3986,7 +4075,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("preflight-rotates a spent profile BEFORE spawn and records typed provenance (W5.4)", async () => {
+  it("preflight rotation skips an unready target and spawns the next ready profile", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-rotate-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4005,6 +4094,11 @@ describe("Orchestrator", () => {
         "    display_name: B",
         "    credential_kind: api_key",
         "    secret_ref: 'openai:b'",
+        "  - profile_id: c",
+        "    harness_id: asker",
+        "    display_name: C",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:c'",
         "harnesses:",
         "  asker:",
         "    profile_policy:",
@@ -4019,6 +4113,14 @@ describe("Orchestrator", () => {
         yield { type: "started", session_id: sessionId, ts };
         yield { type: "message", session_id: sessionId, ts, text: "4" };
         yield { type: "completed", session_id: sessionId, ts };
+      });
+      asker.probeCredentialProfile = async (profile) => ({
+        profile_id: profile.profile_id,
+        harness_id: "asker",
+        availability: profile.profile_id === "b" ? "unavailable" : "available",
+        verification: profile.profile_id === "b" ? "failed" : "passed",
+        detail: profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
+        last_verified_at: new Date().toISOString(),
       });
       const askerRun = asker.run.bind(asker);
       asker.run = (spec) => {
@@ -4061,7 +4163,7 @@ describe("Orchestrator", () => {
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).toBe("success");
-      expect(seen).toEqual(["b"]);
+      expect(seen).toEqual(["c"]);
       expect(events).toContain("route.profile.headroom_exceeded");
       expect(events).toContain("route.profile.rotated");
     } finally {
@@ -4270,7 +4372,7 @@ describe("Orchestrator", () => {
     expect(res.summary).toMatch(/scoped run env/);
   });
 
-  it("mandatory attachment gate refuses an incompatible selected lane and filters auto-pools", async () => {
+  it("mandatory attachment routing refuses an explicit mixed pool before providers and degrades an auto pool without refill", async () => {
     const repo = await initRepo();
     const image = join(repo, "shot.png");
     writeFileSync(image, "png-bytes\n");
@@ -4283,6 +4385,12 @@ describe("Orchestrator", () => {
       size_bytes: 10,
       path: image,
     };
+    const runCounts = new Map<string, number>();
+    const families: Record<string, ProviderFamily> = {
+      blind: "openai",
+      "sighted-a": "anthropic",
+      "sighted-b": "google",
+    };
     const mk = (id: string, acceptsImage: boolean): HarnessAdapter => ({
       id,
       async discover() {
@@ -4290,8 +4398,8 @@ describe("Orchestrator", () => {
           id,
           display_name: id,
           kind: "local_cli",
-          provider_family: id === "blind" ? "openai" : "anthropic",
-          capabilities: { read_files: true },
+          provider_family: families[id],
+          capabilities: { implement: true, review: true, read_files: true },
           capability_profile: {
             attachment_inputs: acceptsImage
               ? [
@@ -4305,17 +4413,18 @@ describe("Orchestrator", () => {
                 ]
               : [],
           },
-          access_profiles_supported: ["readonly"],
+          access_profiles_supported: ["readonly", "workspace_write"],
         });
       },
       async doctor() {
         return ConformanceReport.parse({
           harness_id: id,
           status: "ok",
-          enabled_intents: ["explain"],
+          enabled_intents: ["implement", "review", "explain"],
         });
       },
       async *run(spec) {
+        runCounts.set(id, (runCounts.get(id) ?? 0) + 1);
         const ts = new Date().toISOString();
         yield { type: "started", session_id: spec.session_id, ts };
         yield { type: "message", session_id: spec.session_id, ts, text: `answered by ${id}` };
@@ -4324,28 +4433,46 @@ describe("Orchestrator", () => {
     });
     const registry = new Map<string, HarnessAdapter>([
       ["blind", mk("blind", false)],
-      ["sighted", mk("sighted", true)],
+      ["sighted-a", mk("sighted-a", true)],
+      ["sighted-b", mk("sighted-b", true)],
     ]);
-    // EXPLICIT pool naming a blind harness: loud typed refusal naming the gap.
+    // An explicit mixed pool is atomic: one incompatible member refuses the
+    // entire request before even the compatible provider can start.
     const explicit = await new Orchestrator({ registry, reviewers: [] }).run({
       repoRoot: repo,
       prompt: "what is in this image?",
-      mode: "ask",
-      harnesses: ["blind"],
+      mode: "agent",
+      harnesses: ["blind", "sighted-a"],
+      n: 2,
       attachments: [attachment],
     });
     expect(legacyOutcome(explicit)).toBe("failed");
-    expect(explicit.summary).toMatch(/cannot receive every mandatory attachment/);
-    // AUTO pool: the blind harness is silently-but-honestly DROPPED; the
-    // sighted one carries the run.
+    expect(explicit.summary).toMatch(/blind.*cannot receive every mandatory attachment/);
+    expect(Object.fromEntries(runCounts)).toEqual({});
+
+    // An auto pool may drop the incompatible lane, but it must disclose the
+    // attachment stage and clamp to the two distinct survivors, never refill
+    // the third slot by running either survivor twice.
     const auto = await new Orchestrator({ registry, reviewers: [] }).run({
       repoRoot: repo,
       prompt: "what is in this image?",
-      mode: "ask",
+      mode: "agent",
+      n: 3,
       attachments: [attachment],
     });
-    expect(legacyOutcome(auto)).toBe("success");
-    expect(auto.summary).toContain("answered by sighted");
+    expect(runCounts.get("blind") ?? 0).toBe(0);
+    expect(runCounts.get("sighted-a")).toBe(1);
+    expect(runCounts.get("sighted-b")).toBe(1);
+    const degraded = readRunEvents(auto.runDir).find(
+      (event) => event.type === "route.pool.degraded",
+    );
+    expect(degraded?.payload).toMatchObject({
+      requested_harnesses: ["blind", "sighted-a", "sighted-b"],
+      effective_harnesses: ["sighted-a", "sighted-b"],
+      requested_n: 3,
+      effective_n: 2,
+      dropped_lanes: [expect.objectContaining({ harness_id: "blind", stage: "attachment" })],
+    });
   });
 
   it("blocks ask success when an attempted WebSearch tool_result errors without recovery", async () => {
@@ -9229,6 +9356,43 @@ describe("Orchestrator v0.8 honesty & streaming", () => {
     expect(tracked.stdout).not.toContain(".claudexor/runs");
   });
 
+  it("announces project initialization prepared for an isolated read-only turn", async () => {
+    const repo = await initRepo();
+    const head = (await runCapture("git", ["-C", repo, "rev-parse", "HEAD"])).stdout.trim();
+    const asker = askAdapter("asker", function* (sessionId) {
+      const ts = new Date().toISOString();
+      yield { type: "started", session_id: sessionId, ts };
+      yield { type: "message", session_id: sessionId, ts, text: "answer" };
+      yield { type: "completed", session_id: sessionId, ts };
+    });
+    const res = await new Orchestrator({
+      registry: new Map([["asker", asker]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      executionRoot: repo,
+      projectGitInitialization: {
+        initialized: true,
+        baselineCommitted: true,
+        gitignoreSeeded: false,
+        headSha: head,
+      },
+      prompt: "read",
+      mode: "ask",
+      harnesses: ["asker"],
+    });
+    const events = readRunEvents(res.runDir);
+    const created = events.findIndex((event) => event.type === "run.created");
+    const initialized = events.findIndex((event) => event.type === "project.git.initialized");
+    expect(initialized).toBe(created + 1);
+    expect(events[initialized]?.payload).toMatchObject({
+      repo_root: repo,
+      initialized: true,
+      baseline_committed: true,
+      head_sha: head,
+    });
+  });
+
   it("bridges an AGENTS.md-only project to CLAUDE.md and announces it (D-14/INV-113)", async () => {
     const dir = reapMk(join(tmpdir(), "claudexor-agents-bridge-"));
     writeFileSync(join(dir, "AGENTS.md"), "# project instructions\n");
@@ -9559,6 +9723,7 @@ describe("interaction channel registration order", () => {
     } as never);
     expect(res).toBeNull();
     expect(channel!.pendingCount!()).toBe(0); // suspension released
+    expect(channel!.suspensionVersion!()).toBe(2); // begin + end are both observable
   });
 });
 
@@ -10020,6 +10185,7 @@ describe("final verify fail-closed + spend accounting (exit-gate criticals)", ()
     const seen: string[] = [];
     for await (const v of withInactivityWatchdog(slowSource(), {
       timeoutMs: 50,
+      countsAsProgress: () => true,
       onTimeout: () => undefined,
       isSuspended: () => suspended,
     })) {
@@ -10034,6 +10200,7 @@ describe("final verify fail-closed + spend accounting (exit-gate criticals)", ()
     await expect(async () => {
       for await (const v of withInactivityWatchdog(wedged(), {
         timeoutMs: 50,
+        countsAsProgress: () => true,
         onTimeout: () => undefined,
       })) {
         void v;

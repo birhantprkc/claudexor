@@ -20,7 +20,7 @@
  */
 import { MAX_DELEGATED_CHILDREN, type PaidBudget } from "@claudexor/schema";
 import { DELEGATION_ENV, redactSecrets } from "@claudexor/util";
-import type { McpTool, McpToolAnnotations, RunnerFn } from "./index.js";
+import type { McpTool, McpToolAnnotations, McpToolOutput, RunnerFn } from "./index.js";
 
 /** Runtime policy the belt enforces, derived from the injected delegation env. */
 export interface DelegationPolicy {
@@ -402,7 +402,7 @@ export function beltClaudexorTools(
 
 /** Render a belt sub-run result: summary first, then the runId handle so the
  * parent harness can follow it up with run_status/run_result. */
-function formatBeltResult(result: unknown): string {
+function formatBeltResult(result: unknown): McpToolOutput {
   if (typeof result === "string") return result.trim();
   if (result && typeof result === "object") {
     const r = result as Record<string, unknown>;
@@ -412,8 +412,15 @@ function formatBeltResult(result: unknown): string {
     const trailer: string[] = [];
     if (typeof r["runId"] === "string" && r["runId"]) trailer.push(`runId: ${r["runId"]}`);
     if (typeof r["status"] === "string" && r["status"]) trailer.push(`status: ${r["status"]}`);
-    if (!summary && trailer.length === 0) return JSON.stringify(result);
-    return [summary, trailer.join("\n")].filter(Boolean).join("\n\n");
+    const text =
+      !summary && trailer.length === 0
+        ? JSON.stringify(result)
+        : [summary, trailer.join("\n")].filter(Boolean).join("\n\n");
+    // The belt is a private scoped MCP surface, but terminal read detail must
+    // still remain machine-readable to the parent harness. In particular, a
+    // failed child's typed RunFailure (category/code/nextActions) must not be
+    // collapsed into the human summary/status trailer.
+    return { text, structured: r };
   }
   return result == null ? "" : String(result);
 }

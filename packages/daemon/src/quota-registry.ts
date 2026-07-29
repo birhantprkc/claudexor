@@ -11,6 +11,7 @@ import {
 
 const UPSERTED = "quota.snapshot.upserted";
 const REMOVED = "quota.subject.removed";
+const PROJECTION_UPDATED = "quota.projection.updated";
 const POLL_BACKOFF_MS = 60_000;
 const MAX_POLL_BACKOFF_MS = 15 * 60_000;
 /** Snapshots older than this are pruned from every projection read (W17):
@@ -42,6 +43,10 @@ export class QuotaRegistry {
   private absences: QuotaAbsence[] = [];
   private pollFailures = 0;
   private pollNotBefore = 0;
+  /** Signature carried by the last durable projection marker. Raw quota
+   * evidence may span several records; this is the commit/recovery boundary
+   * consumed by snapshot-then-SSE clients. */
+  private lastPublishedProjectionSignature: string | null = null;
 
   constructor(
     private readonly journal: DurableJournal,
@@ -49,16 +54,36 @@ export class QuotaRegistry {
     private readonly now: () => Date = () => new Date(),
     private readonly subjects: QuotaSubjectUniverse = () => [],
   ) {
+    let rawMutationAfterMarker = false;
     for (const record of journal.records()) {
-      if (record.type === UPSERTED) this.apply(QuotaSnapshotSchema.parse(record.payload));
+      if (record.type === UPSERTED) {
+        this.apply(QuotaSnapshotSchema.parse(record.payload));
+        rawMutationAfterMarker = true;
+      }
       if (record.type === REMOVED) {
         const payload = record.payload as { harness?: unknown; subject_id?: unknown };
         if (typeof payload.harness === "string" && typeof payload.subject_id === "string") {
           this.remove(payload.harness, payload.subject_id);
         }
+        rawMutationAfterMarker = true;
+      }
+      if (record.type === PROJECTION_UPDATED) {
+        const payload = record.payload as { projection_signature?: unknown };
+        this.lastPublishedProjectionSignature =
+          typeof payload.projection_signature === "string"
+            ? payload.projection_signature
+            : null;
+        rawMutationAfterMarker = false;
       }
     }
     this.validateProjection();
+    // A process can stop after a durable raw mutation but before its separate
+    // projection marker. Replaying that state without a new marker would leave
+    // already-subscribed clients permanently behind. Close the recovered
+    // commit boundary synchronously before the projection becomes available.
+    if (rawMutationAfterMarker) {
+      this.appendProjectionMarker("recovery", this.now().toISOString());
+    }
   }
 
   read() {
@@ -94,6 +119,14 @@ export class QuotaRegistry {
     return (await this.refreshCycle()).response;
   }
 
+  /** Fresh quota plus the exact global-journal fence for snapshot-then-SSE.
+   * The cursor is captured inside refreshCycle, synchronously with `response`,
+   * so a later append can never be skipped by a client resuming from it. */
+  async refreshWithCursor() {
+    const { response, quotaEventCursor } = await this.refreshCycle();
+    return { response, quotaEventCursor };
+  }
+
   /** Cycle-local core: the produced-snapshot count belongs to THIS invocation
    * (wave-2 finding: a shared mutable field let a concurrent user refresh
    * overwrite the poller's view of its own cycle). */
@@ -111,8 +144,15 @@ export class QuotaRegistry {
     for (const refresher of this.refreshers) {
       try {
         const result = await refresher();
-        for (const snapshot of result.snapshots) this.upsert(snapshot);
-        producedSnapshots += result.snapshots.length;
+        // Validate the source batch before its first durable write. A malformed
+        // later item must not leave earlier items applied without the cycle's
+        // projection marker when this is the only nominally successful source.
+        const snapshots = result.snapshots.map((snapshot) => QuotaSnapshotSchema.parse(snapshot));
+        // One refresh can contain many vendor subjects. Persist every source
+        // event, but publish ONE projection-level marker after the full response
+        // is assembled so clients never see a marker-per-item burst.
+        for (const snapshot of snapshots) this.recordUpsert(snapshot);
+        producedSnapshots += snapshots.length;
         if (result.absences) claims.push(...result.absences);
         successfulSources += 1;
       } catch (error) {
@@ -127,12 +167,17 @@ export class QuotaRegistry {
     }
     const now = this.now().getTime();
     this.recomputeAbsences(claims, now);
+    const refreshedAt = this.now().toISOString();
     const response = ControlQuotaResponse.parse({
       snapshots: this.activeSnapshots(now),
       absences: this.activeAbsences(now),
-      refreshed_at: this.now().toISOString(),
+      refreshed_at: refreshedAt,
     });
-    return { response, producedSnapshots };
+    // No await may appear between response construction and this marker/cursor.
+    // The marker makes absence-only and identical refreshes observable; its own
+    // cursor is the exact last event represented by this response.
+    const quotaEventCursor = this.appendProjectionMarker("refresh", refreshedAt, response);
+    return { response, producedSnapshots, quotaEventCursor };
   }
 
   /** Aggregate one cycle's snapshots + absence claims against the subject
@@ -189,6 +234,10 @@ export class QuotaRegistry {
   async pollStale(): Promise<boolean> {
     const now = this.now().getTime();
     const snapshots = this.activeSnapshots(now);
+    // Freshness/pruning are clock-derived projection facts. Publish the change
+    // even when the official refresh attempted below fails, so subscribers do
+    // not retain a formerly-fresh quota/next_up pairing indefinitely.
+    this.publishClockTransitionIfNeeded();
     if (snapshots.length > 0 && snapshots.every((snapshot) => snapshot.freshness === "fresh"))
       return false;
     if (now < this.pollNotBefore) return false;
@@ -245,6 +294,11 @@ export class QuotaRegistry {
   }
 
   upsert(value: QuotaSnapshot): void {
+    this.recordUpsert(value);
+    this.appendProjectionMarker("direct_mutation", this.now().toISOString());
+  }
+
+  private recordUpsert(value: QuotaSnapshot): void {
     const snapshot = QuotaSnapshotSchema.parse(value);
     this.journal.append(UPSERTED, snapshot);
     this.apply(snapshot);
@@ -257,7 +311,36 @@ export class QuotaRegistry {
     ).length;
     this.journal.append(REMOVED, { harness, subject_id: subjectId });
     this.remove(harness, subjectId);
+    this.appendProjectionMarker("direct_mutation", this.now().toISOString());
     return removed;
+  }
+
+  private appendProjectionMarker(
+    reason: "refresh" | "direct_mutation" | "recovery" | "clock_transition",
+    observedAt: string,
+    response = this.read(),
+  ): string {
+    const projectionSignature = this.projectionSignature(response);
+    const marker = this.journal.append(PROJECTION_UPDATED, {
+      reason,
+      observed_at: observedAt,
+      projection_signature: projectionSignature,
+    });
+    this.lastPublishedProjectionSignature = projectionSignature;
+    return this.journal.cursorFor(marker);
+  }
+
+  private publishClockTransitionIfNeeded(): void {
+    const response = this.read();
+    const signature = this.projectionSignature(response);
+    if (signature === this.lastPublishedProjectionSignature) return;
+    this.appendProjectionMarker("clock_transition", this.now().toISOString(), response);
+  }
+
+  private projectionSignature(response: ReturnType<QuotaRegistry["read"]>): string {
+    // refreshed_at is request metadata, not projection identity. Snapshot
+    // freshness and absence coverage are logical facts and remain included.
+    return JSON.stringify({ snapshots: response.snapshots, absences: response.absences });
   }
 
   validateProjection(): void {

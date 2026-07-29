@@ -223,7 +223,7 @@ export const TRUST_FULL_ACCESS_CODE = "trust_full_access_required";
  * orphan whose reason lived only in one HTTP response (INV-093). Cleared when
  * a retry binds a run.
  */
-export const TurnEnqueueError = z
+export const TurnEnqueueProblem = z
   .object({
     message: z.string().describe("Human-readable refusal message."),
     /** Machine-readable refusal code carried from the throwing gate (e.g.
@@ -245,8 +245,24 @@ export const TurnEnqueueError = z
       .describe(
         "True when retry can replay this turn (a job was recorded before the failure); false when no job exists to replay.",
       ),
-    failed_at: IsoTimestamp.describe("When the enqueue failed."),
+    required_actions: z
+      .array(z.string().min(1).max(512))
+      .max(16)
+      .default([])
+      .describe("Bounded user actions that may make an exact retry succeed."),
+    context: z
+      .record(z.string(), z.unknown())
+      .default({})
+      .describe("Bounded typed recovery context; never arbitrary provider or environment output."),
   })
+  .strict()
+  .describe("Typed, sanitized problem for a thread turn that could not start.");
+export type TurnEnqueueProblem = z.infer<typeof TurnEnqueueProblem>;
+
+export const TurnEnqueueError = TurnEnqueueProblem.extend({
+  failed_at: IsoTimestamp.describe("When the enqueue failed."),
+})
+  .strict()
   .describe(
     "Typed record of a turn whose run could not be enqueued/started, persisted on the turn so every surface renders the refusal inline; cleared when a retry binds a run.",
   );

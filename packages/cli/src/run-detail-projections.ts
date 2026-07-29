@@ -1,4 +1,33 @@
-import { CouncilProjection } from "@claudexor/schema";
+import {
+  ControlPrimaryOutput,
+  CouncilProjection,
+  RunFailure,
+  type ControlPrimaryOutput as ControlPrimaryOutputType,
+  type RunFailure as RunFailureType,
+} from "@claudexor/schema";
+
+export type PrimaryOutputPresentation = Pick<
+  ControlPrimaryOutputType,
+  "kind" | "path" | "text"
+> & { truncated?: boolean };
+
+/** Schema-validate the Control API's single primary-output owner. */
+export function projectRunPrimaryOutput(
+  detail: Record<string, unknown> | null,
+): ControlPrimaryOutputType | null {
+  const parsed = ControlPrimaryOutput.safeParse(detail?.["primaryOutput"]);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Inline non-patch output with an honest bounded-preview disclosure. */
+export function presentRunPrimaryOutput(output: PrimaryOutputPresentation | null): string | null {
+  if (!output || output.kind === "patch" || typeof output.text !== "string") return null;
+  const text = output.text.trim();
+  if (!text) return null;
+  return output.truncated === true
+    ? `${text}\n\n[Inline preview bounded; full artifact: ${output.path}]`
+    : text;
+}
 
 export type ApplyEligibilityProjection = {
   eligible: boolean;
@@ -25,6 +54,13 @@ export function projectRunSpendUsd(detail: Record<string, unknown> | null): numb
 
 export function projectRunCouncil(detail: Record<string, unknown> | null): unknown {
   const parsed = CouncilProjection.safeParse(detail?.["council"]);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Preserve only the schema-owned typed terminal failure. Every surface uses
+ * this projection instead of forwarding an arbitrary failure-shaped object. */
+export function projectRunFailure(detail: Record<string, unknown> | null): RunFailureType | null {
+  const parsed = RunFailure.safeParse(detail?.["failure"]);
   return parsed.success ? parsed.data : null;
 }
 

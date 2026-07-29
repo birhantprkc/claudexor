@@ -778,6 +778,46 @@
           },
           "default": [],
           "description": "Status rows for all known harnesses."
+        },
+        "git": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "available",
+                "missing",
+                "developer_tools_stub",
+                "failed"
+              ]
+            },
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "remediation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "version",
+            "detail",
+            "remediation"
+          ],
+          "additionalProperties": false,
+          "description": "Execution-location Git readiness; omitted by daemons predating capability projection."
         }
       },
       "additionalProperties": false,

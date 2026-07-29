@@ -1,0 +1,110 @@
+import { describe, expect, it } from "vitest";
+import {
+  GitCapabilityError,
+  gitCapabilityProblem,
+  probeGitCapability,
+  requireGitCapability,
+} from "./git-capability.js";
+
+describe("Git capability", () => {
+  it("recognizes a working executable", async () => {
+    await expect(
+      probeGitCapability({
+        resolveGit: () => "/opt/homebrew/bin/git",
+        runVersion: async () => ({
+          code: 0,
+          signal: null,
+          stdout: "git version 2.50.1\n",
+          stderr: "",
+        }),
+      }),
+    ).resolves.toEqual({
+      status: "available",
+      version: "git version 2.50.1",
+      detail: null,
+      remediation: null,
+    });
+  });
+
+  it("distinguishes the clean-macOS developer-tools launcher", async () => {
+    let versionSpawned = false;
+    const capability = await probeGitCapability({
+      resolveGit: () => "/usr/bin/git",
+      runXcodeSelect: async () => ({
+        code: 1,
+        signal: null,
+        stdout: "",
+        stderr: "xcode-select: error: unable to get active developer directory\n",
+      }),
+      runVersion: async () => {
+        versionSpawned = true;
+        throw new Error("must not execute the Apple Git launcher");
+      },
+    });
+    expect(capability).toMatchObject({
+      status: "developer_tools_stub",
+      version: null,
+      remediation: expect.stringContaining("xcode-select --install"),
+    });
+    expect(versionSpawned).toBe(false);
+    expect(() => requireGitCapability(capability)).toThrow(GitCapabilityError);
+  });
+
+  it("distinguishes executable absence from an opaque failure", async () => {
+    const missing = await probeGitCapability({
+      resolveGit: () => null,
+    });
+    const failed = await probeGitCapability({
+      resolveGit: () => "/custom/git",
+      runVersion: async () => ({
+        code: 128,
+        signal: null,
+        stdout: "",
+        stderr: "fatal: unusable installation\n",
+      }),
+    });
+    expect(missing.status).toBe("missing");
+    expect(failed.status).toBe("failed");
+  });
+
+  it("runs system Git only after xcode-select proves developer tools exist", async () => {
+    const calls: string[] = [];
+    const capability = await probeGitCapability({
+      resolveGit: () => "/usr/bin/git",
+      runXcodeSelect: async () => {
+        calls.push("xcode-select");
+        return {
+          code: 0,
+          signal: null,
+          stdout: "/Library/Developer/CommandLineTools\n",
+          stderr: "",
+        };
+      },
+      runVersion: async (path) => {
+        calls.push(path);
+        return { code: 0, signal: null, stdout: "git version 2.50.1\n", stderr: "" };
+      },
+    });
+    expect(capability.status).toBe("available");
+    expect(calls).toEqual(["xcode-select", "/usr/bin/git"]);
+  });
+
+  it("owns one safe problem projection for errors and applicability", () => {
+    const capability = {
+      status: "developer_tools_stub" as const,
+      version: null,
+      detail: "private probe detail",
+      remediation: "Install Apple Command Line Tools, then retry.",
+    };
+    const problem = gitCapabilityProblem(capability);
+    expect(problem).toEqual({
+      code: "git_developer_tools_stub",
+      reason: "Git is unavailable because Apple Command Line Tools are not installed.",
+      remediation: "Install Apple Command Line Tools, then retry.",
+    });
+    const error = new GitCapabilityError(capability);
+    expect(error.code).toBe(problem?.code);
+    expect(error.message).toBe(`${problem?.reason} ${problem?.remediation}`);
+    expect(error.message).not.toContain(capability.detail);
+  });
+});

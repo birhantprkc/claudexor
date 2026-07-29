@@ -1,4 +1,4 @@
-import { redactSecrets } from "@claudexor/util";
+import { redactSecrets, safeProblemContext, safeProblemRequiredActions } from "@claudexor/util";
 
 export const JOB_STATES = [
   "queued",
@@ -19,6 +19,8 @@ export interface JobRecord {
   errorCode?: string;
   errorStatus?: number;
   errorRetryable?: boolean;
+  errorRequiredActions?: string[];
+  errorContext?: Record<string, unknown>;
   createdAt: string;
   runId?: string;
   taskId?: string;
@@ -58,6 +60,10 @@ export function publicJobRecord(record: JobRecord): JobRecord {
   return {
     ...record,
     error: record.error ? redactSecrets(record.error) : undefined,
+    ...(record.errorRequiredActions
+      ? { errorRequiredActions: safeProblemRequiredActions(record.errorRequiredActions) }
+      : {}),
+    ...(record.errorContext ? { errorContext: safeProblemContext(record.errorContext) } : {}),
     params: redactParams(record.params),
   };
 }

@@ -155,14 +155,18 @@ describe("ThreadStore", () => {
     const { root, journal, s } = store();
     const t = s.createThread({ repoRoot: "/tmp/proj" });
     const turn = s.createTurn(t.id, "do risky work");
-    s.setTurnEnqueueError(
-      turn.id,
-      "access profile 'full' requires allow_full_access: true",
-      "trust_full_access_required",
-    );
+    s.setTurnEnqueueError(turn.id, {
+      message: "access profile 'full' requires allow_full_access: true",
+      code: "trust_full_access_required",
+      retryable: true,
+      required_actions: ["Grant access"],
+      context: { turnId: turn.id },
+    });
     const refused = s.getTurn(turn.id);
     expect(refused?.enqueue_error?.message).toContain("allow_full_access");
     expect(refused?.enqueue_error?.code).toBe("trust_full_access_required");
+    expect(refused?.enqueue_error?.required_actions).toEqual(["Grant access"]);
+    expect(refused?.enqueue_error?.context).toEqual({ turnId: turn.id });
     expect(refused?.enqueue_error?.failed_at).toBeTruthy();
     // Survives a reload (the whole point: a thread re-open still shows WHY).
     const reloadedStore = reload(root, journal);
@@ -170,7 +174,13 @@ describe("ThreadStore", () => {
     expect(reloaded?.enqueue_error?.message).toContain("allow_full_access");
     expect(reloaded?.enqueue_error?.code).toBe("trust_full_access_required");
     // A REPEAT refusal (retry refused again) replaces the recorded reason.
-    reloadedStore.setTurnEnqueueError(turn.id, "still refused", null);
+    reloadedStore.setTurnEnqueueError(turn.id, {
+      message: "still refused",
+      code: null,
+      retryable: true,
+      required_actions: [],
+      context: {},
+    });
     expect(reloadedStore.getTurn(turn.id)?.enqueue_error?.message).toBe("still refused");
     // A successful retry binds a run and the refusal vanishes with it.
     reloadedStore.bindTurnRun(turn.id, "run-retry");
@@ -183,7 +193,13 @@ describe("ThreadStore", () => {
     const t = s.createThread({ repoRoot: "/tmp/proj" });
     const turn = s.createTurn(t.id, "ok work");
     s.bindTurnRun(turn.id, "run-1");
-    s.setTurnEnqueueError(turn.id, "late refusal");
+    s.setTurnEnqueueError(turn.id, {
+      message: "late refusal",
+      code: null,
+      retryable: true,
+      required_actions: [],
+      context: {},
+    });
     expect(s.getTurn(turn.id)?.enqueue_error).toBeNull();
   });
 
@@ -475,7 +491,13 @@ describe("ThreadStore thread.head.updated ping (W12)", () => {
 
     const refused = s.createTurn(thread.id, "risky move");
     expect(pings).toHaveLength(7);
-    s.setTurnEnqueueError(refused.id, "trust refused", "trust_full_access_required");
+    s.setTurnEnqueueError(refused.id, {
+      message: "trust refused",
+      code: "trust_full_access_required",
+      retryable: true,
+      required_actions: [],
+      context: {},
+    });
     expect(pings).toHaveLength(8);
 
     s.recordSession(thread.id, "claude", "native-session-1");

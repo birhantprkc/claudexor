@@ -7,12 +7,11 @@ import {
   claudeTerminalContextEvent,
 } from "./context-signals.js";
 import { requiredMcpStartupReceipts } from "./required-mcp.js";
+import { claudeApiRetryEvents } from "./retry-signals.js";
 
 type Json = any;
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-const CLAUDE_TRANSIENT_RE =
-  /overloaded|temporar(?:y|ily) unavailable|network|econnreset|etimedout|enotfound|eai_again|stream/i;
 
 function toolKindFor(name: string): ToolKind {
   if (name === "WebSearch" || name === "WebFetch") return "web";
@@ -53,6 +52,7 @@ interface SessionTask {
   status: "pending" | "in_progress" | "completed";
 }
 const sessionTasks = new Map<string, SessionTask[]>();
+const sessionPlanSnapshots = new Map<string, string>();
 const SESSION_TASKS_MAX_SESSIONS = 64;
 
 function applySessionTask(
@@ -62,7 +62,10 @@ function applySessionTask(
 ): boolean {
   if (!sessionTasks.has(sessionId) && sessionTasks.size >= SESSION_TASKS_MAX_SESSIONS) {
     const oldest = sessionTasks.keys().next().value;
-    if (oldest !== undefined) sessionTasks.delete(oldest);
+    if (oldest !== undefined) {
+      sessionTasks.delete(oldest);
+      sessionPlanSnapshots.delete(oldest);
+    }
   }
   const list = sessionTasks.get(sessionId) ?? [];
   if (tool === "TaskCreate") {
@@ -89,6 +92,7 @@ function applySessionTask(
     sessionTasks.set(sessionId, list);
     return true;
   }
+  if (task.status === status) return false;
   task.status = status;
   sessionTasks.set(sessionId, list);
   return true;
@@ -98,6 +102,7 @@ function applySessionTask(
  * must not hold every historical session's checklist). */
 function releaseSessionTasks(sessionId: string): void {
   sessionTasks.delete(sessionId);
+  sessionPlanSnapshots.delete(sessionId);
 }
 
 function sessionTaskItems(sessionId: string): SessionTask[] {
@@ -106,6 +111,13 @@ function sessionTaskItems(sessionId: string): SessionTask[] {
     title: t.title,
     status: t.status,
   }));
+}
+
+function planSnapshotChanged(sessionId: string, items: readonly SessionTask[]): boolean {
+  const key = JSON.stringify(items);
+  if (sessionPlanSnapshots.get(sessionId) === key) return false;
+  sessionPlanSnapshots.set(sessionId, key);
+  return true;
 }
 
 export function parseClaudeEvent(obj: Json, sessionId: string): HarnessEvent[] | null {
@@ -156,45 +168,7 @@ function parseClaudeEventStateful(
   }
 
   if (type === "system" && obj.subtype === "api_retry") {
-    // TYPED status, not a fabricated thinking block: the old mapping planted
-    // "api_retry: 529…" junk in the chat's reasoning disclosure. The official
-    // fields (attempt/max_retries/retry_delay_ms/error category) pass through
-    // so the activity feed can say "retrying (2/10, in 5s)" honestly.
-    const errText = String(obj.error ?? "");
-    const ev: HarnessEvent = {
-      type: "status",
-      session_id: sessionId,
-      ts,
-      // The prose is redacted AND bounded (a hostile frame must not inject a
-      // huge/secret-bearing field, review sol #7); the typed category is the
-      // official enum, never free-form text.
-      text: `api_retry: ${redactSecrets(errText).slice(0, 500)}`,
-      status: {
-        kind: "api_retry",
-        attempt: numberOrUndef(obj.attempt),
-        max_retries: numberOrUndef(obj.max_retries),
-        retry_delay_ms: numberOrUndef(obj.retry_delay_ms),
-        error_category: claudeRetryCategory(obj.error),
-      },
-      payload: { api_retry: true, retry_delay_ms: obj.retry_delay_ms },
-    };
-    // Adapter-layer translation of claude's native retry into a TYPED rate-limit
-    // signal (the budget layer reads the typed field, not the prose).
-    if (/rate.?limit|overloaded|too many requests|quota/i.test(errText)) {
-      ev.rate_limit = {
-        resets_at: null,
-        retry_delay_ms: typeof obj.retry_delay_ms === "number" ? obj.retry_delay_ms : null,
-      };
-    }
-    if (CLAUDE_TRANSIENT_RE.test(errText)) {
-      ev.transient = {
-        kind: /overloaded|temporar(?:y|ily) unavailable/i.test(errText)
-          ? "service_unavailable"
-          : "network",
-        retry_delay_ms: typeof obj.retry_delay_ms === "number" ? obj.retry_delay_ms : null,
-      };
-    }
-    return [ev];
+    return claudeApiRetryEvents(obj, sessionId, ts);
   }
 
   // D-16c typed context / rate-limit signal frames (mapping lives in
@@ -263,7 +237,7 @@ function parseClaudeEventStateful(
             ts,
             text: name,
             tool,
-            plan_progress: { items },
+            ...(planSnapshotChanged(sessionId, items) ? { plan_progress: { items } } : {}),
           });
         } else if (name === "TaskCreate" || name === "TaskUpdate") {
           // Typed plan progress, current surface (LIVE-VERIFIED 2.1.165):
@@ -271,14 +245,15 @@ function parseClaudeEventStateful(
           // session's task list and re-emits the WHOLE list on every change
           // (the run-event contract is last-wins).
           const taskChanged = applySessionTask(sessionId, name, input);
-          if (taskChanged) {
+          const taskItems = sessionTaskItems(sessionId);
+          if (taskChanged && planSnapshotChanged(sessionId, taskItems)) {
             out.push({
               type: "tool_call",
               session_id: sessionId,
               ts,
               text: name,
               tool,
-              plan_progress: { items: sessionTaskItems(sessionId) },
+              plan_progress: { items: taskItems },
             });
           } else {
             out.push({
@@ -527,60 +502,6 @@ function summarizeToolResultContent(content: unknown): string {
 
 function numberOrUndef(v: unknown): number | undefined {
   return typeof v === "number" ? v : undefined;
-}
-
-/**
- * Map claude's `api_retry.error` onto the documented category enum (headless
- * docs). It IS the category label, but a hostile/newer frame could send
- * anything — unrecognized values collapse to "unknown" so the typed field is
- * never free-form prose (review sol #7).
- */
-const CLAUDE_RETRY_CATEGORIES = new Set([
-  "authentication_failed",
-  "oauth_org_not_allowed",
-  "billing_error",
-  "rate_limit",
-  "overloaded",
-  "invalid_request",
-  "model_not_found",
-  "server_error",
-  "max_output_tokens",
-  "unknown",
-]);
-
-function claudeRetryCategory(
-  raw: unknown,
-):
-  | "authentication_failed"
-  | "oauth_org_not_allowed"
-  | "billing_error"
-  | "rate_limit"
-  | "overloaded"
-  | "invalid_request"
-  | "model_not_found"
-  | "server_error"
-  | "max_output_tokens"
-  | "unknown"
-  | undefined {
-  if (raw === undefined || raw === null) return undefined;
-  const s = String(raw);
-  if (CLAUDE_RETRY_CATEGORIES.has(s)) return s as ReturnType<typeof claudeRetryCategory>;
-  // Claude 2.1.x sends the human error LINE here, not the bare label (the F3
-  // "Known trap"): classify the documented categories from their stable
-  // markers so bounded-retry policy keeps the reason. Adapter-layer prose
-  // parsing is the one allowed home for this (no-regex governance applies to
-  // consumers, which read only the typed category).
-  if (/rate.?limit|too many requests|(?:^|\D)429(?:\D|$)/i.test(s)) return "rate_limit";
-
-  if (/overloaded|(?:^|\D)529(?:\D|$)/i.test(s)) return "overloaded";
-  if (/authentication|unauthorized|(?:^|\D)401(?:\D|$)/i.test(s)) return "authentication_failed";
-  if (/oauth.*org|org.*not.*allowed/i.test(s)) return "oauth_org_not_allowed";
-  if (/billing|payment|credit balance|(?:^|\D)402(?:\D|$)/i.test(s)) return "billing_error";
-  if (/model.{0,20}not.{0,10}found/i.test(s)) return "model_not_found";
-  if (/max.?output.?tokens/i.test(s)) return "max_output_tokens";
-  if (/invalid.?request|(?:^|\D)400(?:\D|$)/i.test(s)) return "invalid_request";
-  if (/internal server error|server.?error|(?:^|\D)5\d\d(?:\D|$)/i.test(s)) return "server_error";
-  return "unknown";
 }
 
 function sumOrUndef(...values: unknown[]): number | undefined {

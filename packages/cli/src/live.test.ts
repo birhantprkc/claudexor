@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeOutcomeFacts } from "@claudexor/schema";
 import {
   controlApiFetch,
   createRunEventLineFormatter,
@@ -92,6 +93,27 @@ describe("claudexor follow", () => {
         },
       }),
     ).toContain("browser=unavailable:manifest_unsupported");
+  });
+
+  it("renders deadline and operator cancellation from canonical terminal facts", () => {
+    expect(
+      formatRunEventLine({
+        type: "run.failed",
+        payload: {
+          lifecycle: "cancelled",
+          facts: makeOutcomeFacts("cancelled", { reason: "wall_clock_exceeded" }),
+        },
+      }),
+    ).toBe("run ended: Time limit reached");
+    expect(
+      formatRunEventLine({
+        type: "run.failed",
+        payload: {
+          lifecycle: "cancelled",
+          facts: makeOutcomeFacts("cancelled", { reason: "user_cancelled" }),
+        },
+      }),
+    ).toBe("run ended: Cancelled");
   });
 
   it("discloses ignored_settings as a WARNING suffix on harness.started (QA-070)", () => {

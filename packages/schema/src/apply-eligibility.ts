@@ -1,7 +1,7 @@
 import { z } from "zod/v3";
 import { RunOutcomeFacts } from "./decision.js";
 import { PlanReadiness, CouncilProjection } from "./plan.js";
-import { ControlBudgetSnapshot } from "./control.js";
+import { ControlBudgetSnapshot, RunFailure } from "./control.js";
 import { RunDelegationInfo } from "./delegation.js";
 
 /**
@@ -67,6 +67,9 @@ export const McpRunToolResult = z
       .describe(
         "The D8 terminal outcome axes (checks/review/reason/noChanges); null for non-terminal or read-only routes.",
       ),
+    failure: RunFailure.nullable()
+      .default(null)
+      .describe("Typed terminal failure detail and recovery actions; null for non-failed runs."),
     applyEligibility: ApplyEligibility.nullable().describe(
       "Apply-gate verdict for mutating runs; null for read-only routes or when no patch exists.",
     ),
@@ -143,6 +146,9 @@ export const McpRunHandleResult = z
     outcomeFacts: RunOutcomeFacts.nullable()
       .default(null)
       .describe("The D8 terminal outcome axes (checks/review/reason/noChanges), when terminal."),
+    failure: RunFailure.nullable()
+      .default(null)
+      .describe("Typed terminal failure detail and recovery actions; null for non-failed runs."),
     outcomeBanner: z
       .string()
       .nullable()

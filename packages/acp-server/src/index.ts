@@ -7,7 +7,7 @@ import {
   type Writable as NodeWritableStream,
 } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import { acpStopReason } from "@claudexor/schema";
+import { acpStopReason, RunOutcomeFacts } from "@claudexor/schema";
 import {
   extractPromptText,
   renderPlanQuestions,
@@ -183,15 +183,19 @@ export class AcpServer {
           // `result.status` is the run LIFECYCLE (D8); the ACP stop reason is
           // projected through the ONE owner (acpStopReason).
           const status = typeof result.status === "string" ? result.status : "unknown";
+          const outcomeFacts = RunOutcomeFacts.safeParse(result.outcomeFacts);
           const stopReason: acp.StopReason = controller.signal.aborted
             ? "cancelled"
-            : acpStopReason(status);
+            : acpStopReason(status, outcomeFacts.success ? outcomeFacts.data.reason : null);
           return {
             stopReason,
             _meta: {
               claudexor: {
                 runId: result.runId ?? null,
                 status,
+                outcomeFacts: result.outcomeFacts ?? null,
+                outcomeBanner: result.outcomeBanner ?? null,
+                failure: result.failure ?? null,
                 applyEligibility: result.applyEligibility ?? null,
                 detailProblem: result.detailProblem ?? null,
               },

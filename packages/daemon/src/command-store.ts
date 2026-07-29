@@ -245,6 +245,8 @@ export class CommandStore {
       errorCode: undefined,
       errorStatus: undefined,
       errorRetryable: undefined,
+      errorRequiredActions: undefined,
+      errorContext: undefined,
       finishedAt: terminal.ts,
     });
   }

@@ -90,6 +90,9 @@ export interface InteractionChannel {
   /** Number of questions currently awaiting an answer. Lets stream watchdogs
    * treat waiting-on-user as legitimate silence instead of a wedged harness. */
   pendingCount?(): number;
+  /** Monotonic begin/end transition counter. Unlike a boolean poll, this lets
+   * watchdogs detect a complete wait-and-answer cycle between timer ticks. */
+  suspensionVersion?(): number;
 }
 
 export function interactionChannelFromSpec(spec: HarnessRunSpec): InteractionChannel | undefined {

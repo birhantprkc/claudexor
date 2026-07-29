@@ -10,6 +10,7 @@ import {
   continuityLabel,
   outcomeExitCode,
   processExitCode,
+  runOutcomeLabel,
 } from "@claudexor/schema";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import { promptQuestionsOnTty } from "./interaction-prompt.js";
@@ -134,8 +135,11 @@ export function formatRunEventLine(ev: Record<string, unknown>): string | null {
       return typeof p["usd"] === "number" ? `spend +$${(p["usd"] as number).toFixed(4)}` : null;
     case "run.completed":
       return `run completed: ${String(p["lifecycle"] ?? "succeeded")}`;
-    case "run.failed":
+    case "run.failed": {
+      const facts = RunOutcomeFactsSchema.safeParse(p["facts"]);
+      if (facts.success) return `run ended: ${runOutcomeLabel(facts.data)}`;
       return `run failed: ${truncate(String(p["error"] ?? p["status"] ?? "failed"), 200)}`;
+    }
     case "run.blocked":
       return `run blocked: ${truncate(String(p["error"] ?? "needs human decision"), 200)}`;
     case "run.continuation":

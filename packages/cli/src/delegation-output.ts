@@ -1,8 +1,10 @@
 import {
   projectApplyEligibility,
   projectOutcomeBanner,
+  projectRunFailure,
   projectRunLineage,
 } from "./run-detail-projections.js";
+import type { RunFailure } from "@claudexor/schema";
 
 export interface DelegationReceipt {
   requested?: boolean;
@@ -22,14 +24,17 @@ export function terminalDetailFields(detail: Record<string, unknown> | null): {
   outcomeBanner?: string;
   delegation?: DelegationReceipt;
   applyEligibility?: Record<string, unknown>;
+  failure?: RunFailure;
 } {
   const outcomeBanner = projectOutcomeBanner(detail);
   const delegation = projectDelegation(detail);
   const applyEligibility = projectApplyEligibility(detail);
+  const failure = projectRunFailure(detail);
   return {
     ...(outcomeBanner ? { outcomeBanner } : {}),
     ...(delegation ? { delegation } : {}),
     ...(applyEligibility ? { applyEligibility } : {}),
+    ...(failure ? { failure } : {}),
   };
 }
 

@@ -52,6 +52,7 @@ export function structuredRunResult(result: unknown): Record<string, unknown> {
     status: typeof r["status"] === "string" && r["status"] ? r["status"] : null,
     outcomeFacts:
       r["outcomeFacts"] && typeof r["outcomeFacts"] === "object" ? r["outcomeFacts"] : null,
+    failure: r["failure"] && typeof r["failure"] === "object" ? r["failure"] : null,
     applyEligibility:
       r["applyEligibility"] && typeof r["applyEligibility"] === "object"
         ? r["applyEligibility"]

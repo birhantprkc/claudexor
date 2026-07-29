@@ -390,6 +390,44 @@ describe("delegation belt tool surface (D32)", () => {
     expect(parents).toEqual(["run-parent", "run-parent"]);
   });
 
+  it("run_result preserves a failed child's typed failure for the parent harness", async () => {
+    const failure = {
+      phase: "execute",
+      category: "auth",
+      code: null,
+      harnessId: "claude",
+      attemptId: "a01",
+      safeMessage: "Authentication expired",
+      rawDetailRef: null,
+      logRefs: [],
+      eventRefs: [],
+      runDir: "/tmp/sub-failed",
+      nextActions: ["Log in again"],
+    };
+    const tools = beltClaudexorTools(
+      async () => ({
+        runId: "sub-failed",
+        status: "failed",
+        summary: "delegated child failed",
+        failure,
+      }),
+      {
+        parentRunId: "run-parent",
+        repoRoot: "/tmp/project",
+        depth: 1,
+        maxSubRuns: 0,
+        parentBudget: { kind: "finite", maxUsd: 0 },
+      },
+    );
+
+    const output = await tools
+      .find((tool) => tool.name === "claudexor_run_result")!
+      .handler({ runId: "sub-failed" }, {});
+
+    expect(output).not.toBeTypeOf("string");
+    expect(typeof output === "string" ? null : output.structured?.["failure"]).toEqual(failure);
+  });
+
   it("refuses unscoped status/result reads when the belt has no parent id", async () => {
     let calls = 0;
     const tools = beltClaudexorTools(

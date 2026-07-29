@@ -1,10 +1,17 @@
 import type {
+  AuthPreference,
+  AuthSourceReadiness,
   CredentialProfile,
+  CredentialProfileStatus,
   HarnessEvent,
   HarnessRunSpec,
   QuotaSnapshot,
 } from "@claudexor/schema";
-import { HarnessRunSpec as HarnessRunSpecSchema } from "@claudexor/schema";
+import { redactSecrets } from "@claudexor/util";
+import {
+  estimateEffectiveAuthRoute,
+  HarnessRunSpec as HarnessRunSpecSchema,
+} from "@claudexor/schema";
 
 /**
  * The ONE resolve owner for credential profiles (INV-135): explicit id →
@@ -46,12 +53,77 @@ export async function selectedProfileAvailability(input: {
   }
   if (!input.probe) return `harness "${input.harnessId}" has no profile probe`;
   const result = await input.probe(profile);
+  return profileStatusAdmits(profile, result)
+    ? "available"
+    : (result.detail ?? `${result.availability}/${result.verification}`);
+}
+
+/** One readiness predicate shared by run admission and accounts projection. */
+export function profileStatusAdmits(
+  profile: Pick<CredentialProfile, "credential_kind">,
+  result: { availability: string; verification: string },
+): boolean {
   const verificationAdmits =
     result.verification === "passed" ||
     (profile.credential_kind === "api_key" && result.verification === "not_run");
-  return result.availability === "available" && verificationAdmits
-    ? "available"
-    : (result.detail ?? `${result.availability}/${result.verification}`);
+  return result.availability === "available" && verificationAdmits;
+}
+
+/** One fail-closed profile doctor wrapper shared by Accounts and runtime
+ * selection. Probe failures are readiness facts, never selector exceptions. */
+export async function probeCredentialProfileStatus(
+  profile: CredentialProfile,
+  probe?: (profile: CredentialProfile) => Promise<CredentialProfileStatus>,
+): Promise<CredentialProfileStatus> {
+  if (!probe) {
+    return {
+      profile_id: profile.profile_id,
+      harness_id: profile.harness_id,
+      availability: "unknown",
+      verification: "not_run",
+      detail: `harness "${profile.harness_id}" has no profile probe`,
+      last_verified_at: null,
+    };
+  }
+  try {
+    return await probe(profile);
+  } catch (error) {
+    return {
+      profile_id: profile.profile_id,
+      harness_id: profile.harness_id,
+      availability: "unknown",
+      verification: "not_run",
+      detail: `profile readiness probe failed: ${redactSecrets(
+        error instanceof Error ? error.message : String(error),
+      )}`,
+      last_verified_at: null,
+    };
+  }
+}
+
+/** Same precedence used by run admission: the first explicit route wins;
+ * `auto` means fall through rather than shadow a more general setting. */
+export function effectiveAuthPreference(
+  ...values: Array<AuthPreference | null | undefined>
+): AuthPreference {
+  return values.find((value) => value !== undefined && value !== null && value !== "auto") ?? "auto";
+}
+
+/** Fresh effective route for the unprofiled/default subject in Accounts. The
+ * gateway status proves aggregate intent readiness; the schema auth estimator
+ * then chooses the exact usable source under the same configured preference as
+ * run admission. Returning the route (not merely a bool) keeps next_up labels
+ * truthful when a native-capable harness falls back to an API key. */
+export function defaultCredentialRoute(
+  status: {
+  status: "ok" | "degraded" | "unavailable";
+  routableIntents: readonly unknown[];
+  authSources: readonly AuthSourceReadiness[];
+  },
+  requested: AuthPreference,
+): "local_session" | "api_key" | null {
+  if (status.status !== "ok" || status.routableIntents.length === 0) return null;
+  return estimateEffectiveAuthRoute(requested, status.authSources);
 }
 
 export interface ProfilePolicy {
@@ -117,6 +189,7 @@ export function nextEligibleProfile(
   policy: ProfilePolicy,
   current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null,
   snapshots: readonly QuotaSnapshot[],
+  readyProfileIds: ReadonlySet<string>,
   excluded: ReadonlySet<string> = new Set(),
 ): CredentialProfile | null {
   const pool = registry.filter((p) => p.harness_id === harnessId && p.enabled);
@@ -138,6 +211,7 @@ export function nextEligibleProfile(
     // same round-16 BLOCK applies — rotating the subscription default INTO an
     // api_key profile would silently change the payment model mid-attempt.
     if (current === null && candidate.credential_kind === "api_key") continue;
+    if (!readyProfileIds.has(candidate.profile_id)) continue;
     if (
       profileHeadroomBreach(snapshots, harnessId, candidate.profile_id, policy.headroom_threshold)
     )
@@ -153,38 +227,74 @@ export function nextEligibleProfile(
  * routing: explicit control is a per-run `--profile` / per-thread pin.
  *
  * Semantics mirror run-time admission: an unpinned run's default subject is the
- * native/CLI login when it participates in the ladder; enabled profiles route
+ * unprofiled/default credential when it participates in the ladder; enabled profiles route
  * only by explicit pin or, under `rotate`, as the quota-failover target when the
- * native default is already over headroom. A disabled CLI login leaves an
+ * default subject is already over headroom. A disabled default leaves an
  * unpinned run with nothing routable. */
 export type NextUpIdentity =
-  { kind: "profile"; profileId: string } | { kind: "native" } | { kind: "none"; reason: string };
+  | { kind: "profile"; profileId: string }
+  | { kind: "native"; route: "local_session" | "api_key" }
+  | { kind: "none"; reason: string };
 
 export function nextUpIdentity(args: {
   registry: readonly CredentialProfile[];
   harnessId: string;
   policy: ProfilePolicy;
   snapshots: readonly QuotaSnapshot[];
-  nativeEnabled: boolean;
+  defaultEnabled: boolean;
+  /** Fresh doctor/admission truth for the unprofiled default subject. */
+  defaultReady: boolean;
+  /** Effective source route of that default subject under configured auth preference. */
+  defaultRoute: "local_session" | "api_key" | null;
+  /** Profiles admitted by their fresh profile doctor probe in this snapshot. */
+  readyProfileIds: ReadonlySet<string>;
 }): NextUpIdentity {
-  const { registry, harnessId, policy, snapshots, nativeEnabled } = args;
-  if (!nativeEnabled) {
+  const {
+    registry,
+    harnessId,
+    policy,
+    snapshots,
+    defaultEnabled,
+    defaultReady,
+    defaultRoute,
+    readyProfileIds,
+  } = args;
+  if (!defaultEnabled) {
     return {
       kind: "none",
-      reason: "the CLI login is disabled; pin an account per-run (--profile) or per-thread",
+      reason: "the default credential is disabled; enable it or pin an account per-run (--profile)",
+    };
+  }
+  if (!defaultReady) {
+    return {
+      kind: "none",
+      reason: "the default credential is not ready; refresh Accounts or run `claudexor doctor`",
     };
   }
   // Under `rotate`, a native/default subject already over its headroom bound
   // fails over to the next eligible enabled profile BEFORE spawn — that is who
   // an unpinned run routes to next. `ask`/`fail` proceed on the native default.
-  if (policy.limit_action === "rotate") {
+  if (policy.limit_action === "rotate" && defaultRoute === "local_session") {
     const breach = profileHeadroomBreach(snapshots, harnessId, null, policy.headroom_threshold);
     if (breach) {
-      const next = nextEligibleProfile(registry, harnessId, policy, null, snapshots);
+      const next = nextEligibleProfile(
+        registry,
+        harnessId,
+        policy,
+        null,
+        snapshots,
+        readyProfileIds,
+      );
       if (next) return { kind: "profile", profileId: next.profile_id };
     }
   }
-  return { kind: "native" };
+  if (!defaultRoute) {
+    return {
+      kind: "none",
+      reason: "the default credential route is unknown; refresh Accounts or run `claudexor doctor`",
+    };
+  }
+  return { kind: "native", route: defaultRoute };
 }
 
 /**
@@ -213,6 +323,7 @@ function emitRotationExhausted(args: {
   policy: ProfilePolicy;
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
+  readyProfileIds: ReadonlySet<string>;
   excluded?: ReadonlySet<string>;
   attemptId?: string;
   reason: "profile_headroom_preflight" | "vendor_limit_rejected";
@@ -240,6 +351,8 @@ function emitRotationExhausted(args: {
                 ? "credential_kind_mismatch"
                 : args.current === null && profile.credential_kind === "api_key"
                   ? "credential_kind_mismatch"
+                  : !args.readyProfileIds.has(profile.profile_id)
+                    ? "not_ready"
                   : breach
                     ? "headroom_exceeded"
                     : "not_selected";
@@ -273,9 +386,10 @@ export function preflightCredentialProfile(args: {
   policy: ProfilePolicy;
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
+  readyProfileIds: ReadonlySet<string>;
   emit: EmitFn;
 }): CredentialProfile {
-  const { profile, harnessId, policy, registry, snapshots, emit } = args;
+  const { profile, harnessId, policy, registry, snapshots, readyProfileIds, emit } = args;
   const breach = profileHeadroomBreach(
     snapshots,
     harnessId,
@@ -303,7 +417,14 @@ export function preflightCredentialProfile(args: {
     );
   }
   if (policy.limit_action !== "rotate") return profile;
-  const next = nextEligibleProfile(registry, harnessId, policy, profile, snapshots);
+  const next = nextEligibleProfile(
+    registry,
+    harnessId,
+    policy,
+    profile,
+    snapshots,
+    readyProfileIds,
+  );
   if (!next) {
     emitRotationExhausted({
       current: profile,
@@ -311,6 +432,7 @@ export function preflightCredentialProfile(args: {
       policy,
       registry,
       snapshots,
+      readyProfileIds,
       reason: "profile_headroom_preflight",
       emit,
     });
@@ -343,10 +465,12 @@ export function preflightDefaultSubject(args: {
   policy: ProfilePolicy;
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
+  readyProfileIds: ReadonlySet<string>;
+  defaultRoute: "local_session" | "api_key" | null;
   emit: EmitFn;
 }): CredentialProfile | null {
-  const { harnessId, policy, registry, snapshots, emit } = args;
-  if (policy.limit_action !== "rotate") return null;
+  const { harnessId, policy, registry, snapshots, readyProfileIds, defaultRoute, emit } = args;
+  if (policy.limit_action !== "rotate" || defaultRoute !== "local_session") return null;
   const breach = profileHeadroomBreach(snapshots, harnessId, null, policy.headroom_threshold);
   if (!breach) return null;
   emit("route.profile.headroom_exceeded", {
@@ -358,7 +482,14 @@ export function preflightDefaultSubject(args: {
     threshold: breach.threshold,
     resets_at: breach.resets_at,
   });
-  const next = nextEligibleProfile(registry, harnessId, policy, null, snapshots);
+  const next = nextEligibleProfile(
+    registry,
+    harnessId,
+    policy,
+    null,
+    snapshots,
+    readyProfileIds,
+  );
   if (!next) {
     emitRotationExhausted({
       current: null,
@@ -366,6 +497,7 @@ export function preflightDefaultSubject(args: {
       policy,
       registry,
       snapshots,
+      readyProfileIds,
       reason: "profile_headroom_preflight",
       emit,
     });
@@ -400,6 +532,7 @@ export function planReactiveRotation(args: {
   policy: ProfilePolicy;
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
+  readyProfileIds: ReadonlySet<string>;
   triedProfiles: Set<string>;
   sawTypedLimit: boolean;
   deliverableEmpty: boolean;
@@ -416,6 +549,7 @@ export function planReactiveRotation(args: {
     args.policy,
     args.currentProfile,
     args.snapshots,
+    args.readyProfileIds,
     args.triedProfiles,
   );
   if (!next) {
@@ -425,6 +559,7 @@ export function planReactiveRotation(args: {
       policy: args.policy,
       registry: args.registry,
       snapshots: args.snapshots,
+      readyProfileIds: args.readyProfileIds,
       excluded: args.triedProfiles,
       attemptId: args.attemptId,
       reason: "vendor_limit_rejected",
@@ -505,6 +640,7 @@ export function rotateSpecOnTypedLimit(args: {
   policy: ProfilePolicy;
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
+  readyProfileIds: ReadonlySet<string>;
   triedProfiles: Set<string>;
   sawTypedLimit: boolean;
   deliverableEmpty: boolean;
@@ -523,6 +659,7 @@ export function rotateSpecOnTypedLimit(args: {
     policy: args.policy,
     registry: args.registry,
     snapshots: args.snapshots,
+    readyProfileIds: args.readyProfileIds,
     triedProfiles: args.triedProfiles,
     sawTypedLimit: args.sawTypedLimit,
     deliverableEmpty: args.deliverableEmpty,

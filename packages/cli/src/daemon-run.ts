@@ -234,25 +234,11 @@ export async function enqueueAndAwait(
     const startText = await startRes.text();
     const start = startText ? (JSON.parse(startText) as Record<string, unknown>) : {};
     if (!startRes.ok) {
-      const message =
-        typeof start["message"] === "string"
-          ? (start["message"] as string)
-          : `run enqueue failed (HTTP ${startRes.status})`;
-      const code = typeof start["code"] === "string" ? (start["code"] as string) : undefined;
-      if (code === "unsupported_schema_dialect" || code === "invalid_output_schema") {
-        return {
-          runId: "",
-          runDir: "",
-          status: "failed",
-          jobId: "",
-          error: message,
-          errorCode: code,
-          errorStatus: startRes.status,
-          errorRetryable:
-            typeof start["retryable"] === "boolean" ? (start["retryable"] as boolean) : false,
-        };
-      }
-      throw new Error(message);
+      throw controlProblemError(
+        startRes.status,
+        start,
+        `run enqueue failed (HTTP ${startRes.status})`,
+      );
     }
     jobId = String(start["jobId"] ?? "");
     runId = typeof start["runId"] === "string" ? (start["runId"] as string) : "";

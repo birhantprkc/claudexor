@@ -61,6 +61,13 @@ const resources = {
 };
 
 describe("run request requirements preflight", () => {
+  const gitAvailable = async () => ({
+    status: "available" as const,
+    version: "git version test",
+    detail: null,
+    remediation: null,
+  });
+
   it("requires every explicit attachment lane but filters an incompatible auto lane", async () => {
     const compatible = adapter("compatible", { attachments: [textInput] });
     const incompatible = adapter("incompatible");
@@ -72,6 +79,7 @@ describe("run request requirements preflight", () => {
     const preflight = createRunRequirementsPreflight(resources, "/no-project", {
       registry: adapters,
       statusAll,
+      gitCapability: gitAvailable,
     });
     const baseRequest = {
       prompt: "read attachment",
@@ -100,6 +108,7 @@ describe("run request requirements preflight", () => {
         resolvedRoots.push(root);
         return "full";
       },
+      gitCapability: gitAvailable,
     });
 
     await expect(
@@ -127,5 +136,134 @@ describe("run request requirements preflight", () => {
       ),
     ).rejects.toMatchObject({ code: "browser_unavailable" });
     expect(resolvedRoots).toEqual(["/trusted-project"]);
+  });
+
+  it("refuses only Git-dependent run shapes before harness work", async () => {
+    let calls = 0;
+    const preflight = createRunRequirementsPreflight(resources, "/no-project", {
+      gitCapability: async () => {
+        calls += 1;
+        return {
+          status: "developer_tools_stub",
+          version: null,
+          detail: "xcode-select: no developer tools",
+          remediation:
+            "Install Apple Command Line Tools with `xcode-select --install`, then retry.",
+        };
+      },
+    });
+
+    await expect(
+      preflight(ControlRunStartRequest.parse({ prompt: "read", mode: "ask" })),
+    ).resolves.toBeUndefined();
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "repair live",
+          mode: "agent",
+          untilClean: true,
+          execution: { isolation: "live" },
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    expect(calls).toBe(0);
+
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "best of",
+          mode: "agent",
+          n: 2,
+          execution: { isolation: "envelope" },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "git_developer_tools_stub",
+      status: 503,
+      retryable: true,
+      requiredActions: [expect.stringContaining("xcode-select --install")],
+      context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+    });
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "single live",
+          mode: "agent",
+          execution: { isolation: "live" },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "git_developer_tools_stub", status: 503 });
+    expect(calls).toBe(2);
+  });
+
+  it("honors the daemon's effective thread-workspace Git decision", async () => {
+    let probes = 0;
+    const preflight = createRunRequirementsPreflight(resources, "/no-project", {
+      requiresGit: () => true,
+      gitCapability: async () => {
+        probes += 1;
+        return {
+          status: "missing" as const,
+          version: null,
+          detail: "git executable was not found",
+          remediation: "Install Git and retry.",
+        };
+      },
+    });
+
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "repair live",
+          mode: "agent",
+          untilClean: true,
+          execution: { isolation: "live" },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "git_missing", status: 503 });
+    expect(probes).toBe(1);
+  });
+
+  it("defers only Git for durable thread jobs while keeping browser admission eager", async () => {
+    let probes = 0;
+    const lane = adapter("plain");
+    const preflight = createRunRequirementsPreflight(
+      resources,
+      "/no-project",
+      {
+        requiresGit: () => true,
+        gitCapability: async () => {
+          probes += 1;
+          return {
+            status: "missing" as const,
+            version: null,
+            detail: null,
+            remediation: "Install Git and retry.",
+          };
+        },
+        registry: registry(lane),
+        statusAll: async () => [
+          { id: lane.id, status: "ok" as const, enabledIntents: ["implement" as const] },
+        ],
+      },
+      { git: "durable_job" },
+    );
+
+    await expect(
+      preflight(ControlRunStartRequest.parse({ prompt: "durable thread", mode: "agent" })),
+    ).resolves.toBeUndefined();
+    expect(probes).toBe(0);
+
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "browser",
+          mode: "agent",
+          browser: true,
+          access: "full",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "browser_unavailable" });
+    expect(probes).toBe(0);
   });
 });

@@ -13,51 +13,57 @@ import {
 import { loadConfig, updateGlobalConfig } from "@claudexor/config";
 import { listTrustService, updateTrustService } from "./trust-services.js";
 import { SecretStore, isManagedSecretName } from "@claudexor/secrets";
-import { purgeProfileLanes, purgeThreadLanes, purgeThreadWorktree } from "@claudexor/workspace";
+import {
+  probeGitCapability,
+  purgeProfileLanes,
+  purgeThreadLanes,
+  purgeThreadWorktree,
+} from "@claudexor/workspace";
 import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
 import {
   type ResourceAttachmentRef,
   ControlCredentialProfileCreateRequest,
   type CredentialProfile,
   ControlSettingsUpdateRequest,
+  type ControlRunStartRequest,
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
-import {
-  harnessAccountsProjection,
-  profileAccountIdentity,
-  profileDoctorStatus,
-} from "./accounts-projection.js";
+import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
 import {
   canonicalIsolationLocator,
   invalidateDoctorCache,
   normalizeThroughExistingAncestor,
-  validateModel,
 } from "@claudexor/core";
 import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
 import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
-import { AuthReadinessService, normalizeReadiness } from "@claudexor/gateway";
+import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
+import {
+  createCredentialProfilesService,
+  projectHarnessStatuses,
+  type HarnessListInput,
+} from "./accounts-services.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
-import { delegationCapabilityFor } from "./delegation-capability.js";
 import { commitSettingsUpdate, settingsSnapshot } from "./settings-service.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 import { ACTIVE_SETUP_STATES, SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { createRunRequirementsPreflight } from "./request-preflight.js";
+import { threadRunStartRequiresGit } from "./thread-execution-workspace.js";
 import { applyThreadDiff, type ThreadApplyOptions } from "./thread-delivery.js";
 import {
   assertCredentialProfileCompatibility,
   assertCredentialProfileRegistered,
 } from "./profile-compatibility.js";
 import { remoteFilesystemServices } from "./remote-filesystem.js";
+import { projectRunApplicability } from "./run-applicability.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 type SetupJobManager = ReturnType<typeof createSetupJobManager>;
 type SetupBinding = SetupLifecycleBinding<SetupJobStore, SetupJobManager>;
-type HarnessListInput = { fresh?: boolean; includeFakes?: boolean; harnessIds?: string[] };
 /**
  * The project ROOT a non-terminal job runs against (project-remove active-run
  * fence), or null when it holds no project. Parsed via the typed `RunScope`
@@ -112,9 +118,36 @@ export function controlServices(
     }
   };
   mkdirSync(NO_PROJECT_ROOT, { recursive: true, mode: 0o700 });
-  const preflightRunRequirements = createRunRequirementsPreflight(resources, NO_PROJECT_ROOT);
+  const preflightRunRequirements = createRunRequirementsPreflight(resources, NO_PROJECT_ROOT, {
+    requiresGit: (request: ControlRunStartRequest) => {
+      const root = request.scope.kind === "project" ? request.scope.root : NO_PROJECT_ROOT;
+      const thread = request.threadId ? threads.getThread(request.threadId) : undefined;
+      return threadRunStartRequiresGit(
+        request,
+        thread,
+        loadConfig(root).project.constraints.protected_paths,
+      );
+    },
+  });
+  const preflightThreadRunRequirements = createRunRequirementsPreflight(
+    resources,
+    NO_PROJECT_ROOT,
+    {
+      requiresGit: (request: ControlRunStartRequest) => {
+        const root = request.scope.kind === "project" ? request.scope.root : NO_PROJECT_ROOT;
+        const thread = request.threadId ? threads.getThread(request.threadId) : undefined;
+        return threadRunStartRequiresGit(
+          request,
+          thread,
+          loadConfig(root).project.constraints.protected_paths,
+        );
+      },
+    },
+    { git: "durable_job" },
+  );
   return {
     preflightRunRequirements,
+    preflightThreadRunRequirements,
     createUpload: async (input: unknown, idempotencyKey: string) =>
       resources.create(input, idempotencyKey),
     writeUpload: async (uploadId: string, chunks: AsyncIterable<Uint8Array>) =>
@@ -281,10 +314,8 @@ export function controlServices(
     applyThread: async (id: string, opts: ThreadApplyOptions) => applyThreadDiff(threads, id, opts),
     setTurnEnqueueError: (
       turnId: string,
-      message: string,
-      code: string | null,
-      retryable?: boolean,
-    ) => threads.setTurnEnqueueError(turnId, message, code, retryable ?? true),
+      problem: import("@claudexor/schema").TurnEnqueueProblem,
+    ) => threads.setTurnEnqueueError(turnId, problem),
     listTrust: listTrustService,
     updateTrust: updateTrustService,
     pendingInteractions: (runId: string) => interactions.pendingForRun(runId),
@@ -304,40 +335,18 @@ export function controlServices(
     completeDelivery: async (id: string, result: unknown) => threads.completeDelivery(id, result),
     failDelivery: async (id: string, error: unknown) => threads.failDelivery(id, error),
     harnesses: async (input?: HarnessListInput) => {
-      const statuses = await buildGateway({ includeFakes: input?.includeFakes ?? false }).statusAll(
-        { cwd: NO_PROJECT_ROOT, fresh: input?.fresh ?? false },
-        input?.harnessIds,
-      );
-      const cfg = loadConfig(NO_PROJECT_ROOT);
-      return {
-        harnesses: await Promise.all(
-          statuses.map(async (s) => {
-            const configured = cfg.global.harnesses[s.id]?.default_model ?? null;
-            let check: { status: "ok" | "rejected"; message?: string | null } | null = null;
-            if (configured) {
-              const truth = await harnessModels(s.id, NO_PROJECT_ROOT, true);
-              check = validateModel(
-                configured,
-                truth.models.map((m) => m.id),
-                truth.source === "api" ? "api" : "manifest",
-              );
-            }
-            return {
-              ...s,
-              configuredModel: configured,
-              configuredModelCheck: check,
-              delegation: delegationCapabilityFor(s.manifest),
-              // The display-ready readiness list (W4.7): normalized ONCE here;
-              // Swift renders it verbatim and never parses ids or strings.
-              readiness: normalizeReadiness({
-                checks: s.checks,
-                authSources: s.authSources,
-                configuredModel: configured,
-                configuredModelCheck: check,
-              }),
-            };
-          }),
+      const [statuses, git] = await Promise.all([
+        buildGateway({ includeFakes: input?.includeFakes ?? false }).statusAll(
+          { cwd: NO_PROJECT_ROOT, fresh: input?.fresh ?? false },
+          input?.harnessIds,
         ),
+        probeGitCapability(),
+      ]);
+      return {
+        // Additive/optional on the wire so older clients can ignore it while
+        // Doctor reads system readiness without a second capability request.
+        git,
+        harnesses: await projectHarnessStatuses(statuses),
       };
     },
     harnessModels: async (input: { harnessId: string; route?: "local_session" | "api_key" }) =>
@@ -345,6 +354,8 @@ export function controlServices(
     authReadiness: async (input: { harnessId: string; request: unknown }) =>
       authReadiness.refresh(input.harnessId, input.request),
     agentCapabilities: async () => buildAgentCapabilityCatalog(),
+    runApplicability: async (input: { repoRoot: string }) =>
+      projectRunApplicability(input.repoRoot),
     createSetupJob: async (input: { request: unknown; idempotencyKey: string; clientId: string }) =>
       setupJobs().create(input.request, {
         key: input.idempotencyKey,
@@ -382,24 +393,7 @@ export function controlServices(
     refreshQuota: async () => quotaRegistry().refresh(),
     // INV-135: durable registry + live doctor projection, one probe per
     // profile; adapters without profile support report honest unknown.
-    credentialProfiles: async () => {
-      const profiles = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
-      const out = [];
-      for (const profile of profiles) {
-        out.push({
-          profile,
-          status: await profileDoctorStatus(profile),
-          identity: profileAccountIdentity(profile),
-        });
-      }
-      return {
-        profiles: out,
-        harnessAccounts: await harnessAccountsProjection(
-          NO_PROJECT_ROOT,
-          quotaRegistry().read().snapshots,
-        ),
-      };
-    },
+    credentialProfiles: createCredentialProfilesService(quotaRegistry),
     // PATCH /credential-profiles/:harness/:id — the Enabled toggle of the
     // accounts symmetry (INV-135). Flips the profile's durable `enabled` in the
     // registry (one locked write) and returns the refreshed doctor projection.

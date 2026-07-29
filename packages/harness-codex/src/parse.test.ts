@@ -446,6 +446,52 @@ describe("parseCodexEvent", () => {
     expect(compile?.transient).toBeUndefined();
   });
 
+  it("maps exact Codex reconnect notices to nonterminal retry status", () => {
+    const messages = [
+      "Reconnecting... 5/5 (request timed out)",
+      "Reconnecting... 1/5 (request timed out)",
+      "Reconnecting... 2/5 (request timed out)",
+    ];
+    const events = messages.flatMap(
+      (message) => parseCodexEvent({ type: "error", message }, "s-reconnect") ?? [],
+    );
+    expect(events.map((value) => value.type)).toEqual(["status", "status", "status"]);
+    expect(events.map((value) => value.status)).toEqual([
+      expect.objectContaining({
+        kind: "api_retry",
+        attempt: 5,
+        max_retries: 5,
+        error_category: "timeout",
+      }),
+      expect.objectContaining({
+        kind: "api_retry",
+        attempt: 1,
+        max_retries: 5,
+        error_category: "timeout",
+      }),
+      expect.objectContaining({
+        kind: "api_retry",
+        attempt: 2,
+        max_retries: 5,
+        error_category: "timeout",
+      }),
+    ]);
+    for (const value of events) {
+      expect(value.transient?.kind).toBe("timeout");
+      expect(value.error).toBeUndefined();
+      expect(() => HarnessEvent.parse(value)).not.toThrow();
+    }
+  });
+
+  it("keeps a real post-reconnect exhaustion as an error", () => {
+    const exhausted = parseCodexEvent(
+      { type: "error", message: "request timed out" },
+      "s-reconnect",
+    )?.[0];
+    expect(exhausted?.type).toBe("error");
+    expect(exhausted?.transient?.kind).toBe("timeout");
+  });
+
   it("maps a codex todo_list to a plan message (the relay plan signal)", () => {
     // Verified live (codex 0.142): item.completed carries item.type=todo_list with items[].{text,completed}.
     const line =
@@ -461,25 +507,25 @@ describe("parseCodexEvent", () => {
 
 describe("plan progress", () => {
   it("maps todo_list items to the TYPED plan_progress field (message kept for plan extraction)", () => {
-    const out = parseCodexEvent(
-      {
-        type: "item.completed",
-        item: {
-          type: "todo_list",
-          items: [
-            { text: "step one", completed: true },
-            { text: "step two", completed: false },
-          ],
-        },
+    const state: CodexParseState = {};
+    const raw = {
+      type: "item.completed",
+      item: {
+        type: "todo_list",
+        items: [
+          { text: "step one", completed: true },
+          { text: "step two", completed: false },
+        ],
       },
-      "s1",
-    );
+    };
+    const out = parseCodexEvent(raw, "s1", state);
     const ev = out?.[0];
     expect(ev?.type).toBe("message");
     expect(ev?.plan_progress?.items).toEqual([
       { id: "codex-0", title: "step one", status: "completed" },
       { id: "codex-1", title: "step two", status: "pending" },
     ]);
+    expect(parseCodexEvent(raw, "s1", state)).toEqual([]);
   });
 });
 

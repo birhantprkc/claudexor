@@ -72,6 +72,7 @@
                     "wall_clock_exceeded",
                     "user_cancelled",
                     "crash_interrupted",
+                    "workspace_unavailable",
                     "input_required",
                     "work_incomplete",
                     "context_capacity_exhausted",

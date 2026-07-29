@@ -70,7 +70,7 @@ export function runOutcomeLabel(facts: RunOutcomeFacts): string {
     case "failed":
       return facts.reason ? `Failed (${facts.reason.replaceAll("_", " ")})` : "Failed";
     case "cancelled":
-      return "Cancelled";
+      return facts.reason === "wall_clock_exceeded" ? "Time limit reached" : "Cancelled";
     case "interrupted":
       return "Interrupted";
     case "succeeded":
@@ -305,9 +305,14 @@ export function requiredActionsFor(
   return actions;
 }
 
-/** ACP stop-reason projection (3-bucket collapse, unchanged semantics). */
-export function acpStopReason(lifecycle: string): "cancelled" | "refusal" | "end_turn" {
-  if (lifecycle === "cancelled") return "cancelled";
+/** ACP stop-reason projection. A daemon-enforced hard time limit is a typed
+ * refusal: the user did not cancel the turn. Legacy cancellations without a
+ * reason remain cancelled because their initiator cannot be reconstructed. */
+export function acpStopReason(
+  lifecycle: string,
+  reason?: RunReason | null,
+): "cancelled" | "refusal" | "end_turn" {
+  if (lifecycle === "cancelled") return reason === "wall_clock_exceeded" ? "refusal" : "cancelled";
   if (lifecycle === "failed" || lifecycle === "interrupted") return "refusal";
   return "end_turn";
 }
@@ -339,7 +344,10 @@ export function reasonFromFailureCategory(
   lifecycle: RunOutcomeFacts["lifecycle"],
   category: string | null | undefined,
 ): RunReason | null {
-  if (lifecycle === "cancelled") return "user_cancelled";
+  // A legacy terminal with no RunFacts receipt cannot prove who initiated the
+  // cancellation. New runs carry the exact reason in RunFacts; keep the
+  // compatibility projection honest instead of inventing operator intent.
+  if (lifecycle === "cancelled") return null;
   if (lifecycle === "interrupted") return "crash_interrupted";
   if (lifecycle !== "failed") return null;
   switch (category) {

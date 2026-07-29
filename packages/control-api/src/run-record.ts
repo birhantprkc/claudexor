@@ -10,6 +10,8 @@ export interface DaemonRunRecord {
   errorCode?: string;
   errorStatus?: number;
   errorRetryable?: boolean;
+  errorRequiredActions?: string[];
+  errorContext?: Record<string, unknown>;
   params?: unknown;
   createdAt?: string;
   startedAt?: string;

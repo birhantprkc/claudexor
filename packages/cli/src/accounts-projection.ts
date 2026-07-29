@@ -16,7 +16,14 @@ import type {
   QuotaSnapshot,
 } from "@claudexor/schema";
 import { loadConfig } from "@claudexor/config";
-import { nextUpIdentity } from "@claudexor/orchestrator";
+import {
+  defaultCredentialRoute,
+  effectiveAuthPreference,
+  nextUpIdentity,
+  probeCredentialProfileStatus,
+  profileStatusAdmits,
+} from "@claudexor/orchestrator";
+import type { HarnessStatus } from "@claudexor/gateway";
 import { codexAccountIdentity, defaultNativeCodexHome } from "@claudexor/harness-codex";
 import { claudeAccountIdentity, defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { buildGateway, buildRegistry } from "./registry.js";
@@ -55,45 +62,58 @@ export async function profileDoctorStatus(
   profile: CredentialProfile,
 ): Promise<CredentialProfileStatus> {
   const adapter = buildRegistry().get(profile.harness_id);
-  return adapter?.probeCredentialProfile
-    ? adapter.probeCredentialProfile(profile)
-    : {
-        profile_id: profile.profile_id,
-        harness_id: profile.harness_id,
-        availability: "unknown" as const,
-        verification: "not_run" as const,
-        detail: `harness "${profile.harness_id}" has no profile probe`,
-        last_verified_at: null,
-      };
+  return probeCredentialProfileStatus(
+    profile,
+    adapter?.probeCredentialProfile?.bind(adapter),
+  );
 }
 
 export async function harnessAccountsProjection(
   repoRoot: string,
   quotaSnapshots: readonly QuotaSnapshot[] = [],
+  snapshot?: {
+    statuses?: readonly HarnessStatus[];
+    profiles?: readonly { profile: CredentialProfile; status: CredentialProfileStatus }[];
+  },
 ): Promise<ControlHarnessAccounts[]> {
   const cfg = loadConfig(repoRoot).global;
   const harnessIds = [...buildRegistry({ includeFakes: false }).keys()].sort();
   const nativeDetected = new Map<string, boolean>();
-  try {
-    const statuses = await buildGateway({ includeFakes: false }).statusAll(
-      { cwd: repoRoot, fresh: false },
-      harnessIds,
-    );
-    for (const s of statuses) {
-      nativeDetected.set(
-        s.id,
-        s.authSources.some(
-          (src) => src.source === "native_session" && src.availability === "available",
-        ),
+  let statuses: readonly HarnessStatus[] = snapshot?.statuses ?? [];
+  if (!snapshot?.statuses) {
+    try {
+      statuses = await buildGateway({ includeFakes: false }).statusAll(
+        { cwd: repoRoot, fresh: true },
+        harnessIds,
       );
+    } catch {
+      statuses = [];
     }
-  } catch {
-    // Doctor probe unavailable: every harness reports "native not detected"
-    // rather than failing the whole accounts listing.
+  }
+  const defaultRoutes = new Map<string, "local_session" | "api_key">();
+  for (const s of statuses) {
+    const native = s.authSources.find((source) => source.source === "native_session");
+    const detected = native?.availability === "available";
+    nativeDetected.set(s.id, detected);
+    const harness = cfg.harnesses[s.id];
+    const route = defaultCredentialRoute(
+      s,
+      effectiveAuthPreference(harness?.auth_preference, cfg.routing.auth_preference),
+    );
+    if (route) defaultRoutes.set(s.id, route);
+  }
+  const readyProfiles = new Map<string, Set<string>>();
+  for (const entry of snapshot?.profiles ?? []) {
+    if (!entry.profile.enabled || !profileStatusAdmits(entry.profile, entry.status)) continue;
+    const ready = readyProfiles.get(entry.profile.harness_id) ?? new Set<string>();
+    ready.add(entry.profile.profile_id);
+    readyProfiles.set(entry.profile.harness_id, ready);
   }
   return harnessIds.map((harnessId): ControlHarnessAccounts => {
     const h = cfg.harnesses[harnessId];
     const nativeEnabled = h?.native_credentials_enabled ?? true;
+    const defaultEnabled = (h?.enabled ?? true) && nativeEnabled;
+    const defaultRoute = defaultRoutes.get(harnessId) ?? null;
     return {
       harness_id: harnessId,
       native_credentials_enabled: nativeEnabled,
@@ -110,7 +130,10 @@ export async function harnessAccountsProjection(
           headroom_threshold: 0.9,
         },
         snapshots: quotaSnapshots,
-        nativeEnabled,
+        defaultEnabled,
+        defaultReady: defaultRoute !== null,
+        defaultRoute,
+        readyProfileIds: readyProfiles.get(harnessId) ?? new Set(),
       }),
     };
   });

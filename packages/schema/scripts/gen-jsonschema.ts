@@ -21,6 +21,8 @@ import {
   ControlPendingInteraction,
   ControlQuotaResponse,
   ControlCredentialProfilesResponse,
+  ControlCredentialProfilesSnapshotResponse,
+  ControlCredentialProfilesQueryResponse,
   ControlCredentialProfileCreateRequest,
   ControlCredentialProfileCreateResponse,
   ControlCredentialProfileUpdateRequest,
@@ -134,6 +136,8 @@ import {
   ControlProjectRemoveReceipt,
   ControlDirectoryEntry,
   ControlDirectoryListing,
+  GitCapability,
+  ControlRunApplicabilityResponse,
 } from "../src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -206,6 +210,8 @@ const schemas = {
   ControlPendingInteraction,
   ControlQuotaResponse,
   ControlCredentialProfilesResponse,
+  ControlCredentialProfilesSnapshotResponse,
+  ControlCredentialProfilesQueryResponse,
   ControlCredentialProfileCreateRequest,
   ControlCredentialProfileCreateResponse,
   ControlCredentialProfileUpdateRequest,
@@ -213,6 +219,8 @@ const schemas = {
   ControlCredentialProfileDeleteResponse,
   CredentialProfile,
   CredentialProfileStatus,
+  GitCapability,
+  ControlRunApplicabilityResponse,
   ControlInteractionAnswerRequest,
   ControlInteractionAnswerResponse,
   SecretMetadata,

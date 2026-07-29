@@ -1,13 +1,18 @@
 import {
   projectApplyEligibility,
   projectOutcomeBanner,
+  presentRunPrimaryOutput,
+  projectRunFailure,
   projectRunCouncil,
   projectRunLineage,
+  projectRunPrimaryOutput,
   projectRunSpendUsd,
 } from "./run-detail-projections.js";
+import { projectRunOutcomeFacts } from "./daemon-outcome.js";
 
 export function projectImmediateRunDetail(detail: Record<string, unknown> | null) {
   return {
+    outcomeFacts: projectRunOutcomeFacts(detail),
     applyEligibility: projectApplyEligibility(detail),
     spendUsd: projectRunSpendUsd(detail),
     council: projectRunCouncil(detail),
@@ -16,6 +21,7 @@ export function projectImmediateRunDetail(detail: Record<string, unknown> | null
       detail?.["planReadiness"] && typeof detail["planReadiness"] === "object"
         ? detail["planReadiness"]
         : null,
+    failure: projectRunFailure(detail),
     ...projectRunLineage(detail),
   };
 }
@@ -47,15 +53,13 @@ export function projectRecoveryRunDetail(
     pendingInteractions: Array.isArray(detail["pendingInteractions"])
       ? (detail["pendingInteractions"] as unknown[]).length
       : null,
-    outcomeFacts:
-      summary["outcomeFacts"] && typeof summary["outcomeFacts"] === "object"
-        ? summary["outcomeFacts"]
-        : null,
+    outcomeFacts: projectRunOutcomeFacts(detail),
     outcomeBanner: typeof detail["outcomeBanner"] === "string" ? detail["outcomeBanner"] : null,
     applyEligibility: detail["applyEligibility"] ?? null,
     planReadiness: detail["planReadiness"] ?? null,
     council: detail["council"] && typeof detail["council"] === "object" ? detail["council"] : null,
     budget: detail["budget"] && typeof detail["budget"] === "object" ? detail["budget"] : null,
+    failure: projectRunFailure(detail),
     parentRunId: typeof summary["parentRunId"] === "string" ? summary["parentRunId"] : null,
     delegatedFromRunId:
       typeof summary["delegatedFromRunId"] === "string" ? summary["delegatedFromRunId"] : null,
@@ -73,23 +77,19 @@ export function projectRecoveryRunDetail(
       ...base,
     };
   }
-  const primary =
-    detail["primaryOutput"] && typeof detail["primaryOutput"] === "object"
-      ? (detail["primaryOutput"] as Record<string, unknown>)
-      : null;
-  const primaryText = typeof primary?.["text"] === "string" ? primary["text"].trim() : "";
-  const presented =
-    primaryText && primary?.["truncated"] === true
-      ? `${primaryText}\n\n[Inline preview bounded; full artifact: ${String(primary["path"] ?? "unknown")}]`
-      : primaryText;
-  const primaryKind = typeof primary?.["kind"] === "string" ? primary["kind"] : null;
+  const primary = projectRunPrimaryOutput(detail);
+  const presented = presentRunPrimaryOutput(primary);
+  const primaryKind = primary?.kind ?? null;
+  const outcomeBanner = projectOutcomeBanner(detail);
   const terminalSummary =
     presented && primaryKind !== "patch"
       ? presented
-      : typeof detail["finalSummary"] === "string" && detail["finalSummary"]
-        ? detail["finalSummary"]
-        : primaryKind === "patch"
-          ? "patch produced (see artifact handles)"
-          : `run ${runId}: ${String(status ?? "unknown")}`;
+      : outcomeBanner
+        ? outcomeBanner
+        : typeof detail["finalSummary"] === "string" && detail["finalSummary"]
+          ? detail["finalSummary"]
+          : primaryKind === "patch"
+            ? "patch produced (see artifact handles)"
+            : `run ${runId}: ${String(status ?? "unknown")}`;
   return { summary: terminalSummary, ...base };
 }

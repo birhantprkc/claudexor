@@ -5,6 +5,7 @@ import { WorkspaceMode } from "./thread.js";
 import { AttachmentInputClass } from "./attachment.js";
 import { OutputSchemaDialect } from "./output-schema-dialect.js";
 import { DelegationCapability } from "./delegation.js";
+import { GitCapability } from "./git-capability.js";
 
 /**
  * AgentCapabilityCatalog — the machine-readable answer to "what can this
@@ -199,6 +200,9 @@ export const AgentCapabilityCatalog = z
         "Claudexor version serving this catalog (compare with CLAUDEXOR_PLUGIN_VERSION to detect plugin skew).",
       ),
     generatedAt: z.string().describe("ISO timestamp when the catalog was composed."),
+    git: GitCapability.describe(
+      "Execution-location Git readiness. Read-only and valid non-Git in-place flows do not require it.",
+    ),
     harnesses: z.array(CatalogHarness).describe("Live per-harness capabilities (doctor-backed)."),
     availableHarnesses: z.array(z.string()).describe("Convenience: ids with doctor status ok."),
     modes: z

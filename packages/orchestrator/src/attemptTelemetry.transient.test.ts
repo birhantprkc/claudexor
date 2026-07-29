@@ -5,7 +5,7 @@ import {
   createAttemptTelemetry,
   observeAttemptTelemetry,
 } from "./attemptTelemetry.js";
-import type { HarnessEvent } from "@claudexor/schema";
+import { RunTelemetry, type HarnessEvent } from "@claudexor/schema";
 
 // GH #31: the typed harness-failure taxonomy classifies every adapter/stream
 // transient failure at the adapter→orchestrator boundary. These tests pin the
@@ -76,6 +76,40 @@ describe("transient failure taxonomy (GH #31)", () => {
     expect(t.transientFailures[0]?.category).toBe("auth_failed");
     expect(t.transientFailures[0]?.retryable).toBe(false);
     expect(t.transientFailures[0]?.adapterCode).toBe("authentication_failed");
+  });
+
+  it("persists a normalized fractional-vendor delay through final telemetry", () => {
+    const t = fresh();
+    observeAttemptTelemetry(
+      t,
+      ev({
+        type: "status",
+        status: {
+          kind: "api_retry",
+          error_category: "authentication_failed",
+          retry_delay_ms: 573,
+        },
+      }),
+    );
+    const attempt = attemptTelemetryRecord("a01", "claude", t);
+    expect(attempt.transient_failures[0]?.retry_delay_ms).toBe(573);
+    expect(() =>
+      RunTelemetry.parse({
+        schema_version: 2,
+        run_id: "run-fractional-final",
+        task_id: "task-fractional-final",
+        mode: "ask",
+        requested_access: "readonly",
+        effective_access: "readonly",
+        external_context_policy: "auto",
+        effective_web_mode: "auto",
+        web_required: false,
+        web: {},
+        attempts: [attempt],
+        final_attempt_id: "a01",
+        generated_at: "2026-07-28T00:00:00Z",
+      }),
+    ).not.toThrow();
   });
 
   it("classifies invalid_request as config_error and model_not_found as capability_refused (both non-retryable)", () => {

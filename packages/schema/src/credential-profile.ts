@@ -145,8 +145,8 @@ export type AccountIdentity = z.infer<typeof AccountIdentity>;
  * purely informational, never user-set. Server-computed by the routing owner
  * from enabled profiles + native readiness + quota so no surface re-derives it:
  * `profile` names the enabled credential profile a quota-rotation would land on;
- * `native` is the CLI login (the default subject of an unpinned run); `none`
- * means an unpinned run has nothing routable (the CLI login is disabled and no
+ * `native` is the existing unprofiled/default subject (normally the CLI login,
+ * or the configured key for an API-only harness); `none` means an unpinned run has nothing routable (the default is disabled and no
  * account is pinned) with a human reason. Explicit control stays a per-run
  * `--profile` pin or a per-thread pin — this field never gates routing.
  */
@@ -157,14 +157,22 @@ export const ControlNextUpIdentity = z
       .strict()
       .describe("An enabled credential profile is who an unpinned run routes to next."),
     z
-      .object({ kind: z.literal("native") })
+      .object({
+        kind: z.literal("native"),
+        route: z
+          .enum(["local_session", "api_key"])
+          .optional()
+          .describe(
+            "Effective route of the unprofiled/default subject; omitted by older daemons.",
+          ),
+      })
       .strict()
-      .describe("The native/CLI login is the default subject of an unpinned run."),
+      .describe("The unprofiled/default credential is the subject of an unpinned run."),
     z
       .object({ kind: z.literal("none"), reason: z.string() })
       .strict()
       .describe(
-        "An unpinned run has nothing routable (the CLI login is disabled and no account is pinned).",
+        "An unpinned run has nothing routable (the default credential is disabled and no account is pinned).",
       ),
   ])
   .describe("Server-computed identity an unpinned run of this harness would route to next.");

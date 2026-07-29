@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ControlRunSummary, ControlTurnRunCard } from "@claudexor/schema";
+import { ControlRunSummary, ControlTurnRunCard, makeOutcomeFacts } from "@claudexor/schema";
 import { projectSession, projectThread, projectTurn, turnRunCard } from "./thread-projection.js";
 
 describe("Delegate thread-card projection", () => {
@@ -27,6 +27,22 @@ describe("Delegate thread-card projection", () => {
     expect(card.delegation).toBeNull();
     expect(card.delegatedChildRunIds).toEqual([]);
   });
+
+  it.each(["wall_clock_exceeded", "user_cancelled"] as const)(
+    "carries the canonical cancelled reason onto compact thread cards (%s)",
+    (reason) => {
+      const outcomeFacts = makeOutcomeFacts("cancelled", { reason });
+      const card = turnRunCard(
+        ControlRunSummary.parse({
+          jobId: `job-${reason}`,
+          runId: `run-${reason}`,
+          state: "cancelled",
+          outcomeFacts,
+        }),
+      );
+      expect(card.outcomeFacts).toEqual(outcomeFacts);
+    },
+  );
 });
 
 // Release wave round-15 #3: clients can SET a thread-sticky credential

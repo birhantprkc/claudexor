@@ -85,6 +85,19 @@ export function primaryOutput(
     const output = preview(rec, candidate.path);
     if (output?.text.trim()) return ControlPrimaryOutput.parse({ ...candidate, ...output });
   }
+  // A cancelled Ask has no answer artifact by design, but its terminal summary
+  // contains the actionable cancellation diagnostic. Promote it only for this
+  // terminal state; ordinary summaries remain non-primary compatibility text.
+  if (mode === "ask" && rec.state === "cancelled") {
+    const output = preview(rec, "final/summary.md");
+    if (output?.text.trim()) {
+      return ControlPrimaryOutput.parse({
+        kind: "diagnostic",
+        path: "final/summary.md",
+        ...output,
+      });
+    }
+  }
   return failure
     ? ControlPrimaryOutput.parse({
         kind: "diagnostic",

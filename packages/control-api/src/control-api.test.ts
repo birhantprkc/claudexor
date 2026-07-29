@@ -136,26 +136,74 @@ describe("normalizeRunStart prompt validation", () => {
     expect(req.protectedPathApprovals?.[0]?.path).toBe("packages/**/*.test.ts");
     expect(req.protectedPathApprovals?.[0]?.reason).toBe("test authoring requested");
   });
-  it.each(["ask", "plan"] as const)(
-    "rejects Agent-only review and approval controls on %s runs",
-    (mode) => {
-      for (const control of [
-        { reviewerPanel: [{ harness: "claude" }] },
-        { reviewerModels: { anthropic: "claude-opus-4-8" } },
-        { reviewerEfforts: { anthropic: "max" } },
-        { protectedPathApprovals: [{ path: "packages/**/*.test.ts" }] },
-      ]) {
+  it("rejects Agent write/review controls on read-only modes", () => {
+    const controls = [
+      { reviewerPanel: [{ harness: "claude" }] },
+      { reviewerModels: { anthropic: "claude-opus-4-8" } },
+      { reviewerEfforts: { anthropic: "max" } },
+      { protectedPathApprovals: [{ path: "packages/**" }] },
+      { synthesis: "never" },
+      { tests: [{ program: "true" }] },
+      { denyPaths: ["private/**"] },
+    ];
+    for (const mode of ["ask", "plan"] as const) {
+      for (const control of controls) {
         expect(() =>
           normalizeRunStartRequest({
             ...projectScope(),
-            prompt: "do the thing",
+            prompt: "read only",
             mode,
             ...control,
           }),
-        ).toThrowError(/only applies to agent runs/);
+        ).toThrowError(/only applies to agent/);
       }
-    },
-  );
+    }
+  });
+  it("treats empty reviewer maps and approval arrays as absent on read-only modes", () => {
+    for (const mode of ["ask", "plan"] as const) {
+      expect(() =>
+        normalizeRunStartRequest({
+          ...projectScope(),
+          prompt: "read only",
+          mode,
+          reviewerModels: {},
+          reviewerEfforts: {},
+          protectedPathApprovals: [],
+        }),
+      ).not.toThrow();
+    }
+  });
+  it("accepts outputSchema for Ask but rejects it for Plan", () => {
+    const outputSchema = { type: "object", properties: {} };
+    expect(() =>
+      normalizeRunStartRequest({
+        ...projectScope(),
+        prompt: "answer",
+        mode: "ask",
+        outputSchema,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      normalizeRunStartRequest({
+        ...projectScope(),
+        prompt: "plan",
+        mode: "plan",
+        outputSchema,
+      }),
+    ).toThrowError(/outputSchema applies to agent\/ask runs/);
+  });
+  it("rejects live execution on read-only modes", () => {
+    for (const mode of ["ask", "plan"] as const) {
+      expect(() =>
+        normalizeRunStartRequest({
+          ...projectScope(),
+          prompt: "read only",
+          mode,
+          execution: { isolation: "live" },
+        }),
+      ).toThrowError(/only supported for agent runs/);
+    }
+  });
   it("accepts the complete review and approval control set on Agent runs", () => {
     expect(() =>
       normalizeRunStartRequest({
@@ -750,6 +798,7 @@ describe("DaemonControlApiServer", () => {
         path: string;
         applicability: string;
         idempotency: string;
+        responseSchema: string | null;
         parameters: { name: string; location: string; required: boolean; enum: string[] | null }[];
       }[];
       const projectApplicable = ops.filter((o) => o.applicability === "project");
@@ -767,6 +816,17 @@ describe("DaemonControlApiServer", () => {
       const harnesses = ops.find((o) => o.method === "GET" && o.path === "/v2/harnesses");
       expect(harnesses?.parameters.map((p) => p.name)).toEqual(["fresh", "all", "harness"]);
       expect(harnesses?.parameters.every((p) => p.location === "query")).toBe(true);
+      const credentialProfiles = ops.find(
+        (o) => o.method === "GET" && o.path === "/v2/credential-profiles",
+      );
+      expect(credentialProfiles?.parameters).toEqual([
+        expect.objectContaining({
+          name: "snapshot",
+          location: "query",
+          enum: ["true", "false"],
+        }),
+      ]);
+      expect(credentialProfiles?.responseSchema).toBe("ControlCredentialProfilesQueryResponse");
       const models = ops.find((o) => o.path === "/v2/harnesses/:id/models");
       expect(models?.parameters[0]).toMatchObject({
         name: "route",
@@ -2170,10 +2230,9 @@ describe("DaemonControlApiServer", () => {
         return turn;
       },
       // The daemon ThreadStore contract: persist the refusal on the turn.
-      setTurnEnqueueError: (turnId, message, code, retryable) => {
+      setTurnEnqueueError: (turnId, problem) => {
         const turn = turns.find((t) => t["id"] === turnId);
-        if (turn && !turn["run_id"])
-          turn["enqueue_error"] = { message, code, retryable: retryable ?? true, failed_at: now };
+        if (turn && !turn["run_id"]) turn["enqueue_error"] = { ...problem, failed_at: now };
       },
     };
     await withDaemonServer(
@@ -2492,9 +2551,9 @@ describe("DaemonControlApiServer", () => {
         turns.push(turn);
         return turn;
       },
-      setTurnEnqueueError: (turnId, message, code) => {
+      setTurnEnqueueError: (turnId, problem) => {
         const turn = turns.find((t) => t["id"] === turnId);
-        if (turn) turn["enqueue_error"] = { message, code, failed_at: now };
+        if (turn) turn["enqueue_error"] = { ...problem, failed_at: now };
       },
       // Preflight refuses (e.g. a browser lane requirement) AFTER the turn exists.
       preflightRunRequirements: async () => {
@@ -2721,9 +2780,9 @@ describe("DaemonControlApiServer", () => {
     };
     const services: DaemonControlApiOptions["services"] = {
       threadDetail: async () => ({ thread: threadObj, sessions: [], turns }),
-      setTurnEnqueueError: (turnId, message, code) => {
+      setTurnEnqueueError: (turnId, problem) => {
         const turn = turns.find((t) => t["id"] === turnId);
-        if (turn && !turn["run_id"]) turn["enqueue_error"] = { message, code, failed_at: now };
+        if (turn && !turn["run_id"]) turn["enqueue_error"] = { ...problem, failed_at: now };
       },
     };
     await withDaemonServer(
@@ -2870,6 +2929,8 @@ describe("DaemonControlApiServer", () => {
             // Round-2 #4: the runner's typed throw declares retryable=false; the
             // daemon carries it onto the record and into the refused-turn record.
             errorRetryable: false,
+            errorRequiredActions: ["Answer the open plan question"],
+            errorContext: { planRunId: "run-plan" },
             params,
             createdAt: now,
           });
@@ -2894,6 +2955,8 @@ describe("DaemonControlApiServer", () => {
                 message: rec.error,
                 code: "plan_not_ready",
                 retryable: rec.errorRetryable ?? true,
+                required_actions: rec.errorRequiredActions ?? [],
+                context: rec.errorContext ?? {},
                 failed_at: now,
               };
             }
@@ -2947,11 +3010,14 @@ describe("DaemonControlApiServer", () => {
           expect(res.status).toBe(409);
           const body = (await res.json()) as {
             code?: string;
-            context?: { turnId?: string; threadId?: string };
+            requiredActions?: string[];
+            context?: { turnId?: string; threadId?: string; planRunId?: string };
           };
           expect(body.code).toBe("plan_not_ready");
           expect(body.context?.turnId).toBe("tn-impl");
           expect(body.context?.threadId).toBe("th-plan");
+          expect(body.context?.planRunId).toBe("run-plan");
+          expect(body.requiredActions).toEqual(["Answer the open plan question"]);
           // The turn is DURABLE: a thread reload projects it with the typed
           // enqueueError (never an eternally-empty bubble). head/run_ids are
           // unchanged — no run started.
@@ -2965,7 +3031,12 @@ describe("DaemonControlApiServer", () => {
               id: string;
               runId: string | null;
               planRunId: string | null;
-              enqueueError: { code: string | null; retryable: boolean } | null;
+              enqueueError: {
+                code: string | null;
+                retryable: boolean;
+                requiredActions: string[];
+                context: { planRunId?: string };
+              } | null;
             }[];
           };
           const durable = detail.turns.find((t) => t.id === "tn-impl");
@@ -2975,6 +3046,8 @@ describe("DaemonControlApiServer", () => {
           // Round-2 #4: the refusal is NOT retryable — the frozen plan keeps its
           // open questions, so Exact Retry could never make it ready.
           expect(durable?.enqueueError?.retryable).toBe(false);
+          expect(durable?.enqueueError?.requiredActions).toEqual(["Answer the open plan question"]);
+          expect(durable?.enqueueError?.context.planRunId).toBe("run-plan");
           expect(detail.thread.headRunId).toBe("run-plan"); // unchanged (plan run)
 
           // Idempotent: the SAME key returns the SAME durable turn and creates
@@ -3066,10 +3139,9 @@ describe("DaemonControlApiServer", () => {
       };
       const services: DaemonControlApiOptions["services"] = {
         threadDetail: async () => ({ thread: threadObj, sessions: [], turns }),
-        setTurnEnqueueError: (turnId, message, code, retryable) => {
+        setTurnEnqueueError: (turnId, problem) => {
           const turn = turns.find((t) => t["id"] === turnId);
-          if (turn && !turn["run_id"])
-            turn["enqueue_error"] = { message, code, retryable: retryable ?? true, failed_at: now };
+          if (turn && !turn["run_id"]) turn["enqueue_error"] = { ...problem, failed_at: now };
         },
       };
       await withDaemonServer(
@@ -3705,6 +3777,113 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("validates and preserves finalized resource references on Plan enqueue", async () => {
+    const { daemon } = fakeDaemon();
+    const repo = reapMk(join(tmpdir(), "claudexor-plan-resource-attachment-"));
+    let enqueued: Record<string, unknown> | undefined;
+    let validated: unknown;
+    let preflighted: unknown;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue(params: unknown) {
+        enqueued = params as Record<string, unknown>;
+        return daemon.enqueue(params);
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const start = await apiFetch(`${base}/runs`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            prompt: "plan from the attached brief",
+            mode: "plan",
+            scope: { kind: "project", root: repo },
+            attachments: [{ resourceId: "res-plan-note" }],
+          }),
+        });
+        expect(start.status).toBe(200);
+      },
+      undefined,
+      {
+        validateResources: async (refs) => {
+          validated = refs;
+        },
+        preflightRunRequirements: async (request) => {
+          preflighted = request.attachments;
+        },
+      },
+    );
+    const refs = [{ resourceId: "res-plan-note" }];
+    expect(validated).toEqual(refs);
+    expect(preflighted).toEqual(refs);
+    expect(enqueued).toMatchObject({ mode: "plan", attachments: refs });
+  });
+
+  it("persists Plan attachment resources on a thread turn and does not duplicate them in enqueue", async () => {
+    const { daemon } = fakeDaemon();
+    const repo = reapMk(join(tmpdir(), "claudexor-plan-thread-attachment-"));
+    const now = new Date().toISOString();
+    const refs = [{ resourceId: "res-plan-thread" }];
+    let persisted: unknown;
+    let enqueued: Record<string, unknown> | undefined;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue(params: unknown) {
+        enqueued = params as Record<string, unknown>;
+        return daemon.enqueue(params);
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const response = await apiFetch(`${base}/threads/th-plan-attachment/turns`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            prompt: "plan from this resource",
+            mode: "plan",
+            attachments: refs,
+          }),
+        });
+        expect(response.status).toBe(200);
+      },
+      undefined,
+      {
+        threadDetail: async () => ({
+          thread: {
+            schema_version: 2,
+            id: "th-plan-attachment",
+            created_at: now,
+            updated_at: now,
+            repo: { root: repo, base_ref: "HEAD" },
+            title: "plan attachment",
+            mode: "plan",
+            workspace: { mode: "in_place", worktree_path: null, base_sha: null },
+            auth_preference: "auto",
+            primary_harness: null,
+            eligible_harnesses: [],
+            access: null,
+            routingGoal: "auto",
+            run_ids: [],
+            head_run_id: null,
+            state: "active",
+          },
+          sessions: [],
+          turns: [],
+        }),
+        createThreadTurn: async (_threadId, _prompt, options) => {
+          persisted = options.attachments;
+          return { id: "tn-plan-attachment" };
+        },
+      },
+    );
+    expect(persisted).toEqual(refs);
+    expect(enqueued).toMatchObject({ mode: "plan", turnId: "tn-plan-attachment" });
+    expect(enqueued).not.toHaveProperty("attachments");
+  });
+
   it("refuses unsatisfied lane requirements before creating a daemon run", async () => {
     const { daemon } = fakeDaemon();
     const repo = reapMk(join(tmpdir(), "claudexor-pre-enqueue-requirements-"));
@@ -3741,6 +3920,120 @@ describe("DaemonControlApiServer", () => {
             status: 400,
             code: "attachment_pool_unsupported",
           });
+        },
+      },
+    );
+  });
+
+  it("projects an unavailable Git prerequisite as an operational typed problem", async () => {
+    const { daemon } = fakeDaemon();
+    let enqueued = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async enqueue(params: unknown) {
+        enqueued += 1;
+        return daemon.enqueue(params);
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const response = await apiFetch(`${base}/runs`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            prompt: "best of",
+            mode: "agent",
+            n: 2,
+            scope: { kind: "project", root: process.cwd() },
+          }),
+        });
+        const body = await response.json();
+        expect(response.status, JSON.stringify(body)).toBe(503);
+        expect(body).toMatchObject({
+          code: "git_developer_tools_stub",
+          retryable: false,
+          requiredActions: [expect.stringContaining("xcode-select --install")],
+          context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+        });
+        expect(enqueued).toBe(0);
+      },
+      undefined,
+      {
+        preflightRunRequirements: async () => {
+          throw Object.assign(new Error("Git is required for this workspace strategy."), {
+            status: 503,
+            code: "git_developer_tools_stub",
+            retryable: false,
+            requiredActions: [
+              "Install Apple Command Line Tools with xcode-select --install, then retry.",
+            ],
+            context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+          });
+        },
+      },
+    );
+  });
+
+  it("keeps credential-profile snapshots opt-in for strict older clients", async () => {
+    const { daemon } = fakeDaemon();
+    const calls: boolean[] = [];
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const legacy = await apiFetch(`${base}/credential-profiles`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(legacy.status).toBe(200);
+        expect(await legacy.json()).toEqual({ profiles: [], harnessAccounts: [] });
+
+        const snapshot = await apiFetch(`${base}/credential-profiles?snapshot=true`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(snapshot.status).toBe(200);
+        expect(await snapshot.json()).toMatchObject({
+          profiles: [],
+          harnessAccounts: [],
+          harnesses: [],
+          git: { status: "available" },
+          quota: {
+            snapshots: [],
+            absences: [],
+            refreshed_at: "2026-07-28T00:00:00Z",
+          },
+          quotaEventCursor: "quota-fence-http",
+        });
+
+        const invalid = await apiFetch(`${base}/credential-profiles?snapshot=yes`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(invalid.status).toBe(400);
+        expect(calls).toEqual([false, true]);
+      },
+      undefined,
+      {
+        credentialProfiles: async (input) => {
+          const snapshot = input?.snapshot === true;
+          calls.push(snapshot);
+          return snapshot
+            ? {
+                profiles: [],
+                harnessAccounts: [],
+                harnesses: [],
+                git: {
+                  status: "available",
+                  version: "git version test",
+                  detail: null,
+                  remediation: null,
+                },
+                quota: {
+                  snapshots: [],
+                  absences: [],
+                  refreshed_at: "2026-07-28T00:00:00Z",
+                },
+                quotaEventCursor: "quota-fence-http",
+              }
+            : { profiles: [], harnessAccounts: [] };
         },
       },
     );
@@ -4284,6 +4577,85 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("serves strict root-scoped Git applicability without probing unrelated catalogs", async () => {
+    const { daemon } = fakeDaemon();
+    const inputs: unknown[] = [];
+    const cell = (applicable: boolean, requiresGit: boolean) => ({
+      applicable,
+      requiresGit,
+      code: applicable ? null : "git_developer_tools_stub",
+      reason: applicable
+        ? null
+        : "Git is unavailable because Apple Command Line Tools are not installed.",
+      remediation: applicable ? null : "Install Command Line Tools.",
+    });
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const root = "/tmp/project with spaces";
+        const ok = await apiFetch(
+          `${base}/run-applicability?repoRoot=${encodeURIComponent(root)}`,
+          { headers: { authorization: `Bearer ${token}` } },
+        );
+        expect(ok.status).toBe(200);
+        expect(await ok.json()).toMatchObject({
+          repoRoot: root,
+          matrix: {
+            in_place: {
+              read_only: { applicable: true, requiresGit: false },
+              agent_convergence: { applicable: true, requiresGit: false },
+              agent_other: { applicable: false, requiresGit: true },
+            },
+          },
+        });
+
+        for (const suffix of ["", "?repoRoot=/tmp/x&extra=1", "?repoRoot=/a&repoRoot=/b"]) {
+          const invalid = await apiFetch(`${base}/run-applicability${suffix}`, {
+            headers: { authorization: `Bearer ${token}` },
+          });
+          expect(invalid.status).toBe(400);
+        }
+        expect(inputs).toEqual([{ repoRoot: root }]);
+
+        const descriptor = OPERATION_CATALOG.operations.find(
+          (operation) => operation.method === "GET" && operation.path === "/v2/run-applicability",
+        );
+        expect(descriptor).toMatchObject({
+          applicability: "project",
+          responseSchema: "ControlRunApplicabilityResponse",
+          parameters: [{ name: "repoRoot", location: "query", required: true }],
+        });
+      },
+      undefined,
+      {
+        runApplicability: async (input) => {
+          inputs.push(input);
+          return {
+            repoRoot: input.repoRoot,
+            git: {
+              status: "developer_tools_stub",
+              version: null,
+              detail: "xcode-select unavailable",
+              remediation: "Install Command Line Tools.",
+            },
+            matrix: {
+              in_place: {
+                read_only: cell(true, false),
+                agent_convergence: cell(true, false),
+                agent_other: cell(false, true),
+              },
+              isolated: {
+                read_only: cell(false, true),
+                agent_convergence: cell(false, true),
+                agent_other: cell(false, true),
+              },
+            },
+          };
+        },
+      },
+    );
+  });
+
   it("serves harness readiness checks and intent gating through the typed control-api service", async () => {
     const { daemon } = fakeDaemon();
     const harnessInputs: unknown[] = [];
@@ -4295,6 +4667,12 @@ describe("DaemonControlApiServer", () => {
         });
         expect(res.status).toBe(200);
         const body = (await res.json()) as {
+          git?: {
+            status: string;
+            version: string | null;
+            detail: string | null;
+            remediation: string | null;
+          };
           harnesses: {
             id: string;
             status: string;
@@ -4304,6 +4682,12 @@ describe("DaemonControlApiServer", () => {
             reasons: string[];
           }[];
         };
+        expect(body.git).toEqual({
+          status: "missing",
+          version: null,
+          detail: "git absent in HTTP fixture",
+          remediation: "Install Git and retry.",
+        });
         expect(body.harnesses[0]).toMatchObject({
           id: "codex",
           status: "degraded",
@@ -4340,6 +4724,12 @@ describe("DaemonControlApiServer", () => {
         harnesses: async (input) => {
           harnessInputs.push(input);
           return {
+            git: {
+              status: "missing",
+              version: null,
+              detail: "git absent in HTTP fixture",
+              remediation: "Install Git and retry.",
+            },
             harnesses: [
               {
                 id: "codex",
@@ -7499,17 +7889,57 @@ describe("DaemonControlApiServer", () => {
     record.state = "failed";
     rmSync(join(record.runDir as string, "final", "summary.md"), { force: true });
     rmSync(join(record.runDir as string, "final", "patch.diff"), { force: true });
-    writeFileSync(
-      join(record.runDir as string, "final", "failure.yaml"),
-      "safeMessage: Auth failed\ncategory: auth\n",
-    );
+    const failure = {
+      phase: "execute",
+      category: "auth",
+      code: null,
+      harnessId: "claude",
+      attemptId: "a01",
+      safeMessage: "Auth failed",
+      rawDetailRef: null,
+      logRefs: [],
+      eventRefs: [],
+      runDir: record.runDir as string,
+      nextActions: ["Log in again"],
+    };
+    writeFileSync(join(record.runDir as string, "final", "failure.yaml"), JSON.stringify(failure));
     await withDaemonServer(daemon, async (base) => {
       const detail = await apiFetch(`${base}/runs/run-d1`, {
         headers: { authorization: `Bearer ${token}` },
       });
-      const body = (await detail.json()) as { primaryOutput?: { kind: string; text: string } };
+      const body = (await detail.json()) as {
+        primaryOutput?: { kind: string; text: string };
+        failure?: unknown;
+      };
       expect(body.primaryOutput?.kind).toBe("diagnostic");
       expect(body.primaryOutput?.text).toContain("Auth failed");
+      expect(body.failure).toEqual(failure);
+    });
+
+    const cancelledAsk = fakeDaemon();
+    cancelledAsk.record.params = {
+      ...(cancelledAsk.record.params as Record<string, unknown>),
+      mode: "ask",
+    };
+    cancelledAsk.record.state = "cancelled";
+    rmSync(join(cancelledAsk.record.runDir as string, "final", "run_facts.yaml"), { force: true });
+    writeFileSync(
+      join(cancelledAsk.record.runDir as string, "final", "summary.md"),
+      "Ask cancelled while waiting for operator input.\n",
+    );
+    await withDaemonServer(cancelledAsk.daemon, async (base) => {
+      const detail = await apiFetch(`${base}/runs/run-d1`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const body = (await detail.json()) as {
+        primaryOutput?: { kind: string; path: string; text: string };
+        summary: { outcomeFacts: { reason: string | null } | null };
+      };
+      expect(body.primaryOutput).toMatchObject({
+        kind: "diagnostic",
+        path: "final/summary.md",
+      });
+      expect(body.summary.outcomeFacts?.reason).toBeNull();
     });
   });
 

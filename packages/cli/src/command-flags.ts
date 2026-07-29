@@ -15,31 +15,17 @@ export interface CliFlagSpec {
   readonly help: string | null;
 }
 
-/** Flags shared by every run-shaped verb (they funnel into the run entrypoint). */
-export const RUN_FLAGS: readonly string[] = [
+/** Controls that have the same meaning in every run mode. */
+export const COMMON_RUN_FLAGS: readonly string[] = [
   "harness",
   "primary-harness",
-  "n",
-  "attempts",
-  "until-clean",
-  "create",
-  "delegate",
-  "council",
-  "synthesis",
-  "test",
-  "allow-protected-path",
   "max-usd",
   "max-seconds",
   "max-turns",
-  "deny-path",
-  "output-schema",
   "prompt-file",
   "thread",
   "resume",
   "json-stream",
-  "reviewer-panel",
-  "reviewer-model",
-  "reviewer-effort",
   "access",
   "web",
   "model",
@@ -47,12 +33,46 @@ export const RUN_FLAGS: readonly string[] = [
   "portfolio",
   "routing-goal",
   "profile",
-  "in-place",
   "instructions",
   "instructions-file",
   "attach",
   "image",
   "json",
+];
+
+/** Additional controls owned by Agent's write/review pipeline. */
+export const AGENT_MODE_FLAGS: readonly string[] = [
+  "n",
+  "attempts",
+  "until-clean",
+  "create",
+  "delegate",
+  "synthesis",
+  "test",
+  "allow-protected-path",
+  "deny-path",
+  "output-schema",
+  "reviewer-panel",
+  "reviewer-model",
+  "reviewer-effort",
+  "in-place",
+];
+
+/** Additional controls owned by Ask's read-only answer pipeline. */
+export const ASK_MODE_FLAGS: readonly string[] = ["n", "deep-scan", "output-schema"];
+
+/** Additional controls owned by Plan's read-only planning pipeline. */
+export const PLAN_MODE_FLAGS: readonly string[] = ["n", "council"];
+
+export const RUN_FLAGS_BY_MODE: Readonly<Record<"ask" | "plan" | "agent", readonly string[]>> = {
+  ask: [...COMMON_RUN_FLAGS, ...ASK_MODE_FLAGS],
+  plan: [...COMMON_RUN_FLAGS, ...PLAN_MODE_FLAGS],
+  agent: [...COMMON_RUN_FLAGS, ...AGENT_MODE_FLAGS],
+};
+
+/** Full union advertised by the dynamic `agent --mode ...` entrypoint. */
+export const RUN_FLAGS: readonly string[] = [
+  ...new Set([...RUN_FLAGS_BY_MODE.agent, ...RUN_FLAGS_BY_MODE.ask, ...RUN_FLAGS_BY_MODE.plan]),
 ];
 
 const valueFlag = (name: string, valueHint: string, help: string | null): CliFlagSpec => ({
@@ -98,7 +118,11 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
     "<mode>",
     "agent verb: ask | plan | agent (strategies are flags, not modes);\n                           apply verb: delivery mode apply | commit | branch | pr",
   ),
-  valueFlag("n", "<N>", "Best-of-N width (agent): N isolated candidates + cross-review"),
+  valueFlag(
+    "n",
+    "<N>",
+    "Strategy width: Agent best-of candidates, Ask Deep scan scouts, or Plan Council members",
+  ),
   valueFlag("synthesis", "<mode>", "Best-of-N synthesis: auto (default, only n>=3)|always|never"),
   valueFlag("attempts", "<N>", "Convergence cap (agent): repair loop up to N attempts"),
   booleanFlag("until-clean", "Convergence (agent): iterate until the review/gates are clean"),

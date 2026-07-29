@@ -138,6 +138,41 @@ describe("RunFacts CLI projections (GH #29)", () => {
     });
   });
 
+  it("preserves typed RunFailure in the shared JSON and NDJSON terminal envelope", () => {
+    const failure = {
+      phase: "execute",
+      category: "auth",
+      code: null,
+      harnessId: "claude",
+      attemptId: "a01",
+      safeMessage: "Authentication expired",
+      rawDetailRef: null,
+      logRefs: [],
+      eventRefs: [],
+      runDir: "/runs/run-failed",
+      nextActions: ["Log in again"],
+    };
+
+    expect(
+      projectTerminalRunOutput(
+        {
+          runId: "run-failed",
+          runDir: "/runs/run-failed",
+          status: "failed",
+          jobId: "job-failed",
+        },
+        "agent",
+        { failure },
+        { frame: "run.terminal" },
+      ),
+    ).toMatchObject({
+      frame: "run.terminal",
+      status: "failed",
+      failure,
+      runFacts: null,
+    });
+  });
+
   it("binds the receipt lifecycle to the settled daemon job state (unified with control-api)", () => {
     const out = { runId: "run-facts", runDir: "/runs/run-facts", status: "failed", jobId: "j" };
     const detail = {

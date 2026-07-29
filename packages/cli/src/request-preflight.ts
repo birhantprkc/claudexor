@@ -3,7 +3,14 @@ import type { AdapterRegistry } from "@claudexor/core";
 import type { ResourceStore } from "@claudexor/daemon";
 import type { HarnessStatus } from "@claudexor/gateway";
 import { RequestRequirementsResolver } from "@claudexor/orchestrator";
-import type { AccessProfile, ControlRunStartRequest, Intent } from "@claudexor/schema";
+import {
+  runStartRequiresGit,
+  type AccessProfile,
+  type ControlRunStartRequest,
+  type GitCapability,
+  type Intent,
+} from "@claudexor/schema";
+import { gitCapabilityProblem, probeGitCapability } from "@claudexor/workspace";
 import { buildGateway, buildRegistry } from "./registry.js";
 
 const modeIntent = {
@@ -18,6 +25,35 @@ interface RunRequirementsPreflightDependencies {
   ) => Promise<Array<Pick<HarnessStatus, "id" | "status" | "enabledIntents">>>;
   registry?: AdapterRegistry;
   accessDefault?: (cwd: string) => AccessProfile;
+  gitCapability?: () => Promise<GitCapability>;
+  requiresGit?: (request: ControlRunStartRequest) => boolean;
+}
+
+export interface RunRequirementsPreflightPolicy {
+  /** Thread turns defer Git to the durable daemon job; direct runs keep eager admission. */
+  git?: "eager" | "durable_job";
+}
+
+/** Canonical Git admission used both eagerly by direct runs and immediately
+ * pre-provider by durable thread jobs. */
+export async function preflightRunGitRequirement(
+  request: ControlRunStartRequest,
+  dependencies: Pick<RunRequirementsPreflightDependencies, "gitCapability" | "requiresGit"> = {},
+): Promise<void> {
+  if (!(dependencies.requiresGit ?? runStartRequiresGit)(request)) return;
+  const git = await (dependencies.gitCapability ?? probeGitCapability)();
+  const blocker = gitCapabilityProblem(git);
+  if (!blocker) return;
+  throw Object.assign(new Error(blocker.reason), {
+    status: 503,
+    code: blocker.code,
+    retryable: true,
+    requiredActions: [blocker.remediation ?? "Install Git and retry."],
+    context: {
+      capability: "git",
+      capabilityStatus: git.status,
+    },
+  });
 }
 
 /** Refuse requests that no selected lane can satisfy before a run or turn is created. */
@@ -25,9 +61,12 @@ export function createRunRequirementsPreflight(
   resources: Pick<ResourceStore, "resolve">,
   noProjectRoot: string,
   dependencies: RunRequirementsPreflightDependencies = {},
+  policy: RunRequirementsPreflightPolicy = {},
 ): (request: ControlRunStartRequest) => Promise<void> {
   const requirements = new RequestRequirementsResolver();
   return async (request) => {
+    if ((policy.git ?? "eager") === "eager")
+      await preflightRunGitRequirement(request, dependencies);
     if ((request.attachments?.length ?? 0) === 0 && request.browser !== true) return;
     const cwd = request.scope.kind === "project" ? request.scope.root : noProjectRoot;
     const explicitPool = (request.harnesses?.length ?? 0) > 0;

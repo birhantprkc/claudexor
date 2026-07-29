@@ -13,7 +13,7 @@ vi.mock("@claudexor/secrets", async (importOriginal) => ({
   resolveSecret: () => null,
 }));
 
-import { HarnessRunSpec } from "@claudexor/schema";
+import { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { createRawApiAdapter } from "./index.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -138,6 +138,34 @@ describe("raw-api models() — enumeration producer", () => {
     );
     const error = events.find((e) => e.type === "error");
     expect(error?.transient?.kind).toBe("service_unavailable");
+  });
+
+  it("normalizes a fractional Retry-After delay before emitting typed events", async () => {
+    process.env.OPENAI_API_KEY = "sk-test";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("slow down", { status: 429, headers: { "retry-after": "0.572548415" } }),
+      ),
+    );
+    const events = await collect(
+      createRawApiAdapter().run(
+        HarnessRunSpec.parse({
+          session_id: "s-fractional-retry",
+          intent: "review",
+          prompt: "x",
+          cwd: process.cwd(),
+          access: "readonly",
+          external_context_policy: "auto",
+          tool_permission_policy: { web: "auto", allow: [], deny: [] },
+        }),
+      ),
+    );
+    const error = events.find((event) => event.type === "error");
+    expect(error?.rate_limit?.retry_delay_ms).toBe(573);
+    expect(error?.transient?.retry_delay_ms).toBe(573);
+    expect(() => HarnessEvent.parse(error)).not.toThrow();
   });
 });
 

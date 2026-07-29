@@ -7,9 +7,17 @@ import {
   validateRunFactsInvariants,
   validateRunFactsReceipt,
 } from "./run-facts.js";
-import { makeOutcomeFacts, requiredActionsFor } from "./status-projection.js";
+import {
+  makeOutcomeFacts,
+  outcomeFactsFromFailure,
+  requiredActionsFor,
+} from "./status-projection.js";
 
 const timestamp = "2026-07-26T12:00:00.000Z";
+
+it("does not fabricate user cancellation for a legacy cancelled run without RunFacts", () => {
+  expect(outcomeFactsFromFailure("cancelled", null).reason).toBeNull();
+});
 
 function validPlan(): RunFacts {
   return RunFacts.parse({
@@ -259,6 +267,17 @@ describe("RunFacts invariant validator (GH #29)", () => {
         required_actions: requiredActionsFor(failedOutcome, false),
       }).outcome.lifecycle,
     ).toBe("failed");
+
+    const unavailableOutcome = makeOutcomeFacts("failed", {
+      reason: "workspace_unavailable",
+    });
+    expect(
+      validateRunFactsInvariants({
+        ...failedProducer,
+        outcome: unavailableOutcome,
+        required_actions: requiredActionsFor(unavailableOutcome, false),
+      }).outcome.reason,
+    ).toBe("workspace_unavailable");
 
     const blockedOutcome = makeOutcomeFacts("succeeded", {
       review: "blocked",

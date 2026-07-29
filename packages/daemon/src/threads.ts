@@ -6,6 +6,7 @@ import type {
   Session,
   Thread,
   ThreadTurn,
+  TurnEnqueueProblem,
   WorkspaceMode,
 } from "@claudexor/schema";
 import {
@@ -15,7 +16,13 @@ import {
   Thread as ThreadSchema,
   ThreadTurn as ThreadTurnSchema,
 } from "@claudexor/schema";
-import { newId, nowIso, redactSecrets } from "@claudexor/util";
+import {
+  newId,
+  nowIso,
+  redactSecrets,
+  safeProblemContext,
+  safeProblemRequiredActions,
+} from "@claudexor/util";
 import {
   findLaneCheckpoint,
   makeLaneCheckpoint,
@@ -469,23 +476,22 @@ export class ThreadStore {
    * Persist the reason a turn's run could NOT be enqueued/started (trust
    * refusal, preflight validation, enqueue throw). Only meaningful for a
    * RUNLESS turn: once a run is bound the turn's honesty lives on the run's
-   * own terminal artifacts, so a late failure report is ignored. `code` is
-   * the typed throw's machine code (e.g. trust_full_access_required) that
-   * surfaces key remedies on; `retryable=false` marks refusals with NO
-   * recorded job to replay (the enqueue itself threw) so surfaces offer
-   * "send a new message" instead of a doomed Retry.
+   * own terminal artifacts, so a late failure report is ignored. One typed
+   * object carries code, retryability, recovery actions, and bounded context;
+   * adding a field cannot silently fall out of a positional callback chain.
    */
-  setTurnEnqueueError(
-    turnId: string,
-    message: string,
-    code: string | null = null,
-    retryable = true,
-  ): void {
+  setTurnEnqueueError(turnId: string, problem: TurnEnqueueProblem): void {
     const turn = this.state.turns.find((t) => t.id === turnId);
     if (!turn || turn.run_id) return;
     const nextTurn = ThreadTurnSchema.parse({
       ...turn,
-      enqueue_error: { message: redactSecrets(message), code, retryable, failed_at: nowIso() },
+      enqueue_error: {
+        ...problem,
+        message: redactSecrets(problem.message),
+        required_actions: safeProblemRequiredActions(problem.required_actions),
+        context: safeProblemContext(problem.context),
+        failed_at: nowIso(),
+      },
     });
     const thread = this.getThread(turn.thread_id);
     const nextThread = thread ? ThreadSchema.parse({ ...thread, updated_at: nowIso() }) : undefined;

@@ -47,7 +47,11 @@ import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
 import { refreshCodexQuota } from "./codex-quota-source.js";
 import { refreshClaudeStatuslineQuota } from "./claude-statusline.js";
 import { refreshClaudeOauthUsageQuota } from "./claude-oauth-usage.js";
-import { resolveThreadExecutionWorkspace } from "./thread-execution-workspace.js";
+import {
+  resolveThreadExecutionWorkspace,
+  threadRunStartRequiresGit,
+} from "./thread-execution-workspace.js";
+import { preflightRunGitRequirement } from "./request-preflight.js";
 import { dispatchClaudexordEntry, runIfDirectEntry } from "./claudexord-entry.js";
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
@@ -232,8 +236,7 @@ export async function main(): Promise<void> {
         // ride — the terminal changes the thread's presented state, so ping.
         if (threadId) threads.pingThreadHead(threadId);
       },
-      onTurnEnqueueFailed: (turnId, error, code, retryable) =>
-        threads.setTurnEnqueueError(turnId, error, code, retryable),
+      onTurnEnqueueFailed: (turnId, problem) => threads.setTurnEnqueueError(turnId, problem),
       onShutdownRequested: () =>
         shutdownRuntime?.beginShutdown("socket-rpc stop") ??
         Promise.reject(new Error("daemon shutdown coordinator is not initialized")),
@@ -274,14 +277,29 @@ export async function main(): Promise<void> {
             assertPlanImplementReady(planRef.runId, planRef.path);
           }
         }
-        const { executionRoot, inPlace } = await resolveThreadExecutionWorkspace({
-          threadId,
-          repoRoot,
-          mode,
-          requestedInPlace: p.execution.isolation === "live",
-          protectedPaths: runConfig.project.constraints.protected_paths,
-          threads,
-        });
+        // Thread turns own a durable job before this fresh Git check. A
+        // missing/stub installation therefore records a replayable refusal on
+        // the exact turn, and Retry re-runs this boundary without changing any
+        // request fields. No worktree or provider exists yet.
+        if (turnId) {
+          await preflightRunGitRequirement(p, {
+            requiresGit: (request) =>
+              threadRunStartRequiresGit(
+                request,
+                threadId ? threads.getThread(threadId) : undefined,
+                runConfig.project.constraints.protected_paths,
+              ),
+          });
+        }
+        const { executionRoot, inPlace, projectGitInitialization } =
+          await resolveThreadExecutionWorkspace({
+            threadId,
+            repoRoot,
+            mode,
+            requestedInPlace: p.execution.isolation === "live",
+            protectedPaths: runConfig.project.constraints.protected_paths,
+            threads,
+          });
         const onRunStart = (info: { runId: string; taskId: string; runDir: string }): void => {
           ctx.onRunStart?.(info);
           if (!threadId) return;
@@ -387,6 +405,7 @@ export async function main(): Promise<void> {
             interactionTimeoutMs: runConfig.global.interaction_timeout_ms,
             threadId,
             executionRoot,
+            projectGitInitialization,
             resumeSessions: threadId ? threads.resumeMap(threadId, requestedProfileId) : undefined,
             onSessionObserved: threadId
               ? (harnessId, nativeSessionId, observedModel, profileId) => {

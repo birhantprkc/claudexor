@@ -4,14 +4,15 @@ import { WorkspaceError } from "@claudexor/core";
 import { ensureDir, projectRuntimeDir } from "@claudexor/util";
 import {
   branchDelete,
+  ensureGitRepository,
   git,
-  isGitRepo,
   revParse,
   snapshotTree,
   worktreeAdd,
   worktreeAddExisting,
   worktreeRemove,
 } from "./git.js";
+import type { EnsureGitRepositoryResult } from "./git.js";
 
 export interface ThreadWorktreeResult {
   /** Absolute path to the thread's persistent worktree (the execution root). */
@@ -20,6 +21,8 @@ export interface ThreadWorktreeResult {
   baseSha: string;
   /** True when the worktree was just created (vs reused). */
   created: boolean;
+  /** Project initialization performed before this worktree could exist. */
+  projectGitInitialization?: EnsureGitRepositoryResult | null;
 }
 
 /**
@@ -39,15 +42,23 @@ export async function ensureThreadWorktree(
   if (!/^[A-Za-z0-9._-]+$/.test(threadId) || threadId === "." || threadId === "..") {
     throw new WorkspaceError(`threadId '${threadId}' is not a safe path segment`);
   }
-  if (!(await isGitRepo(projectRoot))) {
-    throw new WorkspaceError(`isolated threads require a git project: ${projectRoot}`);
-  }
+  // Explicitly choosing an isolated thread authorizes this one idempotent
+  // project mutation. The same canonical initializer is used by other
+  // write-mode Git boundaries; in-place read-only work remains untouched.
+  const gitInitialization = await ensureGitRepository(projectRoot);
+  const projectGitInitialization =
+    gitInitialization.initialized || gitInitialization.baselineCommitted ? gitInitialization : null;
   const threadDir = join(projectRuntimeDir(projectRoot), "threads", threadId);
   const path = join(threadDir, "tree");
   if (existsSync(join(path, ".git"))) {
     // Turns never commit on the branch (in-place envelopes leave changes in the
     // working tree), so HEAD still points at the original base snapshot.
-    return { path, baseSha: await revParse(path, "HEAD"), created: false };
+    return {
+      path,
+      baseSha: await revParse(path, "HEAD"),
+      created: false,
+      projectGitInitialization,
+    };
   }
   const baseSha = await snapshotTree(projectRoot);
   ensureDir(threadDir);
@@ -66,7 +77,12 @@ export async function ensureThreadWorktree(
       rmSync(threadDir, { recursive: true, force: true });
       throw err; // never delete the surviving branch
     }
-    return { path, baseSha: await revParse(path, "HEAD"), created: true };
+    return {
+      path,
+      baseSha: await revParse(path, "HEAD"),
+      created: true,
+      projectGitInitialization,
+    };
   }
   try {
     await worktreeAdd(projectRoot, path, branch, baseSha);
@@ -79,7 +95,7 @@ export async function ensureThreadWorktree(
     await branchDelete(projectRoot, branch).catch(() => {});
     throw err;
   }
-  return { path, baseSha, created: true };
+  return { path, baseSha, created: true, projectGitInitialization };
 }
 
 /** Advance the persistent thread branch to the project state just delivered,

@@ -1,4 +1,4 @@
-import { ModeKind } from "@claudexor/schema";
+import { isTerminalLifecycle, ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
 import {
   connectDaemonIfRunning,
   daemonOutcomeSummary,
@@ -6,7 +6,12 @@ import {
   enqueueAndAwait,
   fetchRunDetail,
 } from "./daemon-run.js";
-import { describeRunDetailProblem } from "./run-detail-projections.js";
+import {
+  describeRunDetailProblem,
+  presentRunPrimaryOutput,
+  projectRunFailure,
+  projectRunPrimaryOutput,
+} from "./run-detail-projections.js";
 import { primaryOutputForCli } from "./primary-output.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
 import { projectImmediateRunDetail, projectRecoveryRunDetail } from "./mcp-run-projections.js";
@@ -157,33 +162,50 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       ...(onPollTick ? { onPollTick } : {}),
     });
     try {
-      // The MCP result: the run's primary output as the summary (the daemon
-      // outcome reason for non-success terminals), plus the artifact handle.
-      const primary = out.runDir ? primaryOutputForCli(out.runDir, mode) : null;
-      const reason = daemonOutcomeSummary(out);
-      const summary =
-        primary && primary.kind !== "patch"
-          ? primary.text.trim()
-          : (reason ??
-            (primary?.kind === "patch" ? "patch produced (see artifacts)" : `run ${out.status}`));
       // The derived apply verdict rides the result (single producer: the run
       // detail endpoint). The post-terminal detail read DEGRADES: a missing/
       // legacy detail projects null fields, and a raised typed problem —
       // especially 500 run_facts_invalid, the server's verdict that the run's
       // receipt cannot be trusted — rides the result as `detailProblem` with
       // the runId preserved instead of erasing the finished run's outcome.
-      // A deferred MCP call intentionally returns while the run is still live.
-      // Apply eligibility is a terminal projection, so querying it here would
-      // delay the durable handle on a result that cannot be actionable yet.
+      // A deferred MCP call normally returns while the run is still live, but
+      // the bind/status race may already observe a terminal. Project detail
+      // from ACTUAL lifecycle truth; never delay an ordinary running handle.
       let detail: Record<string, unknown> | null = null;
       let detailProblem: ReturnType<typeof describeRunDetailProblem> | null = null;
-      if (p?.deferred !== true) {
+      if (p?.deferred !== true || isTerminalLifecycle(out.status)) {
         try {
           detail = await fetchRunDetail(addr, out.runId);
         } catch (error) {
           detailProblem = describeRunDetailProblem(error);
         }
       }
+      // Canonical output comes from that same detail read (bounded, redacted,
+      // mode-aware). Read local artifacts only when detail was attempted but
+      // unavailable; this preserves a useful terminal result without creating a
+      // second normal-path artifact owner.
+      const canonicalPrimary = projectRunPrimaryOutput(detail);
+      const localFallback =
+        (p?.deferred !== true || isTerminalLifecycle(out.status)) && !detail && out.runDir
+          ? primaryOutputForCli(out.runDir, mode, {
+              failure: projectRunFailure(detail),
+              lifecycle: isTerminalLifecycle(out.status)
+                ? (out.status as RunOutcomeFacts["lifecycle"])
+                : undefined,
+            })
+          : null;
+      const primary = canonicalPrimary ?? localFallback;
+      const presented = presentRunPrimaryOutput(primary);
+      const detailProjection = projectImmediateRunDetail(detail);
+      const reason = daemonOutcomeSummary({
+        ...out,
+        outcomeFacts: detailProjection.outcomeFacts ?? undefined,
+      });
+      const summary =
+        presented ??
+        detailProjection.outcomeBanner ??
+        reason ??
+        (primary?.kind === "patch" ? "patch produced (see artifacts)" : `run ${out.status}`);
       // The sub-run's real settled spend rides the result so the delegation belt
       // can reconcile its budget reservation against the actual drawn amount
       // (single producer: the run-detail budget projection). Deferred calls return
@@ -196,9 +218,8 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
         runId: out.runId,
         runDir: out.runDir,
         status: out.status,
-        outcomeFacts: (out as { outcomeFacts?: unknown }).outcomeFacts ?? null,
         summary,
-        ...projectImmediateRunDetail(detail),
+        ...detailProjection,
         ...(detailProblem ? { detailProblem } : {}),
       };
     } catch (error) {

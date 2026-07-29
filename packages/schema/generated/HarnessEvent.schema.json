@@ -548,9 +548,10 @@
                 "model_not_found",
                 "server_error",
                 "max_output_tokens",
+                "timeout",
                 "unknown"
               ],
-              "description": "Vendor's error category mapped onto the documented enum; unrecognized values collapse to 'unknown' (never free-form prose)."
+              "description": "Vendor error category mapped onto the normalized enum; unrecognized values collapse to 'unknown' (never free-form prose)."
             }
           },
           "required": [

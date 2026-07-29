@@ -49,6 +49,10 @@ export function runStartStrategyViolations(value: {
   reviewerModels?: unknown;
   reviewerEfforts?: unknown;
   protectedPathApprovals?: unknown;
+  synthesis?: unknown;
+  tests?: unknown;
+  denyPaths?: unknown;
+  outputSchema?: unknown;
 }): string[] {
   const mode = value.mode ?? "agent";
   const violations: string[] = [];
@@ -96,16 +100,34 @@ export function runStartStrategyViolations(value: {
     );
   }
   if (hasRecordEntries(value.reviewerModels) && !applicability.reviewerPanel.applicable) {
-    violations.push(`reviewerModels only applies to agent runs; mode is '${mode}'`);
+    violations.push(
+      `reviewerModels only applies to agent runs (plan review was retired in v3; Council is the plan critique path); mode is '${mode}'`,
+    );
   }
   if (hasRecordEntries(value.reviewerEfforts) && !applicability.reviewerPanel.applicable) {
-    violations.push(`reviewerEfforts only applies to agent runs; mode is '${mode}'`);
+    violations.push(
+      `reviewerEfforts only applies to agent runs (plan review was retired in v3; Council is the plan critique path); mode is '${mode}'`,
+    );
   }
   if (
     hasArrayEntries(value.protectedPathApprovals) &&
     !applicability.protectedPathApprovals.applicable
   ) {
-    violations.push(`protectedPathApprovals only applies to agent runs; mode is '${mode}'`);
+    violations.push(
+      `protectedPathApprovals only applies to agent runs (read-only modes do not change protected paths); mode is '${mode}'`,
+    );
+  }
+  if (value.synthesis !== undefined && mode !== "agent") {
+    violations.push(`synthesis only applies to agent best-of runs; mode is '${mode}'`);
+  }
+  if (value.tests !== undefined && mode !== "agent") {
+    violations.push(`tests only applies to agent runs; mode is '${mode}'`);
+  }
+  if (value.denyPaths !== undefined && mode !== "agent") {
+    violations.push(`denyPaths only applies to agent runs; mode is '${mode}'`);
+  }
+  if (value.outputSchema !== undefined && mode === "plan") {
+    violations.push(`outputSchema applies to agent/ask runs, not plan runs`);
   }
   return violations;
 }
@@ -118,4 +140,28 @@ function hasRecordEntries(value: unknown): boolean {
 
 function hasArrayEntries(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
+}
+
+/**
+ * Whether this run shape needs a Git-backed workspace before a provider can
+ * start. Read-only modes do not unless their durable thread itself lives in a
+ * worktree. Agent race/create/single always do; the one existing non-Git write
+ * path is live convergence, whose copy-baseline workspace is explicitly
+ * implemented by the engine.
+ */
+export function runStartRequiresGit(value: {
+  mode?: ModeKind;
+  untilClean?: boolean;
+  attempts?: number | null;
+  execution?: { isolation?: "envelope" | "live" };
+}, context: { effectiveWorkspaceRequiresGit?: boolean } = {}): boolean {
+  // A thread may execute "live" *inside a worktree*: isolated threads and
+  // protected-path promotion are resolved by the daemon from durable thread /
+  // project state, not from the wire isolation flag. That effective workspace
+  // must win over the convergence exception below, because creating/reusing it
+  // requires Git before any provider can start.
+  if (context.effectiveWorkspaceRequiresGit === true) return true;
+  if ((value.mode ?? "agent") !== "agent") return false;
+  const convergence = value.untilClean === true || value.attempts != null;
+  return !(convergence && value.execution?.isolation === "live");
 }

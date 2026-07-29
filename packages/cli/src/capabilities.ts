@@ -18,6 +18,7 @@ import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import { CLI_COMMANDS } from "./command-registry.js";
 import { buildGateway, harnessModels } from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
+import { probeGitCapability } from "@claudexor/workspace";
 
 /** MCP tool names from the server's own descriptor producer (noop runner). */
 export function mcpToolNames(): readonly string[] {
@@ -36,7 +37,10 @@ const NO_PROJECT_ROOT = "/nonexistent-claudexor-project";
  * `claudexor_capabilities` tool — three views, one composer.
  */
 export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCatalog> {
-  const statuses = await buildGateway({ includeFakes: false }).statusAll({ cwd: NO_PROJECT_ROOT });
+  const [statuses, git] = await Promise.all([
+    buildGateway({ includeFakes: false }).statusAll({ cwd: NO_PROJECT_ROOT }),
+    probeGitCapability(),
+  ]);
   const cfg = loadConfig(NO_PROJECT_ROOT);
 
   const harnesses: CatalogHarness[] = await Promise.all(
@@ -104,6 +108,7 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
     ok: true,
     version: CLAUDEXOR_VERSION,
     generatedAt: new Date().toISOString(),
+    git,
     harnesses,
     availableHarnesses: harnesses.filter((h) => h.status === "ok" && h.enabled).map((h) => h.id),
     modes: [...ModeKind.options],

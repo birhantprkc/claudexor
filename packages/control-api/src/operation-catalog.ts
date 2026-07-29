@@ -166,6 +166,8 @@ const OPERATION_SUMMARIES: Record<string, string> = {
   "GET /v2/operations": "List the implemented operations (this catalog).",
   "POST /v2/maintenance/gc": "Run retention garbage collection over expired run trees.",
   "GET /v2/agent-capabilities": "List the agent capability catalog this engine advertises.",
+  "GET /v2/run-applicability":
+    "Project the root-scoped Git prerequisite for every run/workspace shape.",
   "GET /v2/global/events": "Subscribe to the global cross-project event stream (SSE).",
   "GET /v2/quota": "Read cached per-profile harness quota snapshots.",
   "POST /v2/quota": "Refresh and read per-profile harness quota snapshots.",
@@ -273,6 +275,17 @@ const operations: ControlOperationDescriptor[] = [
     idempotency: "natural",
   }),
   j("GET", "/v2/agent-capabilities", "read_only", null, "AgentCapabilityCatalog"),
+  j("GET", "/v2/run-applicability", "read_only", null, "ControlRunApplicabilityResponse", {
+    applicability: "project",
+    parameters: [
+      queryParam({
+        name: "repoRoot",
+        required: true,
+        description:
+          "Absolute existing project root whose protected-path policy and Git prerequisite should be projected.",
+      }),
+    ],
+  }),
   j("GET", "/v2/global/events", "read_only", null, null, {
     responseKind: "stream",
     parameters: [
@@ -282,7 +295,15 @@ const operations: ControlOperationDescriptor[] = [
     ],
   }),
   j("GET", "/v2/quota", "read_only", null, "ControlQuotaResponse"),
-  j("GET", "/v2/credential-profiles", "read_only", null, "ControlCredentialProfilesResponse"),
+  j("GET", "/v2/credential-profiles", "read_only", null, "ControlCredentialProfilesQueryResponse", {
+    parameters: [
+      queryParam({
+        name: "snapshot",
+        enum: ["true", "false"],
+        description: "Return one fresh server-authored Accounts snapshot epoch.",
+      }),
+    ],
+  }),
   j(
     "POST",
     "/v2/credential-profiles",

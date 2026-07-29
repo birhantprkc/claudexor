@@ -7,7 +7,7 @@ import type {
   HarnessRunSpec,
 } from "@claudexor/schema";
 import { attemptUsageCostSettlement, type BudgetLedger } from "@claudexor/budget";
-import { AnswerAssembly, withInactivityWatchdog } from "@claudexor/core";
+import { AnswerAssembly, countsAsAgentProgress, withInactivityWatchdog } from "@claudexor/core";
 import { appendLine, redactSecrets, safeInvoke } from "@claudexor/util";
 import type { RunPaths } from "@claudexor/artifact-store";
 import type { EventLog } from "@claudexor/event-log";
@@ -113,7 +113,7 @@ export interface DeepScanReducerDeps {
     homeEnv: Record<string, string>,
     prompt: string,
     attemptId: string,
-  ) => {
+  ) => Promise<{
     spec: HarnessRunSpec;
     webPolicy: ExternalContextPolicy;
     effectiveWeb: ExternalContextPolicy;
@@ -122,6 +122,12 @@ export interface DeepScanReducerDeps {
      * reducer output is unwrapped + finalized through the SAME contract as every
      * other attempt (never a fourth divergent deliverable predicate). Inactive on
      * a route with no work_report transport (the report passes through untouched). */
+    workReportMode: WorkReportEnvelopeMode;
+  }> | {
+    spec: HarnessRunSpec;
+    webPolicy: ExternalContextPolicy;
+    effectiveWeb: ExternalContextPolicy;
+    model: string | null;
     workReportMode: WorkReportEnvelopeMode;
   };
   /** Hard (total) timeout for the single bounded pass. */
@@ -207,7 +213,7 @@ export async function runDeepScanReducer(
   // the profile/keychain/default store), so a fresh home shares the auth source.
   const reducerHome = deps.newReadOnlyHome();
   const prompt = buildDeepScanReducerPrompt(args.goal, args.scoutReports);
-  const built = deps.buildSpec(args.routed, reducerHome.env, prompt, attemptId);
+  const built = await deps.buildSpec(args.routed, reducerHome.env, prompt, attemptId);
   const spec = built.spec;
   // Hard (total) timeout — one attempt, no failover/transient retry loop.
   const reducerAbort = new AbortController();
@@ -241,6 +247,7 @@ export async function runDeepScanReducer(
   try {
     const watched = withInactivityWatchdog(adapter.run(spec), {
       timeoutMs: deps.inactivityTimeoutMs,
+      countsAsProgress: countsAsAgentProgress,
       onTimeout: () => {
         reducerAbort.abort();
         void adapter.cancel?.(spec.session_id)?.catch(() => {});
