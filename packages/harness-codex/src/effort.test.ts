@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { HarnessEvent, ModelEffortCapability } from "@claudexor/schema";
 import { HarnessRunSpec, effortLevelsForModel } from "@claudexor/schema";
 import { resolveEffort } from "@claudexor/core";
-import { clearCodexEffortCache, createCodexAdapter } from "./index.js";
+import { CODEX_VENDOR_CLI_VERSION, clearCodexEffortCache, createCodexAdapter } from "./index.js";
 import { codexExecArgs } from "./index.js";
 import {
   codexCatalogForRun,
@@ -297,6 +297,7 @@ describe("the effort probe is cached, not re-spawned per call", () => {
       "ultra",
     ]);
     expect(manifest.capabilities.effort_levels_verified_against).toBe("0.144.1");
+    expect(manifest.capabilities.known_models_verified_against).toBe(CODEX_VENDOR_CLI_VERSION);
     clearCodexEffortCache();
   });
 

@@ -27,8 +27,9 @@ import {
 } from "./effort-probe.js";
 import { codexRunEffortResolution } from "./effort-gate.js";
 import { tomlBasicString } from "./toml.js";
+import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
-export { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
+export { CODEX_VENDOR_CLI_VERSION };
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
@@ -437,7 +438,7 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
             "gpt-5.4-mini",
             "gpt-5.3-codex-spark",
           ],
-          known_models_verified_against: "0.144.1",
+          known_models_verified_against: CODEX_VENDOR_CLI_VERSION,
         },
         capability_profile: {
           auth: {
