@@ -33,15 +33,16 @@ function quotaSnapshot(harness: string, subjectId: string | null, usedRatio: num
 describe("QuotaRegistry", () => {
   it("fences one refresh marker after the whole batch and replays only later direct mutations", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-fence-")));
+    const now = () => new Date("2026-07-28T00:00:01.000Z");
     const manager = new JournalManager(root, {
-      now: () => new Date("2026-07-28T00:00:01.000Z"),
+      now,
     });
     const slot = manager.registerProjection(
       quotaProjection([
         async () => ({
           snapshots: [quotaSnapshot("claude", null, 0.2), quotaSnapshot("claude", "work", 0.4)],
         }),
-      ]),
+      ], () => [], now),
     );
     manager.start();
 
@@ -126,7 +127,8 @@ describe("QuotaRegistry", () => {
     first.close();
 
     const afterUpsert = new DurableJournal({ rootDir: root, partition: "global" });
-    const recovered = new QuotaRegistry(afterUpsert);
+    const now = () => new Date("2026-07-28T00:00:01.000Z");
+    const recovered = new QuotaRegistry(afterUpsert, [], now);
     expect(recovered.read().snapshots).toHaveLength(1);
     expect(afterUpsert.records().map((record) => record.type)).toEqual([
       "quota.snapshot.upserted",
@@ -140,7 +142,7 @@ describe("QuotaRegistry", () => {
     afterUpsert.append("quota.subject.removed", { harness: "claude", subject_id: "work" });
     afterUpsert.close();
     const afterRemove = new DurableJournal({ rootDir: root, partition: "global" });
-    const recoveredRemoval = new QuotaRegistry(afterRemove);
+    const recoveredRemoval = new QuotaRegistry(afterRemove, [], now);
     expect(recoveredRemoval.read().snapshots).toEqual([]);
     expect(afterRemove.records().at(-1)?.payload).toMatchObject({ reason: "recovery" });
     afterRemove.close();

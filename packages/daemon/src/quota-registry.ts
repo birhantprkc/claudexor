@@ -414,11 +414,12 @@ export class QuotaRegistry {
 export function quotaProjection(
   refreshers: readonly QuotaRefresher[] = [],
   subjects: QuotaSubjectUniverse = () => [],
+  now: () => Date = () => new Date(),
 ) {
   return {
     name: "quota",
     create: (journal: DurableJournal) =>
-      new QuotaRegistry(journal, refreshers, () => new Date(), subjects),
+      new QuotaRegistry(journal, refreshers, now, subjects),
     validate: (registry: QuotaRegistry) => registry.validateProjection(),
   };
 }
