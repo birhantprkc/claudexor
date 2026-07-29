@@ -130,13 +130,15 @@ public enum RuntimeInstallError: Error, LocalizedError, Equatable {
     case unpackFailed(String)
     case unpackedScriptMissing
     case notMonotonic(target: String)
-    case probeMismatch(expected: String, got: String?)
+    case probeMismatch(expected: RuntimeClosureIdentity, got: RuntimeClosureIdentity?)
     case daemonBusy
-    case handshakeMismatch(expected: String, got: String?)
+    case handshakeMismatch(expected: RuntimeClosureIdentity, got: RuntimeClosureIdentity?)
     /// A rollback could not be PROVEN: the named recovery step (pointer restore,
-    /// relaunch, or expected-version handshake) failed, so the engine may be in a
+    /// relaunch, or expected-identity handshake) failed, so the engine may be in a
     /// degraded state. Carries the exact step + user remediation.
     case recoveryFailed(step: String, remediation: String)
+    case rollbackIdentityUnavailable
+    case lifecycleBusy
     case lockHeld
     case io(String)
 
@@ -149,15 +151,24 @@ public enum RuntimeInstallError: Error, LocalizedError, Equatable {
         case let .notMonotonic(t):
             return "Runtime \(t) is not newer than the installed runtime; refusing a downgrade."
         case let .probeMismatch(e, g):
-            return "The unpacked runtime reported version \(g ?? "nil"), expected \(e)."
+            return "The unpacked runtime reported \(Self.describe(g)), expected \(Self.describe(e))."
         case .daemonBusy: return "The engine is busy running jobs; the update will retry when idle."
         case let .handshakeMismatch(e, g):
-            return "After relaunch the engine reported \(g ?? "nil"), expected \(e); rolling back."
+            return "After relaunch the engine reported \(Self.describe(g)), expected \(Self.describe(e)); rolling back."
         case let .recoveryFailed(step, remediation):
             return "Recovery after a failed update did not complete: could not \(step). \(remediation)"
+        case .rollbackIdentityUnavailable:
+            return "The exact prior engine identity could not be verified; the running engine was not stopped."
+        case .lifecycleBusy:
+            return "Another engine lifecycle action is already in progress; retry the update."
         case .lockHeld: return "Another runtime update is already in progress."
         case let .io(m): return "Runtime update file error: \(m)"
         }
+    }
+
+    private static func describe(_ identity: RuntimeClosureIdentity?) -> String {
+        guard let identity else { return "no exact identity" }
+        return "\(identity.version) @ \(identity.buildSha)"
     }
 }
 

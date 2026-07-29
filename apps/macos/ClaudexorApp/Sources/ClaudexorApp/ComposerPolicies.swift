@@ -42,7 +42,7 @@ struct ComposerRunControlApplicability: Equatable {
     var protectedPathApprovals: Control
 
     static func resolve(mode: RunMode) -> ComposerRunControlApplicability {
-        let isAgent = mode == .agent || mode == .bestOfN || mode == .create
+        let isAgent = mode.apiValue == "agent"
         return .init(
             reviewers: isAgent
                 ? .init(applicable: true)

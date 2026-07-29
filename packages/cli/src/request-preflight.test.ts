@@ -99,6 +99,35 @@ describe("run request requirements preflight", () => {
     await expect(preflight(ControlRunStartRequest.parse(baseRequest))).resolves.toBeUndefined();
   });
 
+  it("projects the canonical aggregate refusal when an auto pool has no attachment survivor", async () => {
+    const first = adapter("incompatible-a");
+    const second = adapter("incompatible-b");
+    const preflight = createRunRequirementsPreflight(resources, "/no-project", {
+      registry: registry(first, second),
+      statusAll: async () =>
+        [first, second].map((candidate) => ({
+          id: candidate.id,
+          status: "ok" as const,
+          enabledIntents: ["implement" as const],
+        })),
+      gitCapability: gitAvailable,
+    });
+
+    await expect(
+      preflight(
+        ControlRunStartRequest.parse({
+          prompt: "read attachment",
+          mode: "agent",
+          scope: { kind: "project", root: "/project", context: "auto" },
+          attachments: [{ resourceId: attachment.resource_id }],
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "attachment_pool_unsupported",
+      message: expect.stringMatching(/incompatible-a.*incompatible-b/),
+    });
+  });
+
   it("uses the project trust default when Browser access is omitted", async () => {
     const browser = adapter("browser", { browser: true });
     const resolvedRoots: string[] = [];

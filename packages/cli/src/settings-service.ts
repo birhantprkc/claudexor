@@ -69,7 +69,7 @@ export function settingsSnapshot(repoRoot: string) {
 }
 
 function badRequest(message: string): never {
-  throw Object.assign(new Error(message), { status: 400 });
+  throw Object.assign(new Error(message), { status: 400, code: "invalid_request" });
 }
 
 /**
@@ -403,7 +403,7 @@ export function applyHarnessSettingsPatches(
         new Error(
           `unknown harness id '${id}' (expected one of: ${[...knownIds].sort().join(", ")})`,
         ),
-        { status: 400 },
+        { status: 400, code: "invalid_request" },
       );
     }
     const base = next[id] ?? GlobalConfig.shape.harnesses.removeDefault().valueSchema.parse({});

@@ -124,18 +124,14 @@ export async function* withInactivityWatchdog<T>(
     if (timer) clearTimeout(timer);
     timer = setTimeout(
       () => {
-        const currentSuspensionVersion =
-          opts.suspensionVersion?.() ?? observedSuspensionVersion;
+        const currentSuspensionVersion = opts.suspensionVersion?.() ?? observedSuspensionVersion;
         if (opts.isSuspended?.()) {
           suspensionObserved = true;
           observedSuspensionVersion = currentSuspensionVersion;
           arm(false);
           return;
         }
-        if (
-          suspensionObserved ||
-          currentSuspensionVersion !== observedSuspensionVersion
-        ) {
+        if (suspensionObserved || currentSuspensionVersion !== observedSuspensionVersion) {
           // Resume has no guaranteed harness event of its own. The first timer
           // boundary that proves the interaction is over starts a full new
           // window; the next boundary may time out if no agent progress follows.

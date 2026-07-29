@@ -84,11 +84,11 @@ describe("RequestRequirementsResolver browser preflight", () => {
       size_bytes: 12,
       path: "/tmp/notes.txt",
     };
-    expect(resolver.attachmentRefusal("raw", [attachment], [])).toContain(
+    expect(resolver.resolveAttachmentLane("raw", [attachment], []).message).toContain(
       "text/plain is unsupported",
     );
     expect(
-      resolver.attachmentRefusal(
+      resolver.resolveAttachmentLane(
         "raw",
         [attachment],
         [
@@ -100,7 +100,7 @@ describe("RequestRequirementsResolver browser preflight", () => {
             transport: "text_inline",
           },
         ],
-      ),
+      ).message,
     ).toBeNull();
   });
 
@@ -141,6 +141,49 @@ describe("RequestRequirementsResolver browser preflight", () => {
         [declaration],
       ),
     ).toMatchObject({ admitted: false, reason: "max_count_exceeded" });
+  });
+
+  it("owns exact explicit and auto attachment-pool aggregation", () => {
+    const attachment = {
+      resource_id: "res-1",
+      kind: "file" as const,
+      mime: "text/plain",
+      name: "notes.txt",
+      sha256: "sha256:test",
+      size_bytes: 12,
+      path: "/tmp/notes.txt",
+    };
+    const declaration = {
+      kind: "file" as const,
+      mime_types: ["text/plain"],
+      max_bytes: 20,
+      max_count: 1,
+      transport: "text_inline" as const,
+    };
+    const lanes = [
+      { harnessId: "capable", declarations: [declaration], available: true },
+      { harnessId: "blind", declarations: [], available: true },
+      { harnessId: "offline", declarations: [declaration], available: false },
+      { harnessId: "capable", declarations: [], available: true },
+    ];
+
+    expect(resolver.resolveAttachmentPool("explicit", [attachment], lanes)).toMatchObject({
+      outcome: "refused",
+      admittedHarnessIds: [],
+      rejected: [{ harnessId: "blind", reason: "unsupported_input" }],
+    });
+    expect(resolver.resolveAttachmentPool("auto", [attachment], lanes)).toMatchObject({
+      outcome: "degraded",
+      admittedHarnessIds: ["capable"],
+      rejected: [{ harnessId: "blind", reason: "unsupported_input" }],
+    });
+    expect(
+      resolver.resolveAttachmentPool(
+        "auto",
+        [attachment],
+        [{ harnessId: "offline", declarations: [declaration], available: false }],
+      ),
+    ).toMatchObject({ outcome: "refused", admittedHarnessIds: [], rejected: [] });
   });
 });
 

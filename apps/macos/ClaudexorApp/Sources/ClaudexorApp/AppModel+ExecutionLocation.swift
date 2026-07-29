@@ -35,6 +35,18 @@ extension AppModel {
             : remoteSettingsSnapshots[activeExecutionLocation]
     }
 
+    var activeSettingsLoadState: ProjectionLoadState {
+        settingsLoadStates[activeExecutionLocation]
+            ?? (activeSettingsSnapshot == nil ? .idle : .loaded)
+    }
+
+    /// The persisted model for the composer’s exact execution location. Keep
+    /// this projection beside the snapshot owner so remote controls never
+    /// accidentally narrow against local defaults.
+    func activeDefaultModel(for harnessID: String) -> String? {
+        activeSettingsSnapshot?.harnesses?[harnessID]?.defaultModel
+    }
+
     var activeQuotaResponse: ControlQuotaResponse? {
         activeExecutionLocation == .local
             ? quotaResponse

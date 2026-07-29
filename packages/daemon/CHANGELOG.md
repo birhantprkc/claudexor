@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Support finite-or-disabled interaction waits and preserve profile readiness, settlement, refused-turn context, and retry truth across restart and projection reload.
 - @claudexor/core@3.2.0
 - @claudexor/journal@3.2.0
 - @claudexor/schema@3.2.0

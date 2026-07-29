@@ -49,29 +49,53 @@ extension AppModel {
         return await task.value
     }
 
-    func refreshSettings() async {
-        let locationID = activeExecutionLocation
+    @discardableResult
+    func refreshSettings(
+        locationID requestedLocationID: ExecutionLocationID? = nil
+    ) async -> String? {
+        let locationID = requestedLocationID ?? activeExecutionLocation
         let generation = executionLocationGeneration(for: locationID)
-        await enqueueSettingsOperation { [weak self] in
-            guard let self, self.executionLocationGeneration(for: locationID) == generation,
-                  let requestClient = self.gateway(for: locationID)
-            else { return }
+        let token = UUID()
+        settingsLoadTokens[locationID] = token
+        settingsLoadStates[locationID] = .loading
+        let error = await enqueueSettingsOperation { [weak self] () -> String? in
+            guard let self else { return "Settings stopped loading." }
+            guard self.executionLocationGeneration(for: locationID) == generation else {
+                return "Settings context changed while loading. Retry."
+            }
+            guard let requestClient = self.gateway(for: locationID) else {
+                return "Engine offline — reconnect to load settings."
+            }
             do {
                 let answer = try await requestClient.settings()
                 // Re-check AFTER the await (X24): the location's connection
                 // generation may have changed while the request was in flight;
                 // a late answer must not repopulate retired state.
-                guard self.executionLocationGeneration(for: locationID) == generation else { return }
+                guard self.executionLocationGeneration(for: locationID) == generation,
+                      self.isCurrentGateway(requestClient, at: locationID),
+                      self.settingsLoadTokens[locationID] == token
+                else { return "Settings context changed while loading. Retry." }
                 if locationID == .local {
                     self.settingsSnapshot = answer
                 } else {
                     self.remoteSettingsSnapshots[locationID] = answer
                 }
+                return nil
             } catch {
-                guard self.executionLocationGeneration(for: locationID) == generation else { return }
-                self.settingsStatus = "Could not load settings: \(error)"
+                guard self.executionLocationGeneration(for: locationID) == generation,
+                      self.isCurrentGateway(requestClient, at: locationID),
+                      self.settingsLoadTokens[locationID] == token
+                else { return "Settings context changed while loading. Retry." }
+                return "Could not load settings: \(self.userMessage(for: error))"
             }
         }
+        guard settingsLoadTokens[locationID] == token else { return error }
+        settingsLoadTokens.removeValue(forKey: locationID)
+        settingsLoadStates[locationID] = error.map(ProjectionLoadState.failed) ?? .loaded
+        if activeExecutionLocation == locationID {
+            settingsStatus = error
+        }
+        return error
     }
 
     func saveSettings(_ patch: SettingsUpdateRequest) async -> Bool {
@@ -138,6 +162,9 @@ extension AppModel {
                     self.settingsSnapshot = answer
                 } else {
                     self.remoteSettingsSnapshots[locationID] = answer
+                }
+                if self.settingsLoadTokens[locationID] == nil {
+                    self.settingsLoadStates[locationID] = .loaded
                 }
                 // The POST response is the settings authority and settles this
                 // lane now. Harness readiness is a derived projection: refresh

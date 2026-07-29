@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Retire the standalone Plan-review subject so the release reviewer remains a code-review owner while Plan uses its own read-only contract.
 - @claudexor/config@3.2.0
 - @claudexor/context@3.2.0
 - @claudexor/core@3.2.0

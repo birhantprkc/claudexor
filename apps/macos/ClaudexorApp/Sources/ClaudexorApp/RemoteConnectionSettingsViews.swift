@@ -235,6 +235,9 @@ private struct RemoteConnectionSettingsRow: View {
                         Task { await model.runRemoteHarnessDoctor(connectionID: connectionID) }
                     }
                     Button("Install runtime…") { confirmInstall = true }
+                        .disabled(
+                            connection.status == .connecting
+                                || connection.status == .installing)
                     Menu("Login") {
                         Button("Claude") {
                             Task {
@@ -299,6 +302,9 @@ private struct RemoteConnectionSettingsRow: View {
                 Button("Install") {
                     Task { await model.installRemoteRuntime(connectionID: connectionID) }
                 }
+                .disabled(
+                    connection.status == .connecting
+                        || connection.status == .installing)
             } message: {
                 Text(
                     "It installs without sudo under ~/.claudexor/remote/versions and atomically updates the current pointer.")

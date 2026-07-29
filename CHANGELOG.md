@@ -3,7 +3,7 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
-- **v3.2.0** (2026-07-28) — a seven-pull-request batch: remote execution, a
+- **v3.2.0** (2026-07-29) — an eight-pull-request batch: remote execution, a
   canonical run receipt, and the toolchain moved forward. Remote SSH
   execution (#82, kazzand): a thread can bind to a concrete `~/.ssh/config`
   host, where the app delegates transport and auth to the system
@@ -75,6 +75,30 @@ Release history for Claudexor. The current version is declared in the root
   dialog shows the remote CLI's own `--dry-run --json` disclosure verbatim
   before opening the terminal sheet; Harness Doctor verifies the result
   afterward.
+  Dogfood hardening closes the shared contract gaps found across Plan, Agent,
+  Settings, long-running research, terminal output, and refused turns. Plan can
+  receive read-only attachments but never Agent-only reviewer or protected-path
+  controls; engine-side attachment admission now has one pool resolver, while
+  Swift composer strategy and pool mirrors are parity-checked against an
+  engine-generated fixture. Settings autosave is location- and
+  lane-scoped, failed initial loads never become editable defaults, and the
+  interaction wait offers either a positive duration or no automatic expiry.
+  Deep Research resets inactivity only for genuine agent progress, while typed
+  refusals, Git readiness, retry remedies, terminal output, and final RunFacts
+  retain the same durable reason across UI, CLI, API, MCP, and ACP.
+  Concurrency and upgrade paths are hardened at their owning boundaries. Remote
+  setup, install, project, preview, directory, and terminal actions carry exact
+  generation-scoped leases; runtime activation commits only after the tunneled
+  handshake and rolls back through the same opaque lease. The packaged app
+  probes the selected local daemon closure and reconciles exact version plus
+  build identity before hydrating state, deferring safely while work is active.
+  Accounts and Settings share explicit location-scoped loading truth. File and
+  screenshot attachments are admitted from metadata before bounded reads,
+  revalidated on publication, and retired on an explicit conversation switch.
+  These dogfood repairs landed after the lockstep 3.2.0 versioning commit but
+  before the first public 3.2.0 publication. The affected package changelogs
+  therefore absorb them into their existing 3.2.0 sections; there is no second
+  changeset or semver bump.
   Toolchain: `@modelcontextprotocol/server` 2.0.0 GA with the
   2026-07-28 discover envelope pinned by regression, TypeScript 7.0.2 with a
   sidecar for the one compiler-API consumer, and zod 4.4.3 with the schema

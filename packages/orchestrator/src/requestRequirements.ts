@@ -37,6 +37,21 @@ export interface AttachmentLaneAdmission {
   attachmentResourceId?: string;
 }
 
+export type AttachmentPoolMode = "auto" | "explicit";
+
+export interface AttachmentPoolLane {
+  harnessId: string;
+  declarations: AttachmentInputClass[] | null;
+  available: boolean;
+}
+
+export interface AttachmentPoolAdmission {
+  outcome: "admitted" | "degraded" | "refused";
+  admittedHarnessIds: string[];
+  rejected: AttachmentLaneAdmission[];
+  message: string | null;
+}
+
 /** Access profiles that map to an unsandboxed/full-access harness lane. */
 export function isFullAccess(access: AccessProfile): boolean {
   return access === "full" || access === "external_sandbox_full";
@@ -76,14 +91,6 @@ export class RequestRequirementsResolver {
         "in-place convergence is unavailable for git_patch_envelope adapters; use an isolated run or a single agent attempt",
       );
     }
-  }
-
-  attachmentRefusal(
-    harnessId: string,
-    attachments: Attachment[],
-    declarations: AttachmentInputClass[],
-  ): string | null {
-    return this.resolveAttachmentLane(harnessId, attachments, declarations).message;
   }
 
   /** Typed finite-descriptor admission for one selected harness lane. */
@@ -144,6 +151,64 @@ export class RequestRequirementsResolver {
       }
     }
     return { harnessId, admitted: true, reason: "admitted", message: null };
+  }
+
+  /**
+   * Canonical pool aggregation for mandatory attachments. Auto drops lanes
+   * that are unavailable or incompatible; an explicit pool is atomic. Lane
+   * identity is stable and de-duplicated before admission.
+   */
+  resolveAttachmentPool(
+    poolMode: AttachmentPoolMode,
+    attachments: Attachment[],
+    lanes: AttachmentPoolLane[],
+  ): AttachmentPoolAdmission {
+    const seen = new Set<string>();
+    const projected = lanes.filter((lane) => {
+      if (poolMode === "auto" && !lane.available) return false;
+      if (seen.has(lane.harnessId)) return false;
+      seen.add(lane.harnessId);
+      return true;
+    });
+
+    if (attachments.length > 0 && projected.length === 0) {
+      return {
+        outcome: "refused",
+        admittedHarnessIds: [],
+        rejected: [],
+        message: "no available harness lane can receive the selected attachments",
+      };
+    }
+
+    const admissions = projected.map((lane) =>
+      this.resolveAttachmentLane(lane.harnessId, attachments, lane.declarations ?? []),
+    );
+    const rejected = admissions.filter((admission) => !admission.admitted);
+    const admittedHarnessIds = admissions
+      .filter((admission) => admission.admitted)
+      .map((admission) => admission.harnessId);
+    if (rejected.length === 0) {
+      return { outcome: "admitted", admittedHarnessIds, rejected: [], message: null };
+    }
+
+    const detail = rejected
+      .map((admission) => admission.message)
+      .filter((message): message is string => message !== null)
+      .join("; ");
+    if (poolMode === "explicit" || admittedHarnessIds.length === 0) {
+      return {
+        outcome: "refused",
+        admittedHarnessIds: [],
+        rejected,
+        message: detail || "no available harness lane can receive the selected attachments",
+      };
+    }
+    return {
+      outcome: "degraded",
+      admittedHarnessIds,
+      rejected,
+      message: detail,
+    };
   }
 
   browserSpec(

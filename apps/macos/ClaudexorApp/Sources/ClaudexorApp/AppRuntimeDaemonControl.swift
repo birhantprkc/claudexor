@@ -4,13 +4,13 @@ import ClaudexorKit
 // MARK: - Production RuntimeDaemonControl (D-2)
 //
 // Wires the install coordinator's daemon-lifecycle port to the REAL machinery:
-//  - probeVersion: spawn the app-bundled Node against the unpacked closure's
-//    daemon with `--probe` (side-effect-free version handshake, no socket).
+//  - probeIdentity: spawn the app-bundled Node against the unpacked closure's
+//    daemon with `--probe` (side-effect-free exact identity, no socket).
 //  - stop: spawn the app-bundled Node against the app-bundled daemon with
 //    `--stop`, which reuses the daemon's socket `claudexor.shutdown` +
 //    identity-proven termination confirmation (never a raw kill).
 //  - start: DaemonLauncher (relaunch against the ACTIVE pointer).
-//  - isBusy / handshakeVersion: injected async closures over the app's
+//  - isBusy / handshakeIdentity: injected async closures over the app's
 //    GatewayClient (active-runs listing / protocol handshake), so this struct
 //    stays Sendable and testable.
 
@@ -18,15 +18,29 @@ struct AppRuntimeDaemonControl: RuntimeDaemonControl {
     /// Active-runs probe: true = a run is queued/running (busy), false = idle,
     /// nil = the daemon could not be asked (coordinator treats nil as busy).
     let isBusyProbe: @Sendable () async -> Bool?
-    /// Live handshake engine version, nil when unreachable.
-    let handshakeProbe: @Sendable () async -> String?
+    /// Live handshake exact identity, nil when unreachable or unstamped.
+    let handshakeIdentityProbe: @Sendable () async -> RuntimeClosureIdentity?
+
+    init(
+        isBusyProbe: @escaping @Sendable () async -> Bool?,
+        handshakeIdentityProbe: @escaping @Sendable () async -> RuntimeClosureIdentity? = { nil }
+    ) {
+        self.isBusyProbe = isBusyProbe
+        self.handshakeIdentityProbe = handshakeIdentityProbe
+    }
 
     func isBusy() async -> Bool? { await isBusyProbe() }
-    func handshakeVersion() async -> String? { await handshakeProbe() }
+    func handshakeIdentity() async -> RuntimeClosureIdentity? { await handshakeIdentityProbe() }
 
     func start() throws {
         guard DaemonLauncher.startIfNeeded() else {
             throw RuntimeInstallError.io("could not relaunch the engine daemon")
+        }
+    }
+
+    func start(scriptURL: URL) throws {
+        guard DaemonLauncher.startIfNeeded(scriptURL: scriptURL) else {
+            throw RuntimeInstallError.io("could not relaunch the selected engine daemon")
         }
     }
 
@@ -42,10 +56,26 @@ struct AppRuntimeDaemonControl: RuntimeDaemonControl {
         }
     }
 
-    func probeVersion(scriptURL: URL) async -> String? {
-        guard let node = DaemonLauncher.bundledNode else { return nil }
-        let result = Self.runNodeJSON([scriptURL.path, "--probe"], node: node, timeout: 20)
-        return result?["version"] as? String
+    func probeIdentity(scriptURL: URL) async -> RuntimeClosureIdentity? {
+        guard let node = DaemonLauncher.bundledNode,
+            let result = Self.runNodeJSON([scriptURL.path, "--probe"], node: node, timeout: 20)
+        else { return nil }
+        return Self.runtimeIdentity(from: result)
+    }
+
+    static func runtimeIdentity(from result: [String: Any]) -> RuntimeClosureIdentity? {
+        runtimeIdentity(
+            version: result["version"] as? String,
+            buildSha: result["buildSha"] as? String)
+    }
+
+    /// Both subprocess probes and live handshakes use the same exact identity
+    /// contract. In particular, `unknown`, abbreviated SHAs, and uppercase hex
+    /// are presentation values, not lifecycle authority.
+    static func runtimeIdentity(
+        version: String?, buildSha: String?
+    ) -> RuntimeClosureIdentity? {
+        RuntimeClosureIdentity.validated(version: version, buildSha: buildSha)
     }
 
     // MARK: - Subprocess helper

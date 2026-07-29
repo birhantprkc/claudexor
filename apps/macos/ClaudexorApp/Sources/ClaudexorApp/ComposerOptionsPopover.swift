@@ -59,7 +59,7 @@ extension ThreadsScreen {
             guard let info = model.harnessInfo(for: family) else { return [] }
             let chosen = (composerModels[family.rawValue] ?? "")
                 .trimmingCharacters(in: .whitespaces)
-            let persisted = (model.settingsSnapshot?.harnesses?[family.rawValue]?.defaultModel ?? "")
+            let persisted = (model.activeDefaultModel(for: family.rawValue) ?? "")
                 .trimmingCharacters(in: .whitespaces)
             let effective = chosen.isEmpty ? persisted : chosen
             if !effective.isEmpty, let perModel = info.modelEffortLevels[effective], !perModel.isEmpty {

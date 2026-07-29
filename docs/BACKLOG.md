@@ -6,6 +6,29 @@ Silent drops are the failure mode this file exists to prevent — the 2.1.0
 audit found ten F2.5 leftovers that were neither shipped nor consciously
 deferred; they are recorded here now.
 
+## v3.2.0 wave-4 review deferrals
+
+- C3: project each command's per-subcommand flag ownership in
+  `claudexor help --json`. The parser already enforces the ownership; this is
+  additional machine-help detail, not a runtime correctness gap.
+- C7: unify the wording prefix emitted by command-level and subcommand-level
+  flag-scope errors. Both paths already reject the invalid flag with the same
+  usage exit, so this is presentation consistency only.
+- C8: normalize the `harness install` failure JSON with the shared `message`
+  and `code` fields instead of exposing only its purpose-built fields and raw
+  child exit. Preserve the one-object stdout contract when this is taken up.
+
+## v3.2.0 dogfood CLI-projector residue
+
+- D-7 sibling sweep: finish routing typed control-API failures through the
+  canonical CLI projector outside the now-correct Settings path. Reachable
+  residues remain in quota, trust, credential profiles, secrets, selected ops
+  reads/writes, run attachment and project bootstrap, handshake/setup attach,
+  apply, and the interactive REPL. Treat this as a bounded migration with
+  per-command golden tests because these endpoints mix problem, result, binary,
+  SSE, and interactive transports; do not hide the behavior change in one
+  generic fetch wrapper. Existing N2 and X208/F45 are subsets of this item.
+
 ## Discovery/distribution review advisories (3.2 wave; X243-X261)
 
 - X243: add the experimental ACP Terminal Auth rationale to the WHITEPAPER if

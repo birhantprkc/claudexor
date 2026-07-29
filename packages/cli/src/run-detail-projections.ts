@@ -6,10 +6,9 @@ import {
   type RunFailure as RunFailureType,
 } from "@claudexor/schema";
 
-export type PrimaryOutputPresentation = Pick<
-  ControlPrimaryOutputType,
-  "kind" | "path" | "text"
-> & { truncated?: boolean };
+export type PrimaryOutputPresentation = Pick<ControlPrimaryOutputType, "kind" | "path" | "text"> & {
+  truncated?: boolean;
+};
 
 /** Schema-validate the Control API's single primary-output owner. */
 export function projectRunPrimaryOutput(

@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Detect typed Git capability and stub repositories before workspace operations, and preserve that truth through thread workspace creation and initialization.
 - @claudexor/core@3.2.0
 - @claudexor/schema@3.2.0
 - @claudexor/util@3.2.0

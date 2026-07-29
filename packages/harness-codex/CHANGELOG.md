@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Translate native reconnect and retry signals into the shared typed run contract.
 - Duplicate native `started` lifecycle frames are recognized and skipped so an attempt emits exactly one started event (fixture-pinned).
 - @claudexor/core@3.2.0
 - @claudexor/schema@3.2.0

@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Keep reviewer and protected-path controls Agent-only, expose the read-only Plan attachment boundary, and project terminal applicability and refusal problems consistently.
 - The MCP SDK dependency moves from the 2.0.0 beta to an exact 2.0.0 GA pin under the modern-era envelope contract, and structured run results now carry `detailProblem`.
 - @claudexor/schema@3.2.0
 - @claudexor/util@3.2.0

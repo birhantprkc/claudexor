@@ -45,8 +45,7 @@ vi.mock("./registry.js", async (importOriginal) => {
           ...adapter,
           probeCredentialProfile: async (profile) => {
             const readiness =
-              gatewayMock.profileReadinessById[profile.profile_id] ??
-              gatewayMock.profileReadiness;
+              gatewayMock.profileReadinessById[profile.profile_id] ?? gatewayMock.profileReadiness;
             return {
               profile_id: profile.profile_id,
               harness_id: profile.harness_id,

@@ -4,9 +4,343 @@ import Foundation
 import Testing
 @testable import ClaudexorApp
 
-@Suite struct RemoteRuntimeInstallerTests {
+private actor RemoteRuntimeTransportStub: RemoteRuntimeSSHTransport {
+    enum Step: Sendable {
+        case output(Data)
+        case failure(String)
+    }
+
+    private var steps: [Step]
+    private(set) var commands: [String] = []
+
+    init(steps: [Step]) { self.steps = steps }
+
+    func execute(
+        _ connection: RemoteConnection,
+        remoteCommand: String,
+        stdin: Data?
+    ) async throws -> SSHProcessOutput {
+        commands.append(remoteCommand)
+        guard !steps.isEmpty else {
+            throw SSHConnectionError.unavailable("unexpected test transport call")
+        }
+        switch steps.removeFirst() {
+        case .output(let data):
+            return SSHProcessOutput(
+                stdout: data, stderr: Data(), status: 0, stdinWriteError: nil)
+        case .failure(let message):
+            throw SSHConnectionError.unavailable(message)
+        }
+    }
+}
+
+private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var bytes = Data()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/gzip"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.bytes)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+@Suite(.serialized) struct RemoteRuntimeInstallerTests {
+    @Test func publicationRequiresHandshakeAndExactActivationCommit() {
+        var activated = RemoteRuntimePublicationGate(requiresActivationCommit: true)
+        #expect(!activated.mayPublish)
+        let prematureCommit = activated.acceptActivationCommit()
+        #expect(!prematureCommit)
+        activated.acceptHandshake()
+        #expect(!activated.mayPublish)
+        let committed = activated.acceptActivationCommit()
+        #expect(committed)
+        #expect(activated.mayPublish)
+
+        var ordinary = RemoteRuntimePublicationGate(requiresActivationCommit: false)
+        #expect(!ordinary.mayPublish)
+        ordinary.acceptHandshake()
+        #expect(ordinary.mayPublish)
+    }
     private let oldBuild = String(repeating: "a", count: 40)
     private let newBuild = String(repeating: "b", count: 40)
+
+    private func activationPayload() -> RemoteRuntimeActivationState.Payload {
+        RemoteRuntimeActivationState.Payload(
+            candidateTarget: "versions/3.4.0-candidate",
+            candidate: RemoteRuntimeProbe(
+                target: .darwinArm64, version: "3.4.0", buildSha: newBuild,
+                protocolMajor: 3),
+            previousTarget: "versions/3.3.0-previous",
+            previous: RemoteRuntimeProbe(
+                target: .darwinArm64, version: "3.3.0", buildSha: oldBuild,
+                protocolMajor: 3))
+    }
+
+    @Test func activationStateIsSingleFlightBeforeAnyAwait() throws {
+        var state = RemoteRuntimeActivationState()
+        let connectionID = UUID()
+        let lease = try state.claim(connectionID: connectionID)
+        #expect(state.phase(for: lease) == .installing)
+        #expect(state.lease(connectionID: connectionID) == lease)
+        #expect(state.recoverableLease(connectionID: connectionID) == nil)
+        #expect(throws: SSHConnectionError.self) {
+            _ = try state.claim(connectionID: connectionID)
+        }
+
+        try state.prepareMutation(activationPayload(), for: lease)
+        try state.confirmMutation(lease)
+        #expect(state.phase(for: lease) == .pending)
+        #expect(state.recoverableLease(connectionID: connectionID) == lease)
+        #expect(throws: SSHConnectionError.self) {
+            _ = try state.claim(connectionID: connectionID)
+        }
+    }
+
+    @Test func staleLeaseCannotSettleANewerActivation() throws {
+        var state = RemoteRuntimeActivationState()
+        let connectionID = UUID()
+        let oldLease = try state.claim(connectionID: connectionID)
+        try state.prepareMutation(activationPayload(), for: oldLease)
+        try state.confirmMutation(oldLease)
+        try state.commit(oldLease)
+
+        let currentLease = try state.claim(connectionID: connectionID)
+        try state.prepareMutation(activationPayload(), for: currentLease)
+        try state.confirmMutation(currentLease)
+        #expect(throws: SSHConnectionError.self) {
+            try state.commit(oldLease)
+        }
+        #expect(state.phase(for: currentLease) == .pending)
+    }
+
+    @Test func settlementOwnsTheLeaseAndFailureLeavesOnlyThatLeaseRetryable() throws {
+        var state = RemoteRuntimeActivationState()
+        let connectionID = UUID()
+        let lease = try state.claim(connectionID: connectionID)
+        try state.prepareMutation(activationPayload(), for: lease)
+        try state.confirmMutation(lease)
+
+        let payload = try state.beginSettlement(lease)
+        #expect(payload.candidate.version == "3.4.0")
+        #expect(state.phase(for: lease) == .settling)
+        #expect(throws: SSHConnectionError.self) {
+            try state.commit(lease)
+        }
+        #expect(throws: SSHConnectionError.self) {
+            _ = try state.claim(connectionID: connectionID)
+        }
+
+        state.settlementFailed(lease)
+        #expect(state.phase(for: lease) == .pending)
+        _ = try state.beginSettlement(lease)
+        try state.finishSettlement(lease)
+        #expect(state.phase(for: lease) == nil)
+    }
+
+    @Test func installPropagatesAndRetainsTheExactLeaseWhenRollbackFails() async throws {
+        let archive = Data("candidate archive".utf8)
+        let digest = SHA256.hash(data: archive)
+            .map { String(format: "%02x", $0) }.joined()
+        let archiveName = RemoteRuntimeManifestV1.archiveName(
+            version: "3.4.0", target: .darwinArm64)
+        let manifest = try JSONDecoder().decode(
+            RemoteRuntimeManifestV1.self,
+            from: Data(#"""
+            {
+              "schemaVersion":1,
+              "kind":"claudexor-remote-runtime",
+              "version":"3.4.0",
+              "buildSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "protocolMajor":3,
+              "minAppVersion":"2.1.0",
+              "notes":"actor recovery test",
+              "assets":[{
+                "target":"darwin-arm64","platform":"darwin","arch":"arm64",
+                "nodeVersion":"24.16.0","archiveName":"\#(archiveName)",
+                "archiveUrl":"https://runtime.test/\#(archiveName)",
+                "sha256":"\#(digest)"
+              }],
+              "keyId":"test","algorithm":"Ed25519","signature":"test"
+            }
+            """#.utf8))
+        RemoteRuntimeArchiveURLProtocol.bytes = archive
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RemoteRuntimeArchiveURLProtocol.self]
+        let transport = RemoteRuntimeTransportStub(steps: [
+            .output(Data()), // pointer before snapshot
+            .output(Data()), // pointer after snapshot
+            .output(Data()), // archive upload
+            .output(Data()), // atomic install/activate
+            .failure("candidate bootstrap failed"),
+            .failure("first rollback failed"),
+            .output(Data()), // retry of the exact pending rollback
+        ])
+        let installer = RemoteRuntimeInstaller(
+            ssh: transport,
+            session: URLSession(configuration: configuration),
+            developmentDirectory: nil)
+        let connection = RemoteConnection(sshAlias: "recovery-test")
+
+        let recovery: RemoteRuntimeRecoveryRequired
+        do {
+            _ = try await installer.install(
+                manifest, target: .darwinArm64, on: connection, appVersion: "3.4.0")
+            Issue.record("failed rollback must return its exact recovery lease")
+            return
+        } catch let error as RemoteRuntimeRecoveryRequired {
+            recovery = error
+        }
+        #expect(recovery.lease.connectionID == connection.id)
+        #expect(recovery.primaryMessage.contains("candidate bootstrap failed"))
+        #expect(recovery.recoveryMessage.contains("first rollback failed"))
+
+        // Production recovery, not just the pure state helper: the retained
+        // lease drives the exact rollback on the next attempt and then becomes
+        // stale, proving it was neither abandoned nor replaced.
+        try await installer.recoverPendingActivation(on: connection)
+        do {
+            try await installer.commitActivation(recovery.lease)
+            Issue.record("a recovered lease must already be settled")
+        } catch {
+            // Expected exact stale-lease refusal.
+        }
+        #expect(await transport.commands.count == 7)
+    }
+
+    @Test func lostInstallResponseAndUnreadablePointerRetainAnUncertainLease() async throws {
+        let archive = Data("uncertain candidate".utf8)
+        let digest = SHA256.hash(data: archive)
+            .map { String(format: "%02x", $0) }.joined()
+        let archiveName = RemoteRuntimeManifestV1.archiveName(
+            version: "3.4.0", target: .darwinArm64)
+        let manifest = try JSONDecoder().decode(
+            RemoteRuntimeManifestV1.self,
+            from: Data(#"""
+            {
+              "schemaVersion":1,
+              "kind":"claudexor-remote-runtime",
+              "version":"3.4.0",
+              "buildSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "protocolMajor":3,
+              "minAppVersion":"2.1.0",
+              "notes":"uncertain activation test",
+              "assets":[{
+                "target":"darwin-arm64","platform":"darwin","arch":"arm64",
+                "nodeVersion":"24.16.0","archiveName":"\#(archiveName)",
+                "archiveUrl":"https://runtime.test/\#(archiveName)",
+                "sha256":"\#(digest)"
+              }],
+              "keyId":"test","algorithm":"Ed25519","signature":"test"
+            }
+            """#.utf8))
+        RemoteRuntimeArchiveURLProtocol.bytes = archive
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RemoteRuntimeArchiveURLProtocol.self]
+        let candidateTarget = "versions/3.4.0-\(digest)"
+        let transport = RemoteRuntimeTransportStub(steps: [
+            .output(Data()), // pointer before snapshot
+            .output(Data()), // pointer after snapshot
+            .output(Data()), // archive upload
+            .failure("install response lost"),
+            .failure("readlink temporarily unavailable"),
+            .output(Data("\(candidateTarget)\n".utf8)), // later recovery observation
+            .output(Data(#"{"ok":true,"deactivated":true}"#.utf8)), // exact rollback
+        ])
+        let installer = RemoteRuntimeInstaller(
+            ssh: transport,
+            session: URLSession(configuration: configuration),
+            developmentDirectory: nil)
+        let connection = RemoteConnection(sshAlias: "uncertain-recovery")
+
+        let recovery: RemoteRuntimeRecoveryRequired
+        do {
+            _ = try await installer.install(
+                manifest, target: .darwinArm64, on: connection, appVersion: "3.4.0")
+            Issue.record("an unreadable post-error pointer must retain recovery ownership")
+            return
+        } catch let error as RemoteRuntimeRecoveryRequired {
+            recovery = error
+        }
+        #expect(recovery.primaryMessage.contains("install response lost"))
+        #expect(recovery.recoveryMessage.contains("readlink temporarily unavailable"))
+
+        try await installer.recoverPendingActivation(on: connection)
+        #expect(await transport.commands.count == 7)
+        do {
+            try await installer.commitActivation(recovery.lease)
+            Issue.record("the recovered uncertain lease must already be settled")
+        } catch {
+            // Exact stale-lease refusal proves recovery removed this owner.
+        }
+    }
+
+    @Test func lostInstallResponseWithUnchangedPreviousPointerRestartsAndSettlesPrevious() async throws {
+        let archive = Data("unchanged previous".utf8)
+        let digest = SHA256.hash(data: archive)
+            .map { String(format: "%02x", $0) }.joined()
+        let archiveName = RemoteRuntimeManifestV1.archiveName(
+            version: "3.4.0", target: .darwinArm64)
+        let manifest = try JSONDecoder().decode(
+            RemoteRuntimeManifestV1.self,
+            from: Data(#"""
+            {
+              "schemaVersion":1,
+              "kind":"claudexor-remote-runtime",
+              "version":"3.4.0",
+              "buildSha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "protocolMajor":3,
+              "minAppVersion":"2.1.0",
+              "notes":"unchanged activation test",
+              "assets":[{
+                "target":"darwin-arm64","platform":"darwin","arch":"arm64",
+                "nodeVersion":"24.16.0","archiveName":"\#(archiveName)",
+                "archiveUrl":"https://runtime.test/\#(archiveName)",
+                "sha256":"\#(digest)"
+              }],
+              "keyId":"test","algorithm":"Ed25519","signature":"test"
+            }
+            """#.utf8))
+        RemoteRuntimeArchiveURLProtocol.bytes = archive
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RemoteRuntimeArchiveURLProtocol.self]
+        let previousTarget = "versions/3.3.0-previous"
+        let previousProbe = #"{"target":"darwin-arm64","version":"3.3.0","buildSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","protocolMajor":3}"#
+        let previousBootstrap = #"{"ok":true,"target":"darwin-arm64","version":"3.3.0","buildSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","protocolMajor":3,"engineVersion":"3.3.0","engineBuildSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","endpoint":{"host":"127.0.0.1","port":43123,"token":"memory-only"}}"#
+        let transport = RemoteRuntimeTransportStub(steps: [
+            .output(Data("\(previousTarget)\n".utf8)),
+            .output(Data(previousProbe.utf8)),
+            .output(Data("\(previousTarget)\n".utf8)),
+            .output(Data()), // archive upload
+            .failure("install response lost before activation"),
+            .output(Data("\(previousTarget)\n".utf8)),
+            .output(Data(previousBootstrap.utf8)),
+        ])
+        let installer = RemoteRuntimeInstaller(
+            ssh: transport,
+            session: URLSession(configuration: configuration),
+            developmentDirectory: nil)
+        let connection = RemoteConnection(sshAlias: "unchanged-recovery")
+
+        do {
+            _ = try await installer.install(
+                manifest, target: .darwinArm64, on: connection, appVersion: "3.4.0")
+            Issue.record("a lost install response must still report the primary failure")
+        } catch is RemoteRuntimeRecoveryRequired {
+            Issue.record("a proven previous pointer and daemon should settle recovery")
+        } catch {
+            #expect(error.localizedDescription.contains("install response lost"))
+        }
+
+        try await installer.recoverPendingActivation(on: connection)
+        #expect(await transport.commands.count == 7)
+    }
 
     private func temporaryHome() throws -> URL {
         let root = FileManager.default.temporaryDirectory

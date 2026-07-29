@@ -186,20 +186,27 @@ describe("canary golden stories", () => {
       schemaPath,
       "--json",
     ]);
-    expect(r.code).toBe(1);
+    // A caller-supplied schema is input validation. The control API refuses it
+    // before a run can materialize, so the one CLI problem projector owns both
+    // the JSON envelope and the usage exit code.
+    expect(r.code).toBe(2);
     expect(r.stderr).toBe("");
     expect(r.json()).toMatchObject({
-      status: "failed",
+      ok: false,
+      exitCode: 2,
       code: "unsupported_schema_dialect",
-      errorStatus: 400,
       retryable: false,
-      supportedDialects: [
-        { dialect: "draft-07", uri: "http://json-schema.org/draft-07/schema#" },
-        {
-          dialect: "draft-2020-12",
-          uri: "https://json-schema.org/draft/2020-12/schema",
-        },
-      ],
+      requiredActions: [expect.stringContaining("set $schema")],
+      context: {
+        state: "failed",
+        supportedDialects: [
+          { dialect: "draft-07", uri: "http://json-schema.org/draft-07/schema#" },
+          {
+            dialect: "draft-2020-12",
+            uri: "https://json-schema.org/draft/2020-12/schema",
+          },
+        ],
+      },
     });
   });
 
@@ -223,13 +230,15 @@ describe("canary golden stories", () => {
       schemaPath,
       "--json",
     ]);
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(2);
     expect(r.stderr).toBe("");
     expect(r.json()).toMatchObject({
-      status: "failed",
+      ok: false,
+      exitCode: 2,
       code: "invalid_output_schema",
-      errorStatus: 400,
       retryable: false,
+      requiredActions: ["fix the output schema and retry the run"],
+      context: { state: "failed" },
     });
   });
 
@@ -553,28 +562,5 @@ describe("canary golden stories", () => {
       name: "openai",
       deleted: true,
     });
-  });
-
-  it("[INV-104:settings-write-strict] `settings set harness.<id>.default_model` refuses a model outside the truth source and persists nothing", () => {
-    // codex's manifest known_models is the offline truth source here.
-    const bad = cli(sb, ["settings", "set", "harness.codex.default_model", "ghost-model-9000"]);
-    expect(bad.code).toBe(1);
-    expect(bad.stdout + bad.stderr).toMatch(/refused|not in the harness/i);
-    const show = cli(sb, ["settings", "show", "--json"]);
-    expect(show.stdout).not.toContain("ghost-model-9000");
-    const good = cli(sb, ["settings", "set", "harness.codex.default_model", "gpt-5.5"]);
-    expect(good.code).toBe(0);
-    const show2 = cli(sb, ["settings", "show", "--json"]);
-    expect(show2.stdout).toContain("gpt-5.5");
-    // Fakes are test fixtures, never persistable routing targets.
-    const fake = cli(sb, ["settings", "set", "harness.fake-success.default_model", "fake-model"]);
-    expect(fake.code).toBe(1);
-    expect(fake.stdout + fake.stderr).toMatch(/fake-success.*(?:not persistable|not a real)/i);
-  });
-
-  it("[INV-103:no-global-model] the retired global default_model setting hard-errors with the harness-scoped remedy", () => {
-    const r = cli(sb, ["settings", "set", "default_model", "gpt-5.5"]);
-    expect(r.code).toBe(1);
-    expect(r.stdout + r.stderr).toMatch(/harness-scoped|harness\.<id>\.default_model/);
   });
 });

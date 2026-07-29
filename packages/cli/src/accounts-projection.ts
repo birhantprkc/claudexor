@@ -62,10 +62,7 @@ export async function profileDoctorStatus(
   profile: CredentialProfile,
 ): Promise<CredentialProfileStatus> {
   const adapter = buildRegistry().get(profile.harness_id);
-  return probeCredentialProfileStatus(
-    profile,
-    adapter?.probeCredentialProfile?.bind(adapter),
-  );
+  return probeCredentialProfileStatus(profile, adapter?.probeCredentialProfile?.bind(adapter));
 }
 
 export async function harnessAccountsProjection(

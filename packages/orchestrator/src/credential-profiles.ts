@@ -21,7 +21,6 @@ export {
   profileHeadroomBreach,
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
-  type HeadroomBreach,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
 

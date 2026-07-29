@@ -85,12 +85,12 @@ struct RemoteTerminalSheet: View {
                         await model.finishInteractiveRemoteConnection(
                             connectionID, generation: generation, exitCode: code)
                     }
-                } else if case .setup(let connectionID, _) = request.purpose {
-                    Task { await model.runRemoteHarnessDoctor(connectionID: connectionID) }
-                } else if case .install(let connectionID, let harness) = request.purpose {
+                } else if case .setup(let lease, _) = request.purpose {
+                    Task { await model.finishRemoteSetup(lease) }
+                } else if case .install(let lease, let harness) = request.purpose {
                     Task {
                         await model.finishRemoteHarnessInstall(
-                            connectionID: connectionID,
+                            lease: lease,
                             harness: harness,
                             exitCode: code)
                     }
@@ -101,6 +101,7 @@ struct RemoteTerminalSheet: View {
         .background(Color(nsColor: .textBackgroundColor))
         .interactiveDismissDisabled(
             exitCode == nil && request.purpose.blocksDismissalWhileRunning)
+        .onDisappear { model.dismissRemoteTerminal(request) }
     }
 }
 
@@ -111,6 +112,7 @@ struct RemoteDirectoryBrowser: View {
     @State private var loading = false
     @State private var status: String?
     @State private var directPath = ""
+    @State private var loadLane = RemoteDirectoryLoadLane()
 
     private var connection: RemoteConnection? {
         model.remoteConnections.first { $0.id == request.connectionID }
@@ -124,10 +126,10 @@ struct RemoteDirectoryBrowser: View {
                     systemImage: "network")
                     .font(.headline)
                 Spacer()
-                Button("Cancel") { model.remoteDirectoryBrowser = nil }
+                Button("Cancel") { model.dismissRemoteDirectoryBrowser(request) }
                 Button("Choose Folder") { chooseCurrent() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(listing == nil)
+                    .disabled(listing == nil || loading)
             }
             .padding()
             Divider()
@@ -144,6 +146,7 @@ struct RemoteDirectoryBrowser: View {
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { Task { await load(directPath) } }
+                    .disabled(loading)
                 Button("Go") { Task { await load(directPath) } }
                     .disabled(
                         loading
@@ -184,26 +187,35 @@ struct RemoteDirectoryBrowser: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(!entry.readable)
+                    .disabled(!entry.readable || loading)
                 }
             }
         }
         .frame(minWidth: 640, minHeight: 520)
         .task { await load(nil) }
+        .onDisappear { model.dismissRemoteDirectoryBrowser(request) }
     }
 
     private func load(_ path: String?) async {
-        guard let client = model.gateway(for: .remote(request.connectionID)) else {
+        guard model.remoteActionIsCurrent(request.lease),
+              let client = model.gateway(for: .remote(request.connectionID))
+        else {
             status = "The SSH connection is offline."
             return
         }
+        let receipt = loadLane.begin(action: request.lease, client: client)
         loading = true
-        defer { loading = false }
+        defer {
+            if loadLane.owns(receipt) { loading = false }
+        }
         do {
-            listing = try await client.listRemoteDirectory(path: path)
-            directPath = listing?.path ?? directPath
+            let value = try await client.listRemoteDirectory(path: path)
+            guard loadLane.accepts(receipt, in: model) else { return }
+            listing = value
+            directPath = value.path
             status = nil
         } catch {
+            guard loadLane.accepts(receipt, in: model) else { return }
             status = model.userMessage(for: error)
         }
     }
@@ -211,7 +223,7 @@ struct RemoteDirectoryBrowser: View {
     private func chooseCurrent() {
         guard let path = listing?.path else { return }
         model.selectRemoteProject(connectionID: request.connectionID, path: path)
-        model.remoteDirectoryBrowser = nil
+        model.dismissRemoteDirectoryBrowser(request)
     }
 }
 
@@ -260,7 +272,7 @@ struct RemoteDeviceLoginSheet: View {
                 Label("Codex device login", systemImage: "person.badge.key")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                Button("Close") { model.remoteDeviceLogin = nil }
+                Button("Close") { model.dismissRemoteDeviceLogin(request) }
             }
             if let disclosure = snapshot?.deviceCode {
                 Text("Open this page in an isolated browser session, then enter the one-time code.")
@@ -339,12 +351,15 @@ struct RemoteDeviceLoginSheet: View {
                 if snapshot?.job.canCancel == true {
                     Button("Cancel", role: .destructive) {
                         Task {
-                            _ = try? await client?.cancelSetupJob(jobId: request.jobID)
+                            guard let client,
+                                  model.remoteActionIsCurrent(request.lease, client: client)
+                            else { return }
+                            _ = try? await client.cancelSetupJob(jobId: request.jobID)
                         }
                     }
                 }
                 Button(snapshot?.job.isTerminal == true ? "Done" : "Keep open") {
-                    model.remoteDeviceLogin = nil
+                    model.dismissRemoteDeviceLogin(request)
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -356,27 +371,34 @@ struct RemoteDeviceLoginSheet: View {
                 status = "The remote connection is offline."
                 return
             }
+            guard model.remoteActionIsCurrent(request.lease, client: client) else { return }
             while !Task.isCancelled {
                 do {
                     let current = try await client.setupJobSnapshot(jobId: request.jobID)
+                    guard model.remoteActionIsCurrent(request.lease, client: client) else { return }
                     snapshot = current
                     status = nil
                     if current.job.isTerminal {
                         if let readiness = await model.refreshRemoteNativeLoginReadiness(
                             connectionID: request.connectionID,
-                            harnessID: SetupHarness.codex.rawValue)
+                            harnessID: SetupHarness.codex.rawValue,
+                            actionLease: request.lease)
                         {
+                            guard model.remoteActionIsCurrent(request.lease, client: client)
+                            else { return }
                             nativeSessionVerified = readiness.nativeSessionVerified
                             harnessRoutable = readiness.harnessRoutable
                         }
                         return
                     }
                 } catch {
+                    guard model.remoteActionIsCurrent(request.lease, client: client) else { return }
                     status = model.userMessage(for: error)
                 }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        .onDisappear { model.dismissRemoteDeviceLogin(request) }
     }
 }
 

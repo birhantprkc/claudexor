@@ -113,23 +113,25 @@ export interface DeepScanReducerDeps {
     homeEnv: Record<string, string>,
     prompt: string,
     attemptId: string,
-  ) => Promise<{
-    spec: HarnessRunSpec;
-    webPolicy: ExternalContextPolicy;
-    effectiveWeb: ExternalContextPolicy;
-    model: string | null;
-    /** D-16: the WorkReport transport mode compiled onto the reducer spec, so the
-     * reducer output is unwrapped + finalized through the SAME contract as every
-     * other attempt (never a fourth divergent deliverable predicate). Inactive on
-     * a route with no work_report transport (the report passes through untouched). */
-    workReportMode: WorkReportEnvelopeMode;
-  }> | {
-    spec: HarnessRunSpec;
-    webPolicy: ExternalContextPolicy;
-    effectiveWeb: ExternalContextPolicy;
-    model: string | null;
-    workReportMode: WorkReportEnvelopeMode;
-  };
+  ) =>
+    | Promise<{
+        spec: HarnessRunSpec;
+        webPolicy: ExternalContextPolicy;
+        effectiveWeb: ExternalContextPolicy;
+        model: string | null;
+        /** D-16: the WorkReport transport mode compiled onto the reducer spec, so the
+         * reducer output is unwrapped + finalized through the SAME contract as every
+         * other attempt (never a fourth divergent deliverable predicate). Inactive on
+         * a route with no work_report transport (the report passes through untouched). */
+        workReportMode: WorkReportEnvelopeMode;
+      }>
+    | {
+        spec: HarnessRunSpec;
+        webPolicy: ExternalContextPolicy;
+        effectiveWeb: ExternalContextPolicy;
+        model: string | null;
+        workReportMode: WorkReportEnvelopeMode;
+      };
   /** Hard (total) timeout for the single bounded pass. */
   hardTimeoutMs: number;
   /** Inactivity watchdog timeout (shared with the scout lane). */

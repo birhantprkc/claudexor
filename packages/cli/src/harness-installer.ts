@@ -54,12 +54,34 @@ export function isInstallableHarness(value: string): value is InstallableHarness
  * vouches for it (its vendor-cli-version.ts discloses this). Cursor is
  * absent deliberately: it ships no npm artifact (see the cursor branch
  * below). */
+export type HarnessInstallVerification =
+  "release_verified" | "deterministic_only" | "human_observed";
+
 const NPM_PINS: Partial<
-  Record<InstallableHarness, { npmPackage: string; version: PinnedVendorCliVersion }>
+  Record<
+    InstallableHarness,
+    {
+      npmPackage: string;
+      version: PinnedVendorCliVersion;
+      verification: Exclude<HarnessInstallVerification, "human_observed">;
+    }
+  >
 > = {
-  claude: { npmPackage: "@anthropic-ai/claude-code", version: CLAUDE_VENDOR_CLI_VERSION },
-  codex: { npmPackage: "@openai/codex", version: CODEX_VENDOR_CLI_VERSION },
-  opencode: { npmPackage: "opencode-ai", version: OPENCODE_VENDOR_CLI_VERSION },
+  claude: {
+    npmPackage: "@anthropic-ai/claude-code",
+    version: CLAUDE_VENDOR_CLI_VERSION,
+    verification: "release_verified",
+  },
+  codex: {
+    npmPackage: "@openai/codex",
+    version: CODEX_VENDOR_CLI_VERSION,
+    verification: "release_verified",
+  },
+  opencode: {
+    npmPackage: "opencode-ai",
+    version: OPENCODE_VENDOR_CLI_VERSION,
+    verification: "deterministic_only",
+  },
 };
 
 export const CURSOR_INSTALL_URL = "https://cursor.com/install";
@@ -71,7 +93,10 @@ export interface HarnessInstallerDisclosure {
   /** Exact vendor version the command installs; null ONLY for cursor, which
    * has no pinnable artifact (disclosed, never faked). */
   pinnedVersion: string | null;
-  verification: "npm_registry_integrity" | "human_watches_pty";
+  /** Evidence behind the install target. Package-registry integrity verifies
+   * downloaded bytes for every npm pin, but only release_verified means the
+   * exact vendor version was exercised by this release's freshness gates. */
+  verification: HarnessInstallVerification;
 }
 
 export function harnessInstallerDisclosure(
@@ -84,7 +109,7 @@ export function harnessInstallerDisclosure(
       command: `npm install --global --prefix ~/.claudexor/remote/vendor ${pin.npmPackage}@${pin.version}`,
       installLocation: "~/.claudexor/remote/vendor/bin",
       pinnedVersion: pin.version,
-      verification: "npm_registry_integrity",
+      verification: pin.verification,
     };
   }
   return {
@@ -94,7 +119,7 @@ export function harnessInstallerDisclosure(
       "--output <private-tmpdir>/install.sh && /bin/sh <private-tmpdir>/install.sh",
     installLocation: "~/.local/bin (or ~/.cursor/bin, as selected by Cursor's installer)",
     pinnedVersion: null,
-    verification: "human_watches_pty",
+    verification: "human_observed",
   };
 }
 
@@ -213,10 +238,7 @@ function pinDisclosureLine(disclosure: HarnessInstallerDisclosure): string {
   if (disclosure.pinnedVersion === null) {
     return "Version pin:      none — Cursor ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it";
   }
-  // opencode's pin is honest but weaker: a deterministic install target, not
-  // a verification claim (no recorded fixture — its vendor-cli-version.ts
-  // discloses this). claude/codex pins are the gate-verified versions.
-  if (disclosure.harness === "opencode") {
+  if (disclosure.verification === "deterministic_only") {
     return `Version pin:      ${disclosure.pinnedVersion} (exact; deterministic install target — not covered by recorded verification fixtures; npm verifies its registry integrity checksum)`;
   }
   return `Version pin:      ${disclosure.pinnedVersion} (exact; the version this release was verified against — npm verifies its registry integrity checksum)`;

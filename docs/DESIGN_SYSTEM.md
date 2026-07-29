@@ -554,6 +554,10 @@ frequency and volume are. The contracts:
     intact, and visibly requires Refresh. It never starts an automatic
     resnapshot loop, and a failed foreground refresh replaces stale Ready truth
     with unavailable/unknown presentation instead of preserving it indefinitely.
+    One location-scoped foreground load state feeds the Accounts list, its
+    header action, Quota detail, and Harness Doctor. Every one of those surfaces
+    shows the same failure reason and Retry; none may reinterpret the discarded
+    snapshot as “No accounts yet”, “Quota unknown”, or ordinary defaults.
   - **Conversation (a message feed; code solid):** each turn is a right-aligned
     accent USER BUBBLE over the assistant's frosted card (Chat-V2, F2.5). The
     user bubble and the assistant's answer bubble MUST differ by HUE, not just
@@ -803,6 +807,11 @@ views in the shared design-system files; screens compose them.
   button (system `screencapture` region select, off the main thread; a
   denied/cancelled grab yields no attachment — never a blank fake image) are
   gated by the pool's finite `capability_profile.attachment_inputs` declarations.
+  The picker and capture path stat and admit each regular file before reading
+  bytes, then use a bounded read and revalidate size/admission at publication.
+  Async results belong to the exact composer selection generation; explicitly
+  switching conversations retires in-flight loads and clears already staged
+  file context, while draft-to-thread materialization retains it.
   Upload progress/cancel happens before Send; if any selected lane lacks the
   MIME/size/count transport, Send is blocked with the engine's typed reason — an
   attachment the model never saw must never look delivered. Plan keeps its
@@ -1101,7 +1110,10 @@ views in the shared design-system files; screens compose them.
   disappearance; invalid drafts never reach the wire. Each edit captures its
   execution location and settings epoch before debounce, so a stale local,
   remote, or superseded response cannot settle another lane or clobber newer
-  typing. A failure stays field-local with Retry and no hot retry loop. An empty
+  typing. Initial and explicit loads have one location-scoped state: until a
+  snapshot is loaded, engine-backed editors render Loading or the exact failure
+  with Retry, never editable `.defaults`; app-local Connections and Appearance
+  remain usable. A failure stays field-local with Retry and no hot retry loop. An empty
   per-harness override explicitly clears it. Quick-launch and Retry honor saved
   engine defaults instead of hardcoded portfolio/cap values.
 

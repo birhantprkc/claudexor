@@ -31,23 +31,29 @@ import Testing
 
     @Test func terminalSetupAndInstallAreOneShotBlockingOperations() {
         let id = UUID()
+        let setupLease = RemoteActionLease(
+            lane: .setupLogin, connectionID: id, generation: 1, token: UUID())
+        let installLease = RemoteActionLease(
+            lane: .harnessInstall, connectionID: id, generation: 1, token: UUID())
         #expect(RemoteTerminalPurpose.authentication(id, 1).blocksDismissalWhileRunning)
-        #expect(RemoteTerminalPurpose.setup(id, "setup-job").blocksDismissalWhileRunning)
-        #expect(RemoteTerminalPurpose.install(id, "cursor").blocksDismissalWhileRunning)
+        #expect(RemoteTerminalPurpose.setup(setupLease, "setup-job").blocksDismissalWhileRunning)
+        #expect(RemoteTerminalPurpose.install(installLease, "cursor").blocksDismissalWhileRunning)
         #expect(!RemoteTerminalPurpose.shell.blocksDismissalWhileRunning)
         #expect(!RemoteTerminalPurpose.log.blocksDismissalWhileRunning)
     }
 
     @Test func installDisclosureParsesOnlyTheRemoteCLIsOwnDryRunAnswer() {
         let id = UUID()
+        let lease = RemoteActionLease(
+            lane: .harnessInstall, connectionID: id, generation: 3, token: UUID())
         let valid = Data("""
         {"ok": true, "dryRun": true, "harness": "codex",
          "command": "npm install --global --prefix ~/.claudexor/remote/vendor @openai/codex@0.144.1",
          "installLocation": "~/.claudexor/remote/vendor/bin",
-         "pinnedVersion": "0.144.1", "verification": "npm_registry_integrity"}
+         "pinnedVersion": "0.144.1", "verification": "release_verified"}
         """.utf8)
         let prompt = AppModel.parseHarnessInstallDisclosure(
-            valid, connectionID: id, harness: "codex")
+            valid, lease: lease, harness: "codex")
         #expect(prompt?.command.hasSuffix("@openai/codex@0.144.1") == true)
         #expect(prompt?.pinnedVersion == "0.144.1")
         #expect(prompt?.installLocation == "~/.claudexor/remote/vendor/bin")
@@ -56,10 +62,10 @@ import Testing
         {"ok": true, "dryRun": true, "harness": "cursor",
          "command": "curl --fail --silent --show-error --location https://cursor.com/install --output x/install.sh && /bin/sh x/install.sh",
          "installLocation": "~/.local/bin", "pinnedVersion": null,
-         "verification": "human_watches_pty"}
+         "verification": "human_observed"}
         """.utf8)
         #expect(AppModel.parseHarnessInstallDisclosure(
-            cursor, connectionID: id, harness: "cursor")?.pinnedVersion == nil)
+            cursor, lease: lease, harness: "cursor")?.pinnedVersion == nil)
 
         // Anything that is NOT the CLI's own affirmative dry-run disclosure
         // must yield nil — and therefore no install prompt at all.
@@ -67,30 +73,50 @@ import Testing
             #"{"ok": false, "dryRun": true, "harness": "codex", "command": "x", "installLocation": "y"}"#
                 .utf8)
         #expect(AppModel.parseHarnessInstallDisclosure(
-            refused, connectionID: id, harness: "codex") == nil)
+            refused, lease: lease, harness: "codex") == nil)
         let mismatched = Data(
             #"{"ok": true, "dryRun": true, "harness": "claude", "command": "x", "installLocation": "y"}"#
                 .utf8)
         #expect(AppModel.parseHarnessInstallDisclosure(
-            mismatched, connectionID: id, harness: "codex") == nil)
+            mismatched, lease: lease, harness: "codex") == nil)
         #expect(AppModel.parseHarnessInstallDisclosure(
-            Data("not json".utf8), connectionID: id, harness: "codex") == nil)
+            Data("not json".utf8), lease: lease, harness: "codex") == nil)
+
+        let obsoleteVerification = Data("""
+        {"ok": true, "dryRun": true, "harness": "codex", "command": "x",
+         "installLocation": "y", "pinnedVersion": "0.144.1",
+         "verification": "npm_registry_integrity"}
+        """.utf8)
+        #expect(AppModel.parseHarnessInstallDisclosure(
+            obsoleteVerification, lease: lease, harness: "codex") == nil)
+
+        let contradictoryVerification = Data("""
+        {"ok": true, "dryRun": true, "harness": "cursor", "command": "x",
+         "installLocation": "y", "pinnedVersion": "unexpected",
+         "verification": "human_observed"}
+        """.utf8)
+        #expect(AppModel.parseHarnessInstallDisclosure(
+            contradictoryVerification, lease: lease, harness: "cursor") == nil)
     }
 
     /// The install guards refuse on a surface that does not need the
     /// connection's own row: a connection deleted between the disclosure
     /// dialog and the confirmation has no ForEach row left to render a
     /// per-connection message, so the refusal goes to threadStatus.
-    @MainActor @Test func installGuardRefusalsSurviveTheConnectionVanishing() async {
+    @MainActor @Test func installGuardRefusalsAndStaleConfirmationAreDistinct() async {
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         let vanished = UUID()
+        let staleLease = RemoteActionLease(
+            lane: .harnessInstall, connectionID: vanished, generation: 0, token: UUID())
 
         await model.confirmRemoteHarnessInstall(
             RemoteHarnessInstallPrompt(
-                connectionID: vanished, harness: "codex",
+                lease: staleLease, harness: "codex",
                 command: "npm install --global x", installLocation: "~/.claudexor",
-                pinnedVersion: "0.144.1"))
-        #expect(model.threadStatus == "That connection no longer exists; nothing was installed.")
+                pinnedVersion: "0.144.1", verification: .releaseVerified))
+        // A completion retired by explicit removal is inert. The direct start
+        // guard below remains loud because it is a new user action.
+        #expect(model.threadStatus == nil)
         #expect(model.remoteConnectionMessages[vanished] == nil)
 
         model.threadStatus = nil

@@ -149,12 +149,15 @@ function hasArrayEntries(value: unknown): boolean {
  * path is live convergence, whose copy-baseline workspace is explicitly
  * implemented by the engine.
  */
-export function runStartRequiresGit(value: {
-  mode?: ModeKind;
-  untilClean?: boolean;
-  attempts?: number | null;
-  execution?: { isolation?: "envelope" | "live" };
-}, context: { effectiveWorkspaceRequiresGit?: boolean } = {}): boolean {
+export function runStartRequiresGit(
+  value: {
+    mode?: ModeKind;
+    untilClean?: boolean;
+    attempts?: number | null;
+    execution?: { isolation?: "envelope" | "live" };
+  },
+  context: { effectiveWorkspaceRequiresGit?: boolean } = {},
+): boolean {
   // A thread may execute "live" *inside a worktree*: isolated threads and
   // protected-path promotion are resolved by the daemon from durable thread /
   // project state, not from the wire isolation flag. That effective workspace

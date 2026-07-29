@@ -843,6 +843,7 @@ struct AppModelRefreshTests {
 
         let accounts = Task { await model.refreshAccounts() }
         try await waitForAppTest(accountsArrived, message: "Accounts request never started")
+        #expect(model.activeAccountsLoadState == .loading)
         #expect(await model.refreshHarnesses(fresh: true))
         releaseAccounts.signal()
 
@@ -1297,6 +1298,7 @@ struct AppModelRefreshTests {
         #expect(model.quotaResponse != nil)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:00Z")
         #expect(model.gitCapability?.available == true)
+        #expect(model.activeAccountsLoadState == .loaded)
     }
 
     @MainActor
@@ -1388,7 +1390,11 @@ struct AppModelRefreshTests {
             return (response, Data(#"{"error":"refresh failed"}"#.utf8))
         }
 
-        #expect(await model.refreshAccounts() != nil)
+        let refreshError = await model.refreshAccounts()
+        #expect(refreshError != nil)
+        if let refreshError {
+            #expect(model.activeAccountsLoadState == .failed(refreshError))
+        }
         // Server facts remain verbatim; only their client freshness expires.
         #expect(model.liveHarnesses.first?.health == .ok)
         #expect(model.liveHarnesses.first?.routableIntents == ["implement"])
@@ -1398,6 +1404,106 @@ struct AppModelRefreshTests {
         #expect(row?.verified == false)
         #expect(model.credentialProfiles.isEmpty)
         #expect(model.harnessAccounts.isEmpty)
+    }
+
+    @MainActor
+    @Test func successfulBackgroundAccountsReloadClearsAnOlderForegroundFailure() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41112),
+            requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            if calls.incrementAndGet() == 1 {
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!,
+                    Data(#"{"error":"foreground failed"}"#.utf8)
+                )
+            }
+            return (
+                appResponse(for: request),
+                appAccountsSnapshot(
+                    profileID: "recovered", displayName: "Recovered",
+                    observedAt: "2026-07-29T00:00:00Z")
+            )
+        }
+
+        let foregroundError = await model.refreshAccounts()
+        #expect(foregroundError != nil)
+        if let foregroundError {
+            #expect(model.activeAccountsLoadState == .failed(foregroundError))
+        }
+
+        await model.refreshCredentialProfiles()
+
+        #expect(model.activeAccountsLoadState == .loaded)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["recovered"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("recovered") == true)
+    }
+
+    @MainActor
+    @Test func newerBackgroundFailureOwnsAnInFlightForegroundSettlement() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        let foregroundArrived = AppRefreshCallCounter()
+        let backgroundArrived = AppRefreshCallCounter()
+        let releaseForeground = DispatchSemaphore(value: 0)
+        let releaseBackground = DispatchSemaphore(value: 0)
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            if calls.incrementAndGet() == 1 {
+                foregroundArrived.increment()
+                _ = releaseForeground.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "retired", displayName: "Retired",
+                    observedAt: "2026-07-29T00:00:01Z"))
+            }
+            backgroundArrived.increment()
+            _ = releaseBackground.wait(timeout: .now() + 5)
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(#"{"error":"newer background failed"}"#.utf8)
+            )
+        }
+
+        let foreground = Task { await model.refreshAccounts() }
+        try await waitForAppTest(
+            foregroundArrived, message: "foreground Accounts request never started")
+        let background = Task { await model.refreshCredentialProfiles() }
+        try await waitForAppTest(
+            backgroundArrived, message: "background Accounts request never started")
+
+        releaseForeground.signal()
+        #expect(await foreground.value == nil)
+        // The retired foreground receipt cannot claim success while the newer
+        // authority is still pending.
+        #expect(model.activeAccountsLoadState == .loading)
+
+        releaseBackground.signal()
+        await background.value
+        guard case let .failed(message) = model.activeAccountsLoadState else {
+            Issue.record("newer background failure must settle Accounts as failed")
+            return
+        }
+        #expect(message.contains("newer background failed"))
+        #expect(model.credentialProfiles.isEmpty)
     }
 
     @MainActor
@@ -1426,13 +1532,13 @@ struct AppModelRefreshTests {
                 profileID: "new", displayName: "New", observedAt: "2026-07-28T00:00:02Z"))
         }
 
-        let older = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        let older = Task { await model.refreshAccounts() }
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while oldArrived.count == 0 {
             try #require(ContinuousClock.now <= deadline, "older Accounts load never reached the stub")
             await Task.yield()
         }
-        let newer = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        let newer = Task { await model.refreshAccounts() }
         #expect(await newer.value == nil)
         releaseOld.signal()
         #expect(await older.value == nil)
@@ -1441,6 +1547,7 @@ struct AppModelRefreshTests {
         #expect(model.harnessAccounts.first?.nextUp.isProfile("new") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:02Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+        #expect(model.activeAccountsLoadState == .loaded)
     }
 
     @MainActor
@@ -1474,13 +1581,13 @@ struct AppModelRefreshTests {
                 profileID: "new", displayName: "New", observedAt: "2026-07-28T00:00:03Z"))
         }
 
-        let older = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        let older = Task { await model.refreshAccounts() }
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while oldArrived.count == 0 {
             try #require(ContinuousClock.now <= deadline, "older Accounts load never reached the stub")
             await Task.yield()
         }
-        let newer = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        let newer = Task { await model.refreshAccounts() }
         #expect(await newer.value == nil)
         releaseOld.signal()
         #expect(await older.value == nil)
@@ -1489,6 +1596,7 @@ struct AppModelRefreshTests {
         #expect(model.harnessReadinessFresh == true)
         #expect(model.harnessAccounts.first?.nextUp.isProfile("new") == true)
         #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+        #expect(model.activeAccountsLoadState == .loaded)
     }
 
     @MainActor
@@ -3152,6 +3260,14 @@ struct AppModelRefreshTests {
             baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
             session: URLSession(configuration: config)
         ), requestNotificationAuthorization: false)
+        // Keep this connectivity-only test hermetic: exact local-runtime
+        // lifecycle behavior has its own injected AppModel coverage in
+        // LocalDaemonReconcilerTests and must never probe/stop a host daemon.
+        model.localDaemonReconciler = LocalDaemonReconciler(
+            daemon: AppRuntimeDaemonControl(
+                isBusyProbe: { nil }, handshakeIdentityProbe: { nil }),
+            lifecycleOwner: model.localRuntimeLifecycleOwner,
+            targetClosure: { nil })
         model.health = .connected
         let handshakes = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in

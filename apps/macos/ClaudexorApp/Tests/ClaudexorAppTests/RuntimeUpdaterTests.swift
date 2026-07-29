@@ -173,21 +173,65 @@ private final class StubTransport: RuntimeReleaseTransport, @unchecked Sendable 
 
     // MARK: - DaemonLauncher resolution (the pointer READ side that stays)
 
-    @Test func daemonResolvesToVersionDirWhenCurrentValid() throws {
+    @Test func daemonResolvesToVersionDirOnlyWhenCurrentIsStrictlyNewerThanBundle() throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let installer = RuntimeInstaller(root: root)
-        // Lay down versions/3.2.0/claudexord.bundle.cjs and point current.json at it.
-        let versionDir = root.appendingPathComponent("versions/3.2.0", isDirectory: true)
+        let bundled = root.appendingPathComponent("bundled.cjs")
+        try Data("// bundled".utf8).write(to: bundled)
+        // Lay down versions/3.2.1/claudexord.bundle.cjs and point current.json at it.
+        let versionDir = root.appendingPathComponent("versions/3.2.1", isDirectory: true)
         try FileManager.default.createDirectory(at: versionDir, withIntermediateDirectories: true)
         try Data("// daemon".utf8).write(to: versionDir.appendingPathComponent("claudexord.bundle.cjs"))
         try writePointer(RuntimeCurrent(
-            version: "3.2.0", path: "versions/3.2.0",
+            version: "3.2.1", path: "versions/3.2.1",
             sha256: String(repeating: "a", count: 64), installedAt: "x", engineSha: nil),
             to: installer)
 
-        let resolved = DaemonLauncher.resolvedDaemon(installer: installer)
+        let resolved = DaemonLauncher.resolvedDaemon(
+            installer: installer, bundledDaemon: bundled, bundledVersion: "3.2.0")
         #expect(resolved?.path == versionDir.appendingPathComponent("claudexord.bundle.cjs").path)
+    }
+
+    @Test(arguments: ["3.1.2", "3.2.0"])
+    func daemonUsesBundleWhenCurrentIsOlderOrEqual(_ currentVersion: String) throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = RuntimeInstaller(root: root)
+        let bundled = root.appendingPathComponent("bundled.cjs")
+        try Data("// bundled".utf8).write(to: bundled)
+        let versionDir = root.appendingPathComponent("versions/\(currentVersion)", isDirectory: true)
+        try FileManager.default.createDirectory(at: versionDir, withIntermediateDirectories: true)
+        try Data("// current".utf8).write(
+            to: versionDir.appendingPathComponent("claudexord.bundle.cjs"))
+        try writePointer(
+            RuntimeCurrent(
+                version: currentVersion, path: "versions/\(currentVersion)",
+                sha256: String(repeating: "a", count: 64), installedAt: "x", engineSha: nil),
+            to: installer)
+
+        #expect(DaemonLauncher.resolvedDaemon(
+            installer: installer, bundledDaemon: bundled, bundledVersion: "3.2.0") == bundled)
+    }
+
+    @Test func daemonUsesBundleWhenCurrentVersionCannotBeOrdered() throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = RuntimeInstaller(root: root)
+        let bundled = root.appendingPathComponent("bundled.cjs")
+        try Data("// bundled".utf8).write(to: bundled)
+        let versionDir = root.appendingPathComponent("versions/latest", isDirectory: true)
+        try FileManager.default.createDirectory(at: versionDir, withIntermediateDirectories: true)
+        try Data("// current".utf8).write(
+            to: versionDir.appendingPathComponent("claudexord.bundle.cjs"))
+        try writePointer(
+            RuntimeCurrent(
+                version: "latest", path: "versions/latest",
+                sha256: String(repeating: "a", count: 64), installedAt: "x", engineSha: nil),
+            to: installer)
+
+        #expect(DaemonLauncher.resolvedDaemon(
+            installer: installer, bundledDaemon: bundled, bundledVersion: "3.2.0") == bundled)
     }
 
     @Test func daemonFallsBackToBundledWhenPointerMissing() throws {

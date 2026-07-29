@@ -38,11 +38,15 @@ describe("QuotaRegistry", () => {
       now,
     });
     const slot = manager.registerProjection(
-      quotaProjection([
-        async () => ({
-          snapshots: [quotaSnapshot("claude", null, 0.2), quotaSnapshot("claude", "work", 0.4)],
-        }),
-      ], () => [], now),
+      quotaProjection(
+        [
+          async () => ({
+            snapshots: [quotaSnapshot("claude", null, 0.2), quotaSnapshot("claude", "work", 0.4)],
+          }),
+        ],
+        () => [],
+        now,
+      ),
     );
     manager.start();
 

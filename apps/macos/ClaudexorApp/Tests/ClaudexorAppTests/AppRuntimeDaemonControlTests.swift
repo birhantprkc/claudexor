@@ -30,7 +30,7 @@ import Testing
         let body = """
             const a = process.argv.slice(2);
             if (a.includes("--probe")) {
-              process.stdout.write(JSON.stringify({ version: "3.4.0", buildSha: "abc" }) + "\\n");
+              process.stdout.write(JSON.stringify({ version: "3.4.0", buildSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }) + "\\n");
             } else if (a.includes("--stop")) {
               process.stdout.write(JSON.stringify({ stopped: true, outcome: "clean" }) + "\\n");
             } else {
@@ -47,7 +47,8 @@ import Testing
         defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
 
         let probe = AppRuntimeDaemonControl.runNodeJSON([script.path, "--probe"], node: node, timeout: 10)
-        #expect(probe?["version"] as? String == "3.4.0")
+        #expect(AppRuntimeDaemonControl.runtimeIdentity(from: try #require(probe)) == RuntimeClosureIdentity(
+            version: "3.4.0", buildSha: String(repeating: "b", count: 40)))
 
         let stop = AppRuntimeDaemonControl.runNodeJSON([script.path, "--stop"], node: node, timeout: 10)
         #expect(stop?["stopped"] as? Bool == true)
@@ -61,15 +62,27 @@ import Testing
         #expect(AppRuntimeDaemonControl.runNodeJSON([script.path], node: node, timeout: 10) == nil)
     }
 
+    @Test func exactIdentityParserRejectsMissingOrUnstampedBuildSha() {
+        #expect(AppRuntimeDaemonControl.runtimeIdentity(from: ["version": "3.4.0"]) == nil)
+        #expect(AppRuntimeDaemonControl.runtimeIdentity(
+            from: ["version": "3.4.0", "buildSha": "unknown"]) == nil)
+        #expect(AppRuntimeDaemonControl.runtimeIdentity(
+            version: "3.4.0", buildSha: String(repeating: "A", count: 40)) == nil)
+        #expect(AppRuntimeDaemonControl.runtimeIdentity(
+            version: "3.4.0", buildSha: String(repeating: "a", count: 39)) == nil)
+    }
+
     @Test func endToEndDrillThroughRealPortSubprocessProbe() async throws {
-        // The coordinator's probeVersion port, backed by the REAL runNodeJSON,
+        // The coordinator's exact probeIdentity port, backed by REAL runNodeJSON,
         // against a real node script — the closest offline approximation of the
         // packaged probe. isBusy/handshake stay in-memory (no daemon).
         guard let node = resolveNode() else { return }
         let script = try writeScript()
         defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
-        let probed = AppRuntimeDaemonControl.runNodeJSON(
-            [script.path, "--probe"], node: node, timeout: 10)?["version"] as? String
-        #expect(probed == "3.4.0")
+        let raw = AppRuntimeDaemonControl.runNodeJSON(
+            [script.path, "--probe"], node: node, timeout: 10)
+        let probed = raw.flatMap { AppRuntimeDaemonControl.runtimeIdentity(from: $0) }
+        #expect(probed == RuntimeClosureIdentity(
+            version: "3.4.0", buildSha: String(repeating: "b", count: 40)))
     }
 }

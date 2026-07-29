@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Accept digest-bound read-only attachments for Plan runs and preserve canonical terminal and refusal presentation across ACP turns.
 - @claudexor/schema@3.2.0
 - @claudexor/util@3.2.0
 

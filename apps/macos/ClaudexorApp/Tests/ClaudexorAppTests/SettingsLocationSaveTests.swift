@@ -6,6 +6,182 @@ import ClaudexorKit
 @Suite(.serialized)
 struct SettingsLocationSaveTests {
     @MainActor
+    @Test func failedInitialLoadDoesNotMaterializeEditableDefaults() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        model.draftExecutionLocation = remote
+        SettingsLocationURLProtocol.handler = { request in
+            (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(#"{"error":"engine unavailable"}"#.utf8)
+            )
+        }
+
+        let error = await model.refreshSettings(locationID: remote)
+
+        #expect(error?.contains("Could not load settings") == true)
+        #expect(model.remoteSettingsSnapshots[remote] == nil)
+        guard case .failed(let message) = model.settingsLoadStates[remote] else {
+            Issue.record("failed GET must remain an explicit failed projection")
+            return
+        }
+        #expect(message.contains("Could not load settings"))
+        #expect(model.activeSettingsSnapshot == nil)
+        #expect(model.activeSettingsLoadState == .failed(message))
+    }
+
+    @MainActor
+    @Test func hiddenLocationLoadFailureDoesNotPaintTheVisibleLocation() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        model.draftExecutionLocation = .local
+        model.settingsStatus = "Visible local status"
+        SettingsLocationURLProtocol.handler = { request in
+            (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(#"{"error":"remote unavailable"}"#.utf8)
+            )
+        }
+
+        _ = await model.refreshSettings(locationID: remote)
+
+        #expect(model.settingsStatus == "Visible local status")
+        guard case .failed = model.settingsLoadStates[remote] else {
+            Issue.record("the hidden location must retain its own retryable failure")
+            return
+        }
+    }
+
+    @MainActor
+    @Test func newerRefreshOwnsTheProjectionWhenAnOlderRequestSettlesFirst() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        model.draftExecutionLocation = remote
+        let calls = SettingsLocationCallCounter()
+        let firstArrived = SettingsLocationCallCounter()
+        let releaseFirst = DispatchSemaphore(value: 0)
+        defer { releaseFirst.signal() }
+        SettingsLocationURLProtocol.handler = { request in
+            calls.increment()
+            if calls.count == 1 {
+                firstArrived.increment()
+                _ = releaseFirst.wait(timeout: .now() + 5)
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!,
+                    Data(#"{"error":"old failure"}"#.utf8)
+                )
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(Self.settingsSnapshotJSON.utf8)
+            )
+        }
+
+        let old = Task { @MainActor in await model.refreshSettings(locationID: remote) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while firstArrived.count == 0 {
+            try #require(ContinuousClock.now <= deadline, "first settings GET never arrived")
+            await Task.yield()
+        }
+        let newest = Task { @MainActor in await model.refreshSettings(locationID: remote) }
+        releaseFirst.signal()
+
+        #expect(await old.value?.contains("context changed") == true)
+        #expect(await newest.value == nil)
+        #expect(model.settingsLoadStates[remote] == .loaded)
+        #expect(model.remoteSettingsSnapshots[remote]?.routing.goal == "economy")
+        #expect(model.settingsStatus == nil)
+    }
+
+    @MainActor
+    @Test func supersededSuccessfulRefreshCannotSurviveTheNewerRefreshFailure() async throws {
+        defer { SettingsLocationURLProtocol.handler = nil }
+        let (model, remote, _) = makeRemoteModel()
+        model.draftExecutionLocation = remote
+        let calls = SettingsLocationCallCounter()
+        let firstArrived = SettingsLocationCallCounter()
+        let releaseFirst = DispatchSemaphore(value: 0)
+        defer { releaseFirst.signal() }
+        SettingsLocationURLProtocol.handler = { request in
+            calls.increment()
+            if calls.count == 1 {
+                firstArrived.increment()
+                _ = releaseFirst.wait(timeout: .now() + 5)
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!,
+                    Data(Self.settingsSnapshotJSON.utf8)
+                )
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(#"{"error":"new failure"}"#.utf8)
+            )
+        }
+
+        let older = Task { @MainActor in await model.refreshSettings(locationID: remote) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while firstArrived.count == 0 {
+            try #require(ContinuousClock.now <= deadline, "first settings GET never arrived")
+            await Task.yield()
+        }
+        let newer = Task { @MainActor in await model.refreshSettings(locationID: remote) }
+        releaseFirst.signal()
+
+        #expect(await older.value?.contains("context changed") == true)
+        let newestError = await newer.value
+        #expect(newestError?.contains("Could not load settings") == true)
+        #expect(model.remoteSettingsSnapshots[remote] == nil)
+        if let newestError {
+            #expect(model.settingsLoadStates[remote] == .failed(newestError))
+        }
+    }
+
+    @MainActor
+    @Test func composerDefaultModelComesFromTheActiveRemoteSettingsSnapshot() throws {
+        func snapshot(defaultModel: String) throws -> SettingsSnapshot {
+            try JSONDecoder().decode(SettingsSnapshot.self, from: Data(#"""
+            {
+              "sources": [],
+              "routing": {"goal":"auto","paidFallback":"when_unavailable","qualityTiers":{},"primaryHarness":null,"eligibleHarnesses":[],"envInheritance":"mirror_native","authPreference":"auto"},
+              "budget": {"paidBudgetPerRun":{"kind":"unlimited"}},
+              "runtime": null,
+              "harnesses": {"claude":{"enabled":true,"nativeCredentialsEnabled":true,"defaultModel":"\#(defaultModel)","effort":null,"maxTurns":null,"maxRounds":null,"toolsAllow":[],"toolsDeny":[],"fallbackModel":null,"web":"auto","authPreference":"auto","profileLimitAction":"rotate"}},
+              "interactionTimeoutMs": 900000
+            }
+            """#.utf8))
+        }
+
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let remote = ExecutionLocationID.remote(UUID())
+        model.settingsSnapshot = try snapshot(defaultModel: "local-model")
+        model.remoteSettingsSnapshots[remote] = try snapshot(defaultModel: "remote-model")
+
+        model.draftExecutionLocation = remote
+        #expect(model.activeDefaultModel(for: "claude") == "remote-model")
+
+        model.draftExecutionLocation = .local
+        #expect(model.activeDefaultModel(for: "claude") == "local-model")
+    }
+
+    @MainActor
     @Test func capturedLocationDoesNotRetargetWhenTheActiveLocationChanges() async throws {
         defer { SettingsLocationURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

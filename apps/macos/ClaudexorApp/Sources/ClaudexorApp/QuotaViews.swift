@@ -29,6 +29,16 @@ struct QuotaDetailView: View {
                 }
                 if model.gateway(for: model.activeExecutionLocation) == nil {
                     ContentUnavailableView("Engine offline", systemImage: "wifi.slash")
+                } else if case .failed(let message) = model.activeAccountsLoadState {
+                    VStack(spacing: Theme.Spacing.sm) {
+                        ContentUnavailableView(
+                            "Could not refresh quota",
+                            systemImage: "exclamationmark.triangle.fill",
+                            description: Text(message)
+                        )
+                        Button("Retry") { Task { _ = await model.refreshAccounts() } }
+                            .buttonStyle(.borderedProminent)
+                    }
                 } else if !groups.isEmpty {
                     ForEach(groups) { group in
                         groupSection(group)

@@ -2,6 +2,10 @@
 
 ## 3.2.0
 
+### Patch Changes
+
+- Add bounded problem redaction and normalized retry-delay helpers for every control and harness surface.
+
 ## 3.1.2
 
 ## 3.1.1

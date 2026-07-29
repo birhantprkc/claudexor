@@ -7,7 +7,7 @@ import ClaudexorKit
 //
 //   verify monotonic → download → sha256-verify against the SIGNED manifest →
 //   full unpack to versions/<v> → re-verify → strip quarantine → probe-start the
-//   unpacked daemon (--version handshake) → idle-gate (refuse while jobs run) →
+//   unpacked daemon (exact `{version,buildSha}` probe) → idle-gate →
 //   identity-proven daemon stop → ATOMIC current.json swap (single rename inside
 //   a whole-critical-section lock) → relaunch → handshake-verify → rollback to
 //   last-known-good on ANY failure. The bundled runtime stays the final fallback
@@ -20,6 +20,64 @@ import ClaudexorKit
 
 /// The daemon-lifecycle port the installer drives. Every method is the seam a
 /// test stubs; production wires them to the existing daemon machinery.
+public struct RuntimeClosureIdentity: Sendable, Equatable {
+    public let version: String
+    public let buildSha: String
+
+    public init(version: String, buildSha: String) {
+        self.version = version
+        self.buildSha = buildSha
+    }
+
+    static func validated(version: String?, buildSha: String?) -> Self? {
+        guard let version, !version.isEmpty,
+              let buildSha,
+              buildSha.count == 40,
+              buildSha.utf8.allSatisfy({
+                  (48 ... 57).contains($0) || (97 ... 102).contains($0)
+              })
+        else { return nil }
+        return Self(version: version, buildSha: buildSha)
+    }
+}
+
+/// One process-local authority for every mutation of the app-owned local daemon
+/// lifecycle. The opaque token makes release exact: a stale caller can never
+/// clear a newer owner's admission. `claim` is synchronous, so both reconciliation
+/// and installation acquire it before their first suspension.
+public enum LocalRuntimeLifecycleOperation: Sendable, Equatable {
+    case reconciliation
+    case installation
+}
+
+public struct LocalRuntimeLifecycleLease: Sendable, Equatable {
+    fileprivate let id: UUID
+    public let operation: LocalRuntimeLifecycleOperation
+}
+
+public final class LocalRuntimeLifecycleOwner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: LocalRuntimeLifecycleLease?
+
+    public init() {}
+
+    public func claim(_ operation: LocalRuntimeLifecycleOperation) -> LocalRuntimeLifecycleLease? {
+        lock.withLock {
+            guard current == nil else { return nil }
+            let lease = LocalRuntimeLifecycleLease(id: UUID(), operation: operation)
+            current = lease
+            return lease
+        }
+    }
+
+    public func release(_ lease: LocalRuntimeLifecycleLease) {
+        lock.withLock {
+            guard current == lease else { return }
+            current = nil
+        }
+    }
+}
+
 public protocol RuntimeDaemonControl: Sendable {
     /// Are jobs running right now? `true` = busy (refuse), `false` = idle,
     /// `nil` = the daemon could not be asked (treated as busy — fail-closed, we
@@ -30,13 +88,24 @@ public protocol RuntimeDaemonControl: Sendable {
     func stop() async throws
     /// Relaunch the daemon (DaemonLauncher) against the ACTIVE pointer.
     func start() throws
-    /// Probe-start the UNPACKED daemon in `--version` mode using the app-bundled
-    /// Node and return its reported engine version (nil on any failure). No
-    /// pointer is swapped — this is a dry-run handshake before we commit.
-    func probeVersion(scriptURL: URL) async -> String?
-    /// The running engine version from a live handshake after relaunch (nil when
-    /// unreachable).
-    func handshakeVersion() async -> String?
+    /// Relaunch one already-resolved closure. Reconciliation uses this overload
+    /// so a concurrent pointer change cannot switch the script between its
+    /// exact probe and launch.
+    func start(scriptURL: URL) throws
+    /// Side-effect-free exact closure identity from `--probe`.
+    func probeIdentity(scriptURL: URL) async -> RuntimeClosureIdentity?
+    /// Exact identity of the currently serving daemon.
+    func handshakeIdentity() async -> RuntimeClosureIdentity?
+}
+
+public extension RuntimeDaemonControl {
+    /// Existing installer stubs keep their pointer-based start. Production and
+    /// reconciliation-specific stubs override this to bind the selected script.
+    func start(scriptURL: URL) throws { try start() }
+    /// Exact identity is deliberately unavailable unless a conformer proves it;
+    /// lifecycle owners treat nil as failure and never guess from a version.
+    func probeIdentity(scriptURL: URL) async -> RuntimeClosureIdentity? { nil }
+    func handshakeIdentity() async -> RuntimeClosureIdentity? { nil }
 }
 
 /// Progress states surfaced to the update chip (honest, per DESIGN_SYSTEM).
@@ -57,6 +126,8 @@ public actor RuntimeInstallCoordinator {
     private let installer: RuntimeInstaller
     private let transport: RuntimeReleaseTransport
     private let daemon: RuntimeDaemonControl
+    private let lifecycleOwner: LocalRuntimeLifecycleOwner
+    private let rollbackSelection: @Sendable () -> LocalRuntimeClosureSelection?
     private let onPhase: @Sendable (RuntimeInstallPhase) -> Void
     /// Bounded-poll cadence for the post-relaunch handshake. A relaunched daemon
     /// spawns DETACHED and needs seconds to bind its socket + rewrite
@@ -69,6 +140,8 @@ public actor RuntimeInstallCoordinator {
         installer: RuntimeInstaller,
         transport: RuntimeReleaseTransport,
         daemon: RuntimeDaemonControl,
+        lifecycleOwner: LocalRuntimeLifecycleOwner,
+        rollbackSelection: @escaping @Sendable () -> LocalRuntimeClosureSelection? = { nil },
         handshakePollInterval: TimeInterval = 0.5,
         handshakePollTimeout: TimeInterval = 30,
         onPhase: @escaping @Sendable (RuntimeInstallPhase) -> Void = { _ in }
@@ -76,6 +149,8 @@ public actor RuntimeInstallCoordinator {
         self.installer = installer
         self.transport = transport
         self.daemon = daemon
+        self.lifecycleOwner = lifecycleOwner
+        self.rollbackSelection = rollbackSelection
         self.handshakePollInterval = handshakePollInterval
         self.handshakePollTimeout = handshakePollTimeout
         self.onPhase = onPhase
@@ -88,6 +163,15 @@ public actor RuntimeInstallCoordinator {
     /// failure after the swap rolls back before throwing).
     @discardableResult
     public func install(manifest: RuntimeManifest, assetURL: URL) async throws -> String {
+        // Session admission is the first operation in this async transaction.
+        // The filesystem lock protects pointer writers; this exact lease also
+        // excludes the steady reconciler's stop/start lifecycle.
+        guard let lifecycleLease = lifecycleOwner.claim(.installation) else {
+            fail(.failed(reason: "another engine lifecycle action is in progress"))
+            throw RuntimeInstallError.lifecycleBusy
+        }
+        defer { lifecycleOwner.release(lifecycleLease) }
+
         // Whole check-then-swap critical section is guarded by a lock file so two
         // installers can never race the pointer.
         let lock = try acquireLock()
@@ -120,13 +204,16 @@ public actor RuntimeInstallCoordinator {
         installer.stripQuarantine(at: versionDir)
         let unpackedScript = versionDir.appendingPathComponent("claudexord.bundle.cjs")
 
-        // 5. Probe-start the unpacked daemon: it must report the target version.
+        // 5. Probe-start the unpacked daemon: both signed identity fields must
+        // match. Version equality alone can bind the pointer to the wrong build.
         onPhase(.probing)
-        let probed = await daemon.probeVersion(scriptURL: unpackedScript)
-        guard probed == manifest.version else {
+        let expectedCandidate = RuntimeClosureIdentity(
+            version: manifest.version, buildSha: manifest.buildSha)
+        let probed = await daemon.probeIdentity(scriptURL: unpackedScript)
+        guard probed == expectedCandidate else {
             try? installer.removeVersionDir(manifest.version)
-            fail(.failed(reason: "probe version mismatch"))
-            throw RuntimeInstallError.probeMismatch(expected: manifest.version, got: probed)
+            fail(.failed(reason: "probe identity mismatch"))
+            throw RuntimeInstallError.probeMismatch(expected: expectedCandidate, got: probed)
         }
 
         // 6. Idle-gate: refuse while jobs run (nil state = fail-closed busy).
@@ -140,6 +227,13 @@ public actor RuntimeInstallCoordinator {
 
         // Snapshot the pre-swap pointer so we can roll back to it verbatim.
         let previous = installer.readCurrent()
+        let rollbackExpected = await rollbackIdentity(
+            selection: rollbackSelection(), previous: previous)
+        guard let rollbackExpected else {
+            try? installer.removeVersionDir(manifest.version)
+            fail(.failed(reason: "exact rollback identity unavailable"))
+            throw RuntimeInstallError.rollbackIdentityUnavailable
+        }
 
         // 7. Identity-proven daemon stop.
         try await daemon.stop()
@@ -158,10 +252,11 @@ public actor RuntimeInstallCoordinator {
             try installer.writeCurrentAtomic(next)
         } catch {
             // The new pointer never landed. The daemon was stopped for the swap,
-            // so recover the OLD runtime and PROVE it (restart + expected-version
+            // so recover the OLD runtime and PROVE it (restart + expected-identity
             // handshake) before reporting — never claim safety over a dead engine.
             throw await rollbackAndClassify(
                 to: previous, reason: "pointer write failed",
+                expectedIdentity: rollbackExpected,
                 recoveredError: .io("could not write current.json: \(error.localizedDescription)"))
         }
 
@@ -175,6 +270,7 @@ public actor RuntimeInstallCoordinator {
         } catch {
             throw await rollbackAndClassify(
                 to: previous, reason: "engine relaunch failed after swap",
+                expectedIdentity: rollbackExpected,
                 recoveredError: .io(
                     "engine relaunch failed after swap; rolled back to the previous runtime: \(error.localizedDescription)"))
         }
@@ -182,28 +278,30 @@ public actor RuntimeInstallCoordinator {
         // 10. Handshake-verify the new engine with a BOUNDED poll: the relaunched
         // daemon boots detached and needs seconds to serve, so a single-shot probe
         // reads nil on essentially every real install. Rollback ONLY on a genuine
-        // wrong-version handshake or a boot-window timeout — never on a not-yet-
+        // wrong-identity handshake or a boot-window timeout — never on a not-yet-
         // ready nil.
-        switch await pollHandshake(expected: manifest.version) {
+        switch await pollHandshake(expected: expectedCandidate) {
         case .matched:
             onPhase(.done(version: manifest.version))
             return manifest.version
         case let .mismatch(got):
             throw await rollbackAndClassify(
                 to: previous, reason: "post-relaunch handshake mismatch",
-                recoveredError: .handshakeMismatch(expected: manifest.version, got: got))
+                expectedIdentity: rollbackExpected,
+                recoveredError: .handshakeMismatch(expected: expectedCandidate, got: got))
         case .unreachable:
             throw await rollbackAndClassify(
                 to: previous, reason: "post-relaunch handshake timed out",
-                recoveredError: .handshakeMismatch(expected: manifest.version, got: nil))
+                expectedIdentity: rollbackExpected,
+                recoveredError: .handshakeMismatch(expected: expectedCandidate, got: nil))
         }
     }
 
     // MARK: - Handshake poll
 
     private enum HandshakeProbe: Sendable {
-        case matched(String)
-        case mismatch(String)
+        case matched(RuntimeClosureIdentity)
+        case mismatch(RuntimeClosureIdentity)
         case unreachable
     }
 
@@ -211,14 +309,11 @@ public actor RuntimeInstallCoordinator {
     /// `handshakePollInterval` up to `handshakePollTimeout`, reloading discovery
     /// each try (the production probe re-reads ControlApiDiscovery per call). A
     /// `nil` handshake is "not serving YET" and keeps polling; a mismatch is
-    /// concluded ONLY on a non-nil WRONG version or a timeout. `expected == nil`
-    /// accepts ANY reachable version — the bundled-fallback rollback case, whose
-    /// version is not known here.
-    private func pollHandshake(expected: String?) async -> HandshakeProbe {
+    /// concluded only on a non-nil wrong exact identity or a timeout.
+    private func pollHandshake(expected: RuntimeClosureIdentity) async -> HandshakeProbe {
         let deadline = Date().addingTimeInterval(handshakePollTimeout)
         while true {
-            if let running = await daemon.handshakeVersion() {
-                guard let expected else { return .matched(running) }
+            if let running = await daemon.handshakeIdentity() {
                 return running == expected ? .matched(running) : .mismatch(running)
             }
             if Date() >= deadline { return .unreachable }
@@ -238,9 +333,13 @@ public actor RuntimeInstallCoordinator {
     /// recovery throws `.recoveryFailed` with the exact step + remediation, so the
     /// thrown error never claims a clean rollback over a broken engine.
     private func rollbackAndClassify(
-        to previous: RuntimeCurrent?, reason: String, recoveredError: RuntimeInstallError
+        to previous: RuntimeCurrent?, reason: String,
+        expectedIdentity: RuntimeClosureIdentity,
+        recoveredError: RuntimeInstallError
     ) async -> RuntimeInstallError {
-        switch await rollback(to: previous, reason: reason) {
+        switch await rollback(
+            to: previous, expectedIdentity: expectedIdentity, reason: reason)
+        {
         case .recovered:
             return recoveredError
         case let .failed(step, remediation):
@@ -251,11 +350,15 @@ public actor RuntimeInstallCoordinator {
     /// Restore the previous pointer (or delete it so the launcher falls back to
     /// the bundled runtime), relaunch, and PROVE the recovery with the same
     /// bounded handshake poll — the restored pointer wrote, the daemon relaunched,
-    /// and it reports the expected version (the previous version when we had one,
-    /// else any reachable engine). Only then is `.rolledBack` emitted. If any step
+    /// and it reports the exact expected prior identity. Only then is `.rolledBack`
+    /// emitted. If any step
     /// fails, `.failed` carries the exact step + remediation — never a green
     /// "rolled back" over a dead daemon or a broken pointer.
-    private func rollback(to previous: RuntimeCurrent?, reason: String) async -> RollbackOutcome {
+    private func rollback(
+        to previous: RuntimeCurrent?,
+        expectedIdentity: RuntimeClosureIdentity,
+        reason: String
+    ) async -> RollbackOutcome {
         // Stop the wrong/broken daemon. A stop failure alone is not decisive — the
         // restore + relaunch + handshake below is the real proof — so it is not
         // treated as a recovery failure on its own.
@@ -283,9 +386,9 @@ public actor RuntimeInstallCoordinator {
                 remediation: "Quit and reopen Claudexor to restart the engine.")
         }
 
-        // 3. Prove the restored engine is actually serving, with the SAME bounded
-        // poll used after a forward relaunch.
-        switch await pollHandshake(expected: previous?.version) {
+        // 3. Prove the restored engine is the exact prior closure. A reachable
+        // version without its authoritative build SHA is not a recovery proof.
+        switch await pollHandshake(expected: expectedIdentity) {
         case .matched:
             onPhase(.rolledBack(reason: reason))
             return .recovered
@@ -298,6 +401,30 @@ public actor RuntimeInstallCoordinator {
                 reason, step: "reach the engine after relaunch",
                 remediation: "Quit and reopen Claudexor to restart the engine.")
         }
+    }
+
+    /// Resolve rollback authority from the SAME launch selection used by
+    /// DaemonLauncher and steady reconciliation. This matters when a stale/same-
+    /// version current.json exists but the newer app bundle is the actual target.
+    private func rollbackIdentity(
+        selection: LocalRuntimeClosureSelection?,
+        previous: RuntimeCurrent?
+    ) async -> RuntimeClosureIdentity? {
+        if let selection {
+            switch selection.authority {
+            case .installed(let expected):
+                return expected
+            case .bundledStampedProbe:
+                return await daemon.probeIdentity(scriptURL: selection.scriptURL)
+            }
+        }
+        // Direct coordinator tests and non-app embedders may omit a selection
+        // resolver. A valid prior pointer still supplies exact rollback authority.
+        if let previous {
+            return RuntimeClosureIdentity.validated(
+                version: previous.version, buildSha: previous.engineSha)
+        }
+        return nil
     }
 
     private func rollbackFailed(_ reason: String, step: String, remediation: String) -> RollbackOutcome {

@@ -13,149 +13,186 @@ struct RemoteNativeLoginReadiness: Equatable {
 /// feeds the Settings install menu and the pre-flight guard.
 let installableRemoteHarnesses = ["claude", "codex", "cursor", "opencode"]
 
+enum RemoteHarnessInstallVerification: String, Decodable, Equatable, Sendable {
+    case releaseVerified = "release_verified"
+    case deterministicOnly = "deterministic_only"
+    case humanObserved = "human_observed"
+}
+
 /// A pending remote harness install, awaiting the user's confirmation. The
 /// command/location/pin fields are the remote CLI's own `--dry-run --json`
 /// disclosure verbatim (issue #89): the app never re-derives the install
 /// command, so the text the user approves is exactly what will run.
 struct RemoteHarnessInstallPrompt: Identifiable, Equatable {
-    let id = UUID()
-    let connectionID: UUID
+    let lease: RemoteActionLease
     let harness: String
     let command: String
     let installLocation: String
     let pinnedVersion: String?
+    let verification: RemoteHarnessInstallVerification
+
+    var id: UUID { lease.token }
+    var connectionID: UUID { lease.connectionID }
 }
 
 extension AppModel {
-    func selectRemoteProject(connectionID: UUID, path: String) {
-        let root = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !root.isEmpty,
-              remoteConnections.contains(where: { $0.id == connectionID })
-        else { return }
-        if selectedThreadId != nil { startDraftThread() }
-        draftExecutionLocation = .remote(connectionID)
-        draftRemoteProjectRoot = root
-        mutateRemoteConnection(connectionID) {
-            $0.savedProjects.removeAll { $0 == root }
-            $0.savedProjects.insert(root, at: 0)
-            $0.savedProjects = Array($0.savedProjects.prefix(20))
-        }
-        Task {
-            guard let client = remoteClients[.remote(connectionID)] else { return }
-            do {
-                let registered = try await client.registerProject(root: root)
-                let locationID = ExecutionLocationID.remote(connectionID)
-                var projects = remoteProjects[locationID] ?? []
-                projects.removeAll { $0.id == registered.id || $0.root == registered.root }
-                projects.insert(registered, at: 0)
-                remoteProjects[locationID] = projects
-                remoteConnectionMessages[connectionID] =
-                    "Registered \(root) as a remote project."
-            } catch {
-                remoteConnectionMessages[connectionID] =
-                    "Could not register \(root): \(userMessage(for: error))"
-            }
-        }
-    }
-
-    func showRemoteDirectoryBrowser(connectionID: UUID) {
-        if remoteClients[.remote(connectionID)] == nil {
-            Task {
-                await connectRemote(connectionID)
-                if remoteClients[.remote(connectionID)] != nil {
-                    remoteDirectoryBrowser = RemoteDirectoryBrowserRequest(
-                        connectionID: connectionID)
-                }
-            }
-        } else {
-            remoteDirectoryBrowser = RemoteDirectoryBrowserRequest(connectionID: connectionID)
-        }
-    }
-
-    func openRemoteTerminal(directory: String, title: String? = nil) async {
-        guard let connection = selectedRemoteConnection else { return }
-        do {
-            let invocation = try await sshConnectionManager.terminalShellInvocation(
-                connection, directory: directory)
-            remoteTerminalSheet = RemoteTerminalSheetRequest(
-                title: title ?? "Terminal — \(connection.displayName)",
-                invocation: invocation,
-                purpose: .shell)
-        } catch {
-            threadStatus = userMessageForRemote(error)
-        }
-    }
-
-    func openRemoteDaemonLog() async {
-        guard let connection = selectedRemoteConnection else { return }
-        do {
-            let factory = try await sshConnectionManager.factory(for: connection)
-            let command =
-                "tail -n 200 -f \"$HOME/.claudexor/v3/daemon/claudexord.log\""
-            remoteTerminalSheet = RemoteTerminalSheetRequest(
-                title: "Daemon log — \(connection.displayName)",
-                invocation: factory.remoteCommand(command, requestTTY: true),
-                purpose: .log)
-        } catch {
-            threadStatus = userMessageForRemote(error)
-        }
-    }
-
     func startRemoteLogin(
         connectionID: UUID,
         harness: SetupHarness,
         profileID: String? = nil
     ) async {
         let location = ExecutionLocationID.remote(connectionID)
-        guard let connection = remoteConnections.first(where: { $0.id == connectionID })
+        guard remoteConnections.contains(where: { $0.id == connectionID }),
+              let admittedLease = beginRemoteAction(.setupLogin, connectionID: connectionID)
         else { return }
+        let transport: SetupJobTransport = harness == .codex ? .daemon : .clientPty
+        let terminalPresentation =
+            transport == .clientPty
+            ? beginRemoteTerminalPresentation(connectionID: connectionID)
+            : nil
+        // Admit before the first suspension so invocation order, rather than
+        // reconnect scheduling order, defines which login is newest.
+        remoteDeviceLogin = nil
+        if let request = remoteTerminalSheet,
+           case .setup = request.purpose
+        {
+            dismissRemoteTerminal(request)
+        }
+        retireHarnessProjection(at: location)
         if remoteClients[location] == nil { await connectRemote(connectionID) }
-        guard let client = remoteClients[location] else { return }
+        guard let reboundLease = rebindRemoteActionToCurrentGeneration(admittedLease) else {
+            if let terminalPresentation {
+                finishRemoteTerminalPresentation(terminalPresentation)
+            }
+            finishRemoteAction(admittedLease)
+            return
+        }
+        guard let connection = remoteConnections.first(where: { $0.id == connectionID }),
+              let client = remoteClients[location]
+        else {
+            if let terminalPresentation {
+                finishRemoteTerminalPresentation(terminalPresentation)
+            }
+            finishRemoteAction(reboundLease)
+            return
+        }
+        let lease = reboundLease
+        let setupTarget = RemoteSetupLoginTarget(
+            connectionID: connectionID,
+            harness: harness.rawValue,
+            profileID: profileID,
+            transport: transport.rawValue,
+            loginFlow: harness == .codex ? "device_auth" : nil)
+        beginRemoteSetupJobOwnership(lease: lease, target: setupTarget)
+        var createdJobID: String?
+        var handedOff = false
+        defer {
+            if let jobID = finishRemoteSetupJobOwnership(
+                lease: lease,
+                target: setupTarget,
+                createdJobID: createdJobID,
+                handedOff: handedOff)
+            {
+                Task { _ = try? await client.cancelSetupJob(jobId: jobID) }
+            }
+            if !handedOff, let terminalPresentation {
+                finishRemoteTerminalPresentation(terminalPresentation)
+            }
+        }
         do {
             // Codex device auth remains daemon/API driven. Browser-redirect CLI
             // logins use the same sealed client_pty job as Claude/Cursor.
-            let transport: SetupJobTransport = harness == .codex ? .daemon : .clientPty
             let job = try await client.createSetupJob(SetupJobCreateRequest(
                 harness: harness,
                 action: .login,
                 profileId: profileID,
                 loginFlow: harness == .codex ? .deviceAuth : nil,
                 transport: transport))
+            createdJobID = job.jobId
+            recordRemoteSetupJob(job.jobId, lease: lease, target: setupTarget)
+            guard remoteActionIsCurrent(lease, client: client) else { return }
             if transport == .clientPty {
+                guard let terminalPresentation,
+                      remoteTerminalPresentationIsCurrent(terminalPresentation)
+                else {
+                    finishRemoteAction(lease)
+                    return
+                }
                 let invocation = try await sshConnectionManager.setupAttachInvocation(
                     connection, jobID: job.jobId)
-                remoteTerminalSheet = RemoteTerminalSheetRequest(
+                guard remoteActionIsCurrent(lease, client: client),
+                      remoteTerminalPresentationIsCurrent(terminalPresentation)
+                else {
+                    finishRemoteAction(lease)
+                    return
+                }
+                guard presentRemoteTerminal(
+                    terminalPresentation,
                     title: "\(harness.rawValue.capitalized) login — \(connection.displayName)",
                     invocation: invocation,
-                    purpose: .setup(connectionID, job.jobId))
+                    purpose: .setup(lease, job.jobId))
+                else {
+                    finishRemoteAction(lease)
+                    return
+                }
+                handedOff = true
             } else {
                 remoteConnectionMessages[connectionID] =
                     "Codex device login started."
                 remoteDeviceLogin = RemoteDeviceLoginRequest(
-                    connectionID: connectionID, jobID: job.jobId)
+                    lease: lease, jobID: job.jobId)
+                handedOff = true
             }
         } catch {
+            guard remoteActionIsCurrent(lease, client: client) else { return }
+            if let terminalPresentation {
+                guard remoteTerminalPresentationIsCurrent(terminalPresentation) else {
+                    finishRemoteAction(lease)
+                    return
+                }
+                finishRemoteTerminalPresentation(terminalPresentation)
+            }
             remoteConnectionMessages[connectionID] = userMessageForRemote(error)
+            finishRemoteAction(lease)
         }
     }
 
-    func runRemoteHarnessDoctor(connectionID: UUID) async {
+    func runRemoteHarnessDoctor(
+        connectionID: UUID,
+        actionLease: RemoteActionLease? = nil
+    ) async {
         let location = ExecutionLocationID.remote(connectionID)
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return }
+        if let actionLease {
+            guard remoteActionIsCurrent(actionLease, client: client) else { return }
+        }
         guard await refreshHarnesses(
             fresh: true, locationID: location, markStaleOnFailure: true),
             isCurrentGateway(client, at: location)
         else {
-            if isCurrentGateway(client, at: location) {
+            if isCurrentGateway(client, at: location),
+               actionLease.map({ remoteActionIsCurrent($0, client: client) }) ?? true
+            {
                 remoteConnectionMessages[connectionID] = "Harness Doctor could not refresh. Retry."
             }
             return
+        }
+        if let actionLease {
+            guard remoteActionIsCurrent(actionLease, client: client) else { return }
         }
         let harnesses = remoteHarnesses[location] ?? []
         let ready = harnesses.filter { !$0.routableIntents.isEmpty }.count
         remoteConnectionMessages[connectionID] =
             "Harness Doctor: \(ready) of \(harnesses.count) harnesses ready."
+    }
+
+    func finishRemoteSetup(_ lease: RemoteActionLease) async {
+        guard remoteActionIsCurrent(lease) else { return }
+        await runRemoteHarnessDoctor(
+            connectionID: lease.connectionID,
+            actionLease: lease)
+        finishRemoteAction(lease)
     }
 
     /// Fetch the remote runtime's own install disclosure and surface it for
@@ -171,31 +208,55 @@ extension AppModel {
                 "\(harness) is not an installable harness; nothing was installed."
             return
         }
-        guard let connection = remoteConnections.first(where: { $0.id == connectionID })
-        else {
+        guard remoteConnections.contains(where: { $0.id == connectionID }) else {
             threadStatus = "That connection no longer exists; nothing was installed."
             return
         }
+        guard let admittedLease = beginRemoteAction(
+            .harnessInstall, connectionID: connectionID)
+        else { return }
+        // Admit before reconnect so two rapid install requests retain the
+        // user's invocation order across suspension.
+        remoteHarnessInstallPrompt = nil
+        if let purpose = settingsRemoteTerminalSheet?.purpose,
+           case .install = purpose
+        {
+            settingsRemoteTerminalSheet = nil
+        }
+        retireHarnessProjection(at: .remote(connectionID))
         if remoteClients[.remote(connectionID)] == nil {
             await connectRemote(connectionID)
         }
+        guard let reboundLease = rebindRemoteActionToCurrentGeneration(admittedLease) else {
+            finishRemoteAction(admittedLease)
+            return
+        }
+        guard let connection = remoteConnections.first(where: { $0.id == connectionID }) else {
+            finishRemoteAction(reboundLease)
+            return
+        }
+        let lease = reboundLease
         do {
             let dryRun =
                 "~/.claudexor/remote/current/bin/claudexor harness install "
                 + SSHCommandFactory.posixQuote(harness) + " --dry-run --json"
             let output = try await sshConnectionManager.execute(
                 connection, remoteCommand: dryRun)
+            guard remoteActionIsCurrent(lease) else { return }
             guard let prompt = Self.parseHarnessInstallDisclosure(
-                output.stdout, connectionID: connectionID, harness: harness)
+                output.stdout, lease: lease, harness: harness)
             else {
                 remoteConnectionMessages[connectionID] =
                     "The remote runtime did not return an install disclosure for "
                     + "\(harness); nothing was installed."
+                finishRemoteAction(lease)
                 return
             }
             remoteHarnessInstallPrompt = prompt
         } catch {
+            guard remoteActionIsCurrent(lease) else { return }
             remoteConnectionMessages[connectionID] = userMessageForRemote(error)
+            finishRemoteAction(lease)
         }
     }
 
@@ -204,7 +265,7 @@ extension AppModel {
     /// harness mismatch, empty command) yields nil and therefore no install.
     nonisolated static func parseHarnessInstallDisclosure(
         _ data: Data,
-        connectionID: UUID,
+        lease: RemoteActionLease,
         harness: String
     ) -> RemoteHarnessInstallPrompt? {
         struct Disclosure: Decodable {
@@ -214,24 +275,37 @@ extension AppModel {
             let command: String
             let installLocation: String
             let pinnedVersion: String?
+            let verification: RemoteHarnessInstallVerification
         }
         guard let parsed = try? JSONDecoder().decode(Disclosure.self, from: data),
               parsed.ok, parsed.dryRun, parsed.harness == harness,
               !parsed.command.isEmpty
         else { return nil }
+        switch parsed.verification {
+        case .releaseVerified, .deterministicOnly:
+            guard parsed.pinnedVersion?.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty == false
+            else { return nil }
+        case .humanObserved:
+            guard parsed.pinnedVersion == nil else { return nil }
+        }
         return RemoteHarnessInstallPrompt(
-            connectionID: connectionID,
+            lease: lease,
             harness: harness,
             command: parsed.command,
             installLocation: parsed.installLocation,
-            pinnedVersion: parsed.pinnedVersion)
+            pinnedVersion: parsed.pinnedVersion,
+            verification: parsed.verification)
     }
 
     /// Run the CONFIRMED install in the visible embedded PTY. `--yes` is
     /// honest here: the user just approved the remote CLI's own disclosure,
     /// and the CLI prints it again in the terminal before executing.
     func confirmRemoteHarnessInstall(_ prompt: RemoteHarnessInstallPrompt) async {
-        remoteHarnessInstallPrompt = nil
+        guard remoteActionIsCurrent(prompt.lease) else { return }
+        if remoteHarnessInstallPrompt?.lease == prompt.lease {
+            remoteHarnessInstallPrompt = nil
+        }
         guard let connection = remoteConnections.first(where: {
             $0.id == prompt.connectionID
         }) else {
@@ -242,77 +316,98 @@ extension AppModel {
         }
         do {
             let factory = try await sshConnectionManager.factory(for: connection)
+            guard remoteActionIsCurrent(prompt.lease) else { return }
             let command =
                 "~/.claudexor/remote/current/bin/claudexor harness install "
                 + SSHCommandFactory.posixQuote(prompt.harness) + " --yes"
             settingsRemoteTerminalSheet = RemoteTerminalSheetRequest(
                 title: "Install \(prompt.harness.capitalized) — \(connection.displayName)",
                 invocation: factory.remoteCommand(command, requestTTY: true),
-                purpose: .install(prompt.connectionID, prompt.harness))
+                purpose: .install(prompt.lease, prompt.harness))
         } catch {
+            guard remoteActionIsCurrent(prompt.lease) else { return }
             remoteConnectionMessages[prompt.connectionID] = userMessageForRemote(error)
+            finishRemoteAction(prompt.lease)
         }
     }
 
     func finishRemoteHarnessInstall(
-        connectionID: UUID,
+        lease: RemoteActionLease,
         harness: String,
         exitCode: Int32
     ) async {
+        guard remoteActionIsCurrent(lease) else { return }
+        let connectionID = lease.connectionID
         let displayName = harness.capitalized
         guard exitCode == 0 else {
             remoteConnectionMessages[connectionID] =
                 "\(displayName) installer failed with exit code \(exitCode)."
+            finishRemoteAction(lease)
             return
         }
         let location = ExecutionLocationID.remote(connectionID)
         guard let client = remoteClients[location] else {
             remoteConnectionMessages[connectionID] =
                 "\(displayName) installed, but the remote connection is unavailable for Harness Doctor."
+            finishRemoteAction(lease)
             return
         }
-        do {
-            let harnesses = try await client.listHarnesses(fresh: true)
-            remoteHarnesses[location] = Self.mapHarnessStatuses(harnesses)
-            guard let result = harnesses.first(where: { $0.id == harness }) else {
-                remoteConnectionMessages[connectionID] =
-                    "\(displayName) installer finished, but Harness Doctor did not return that harness."
-                return
-            }
-            let installed = result.checks.first(where: { $0.id == "installed" })
-            if installed?.status != "pass" {
-                remoteConnectionMessages[connectionID] =
-                    "\(displayName) installer finished, but Harness Doctor still cannot find it"
-                    + (installed.flatMap(\.detail).map { ": \($0)" } ?? "") + "."
-            } else if !result.routableIntents.isEmpty {
-                remoteConnectionMessages[connectionID] =
-                    "\(displayName) installed and ready."
-            } else {
-                let reason = result.reasons?.first ?? "authentication is still required"
-                let nextStep =
-                    harness == "opencode"
-                    ? "Configure its provider credentials."
-                    : "Use Login → \(displayName)."
-                remoteConnectionMessages[connectionID] =
-                    "\(displayName) installed, but is not ready: \(reason). \(nextStep)"
-            }
-        } catch {
+        guard await refreshHarnesses(
+            fresh: true, locationID: location, markStaleOnFailure: true),
+            remoteActionIsCurrent(lease, client: client)
+        else {
+            guard remoteActionIsCurrent(lease, client: client) else { return }
             remoteConnectionMessages[connectionID] =
-                "\(displayName) installed, but Harness Doctor failed: \(userMessageForRemote(error))"
+                "\(displayName) installed, but Harness Doctor could not refresh. Retry."
+            finishRemoteAction(lease)
+            return
         }
+        guard let result = remoteHarnesses[location]?.first(where: {
+            $0.family.rawValue == harness
+        }) else {
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installer finished, but Harness Doctor did not return that harness."
+            finishRemoteAction(lease)
+            return
+        }
+        let installed = result.readiness.first(where: { $0.id == "installed" })
+        if installed?.status != "pass" {
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installer finished, but Harness Doctor still cannot find it"
+                + (installed.flatMap(\.detail).map { ": \($0)" } ?? "") + "."
+        } else if !result.routableIntents.isEmpty {
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installed and ready."
+        } else {
+            let reason = result.reasons.first ?? "authentication is still required"
+            let nextStep =
+                harness == "opencode"
+                ? "Configure its provider credentials."
+                : "Use Login → \(displayName)."
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installed, but is not ready: \(reason). \(nextStep)"
+        }
+        finishRemoteAction(lease)
     }
 
     func refreshRemoteNativeLoginReadiness(
         connectionID: UUID,
-        harnessID: String
+        harnessID: String,
+        actionLease: RemoteActionLease? = nil
     ) async -> RemoteNativeLoginReadiness? {
         let location = ExecutionLocationID.remote(connectionID)
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return nil }
+        if let actionLease {
+            guard remoteActionIsCurrent(actionLease, client: client) else { return nil }
+        }
         guard await refreshHarnesses(
             fresh: true, locationID: location, markStaleOnFailure: true),
             isCurrentGateway(client, at: location)
         else { return nil }
+        if let actionLease {
+            guard remoteActionIsCurrent(actionLease, client: client) else { return nil }
+        }
         guard let harness = remoteHarnesses[location]?.first(where: {
             $0.family.rawValue == harnessID
         }) else {
@@ -333,210 +428,88 @@ extension AppModel {
         return readiness
     }
 
+    func dismissRemoteDeviceLogin(_ request: RemoteDeviceLoginRequest) {
+        if remoteDeviceLogin?.lease == request.lease {
+            remoteDeviceLogin = nil
+        }
+        // SwiftUI may clear the item binding before onDisappear. Exact finish
+        // is still safe: a stale request cannot retire a replacement token.
+        finishRemoteAction(request.lease)
+    }
+
+    func dismissRemoteHarnessInstallPrompt(_ prompt: RemoteHarnessInstallPrompt) {
+        guard remoteHarnessInstallPrompt?.lease == prompt.lease else { return }
+        remoteHarnessInstallPrompt = nil
+        finishRemoteAction(prompt.lease)
+    }
+
+    @discardableResult
+    func acceptRemoteHarnessInstallPrompt(_ prompt: RemoteHarnessInstallPrompt) -> Bool {
+        guard remoteActionIsCurrent(prompt.lease),
+              remoteHarnessInstallPrompt?.lease == prompt.lease
+        else { return false }
+        // Transfer ownership to the confirm → terminal → Doctor chain before
+        // SwiftUI automatically drives the dialog binding to false.
+        remoteHarnessInstallPrompt = nil
+        return true
+    }
+
     func installRemoteRuntime(connectionID: UUID) async {
         guard let connection = remoteConnections.first(where: {
             $0.id == connectionID
         }) else { return }
+        guard remoteConnectTasks[connectionID] == nil,
+              connection.status != .connecting,
+              connection.status != .installing
+        else {
+            remoteConnectionMessages[connectionID] =
+                "A connection or runtime installation is already in progress."
+            return
+        }
+        let sourceGeneration = remoteConnectionGenerations[connectionID] ?? 0
+        var activationLease: RemoteRuntimeActivationLease?
         setRemoteState(
             connectionID, .installing,
             message: "Downloading and verifying the signed runtime…")
         do {
             try await sshConnectionManager.connectBatch(connection)
+            try await remoteRuntimeInstaller.recoverPendingActivation(on: connection)
             let target = try await remoteRuntimeInstaller.detectTarget(on: connection)
             let manifest = try await remoteRuntimeInstaller.loadManifest()
-            try await remoteRuntimeInstaller.install(
+            activationLease = try await remoteRuntimeInstaller.install(
                 manifest, target: target, on: connection,
                 appVersion: Self.appVersionString())
-            await connectRemote(connectionID)
-            guard remoteConnections.first(where: { $0.id == connectionID })?.status == .connected
-            else {
-                await remoteRuntimeInstaller.rollbackOrDeactivate(on: connection)
-                return
+            guard remoteConnectionGenerations[connectionID] == sourceGeneration,
+                  remoteConnections.contains(where: { $0.id == connectionID }),
+                  remoteConnectTasks[connectionID] == nil
+            else { throw CancellationError() }
+
+            guard let lease = activationLease else {
+                throw SSHConnectionError.unavailable(
+                    "the runtime activation receipt was lost before commit")
             }
-            await remoteRuntimeInstaller.commitActivation(on: connection)
-        } catch {
-            setRemoteState(
-                connectionID, .failed, message: userMessageForRemote(error))
-        }
-    }
-
-    func openRemotePreview(remotePort: Int) async {
-        guard let connection = selectedRemoteConnection,
-              (1 ... 65_535).contains(remotePort)
-        else { return }
-        if let old = remotePreviewForwards.removeValue(forKey: connection.id) {
-            await sshConnectionManager.closeForward(old)
-        }
-        do {
-            let forward = try await sshConnectionManager.openForward(
-                connection, remotePort: remotePort)
-            remotePreviewForwards[connection.id] = forward
-            remotePreview = RemotePreviewRequest(
-                id: UUID(), connectionID: connection.id,
-                localPort: forward.localPort, remotePort: remotePort)
-        } catch {
-            threadStatus = userMessageForRemote(error)
-        }
-    }
-
-    func closeRemotePreview(_ request: RemotePreviewRequest) async {
-        remotePreview = nil
-        guard let forward = remotePreviewForwards.removeValue(forKey: request.connectionID)
-        else { return }
-        await sshConnectionManager.closeForward(forward)
-    }
-
-    func startRemoteGlobalStream(_ locationID: ExecutionLocationID) {
-        guard let requestClient = remoteClients[locationID] else { return }
-        remoteGlobalStreamTasks[locationID]?.cancel()
-        let token = UUID()
-        remoteGlobalStreamTokens[locationID] = token
-        remoteGlobalStreamTasks[locationID] = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                guard let self,
-                      self.isCurrentGateway(requestClient, at: locationID),
-                      self.remoteGlobalStreamTokens[locationID] == token
-                else { break }
-                do {
-                    for try await event in requestClient.globalEvents(
-                        lastEventId: self.remoteGlobalEventCursors[locationID])
-                    {
-                        guard self.isCurrentGateway(requestClient, at: locationID),
-                              self.remoteGlobalStreamTokens[locationID] == token
-                        else { return }
-                        self.remoteGlobalEventCursors[locationID] = event.cursor
-                        await self.handleRemoteGlobalEvent(
-                            event,
-                            locationID: locationID,
-                            requestClient: requestClient,
-                            streamToken: token)
-                    }
-                } catch let GatewayError.http(status, _)
-                    where status == 400 || status == 409 || status == 410
-                {
-                    guard self.isCurrentGateway(requestClient, at: locationID),
-                          self.remoteGlobalStreamTokens[locationID] == token
-                    else { break }
-                    self.remoteGlobalEventCursors[locationID] = nil
-                    await self.refreshRemoteThreads(locationID)
-                } catch is DecodingError {
-                    guard self.isCurrentGateway(requestClient, at: locationID),
-                          self.remoteGlobalStreamTokens[locationID] == token
-                    else { break }
-                    self.remoteGlobalEventCursors[locationID] = nil
-                    await self.refreshRemoteThreads(locationID)
-                } catch GatewayError.decoding {
-                    guard self.isCurrentGateway(requestClient, at: locationID),
-                          self.remoteGlobalStreamTokens[locationID] == token
-                    else { break }
-                    self.remoteGlobalEventCursors[locationID] = nil
-                    await self.refreshRemoteThreads(locationID)
-                } catch {
-                    if Task.isCancelled { break }
-                }
-                guard !Task.isCancelled,
-                      self.isCurrentGateway(requestClient, at: locationID),
-                      self.remoteGlobalStreamTokens[locationID] == token
-                else { break }
-                try? await Task.sleep(for: .seconds(3))
-            }
-            guard let self, self.remoteGlobalStreamTokens[locationID] == token else { return }
-            self.remoteGlobalStreamTokens.removeValue(forKey: locationID)
-            self.remoteGlobalStreamTasks.removeValue(forKey: locationID)
-        }
-    }
-
-    func streamRemoteRun(
-        locationID: ExecutionLocationID,
-        runID: String,
-        threadID: String
-    ) {
-        let key = "\(locationID.rawValue)|\(runID)"
-        guard remoteRunStreamTasks[key] == nil,
-              let requestClient = remoteClients[locationID]
-        else { return }
-        let token = UUID()
-        remoteRunStreamTokens[key] = token
-        remoteRunStreamTasks[key] = Task { @MainActor [weak self] in
-            var lastEventID: Int?
-            var lastDetailRefresh = Date.distantPast
-            var attempt = 0
-            while !Task.isCancelled {
-                do {
-                    for try await envelope in requestClient.events(
-                        runId: runID, lastEventId: lastEventID)
-                    {
-                        guard let self,
-                              self.isCurrentGateway(requestClient, at: locationID),
-                              self.remoteRunStreamTokens[key] == token
-                        else { return }
-                        if envelope.seq > 0 { lastEventID = envelope.seq }
-                        attempt = 0
-                        if self.selectedExecutionLocation == locationID,
-                           self.selectedThreadId == threadID,
-                           Date().timeIntervalSince(lastDetailRefresh) >= 0.25
-                        {
-                            lastDetailRefresh = .now
-                            await self.refreshOpenThread(
-                                locationID: locationID, id: threadID,
-                                mayReconnect: false)
-                        }
-                    }
-                    break
-                } catch {
-                    if Task.isCancelled { break }
-                    attempt += 1
-                    if attempt > 5 { break }
-                    try? await Task.sleep(for: .seconds(min(Double(attempt) * 2, 10)))
-                }
-            }
-            guard let self,
-                  self.isCurrentGateway(requestClient, at: locationID),
-                  self.remoteRunStreamTokens[key] == token
+            // Ownership transfers before suspension. The exact reconnect now
+            // performs handshake → activation commit → client/projection adopt
+            // as one publication transaction, and owns rollback on every exit.
+            activationLease = nil
+            guard await connectRemoteTransferringActivation(
+                connection, lease: lease) != nil
             else { return }
-            await self.refreshRemoteThreads(locationID)
-            guard self.isCurrentGateway(requestClient, at: locationID),
-                  self.remoteRunStreamTokens[key] == token
-            else { return }
-            if self.selectedExecutionLocation == locationID,
-               self.selectedThreadId == threadID
+        } catch {
+            let failure = await remoteActivationFailure(
+                error, lease: activationLease, on: connection)
+            activationLease = nil
+            let currentGeneration = remoteConnectionGenerations[connectionID] ?? 0
+            let mayPublish = currentGeneration == sourceGeneration
+                || currentGeneration == sourceGeneration + 1
+            if mayPublish,
+               remoteConnections.contains(where: { $0.id == connectionID })
             {
-                await self.refreshOpenThread(
-                    locationID: locationID, id: threadID, mayReconnect: false)
+                setRemoteState(connectionID, .failed, message: failure.message)
+            } else if failure.rollbackFailed {
+                threadStatus = failure.message
             }
-            guard self.remoteRunStreamTokens[key] == token else { return }
-            self.remoteRunStreamTokens.removeValue(forKey: key)
-            self.remoteRunStreamTasks.removeValue(forKey: key)
         }
     }
 
-    private func handleRemoteGlobalEvent(
-        _ event: JournalEvent,
-        locationID: ExecutionLocationID,
-        requestClient: GatewayClient,
-        streamToken: UUID
-    ) async {
-        guard event.type == "thread.head.updated" else { return }
-        await refreshRemoteThreads(locationID)
-        guard isCurrentGateway(requestClient, at: locationID),
-              remoteGlobalStreamTokens[locationID] == streamToken,
-              selectedExecutionLocation == locationID,
-              let selectedThreadId,
-              event.payload["thread_id"]?.stringValue == selectedThreadId
-        else { return }
-        await refreshOpenThread(
-            locationID: locationID, id: selectedThreadId, mayReconnect: false)
-    }
-
-    func cancelRemoteStreams(_ locationID: ExecutionLocationID) {
-        suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
-        remoteGlobalStreamTokens.removeValue(forKey: locationID)
-        remoteGlobalStreamTasks.removeValue(forKey: locationID)?.cancel()
-        remoteGlobalEventCursors.removeValue(forKey: locationID)
-        let prefix = "\(locationID.rawValue)|"
-        for key in Array(remoteRunStreamTasks.keys) where key.hasPrefix(prefix) {
-            remoteRunStreamTokens.removeValue(forKey: key)
-            remoteRunStreamTasks.removeValue(forKey: key)?.cancel()
-        }
-    }
 }

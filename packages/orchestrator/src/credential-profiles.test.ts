@@ -146,8 +146,16 @@ describe("defaultCredentialRoute", () => {
     const mixed = {
       ...base,
       authSources: [
-        { source: "native_session" as const, availability: "unavailable" as const, verification: "failed" as const },
-        { source: "api_key_env" as const, availability: "available" as const, verification: "passed" as const },
+        {
+          source: "native_session" as const,
+          availability: "unavailable" as const,
+          verification: "failed" as const,
+        },
+        {
+          source: "api_key_env" as const,
+          availability: "available" as const,
+          verification: "passed" as const,
+        },
       ],
     };
     expect(defaultCredentialRoute(mixed, "auto")).toBe("api_key");
@@ -233,7 +241,9 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
   const c = { ...work, profile_id: "c", enabled: false };
 
   it("registry order by default; skips current, disabled, excluded, and spent profiles", () => {
-    expect(nextEligibleProfile([a, b, c], "claude", policy, a, [], ready("a", "b"))?.profile_id).toBe("b");
+    expect(
+      nextEligibleProfile([a, b, c], "claude", policy, a, [], ready("a", "b"))?.profile_id,
+    ).toBe("b");
     expect(
       nextEligibleProfile([a, b], "claude", policy, a, [], ready("a", "b"), new Set(["b"])),
     ).toBeNull();
@@ -245,7 +255,9 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
 
   it("policy order wins over registry order", () => {
     const ordered = { ...policy, rotation_eligible: ["b", "a"] };
-    expect(nextEligibleProfile([a, b], "claude", ordered, null, [], ready("a", "b"))?.profile_id).toBe("b");
+    expect(
+      nextEligibleProfile([a, b], "claude", ordered, null, [], ready("a", "b"))?.profile_id,
+    ).toBe("b");
   });
 
   it("rotation NEVER crosses credential kinds (round-16 BLOCK): a subscription→API-key swap would misvalue metered usage under the attempt's first-wins route receipt", () => {
@@ -267,14 +279,8 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
     // Kind symmetry: an api_key profile rotates only to api_key profiles.
     const keyed2 = { ...keyed, profile_id: "k2", secret_ref: "anthropic:k2" };
     expect(
-      nextEligibleProfile(
-        [keyed, keyed2, b],
-        "claude",
-        policy,
-        keyed,
-        [],
-        ready("k", "k2", "b"),
-      )?.profile_id,
+      nextEligibleProfile([keyed, keyed2, b], "claude", policy, keyed, [], ready("k", "k2", "b"))
+        ?.profile_id,
     ).toBe("k2");
   });
 
@@ -289,13 +295,15 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
     // The current profile was disabled/removed mid-attempt: it is absent from
     // the registry, but its TYPED kind still forbids a cross-kind swap.
     expect(nextEligibleProfile([keyed], "claude", policy, a, [], ready("k"))).toBeNull();
-    expect(nextEligibleProfile([keyed, b], "claude", policy, a, [], ready("k", "b"))?.profile_id).toBe("b");
+    expect(
+      nextEligibleProfile([keyed, b], "claude", policy, a, [], ready("k", "b"))?.profile_id,
+    ).toBe("b");
   });
 
   it("skips an enabled but unready target and selects the next ready sibling", () => {
-    expect(
-      nextEligibleProfile([a, b], "claude", policy, null, [], ready("b"))?.profile_id,
-    ).toBe("b");
+    expect(nextEligibleProfile([a, b], "claude", policy, null, [], ready("b"))?.profile_id).toBe(
+      "b",
+    );
     expect(nextEligibleProfile([a], "claude", policy, null, [], ready())).toBeNull();
   });
 });
@@ -321,7 +329,9 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
 
   it("null current (default subject) never rotates INTO an api_key profile — the round-16 BLOCK generalized", () => {
     expect(nextEligibleProfile([keyed], "claude", policy, null, [], ready("k"))).toBeNull();
-    expect(nextEligibleProfile([keyed, a], "claude", policy, null, [], ready("k", "a"))?.profile_id).toBe("a");
+    expect(
+      nextEligibleProfile([keyed, a], "claude", policy, null, [], ready("k", "a"))?.profile_id,
+    ).toBe("a");
   });
 
   it("preflightDefaultSubject: rotate + fresh default breach starts on the next subscription profile with full provenance", () => {

@@ -1,6 +1,6 @@
 import Foundation
 
-struct HarnessAttachmentInput: Hashable {
+struct HarnessAttachmentInput: Hashable, Sendable {
     var kind: String
     var mimeTypes: [String]
     var maxBytes: Int
@@ -8,7 +8,7 @@ struct HarnessAttachmentInput: Hashable {
     var transport: String
 }
 
-struct ComposerAttachmentDescriptor: Hashable {
+struct ComposerAttachmentDescriptor: Hashable, Sendable {
     var id: String
     var kind: String
     var mime: String
@@ -16,12 +16,12 @@ struct ComposerAttachmentDescriptor: Hashable {
     var sizeBytes: Int
 }
 
-struct ComposerAttachmentLane: Hashable {
+struct ComposerAttachmentLane: Hashable, Sendable {
     var id: String
     var inputs: [HarnessAttachmentInput]
 }
 
-enum ComposerAttachmentPoolMode: Equatable { case auto, explicit }
+enum ComposerAttachmentPoolMode: Equatable, Sendable { case auto, explicit }
 enum ComposerAttachmentOutcome: Equatable { case admitted, degraded, refused }
 enum ComposerAttachmentRefusalReason: String, Equatable {
     case admitted

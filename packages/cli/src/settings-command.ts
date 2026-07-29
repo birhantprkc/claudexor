@@ -6,7 +6,7 @@ import {
 } from "@claudexor/schema";
 import type { ParsedArgs } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
-import { renderCliFailure } from "./cli-error.js";
+import { controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
 import { ensureDaemon } from "./daemon-run.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
 
@@ -61,7 +61,14 @@ export async function settingsCommand(args: ParsedArgs, json: boolean): Promise<
   const sub = args._[1] ?? "show";
   if (sub !== "show" && sub !== "set")
     return printUsageError(json, "usage: claudexor settings show|set");
+  const key = args._[2];
+  const value = args._[3];
+  if (sub === "set" && (!key || value === undefined)) return printUsageError(json, USAGE);
   try {
+    // Validate caller-owned input before daemon bootstrap. A bad key/value is a
+    // usage failure even when the engine is offline; starting the daemon cannot
+    // make malformed input valid.
+    const patch = sub === "set" ? settingPatch(key as string, value as string) : undefined;
     const { addr } = await ensureDaemon();
     if (sub === "show") {
       const snapshot = await settingsRequest(addr, "GET");
@@ -69,10 +76,7 @@ export async function settingsCommand(args: ParsedArgs, json: boolean): Promise<
       else printSettings(snapshot);
       return 0;
     }
-    const key = args._[2];
-    const value = args._[3];
-    if (!key || value === undefined) return printUsageError(json, USAGE);
-    const snapshot = await settingsRequest(addr, "POST", settingPatch(key, value));
+    const snapshot = await settingsRequest(addr, "POST", patch);
     if (json) printJson(snapshot);
     else print(`updated ${key}`);
     return 0;
@@ -102,13 +106,10 @@ async function settingsRequest(
     throw new Error(`settings endpoint returned invalid JSON (HTTP ${response.status})`);
   }
   if (!response.ok) {
-    const detail = value as Record<string, unknown>;
-    throw new Error(
-      typeof detail["message"] === "string"
-        ? detail["message"]
-        : typeof detail["error"] === "string"
-          ? detail["error"]
-          : `settings request failed (HTTP ${response.status})`,
+    throw controlProblemError(
+      response.status,
+      value,
+      `settings request failed (HTTP ${response.status})`,
     );
   }
   return ControlSettingsSnapshot.parse(value);
@@ -122,12 +123,12 @@ function harnessFieldPatch(field: keyof typeof HARNESS_SETTING_FIELDS, value: st
   switch (field) {
     case "enabled": {
       if (value !== "true" && value !== "false")
-        throw new Error("harness enabled must be true or false");
+        throw usageError("harness enabled must be true or false");
       return { enabled: value === "true" };
     }
     case "native_credentials_enabled": {
       if (value !== "true" && value !== "false")
-        throw new Error("harness native_credentials_enabled must be true or false");
+        throw usageError("harness native_credentials_enabled must be true or false");
       return { nativeCredentialsEnabled: value === "true" };
     }
     case "default_model":
@@ -142,7 +143,7 @@ function harnessFieldPatch(field: keyof typeof HARNESS_SETTING_FIELDS, value: st
       if (cleared) return { [patchKey]: null };
       const n = Number(value.trim());
       if (!Number.isInteger(n) || n <= 0)
-        throw new Error(`harness ${field} must be a positive integer or none`);
+        throw usageError(`harness ${field} must be a positive integer or none`);
       return { [patchKey]: n };
     }
     case "tools_allow":
@@ -167,7 +168,7 @@ function harnessFieldPatch(field: keyof typeof HARNESS_SETTING_FIELDS, value: st
 
 export function settingPatch(key: string, value: string): SettingsPatch {
   if (key === "default_model") {
-    throw new Error(
+    throw usageError(
       "the global default_model setting was removed (model choice is harness-scoped, INV-103); use `claudexor settings set harness.<id>.default_model <model>`",
     );
   }
@@ -180,7 +181,7 @@ export function settingPatch(key: string, value: string): SettingsPatch {
     });
   }
   if (key === "default_portfolio") {
-    throw new Error("default_portfolio was removed in v2; use routing_goal");
+    throw usageError("default_portfolio was removed in v2; use routing_goal");
   }
   if (key === "routing_goal") return ControlSettingsUpdateRequest.parse({ routingGoal: value });
   if (key === "paid_fallback") return ControlSettingsUpdateRequest.parse({ paidFallback: value });
@@ -191,7 +192,7 @@ export function settingPatch(key: string, value: string): SettingsPatch {
     try {
       qualityTiers = JSON.parse(value);
     } catch {
-      throw new Error("quality_tiers must be a JSON object of per-intent ordered tiers");
+      throw usageError("quality_tiers must be a JSON object of per-intent ordered tiers");
     }
     return ControlSettingsUpdateRequest.parse({ qualityTiers });
   }
@@ -214,7 +215,7 @@ export function settingPatch(key: string, value: string): SettingsPatch {
       return ControlSettingsUpdateRequest.parse({ paidBudgetPerRun: { kind: "unlimited" } });
     const maxUsd = Number(value.trim());
     if (!Number.isFinite(maxUsd) || maxUsd < 0 || value.trim() === "")
-      throw new Error(`${key} must be a non-negative number or unlimited`);
+      throw usageError(`${key} must be a non-negative number or unlimited`);
     return ControlSettingsUpdateRequest.parse({
       paidBudgetPerRun: { kind: "finite", maxUsd },
     });
@@ -226,7 +227,7 @@ export function settingPatch(key: string, value: string): SettingsPatch {
     const interactionTimeoutMs = Number(value.trim());
     return ControlSettingsUpdateRequest.parse({ interactionTimeoutMs });
   }
-  throw new Error(`unknown setting: ${key}`);
+  throw usageError(`unknown setting: ${key}`);
 }
 
 function printSettings(settings: ReturnType<typeof ControlSettingsSnapshot.parse>): void {

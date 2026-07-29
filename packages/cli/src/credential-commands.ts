@@ -302,8 +302,7 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
           ? `  next up: API key [default]`
           : `  next up: CLI login [native]`,
       );
-    }
-    else if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
+    } else if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
     else if (nextUp?.kind === "none") print(`  next up: nothing routable (${nextUp.reason})`);
   }
   return 0;

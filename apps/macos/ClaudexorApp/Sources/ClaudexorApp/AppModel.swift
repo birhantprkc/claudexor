@@ -100,14 +100,14 @@ final class AppModel {
     /// Located run ids the user has successfully cancelled. Daemon ids are not
     /// globally unique, so cancellation memory must never leak between local and
     /// remote engines (or between two cloned remote homes).
-    private var cancelledRunIds: Set<String> = []
+    var cancelledRunIds: Set<String> = []
     /// A turn POST is in flight (composerSend: from the click until the thread detail
     /// reflects the accepted turn). The head-turn busy-gate is detail-derived and
     /// can't see this window, so without it the composer would still show Send and a
     /// user could DOUBLE-SUBMIT (or, on a draft, create two threads). Folded into
     /// `selectedThreadBusy`/`selectedThreadStarting` and re-entry-guarded in
     /// composerSend so no turn-start path can bypass it.
-    private(set) var turnSubmitting = false
+    var turnSubmitting = false
     // Threads (chat/session-first): the conversation list + selected detail.
     var threads: [ThreadSummary] = []
     var selectedThreadId: String?
@@ -146,6 +146,10 @@ final class AppModel {
     /// Monotonic per-location fence for overlapping complete Accounts loads.
     /// Internal request ordering is not UI state and stays off the observation graph.
     @ObservationIgnored var accountsRefreshGenerations: [ExecutionLocationID: UInt64] = [:]
+    /// Foreground Accounts truth shared by list, quota, and Harness Doctor.
+    /// Tokens keep a slower predecessor from settling a newer visible refresh.
+    var accountsLoadStates: [ExecutionLocationID: ProjectionLoadState] = [:]
+    @ObservationIgnored var accountsLoadTokens: [ExecutionLocationID: UUID] = [:]
     /// Dedicated quota observers use the global journal transport but own an
     /// independent cursor. The general global stream must never consume an
     /// Accounts snapshot cursor because that could skip unrelated run/thread events.
@@ -183,13 +187,27 @@ final class AppModel {
                 guard let client = try? ControlApiDiscovery.load().makeClient() else { return nil }
                 do { return try await client.engineHasActiveWork() } catch { return nil }
             },
-            handshakeProbe: {
+            handshakeIdentityProbe: {
                 guard let client = try? ControlApiDiscovery.load().makeClient(),
-                    let outcome = try? await client.handshake(), outcome.ok
+                    let outcome = try? await client.handshake(), outcome.ok,
+                    let engine = outcome.engine
                 else { return nil }
-                return outcome.engine?.version
+                return AppRuntimeDaemonControl.runtimeIdentity(
+                    version: engine.version, buildSha: engine.sha)
             })
     }
+    /// The one session-wide exact owner shared by updater installation and
+    /// steady local-daemon reconciliation. Filesystem locking protects the
+    /// pointer; this lease protects the stop/start lifecycle itself.
+    @ObservationIgnored let localRuntimeLifecycleOwner = LocalRuntimeLifecycleOwner()
+    /// One lifecycle owner for the entire AppModel session. It is created lazily
+    /// so tests can replace `makeDaemonControl` before the first reconciliation;
+    /// the actor itself coalesces overlapping connect/poll attempts.
+    @ObservationIgnored var localDaemonReconciler: LocalDaemonReconciler?
+    /// Visible exact-closure coherence notice. This is separate from update
+    /// discovery/install text so either owner can settle without erasing the
+    /// other's state.
+    var localDaemonReconciliationNotice: String?
     /// The update CHECKER (actor, off the observable graph) + an injectable
     /// transport factory so tests drive a stub without the network. One auto
     /// foreground check per session; the menu command forces a re-check. The chip
@@ -227,6 +245,8 @@ final class AppModel {
     var remoteExactAuthSources:
         [ExecutionLocationID: [HarnessFamily: [AuthSourceKind: HarnessAuthSource]]] = [:]
     var settingsSnapshot: SettingsSnapshot?
+    var settingsLoadStates: [ExecutionLocationID: ProjectionLoadState] = [:]
+    @ObservationIgnored var settingsLoadTokens: [ExecutionLocationID: UUID] = [:]
     var quotaResponse: ControlQuotaResponse?
     var remoteQuotaResponses: [ExecutionLocationID: ControlQuotaResponse] = [:]
     var quotaStatus: String?
@@ -251,14 +271,19 @@ final class AppModel {
         }
     }
 
-    private(set) var client: GatewayClient?
+    var client: GatewayClient?
     @ObservationIgnored let sshConnectionManager: SSHConnectionManager
     @ObservationIgnored let remoteRuntimeInstaller: RemoteRuntimeInstaller
     /// Tokens only live inside these in-memory clients. Persistence stores
     /// connection labels and thread summaries, never credentials or endpoints.
     @ObservationIgnored var remoteClients: [ExecutionLocationID: GatewayClient] = [:]
     @ObservationIgnored var remoteControlForwards: [UUID: RemoteControlForwardLease] = [:]
-    @ObservationIgnored var remotePreviewForwards: [UUID: SSHForward] = [:]
+    @ObservationIgnored var remotePreviewForwards: [UUID: RemotePreviewForwardLease] = [:]
+    @ObservationIgnored var remoteActionLeases: [RemoteActionOwnerKey: RemoteActionLease] = [:]
+    /// In-flight setup job cleanup ownership. This exists only across the
+    /// create/adopt await window; visible sheets own their exact job afterward.
+    @ObservationIgnored var remoteSetupJobOwnership: RemoteSetupJobOwnership?
+    @ObservationIgnored var remoteTerminalPresentationLease: RemoteTerminalPresentationLease?
     @ObservationIgnored var remoteGlobalStreamTasks: [ExecutionLocationID: Task<Void, Never>] = [:]
     @ObservationIgnored var remoteGlobalStreamTokens: [ExecutionLocationID: UUID] = [:]
     @ObservationIgnored var remoteGlobalEventCursors: [ExecutionLocationID: String] = [:]
@@ -378,167 +403,6 @@ final class AppModel {
             }
         remoteThreadCache = (try? RemoteThreadCacheStore.applicationSupport().load()) ?? []
         sshHostScan = SSHHostScanState.scan()
-    }
-
-    // MARK: Connection
-
-    func connect() async {
-        connectionGeneration += 1
-        let generation = connectionGeneration
-        var attemptedLaunch = false
-        while !Task.isCancelled, generation == connectionGeneration {
-            health = .connecting
-            cancelAllStreams()
-            if await tryConnect() {
-                while !Task.isCancelled, generation == connectionGeneration {
-                    try? await Task.sleep(for: .seconds(3))
-                    guard generation == connectionGeneration, client != nil else { break }
-                    guard await pollEngineIdentity() else { break }
-                }
-            } else if !attemptedLaunch, DaemonLauncher.startIfNeeded() {
-                attemptedLaunch = true
-                try? await Task.sleep(for: .seconds(3))
-                continue
-            }
-            guard generation == connectionGeneration else { return }
-            enterHardOffline()
-            try? await Task.sleep(for: .seconds(3))
-        }
-    }
-
-    /// Drop every daemon-owned projection when the engine is unreachable. The
-    /// reconnect path repopulates these from `/v2`; user preferences and the
-    /// current composer draft remain local and are intentionally preserved.
-    func enterHardOffline() {
-        let keepRemoteSelection = selectedExecutionLocation != .local
-        health = .offline
-        endpoint = ""
-        client = nil
-        engineIdentity = nil
-        authSheetTarget = nil
-        cancelAllStreams()
-        // Retire queued settings ops (X20) but KEEP the chain tail (X30): a
-        // post-reconnect op must still await the old in-flight request, or two
-        // settings requests overlap on the wire and break the X14 single-chain
-        // criterion. Old ops retire inert through their epoch guards.
-        settingsEpoch += 1
-        retireHarnessProjection(at: .local)
-
-        if !keepRemoteSelection { route = .threads }
-        liveTasks.removeAll()
-        cancelledRunIds.removeAll()
-        transcripts.removeAll()
-        liveBoxes.removeAll()
-        retireRunDetailState(cancelInFlight: true)
-        runListReconciliationNeeded = false
-        turnSubmitting = false
-
-        threads.removeAll()
-        projectListingProblems.removeAll()
-        registeredProjects.removeAll()
-        if !keepRemoteSelection {
-            selectedThreadId = nil
-            selectedThreadDetail = nil
-            threadStatus = nil
-            threadLoadGeneration += 1
-        }
-
-        liveHarnesses.removeAll()
-        harnessReadinessFresh = nil
-        gitCapability = nil
-        retireRunApplicability(at: .local)
-        // X140 class: the credential-profile + harness-account registries load on
-        // connect and feed the sessions footer/accounts surfaces — leaving them
-        // presents the last daemon's registry as truth. Reconnect repopulates.
-        credentialProfiles.removeAll()
-        harnessAccounts.removeAll()
-        accountsNextUpAuthorityFresh.removeValue(forKey: .local)
-        suspendAccountsQuotaObserver(at: .local, discardCursor: true)
-        exactAuthSources.removeAll()
-        settingsSnapshot = nil
-        settingsStatus = nil
-        quotaResponse = nil
-        quotaStatus = nil
-        secretBackend = "unknown"
-        storedSecrets.removeAll()
-        trustEntries.removeAll()
-        trustStatus = nil
-    }
-
-    /// A daemon replacement cannot inherit a local cancel verdict for a reused
-    /// run id. Keep cancellation memory scoped to the exact location epoch.
-    func discardCancelledRunMemory(at locationID: ExecutionLocationID) {
-        let prefix = "\(locationID.rawValue)|"
-        cancelledRunIds = Set(cancelledRunIds.filter { !$0.hasPrefix(prefix) })
-    }
-
-    func rememberRunCancelled(_ id: String, at locationID: ExecutionLocationID) {
-        cancelledRunIds.insert(locatedRunKey(id, at: locationID))
-    }
-
-    func wasRunCancelled(_ id: String, at locationID: ExecutionLocationID) -> Bool {
-        cancelledRunIds.contains(locatedRunKey(id, at: locationID))
-    }
-
-    /// Retire every per-run detail owner at a connection boundary. Tests may
-    /// leave the old task uncancelled to release its response after a new
-    /// same-id request and prove the client/token fences deterministically.
-    func retireRunDetailState(cancelInFlight: Bool) {
-        snapshotLoadDepth.removeAll()
-        snapshotReplayFences.removeAll()
-        hydratedRunDetails.removeAll()
-        if cancelInFlight {
-            for task in runDetailLoads.values { task.cancel() }
-        }
-        runDetailLoads.removeAll()
-        runDetailLoadTokens.removeAll()
-        runDetailTrailing.removeAll()
-        runDetailAcceptingTrailing.removeAll()
-        deferredEnvelopes.removeAll()
-        deferredOverflow.removeAll()
-    }
-
-    private func tryConnect() async -> Bool {
-        do {
-            let discovery = try ControlApiDiscovery.load()
-            let client = try discovery.makeClient()
-            endpoint = "\(discovery.host):\(discovery.port)"
-            adoptClientForReconnect(client)
-            // One handshake serves both the connectivity verdict AND the engine
-            // build identity (QA-002): retain what the daemon discloses instead
-            // of a bare Bool that drops version/sha on the floor.
-            let outcome = try await client.handshake()
-            if outcome.ok {
-                engineIdentity = outcome.engine
-                health = .connected
-                await refreshRuns()
-                await refreshSettings()
-                await refreshSecrets()
-                await refreshThreads()
-                await refreshProjects()
-                // QA-065: resolve credential-profile DISPLAY NAMES on connect, not
-                // only when the accounts popover opens — otherwise the sessions
-                // footer shows raw profile ids by default until that popover loads.
-                await refreshCredentialProfiles()
-                startGlobalStream()
-                return true
-            }
-        } catch {
-            // fall through to caller (offline / auto-start path)
-        }
-        return false
-    }
-
-    /// One steady-state connectivity poll (round-4 #5 / QA-002): re-HANDSHAKE
-    /// rather than the bare `health()` Bool, so a daemon SWAPPED at the same
-    /// endpoint refreshes its disclosed build identity instead of pinning the old
-    /// version/sha in About forever. A dropped or incompatible handshake returns
-    /// false → the caller falls to the reconnect path.
-    @discardableResult
-    func pollEngineIdentity() async -> Bool {
-        guard let current = client, let outcome = try? await current.handshake(), outcome.ok else { return false }
-        engineIdentity = outcome.engine
-        return true
     }
 
     /// Single-flight + coalescing runs-list refresh (QA-052), mirroring the

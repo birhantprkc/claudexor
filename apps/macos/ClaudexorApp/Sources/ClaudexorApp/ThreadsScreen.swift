@@ -14,6 +14,8 @@ struct ThreadsScreen: View {
     /// Files/images staged for upload before the next turn. Images are gated by
     /// each selected harness's finite attachment-input declaration.
     @State var composerAttachments: [PendingAttachment] = []
+    @State var composerAttachmentStagingMessage: String?
+    @State var composerAttachmentOperations = ComposerAttachmentOperationCoordinator()
     @State var composerMode: RunMode = .agent
     // "⋯" per-turn options (collapsed by default).
     @State var showOptions = false
@@ -189,6 +191,11 @@ struct ThreadsScreen: View {
             blockers.append(.attachments(
                 composerAttachmentAdmission.message
                     ?? "Change the harness pool or remove incompatible attachments"
+            ))
+        }
+        if composerAttachmentOperations.inFlightCount > 0 {
+            blockers.append(.attachments(
+                "Wait for attachment preparation to finish or cancel it"
             ))
         }
         if let composerApplicabilityBlocker {
@@ -475,11 +482,17 @@ struct ThreadsScreen: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { if !threadHasProject { composerMode = .ask } }
         .onChange(of: composerSelectionContext) { oldContext, newContext in
-            if composerSubmissions.classifySelection(
+            let selectionTransition = composerSubmissions.classifySelection(
                 from: oldContext, to: newContext
-            ) != .explicitSelection {
+            )
+            if selectionTransition != .explicitSelection {
                 return
             }
+            composerAttachmentOperations.invalidateSelection()
+            composerAttachments = ComposerAttachmentSelectionPolicy.retained(
+                composerAttachments, after: selectionTransition
+            )
+            composerAttachmentStagingMessage = nil
             // QA-007: a FRESH draft seeds intent from the project default — Agent
             // for a project, Ask for none — so a stale Ask/Plan from the previous
             // thread never leaks onto a new project draft. Selecting an EXISTING

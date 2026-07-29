@@ -63,6 +63,22 @@ struct UpdateChip: View {
             .padding(.horizontal, Theme.Spacing.md)
             .padding(.vertical, Theme.Spacing.xs)
             .help(model.runtimeInstallStatus ?? "Installing the engine update…")
+        } else if let notice = model.localDaemonReconciliationNotice,
+            !notice.isEmpty
+        {
+            // Closure coherence is a live safety state, so it stays visible even
+            // when a cached update is also available. An active install remains
+            // first because it currently owns the daemon lifecycle.
+            HStack(spacing: Theme.Spacing.xs) {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.caption2).foregroundStyle(Theme.status(.warn))
+                Text(notice)
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Theme.Spacing.md)
+            .padding(.vertical, Theme.Spacing.xs)
+            .help(notice)
         } else if let update = model.updateAvailability {
             // A newer, signature-verified runtime exists (D-2): the primary
             // action installs it in place; "View release" stays as a manual
@@ -206,7 +222,6 @@ struct AccountsPopover: View {
     @Environment(AppModel.self) private var model
     @Binding var isPresented: Bool
 
-    @State private var refreshing = false
     @State private var showQuotaDetail = false
 
     var body: some View {
@@ -259,16 +274,16 @@ struct AccountsPopover: View {
             .buttonStyle(.borderless)
             .help("All quota windows and provenance")
             Button {
-                refreshing = true
-                Task {
-                    _ = await model.refreshAccounts()
-                    refreshing = false
-                }
+                Task { _ = await model.refreshAccounts() }
             } label: {
-                Image(systemName: "arrow.clockwise")
+                if model.activeAccountsLoadState == .loading {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
             }
             .buttonStyle(.borderless)
-            .disabled(refreshing)
+            .disabled(model.activeAccountsLoadState == .loading)
             .help("Refresh quota and account readiness from official provider sources")
         }
     }
@@ -335,13 +350,6 @@ struct AccountsSurface: View {
     @State private var pendingDelete: AccountRowModel?
     @State private var deleting = false
     @State private var deleteNotice: String?
-    /// The accounts load state (batch-6 item h): a config/load ERROR is a typed
-    /// state with the reason + retry — never the empty "No accounts yet".
-    @State private var loadState: AccountsLoadState = .idle
-
-    /// Typed load state for the accounts registry (error ≠ empty).
-    enum AccountsLoadState: Equatable { case idle, loading, loaded, failed(String) }
-
     /// The add form registers config_dir_login profiles (claude|codex only —
     /// the same rule the daemon enforces).
     private var addHarness: String? {
@@ -357,6 +365,11 @@ struct AccountsSurface: View {
         }
     }
 
+    private var loadFailed: Bool {
+        if case .failed = model.activeAccountsLoadState { return true }
+        return false
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             accountsList
@@ -369,7 +382,7 @@ struct AccountsSurface: View {
                 addSection
             }
         }
-        .task { await loadAccounts() }
+        .task { _ = await model.refreshAccounts() }
         .confirmationDialog(
             "Remove \(pendingDelete?.displayName ?? "account")?",
             isPresented: Binding(
@@ -415,29 +428,32 @@ struct AccountsSurface: View {
         // quota/detail line can never wrap into fragments that flow around the
         // trailing columns (the owner-round-3 bug).
         AlignedList {
-            if case .failed(let message) = loadState, rows.isEmpty {
-                // A config/load ERROR is NOT an empty registry (item h): render the
-                // typed reason + retry, never the "No accounts yet" empty copy.
+            if case .failed(let message) = model.activeAccountsLoadState {
+                // A foreground snapshot error remains visible even if identity
+                // rows survived a partial/legacy response. It is never folded
+                // into either an empty registry or an ordinary row list.
                 GridRow {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                         Label("Could not load accounts", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption.weight(.medium)).foregroundStyle(Theme.status(.negative))
                         Text(message).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                        Button("Retry") { Task { await loadAccounts() } }
+                        Button("Retry") { Task { _ = await model.refreshAccounts() } }
                             .buttonStyle(.bordered).controlSize(.small)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
                 }
-            } else if rows.isEmpty {
+            }
+            if rows.isEmpty, !loadFailed {
                 GridRow {
-                    Label(loadState == .loading ? "Loading accounts…" : "No accounts yet — add one below.",
+                    Label(model.activeAccountsLoadState == .loading
+                          ? "Loading accounts…" : "No accounts yet — add one below.",
                           systemImage: "person.crop.circle.badge.plus")
                         .font(.caption).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
                 }
-            } else {
+            } else if !rows.isEmpty {
                 ForEach(rows) { row in
                     AccountRowView(
                         row: row,
@@ -487,17 +503,6 @@ struct AccountsSurface: View {
                     .controlSize(.small)
                     .disabled(adding)
             }
-        }
-    }
-
-    /// Load accounts into the typed load state (item h): a failure renders the
-    /// reason + retry, not the empty "No accounts yet".
-    private func loadAccounts() async {
-        if loadState != .loaded { loadState = .loading }
-        if let error = await model.refreshAccounts() {
-            loadState = .failed(error)
-        } else {
-            loadState = .loaded
         }
     }
 

@@ -65,16 +65,25 @@ describe("remote harness installer allowlist", () => {
 describe("pinned versions (issue #89: never @latest)", () => {
   it("every npm harness pins the exact vendor-version SSOT the freshness gates read", () => {
     const pins = {
-      claude: CLAUDE_VENDOR_CLI_VERSION,
-      codex: CODEX_VENDOR_CLI_VERSION,
-      opencode: OPENCODE_VENDOR_CLI_VERSION,
+      claude: {
+        version: CLAUDE_VENDOR_CLI_VERSION,
+        verification: "release_verified",
+      },
+      codex: {
+        version: CODEX_VENDOR_CLI_VERSION,
+        verification: "release_verified",
+      },
+      opencode: {
+        version: OPENCODE_VENDOR_CLI_VERSION,
+        verification: "deterministic_only",
+      },
     } as const;
-    for (const [harness, version] of Object.entries(pins)) {
+    for (const [harness, pin] of Object.entries(pins)) {
       const disclosure = harnessInstallerDisclosure(harness as "claude" | "codex" | "opencode");
-      expect(version).toMatch(/^\d+\.\d+\.\d+$/);
-      expect(disclosure.pinnedVersion).toBe(version);
-      expect(disclosure.command.endsWith(`@${version}`)).toBe(true);
-      expect(disclosure.verification).toBe("npm_registry_integrity");
+      expect(pin.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(disclosure.pinnedVersion).toBe(pin.version);
+      expect(disclosure.command.endsWith(`@${pin.version}`)).toBe(true);
+      expect(disclosure.verification).toBe(pin.verification);
     }
     for (const harness of INSTALLABLE_HARNESSES) {
       expect(harnessInstallerDisclosure(harness).command).not.toContain("@latest");
@@ -87,14 +96,14 @@ describe("pinned versions (issue #89: never @latest)", () => {
       command: `npm install --global --prefix ~/.claudexor/remote/vendor @anthropic-ai/claude-code@${CLAUDE_VENDOR_CLI_VERSION}`,
       installLocation: "~/.claudexor/remote/vendor/bin",
       pinnedVersion: CLAUDE_VENDOR_CLI_VERSION,
-      verification: "npm_registry_integrity",
+      verification: "release_verified",
     });
   });
 
   it("cursor is honestly unpinnable: full download, never piped, human watches the PTY", () => {
     const disclosure = harnessInstallerDisclosure("cursor");
     expect(disclosure.pinnedVersion).toBeNull();
-    expect(disclosure.verification).toBe("human_watches_pty");
+    expect(disclosure.verification).toBe("human_observed");
     expect(disclosure.command).toContain(CURSOR_INSTALL_URL);
     expect(disclosure.command).toContain("--fail");
     expect(disclosure.command).not.toMatch(/\|\s*(\/bin\/)?(ba)?sh/);

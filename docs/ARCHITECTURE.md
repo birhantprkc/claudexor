@@ -587,7 +587,10 @@ begins a dedicated quota observer from exactly that cursor. A later quota
 projection marker, a rejected cursor, stream error, or premature EOF expires
 only quota-derived authority (`next_up` and quota) and stops the observer;
 profile identity, Enabled state, and readiness remain. Recovery is one explicit
-Accounts Refresh, not an automatic resnapshot loop.
+Accounts Refresh, not an automatic resnapshot loop. The foreground result is a
+location-scoped app-model state shared by Accounts, Quota, and Harness Doctor;
+overlapping refreshes settle it only through the newest request token, and a
+failure stays a visible reason plus Retry rather than an empty projection.
 External thread create/PATCH calls with an explicit pool are rejected unless
 the profile id exists for every pool lane. Run preflight probes the selected profile for every lane even when the
 default harness doctor is already OK, before any adapter starts:
@@ -1038,6 +1041,15 @@ Endpoint semantics beyond the inventory:
   Validation, persistence, cache invalidation, and the returned effective
   `ControlSettingsSnapshot` come from the daemon; the CLI has no second config
   writer or model/effort validator.
+- The macOS Settings surface treats each execution location's `GET /v2/settings`
+  as an explicit `idle | loading | loaded | failed` projection. Engine-backed
+  editors exist only in `loaded`; a missing or failed snapshot is never replaced
+  by editable client defaults. Load publication is fenced by location, gateway
+  identity, connection generation, and a newest-request token. `POST /v2/settings`
+  remains the write authority and its returned snapshot may establish `loaded`
+  only when no newer GET owns that location. App-local controls such as
+  Connections and Appearance remain available while engine settings are loading
+  or retryable.
 
 `GET /healthz` is the only unauthenticated route; it is loopback-host guarded
 and returns liveness only.
@@ -2000,6 +2012,14 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   `capability_profile.attachment_inputs`; every explicitly selected lane must
   support every mandatory attachment. The daemon revalidates finalized bytes at
   enqueue and adapters recheck the digest immediately before vendor serialization.
+  The macOS staging owner applies that same pool admission to file metadata
+  before allocation, reads no more than the admitted stat size plus one byte,
+  and rechecks both file size and the live attachment set before publication.
+  Picker/capture staging is an explicit in-flight composer owner: Send remains
+  blocked with visible progress until every operation settles, and Cancel
+  retires the whole generation so a late read can never enter the next turn.
+  A selection-generation lease prevents late picker/capture completion, including
+  A→B→A, from publishing private file context into another conversation.
 - The agent-driven browser is an engine capability the app merely arms. The
   composer preserves user-selected access and web policy separately from the
   effective request: Browser derives Full access and upgrades selected `off` to
@@ -2067,7 +2087,15 @@ version pinned by `.node-version`; official Node archive digests are pinned in
 uploads through SSH, probes a staging directory, and atomically switches
 `~/.claudexor/remote/current`, retaining `last-known-good` for rollback. No
 remote installation uses `sudo`. A newer compatible runtime is never
-downgraded; an incompatible older runtime is updated before use.
+downgraded; an incompatible older runtime is updated before use. One opaque
+activation lease is claimed before the install actor's first SSH suspension and
+owns the candidate through the tunneled daemon handshake. Commit and rollback
+accept only that exact lease; another install cannot replace it, and a rollback
+failure remains visible instead of being swallowed. If the mutating SSH response
+is lost, the exact candidate/previous payload remains `uncertain`: recovery must
+observe the candidate and roll it back, prove and restart the previous closure,
+or stay visibly blocked. An unreadable pointer is never collapsed into a proven
+absent pointer.
 
 Vendor harness CLIs land on a host only through the disclosed installer
 (`claudexor harness install`, reachable from Settings → Harnesses for a
@@ -2088,7 +2116,9 @@ the CLI prints the exact command and destination
 (`~/.claudexor/remote/vendor/bin`, which the remote wrapper puts first on
 PATH) and requires a TTY confirmation or an explicit `--yes`, and the macOS
 confirmation dialog shows the remote CLI's own `--dry-run --json` disclosure
-verbatim before opening the terminal sheet. Failures are typed and loud — a
+verbatim before opening the terminal sheet, including the typed evidence class
+(`release_verified`, `deterministic_only`, or `human_observed`) that selects the
+same honest pin wording as the CLI. Failures are typed and loud — a
 failed or unreadable download refuses without executing, a non-zero installer
 exit never reads as success, and Harness Doctor verifies the result
 afterward.
@@ -2178,13 +2208,21 @@ signed manifest → FULL unpack to `versions/<version>/` → re-verify → strip
 `com.apple.quarantine` (after hash verification) → probe-start the unpacked
 daemon with the app-bundled Node via `claudexord --probe` (prints
 `{version,buildSha}` and exits without binding a socket or opening the journal) →
+require that exact pair to equal the signed manifest → claim one process-session
+lifecycle lease shared with steady daemon reconciliation before the first async
+install step →
 idle-gate (ask the daemon for active jobs; refuse while any run — an unknown
 state is treated as busy) → identity-proven daemon stop (`claudexord --stop`
 reuses the socket `claudexor.shutdown` + termination confirmation, never a raw
 kill) → ATOMIC `current.json`
 swap (write a temp file + a single rename, inside a `flock` over the whole
 check-then-swap critical section) → relaunch → handshake-verify the new engine
-version → rollback to `last-known-good.json` on ANY failure. The bundled runtime
+identity against the signed manifest → rollback to `last-known-good.json` on
+ANY failure, accepting recovery only when the prior exact identity returns.
+Rollback authority comes from the same launcher selection: current.json's exact
+`{version,engineSha}` for an installed closure or the app-signed bundled script's
+stamped probe. If that authority is unavailable, installation refuses before it
+stops the daemon. The bundled runtime
 stays the final fallback (the launcher already falls back on an invalid/absent
 pointer). The daemon-lifecycle side effects are behind a `RuntimeDaemonControl`
 port so the whole sequence, including rollback, is exercised offline against a
@@ -2210,9 +2248,25 @@ the closure.
   QA-073 containment guard (`RuntimeInstaller`'s `containedDaemonScript`): the
   pointer path must be exactly `versions/<version>`, resolve with no `..` and no
   symlink escape out of `versions/`, and name a REGULAR file — otherwise it
-  falls back to the bundled `Contents/Resources` path. Node is ALWAYS the
-  app-bundled binary; because the whole closure unpacks together, the Browser MCP
-  resolves adjacent to the daemon inside the same version dir.
+  falls back to the bundled `Contents/Resources` path. A contained pointer wins
+  only when its semantic version is strictly newer than the app bundle; an
+  equal-version pointer also falls back so a newly installed DMG cannot retain
+  different bytes under the same version. On connection, the app side-effect-
+  free probes the selected script and compares its exact `{version, buildSha}`
+  with the live handshake before hydrating daemon state. A mismatch is replaced
+  only after the daemon proves idle; busy or unknown activity keeps the
+  compatible daemon alive and visibly defers reconciliation. A successful
+  replacement retires the old client and re-reads discovery before hydrating;
+  any failure after lifecycle work begins goes offline rather than reusing an
+  ambiguous process. An installed selection's probe must also equal the pointer's
+  exact `{version,engineSha}` authority; the signed bundled selection uses its
+  stamped probe as authority. The three-second identity poll retries deferred
+  work when the daemon becomes idle. Reconciliation and in-app installation
+  claim the same exact session lifecycle lease before their first suspension,
+  so their stop/start transactions cannot overlap. Node is ALWAYS the
+  app-bundled binary; because the
+  whole closure unpacks together, the Browser MCP resolves adjacent to the
+  daemon inside the same version dir.
 - **Check flow** (foreground / bottom-left chip / Check for Updates — no timer):
   GET the latest release manifest (`api.github.com`, ETag-cached) → verify the
   signature fail-closed → compare `version` to the running engine and gate on

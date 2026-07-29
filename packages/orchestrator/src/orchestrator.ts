@@ -1241,6 +1241,39 @@ export class Orchestrator {
         }
       }
     }
+    const attachments = input.attachments ?? [];
+    // Resolve the complete attachment pool once from manifest truth. If any
+    // lane still lacks usable discovery truth, preserve the existing per-lane
+    // discovery/doctor precedence and resolve that lane inside the route loop.
+    const canResolveAttachmentPool =
+      attachments.length > 0 &&
+      ids.every((id) => {
+        const status = statusById.get(id);
+        return status?.manifest != null && status.status !== "unavailable";
+      });
+    const attachmentPoolAdmission = canResolveAttachmentPool
+      ? this.requestRequirements.resolveAttachmentPool(
+          explicitPool ? "explicit" : "auto",
+          attachments,
+          ids.map((id) => ({
+            harnessId: id,
+            declarations:
+              statusById.get(id)?.manifest?.capability_profile.attachment_inputs ?? null,
+            available: true,
+          })),
+        )
+      : null;
+    if (attachmentPoolAdmission?.outcome === "refused") {
+      throw new HarnessUnavailableError(
+        attachmentPoolAdmission.message ??
+          "no available harness lane can receive the selected attachments",
+      );
+    }
+    const attachmentRejectionById = new Map(
+      attachmentPoolAdmission?.rejected.map(
+        (admission) => [admission.harnessId, admission] as const,
+      ) ?? [],
+    );
     const policy = input.web ?? input.externalContextPolicy ?? "auto";
     const pool: RoutedAdapter[] = [];
     const dropped: string[] = [];
@@ -1394,13 +1427,15 @@ export class Orchestrator {
         dropLane(id, "web", why);
         continue;
       }
-      const attachmentRefusal = this.requestRequirements.attachmentRefusal(
-        id,
-        input.attachments ?? [],
-        manifest.capability_profile.attachment_inputs,
-      );
-      if (attachmentRefusal) {
-        dropLane(id, "attachment", attachmentRefusal);
+      const attachmentAdmission =
+        attachmentRejectionById.get(id) ??
+        this.requestRequirements.resolveAttachmentLane(
+          id,
+          attachments,
+          manifest.capability_profile.attachment_inputs,
+        );
+      if (!attachmentAdmission.admitted) {
+        dropLane(id, "attachment", attachmentAdmission.message ?? `${id} rejects attachments`);
         continue;
       }
       const reason = status.reasons.length > 0 ? `: ${status.reasons.join("; ")}` : "";

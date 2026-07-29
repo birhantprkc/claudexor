@@ -98,26 +98,26 @@ export function createRunRequirementsPreflight(
         return { harnessId, manifest: await adapter.discover() };
       }),
     );
-    const compatibleManifests: typeof manifests = [];
-    for (const { harnessId, manifest } of manifests) {
-      const refusal = requirements.attachmentRefusal(
+    const attachmentAdmission = requirements.resolveAttachmentPool(
+      explicitPool ? "explicit" : "auto",
+      attachments,
+      manifests.map(({ harnessId, manifest }) => ({
         harnessId,
-        attachments,
-        manifest.capability_profile.attachment_inputs,
-      );
-      if (refusal) {
-        if (explicitPool) throw requestError(refusal, 400, "attachment_pool_unsupported");
-        continue;
-      }
-      compatibleManifests.push({ harnessId, manifest });
-    }
-    if (compatibleManifests.length === 0) {
+        declarations: manifest.capability_profile.attachment_inputs,
+        available: true,
+      })),
+    );
+    if (attachmentAdmission.outcome === "refused") {
       throw requestError(
-        "no eligible harness lane can receive every required attachment",
+        attachmentAdmission.message ??
+          "no eligible harness lane can receive every required attachment",
         400,
         "attachment_pool_unsupported",
       );
     }
+    const compatibleManifests = attachmentAdmission.admittedHarnessIds
+      .map((harnessId) => manifests.find((entry) => entry.harnessId === harnessId))
+      .filter((entry): entry is (typeof manifests)[number] => entry !== undefined);
     if (request.browser !== true) return;
 
     const access =

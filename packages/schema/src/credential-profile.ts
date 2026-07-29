@@ -162,9 +162,7 @@ export const ControlNextUpIdentity = z
         route: z
           .enum(["local_session", "api_key"])
           .optional()
-          .describe(
-            "Effective route of the unprofiled/default subject; omitted by older daemons.",
-          ),
+          .describe("Effective route of the unprofiled/default subject; omitted by older daemons."),
       })
       .strict()
       .describe("The unprofiled/default credential is the subject of an unpinned run."),

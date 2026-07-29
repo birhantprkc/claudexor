@@ -70,9 +70,7 @@ export class QuotaRegistry {
       if (record.type === PROJECTION_UPDATED) {
         const payload = record.payload as { projection_signature?: unknown };
         this.lastPublishedProjectionSignature =
-          typeof payload.projection_signature === "string"
-            ? payload.projection_signature
-            : null;
+          typeof payload.projection_signature === "string" ? payload.projection_signature : null;
         rawMutationAfterMarker = false;
       }
     }
@@ -418,8 +416,7 @@ export function quotaProjection(
 ) {
   return {
     name: "quota",
-    create: (journal: DurableJournal) =>
-      new QuotaRegistry(journal, refreshers, now, subjects),
+    create: (journal: DurableJournal) => new QuotaRegistry(journal, refreshers, now, subjects),
     validate: (registry: QuotaRegistry) => registry.validateProjection(),
   };
 }

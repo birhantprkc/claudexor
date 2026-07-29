@@ -73,7 +73,7 @@ struct RootView: View {
         }
         .sheet(item: $model.remoteTerminalSheet) { request in
             RemoteTerminalSheet(request: request) {
-                model.remoteTerminalSheet = nil
+                model.dismissRemoteTerminal(request)
             }
             .environment(model)
         }

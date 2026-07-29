@@ -160,6 +160,17 @@ extension SettingsScreen {
             Text("Claudexor mirrors native harness auth first, with API-key fallback through stored secret refs.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if case .failed(let message) = model.activeAccountsLoadState {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                    Label("Could not refresh accounts and readiness",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.status(.negative))
+                    Text(message).font(.caption2).foregroundStyle(.secondary)
+                    Button("Retry") { Task { _ = await model.refreshAccounts() } }
+                        .buttonStyle(.bordered).controlSize(.small)
+                }
+            }
             KeyValueRow(
                 key: "Control API",
                 value: model.endpoint.isEmpty ? "—" : "http://\(model.endpoint)",

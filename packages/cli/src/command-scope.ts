@@ -37,8 +37,8 @@ export function commandPositionalError(
   commandId: string,
   values: readonly string[],
 ): string | null {
-  const cmd = CLI_COMMANDS.find((candidate) =>
-    candidate.id === commandId || (candidate.aliases ?? []).includes(commandId),
+  const cmd = CLI_COMMANDS.find(
+    (candidate) => candidate.id === commandId || (candidate.aliases ?? []).includes(commandId),
   );
   if (!cmd) return null;
   const matches = cmd.positionalPatterns.some((pattern) => {

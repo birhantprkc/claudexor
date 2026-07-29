@@ -1,4 +1,5 @@
 {
+  "generatedBy": ["runControlApplicability", "RequestRequirementsResolver"],
   "runControls": [
     {
       "name": "agent",
@@ -41,6 +42,20 @@
       "protectedPathApprovals": { "applicable": true }
     },
     {
+      "name": "attempts-agent-projection",
+      "schemaMode": "agent",
+      "swiftMode": "maxAttempts",
+      "reviewers": { "applicable": true },
+      "protectedPathApprovals": { "applicable": true }
+    },
+    {
+      "name": "until-clean-agent-projection",
+      "schemaMode": "agent",
+      "swiftMode": "untilClean",
+      "reviewers": { "applicable": true },
+      "protectedPathApprovals": { "applicable": true }
+    },
+    {
       "name": "create-agent-projection",
       "schemaMode": "agent",
       "swiftMode": "create",
@@ -48,16 +63,20 @@
       "protectedPathApprovals": { "applicable": true }
     }
   ],
-  "attachmentInput": {
-    "kind": "file",
-    "mimeTypes": ["text/plain"],
-    "maxBytes": 20,
-    "maxCount": 1,
-    "transport": "text_inline"
-  },
+  "attachmentInputs": [
+    {
+      "name": "text",
+      "kind": "file",
+      "mimeTypes": ["text/plain"],
+      "maxBytes": 20,
+      "maxCount": 1,
+      "transport": "text_inline"
+    }
+  ],
   "attachmentCases": [
     {
       "name": "admitted",
+      "inputNames": ["text"],
       "attachments": [
         { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
       ],
@@ -66,6 +85,7 @@
     },
     {
       "name": "unsupported-input",
+      "inputNames": ["text"],
       "attachments": [
         {
           "id": "a1",
@@ -80,6 +100,7 @@
     },
     {
       "name": "max-bytes-exceeded",
+      "inputNames": ["text"],
       "attachments": [
         { "id": "a1", "kind": "file", "mime": "text/plain", "name": "large.txt", "sizeBytes": 21 }
       ],
@@ -88,12 +109,127 @@
     },
     {
       "name": "max-count-exceeded",
+      "inputNames": ["text"],
       "attachments": [
         { "id": "a1", "kind": "file", "mime": "text/plain", "name": "one.txt", "sizeBytes": 12 },
         { "id": "a2", "kind": "file", "mime": "text/plain", "name": "two.txt", "sizeBytes": 12 }
       ],
       "admitted": false,
       "reason": "max_count_exceeded"
+    }
+  ],
+  "attachmentPoolCases": [
+    {
+      "name": "explicit-all-admitted",
+      "poolMode": "explicit",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "claude", "inputNames": ["text"], "available": true },
+        { "id": "codex", "inputNames": ["text"], "available": true }
+      ],
+      "outcome": "admitted",
+      "admittedLaneIDs": ["claude", "codex"],
+      "rejected": []
+    },
+    {
+      "name": "explicit-mixed-rejects",
+      "poolMode": "explicit",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "claude", "inputNames": ["text"], "available": true },
+        { "id": "blind", "inputNames": [], "available": true }
+      ],
+      "outcome": "refused",
+      "admittedLaneIDs": [],
+      "rejected": [{ "laneID": "blind", "reason": "unsupported_input" }]
+    },
+    {
+      "name": "auto-mixed-degrades",
+      "poolMode": "auto",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "claude", "inputNames": ["text"], "available": true },
+        { "id": "blind", "inputNames": [], "available": true }
+      ],
+      "outcome": "degraded",
+      "admittedLaneIDs": ["claude"],
+      "rejected": [{ "laneID": "blind", "reason": "unsupported_input" }]
+    },
+    {
+      "name": "auto-drops-unavailable",
+      "poolMode": "auto",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "claude", "inputNames": ["text"], "available": true },
+        { "id": "offline", "inputNames": ["text"], "available": false }
+      ],
+      "outcome": "admitted",
+      "admittedLaneIDs": ["claude"],
+      "rejected": []
+    },
+    {
+      "name": "auto-zero-survivors",
+      "poolMode": "auto",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [{ "id": "offline", "inputNames": ["text"], "available": false }],
+      "outcome": "refused",
+      "admittedLaneIDs": [],
+      "rejected": []
+    },
+    {
+      "name": "auto-all-incompatible",
+      "poolMode": "auto",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "blind-a", "inputNames": [], "available": true },
+        { "id": "blind-b", "inputNames": [], "available": true }
+      ],
+      "outcome": "refused",
+      "admittedLaneIDs": [],
+      "rejected": [
+        { "laneID": "blind-a", "reason": "unsupported_input" },
+        { "laneID": "blind-b", "reason": "unsupported_input" }
+      ]
+    },
+    {
+      "name": "explicit-unavailable-retained",
+      "poolMode": "explicit",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "claude", "inputNames": ["text"], "available": true },
+        { "id": "offline", "inputNames": null, "available": false }
+      ],
+      "outcome": "refused",
+      "admittedLaneIDs": [],
+      "rejected": [{ "laneID": "offline", "reason": "unsupported_input" }]
+    },
+    {
+      "name": "lane-identity-deduplicated-first-wins",
+      "poolMode": "explicit",
+      "attachments": [
+        { "id": "a1", "kind": "file", "mime": "text/plain", "name": "notes.txt", "sizeBytes": 12 }
+      ],
+      "lanes": [
+        { "id": "claude", "inputNames": ["text"], "available": true },
+        { "id": "claude", "inputNames": [], "available": true }
+      ],
+      "outcome": "admitted",
+      "admittedLaneIDs": ["claude"],
+      "rejected": []
     }
   ]
 }

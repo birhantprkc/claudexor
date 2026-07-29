@@ -1,6 +1,11 @@
 import Foundation
 import ClaudexorKit
 
+private struct AccountsRefreshReceipt {
+    let generation: UInt64
+    let error: String?
+}
+
 // MARK: - Credential profiles + auto-balance (INV-135)
 //
 // The account-registry half of AppModel: registered credential profiles with
@@ -8,6 +13,10 @@ import ClaudexorKit
 // (per-harness profile_policy.limit_action via the settings wire).
 
 extension AppModel {
+    var activeAccountsLoadState: ProjectionLoadState {
+        accountsLoadStates[activeExecutionLocation] ?? .idle
+    }
+
     /// Persist the thread's manual account choice (INV-135). nil restores the
     /// engine-default ladder; a draft carries the choice into thread creation.
     func setThreadCredentialProfile(_ profileId: String?, harnessId: String? = nil) async {
@@ -57,10 +66,27 @@ extension AppModel {
         -> String?
     {
         let locationID = requestedLocationID ?? activeExecutionLocation
+        let receipt = await loadCredentialProfilesReceipt(
+            at: locationID, discardOnFailure: discardOnFailure)
+        settleAccountsLoad(receipt, at: locationID)
+        return receipt.error
+    }
+
+    /// The request receipt keeps the data-generation fence and the Accounts
+    /// presentation settlement on one authority. In particular, a newer
+    /// background refresh that supersedes an in-flight foreground Retry owns
+    /// the visible success/failure once it settles.
+    private func loadCredentialProfilesReceipt(
+        at locationID: ExecutionLocationID,
+        discardOnFailure: Bool
+    ) async -> AccountsRefreshReceipt {
         let previousQuotaCursor = suspendAccountsQuotaObserver(at: locationID)
         accountsNextUpAuthorityFresh[locationID] = false
         let generation = (accountsRefreshGenerations[locationID] ?? 0) &+ 1
         accountsRefreshGenerations[locationID] = generation
+        let finish: (String?) -> AccountsRefreshReceipt = {
+            AccountsRefreshReceipt(generation: generation, error: $0)
+        }
         guard let requestClient = gateway(for: locationID) else {
             if discardOnFailure,
                accountsRefreshGenerations[locationID] == generation,
@@ -68,17 +94,20 @@ extension AppModel {
             {
                 discardCompleteAccountsSnapshot(at: locationID)
             }
-            return "Engine offline — reconnect to load accounts."
+            return finish("Engine offline — reconnect to load accounts.")
         }
         guard let harnessLease = claimHarnessProjection(
             at: locationID, client: requestClient)
         else {
-            return "The engine connection changed before Accounts could refresh. Retry Accounts."
+            return finish(
+                "The engine connection changed before Accounts could refresh. Retry Accounts.")
         }
         do {
             let response = try await requestClient.credentialProfilesSnapshot()
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
-            else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            else {
+                return finish(accountsRefreshRetirementMessage(requestClient, at: locationID))
+            }
             if let harnesses = response.harnesses,
                let git = response.git,
                let quota = response.quota,
@@ -89,11 +118,11 @@ extension AppModel {
                 guard acceptHarnessSnapshot(
                     harnesses, git: git, lease: harnessLease)
                 else {
-                    return settleAccountsAfterSupersededHarnessProjection(
+                    return finish(settleAccountsAfterSupersededHarnessProjection(
                         at: locationID,
                         client: requestClient,
                         previousQuotaCursor: previousQuotaCursor,
-                        discardOnFailure: discardOnFailure)
+                        discardOnFailure: discardOnFailure))
                 }
                 storeCredentialProfiles(
                     response.profiles, harnessAccounts: response.harnessAccounts,
@@ -104,7 +133,7 @@ extension AppModel {
                 // Reassert only after the complete profiles + harness + Git +
                 // quota + cursor tuple has committed without an intervening await.
                 accountsNextUpAuthorityFresh[locationID] = true
-                return nil
+                return finish(nil)
             }
             // A daemon that ignored/omitted the complete opt-in response cannot
             // prove that next_up, harness rows, and quota share one epoch. Keep
@@ -115,32 +144,38 @@ extension AppModel {
                 locationID: locationID,
                 markStaleOnFailure: discardOnFailure)
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
-            else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            else {
+                return finish(accountsRefreshRetirementMessage(requestClient, at: locationID))
+            }
             storeCredentialProfiles(response.profiles, harnessAccounts: [], at: locationID)
             discardAccountsQuotaSnapshot(at: locationID)
             accountsNextUpAuthorityFresh[locationID] = false
             suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
-            if fallbackRefreshed { return nil }
-            return "Could not refresh account readiness. Retry Accounts."
+            if fallbackRefreshed {
+                return finish(nil)
+            }
+            return finish("Could not refresh account readiness. Retry Accounts.")
         } catch {
             // Background callers keep the last snapshot. Accounts' explicit
             // fresh cycle discards it: stale profile readiness/next_up cannot
             // remain presented as current after the authoritative fetch failed.
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
-            else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            else {
+                return finish(accountsRefreshRetirementMessage(requestClient, at: locationID))
+            }
             guard harnessProjectionIsCurrent(harnessLease) else {
-                return settleAccountsAfterSupersededHarnessProjection(
+                return finish(settleAccountsAfterSupersededHarnessProjection(
                     at: locationID,
                     client: requestClient,
                     previousQuotaCursor: previousQuotaCursor,
-                    discardOnFailure: discardOnFailure)
+                    discardOnFailure: discardOnFailure))
             }
             if discardOnFailure { discardCompleteAccountsSnapshot(at: locationID) }
             else if let previousQuotaCursor {
                 startAccountsQuotaObserver(
                     at: locationID, client: requestClient, after: previousQuotaCursor)
             }
-            return userMessage(for: error)
+            return finish(userMessage(for: error))
         }
     }
 
@@ -151,6 +186,27 @@ extension AppModel {
     ) -> Bool {
         accountsRefreshGenerations[locationID] == generation
             && gateway(for: locationID) === requestClient
+    }
+
+    /// Settle only the newest request generation. A background refresh may
+    /// inherit an in-flight foreground token: once it supersedes that request,
+    /// its receipt is the only request allowed to publish loaded or failed.
+    private func settleAccountsLoad(
+        _ receipt: AccountsRefreshReceipt,
+        at locationID: ExecutionLocationID,
+        foregroundToken: UUID? = nil
+    ) {
+        guard accountsRefreshGenerations[locationID] == receipt.generation else { return }
+        if let foregroundToken {
+            guard accountsLoadTokens[locationID] == foregroundToken else { return }
+        }
+        if accountsLoadTokens[locationID] != nil {
+            accountsLoadTokens.removeValue(forKey: locationID)
+            accountsLoadStates[locationID] =
+                receipt.error.map(ProjectionLoadState.failed) ?? .loaded
+        } else if receipt.error == nil {
+            accountsLoadStates[locationID] = .loaded
+        }
     }
 
     /// A newer Accounts refresh supersedes an older one silently. Retiring the
@@ -249,7 +305,13 @@ extension AppModel {
         -> String?
     {
         let locationID = requestedLocationID ?? activeExecutionLocation
-        return await loadCredentialProfiles(locationID: locationID, discardOnFailure: true)
+        let token = UUID()
+        accountsLoadTokens[locationID] = token
+        accountsLoadStates[locationID] = .loading
+        let receipt = await loadCredentialProfilesReceipt(
+            at: locationID, discardOnFailure: true)
+        settleAccountsLoad(receipt, at: locationID, foregroundToken: token)
+        return receipt.error
     }
 
     /// The V11b per-harness accounts authority for `harnessId` (native CLI-login
@@ -354,198 +416,6 @@ extension AppModel {
         }
     }
 
-    // MARK: Update availability (M7 runtime updater)
-
-    /// Cheap, non-blocking cached read: reflect the last decision the provider
-    /// holds into the chip. No network — the actual fetch is checkForRuntimeUpdate().
-    func refreshUpdateAvailability() {
-        updateAvailability = updateProvider.current()
-    }
-
-    /// The app's own version (`CFBundleShortVersionString`), or "dev" for the
-    /// SwiftPM/CI executable with no bundle (which satisfies any minAppVersion).
-    static func appVersionString() -> String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
-    }
-
-    /// The serving engine's version, honestly (QA-002): the handshake-disclosed
-    /// build version when connected, else "unknown". Never guessed from the app
-    /// version — a stale daemon skew must be visible, not papered over.
-    var engineVersionDisplay: String { engineIdentity?.version ?? "unknown" }
-
-    /// The serving engine's git sha, shortened for display; "unknown" passes
-    /// through verbatim (the honest value a not-yet-stamped package discloses —
-    /// packaged sha stamping lands in Ф4).
-    var engineShaDisplay: String { engineIdentity.map { AboutInfo.shortSha($0.sha) } ?? "unknown" }
-
-    /// The engine version currently running: the CONNECTED daemon's
-    /// handshake-disclosed version wins (a serving daemon older than a freshly
-    /// installed app must not read as "Up to date"); else an installed runtime's
-    /// pinned `current.json` version; else the app's own version (the bundled
-    /// first-run engine ships lockstep with the app).
-    private func resolvedRunningEngineVersion() -> String {
-        if let serving = engineIdentity?.version { return serving }
-        if let installed = RuntimeInstaller().readCurrent()?.version { return installed }
-        return Self.appVersionString()
-    }
-
-    /// CHECK for an engine-runtime update (foreground / Check-for-Updates —
-    /// never a background timer). Cheap and ETag-cached; reports the outcome
-    /// verbatim into `runtimeUpdateStatus` and refreshes the chip. `force`
-    /// bypasses the once-per-session auto-check guard.
-    func checkForRuntimeUpdate(force: Bool = true) async {
-        if !force {
-            guard !didAutoCheckRuntime else { return }
-        }
-        didAutoCheckRuntime = true
-        if runtimeUpdateChecking { return }
-        runtimeUpdateChecking = true
-        defer { runtimeUpdateChecking = false }
-
-        // Cache the checker so a 304 reuses the prior verdict and a re-check
-        // reuses the stored ETag. 3.0 is check-only (D1) — no install path shares
-        // this actor — so the checker needs only the release transport.
-        let updater = runtimeUpdater
-            ?? RuntimeUpdater(transport: makeRuntimeTransport())
-        runtimeUpdater = updater
-        let running = resolvedRunningEngineVersion()
-        let app = Self.appVersionString()
-        do {
-            let outcome = try await updater.check(runningEngineVersion: running, appVersion: app)
-            switch outcome {
-            case .notModified:
-                if let cached = await updater.cachedDecision {
-                    applyRuntimeDecision(cached)
-                } else {
-                    runtimeUpdateStatus = "Up to date"
-                }
-            case let .decided(decision):
-                applyRuntimeDecision(decision)
-            }
-        } catch {
-            // Honest failure: never a fake "up to date".
-            runtimeUpdateStatus = (error as? RuntimeUpdateError)?.errorDescription
-                ?? "Update check failed: \(error.localizedDescription)"
-        }
-    }
-
-    /// Project a decision onto the provider cache, the chip, and the verbatim
-    /// status line. 3.0 is check-only: `.available` surfaces the version as an
-    /// informational chip that links to the GitHub release for a manual download
-    /// (D1) — there is no in-app install action to arm.
-    private func applyRuntimeDecision(_ decision: RuntimeUpdateDecision) {
-        runtimeUpdateProvider.store(decision)
-        updateAvailability = decision.chipAvailability
-        switch decision {
-        case .upToDate:
-            runtimeUpdateStatus = "Up to date"
-        case let .available(manifest):
-            runtimeUpdateStatus = "Update available: v\(manifest.version)"
-        case let .appUpdateRequired(minAppVersion, _):
-            runtimeUpdateStatus = "App update required — install the latest app (needs v\(minAppVersion) or newer), then re-check."
-        case let .unknown(reason):
-            // Dev-build polish: a source/SwiftPM build reports engine version
-            // "dev", which is legitimately unorderable — say so plainly instead
-            // of surfacing the raw "'dev' is not a valid version" parser detail.
-            // A genuinely-unparseable NON-dev version keeps the honest unknown.
-            runtimeUpdateStatus =
-                resolvedRunningEngineVersion() == "dev"
-                ? "Dev build — update check not applicable"
-                : "Update status unknown: \(reason)"
-        }
-    }
-
-    // MARK: Engine-runtime auto-install (D-2)
-
-    /// Resolve the closure tarball's release-asset download URL for a verified
-    /// manifest (the asset named `manifest.archiveName` on the latest release).
-    private func resolveClosureURL(
-        transport: RuntimeReleaseTransport, archiveName: String
-    ) async -> URL? {
-        guard let fetch = try? await transport.fetchLatestRelease(etag: nil),
-            let body = fetch.data, let release = GitHubRelease.parse(body),
-            let asset = release.asset(named: archiveName),
-            let url = URL(string: asset.browserDownloadURL)
-        else { return nil }
-        return url
-    }
-
-    /// One-click in-place engine-runtime install (D-2). Requires a signature-
-    /// VERIFIED `.available` decision from the last check; downloads the bound
-    /// closure, then runs the full RuntimeInstallCoordinator sequence (verify →
-    /// unpack → probe → idle-gate → stop → atomic swap → relaunch → handshake →
-    /// rollback). Progress/failure is surfaced honestly via RuntimeInstallPhase.
-    func installRuntimeUpdate() async {
-        guard !runtimeInstalling else { return }
-        guard case let .available(manifest)? = await runtimeUpdater?.cachedDecision else {
-            runtimeInstallStatus = "No verified update to install."
-            return
-        }
-        runtimeInstalling = true
-        runtimeInstallStatus = "Preparing update to v\(manifest.version)…"
-        defer { runtimeInstalling = false }
-
-        let transport = makeRuntimeTransport()
-        guard let resolved = await resolveClosureURL(transport: transport, archiveName: manifest.archiveName)
-        else {
-            runtimeInstallStatus = "Could not locate the runtime download for v\(manifest.version)."
-            return
-        }
-        // D-2 name+URL binding: the release asset URL resolved from the release
-        // JSON must EXACTLY equal the signed `archiveUrl`, so a tampered release
-        // listing cannot redirect the download to a different host/path even
-        // though the sha256 would still be checked. Download from the SIGNED URL.
-        guard resolved.absoluteString == manifest.archiveUrl,
-            let assetURL = URL(string: manifest.archiveUrl)
-        else {
-            runtimeInstallStatus =
-                "Refusing update: the download URL does not match the signed manifest."
-            return
-        }
-        let coordinator = RuntimeInstallCoordinator(
-            installer: RuntimeInstaller(),
-            transport: transport,
-            daemon: makeDaemonControl(),
-            onPhase: { [weak self] phase in
-                Task { @MainActor in self?.applyInstallPhase(phase) }
-            })
-        do {
-            let version = try await coordinator.install(manifest: manifest, assetURL: assetURL)
-            runtimeInstallStatus = "Updated to engine v\(version)."
-            // Post-install TRUTH: the coordinator only returns after a handshake-
-            // verified relaunch, so the running engine IS `version` and there is no
-            // newer closure than the one we just installed. A network re-check here
-            // would re-arm `.available` — `resolvedRunningEngineVersion` still
-            // prefers the stale pre-install engineIdentity and an HTTP 304 reuses
-            // the cached `.available` verdict. Instead, record the installed version
-            // (clears the cached decision + ETag) and assert Up-to-date directly so
-            // the chip clears honestly.
-            await runtimeUpdater?.recordInstalledVersion(version, appVersion: Self.appVersionString())
-            applyRuntimeDecision(.upToDate)
-        } catch {
-            runtimeInstallStatus =
-                (error as? RuntimeInstallError)?.errorDescription
-                ?? (error as? RuntimeUpdateError)?.errorDescription
-                ?? "Update failed: \(error.localizedDescription)"
-        }
-    }
-
-    /// Map an install phase to honest chip status text (per DESIGN_SYSTEM: real
-    /// state, never a fabricated success).
-    private func applyInstallPhase(_ phase: RuntimeInstallPhase) {
-        switch phase {
-        case .downloading: runtimeInstallStatus = "Downloading engine runtime…"
-        case .verifying: runtimeInstallStatus = "Verifying signature and checksum…"
-        case .unpacking: runtimeInstallStatus = "Unpacking…"
-        case .probing: runtimeInstallStatus = "Checking the new runtime…"
-        case .awaitingIdle: runtimeInstallStatus = "Waiting for running jobs to finish…"
-        case .swapping: runtimeInstallStatus = "Switching to the new runtime…"
-        case .relaunching: runtimeInstallStatus = "Relaunching the engine…"
-        case let .done(version): runtimeInstallStatus = "Updated to engine v\(version)."
-        case let .rolledBack(reason): runtimeInstallStatus = "Update rolled back: \(reason)."
-        case let .failed(reason): runtimeInstallStatus = "Update failed: \(reason)."
-        }
-    }
 
     // MARK: Auto-switch-at-quota (batch-6 item b)
 

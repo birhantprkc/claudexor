@@ -57,13 +57,23 @@ struct RemoteHarnessInstallSection: View {
                 "Install \(model.remoteHarnessInstallPrompt?.harness.capitalized ?? "harness")?",
                 isPresented: Binding(
                     get: { model.remoteHarnessInstallPrompt != nil },
-                    set: { if !$0 { model.remoteHarnessInstallPrompt = nil } })
+                    set: { presented in
+                        guard !presented, let prompt = model.remoteHarnessInstallPrompt else {
+                            return
+                        }
+                        model.dismissRemoteHarnessInstallPrompt(prompt)
+                    })
             ) {
                 Button("Run installer") {
-                    guard let prompt = model.remoteHarnessInstallPrompt else { return }
+                    guard let prompt = model.remoteHarnessInstallPrompt,
+                          model.acceptRemoteHarnessInstallPrompt(prompt)
+                    else { return }
                     Task { await model.confirmRemoteHarnessInstall(prompt) }
                 }
-                Button("Cancel", role: .cancel) { model.remoteHarnessInstallPrompt = nil }
+                Button("Cancel", role: .cancel) {
+                    guard let prompt = model.remoteHarnessInstallPrompt else { return }
+                    model.dismissRemoteHarnessInstallPrompt(prompt)
+                }
             } message: {
                 if let prompt = model.remoteHarnessInstallPrompt {
                     Text(Self.disclosureText(prompt, model: model))
@@ -77,9 +87,21 @@ struct RemoteHarnessInstallSection: View {
     ) -> String {
         let host = model.remoteConnections
             .first(where: { $0.id == prompt.connectionID })?.displayName ?? "the remote host"
-        let pin = prompt.pinnedVersion.map {
-            "Pinned version: \($0) (exact; npm verifies its registry checksum)"
-        } ?? "No version pin: Cursor ships no npm artifact — the downloaded script runs in the embedded terminal where you watch it"
+        let pin: String
+        switch prompt.verification {
+        case .releaseVerified:
+            pin = "Pinned version: \(prompt.pinnedVersion!) "
+                + "(exact; the version this release was verified against; "
+                + "npm verifies its registry integrity checksum)"
+        case .deterministicOnly:
+            pin = "Pinned version: \(prompt.pinnedVersion!) "
+                + "(exact deterministic install target; not covered by recorded "
+                + "verification fixtures; npm verifies its registry integrity checksum)"
+        case .humanObserved:
+            pin = "No version pin: Cursor ships no pinnable npm artifact; the vendor script "
+                + "is downloaded in full, its size and SHA-256 print, and it runs in the "
+                + "embedded terminal where you watch it"
+        }
         return """
         Command: \(prompt.command)
         Install location: \(prompt.installLocation)

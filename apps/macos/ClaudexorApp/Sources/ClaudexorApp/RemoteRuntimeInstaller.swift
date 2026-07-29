@@ -5,6 +5,25 @@ import Foundation
 private let remoteManifestURL = URL(
     string: "https://github.com/razzant/claudexor/releases/latest/download/remote-runtime-manifest.json")!
 
+protocol RemoteRuntimeSSHTransport: Sendable {
+    func execute(
+        _ connection: RemoteConnection,
+        remoteCommand: String,
+        stdin: Data?
+    ) async throws -> SSHProcessOutput
+}
+
+extension RemoteRuntimeSSHTransport {
+    func execute(
+        _ connection: RemoteConnection,
+        remoteCommand: String
+    ) async throws -> SSHProcessOutput {
+        try await execute(connection, remoteCommand: remoteCommand, stdin: nil)
+    }
+}
+
+extension SSHConnectionManager: RemoteRuntimeSSHTransport {}
+
 struct RemoteBootstrapResponse: Decodable, Sendable {
     struct Endpoint: Decodable, Sendable {
         let host: String
@@ -34,22 +53,15 @@ actor RemoteRuntimeInstaller {
         let probe: RemoteRuntimeProbe?
     }
 
-    private struct Activation: Sendable {
-        let candidateTarget: String
-        let candidate: RemoteRuntimeProbe
-        let previousTarget: String?
-        let previous: RemoteRuntimeProbe?
-    }
-
-    private let ssh: SSHConnectionManager
+    private let ssh: any RemoteRuntimeSSHTransport
     private let session: URLSession
     private let developmentDirectory: URL?
     private var bundledManifest: RemoteRuntimeManifestV1?
     private var bundledAssetsDirectory: URL?
-    private var pendingActivations: [UUID: Activation] = [:]
+    private var activationState = RemoteRuntimeActivationState()
 
     init(
-        ssh: SSHConnectionManager,
+        ssh: any RemoteRuntimeSSHTransport,
         session: URLSession = .shared,
         developmentDirectory: URL? = RemoteRuntimeInstaller.defaultDevelopmentDirectory
     ) {
@@ -240,7 +252,22 @@ actor RemoteRuntimeInstaller {
         target: RemoteRuntimeTarget,
         on connection: RemoteConnection,
         appVersion: String
-    ) async throws {
+    ) async throws -> RemoteRuntimeActivationLease {
+        // A prior candidate whose rollback could not be proven owns this host
+        // until exact recovery succeeds. Retry that recovery before admitting
+        // new bytes; never overwrite its compare-and-swap evidence.
+        try await recoverPendingActivation(on: connection)
+        // Claim synchronously before the first suspension. The actor may admit
+        // another task at every await below, but that task sees this lease and
+        // refuses instead of overwriting its activation bookkeeping.
+        let lease = try activationState.claim(connectionID: connection.id)
+        var handedOff = false
+        var mutationMayHaveChangedPointer = false
+        defer {
+            if !handedOff, !mutationMayHaveChangedPointer {
+                activationState.abandon(lease)
+            }
+        }
         let initial = try await snapshot(on: connection)
         switch decideRemoteRuntimeInstall(
             current: initial.probe, target: target, manifest: manifest, appVersion: appVersion)
@@ -295,53 +322,129 @@ actor RemoteRuntimeInstaller {
             version: manifest.version,
             buildSha: manifest.buildSha,
             protocolMajor: manifest.protocolMajor)
-        let activation = Activation(
+        let activation = RemoteRuntimeActivationState.Payload(
             candidateTarget: "versions/\(manifest.version)-\(asset.sha256)",
             candidate: candidate,
             previousTarget: initial.pointerTarget,
             previous: initial.probe)
+        try activationState.prepareMutation(activation, for: lease)
+        mutationMayHaveChangedPointer = true
         do {
             _ = try await ssh.execute(
                 connection,
                 remoteCommand: installCommand,
                 stdin: Data(Self.installScript.utf8))
         } catch {
-            // The SSH result can be lost after the atomic rename. Only claim an
-            // activation when the remote CAS target proves that it happened.
-            let observed = try? await currentPointerTarget(on: connection)
+            // The SSH result can be lost after the atomic rename. Preserve the
+            // exact candidate/previous closure before inspecting anything: a
+            // failed readlink remains recoverable instead of being collapsed
+            // into the same nil value as a proven absent pointer.
             do {
-                if observed == activation.candidateTarget {
-                    pendingActivations[connection.id] = activation
-                    try await rollback(on: connection)
-                } else if observed == activation.previousTarget,
-                          let previous = activation.previous
-                {
-                    _ = try await bootstrap(on: connection, expecting: previous)
-                }
+                try activationState.markUncertain(lease)
+                try await recoverActivation(lease, on: connection)
             } catch let recoveryError {
-                throw SSHConnectionError.unavailable(
-                    "runtime activation failed and recovery failed: \(recoveryError.localizedDescription)")
+                throw RemoteRuntimeRecoveryRequired(
+                    lease: lease,
+                    primaryMessage: userFacingRemoteRuntimeMessage(error),
+                    recoveryMessage: userFacingRemoteRuntimeMessage(recoveryError))
             }
             throw error
         }
-        pendingActivations[connection.id] = activation
+        try activationState.confirmMutation(lease)
         do {
             _ = try await bootstrap(on: connection, expecting: candidate)
         } catch {
             do {
-                try await rollback(on: connection)
+                try await rollback(lease, on: connection)
             } catch let rollbackError {
-                throw SSHConnectionError.unavailable(
-                    "candidate runtime failed to restart and recovery failed: \(rollbackError.localizedDescription)")
+                throw RemoteRuntimeRecoveryRequired(
+                    lease: lease,
+                    primaryMessage: userFacingRemoteRuntimeMessage(error),
+                    recoveryMessage: userFacingRemoteRuntimeMessage(rollbackError))
             }
             throw error
         }
+        handedOff = true
+        return lease
     }
 
-    func rollback(on connection: RemoteConnection) async throws {
-        guard let activation = pendingActivations[connection.id] else {
-            throw SSHConnectionError.unavailable("there is no pending runtime activation")
+    /// Retry the only safe action for an activation that failed before the app
+    /// accepted its tunneled Control handshake. Connection-only lookup is safe
+    /// here because the single-flight state forbids any newer activation while
+    /// this exact pending lease exists; recovery can only roll back, never
+    /// commit.
+    func recoverPendingActivation(on connection: RemoteConnection) async throws {
+        guard let lease = activationState.lease(connectionID: connection.id) else { return }
+        guard activationState.recoverableLease(connectionID: connection.id) == lease else {
+            // An ordinary reconnect must not probe/publish a candidate while
+            // the mutating command or its exact settlement is suspended.
+            throw SSHConnectionError.unavailable(
+                "runtime activation is still in progress for this host")
         }
+        try await recoverActivation(lease, on: connection)
+    }
+
+    /// Settle either a proven activated candidate or an install whose SSH
+    /// completion is uncertain. An uncertain pointer has exactly three safe
+    /// outcomes: candidate -> exact rollback; previous -> exact previous-daemon
+    /// proof (or proven absence); anything else/unreadable -> retain the lease.
+    func recoverActivation(
+        _ lease: RemoteRuntimeActivationLease,
+        on connection: RemoteConnection
+    ) async throws {
+        guard lease.connectionID == connection.id else {
+            throw SSHConnectionError.unavailable(
+                "the runtime activation lease belongs to another host")
+        }
+        switch activationState.phase(for: lease) {
+        case .pending:
+            try await rollback(lease, on: connection)
+        case .uncertain:
+            let activation = try activationState.beginUncertainReconciliation(lease)
+            let observed: String?
+            do {
+                observed = try await currentPointerTarget(on: connection)
+            } catch {
+                activationState.uncertainReconciliationFailed(lease)
+                throw error
+            }
+            if observed == activation.candidateTarget {
+                try activationState.confirmUncertainCandidate(lease)
+                try await rollback(lease, on: connection)
+                return
+            }
+            guard observed == activation.previousTarget else {
+                activationState.uncertainReconciliationFailed(lease)
+                throw SSHConnectionError.unavailable(
+                    "remote runtime pointer changed while activation recovery was pending")
+            }
+            do {
+                if let previous = activation.previous {
+                    _ = try await bootstrap(on: connection, expecting: previous)
+                }
+                try activationState.resolveUnchangedPointer(lease)
+            } catch {
+                activationState.uncertainReconciliationFailed(lease)
+                throw error
+            }
+        case .installing, .reconciling, .settling:
+            throw SSHConnectionError.unavailable(
+                "runtime activation recovery is already in progress")
+        case nil:
+            throw SSHConnectionError.unavailable(
+                "the runtime activation lease is stale or already settled")
+        }
+    }
+
+    func rollback(
+        _ lease: RemoteRuntimeActivationLease,
+        on connection: RemoteConnection
+    ) async throws {
+        guard lease.connectionID == connection.id else {
+            throw SSHConnectionError.unavailable(
+                "the runtime activation lease belongs to another host")
+        }
+        let activation = try activationState.beginSettlement(lease)
         let command =
             "sh -s -- \(SSHCommandFactory.posixQuote(activation.candidateTarget)) " +
             "\(SSHCommandFactory.posixQuote(activation.previousTarget ?? "-")) " +
@@ -349,35 +452,42 @@ actor RemoteRuntimeInstaller {
             "\(SSHCommandFactory.posixQuote(activation.candidate.buildSha)) " +
             "\(SSHCommandFactory.posixQuote(activation.previous?.version ?? "-")) " +
             SSHCommandFactory.posixQuote(activation.previous?.buildSha ?? "-")
-        let result = try await ssh.execute(
-            connection,
-            remoteCommand: command,
-            stdin: Data(Self.rollbackScript.utf8))
-        if let previous = activation.previous {
-            let bootstrap = try JSONDecoder().decode(
-                RemoteBootstrapResponse.self, from: result.stdout)
-            guard bootstrap.target == previous.target,
-                  bootstrap.version == previous.version,
-                  bootstrap.buildSha == previous.buildSha,
-                  bootstrap.protocolMajor == previous.protocolMajor,
-                  bootstrap.engineVersion == previous.version,
-                  bootstrap.engineBuildSha == previous.buildSha
-            else {
-                throw SSHConnectionError.unavailable(
-                    "rollback restarted a daemon with the wrong identity")
+        do {
+            let result = try await ssh.execute(
+                connection,
+                remoteCommand: command,
+                stdin: Data(Self.rollbackScript.utf8))
+            if let previous = activation.previous {
+                let bootstrap = try JSONDecoder().decode(
+                    RemoteBootstrapResponse.self, from: result.stdout)
+                guard bootstrap.target == previous.target,
+                      bootstrap.version == previous.version,
+                      bootstrap.buildSha == previous.buildSha,
+                      bootstrap.protocolMajor == previous.protocolMajor,
+                      bootstrap.engineVersion == previous.version,
+                      bootstrap.engineBuildSha == previous.buildSha
+                else {
+                    throw SSHConnectionError.unavailable(
+                        "rollback restarted a daemon with the wrong identity")
+                }
             }
+            try activationState.finishSettlement(lease)
+        } catch {
+            // Keep the exact lease retryable for its owner. A different caller
+            // still cannot commit or replace it while this error is reported.
+            activationState.settlementFailed(lease)
+            throw error
         }
-        pendingActivations.removeValue(forKey: connection.id)
-    }
-
-    func rollbackOrDeactivate(on connection: RemoteConnection) async {
-        try? await rollback(on: connection)
     }
 
     /// The app calls this only after its tunneled Control API handshake has
     /// accepted the new daemon. Until then rollback remains a precise CAS.
-    func commitActivation(on connection: RemoteConnection) {
-        pendingActivations.removeValue(forKey: connection.id)
+    func commitActivation(_ lease: RemoteRuntimeActivationLease) throws {
+        try activationState.commit(lease)
+    }
+
+    private func userFacingRemoteRuntimeMessage(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 
     private func readRegularFile(
@@ -393,157 +503,4 @@ actor RemoteRuntimeInstaller {
         return loadBytes ? try Data(contentsOf: url, options: .mappedIfSafe) : Data()
     }
 
-    static let installScript = """
-        set -eu
-        version=$1
-        expected=$2
-        expected_current=$3
-        previous_version=$4
-        previous_sha=$5
-        case "$version" in *[!0-9.]*|'') exit 64;; esac
-        case "$expected" in *[!0-9a-f]*|'') exit 64;; esac
-        test "${#expected}" -eq 64
-        case "$expected_current" in
-          -) test "$previous_version" = "-" && test "$previous_sha" = "-";;
-          versions/*)
-            case "$expected_current" in */*/*|*..*) exit 64;; esac
-            case "$previous_version" in *[!0-9.]*|'') exit 64;; esac
-            case "$previous_sha" in *[!0-9a-f]*|'') exit 64;; esac
-            test "${#previous_sha}" -eq 40;;
-          *) exit 64;;
-        esac
-        root="$HOME/.claudexor/remote"
-        archive="$root/incoming/$expected.tar.gz"
-        staging="$root/.staging/$version-$$"
-        candidate="versions/$version-$expected"
-        destination="$root/$candidate"
-        lock="$root/.install-lock"
-        umask 077
-        mkdir -p "$root/incoming" "$root/.staging" "$root/versions"
-        if ! mkdir "$lock" 2>/dev/null; then
-          echo "another install holds the lock $lock (remove it if no install is running)" >&2
-          exit 75
-        fi
-        cleanup() {
-          rm -rf "$staging"
-          rmdir "$lock" 2>/dev/null || true
-        }
-        trap cleanup EXIT HUP INT TERM
-        actual_current=-
-        if test -L "$root/current"; then
-          actual_current=$(readlink "$root/current")
-        elif test -e "$root/current"; then
-          exit 73
-        fi
-        test "$actual_current" = "$expected_current" || exit 75
-        if command -v shasum >/dev/null 2>&1; then
-          actual=$(shasum -a 256 "$archive" | awk '{print $1}')
-        elif command -v sha256sum >/dev/null 2>&1; then
-          actual=$(sha256sum "$archive" | awk '{print $1}')
-        else
-          exit 69
-        fi
-        test "$actual" = "$expected"
-        # Capture both listings through plain assignments: `set -e` propagates
-        # a tar failure out of `x=$(...)`, while a substitution inline in the
-        # heredoc body would silently truncate the listing on a corrupt
-        # archive. Heredoc expansion never field-splits or globs, and the
-        # anchored patterns are closed under raw-newline entry names: any
-        # `..` path component leaves `..`, `../*`, `*/../*` or `*/..` on at
-        # least one physical line no matter where the name is split.
-        listing=$(tar -tzf "$archive")
-        while IFS= read -r entry; do
-          case "$entry" in /*|..|../*|*/../*|*/..) exit 65;; esac
-        done <<EOF
-        $listing
-        EOF
-        verbose=$(tar -tvzf "$archive")
-        while IFS= read -r detail; do
-          case "$detail" in
-            -*) ;;
-            d*) ;;
-            *) exit 65;;
-          esac
-        done <<EOF
-        $verbose
-        EOF
-        mkdir "$staging"
-        tar -xzf "$archive" -C "$staging" --no-same-owner
-        test -x "$staging/bin/claudexor"
-        "$staging/bin/claudexor" remote probe --json >/dev/null
-        printf '%s\\n' "$expected" > "$staging/.archive-sha256"
-        if test -e "$destination"; then
-          test -d "$destination" && test ! -L "$destination"
-          test -f "$destination/.archive-sha256"
-          test "$(cat "$destination/.archive-sha256")" = "$expected"
-          test -x "$destination/bin/claudexor"
-          "$destination/bin/claudexor" remote probe --json >/dev/null
-        else
-          mv "$staging" "$destination"
-        fi
-        if test "$expected_current" != "-"; then
-          "$root/$expected_current/bin/claudexor" \
-            remote stop "$previous_version" "$previous_sha" --json >/dev/null
-          test -L "$root/current"
-          test "$(readlink "$root/current")" = "$expected_current"
-        else
-          test ! -e "$root/current"
-        fi
-        "$destination/bin/claudexor" \
-          remote activate "$expected_current" "$candidate" --json >/dev/null
-        rm -f "$archive"
-        rm -rf "$staging"
-        trap - EXIT HUP INT TERM
-        rmdir "$lock"
-        """
-
-    static let rollbackScript = """
-        set -eu
-        candidate=$1
-        previous=$2
-        candidate_version=$3
-        candidate_sha=$4
-        previous_version=$5
-        previous_sha=$6
-        case "$candidate" in versions/*) ;; *) exit 64;; esac
-        case "$candidate" in */*/*|*..*) exit 64;; esac
-        case "$previous" in
-          -) test "$previous_version" = "-" && test "$previous_sha" = "-";;
-          versions/*)
-            case "$previous" in */*/*|*..*) exit 64;; esac
-            case "$previous_version" in *[!0-9.]*|'') exit 64;; esac
-            case "$previous_sha" in *[!0-9a-f]*|'') exit 64;; esac
-            test "${#previous_sha}" -eq 40;;
-          *) exit 64;;
-        esac
-        case "$candidate_version" in *[!0-9.]*|'') exit 64;; esac
-        case "$candidate_sha" in *[!0-9a-f]*|'') exit 64;; esac
-        test "${#candidate_sha}" -eq 40
-        root="$HOME/.claudexor/remote"
-        lock="$root/.install-lock"
-        umask 077
-        if ! mkdir "$lock" 2>/dev/null; then
-          echo "another install holds the lock $lock (remove it if no install is running)" >&2
-          exit 75
-        fi
-        cleanup() { rmdir "$lock" 2>/dev/null || true; }
-        trap cleanup EXIT HUP INT TERM
-        test -L "$root/current"
-        test "$(readlink "$root/current")" = "$candidate"
-        "$root/$candidate/bin/claudexor" \
-          remote stop "$candidate_version" "$candidate_sha" --json >/dev/null
-        test -L "$root/current"
-        test "$(readlink "$root/current")" = "$candidate"
-        "$root/$candidate/bin/claudexor" \
-          remote rollback "$candidate" "$previous" --json >/dev/null
-        if test "$previous" = "-"; then
-          printf '%s\\n' '{"ok":true,"deactivated":true}'
-        else
-          test -d "$root/$previous"
-          test ! -L "$root/$previous"
-          "$root/$previous/bin/claudexor" remote bootstrap --json
-        fi
-        trap - EXIT HUP INT TERM
-        rmdir "$lock"
-        """
 }

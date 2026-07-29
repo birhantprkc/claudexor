@@ -1,171 +1,47 @@
 import ClaudexorKit
 import Foundation
 
-struct RemoteDirectoryBrowserRequest: Identifiable, Equatable {
-    let id = UUID()
-    let connectionID: UUID
-}
-
-enum RemoteTerminalPurpose: Equatable {
-    case authentication(UUID, Int)
-    case shell
-    case setup(UUID, String)
-    case install(UUID, String)
-    case log
-
-    var blocksDismissalWhileRunning: Bool {
-        switch self {
-        case .authentication, .setup, .install:
-            return true
-        case .shell, .log:
-            return false
-        }
-    }
-}
-
-struct RemoteTerminalSheetRequest: Identifiable, Equatable {
-    let id = UUID()
-    let title: String
-    let invocation: SSHInvocation
-    let purpose: RemoteTerminalPurpose
-}
-
-struct RemotePreviewRequest: Identifiable, Equatable {
-    let id: UUID
-    let connectionID: UUID
-    let localPort: Int
-    let remotePort: Int
-}
-
-struct RemoteDeviceLoginRequest: Identifiable, Equatable {
-    let id = UUID()
-    let connectionID: UUID
-    let jobID: String
-}
-
-/// Ownership receipt for the local port forward serving one remote daemon
-/// epoch. A stale cleanup may close its own forward, never a newer generation's.
-struct RemoteControlForwardLease: Sendable {
-    let generation: Int
-    let forward: SSHForward
-}
-
 extension AppModel {
-    var locatedThreads: [LocatedThread] {
-        let local = threads.map { LocatedThread(locationID: .local, thread: $0) }
-        let remote = remoteThreadCache.map {
-            LocatedThread(locationID: $0.locationID, thread: $0.thread)
-        }
-        return (local + remote).sorted {
-            Self.threadSortDate($0.thread) > Self.threadSortDate($1.thread)
-        }
-    }
-
-    var selectedLocatedThreadID: String? {
-        guard let selectedThreadId else { return nil }
-        return "\(selectedExecutionLocation.rawValue)|\(selectedThreadId)"
-    }
-
-    var selectedRemoteConnection: RemoteConnection? {
-        guard let id = selectedExecutionLocation.remoteConnectionID else { return nil }
-        return remoteConnections.first { $0.id == id }
-    }
-
-    func remoteConnection(for locationID: ExecutionLocationID) -> RemoteConnection? {
-        guard let id = locationID.remoteConnectionID else { return nil }
-        return remoteConnections.first { $0.id == id }
-    }
-
-    func gateway(for locationID: ExecutionLocationID) -> GatewayClient? {
-        locationID == .local ? client : remoteClients[locationID]
-    }
-
-    /// One lease check for every response that wants to mutate a
-    /// location-scoped daemon projection after an await. Removing/replacing the
-    /// exact client retires the whole epoch; a late response is then inert.
-    func isCurrentGateway(_ requestClient: GatewayClient, at locationID: ExecutionLocationID) -> Bool {
-        gateway(for: locationID) === requestClient
-    }
-
-    /// The only reconnect-time remote client-slot mutation. Applicability is a
-    /// receipt from one daemon epoch and must be retired before another client
-    /// can occupy the same logical location.
-    func adoptRemoteClientForReconnect(
-        _ newClient: GatewayClient,
-        at locationID: ExecutionLocationID
-    ) {
-        if let currentClient = remoteClients[locationID], currentClient !== newClient {
-            retireRunApplicability(at: locationID)
-            retireHarnessProjection(at: locationID)
-        }
-        remoteClients[locationID] = newClient
-    }
-
-    func refreshSSHHosts() {
-        sshHostScan = SSHHostScanState.scan()
-    }
-
-    /// "Create & Add" in ONE step: append the `Host` block through the Kit
-    /// writer, rescan, and immediately create the `RemoteConnection`. Typed
-    /// writer refusals propagate to the sheet (mapped to their owning field);
-    /// a write-succeeded-but-add-failed partial outcome is carried on the
-    /// receipt explicitly — never silently lost.
-    func createSSHHostConnection(_ draft: SSHHostDraft) throws -> SSHHostCreationReceipt {
-        let receipt = try SSHConfigWriter().appendHost(draft)
-        refreshSSHHosts()
-        let failure = addRemoteConnection(alias: receipt.alias)
-        return SSHHostCreationReceipt(
-            alias: receipt.alias,
-            configPath: receipt.configPath,
-            backupPath: receipt.backupPath,
-            createdConfig: receipt.createdConfig,
-            appendedBlock: receipt.appendedBlock,
-            connectionFailure: failure)
-    }
-
-    /// Add an execution location for a config alias. Returns nil on success or
-    /// the user-facing refusal reason — callers surface it (the old Void
-    /// signature parked the OpenSSH resolve failure under a random UUID key
-    /// that no view ever read).
-    @discardableResult
-    func addRemoteConnection(alias: String) -> String? {
-        guard SSHConfigScanner.isConcreteAlias(alias) else {
-            return "“\(alias)” is not a concrete Host alias."
-        }
-        guard !remoteConnections.contains(where: { $0.sshAlias == alias }) else {
-            return "“\(alias)” is already added as a connection."
-        }
-        // Resolve with OpenSSH before persisting. This catches misspelled aliases
-        // while preserving all key/agent/ProxyJump semantics in ssh itself.
-        guard (try? OpenSSHResolver().resolve(alias: alias)) != nil else {
-            return "OpenSSH could not resolve “\(alias)”."
-        }
-        remoteConnections.append(RemoteConnection(sshAlias: alias))
-        persistRemoteConnections()
-        return nil
-    }
-
-    func removeRemoteConnection(_ id: UUID) async {
-        await disconnectRemote(id)
-        remoteConnections.removeAll { $0.id == id }
-        remoteThreadCache.removeAll { $0.locationID.remoteConnectionID == id }
-        persistRemoteConnections()
-        persistRemoteThreadCache()
-    }
-
-    func setRemoteNickname(_ id: UUID, nickname: String) {
-        mutateRemoteConnection(id) {
-            $0.nickname = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-
-    func setRemoteEnabled(_ id: UUID, enabled: Bool) {
-        mutateRemoteConnection(id) { $0.enabled = enabled }
-    }
-
     @discardableResult
     func connectRemote(_ id: UUID, allowInteraction: Bool = true) async -> GatewayClient? {
+        await connectRemoteCore(
+            id, allowInteraction: allowInteraction, transferredActivation: nil)
+    }
+
+    /// Manual installation transfers its exact pending activation into the
+    /// reconnect generation. From this call onward the reconnect owns both
+    /// commit and rollback, so no outer caller can publish a candidate first or
+    /// race a second settlement after suspension.
+    @discardableResult
+    func connectRemoteTransferringActivation(
+        _ connection: RemoteConnection,
+        lease: RemoteRuntimeActivationLease
+    ) async -> GatewayClient? {
+        await connectRemoteCore(
+            connection.id,
+            allowInteraction: false,
+            transferredActivation: (lease, connection))
+    }
+
+    private func connectRemoteCore(
+        _ id: UUID,
+        allowInteraction: Bool,
+        transferredActivation: (lease: RemoteRuntimeActivationLease, connection: RemoteConnection)?
+    ) async -> GatewayClient? {
         if let existing = remoteConnectTasks[id] {
+            if let transferredActivation {
+                let failure = await remoteActivationFailure(
+                    SSHConnectionError.unavailable(
+                        "another reconnect claimed this host before activation verification"),
+                    lease: transferredActivation.lease,
+                    on: transferredActivation.connection)
+                if remoteConnections.contains(where: { $0.id == id }) {
+                    setRemoteState(id, .failed, message: failure.message)
+                } else if failure.rollbackFailed {
+                    threadStatus = failure.message
+                }
+                return nil
+            }
             let generation = remoteConnectionGenerations[id] ?? 0
             await existing.value
             guard remoteConnectionGenerations[id] == generation else { return nil }
@@ -182,7 +58,10 @@ extension AppModel {
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.connectRemoteOnce(
-                id, allowInteraction: allowInteraction, generation: generation)
+                id,
+                allowInteraction: allowInteraction,
+                generation: generation,
+                transferredActivation: transferredActivation)
         }
         remoteConnectTasks[id] = task
         await task.value
@@ -196,11 +75,22 @@ extension AppModel {
     private func connectRemoteOnce(
         _ id: UUID,
         allowInteraction: Bool,
-        generation: Int
+        generation: Int,
+        transferredActivation:
+            (lease: RemoteRuntimeActivationLease, connection: RemoteConnection)?
     ) async {
         guard remoteConnectionGenerations[id] == generation,
               var connection = remoteConnections.first(where: { $0.id == id })
-        else { return }
+        else {
+            if let transferredActivation {
+                let failure = await remoteActivationFailure(
+                    CancellationError(),
+                    lease: transferredActivation.lease,
+                    on: transferredActivation.connection)
+                if failure.rollbackFailed { threadStatus = failure.message }
+            }
+            return
+        }
         let locationID = connection.locationID
         // A new connection generation replaces one daemon epoch. Retire its
         // client first, then every volatile projection; persisted thread titles
@@ -208,11 +98,22 @@ extension AppModel {
         remoteClients.removeValue(forKey: locationID)
         cancelRemoteStreams(locationID)
         discardRemoteDaemonProjections(at: locationID)
-        var switchedRuntime = false
+        var activationLease = transferredActivation?.lease
         setRemoteState(id, .connecting, message: "Connecting with OpenSSH…")
         do {
             try await sshConnectionManager.connectBatch(connection)
         } catch let error as SSHConnectionError {
+            if activationLease != nil {
+                let failure = await remoteActivationFailure(
+                    error, lease: activationLease, on: connection)
+                activationLease = nil
+                guard remoteConnectionGenerations[id] == generation else {
+                    if failure.rollbackFailed { threadStatus = failure.message }
+                    return
+                }
+                setRemoteState(id, .failed, message: failure.message)
+                return
+            }
             guard remoteConnectionGenerations[id] == generation else { return }
             if case .needsInteraction = error {
                 guard allowInteraction, remoteTerminalSheet == nil else {
@@ -221,17 +122,44 @@ extension AppModel {
                         message: "SSH needs authentication. Click Connect to open its terminal.")
                     return
                 }
+                guard let presentation = beginRemoteTerminalPresentation(
+                    connectionID: id)
+                else { return }
+                setRemoteState(
+                    id, .needsInteraction,
+                    message: "Preparing the SSH authentication terminal…")
                 do {
                     let invocation =
                         try await sshConnectionManager.interactiveMasterInvocation(for: connection)
+                    guard remoteConnectionGenerations[id] == generation else {
+                        finishRemoteTerminalPresentation(presentation)
+                        return
+                    }
+                    guard remoteTerminalPresentationIsCurrent(presentation) else {
+                        recordSupersededRemoteAuthentication(
+                            connectionID: id,
+                            generation: generation,
+                            presentation: presentation)
+                        return
+                    }
                     setRemoteState(
                         id, .needsInteraction,
                         message: "Finish SSH authentication in the terminal.")
-                    remoteTerminalSheet = RemoteTerminalSheetRequest(
+                    _ = presentRemoteTerminal(
+                        presentation,
                         title: "Connect to \(connection.displayName)",
                         invocation: invocation,
                         purpose: .authentication(id, generation))
                 } catch {
+                    guard remoteConnectionGenerations[id] == generation else { return }
+                    guard remoteTerminalPresentationIsCurrent(presentation) else {
+                        recordSupersededRemoteAuthentication(
+                            connectionID: id,
+                            generation: generation,
+                            presentation: presentation)
+                        return
+                    }
+                    finishRemoteTerminalPresentation(presentation)
                     setRemoteState(id, .failed, message: userMessageForRemote(error))
                 }
                 return
@@ -239,6 +167,17 @@ extension AppModel {
             setRemoteState(id, .failed, message: userMessageForRemote(error))
             return
         } catch {
+            if activationLease != nil {
+                let failure = await remoteActivationFailure(
+                    error, lease: activationLease, on: connection)
+                activationLease = nil
+                guard remoteConnectionGenerations[id] == generation else {
+                    if failure.rollbackFailed { threadStatus = failure.message }
+                    return
+                }
+                setRemoteState(id, .failed, message: failure.message)
+                return
+            }
             guard remoteConnectionGenerations[id] == generation else { return }
             setRemoteState(id, .failed, message: userMessageForRemote(error))
             return
@@ -251,6 +190,9 @@ extension AppModel {
                 return
             }
             connection = remoteConnections.first(where: { $0.id == id }) ?? connection
+            if activationLease == nil {
+                try await remoteRuntimeInstaller.recoverPendingActivation(on: connection)
+            }
             let detectedTarget = try await remoteRuntimeInstaller.detectTarget(on: connection)
             var probe = try? await remoteRuntimeInstaller.probe(on: connection)
             if probe?.target != detectedTarget { probe = nil }
@@ -262,10 +204,9 @@ extension AppModel {
                         "the runtime is missing and the signed release manifest is unavailable")
                 }
                 setRemoteState(id, .installing, message: "Installing the remote runtime…")
-                try await remoteRuntimeInstaller.install(
+                activationLease = try await remoteRuntimeInstaller.install(
                     manifest, target: detectedTarget, on: connection,
                     appVersion: Self.appVersionString())
-                switchedRuntime = true
                 probe = try await remoteRuntimeInstaller.probe(on: connection)
             } else if let manifest, let probe {
                 switch decideRemoteRuntime(
@@ -276,10 +217,9 @@ extension AppModel {
                 {
                 case .blockingUpdate:
                     setRemoteState(id, .installing, message: "Updating an incompatible runtime…")
-                    try await remoteRuntimeInstaller.install(
+                    activationLease = try await remoteRuntimeInstaller.install(
                         manifest, target: detectedTarget, on: connection,
                         appVersion: Self.appVersionString())
-                    switchedRuntime = true
                 case .appUpdateRequired:
                     throw SSHConnectionError.unavailable(
                         "this host needs a newer Claudexor app; the runtime was not downgraded")
@@ -288,9 +228,14 @@ extension AppModel {
                 }
             }
 
-            guard remoteConnectionGenerations[id] == generation else { return }
+            guard remoteConnectionGenerations[id] == generation else {
+                throw CancellationError()
+            }
             var activeClient = try await bootstrapRemoteClient(connection, generation: generation)
-            if let manifest, let currentProbe = try? await remoteRuntimeInstaller.probe(on: connection) {
+            if activationLease == nil,
+               let manifest,
+               let currentProbe = try? await remoteRuntimeInstaller.probe(on: connection)
+            {
                 let hasActive = (try? await activeClient.engineHasActiveWork()) ?? true
                 switch decideRemoteRuntime(
                     probe: currentProbe,
@@ -301,10 +246,9 @@ extension AppModel {
                 case .updateAvailable:
                     setRemoteState(id, .installing, message: "Updating the remote runtime…")
                     await closeRemoteControlForward(id, through: generation)
-                    try await remoteRuntimeInstaller.install(
+                    activationLease = try await remoteRuntimeInstaller.install(
                         manifest, target: detectedTarget, on: connection,
                         appVersion: Self.appVersionString())
-                    switchedRuntime = true
                     activeClient = try await bootstrapRemoteClient(
                         connection, generation: generation)
                 case .useCurrentAndOfferUpdate:
@@ -314,13 +258,27 @@ extension AppModel {
                     break
                 }
             }
+            var publicationGate = RemoteRuntimePublicationGate(
+                requiresActivationCommit: activationLease != nil)
             let outcome = try await activeClient.handshake()
             guard outcome.ok else {
                 throw SSHConnectionError.unavailable("remote daemon handshake failed")
             }
-            if switchedRuntime {
-                await remoteRuntimeInstaller.commitActivation(on: connection)
-                switchedRuntime = false
+            publicationGate.acceptHandshake()
+            guard remoteConnectionGenerations[id] == generation else {
+                throw CancellationError()
+            }
+            if let lease = activationLease {
+                try await remoteRuntimeInstaller.commitActivation(lease)
+                activationLease = nil
+                guard publicationGate.acceptActivationCommit() else {
+                    throw SSHConnectionError.unavailable(
+                        "remote runtime activation committed before its handshake")
+                }
+            }
+            guard publicationGate.mayPublish else {
+                throw SSHConnectionError.unavailable(
+                    "remote runtime activation was not committed before publication")
             }
             guard remoteConnectionGenerations[id] == generation else {
                 await closeRemoteControlForward(id, through: generation)
@@ -444,15 +402,20 @@ extension AppModel {
             else { return }
             startRemoteGlobalStream(connection.locationID)
         } catch {
-            if switchedRuntime {
-                await remoteRuntimeInstaller.rollbackOrDeactivate(on: connection)
+            let failure = await remoteActivationFailure(
+                error, lease: activationLease, on: connection)
+            activationLease = nil
+            guard remoteConnectionGenerations[id] == generation else {
+                if failure.rollbackFailed {
+                    threadStatus = failure.message
+                }
+                return
             }
-            guard remoteConnectionGenerations[id] == generation else { return }
             await closeRemoteControlForward(id, through: generation)
             remoteClients.removeValue(forKey: connection.locationID)
             cancelRemoteStreams(connection.locationID)
             discardRemoteDaemonProjections(at: connection.locationID)
-            setRemoteState(id, .failed, message: userMessageForRemote(error))
+            setRemoteState(id, .failed, message: failure.message)
         }
     }
 
@@ -489,19 +452,12 @@ extension AppModel {
         let locationID = ExecutionLocationID.remote(id)
         let generation = (remoteConnectionGenerations[id] ?? 0) + 1
         remoteConnectionGenerations[id] = generation
+        retireRemoteActions(for: id)
+        retireRemoteTerminalPresentation(for: id)
         remoteConnectTasks.removeValue(forKey: id)?.cancel()
-        if let purpose = remoteTerminalSheet?.purpose {
-            switch purpose {
-            case .authentication(let sheetID, _) where sheetID == id,
-                 .setup(let sheetID, _) where sheetID == id:
-                remoteTerminalSheet = nil
-            default:
-                break
-            }
-        }
         if let purpose = settingsRemoteTerminalSheet?.purpose,
-           case .install(let sheetID, _) = purpose,
-           sheetID == id
+           case .install(let lease, _) = purpose,
+           lease.connectionID == id
         {
             settingsRemoteTerminalSheet = nil
         }
@@ -509,6 +465,7 @@ extension AppModel {
             remoteHarnessInstallPrompt = nil
         }
         if remoteDeviceLogin?.connectionID == id { remoteDeviceLogin = nil }
+        if remotePreview?.connectionID == id { remotePreview = nil }
         if remoteDirectoryBrowser?.connectionID == id { remoteDirectoryBrowser = nil }
         if pendingRemoteThreadSelection?.locationID == locationID {
             pendingRemoteThreadSelection = nil
@@ -519,7 +476,7 @@ extension AppModel {
         await closeRemoteControlForward(id, through: generation)
         guard remoteConnectionGenerations[id] == generation else { return nil }
         if let forward = remotePreviewForwards.removeValue(forKey: id) {
-            await sshConnectionManager.closeForward(forward)
+            await sshConnectionManager.closeForward(forward.forward)
             guard remoteConnectionGenerations[id] == generation else { return nil }
         }
         await sshConnectionManager.disconnect(id)
@@ -540,6 +497,8 @@ extension AppModel {
         // Cancellation is cooperative; an old request may otherwise complete
         // while shutdown is waiting for a connection task and repaint state.
         remoteClients.removeAll()
+        remoteTerminalPresentationLease = nil
+        remoteTerminalSheet = nil
         for locationID in locationIDs {
             cancelRemoteStreams(locationID)
             discardRemoteDaemonProjections(at: locationID)
@@ -554,7 +513,7 @@ extension AppModel {
         for task in connectTasks { await task.value }
         remoteControlForwards.removeAll()
         remotePreviewForwards.removeAll()
-        remoteTerminalSheet = nil
+        remoteActionLeases.removeAll()
         settingsRemoteTerminalSheet = nil
         remoteHarnessInstallPrompt = nil
         await sshConnectionManager.shutdown()
@@ -562,97 +521,6 @@ extension AppModel {
         // snapshots the registry. A second idempotent pass closes anything that
         // became visible during task teardown.
         await sshConnectionManager.shutdown()
-    }
-
-    func refreshRemoteThreads(
-        _ locationID: ExecutionLocationID,
-        using preparedClient: GatewayClient? = nil
-    ) async {
-        guard let remote = remoteConnection(for: locationID),
-              let client = preparedClient ?? remoteClients[locationID],
-              isCurrentGateway(client, at: locationID)
-        else { return }
-        do {
-            let list = try await client.listThreads()
-            guard isCurrentGateway(client, at: locationID) else { return }
-            let now = Date()
-            remoteThreadCache.removeAll { $0.locationID == locationID }
-            remoteThreadCache.append(contentsOf: list.threads.map {
-                RemoteThreadCacheEntry(locationID: locationID, thread: $0, syncedAt: now)
-            })
-            persistRemoteThreadCache()
-            await refreshRemoteRuns(locationID, using: client)
-            guard isCurrentGateway(client, at: locationID) else { return }
-            for thread in list.threads {
-                guard let runID = thread.headRunId,
-                      remoteTasks[locationID]?.first(where: {
-                          $0.id == runID
-                      })?.phase.isActive == true
-                else { continue }
-                streamRemoteRun(
-                    locationID: locationID, runID: runID, threadID: thread.id)
-            }
-            remoteConnectionMessages[remote.id] =
-                list.droppedThreads == 0
-                ? "Synced \(list.threads.count) thread(s)."
-                : "Synced with \(list.droppedThreads) incompatible thread row(s) hidden."
-        } catch {
-            guard isCurrentGateway(client, at: locationID) else { return }
-            remoteConnectionMessages[remote.id] =
-                "Could not sync; showing cached thread summaries."
-        }
-    }
-
-    func refreshRemoteRuns(
-        _ locationID: ExecutionLocationID,
-        using preparedClient: GatewayClient? = nil
-    ) async {
-        guard let client = preparedClient ?? remoteClients[locationID],
-              isCurrentGateway(client, at: locationID)
-        else { return }
-        do {
-            let summaries = try await client.listRuns()
-            guard remoteClients[locationID] === client else { return }
-            let existingByID = Dictionary(
-                uniqueKeysWithValues: (remoteTasks[locationID] ?? []).map { ($0.id, $0) })
-            remoteTasks[locationID] = summaries.map {
-                Self.mergeRefreshedTask(
-                    summary: $0,
-                    existing: existingByID[$0.runId]
-                        ?? $0.jobId.flatMap { existingByID[$0] })
-            }
-        } catch {
-            // Run transcripts and artifacts are intentionally memory-only.
-        }
-    }
-
-    func remoteProjectFileReference(
-        target: String
-    ) -> (projectID: String, relativePath: String)? {
-        let locationID = selectedExecutionLocation
-        guard locationID != .local,
-              let root = currentThread?.repoRoot,
-              let project = remoteProjects[locationID]?.first(where: {
-                  $0.root == root
-              })
-        else { return nil }
-        var path = target
-        if path.hasPrefix("file://") { path.removeFirst("file://".count) }
-        let absolute: String
-        if path.hasPrefix("/") {
-            absolute = path
-        } else {
-            absolute = (root as NSString).appendingPathComponent(path)
-        }
-        let normalizedRoot = URL(fileURLWithPath: root).standardized.path
-        let normalized = URL(fileURLWithPath: absolute).standardized.path
-        let prefix = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
-        guard normalized.hasPrefix(prefix) else { return nil }
-        let relative = String(normalized.dropFirst(prefix.count))
-        guard !relative.isEmpty,
-              !relative.split(separator: "/").contains("..")
-        else { return nil }
-        return (project.id, relative)
     }
 
     private func bootstrapRemoteClient(
@@ -688,45 +556,28 @@ extension AppModel {
         await sshConnectionManager.closeForward(lease.forward)
     }
 
-    func setRemoteState(
-        _ id: UUID,
-        _ state: RemoteConnectionState,
-        message: String
-    ) {
-        mutateRemoteConnection(id) { $0.status = state }
-        remoteConnectionMessages[id] = message
-    }
-
-    func mutateRemoteConnection(
-        _ id: UUID,
-        mutation: (inout RemoteConnection) -> Void
-    ) {
-        guard let index = remoteConnections.firstIndex(where: { $0.id == id }) else { return }
-        mutation(&remoteConnections[index])
-        persistRemoteConnections()
-    }
-
-    private func persistRemoteConnections() {
-        try? RemoteConnectionStore.applicationSupport().save(remoteConnections)
-    }
-
-    private func persistRemoteThreadCache() {
-        try? RemoteThreadCacheStore.applicationSupport().save(remoteThreadCache)
-    }
-
-    func userMessageForRemote(_ error: Error) -> String {
-        if isRecoverableRemoteTransportFailure(error) {
-            return "The SSH tunnel is unavailable. Reconnect the host."
+    /// Settle only the exact activation created by the failed caller. Rollback
+    /// failure is part of the primary user-visible error because the remote
+    /// pointer may still reference a candidate that did not pass the tunneled
+    /// Control handshake.
+    func remoteActivationFailure(
+        _ primaryError: Error,
+        lease: RemoteRuntimeActivationLease?,
+        on connection: RemoteConnection
+    ) async -> (message: String, rollbackFailed: Bool) {
+        let recovery = primaryError as? RemoteRuntimeRecoveryRequired
+        let primaryMessage = recovery?.primaryMessage ?? userMessageForRemote(primaryError)
+        guard let lease = recovery?.lease ?? lease else { return (primaryMessage, false) }
+        do {
+            try await remoteRuntimeInstaller.recoverActivation(lease, on: connection)
+            return (primaryMessage, false)
+        } catch {
+            return (
+                primaryMessage
+                    + " Runtime recovery also failed: "
+                    + userMessageForRemote(error),
+                true)
         }
-        if let localized = error as? LocalizedError,
-           let detail = localized.errorDescription, !detail.isEmpty
-        {
-            return detail
-        }
-        return userMessage(for: error)
     }
 
-    private static func threadSortDate(_ thread: ThreadSummary) -> String {
-        thread.updatedAt
-    }
 }

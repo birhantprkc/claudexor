@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 import ClaudexorKit
-import UniformTypeIdentifiers
 
 // MARK: - Composer attachments (files / images / screen capture)
 //
@@ -129,34 +128,29 @@ extension ThreadsScreen {
     }
 
     /// Pick files via NSOpenPanel and stage their bytes outside the main actor.
-    /// AppModel uploads and finalizes them before the turn sends resource ids.
+    /// Metadata admission happens before any byte read, and the completion may
+    /// publish only into the exact composer generation that launched it.
     private func pickAttachments() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         guard panel.runModal() == .OK else { return }
-        let urls = panel.urls
+        let lease = composerAttachmentOperations.begin(from: composerSelectionContext)
+        composerAttachmentStagingMessage = nil
+        let sources = panel.urls.map(ComposerAttachmentSource.pickedFile)
+        let request = ComposerAttachmentStagingRequest(
+            sources: sources,
+            existing: composerAttachmentDescriptors,
+            poolMode: composerAttachmentPoolMode,
+            lanes: composerAttachmentLanes
+        )
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> [PendingAttachment] in
-                var attachments: [PendingAttachment] = []
-                for url in urls {
-                    guard let data = try? Data(contentsOf: url) else { continue }
-                    let mime = Self.mimeType(for: url)
-                    let isImage = mime.hasPrefix("image/")
-                    attachments.append(PendingAttachment(
-                        kind: isImage ? "image" : "file", mime: mime, name: url.lastPathComponent,
-                        data: data))
-                }
-                return attachments
+            let staged = await Task.detached(priority: .userInitiated) {
+                ComposerAttachmentStager.stage(request)
             }.value
-            composerAttachments.append(contentsOf: loaded)
+            publish(staged, for: lease)
         }
-    }
-
-    nonisolated private static func mimeType(for url: URL) -> String {
-        if let t = UTType(filenameExtension: url.pathExtension), let m = t.preferredMIMEType { return m }
-        return "application/octet-stream"
     }
 
     var captureButton: some View {
@@ -188,6 +182,27 @@ extension ThreadsScreen {
     }
 
     @ViewBuilder var composerAttachmentNotice: some View {
+        if composerAttachmentOperations.inFlightCount > 0 {
+            HStack(spacing: Theme.Spacing.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Preparing attachments…")
+                    .font(.caption2)
+                    .foregroundStyle(Color.secondary)
+                Button("Cancel") {
+                    composerAttachmentOperations.cancelAll()
+                    composerAttachmentStagingMessage = "Attachment preparation cancelled."
+                }
+                .buttonStyle(.link)
+                .font(.caption2)
+            }
+        }
+        if let message = composerAttachmentStagingMessage {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(Theme.status(.caution))
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if !composerAttachments.isEmpty,
            composerAttachmentAdmission.outcome == .degraded,
            let message = composerAttachmentAdmission.message {
@@ -198,35 +213,76 @@ extension ThreadsScreen {
         }
     }
 
-    /// Grab a screen region via the system `screencapture` (interactive crosshair),
-    /// off the main thread so the UI doesn't freeze during selection. macOS gates
-    /// this behind Screen Recording permission; a denied/cancelled grab yields no
-    /// attachment (honest — never a blank/fake image).
+    /// Grab a screen region via the system `screencapture` (interactive crosshair)
+    /// and pass its temporary file through the same metadata-first staging path.
     private func captureScreenshot() {
-        Task { @MainActor in
-            if let att = await Self.runScreencapture() {
-                composerAttachments.append(att)
-            }
+        let lease = composerAttachmentOperations.begin(from: composerSelectionContext)
+        composerAttachmentStagingMessage = nil
+        let request = ComposerAttachmentStagingRequest(
+            sources: [],
+            existing: composerAttachmentDescriptors,
+            poolMode: composerAttachmentPoolMode,
+            lanes: composerAttachmentLanes
+        )
+        Task {
+            let staged = await Self.runScreencapture(request: request)
+            publish(staged, for: lease)
         }
     }
 
-    private static func runScreencapture() async -> PendingAttachment? {
-        await withCheckedContinuation { (cont: CheckedContinuation<PendingAttachment?, Never>) in
+    private func publish(
+        _ staged: ComposerAttachmentStagingResult,
+        for lease: ComposerAttachmentOperationLease
+    ) {
+        defer { composerAttachmentOperations.finish(lease) }
+        guard let staged = composerAttachmentOperations.owned(
+            staged, for: lease, current: composerSelectionContext
+        ) else { return }
+        let publication = ComposerAttachmentStager.revalidated(
+            staged,
+            existing: composerAttachmentDescriptors,
+            poolMode: composerAttachmentPoolMode,
+            lanes: composerAttachmentLanes
+        )
+        composerAttachments.append(contentsOf: publication.attachments)
+        if let notice = publication.notice {
+            composerAttachmentStagingMessage = [composerAttachmentStagingMessage, notice]
+                .compactMap { $0 }
+                .joined(separator: "\n")
+        }
+    }
+
+    private static func runScreencapture(
+        request: ComposerAttachmentStagingRequest
+    ) async -> ComposerAttachmentStagingResult {
+        await withCheckedContinuation { (cont: CheckedContinuation<ComposerAttachmentStagingResult, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let tmp = FileManager.default.temporaryDirectory
                     .appendingPathComponent("claudexor-shot-\(UUID().uuidString).png")
+                defer { try? FileManager.default.removeItem(at: tmp) }
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
                 proc.arguments = ["-i", "-x", tmp.path] // interactive region select, silent
-                do { try proc.run(); proc.waitUntilExit() }
-                catch { cont.resume(returning: nil); return }
-                guard let data = try? Data(contentsOf: tmp), !data.isEmpty else {
-                    cont.resume(returning: nil); return // cancelled or permission denied
+                do {
+                    try proc.run()
+                    proc.waitUntilExit()
+                } catch {
+                    cont.resume(returning: .init(
+                        notices: ["Screen capture could not start."]
+                    ))
+                    return
                 }
-                try? FileManager.default.removeItem(at: tmp)
-                cont.resume(returning: PendingAttachment(
-                    kind: "image", mime: "image/png", name: "screenshot.png",
-                    data: data))
+                let capturedSize = try? tmp.resourceValues(forKeys: [.fileSizeKey]).fileSize
+                guard proc.terminationStatus == 0,
+                      let capturedSize,
+                      capturedSize > 0 else {
+                    cont.resume(returning: .init(
+                        notices: ["No screenshot was attached because capture was cancelled or unavailable."]
+                    ))
+                    return
+                }
+                let captureRequest = request.replacingSources([.screenshot(tmp)])
+                cont.resume(returning: ComposerAttachmentStager.stage(captureRequest))
             }
         }
     }

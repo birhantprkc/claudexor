@@ -20,15 +20,19 @@ struct SettingsScreen: View {
     var body: some View {
         @Bindable var model = model
         TabView {
-            settingsTab { generalGroup; advancedGroup }
+            settingsTab { generalGroup; loadedSettings { advancedGroup } }
                 .tabItem { Label("General", systemImage: "gearshape") }
-            settingsTab { routingGroup }
+            settingsTab { loadedSettings { routingGroup } }
                 .tabItem { Label("Routing", systemImage: "point.3.connected.trianglepath.dotted") }
-            settingsTab { harnessDoctorGroup; RemoteHarnessInstallSection(); perHarnessGroup }
+            settingsTab {
+                harnessDoctorGroup
+                RemoteHarnessInstallSection()
+                loadedSettings { perHarnessGroup }
+            }
                 .tabItem { Label("Harnesses", systemImage: "cpu") }
             settingsTab { ConnectionsSettingsView() }
                 .tabItem { Label("Connections", systemImage: "network") }
-            settingsTab { budgetGroup; interactiveGroup }
+            settingsTab { loadedSettings { budgetGroup; interactiveGroup } }
                 .tabItem { Label("Budget", systemImage: "dollarsign.circle") }
             settingsTab { secretsGroup; TrustSettingsSection() }
                 .tabItem { Label("Secrets", systemImage: "key") }
@@ -55,6 +59,7 @@ struct SettingsScreen: View {
             .environment(model)
         }
     }
+
 
     @ViewBuilder private var budgetGroup: some View {
         settingsGroup("Budget", "dollarsign.circle") {
