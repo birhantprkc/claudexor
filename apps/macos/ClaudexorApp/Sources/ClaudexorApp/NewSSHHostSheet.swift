@@ -170,6 +170,10 @@ struct NewSSHHostSheet: View {
         Binding(
             get: { draft[keyPath: keyPath] },
             set: { value in
+                // The AppKit field editor re-sets the unchanged value when a
+                // field gains focus; that must not count as "touched" or a
+                // required-field error shows on a freshly opened sheet.
+                guard draft[keyPath: keyPath] != value else { return }
                 draft[keyPath: keyPath] = value
                 touched.insert(field)
                 // Editing a field clears ITS stale errors (live + mapped).
@@ -228,3 +232,4 @@ struct NewSSHHostSheet: View {
         writerErrors[.identityFile] = nil
     }
 }
+
