@@ -25,6 +25,12 @@ export interface ThreadMutation {
   threadCreation?: { keyDigest: string; requestDigest: string; threadId: string };
 }
 
+/** Keep a sticky primary only when it belongs to a non-empty explicit pool. */
+export function coercePrimaryToPool(primary: string | null, pool: string[]): string | null {
+  if (primary && pool.length > 0 && !pool.includes(primary)) return null;
+  return primary;
+}
+
 export function parseMutation(value: unknown): ThreadMutation {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("invalid thread mutation");

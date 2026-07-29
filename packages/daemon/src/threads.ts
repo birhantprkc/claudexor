@@ -36,6 +36,7 @@ import { reduceThreadLifecycle, type ThreadLifecycleAction } from "./thread-life
 import { deriveThreadTitle } from "./thread-title.js";
 import {
   assertUnique,
+  coercePrimaryToPool,
   idempotencyConflict,
   parseMutation,
   threadCreationIdempotency,
@@ -95,18 +96,6 @@ export interface UpdateThreadInput {
   eligibleHarnesses?: string[];
   /** Switch the sticky write scope (null => repo trust default). */
   access?: Thread["access"];
-}
-
-/**
- * Thread routing invariant: a sticky primary harness must be a member of a
- * NON-EMPTY eligible pool (an empty pool = engine auto-pool, so it constrains
- * nothing). Returns the primary, or null when it falls outside the pool — so a
- * thread is never stored claiming a primary the engine would drop. Applied at
- * both create and update (the only writers of these two fields).
- */
-function coercePrimaryToPool(primary: string | null, pool: string[]): string | null {
-  if (primary && pool.length > 0 && !pool.includes(primary)) return null;
-  return primary;
 }
 
 /**

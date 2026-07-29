@@ -6,7 +6,6 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
@@ -103,6 +102,11 @@ import {
   selectRunListPage,
   type RunListQuery,
 } from "./run-list.js";
+import { summaryFingerprint } from "./run-list-fingerprint.js";
+export {
+  resetRunListFingerprintProbeCountForTests,
+  runListFingerprintProbeCountForTests,
+} from "./run-list-fingerprint.js";
 import {
   controlProblemError,
   normalizeRequestValidationError,
@@ -2310,84 +2314,6 @@ function appendRunAuditEvent(
     );
   } catch {
     /* audit append must not change control behavior */
-  }
-}
-
-/**
- * QA-052 observability: how many artifact-path probes the run-list fingerprinter
- * has performed (each probe is a synchronous filesystem stat-family lookup). The
- * single-parse test pattern (eventsParseCount) proves warm-list work is BOUNDED
- * — by page size (only sliced records are fingerprinted) and, for terminal runs,
- * by the one-probe short-circuit below (1 path instead of 13).
- */
-let fingerprintProbeCount = 0;
-export function runListFingerprintProbeCountForTests(): number {
-  return fingerprintProbeCount;
-}
-export function resetRunListFingerprintProbeCountForTests(): void {
-  fingerprintProbeCount = 0;
-}
-
-function summaryFingerprint(rec: DaemonRunRecord): string {
-  const mtime = (rel: string): number => {
-    fingerprintProbeCount++;
-    if (!rec.runDir) return 0;
-    const path = safeArtifactPath(rec.runDir, rel);
-    if (!path) return 0;
-    try {
-      return statSync(path).mtimeMs;
-    } catch {
-      return 0;
-    }
-  };
-  const identity = [rec.state, paramsFingerprint(rec), rec.finishedAt ?? "", rec.error ?? ""];
-  // QA-052 terminal short-circuit: a TERMINAL run's every projected artifact
-  // (events.jsonl, arbitration, telemetry, failure, the final/* outputs,
-  // work_product, and the canonical RunFacts receipt) is written before the
-  // daemon marks the run terminal and never changes afterward. The SOLE
-  // post-terminal mutation is the delivery/apply overlay
-  // (final/delivery_state.yaml), which the apply/revert route is the one
-  // writer of [B7]. So a warm re-list of a terminal run fingerprints ONE path
-  // instead of thirteen — the cheap probe still detects an apply/revert, and
-  // every other axis is frozen. Active (queued/running) runs keep the full
-  // artifact-mtime fingerprint because their events.jsonl and final/* land
-  // while the run is still live.
-  if (TERMINAL_STATES.has(rec.state)) {
-    return [...identity, mtime("final/delivery_state.yaml")].join("|");
-  }
-  return [
-    ...identity,
-    mtime("events.jsonl"),
-    mtime("arbitration/decision.yaml"),
-    mtime("final/telemetry.yaml"),
-    mtime("final/run_facts.yaml"),
-    mtime("final/failure.yaml"),
-    mtime("final/summary.md"),
-    // Primary outputs feed outputReadyState; a summary cached before the
-    // answer/plan/report/patch landed must invalidate when it does.
-    mtime("final/answer.md"),
-    mtime("final/plan.md"),
-    mtime("final/explore.md"),
-    mtime("final/report.md"),
-    mtime("final/patch.diff"),
-    // The honest outcome (result kind / diffstat / adopted) is projected from
-    // work_product.yaml; a summary cached before it landed must invalidate.
-    mtime("final/work_product.yaml"),
-    // The MUTABLE delivery state (applied / reverted / not_applied) is written
-    // to delivery_state.yaml by markRunApplyState, and controlRunResult prefers
-    // that overlay over work_product.yaml's immutable apply_state. It must be in
-    // the fingerprint set or a summary cached before an apply/revert keeps
-    // reporting the stale applyState (the dedicated apply route writes only this
-    // file, so no other fingerprinted mtime would move). [B7]
-    mtime("final/delivery_state.yaml"),
-  ].join("|");
-}
-
-function paramsFingerprint(rec: DaemonRunRecord): string {
-  try {
-    return sha256(JSON.stringify(rec.params ?? null));
-  } catch {
-    return "unserializable-params";
   }
 }
 

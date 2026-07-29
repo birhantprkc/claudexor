@@ -11,6 +11,7 @@ import { engineBuildIdentity } from "@claudexor/util";
 import { pathnameDecodes, queryParam, resumeHeader } from "./operation-parameters.js";
 import { REMOTE_OPERATION_DRAFTS } from "./remote-operation-descriptors.js";
 import type { OperationDraft } from "./operation-draft.js";
+import { OPERATION_SUMMARIES } from "./operation-summaries.js";
 
 export type ControlProtocolBoundary =
   | { kind: "route"; path: string }
@@ -146,95 +147,6 @@ function descriptor(input: OperationDraft): ControlOperationDescriptor {
       input.completion ?? (input.responseKind === "stream" ? "terminal_stream" : "immediate"),
   };
 }
-
-/**
- * Human one-line summaries, keyed by `${method} ${path}`, co-located with the
- * descriptors they annotate. This IS the descriptor summary data (not a shadow
- * of another table) — descriptor() throws if a route has no entry, so the map
- * can never silently drift from the operations array.
- */
-const OPERATION_SUMMARIES: Record<string, string> = {
-  "POST /v2/uploads":
-    "Create a single-request streaming upload session for an attachment of the declared size.",
-  "PUT /v2/uploads/:id/bytes":
-    "Stream the complete declared byte body in ONE request. The store is single-shot: a short, oversized, or interrupted PUT cancels the upload and discards partial bytes — retry by creating a new upload and resending from byte zero. Not resumable.",
-  "GET /v2/uploads/:id":
-    "Read an upload session's status and received byte count (diagnostic on a cancelled upload, not a resumable offset).",
-  "DELETE /v2/uploads/:id": "Abort and discard an in-progress upload session.",
-  "POST /v2/uploads/:id/finalize": "Finalize an upload into a durable attachment resource.",
-  "POST /v2/handshake": "Negotiate the control protocol major before product calls.",
-  "GET /v2/operations": "List the implemented operations (this catalog).",
-  "POST /v2/maintenance/gc": "Run retention garbage collection over expired run trees.",
-  "GET /v2/agent-capabilities": "List the agent capability catalog this engine advertises.",
-  "GET /v2/run-applicability":
-    "Project the root-scoped Git prerequisite for every run/workspace shape.",
-  "GET /v2/global/events": "Subscribe to the global cross-project event stream (SSE).",
-  "GET /v2/quota": "Read cached per-profile harness quota snapshots.",
-  "POST /v2/quota": "Refresh and read per-profile harness quota snapshots.",
-  "GET /v2/credential-profiles": "List credential profiles per harness.",
-  "POST /v2/credential-profiles": "Create a credential profile for a harness.",
-  "PATCH /v2/credential-profiles/:harness/:profileId":
-    "Toggle a credential profile's enabled state (the accounts Enabled row).",
-  "DELETE /v2/credential-profiles/:harness/:profileId": "Delete a harness credential profile.",
-  "GET /v2/harnesses": "List installed harnesses and their availability.",
-  "GET /v2/projects": "List registered projects (durable handles).",
-  "POST /v2/projects": "Register a project root as a durable handle.",
-  "POST /v2/projects/:id/relink": "Relink a registered project to a new root.",
-  "DELETE /v2/projects/:id":
-    "Remove a registered project: retire the registry entry and archive its journal partition. Refused (409) while any non-purged thread or live/queued run references it; run artifacts are left to normal GC.",
-  "GET /v2/projects/:id/events": "Subscribe to a project's event stream (SSE).",
-  "GET /v2/projects/:id/outputs": "List a project's durable outputs (artifacts/).",
-  "GET /v2/projects/:id/outputs/<path>": "Fetch one durable output file from a project.",
-  "GET /v2/harnesses/:id/models": "List a harness's selectable models.",
-  "POST /v2/harnesses/:id/auth-readiness": "Re-check a harness's auth readiness (dry).",
-  "GET /v2/runs":
-    "List a bounded, newest-first, keyset-paginated page of durable run summaries visible to the daemon.",
-  "POST /v2/runs": "Start a run and return its durable handle.",
-  "GET /v2/runs/:id": "Read a run's full detail snapshot.",
-  "POST /v2/runs/:id/retry": "Retry a run, returning a new durable handle.",
-  "GET /v2/runs/:id/run-again": "Draft a run-again request from a prior run.",
-  "POST /v2/runs/:id/apply":
-    "Apply a run's work product to the live tree; replay of an already-delivered run is a typed idempotent no-op.",
-  "POST /v2/runs/:id/apply/check":
-    "Dry-check whether a run's patch would apply; an already-delivered run reports the safe already-applied no-op.",
-  "GET /v2/runs/:id/artifacts": "List a run tree's technical artifacts.",
-  "GET /v2/runs/:id/artifacts/<path>": "Fetch one artifact file from a run tree.",
-  "POST /v2/runs/:id/control": "Send a control signal (cancel/pause) to a run.",
-  "POST /v2/runs/:id/decision": "Record an operator unblock/rerun decision on a run.",
-  "GET /v2/runs/:id/events": "Replay + tail a run's event stream (SSE).",
-  "POST /v2/runs/:id/interactions/:id/answer": "Answer a run's pending interactive question.",
-  "GET /v2/runs/:id/produced": "List a run's produced project outputs.",
-  "GET /v2/runs/:id/produced/<path>": "Fetch one produced project-output file from a run.",
-  "GET /v2/threads": "List conversation threads.",
-  "POST /v2/threads": "Create a conversation thread.",
-  "GET /v2/threads/:id": "Read a thread's detail (turns + head).",
-  "PATCH /v2/threads/:id": "Update a thread's sticky settings (harness/profile/access).",
-  "POST /v2/threads/:id/trash": "Move a thread to trash.",
-  "POST /v2/threads/:id/restore": "Restore a thread from trash.",
-  "POST /v2/threads/:id/purge": "Permanently purge a trashed thread.",
-  "POST /v2/threads/:id/apply": "Apply the thread's latest run work product.",
-  "POST /v2/threads/:id/turns": "Enqueue a new turn on a thread.",
-  "POST /v2/threads/:id/turns/:id/retry": "Retry a thread turn.",
-  "GET /v2/trust": "List protected-path trust state.",
-  "POST /v2/trust": "Update protected-path trust state.",
-  "GET /v2/settings": "Read the settings snapshot.",
-  "POST /v2/settings": "Update settings.",
-  "GET /v2/secrets": "List stored secret handles (values never returned).",
-  "POST /v2/secrets": "Set a stored secret value.",
-  "DELETE /v2/secrets/:id": "Delete a stored secret.",
-  "GET /v2/setup/jobs": "List harness setup/login jobs.",
-  "POST /v2/setup/jobs": "Start a harness setup/login job.",
-  "GET /v2/setup/jobs/:id": "Read a setup job's status.",
-  "GET /v2/setup/jobs/:id/snapshot": "Read a setup job's terminal snapshot.",
-  "GET /v2/setup/jobs/:id/events": "Tail a setup job's event stream (SSE).",
-  "POST /v2/setup/jobs/:id/cancel": "Cancel a setup job.",
-  "POST /v2/setup/jobs/:id/reconcile": "Reconcile a setup job's state.",
-  "POST /v2/setup/jobs/:id/extend": "Extend a setup job's deadline.",
-  "GET /v2/recovery/partitions/:id": "Inspect a journal partition for recovery.",
-  "POST /v2/recovery/partitions/:id/validate": "Validate a journal partition (dry).",
-  "POST /v2/recovery/partitions/:id/export": "Export a journal partition (dry).",
-  "POST /v2/recovery/partitions/:id/quarantine": "Quarantine a corrupt journal partition.",
-};
 
 const j = (
   method: OperationDraft["method"],
