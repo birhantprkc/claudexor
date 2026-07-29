@@ -36,12 +36,16 @@ extension SettingsScreen {
                     Label("Reconnect", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
+                .productControlAccessibility("Reconnect")
+                .help("Reconnect the app to the selected engine and reload its current state.")
                 Button {
                     Task { await refreshAll() }
                 } label: {
                     Label("Refresh metadata", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .buttonStyle(.bordered)
+                .productControlAccessibility("Refresh metadata")
+                .help("Reload settings, quota, secrets, harness readiness, and trust metadata.")
             }
         }
     }
