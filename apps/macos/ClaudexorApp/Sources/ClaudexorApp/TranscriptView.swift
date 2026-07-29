@@ -154,7 +154,7 @@ struct ToolRow: View {
     /// Short humane title. For a command, the binary's basename from the
     /// TYPED target (first whitespace token) — presentation shortening of a
     /// typed field, not prose governance. Other kinds keep the tool name.
-    static func title(_ tool: ToolBlock) -> String {
+    nonisolated static func title(_ tool: ToolBlock) -> String {
         guard tool.kind == "command",
               let target = tool.target?.trimmingCharacters(in: .whitespaces),
               !target.isEmpty
@@ -165,7 +165,7 @@ struct ToolRow: View {
 
     /// The single-line context after the title: a command shows its (bounded
     /// by the reducer) full target; other kinds show their target verbatim.
-    static func subtitle(_ tool: ToolBlock) -> String? {
+    nonisolated static func subtitle(_ tool: ToolBlock) -> String? {
         guard let target = tool.target, !target.isEmpty else { return nil }
         // Don't repeat a target that IS the title (e.g. bare "ls").
         return target == title(tool) ? nil : target
@@ -174,7 +174,7 @@ struct ToolRow: View {
     /// SF Symbol per typed ToolKind (schema vocabulary: web/file/command/
     /// mcp/search/other) — every name is exercised by a unit test, so a
     /// bad symbol never renders as an invisible blank.
-    static func kindGlyph(_ kind: String?) -> String {
+    nonisolated static func kindGlyph(_ kind: String?) -> String {
         switch kind {
         case "command": return "terminal"
         case "web": return "globe"
