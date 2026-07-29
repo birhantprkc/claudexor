@@ -831,19 +831,6 @@ final class AppModel {
         }?.thread.repoRoot
     }
 
-    /// The eligible pool bound to a SPECIFIC thread, not live selection. Used by
-    /// card actions that carry their owning thread id and may run after selection
-    /// changes.
-    func threadEligiblePool(_ tid: String) -> [String] {
-        if tid == selectedThreadId, let d = selectedThreadDetail {
-            let sticky = d.thread.eligibleHarnesses ?? []
-            if !sticky.isEmpty { return sticky }
-        }
-        let sticky = threads.first { $0.id == tid }?.eligibleHarnesses ?? []
-        if !sticky.isEmpty { return sticky }
-        return activeSettingsSnapshot?.routing.eligibleHarnesses ?? []
-    }
-
     /// The selected thread's HEAD turn runId — the CANCEL target. Present as soon
     /// as the head turn binds a runId, EVEN BEFORE its live `TaskRun` row hydrates
     /// (so Stop is actionable in that window). nil only during the 202 pre-bind

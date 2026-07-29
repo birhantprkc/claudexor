@@ -194,7 +194,7 @@ struct AccountsTriggerRow: View {
     /// quiet row — it must not compete with the thread list.
     private var trigger: some View {
         HStack(spacing: Theme.Spacing.sm) {
-            if model.gateway(for: model.activeExecutionLocation) == nil {
+            if !AccountsPresentation.isAvailable(model: model) {
                 Image(systemName: "wifi.slash").font(.callout).foregroundStyle(.secondary)
             } else {
                 Circle()
@@ -227,7 +227,7 @@ struct AccountsPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             header
-            if model.health != .connected {
+            if !AccountsPresentation.isAvailable(model: model) {
                 Label("Accounts and quota are unavailable while the engine is offline.",
                       systemImage: "wifi.slash")
                     .font(.caption).foregroundStyle(.secondary)

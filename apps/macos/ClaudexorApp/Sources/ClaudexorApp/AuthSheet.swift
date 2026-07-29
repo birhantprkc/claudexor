@@ -377,13 +377,8 @@ struct AuthSheet: View {
             else if let err = next.lastError, !err.isEmpty { status = err }
             if let job = next.job, job.isTerminal, lastRefreshedTerminalJobId != job.jobId {
                 lastRefreshedTerminalJobId = job.jobId
-                let refreshed = await model.refreshAuthReadinessAfterSetupLifecycle(
-                    for: family,
-                    job: job
-                )
-                // A profile job's verification truth is the profile projection,
-                // not the default store — refresh it too (INV-135).
-                if profileId != nil { await model.refreshCredentialProfiles() }
+                let refreshed = await model.refreshCredentialReadiness(
+                    for: family, profileId: profileId, after: job)
                 if !refreshed {
                     status = "Setup finished, but the exact auth-readiness refresh failed. Use Recheck before trusting readiness."
                 }
@@ -466,10 +461,9 @@ struct AuthSheet: View {
     private func recheck() async {
         actionInFlight = true
         defer { actionInFlight = false }
-        // A profile target's verification truth is ITS doctor projection —
-        // refresh it alongside the default-store probe (round-2 R2-1).
-        if profileId != nil { await model.refreshCredentialProfiles() }
-        if await model.refreshAuthReadinessAfterSetupLifecycle(for: family, job: job) {
+        if await model.refreshCredentialReadiness(
+            for: family, profileId: profileId, after: job)
+        {
             status = profileId == nil
                 ? "Exact auth-readiness check completed for \(family.label)."
                 : "Account readiness refreshed for this \(family.label) profile."
@@ -483,7 +477,9 @@ struct AuthSheet: View {
         lifecycle = SetupLifecycleSnapshot(job: job, connection: .recovering)
         await controller.reconnect(harness: family.setupHarnessId)
         lifecycle = await controller.snapshot()
-        if !(await model.refreshAuthReadinessAfterSetupLifecycle(for: family, job: lifecycle.job)) {
+        if !(await model.refreshCredentialReadiness(
+            for: family, profileId: profileId, after: lifecycle.job))
+        {
             status = "Setup state reconnected, but the exact auth-readiness refresh failed. Use Recheck before trusting readiness."
         }
     }
@@ -537,7 +533,8 @@ struct AuthSheet: View {
 
             guard let target = latest.job else {
                 if latest.connection == .idle {
-                    _ = await model.refreshAuthReadinessAfterSetupLifecycle(for: family, job: nil)
+                    _ = await model.refreshCredentialReadiness(
+                        for: family, profileId: profileId, after: nil)
                     closeAfterCancellation = false
                     dismiss()
                 } else {

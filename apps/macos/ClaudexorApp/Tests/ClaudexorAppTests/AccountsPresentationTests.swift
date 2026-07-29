@@ -31,12 +31,34 @@ import Testing
 
         model.exactAuthSources[.claude] = [
             .nativeSession: HarnessAuthSource(
+                source: "native_session", availability: "unavailable",
+                verification: "not_run"),
+        ]
+        row = try #require(AccountsPresentation.rows(model: model).first)
+        #expect(row.readiness == .unavailable)
+
+        model.exactAuthSources[.claude] = [
+            .nativeSession: HarnessAuthSource(
                 source: "native_session", availability: "available",
                 verification: "passed"),
         ]
         row = try #require(AccountsPresentation.rows(model: model).first)
         #expect(row.readiness == .ready)
         #expect(row.verified)
+    }
+
+    @MainActor
+    @Test func accountsAvailabilityFollowsTheActiveLocationGateway() {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let locationID = ExecutionLocationID.remote(UUID())
+        model.draftExecutionLocation = locationID
+        model.health = .connected
+        #expect(!AccountsPresentation.isAvailable(model: model))
+
+        model.remoteClients[locationID] = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test")
+        model.health = .offline
+        #expect(AccountsPresentation.isAvailable(model: model))
     }
 
     @MainActor

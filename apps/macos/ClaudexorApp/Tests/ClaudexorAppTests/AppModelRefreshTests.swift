@@ -1881,6 +1881,29 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func profileSheetRefreshUsesOnlyThatProfilesDoctorSnapshot() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41118), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.httpMethod == "GET",
+                  request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            calls.increment()
+            let body = #"{"profiles":[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":"profile ready","last_verified_at":null}}],"harnessAccounts":[],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[],"quotaEventCursor":"quota:profile","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-29T00:00:00Z"}}"#
+            return (appResponse(for: request), Data(body.utf8))
+        }
+
+        #expect(await model.refreshCredentialReadiness(
+            for: .claude, profileId: "work", after: nil))
+        #expect(calls.count == 1)
+        #expect(model.credentialProfiles.first?.status.verification == "passed")
+        #expect(model.exactAuthSources[.claude] == nil)
+    }
+
+    @MainActor
     @Test func rawAPISetupAndAPIKeyReadinessNeverUseRetiredRawHarnessId() async throws {
         #expect(HarnessFamily.raw.setupHarnessId == "raw-api")
         #expect(HarnessFamily.raw.apiKeyAuthReadinessRequest == AuthReadinessRefreshRequest(

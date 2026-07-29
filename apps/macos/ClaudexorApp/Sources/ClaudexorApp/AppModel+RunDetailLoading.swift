@@ -72,6 +72,32 @@ extension AppModel {
         return nil
     }
 
+    /// One local/remote answer projection. New runs consume the server-selected
+    /// bounded primary output; legacy runs share the same bounded artifact fallback.
+    func answerText(
+        for detail: RunDetail,
+        client: GatewayClient,
+        runId: String
+    ) async -> String? {
+        if let primary = detail.primaryOutput,
+           let text = primary.text,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            guard primary.kind != "patch",
+                  primary.kind != "diagnostic",
+                  detail.summary.outputReadyState != "diagnostic"
+            else { return nil }
+            return primary.truncated == true
+                ? text + "\n\n_Inline preview bounded; open \(primary.path) for the full output._"
+                : text
+        }
+        guard detail.summary.outputReadyState != "diagnostic" else { return nil }
+        return await firstArtifactText(
+            client: client,
+            runId: runId,
+            paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md"])
+    }
+
     /// Keep a valid String prefix within an exact UTF-8 byte ceiling. Cutting
     /// through a multibyte scalar backs up to its start instead of inserting a
     /// replacement character that could exceed the byte bound.

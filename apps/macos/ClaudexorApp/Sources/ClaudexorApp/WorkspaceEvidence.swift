@@ -84,8 +84,8 @@ struct RunEvidenceSection: View {
             guard loadedRunId != runId,
                   model.task(runId, at: locationID) != nil
             else { return }
-            await model.loadRunDetail(runId, locationID: locationID)
-            loadedRunId = runId
+            loadedRunId = await model.loadRunDetail(runId, locationID: locationID)
+                ? runId : nil
             return
         }
         guard Self.needsDetailLoad(

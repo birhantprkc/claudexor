@@ -76,6 +76,13 @@ struct AccountRowModel: Identifiable {
 /// Pure assembly of account rows from the model's profile + readiness + quota
 /// state, plus the trigger's worst-of aggregates.
 enum AccountsPresentation {
+    /// Account controls belong to the active execution location. Local daemon
+    /// health is neither necessary nor sufficient while a remote host is active.
+    @MainActor
+    static func isAvailable(model: AppModel) -> Bool {
+        model.gateway(for: model.activeExecutionLocation) != nil
+    }
+
     @MainActor
     static func rows(model: AppModel) -> [AccountRowModel] {
         let groups = QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
@@ -143,6 +150,9 @@ enum AccountsPresentation {
         availability: String?, verification: String?
     ) -> AccountReadiness {
         if availability == "available" && verification == "passed" { return .ready }
+        // `unavailable + not_run` is the canonical absent/logged-out source,
+        // while `available + not_run` is a presence-only probe and stays unknown.
+        if availability == "unavailable" { return .unavailable }
         if availability == nil || availability == "unknown"
             || verification == nil || verification == "not_run" || verification == "unknown" {
             return .unknown

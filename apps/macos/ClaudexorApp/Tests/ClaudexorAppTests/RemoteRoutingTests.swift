@@ -176,5 +176,25 @@ import Testing
             effectiveSource: .nativeSession,
             nativeSessionVerified: true,
             harnessRoutable: true))
+
+        let recovered = RemoteDeviceLoginTerminalPresentation(
+            jobState: .failed,
+            selectionReason: .protocolViolation,
+            effectiveRoute: .vendorNative,
+            effectiveSource: .nativeSession,
+            nativeSessionVerified: true,
+            harnessRoutable: true)
+        #expect(recovered == .readyWithWarning)
+        #expect(recovered.label == "Signed in; setup check failed")
+        #expect(recovered.label != "Login verified")
+
+        #expect(RemoteDeviceLoginTerminalPresentation(
+            jobState: .succeeded,
+            selectionReason: nil,
+            effectiveRoute: nil,
+            effectiveSource: nil,
+            nativeSessionVerified: false,
+            harnessRoutable: false
+        ) == .verified)
     }
 }

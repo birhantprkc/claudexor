@@ -303,14 +303,14 @@ struct RemoteDeviceLoginSheet: View {
                 ProgressView("Waiting for Codex to issue a device code…")
             }
             if let job = snapshot?.job {
-                if remoteDeviceLoginRecoveredFromProtocolMismatch(
+                let terminalPresentation = RemoteDeviceLoginTerminalPresentation(
                     jobState: job.state,
                     selectionReason: job.authCapability?.receipt?.selectionReason,
                     effectiveRoute: job.authCapability?.receipt?.effective,
                     effectiveSource: job.authCapability?.receipt?.effectiveSource,
                     nativeSessionVerified: nativeSessionVerified,
                     harnessRoutable: harnessRoutable)
-                {
+                if terminalPresentation == .readyWithWarning {
                     Text("Codex is signed in and ready.")
                         .font(.callout)
                         .foregroundStyle(Theme.status(.positive))
@@ -326,20 +326,10 @@ struct RemoteDeviceLoginSheet: View {
                             ? SwiftUI.Color.orange : SwiftUI.Color.secondary)
                 }
                 if job.isTerminal {
-                    let verified = job.state == .succeeded
-                        || remoteDeviceLoginRecoveredFromProtocolMismatch(
-                            jobState: job.state,
-                            selectionReason: job.authCapability?.receipt?.selectionReason,
-                            effectiveRoute: job.authCapability?.receipt?.effective,
-                            effectiveSource: job.authCapability?.receipt?.effectiveSource,
-                            nativeSessionVerified: nativeSessionVerified,
-                            harnessRoutable: harnessRoutable)
                     Label(
-                        verified ? "Login verified" : "Login failed",
-                        systemImage: verified
-                            ? "checkmark.circle.fill" : "xmark.circle")
-                        .foregroundStyle(verified
-                            ? Theme.status(.positive) : SwiftUI.Color.orange)
+                        terminalPresentation.label,
+                        systemImage: terminalPresentation.systemImage)
+                        .foregroundStyle(terminalPresentation.color)
                 }
             }
             if let status {

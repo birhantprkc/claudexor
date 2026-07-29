@@ -7,31 +7,29 @@ extension AppModel {
     /// Local detail hydration stays on the mainline request owner in
     /// `AppModel+RunDetailLoading`; remote rows are kept in their location-scoped
     /// collection so identical daemon run ids can never collide.
-    func loadRunDetail(_ id: String, locationID: ExecutionLocationID) async {
+    @discardableResult
+    func loadRunDetail(_ id: String, locationID: ExecutionLocationID) async -> Bool {
         if locationID == .local {
             await loadRunDetail(id)
-            return
+            return hydratedRunDetails.contains(id)
         }
-        await performRemoteRunDetailLoad(id, locationID: locationID)
+        return await performRemoteRunDetailLoad(id, locationID: locationID)
     }
 
     private func performRemoteRunDetailLoad(
         _ id: String,
         locationID: ExecutionLocationID
-    ) async {
+    ) async -> Bool {
         guard let requestClient = gateway(for: locationID),
               let original = remoteTasks[locationID]?.first(where: {
                   $0.id == id || $0.resolvedRunId == id
               })
-        else { return }
+        else { return false }
         do {
             let detail = try await requestClient.runDetail(runId: id)
             guard selectedExecutionLocation == locationID,
-                  gateway(for: locationID) === requestClient,
-                  let index = remoteTasks[locationID]?.firstIndex(where: {
-                      $0.id == id || $0.resolvedRunId == id
-                  })
-            else { return }
+                  gateway(for: locationID) === requestClient
+            else { return false }
             var task = Self.liveTask(from: detail.summary)
             task.diff = original.diff
             task.operatorDecisionAction = detail.operatorDecisionAction
@@ -60,22 +58,14 @@ extension AppModel {
             if !detail.timeline.isEmpty {
                 task.activity = detail.timeline.map(Self.activityEvent(from:))
             }
-            if let primary = detail.primaryOutput,
-               let text = primary.text,
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               primary.kind != "patch"
-            {
-                let rendered = primary.truncated == true
-                    ? text
-                        + "\n\n_Inline preview bounded; open \(primary.path) for the full output._"
-                    : text
-                if primary.kind == "diagnostic" || detail.summary.outputReadyState == "diagnostic" {
-                    task.diagnosticText = rendered
-                    task.answerText = nil
-                } else {
-                    task.answerText = rendered
-                }
-            }
+            task.answerText = await answerText(
+                for: detail, client: requestClient, runId: id)
+            guard selectedExecutionLocation == locationID,
+                  gateway(for: locationID) === requestClient,
+                  let index = remoteTasks[locationID]?.firstIndex(where: {
+                      $0.id == id || $0.resolvedRunId == id
+                  })
+            else { return false }
             let failure = detail.failure ?? detail.summary.failure
             let findings = detail.reviewFindings.compactMap {
                 Self.finding(from: $0, taskTitle: task.title)
@@ -91,16 +81,17 @@ extension AppModel {
             task.diagnosticText = RunDiagnosticsPresentation.summary(
                 detail: detail, error: task.engineError)
             remoteTasks[locationID]?[index] = task
+            return true
         } catch {
             guard gateway(for: locationID) === requestClient,
                   let index = remoteTasks[locationID]?.firstIndex(where: {
                       $0.id == id || $0.resolvedRunId == id
                   })
-            else { return }
-            remoteTasks[locationID]?[index].engineError =
-                "Could not load run detail: \(error)"
-            remoteTasks[locationID]?[index].diagnosticText =
-                remoteTasks[locationID]?[index].engineError
+            else { return false }
+            let message = "Could not load run detail: \(error)"
+            remoteTasks[locationID]?[index].engineError = message
+            remoteTasks[locationID]?[index].diagnosticText = message
+            return false
         }
     }
 }

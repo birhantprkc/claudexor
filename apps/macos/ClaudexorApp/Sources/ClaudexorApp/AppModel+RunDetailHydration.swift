@@ -184,28 +184,8 @@ extension AppModel {
                !task.activity.contains(where: { $0.title == "Final summary" }) {
                 task.activity.append(ActivityEvent(.message, "Final summary", detail: final))
             }
-            if let primary = detail.primaryOutput, let text = primary.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let displayedText = primary.truncated == true
-                    ? text + "\n\n_Inline preview bounded; open \(primary.path) for the full output._"
-                    : text
-                if primary.kind == "diagnostic" || detail.summary.outputReadyState == "diagnostic" {
-                    task.diagnosticText = displayedText
-                    task.answerText = nil
-                } else if primary.kind == "patch" {
-                    // A raw diff is NEVER markdown-rendered as the Outcome; it
-                    // belongs to the Diff tab (parsed below).
-                    task.answerText = nil
-                } else {
-                    task.answerText = displayedText
-                }
-            } else if detail.summary.outputReadyState != "diagnostic" {
-                // Legacy fallback is limited to genuine mode outputs. A
-                // successful summary is evidence, never a model answer, and a
-                // diagnostic receipt must not resurrect an earlier ready file.
-                task.answerText = await firstArtifactText(client: requestClient, runId: id, paths: ["final/answer.md", "final/explore.md", "final/report.md", "final/plan.md"])
-            } else {
-                task.answerText = nil
-            }
+            task.answerText = await answerText(
+                for: detail, client: requestClient, runId: id)
             // The fallback artifact fetch above is the final suspension point
             // in this load. A disconnect can retire the request while it is
             // awaiting bytes, so re-validate before any new-connection state

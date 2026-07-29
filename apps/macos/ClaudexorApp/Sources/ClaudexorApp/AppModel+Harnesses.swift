@@ -293,6 +293,29 @@ extension AppModel {
         return refreshed
     }
 
+    /// Refresh the exact credential store an AuthSheet represents. Default login
+    /// sheets use the source-targeted probe; profile sheets consume the profile
+    /// snapshot's own doctor result and never let default-route failure overwrite it.
+    @discardableResult
+    func refreshCredentialReadiness(
+        for family: HarnessFamily,
+        profileId: String?,
+        after job: SetupJob?
+    ) async -> Bool {
+        guard let profileId else {
+            return await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
+        }
+        let locationID = activeExecutionLocation
+        guard await loadCredentialProfiles(locationID: locationID) == nil else { return false }
+        let profiles = locationID == .local
+            ? credentialProfiles
+            : (remoteCredentialProfiles[locationID] ?? [])
+        return profiles.contains {
+            $0.profile.harnessId == family.setupHarnessId
+                && $0.profile.profileId == profileId
+        }
+    }
+
     @discardableResult
     func refreshAuthReadiness(for family: HarnessFamily, request: AuthReadinessRefreshRequest) async -> Bool {
         let locationID = activeExecutionLocation
