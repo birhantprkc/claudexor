@@ -76,7 +76,7 @@ import Testing
                 "shots/action.png",
                 "/Users/anka/project/shots/absolute.jpg",
                 "../escape.png",
-                "/Users/anton/secret.png",
+                "/Users/elsewhere/secret.png",
                 "notes.txt",
             ],
             repoRoot: "/Users/anka/project",
