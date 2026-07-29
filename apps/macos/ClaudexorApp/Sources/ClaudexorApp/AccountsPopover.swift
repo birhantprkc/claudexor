@@ -166,6 +166,7 @@ struct AccountsTriggerRow: View {
             Divider().opacity(0.45)
             Button { showPopover = true } label: { trigger }
                 .buttonStyle(.plain)
+                .productControlAccessibility("Accounts and quota")
                 .help("Manage accounts — add, log in, view quota, auto-switch")
                 .padding(.horizontal, Theme.Spacing.md)
                 .padding(.vertical, Theme.Spacing.sm)
