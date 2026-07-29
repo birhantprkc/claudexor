@@ -16,9 +16,10 @@ import { FAKE_KINDS } from "@claudexor/harness-fake";
 import { parseArgs } from "./args.js";
 import { harnessCommand } from "./harness-command.js";
 
-// `harness list` is the ONLY harness verb that survived the install-verb cut
-// (the remote vendor installer executed unverified curl|sh payloads); this
-// pins the survivor so a regression cannot ride out unnoticed.
+// `harness list` plus the RESTORED disclosed installer (issue #89): list
+// stays exactly as it was after the PR #82 cut, and install now routes to
+// harness-installer.ts (pinned versions, disclosure-before-execution — its
+// own suite covers the details; here we pin the dispatch and the refusal).
 describe("harnessCommand", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -41,11 +42,22 @@ describe("harnessCommand", () => {
     expect(mocks.printJson).not.toHaveBeenCalled();
   });
 
-  it("rejects any other verb (harness install stays removed) with the usage error", () => {
-    expect(harnessCommand(parseArgs(["harness", "install", "codex"]), false)).toBe(2);
+  it("rejects unknown verbs with the usage error", () => {
+    expect(harnessCommand(parseArgs(["harness", "bogus"]), false)).toBe(2);
     expect(mocks.printUsageError).toHaveBeenCalledWith(
       false,
-      "usage: claudexor harness list [--all]",
+      "usage: claudexor harness list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
     );
+  });
+
+  it("routes install to the disclosed installer, which refuses without confirmation", () => {
+    // Non-TTY, no --yes: the pinned disclosure prints, then a loud refusal —
+    // exit 1, and NEVER the usage path (the verb exists again).
+    expect(harnessCommand(parseArgs(["harness", "install", "codex"]), false)).toBe(1);
+    expect(mocks.printUsageError).not.toHaveBeenCalled();
+    const printed = mocks.print.mock.calls.map((call) => call[0] as string).join("\n");
+    expect(printed).toContain("@openai/codex@");
+    expect(printed).not.toContain("@latest");
+    expect(printed).toContain("Not installing");
   });
 });

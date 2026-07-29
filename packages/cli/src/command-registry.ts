@@ -274,10 +274,10 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
   },
   {
     id: "harness",
-    usageArgs: "list [--all]",
-    summary: "List real harnesses (--all includes fakes)",
-    flags: ["all", "json"],
-    mutability: "read",
+    usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
+    summary: "List harnesses, or install one pinned vendor CLI after disclosure",
+    flags: ["all", "dry-run", "yes", "json"],
+    mutability: "ops",
     stability: "stable",
   },
   {

@@ -20,6 +20,7 @@ import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import { EffortHint } from "@claudexor/schema";
 import { normalizeEffort, resolveEffort, runCapture } from "@claudexor/core";
 import { nowIso, redactSecrets } from "@claudexor/util";
+import { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
 export const BIN = process.env.CLAUDEXOR_CLAUDE_BIN || "claude";
 
@@ -35,8 +36,11 @@ export const CLAUDE_EFFORT_SNAPSHOT: readonly EffortHint[] = [
   "max",
 ];
 
-/** Vendor CLI version `CLAUDE_EFFORT_SNAPSHOT` was captured from. */
-export const CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "2.1.165";
+/** Vendor CLI version `CLAUDE_EFFORT_SNAPSHOT` was captured from. Aliases the
+ * per-package vendor-version SSOT (vendor-cli-version.ts), the same constant
+ * the remote installer pins — bumping the pin without re-recording this
+ * snapshot is a lie the alias makes impossible to tell twice. */
+export const CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST: string = CLAUDE_VENDOR_CLI_VERSION;
 
 /**
  * Whether the recorded snapshot may be TRUSTED for arg emission against the

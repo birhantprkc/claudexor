@@ -204,7 +204,14 @@ export const CLI_FLAGS: readonly CliFlagSpec[] = [
     "browser-redirect",
     "Codex login: opt into the localhost-callback flow instead of the device-auth default",
   ),
-  booleanFlag("dry-run", "Plugin: show lifecycle actions; apply: check patch without mutating"),
+  booleanFlag(
+    "dry-run",
+    "Plugin: show lifecycle actions; apply: check patch without mutating;\n                           harness install: print the disclosure only",
+  ),
+  booleanFlag(
+    "yes",
+    "harness install: confirm the disclosed installer without the interactive prompt",
+  ),
   booleanFlag(
     "force",
     "Reapply verified Claudexor-owned plugin drift; never overwrites unowned files",

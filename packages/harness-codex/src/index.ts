@@ -3,17 +3,15 @@ import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js
 import { resolveSecret } from "@claudexor/secrets";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AccessProfile,
-  AuthSourceReadiness,
-  ConformanceReport,
-  CredentialProfile,
-  CredentialProfileStatus,
-  HarnessEvent,
-  HarnessManifest,
-  HarnessRunSpec,
-} from "@claudexor/schema";
 import {
+  type AccessProfile,
+  type AuthSourceReadiness,
+  type ConformanceReport,
+  type CredentialProfile,
+  type CredentialProfileStatus,
+  type HarnessEvent,
+  type HarnessManifest,
+  type HarnessRunSpec,
   ConformanceReport as ConformanceReportSchema,
   HarnessManifest as HarnessManifestSchema,
 } from "@claudexor/schema";
@@ -30,6 +28,7 @@ import {
 import { codexRunEffortResolution } from "./effort-gate.js";
 import { tomlBasicString } from "./toml.js";
 export { CODEX_EFFORT_SNAPSHOT, clearCodexEffortCache, unionEffortLevels } from "./effort-probe.js";
+export { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,

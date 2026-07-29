@@ -82,6 +82,14 @@ final class AppModel {
     var remoteConnectionMessages: [UUID: String] = [:]
     var remoteDirectoryBrowser: RemoteDirectoryBrowserRequest?
     var remoteTerminalSheet: RemoteTerminalSheetRequest?
+    /// Terminal work launched from Settings stays owned by that window. Using
+    /// the main-window sheet here steals focus and makes Settings appear to
+    /// close as soon as an installer starts.
+    var settingsRemoteTerminalSheet: RemoteTerminalSheetRequest?
+    /// Pending install confirmation: the disclosure text comes from the remote
+    /// runtime's own `harness install --dry-run --json` answer, never from a
+    /// string table in the app — what the user approves is what will run.
+    var remoteHarnessInstallPrompt: RemoteHarnessInstallPrompt?
     var remoteDeviceLogin: RemoteDeviceLoginRequest?
     var remotePreview: RemotePreviewRequest?
 

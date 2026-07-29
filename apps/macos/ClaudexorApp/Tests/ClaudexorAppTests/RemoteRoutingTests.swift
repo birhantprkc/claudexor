@@ -29,12 +29,52 @@ import Testing
         #expect(model.task("same-run", at: locationID)?.phase == .cancelled)
     }
 
-    @Test func terminalAuthAndSetupAreOneShotBlockingOperations() {
+    @Test func terminalSetupAndInstallAreOneShotBlockingOperations() {
         let id = UUID()
         #expect(RemoteTerminalPurpose.authentication(id, 1).blocksDismissalWhileRunning)
         #expect(RemoteTerminalPurpose.setup(id, "setup-job").blocksDismissalWhileRunning)
+        #expect(RemoteTerminalPurpose.install(id, "cursor").blocksDismissalWhileRunning)
         #expect(!RemoteTerminalPurpose.shell.blocksDismissalWhileRunning)
         #expect(!RemoteTerminalPurpose.log.blocksDismissalWhileRunning)
+    }
+
+    @Test func installDisclosureParsesOnlyTheRemoteCLIsOwnDryRunAnswer() {
+        let id = UUID()
+        let valid = Data("""
+        {"ok": true, "dryRun": true, "harness": "codex",
+         "command": "npm install --global --prefix ~/.claudexor/remote/vendor @openai/codex@0.144.1",
+         "installLocation": "~/.claudexor/remote/vendor/bin",
+         "pinnedVersion": "0.144.1", "verification": "npm_registry_integrity"}
+        """.utf8)
+        let prompt = AppModel.parseHarnessInstallDisclosure(
+            valid, connectionID: id, harness: "codex")
+        #expect(prompt?.command.hasSuffix("@openai/codex@0.144.1") == true)
+        #expect(prompt?.pinnedVersion == "0.144.1")
+        #expect(prompt?.installLocation == "~/.claudexor/remote/vendor/bin")
+
+        let cursor = Data("""
+        {"ok": true, "dryRun": true, "harness": "cursor",
+         "command": "curl --fail --silent --show-error --location https://cursor.com/install --output x/install.sh && /bin/sh x/install.sh",
+         "installLocation": "~/.local/bin", "pinnedVersion": null,
+         "verification": "human_watches_pty"}
+        """.utf8)
+        #expect(AppModel.parseHarnessInstallDisclosure(
+            cursor, connectionID: id, harness: "cursor")?.pinnedVersion == nil)
+
+        // Anything that is NOT the CLI's own affirmative dry-run disclosure
+        // must yield nil — and therefore no install prompt at all.
+        let refused = Data(
+            #"{"ok": false, "dryRun": true, "harness": "codex", "command": "x", "installLocation": "y"}"#
+                .utf8)
+        #expect(AppModel.parseHarnessInstallDisclosure(
+            refused, connectionID: id, harness: "codex") == nil)
+        let mismatched = Data(
+            #"{"ok": true, "dryRun": true, "harness": "claude", "command": "x", "installLocation": "y"}"#
+                .utf8)
+        #expect(AppModel.parseHarnessInstallDisclosure(
+            mismatched, connectionID: id, harness: "codex") == nil)
+        #expect(AppModel.parseHarnessInstallDisclosure(
+            Data("not json".utf8), connectionID: id, harness: "codex") == nil)
     }
 
     @Test func onlyConnectionFailuresTriggerRemoteReadReconnect() {

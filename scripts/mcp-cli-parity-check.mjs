@@ -121,6 +121,10 @@ const BOOLEAN_FLAG_MAP = {
   all: { mcp: null, reason: "subcommand scope flag, not a run control" },
   refresh: { mcp: null, reason: "quota subcommand operation, not a run control" },
   "dry-run": { mcp: null, reason: "subcommand plumbing" },
+  yes: {
+    mcp: null,
+    reason: "harness install confirmation (subcommand plumbing, not a run control)",
+  },
   force: { mcp: null, reason: "subcommand plumbing" },
   "allow-full-access": { mcp: null, reason: "trust subcommand flag" },
   "revoke-full-access": { mcp: null, reason: "trust subcommand flag" },

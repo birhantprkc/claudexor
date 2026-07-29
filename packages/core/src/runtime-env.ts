@@ -74,11 +74,11 @@ export function normalizedHarnessPath(
   const runnerDir = managedRunnerNodeDir(execPath, platform);
   const preferred = [
     ...(runnerDir ? [runnerDir] : []),
-    // The documented vendor-CLI prefix on SSH hosts (installs are user-driven;
-    // Claudexor ships no remote vendor installer). Keep this app-owned prefix
-    // ahead of legacy ~/.local or managed-node shims so a vendor CLI installed
-    // here cannot remain shadowed by an older copy. The remote wrapper sets the
-    // marker; local runtimes never probe this remote-only path.
+    // The disclosed SSH harness installer (`claudexor harness install`,
+    // exact pinned versions) deliberately writes here. Keep this app-owned
+    // prefix ahead of legacy ~/.local or managed-node shims so a successful
+    // remote install cannot remain shadowed by an older vendor CLI. The remote
+    // wrapper sets the marker; local runtimes never probe this remote-only path.
     ...(source.CLAUDEXOR_REMOTE_RUNTIME === "1"
       ? [join(home, ".claudexor", "remote", "vendor", "bin")]
       : []),

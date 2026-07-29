@@ -1,5 +1,6 @@
 import type { HarnessCapabilityProfile } from "@claudexor/schema";
 import { HarnessCapabilityProfile as HarnessCapabilityProfileSchema } from "@claudexor/schema";
+import { CLAUDE_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
 /**
  * Manifest model truth source (strict model-truth validation: an explicit
@@ -27,8 +28,10 @@ export const CLAUDE_KNOWN_MODELS: readonly string[] = [
 ];
 
 /** Installed vendor CLI the known-model list above was last live-verified
- * against (the strict freshness gate compares this against the live CLI). */
-export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST = "2.1.165";
+ * against (the strict freshness gate compares this against the live CLI).
+ * Aliases the per-package vendor-version SSOT so the freshness gate and the
+ * remote installer's pin read the SAME value (vendor-cli-version.ts). */
+export const CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST: string = CLAUDE_VENDOR_CLI_VERSION;
 
 export const CLAUDE_CAPABILITY_PROFILE: HarnessCapabilityProfile =
   HarnessCapabilityProfileSchema.parse({

@@ -1990,6 +1990,27 @@ uploads through SSH, probes a staging directory, and atomically switches
 remote installation uses `sudo`. A newer compatible runtime is never
 downgraded; an incompatible older runtime is updated before use.
 
+Vendor harness CLIs land on a host only through the disclosed installer
+(`claudexor harness install`, reachable from Settings → Harnesses for a
+connected host). The npm-distributed harnesses (claude, codex, opencode)
+install one EXACT pinned version — each pin aliases that harness package's
+vendor-version constant, the same value the model-hints and effort freshness
+gates read, so the installed CLI is the version this release was verified
+against and npm checks the registry integrity checksum for that exact version;
+`@latest` is never used. Cursor ships no npm artifact and cannot be pinned:
+its vendor script is downloaded in full (`curl --fail`, never piped to a
+shell), its size and SHA-256 are printed, and it executes in the visible
+embedded PTY where the operator watches it — the human is the verifier, the
+same principle as interactive SSH auth. Nothing installs without disclosure:
+the CLI prints the exact command and destination
+(`~/.claudexor/remote/vendor/bin`, which the remote wrapper puts first on
+PATH) and requires a TTY confirmation or an explicit `--yes`, and the macOS
+confirmation dialog shows the remote CLI's own `--dry-run --json` disclosure
+verbatim before opening the terminal sheet. Failures are typed and loud — a
+failed or unreadable download refuses without executing, a non-zero installer
+exit never reads as success, and Harness Doctor verifies the result
+afterward.
+
 `claudexor remote bootstrap --json` starts or discovers the remote daemon and
 returns its loopback endpoint. The daemon remains bound to `127.0.0.1`; the app
 opens a local SSH forward and keeps the bearer token only in the in-memory

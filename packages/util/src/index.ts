@@ -1,4 +1,5 @@
 export { CLAUDEXOR_VERSION } from "./version.js";
+export type { PinnedVendorCliVersion } from "./vendor-pin.js";
 export * from "./secret-names.js";
 export * from "./sensitive-resource.js";
 export * from "./delegation-env.js";

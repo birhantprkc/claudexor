@@ -6,6 +6,19 @@ struct RemoteNativeLoginReadiness: Equatable {
     let harnessRoutable: Bool
 }
 
+/// A pending remote harness install, awaiting the user's confirmation. The
+/// command/location/pin fields are the remote CLI's own `--dry-run --json`
+/// disclosure verbatim (issue #89): the app never re-derives the install
+/// command, so the text the user approves is exactly what will run.
+struct RemoteHarnessInstallPrompt: Identifiable, Equatable {
+    let id = UUID()
+    let connectionID: UUID
+    let harness: String
+    let command: String
+    let installLocation: String
+    let pinnedVersion: String?
+}
+
 extension AppModel {
     func selectRemoteProject(connectionID: UUID, path: String) {
         let root = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -131,6 +144,136 @@ extension AppModel {
                 "Harness Doctor: \(ready) of \(harnesses.count) harnesses ready."
         } catch {
             remoteConnectionMessages[connectionID] = userMessageForRemote(error)
+        }
+    }
+
+    /// Fetch the remote runtime's own install disclosure and surface it for
+    /// confirmation. Nothing executes here: the actual installer starts only
+    /// from `confirmRemoteHarnessInstall`. A missing runtime or an
+    /// unparseable disclosure is a loud typed message, never a silent no-op.
+    func startRemoteHarnessInstall(connectionID: UUID, harness: String) async {
+        let allowed = ["claude", "codex", "cursor", "opencode"]
+        guard allowed.contains(harness),
+              let connection = remoteConnections.first(where: { $0.id == connectionID })
+        else { return }
+        if remoteClients[.remote(connectionID)] == nil {
+            await connectRemote(connectionID)
+        }
+        do {
+            let dryRun =
+                "~/.claudexor/remote/current/bin/claudexor harness install "
+                + SSHCommandFactory.posixQuote(harness) + " --dry-run --json"
+            let output = try await sshConnectionManager.execute(
+                connection, remoteCommand: dryRun)
+            guard let prompt = Self.parseHarnessInstallDisclosure(
+                output.stdout, connectionID: connectionID, harness: harness)
+            else {
+                remoteConnectionMessages[connectionID] =
+                    "The remote runtime did not return an install disclosure for "
+                    + "\(harness); nothing was installed."
+                return
+            }
+            remoteHarnessInstallPrompt = prompt
+        } catch {
+            remoteConnectionMessages[connectionID] = userMessageForRemote(error)
+        }
+    }
+
+    /// The remote CLI's `--dry-run --json` answer is the ONLY source of the
+    /// confirmation text. Strict: a non-disclosure payload (ok/dryRun false,
+    /// harness mismatch, empty command) yields nil and therefore no install.
+    nonisolated static func parseHarnessInstallDisclosure(
+        _ data: Data,
+        connectionID: UUID,
+        harness: String
+    ) -> RemoteHarnessInstallPrompt? {
+        struct Disclosure: Decodable {
+            let ok: Bool
+            let dryRun: Bool
+            let harness: String
+            let command: String
+            let installLocation: String
+            let pinnedVersion: String?
+        }
+        guard let parsed = try? JSONDecoder().decode(Disclosure.self, from: data),
+              parsed.ok, parsed.dryRun, parsed.harness == harness,
+              !parsed.command.isEmpty
+        else { return nil }
+        return RemoteHarnessInstallPrompt(
+            connectionID: connectionID,
+            harness: harness,
+            command: parsed.command,
+            installLocation: parsed.installLocation,
+            pinnedVersion: parsed.pinnedVersion)
+    }
+
+    /// Run the CONFIRMED install in the visible embedded PTY. `--yes` is
+    /// honest here: the user just approved the remote CLI's own disclosure,
+    /// and the CLI prints it again in the terminal before executing.
+    func confirmRemoteHarnessInstall(_ prompt: RemoteHarnessInstallPrompt) async {
+        remoteHarnessInstallPrompt = nil
+        guard let connection = remoteConnections.first(where: {
+            $0.id == prompt.connectionID
+        }) else { return }
+        do {
+            let factory = try await sshConnectionManager.factory(for: connection)
+            let command =
+                "~/.claudexor/remote/current/bin/claudexor harness install "
+                + SSHCommandFactory.posixQuote(prompt.harness) + " --yes"
+            settingsRemoteTerminalSheet = RemoteTerminalSheetRequest(
+                title: "Install \(prompt.harness.capitalized) — \(connection.displayName)",
+                invocation: factory.remoteCommand(command, requestTTY: true),
+                purpose: .install(prompt.connectionID, prompt.harness))
+        } catch {
+            remoteConnectionMessages[prompt.connectionID] = userMessageForRemote(error)
+        }
+    }
+
+    func finishRemoteHarnessInstall(
+        connectionID: UUID,
+        harness: String,
+        exitCode: Int32
+    ) async {
+        let displayName = harness.capitalized
+        guard exitCode == 0 else {
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installer failed with exit code \(exitCode)."
+            return
+        }
+        let location = ExecutionLocationID.remote(connectionID)
+        guard let client = remoteClients[location] else {
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installed, but the remote connection is unavailable for Harness Doctor."
+            return
+        }
+        do {
+            let harnesses = try await client.listHarnesses(fresh: true)
+            remoteHarnesses[location] = Self.mapHarnessStatuses(harnesses)
+            guard let result = harnesses.first(where: { $0.id == harness }) else {
+                remoteConnectionMessages[connectionID] =
+                    "\(displayName) installer finished, but Harness Doctor did not return that harness."
+                return
+            }
+            let installed = result.checks.first(where: { $0.id == "installed" })
+            if installed?.status != "pass" {
+                remoteConnectionMessages[connectionID] =
+                    "\(displayName) installer finished, but Harness Doctor still cannot find it"
+                    + (installed.flatMap(\.detail).map { ": \($0)" } ?? "") + "."
+            } else if !result.routableIntents.isEmpty {
+                remoteConnectionMessages[connectionID] =
+                    "\(displayName) installed and ready."
+            } else {
+                let reason = result.reasons?.first ?? "authentication is still required"
+                let nextStep =
+                    harness == "opencode"
+                    ? "Configure its provider credentials."
+                    : "Use Login → \(displayName)."
+                remoteConnectionMessages[connectionID] =
+                    "\(displayName) installed, but is not ready: \(reason). \(nextStep)"
+            }
+        } catch {
+            remoteConnectionMessages[connectionID] =
+                "\(displayName) installed, but Harness Doctor failed: \(userMessageForRemote(error))"
         }
     }
 

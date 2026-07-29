@@ -23,6 +23,7 @@ import { EffortHint, effortLevelsForModel, mergeEffortLadders } from "@claudexor
 import { resolveEffort } from "@claudexor/core";
 import { nowIso } from "@claudexor/util";
 import { BIN, probeEnv } from "./missing-cli.js";
+import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
 export type CodexEffortCapability = Record<string, ModelEffortCapability>;
 
@@ -64,8 +65,11 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
   defaultModel: "gpt-5.6-sol",
 };
 
-/** Vendor CLI version `CODEX_EFFORT_SNAPSHOT` was captured from. */
-export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST = "0.144.1";
+/** Vendor CLI version `CODEX_EFFORT_SNAPSHOT` was captured from. Aliases the
+ * per-package vendor-version SSOT (vendor-cli-version.ts), the same constant
+ * the remote installer pins — the freshness gate and the installed bytes can
+ * never disagree about which version this release vouches for. */
+export const CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST: string = CODEX_VENDOR_CLI_VERSION;
 
 /**
  * Harness-wide merged ladder of an advertised catalog, weakest→strongest. Kept
