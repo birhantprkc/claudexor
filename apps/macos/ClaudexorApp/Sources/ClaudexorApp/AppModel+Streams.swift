@@ -25,6 +25,12 @@ struct ThreadsRefreshState {
 }
 
 extension AppModel {
+    static func interactionResolutionActivityTitle(type: String, reason: String?) -> String {
+        if type == "interaction.answered" { return "Answer delivered" }
+        if reason == "cancelled" { return "Question closed — run cancelled" }
+        return "Question timed out — continuing with assumptions"
+    }
+
     // MARK: Live SSE stream
 
     /// Attach (idempotently) a live stream for a run. Reconnects with
@@ -194,6 +200,7 @@ extension AppModel {
 
     /// Cancel every live stream (daemon/client about to be replaced).
     func cancelAllStreams() {
+        suspendAccountsQuotaObserver(at: .local, discardCursor: true)
         globalStreamTask?.cancel()
         globalStreamTask = nil
         globalEventCursor = nil
@@ -272,7 +279,6 @@ extension AppModel {
     }
 
     func handleGlobalEvent(_ event: JournalEvent) async {
-        if event.type == "quota.snapshot.upserted" { await refreshQuota(); return }
         // Sidebar staleness (W12+W16): the engine pings the GLOBAL partition on
         // every thread mutation (create/rename/archive/turn-add/run-terminal —
         // any surface, incl. the CLI). Handled BEFORE the run_id guard below
@@ -386,9 +392,12 @@ extension AppModel {
             // emits. Reading only status/state silently ignored the real word —
             // a cancelled/interrupted run (run.failed with lifecycle "cancelled")
             // mis-rendered as .failed.
-            let lifecycle = payload["lifecycle"]?.stringValue
+            let reportedLifecycle = payload["lifecycle"]?.stringValue
                 ?? payload["status"]?.stringValue
                 ?? payload["state"]?.stringValue
+            let eventFacts = Self.terminalOutcomeFacts(
+                from: payload, expectedLifecycle: reportedLifecycle)
+            let lifecycle = reportedLifecycle ?? eventFacts?.lifecycle
             if type == "run.completed" {
                 if let s = lifecycle {
                     t.phase = RunPhase(api: s)
@@ -412,8 +421,12 @@ extension AppModel {
             }
             else if let s = lifecycle { t.phase = RunPhase(api: s) }
             else if t.phase == .queued { t.phase = .running }
-            // Only an ACTUAL phase change rewrites the tasks array (a
-            // repeated same-phase run.* frame is a no-op for the lists).
+            if let eventFacts, t.outcomeFacts != eventFacts {
+                t.outcomeFacts = eventFacts
+                taskChanged = true
+            }
+            // A phase change or newly learned terminal facts rewrites the tasks
+            // array; a repeated same-phase frame with identical facts is inert.
             if t.phase != before { taskChanged = true }
         } else if type.hasPrefix("harness.") {
             let detail = payload["type"]?.stringValue ?? payload["kind"]?.stringValue ?? ""
@@ -515,7 +528,12 @@ extension AppModel {
             }
             t.waitingOnUser = !t.pendingInteractions.isEmpty
             taskChanged = true
-            box.appendActivity(ActivityEvent(.system, type == "interaction.answered" ? "Answer delivered" : "Question timed out — continuing with assumptions", at: .now))
+            box.appendActivity(ActivityEvent(
+                .system,
+                Self.interactionResolutionActivityTitle(
+                    type: type,
+                    reason: payload["reason"]?.stringValue),
+                at: .now))
         } else if type == "route.profile.rotated" {
             // Auto-balance (INV-135): the engine hit a quota limit and switched
             // this run to another account. Surface it as a visible, non-blocking

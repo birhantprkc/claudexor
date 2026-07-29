@@ -53,6 +53,14 @@ import ClaudexorKit
         #expect(line.tone == .failure)
     }
 
+    @Test func workspaceUnavailableNamesTheFailureHeadline() throws {
+        let line = try #require(OutcomePresentation.line(
+            phase: .failed, reason: "workspace_unavailable", result: nil, reviewVerdict: .notRun
+        ))
+        #expect(line.headline == "Workspace unavailable")
+        #expect(line.tone == .failure)
+    }
+
     @Test func cancelledIsNeutralNotRed() throws {
         let line = try #require(OutcomePresentation.line(
             phase: .cancelled, reason: nil, result: patch(applyState: "not_applied"), reviewVerdict: .notRun

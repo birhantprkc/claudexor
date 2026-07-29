@@ -143,6 +143,19 @@ final class AppModel {
     /// surface reads Enabled/Active from HERE so nothing re-derives the symmetry.
     var harnessAccounts: [HarnessAccounts] = []
     var remoteHarnessAccounts: [ExecutionLocationID: [HarnessAccounts]] = [:]
+    /// Monotonic per-location fence for overlapping complete Accounts loads.
+    /// Internal request ordering is not UI state and stays off the observation graph.
+    @ObservationIgnored var accountsRefreshGenerations: [ExecutionLocationID: UInt64] = [:]
+    /// Dedicated quota observers use the global journal transport but own an
+    /// independent cursor. The general global stream must never consume an
+    /// Accounts snapshot cursor because that could skip unrelated run/thread events.
+    @ObservationIgnored var accountsQuotaStreamTasks:
+        [ExecutionLocationID: Task<Void, Never>] = [:]
+    @ObservationIgnored var accountsQuotaStreamTokens: [ExecutionLocationID: UUID] = [:]
+    @ObservationIgnored var accountsQuotaEventCursors: [ExecutionLocationID: String] = [:]
+    /// Presentation freshness for the server-computed `next_up` field only.
+    /// Profiles, readiness, Enabled, and identity remain independently valid.
+    var accountsNextUpAuthorityFresh: [ExecutionLocationID: Bool] = [:]
     /// M7 update-chip: latest availability (nil = nothing to advertise), read
     /// cheaply by refreshUpdateAvailability(); populated by checkForRuntimeUpdate().
     /// `updateProvider` (injectable for tests/dogfood) defaults to the real
@@ -196,6 +209,10 @@ final class AppModel {
     var draftIsolatedWorkspace = false
     var liveHarnesses: [HarnessInfo] = []
     var remoteHarnesses: [ExecutionLocationID: [HarnessInfo]] = [:]
+    /// Client freshness of the last server-authored doctor rows. This never
+    /// rewrites their health/status; failed explicit refreshes only expire use.
+    var harnessReadinessFresh: Bool?
+    var remoteHarnessReadinessFresh: [ExecutionLocationID: Bool] = [:]
     /// Location-wide Git probe from /harnesses. It can trigger a root-scoped
     /// applicability refresh, but never decides a strategy itself.
     var gitCapability: WorkspaceGitCapability?
@@ -423,6 +440,7 @@ final class AppModel {
         }
 
         liveHarnesses.removeAll()
+        harnessReadinessFresh = nil
         gitCapability = nil
         retireRunApplicability(at: .local)
         // X140 class: the credential-profile + harness-account registries load on
@@ -430,6 +448,8 @@ final class AppModel {
         // presents the last daemon's registry as truth. Reconnect repopulates.
         credentialProfiles.removeAll()
         harnessAccounts.removeAll()
+        accountsNextUpAuthorityFresh.removeValue(forKey: .local)
+        suspendAccountsQuotaObserver(at: .local, discardCursor: true)
         exactAuthSources.removeAll()
         settingsSnapshot = nil
         settingsStatus = nil
@@ -488,9 +508,7 @@ final class AppModel {
                 engineIdentity = outcome.engine
                 health = .connected
                 await refreshRuns()
-                await refreshHarnesses()
                 await refreshSettings()
-                await refreshQuota()
                 await refreshSecrets()
                 await refreshThreads()
                 await refreshProjects()
@@ -619,27 +637,6 @@ final class AppModel {
     var settingsChain: Task<Void, Never>?
     var settingsEpoch = 0
 
-    func refreshQuota(force: Bool = false) async {
-        let locationID = activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else {
-            if locationID == .local {
-                quotaResponse = nil
-            } else {
-                remoteQuotaResponses.removeValue(forKey: locationID)
-            }
-            quotaStatus = "Quota is unavailable while the engine is offline."
-            return
-        }
-        do {
-            let response = try await requestClient.quota(refresh: force)
-            if locationID == .local {
-                quotaResponse = response
-            } else {
-                remoteQuotaResponses[locationID] = response
-            }
-            quotaStatus = nil
-        } catch { quotaStatus = "Could not load quota: \(error)" }
-    }
     var normalizedProjectRoot: String {
         if draftExecutionLocation != .local {
             return draftRemoteProjectRoot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

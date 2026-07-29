@@ -38,6 +38,12 @@ extension AppModel {
                                        reason: "Harness Doctor has not loaded \(family.label). Reconnect the engine, then recheck.",
                                        intent: intent, info: nil)
         }
+        guard activeHarnessReadinessFresh else {
+            return HarnessAvailability(
+                family: family, available: false,
+                reason: "Harness readiness is stale. Refresh Accounts or Harness Doctor.",
+                intent: intent, info: info)
+        }
         // Engine-level per-harness settings gate routing; the composer must
         // mirror that truth instead of offering a chip the engine will reject.
         if activeSettingsSnapshot?.harnesses?[family.rawValue]?.enabled == false {

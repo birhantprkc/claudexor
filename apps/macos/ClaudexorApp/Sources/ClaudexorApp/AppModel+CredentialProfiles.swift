@@ -50,28 +50,171 @@ extension AppModel {
     /// state + retry) from an EMPTY registry ("No accounts yet"). nil = loaded OK
     /// (the arrays are updated); non-nil = the failure message (last snapshot kept).
     @discardableResult
-    func loadCredentialProfiles(locationID requestedLocationID: ExecutionLocationID? = nil) async
+    func loadCredentialProfiles(
+        locationID requestedLocationID: ExecutionLocationID? = nil,
+        discardOnFailure: Bool = false
+    ) async
         -> String?
     {
         let locationID = requestedLocationID ?? activeExecutionLocation
+        let previousQuotaCursor = suspendAccountsQuotaObserver(at: locationID)
+        accountsNextUpAuthorityFresh[locationID] = false
+        let generation = (accountsRefreshGenerations[locationID] ?? 0) &+ 1
+        accountsRefreshGenerations[locationID] = generation
         guard let requestClient = gateway(for: locationID) else {
+            if discardOnFailure,
+               accountsRefreshGenerations[locationID] == generation,
+               gateway(for: locationID) == nil
+            {
+                discardCompleteAccountsSnapshot(at: locationID)
+            }
             return "Engine offline — reconnect to load accounts."
         }
         do {
-            let response = try await requestClient.credentialProfiles()
-            if locationID == .local {
-                credentialProfiles = response.profiles
-                harnessAccounts = response.harnessAccounts
-            } else {
-                remoteCredentialProfiles[locationID] = response.profiles
-                remoteHarnessAccounts[locationID] = response.harnessAccounts
+            let response = try await requestClient.credentialProfilesSnapshot()
+            guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
+            else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            if let harnesses = response.harnesses,
+               let git = response.git,
+               let quota = response.quota,
+               let quotaEventCursor = response.quotaEventCursor?.trimmingCharacters(
+                   in: .whitespacesAndNewlines),
+               !quotaEventCursor.isEmpty
+            {
+                storeCredentialProfiles(
+                    response.profiles, harnessAccounts: response.harnessAccounts,
+                    at: locationID)
+                storeHarnessSnapshot(harnesses, git: git, at: locationID)
+                storeAccountsQuotaSnapshot(quota, at: locationID)
+                accountsNextUpAuthorityFresh[locationID] = true
+                startAccountsQuotaObserver(
+                    at: locationID, client: requestClient, after: quotaEventCursor)
+                return nil
             }
-            return nil
+            // A daemon that ignored/omitted the complete opt-in response cannot
+            // prove that next_up, harness rows, and quota share one epoch. Keep
+            // profile readiness, drop that informational authority and quota,
+            // and fetch one fresh harness list for honest compatibility.
+            let fallbackHarnesses: HarnessListResponse?
+            do {
+                fallbackHarnesses = try await requestClient.listHarnessStatus(fresh: true)
+            } catch {
+                fallbackHarnesses = nil
+            }
+            guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
+            else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            storeCredentialProfiles(response.profiles, harnessAccounts: [], at: locationID)
+            discardAccountsQuotaSnapshot(at: locationID)
+            accountsNextUpAuthorityFresh[locationID] = false
+            suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
+            if let fallbackHarnesses {
+                storeHarnessSnapshot(
+                    fallbackHarnesses.harnesses, git: fallbackHarnesses.git, at: locationID)
+                return nil
+            }
+            if discardOnFailure {
+                if locationID == .local { harnessReadinessFresh = false }
+                else { remoteHarnessReadinessFresh[locationID] = false }
+            }
+            if locationID == .local { gitCapability = nil }
+            else { remoteGitCapabilities.removeValue(forKey: locationID) }
+            return "Could not refresh account readiness. Retry Accounts."
         } catch {
-            // Endpoint absent (older daemon) / offline / malformed config — keep
-            // the last snapshot, surface the reason (never a silent empty list).
+            // Background callers keep the last snapshot. Accounts' explicit
+            // fresh cycle discards it: stale profile readiness/next_up cannot
+            // remain presented as current after the authoritative fetch failed.
+            guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
+            else { return accountsRefreshRetirementMessage(requestClient, at: locationID) }
+            if discardOnFailure { discardCompleteAccountsSnapshot(at: locationID) }
+            else if let previousQuotaCursor {
+                startAccountsQuotaObserver(
+                    at: locationID, client: requestClient, after: previousQuotaCursor)
+            }
             return userMessage(for: error)
         }
+    }
+
+    private func accountsRefreshIsCurrent(
+        _ generation: UInt64,
+        client requestClient: GatewayClient,
+        at locationID: ExecutionLocationID
+    ) -> Bool {
+        accountsRefreshGenerations[locationID] == generation
+            && gateway(for: locationID) === requestClient
+    }
+
+    /// A newer Accounts refresh supersedes an older one silently. Retiring the
+    /// exact daemon client is different: an explicit foreground refresh must
+    /// not report that an empty, discarded projection loaded successfully.
+    private func accountsRefreshRetirementMessage(
+        _ requestClient: GatewayClient,
+        at locationID: ExecutionLocationID
+    ) -> String? {
+        isCurrentGateway(requestClient, at: locationID)
+            ? nil
+            : "The engine connection changed while Accounts was refreshing. Retry Accounts."
+    }
+
+    private func storeCredentialProfiles(
+        _ profiles: [CredentialProfileEntry],
+        harnessAccounts accounts: [HarnessAccounts],
+        at locationID: ExecutionLocationID
+    ) {
+        if locationID == .local {
+            credentialProfiles = profiles
+            harnessAccounts = accounts
+        } else {
+            remoteCredentialProfiles[locationID] = profiles
+            remoteHarnessAccounts[locationID] = accounts
+        }
+    }
+
+    private func discardCredentialProfiles(at locationID: ExecutionLocationID) {
+        if locationID == .local {
+            credentialProfiles = []
+            harnessAccounts = []
+        } else {
+            remoteCredentialProfiles[locationID] = []
+            remoteHarnessAccounts[locationID] = []
+        }
+    }
+
+    func storeAccountsQuotaSnapshot(
+        _ response: ControlQuotaResponse, at locationID: ExecutionLocationID
+    ) {
+        if locationID == .local { quotaResponse = response }
+        else { remoteQuotaResponses[locationID] = response }
+        quotaStatus = nil
+    }
+
+    private func discardAccountsQuotaSnapshot(at locationID: ExecutionLocationID) {
+        if locationID == .local { quotaResponse = nil }
+        else { remoteQuotaResponses.removeValue(forKey: locationID) }
+    }
+
+    private func discardCompleteAccountsSnapshot(at locationID: ExecutionLocationID) {
+        discardCredentialProfiles(at: locationID)
+        discardAccountsQuotaSnapshot(at: locationID)
+        accountsNextUpAuthorityFresh[locationID] = false
+        suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
+        if locationID == .local {
+            harnessReadinessFresh = false
+            gitCapability = nil
+        } else {
+            remoteHarnessReadinessFresh[locationID] = false
+            remoteGitCapabilities.removeValue(forKey: locationID)
+        }
+    }
+
+    /// One event-driven Accounts refresh, pinned to one execution location for
+    /// the whole await: fresh doctor readiness, account projection, Git, and
+    /// quota arrive from one server-authored snapshot epoch.
+    @discardableResult
+    func refreshAccounts(locationID requestedLocationID: ExecutionLocationID? = nil) async
+        -> String?
+    {
+        let locationID = requestedLocationID ?? activeExecutionLocation
+        return await loadCredentialProfiles(locationID: locationID, discardOnFailure: true)
     }
 
     /// The V11b per-harness accounts authority for `harnessId` (native CLI-login
@@ -80,6 +223,13 @@ extension AppModel {
     /// client-derived state.
     func harnessAccounts(for harnessId: String) -> HarnessAccounts? {
         activeHarnessAccounts.first { $0.harnessId == harnessId }
+    }
+
+    /// The next-up identity is a separately expiring slice of HarnessAccounts.
+    /// Invalidating it never fabricates `.none` and never erases Enabled or identity.
+    func authoritativeNextUp(for harnessId: String) -> ControlNextUpIdentity? {
+        guard accountsNextUpAuthorityFresh[activeExecutionLocation] == true else { return nil }
+        return harnessAccounts(for: harnessId)?.nextUp
     }
 
     /// Toggle a credential profile's Enabled (V11b — the Enabled row of the
@@ -114,16 +264,6 @@ extension AppModel {
             harnesses: [harnessId: HarnessSettingsPatch(nativeCredentialsEnabled: enabled)]))
         await refreshCredentialProfiles(locationID: locationID)
         return ok ? nil : (settingsStatus ?? "Could not update the native login setting.")
-    }
-
-    /// Toggle an api-key META-HOST's routing participation (batch-6 item g — the
-    /// raw-api/openrouter row's Enabled). These hosts have no per-account rotation
-    /// (one key), so their "Enabled" IS the harness `enabled` setting.
-    @discardableResult
-    func setHarnessEnabled(harnessId: String, enabled: Bool) async -> String? {
-        let ok = await saveSettings(SettingsUpdateRequest(
-            harnesses: [harnessId: HarnessSettingsPatch(enabled: enabled)]))
-        return ok ? nil : (settingsStatus ?? "Could not update the harness setting.")
     }
 
     /// Register a new credential profile (INV-135). On success the registry is
@@ -165,13 +305,13 @@ extension AppModel {
             }
             await refreshCredentialProfiles(locationID: locationID)
             if locationID == .local {
-                await refreshQuota(force: true)
                 await refreshThreads()
             } else {
                 await refreshRemoteThreads(locationID)
             }
             if let selectedThreadId {
-                await openThread(locationID: locationID, id: selectedThreadId)
+                await refreshOpenThread(
+                    locationID: locationID, id: selectedThreadId, mayReconnect: false)
             }
             return receipt.cleanupWarning
         } catch {
@@ -185,17 +325,15 @@ extension AppModel {
     /// will authenticate as, resolved from the wire (thread sticky > draft). The
     /// profile name is looked up in the registered profiles; nil = the engine's
     /// automatic account routing (no pinned profile). Truth from the wire only.
-    var activeAccountFooter: (harnessLabel: String, profileName: String?)? {
+    var activeAccountFooter: (harnessLabel: String, accountLabel: String)? {
         guard let harnessId = effectivePrimaryHarness else { return nil }
         let label = HarnessFamily(rawValue: harnessId).label
         let profileId = selectedThreadId == nil
             ? draftCredentialProfileId
             : currentThread?.credentialProfileId
-        guard let profileId else { return (label, nil) }
-        let name = activeCredentialProfiles.first {
-            $0.profile.profileId == profileId && $0.profile.harnessId == harnessId
-        }?.profile.displayName
-        return (label, name ?? profileId)
+        let account = AccountsPresentation.composerAccountSegment(
+            model: self, harnessId: harnessId, pinnedProfileId: profileId)
+        return (label, account.label)
     }
 
     /// The human ACCOUNT label for a native thread session (QA-065): resolve the

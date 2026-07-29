@@ -124,6 +124,7 @@ struct RunOutcomeSection: View {
     /// review-blocked delivery must never read green.
     private var bannerTone: StatusTone {
         if task.phase.isFailureShaped { return .negative }
+        if task.phase == .cancelled { return .neutral }
         if task.reviewNeedsDecision || task.outcomeFacts?.review == "blocked"
             || task.applyState == "applied_review_blocked" { return .caution }
         return .positive

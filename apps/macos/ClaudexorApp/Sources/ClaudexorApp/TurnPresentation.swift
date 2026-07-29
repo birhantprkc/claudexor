@@ -75,7 +75,7 @@ enum TurnPresentation {
         } else if phase.isActive {
             stateWord = retryLabel ?? "Working…"
         } else {
-            stateWord = phase.label
+            stateWord = RunReasonLabel.label(reason) ?? phase.label
         }
         return StatusLine(identity: identity, family: family, stateWord: stateWord)
     }

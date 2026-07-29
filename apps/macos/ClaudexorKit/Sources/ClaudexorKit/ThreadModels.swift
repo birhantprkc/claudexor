@@ -145,13 +145,35 @@ public struct TurnEnqueueErrorInfo: Codable, Sendable, Equatable {
     /// threw): the card offers "send a new message" instead of Retry.
     /// nil (older servers) reads as retryable.
     public let retryable: Bool?
+    /// Bounded engine-provided recovery steps; empty for legacy servers.
+    public let requiredActions: [String]
+    /// Typed recovery identifiers/details; UI does not render this wholesale.
+    public let context: [String: JSONValue]
     public let failedAt: String
 
-    public init(message: String, code: String? = nil, retryable: Bool? = nil, failedAt: String) {
+    public init(message: String, code: String? = nil, retryable: Bool? = nil,
+                requiredActions: [String] = [], context: [String: JSONValue] = [:],
+                failedAt: String) {
         self.message = message
         self.code = code
         self.retryable = retryable
+        self.requiredActions = requiredActions
+        self.context = context
         self.failedAt = failedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case message, code, retryable, requiredActions, context, failedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        message = try c.decode(String.self, forKey: .message)
+        code = try c.decodeIfPresent(String.self, forKey: .code)
+        retryable = try c.decodeIfPresent(Bool.self, forKey: .retryable)
+        requiredActions = try c.decodeIfPresent([String].self, forKey: .requiredActions) ?? []
+        context = try c.decodeIfPresent([String: JSONValue].self, forKey: .context) ?? [:]
+        failedAt = try c.decode(String.self, forKey: .failedAt)
     }
 }
 

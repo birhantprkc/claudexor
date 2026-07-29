@@ -325,20 +325,31 @@ extension AppModel {
                 await closeRemoteControlForward(id, through: generation)
                 return
             }
-            async let harnessRows = activeClient.listHarnesses(fresh: true)
             async let settings = activeClient.settings()
             async let projects = activeClient.listProjects()
             async let trust = activeClient.trustList()
-            async let credentials = activeClient.credentialProfiles()
-            async let quota = activeClient.quota(refresh: false)
+            async let credentials = activeClient.credentialProfilesSnapshot()
             async let secrets = activeClient.listSecrets()
-            let harnessValue = try? await harnessRows
             let settingsValue = try? await settings
             let projectValue = try? await projects
             let trustValue = try? await trust
             let credentialValue = try? await credentials
-            let quotaValue = try? await quota
+            // Current runtimes return the quota used for next_up in the same
+            // Accounts snapshot. Only a legacy response may need a cached GET;
+            // its unfenced next_up is discarded below.
+            let quotaValue: ControlQuotaResponse?
+            if let snapshotQuota = credentialValue?.quota {
+                quotaValue = snapshotQuota
+            } else {
+                quotaValue = try? await activeClient.quota(refresh: false)
+            }
             let secretValue = try? await secrets
+            let fallbackHarnessValue: HarnessListResponse?
+            if credentialValue?.harnesses == nil {
+                fallbackHarnessValue = try? await activeClient.listHarnessStatus(fresh: true)
+            } else {
+                fallbackHarnessValue = nil
+            }
             let finalProbe = try? await remoteRuntimeInstaller.probe(on: connection)
             guard !Task.isCancelled,
                   remoteConnectionGenerations[id] == generation
@@ -347,9 +358,17 @@ extension AppModel {
                 return
             }
             adoptRemoteClientForReconnect(activeClient, at: connection.locationID)
-            if let harnessValue {
-                remoteHarnesses[connection.locationID] =
-                    Self.mapHarnessStatuses(harnessValue)
+            if let harnesses = credentialValue?.harnesses,
+               let git = credentialValue?.git {
+                storeHarnessSnapshot(harnesses, git: git, at: connection.locationID)
+            } else if let fallbackHarnessValue {
+                storeHarnessSnapshot(
+                    fallbackHarnessValue.harnesses,
+                    git: fallbackHarnessValue.git,
+                    at: connection.locationID)
+            } else {
+                remoteHarnessReadinessFresh[connection.locationID] = false
+                remoteGitCapabilities.removeValue(forKey: connection.locationID)
             }
             if let settingsValue {
                 remoteSettingsSnapshots[connection.locationID] = settingsValue
@@ -360,12 +379,34 @@ extension AppModel {
             if let trustValue {
                 remoteTrustEntries[connection.locationID] = trustValue.entries
             }
-            if let credentialValue {
+            var installedQuotaEventCursor: String?
+            if let credentialValue,
+               credentialValue.harnesses != nil,
+               credentialValue.git != nil,
+               credentialValue.quota != nil,
+               let quotaEventCursor = credentialValue.quotaEventCursor?.trimmingCharacters(
+                   in: .whitespacesAndNewlines),
+               !quotaEventCursor.isEmpty
+            {
                 remoteCredentialProfiles[connection.locationID] = credentialValue.profiles
                 remoteHarnessAccounts[connection.locationID] = credentialValue.harnessAccounts
+                accountsNextUpAuthorityFresh[connection.locationID] = true
+                installedQuotaEventCursor = quotaEventCursor
+            } else if let credentialValue {
+                // Legacy daemon: profiles remain useful, but it cannot bind
+                // next_up to an event boundary.
+                remoteCredentialProfiles[connection.locationID] = credentialValue.profiles
+                remoteHarnessAccounts[connection.locationID] = []
+                accountsNextUpAuthorityFresh[connection.locationID] = false
             }
             if let quotaValue {
                 remoteQuotaResponses[connection.locationID] = quotaValue
+            }
+            if let installedQuotaEventCursor {
+                startAccountsQuotaObserver(
+                    at: connection.locationID,
+                    client: activeClient,
+                    after: installedQuotaEventCursor)
             }
             if let secretValue {
                 remoteSecretBackends[connection.locationID] = secretValue.backend

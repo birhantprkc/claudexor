@@ -7,6 +7,36 @@ import Foundation
 import ClaudexorKit
 
 extension AppModel {
+    /// Decode the canonical terminal `facts` carried by run.* events. The
+    /// detail snapshot remains authoritative, but this receipt prevents a
+    /// delayed/failed follow-up GET from flattening a known deadline into a
+    /// generic cancellation on the live card.
+    static func terminalOutcomeFacts(
+        from payload: JSONValue,
+        expectedLifecycle: String?
+    ) -> RunOutcomeFacts? {
+        guard let raw = payload["facts"],
+              let lifecycle = raw["lifecycle"]?.stringValue,
+              let noChanges = raw["noChanges"]?.boolValue,
+              let checks = raw["checks"]?.stringValue,
+              let review = raw["review"]?.stringValue,
+              RunPhase(api: lifecycle).isTerminal,
+              expectedLifecycle == nil || expectedLifecycle == lifecycle
+        else { return nil }
+        let reason: String?
+        switch raw["reason"] {
+        case .string(let value)?: reason = value
+        case .null?, nil: reason = nil
+        default: return nil
+        }
+        return RunOutcomeFacts(
+            lifecycle: lifecycle,
+            noChanges: noChanges,
+            checks: checks,
+            review: review,
+            reason: reason)
+    }
+
     /// The server persisted a refusal on a recorded turn when the HTTP error
     /// body names its `turnId` (thread-turn create/replay paths attach it).
     /// `retryable=false` means no job was recorded (enqueue itself threw), so
@@ -14,8 +44,13 @@ extension AppModel {
     static func refusedTurn(from error: Error) -> (turnId: String, retryable: Bool)? {
         guard case GatewayError.http(_, let body) = error,
               let data = body.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let turnId = obj["turnId"] as? String, !turnId.isEmpty
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let context = obj["context"] as? [String: Any]
+        // Current ControlProblem shape owns recovery identifiers in context;
+        // keep the historical top-level field as a compatibility fallback.
+        guard let turnId = (context?["turnId"] as? String) ?? (obj["turnId"] as? String),
+              !turnId.isEmpty
         else { return nil }
         return (turnId, (obj["retryable"] as? Bool) ?? true)
     }

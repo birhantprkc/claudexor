@@ -169,9 +169,8 @@ struct SettingsScreen: View {
 
     func refreshAll() async {
         await model.refreshSettings()
-        await model.refreshQuota()
         await model.refreshSecrets()
-        await model.refreshHarnesses()
+        _ = await model.refreshAccounts()
         await model.refreshTrust()
         hydrate(model.activeExecutionLocation)
     }

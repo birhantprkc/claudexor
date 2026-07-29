@@ -46,10 +46,10 @@ struct AccountRowView: View {
     /// "Next up") + the ONE single-line quota line + optional single-line detail.
     private var identity: AlignedRowIdentity {
         var badges: [AlignedRowBadge] = [
-            // The native vendor login is a symmetric "CLI login" row; an api-key
-            // meta-host reads "API key"; a profile shows its harness id.
-            AlignedRowBadge(row.isProfile ? row.harnessId : (row.isApiKeyHost ? "API key" : "CLI login"),
-                            emphasis: .secondary)
+            // A real native vendor login is the symmetric "CLI login" row; a
+            // registered profile shows its harness id. API keys are routes, not
+            // synthetic account rows.
+            AlignedRowBadge(row.isProfile ? row.harnessId : "CLI login", emphasis: .secondary)
         ]
         if row.nextUp {
             // F1 informational hint: this is who an unpinned run routes to next.
@@ -100,11 +100,6 @@ struct AccountRowView: View {
     }
 
     private var enabledHelp: String {
-        if row.isApiKeyHost {
-            return row.enabled
-                ? "Enabled — this api-key host is eligible for routing. Turn off to exclude it."
-                : "Disabled — this api-key host is excluded from routing."
-        }
         if row.isCliLogin {
             return row.enabled
                 ? "Enabled — the native/CLI login participates in this harness's credential ladder. Turn off to exclude it."

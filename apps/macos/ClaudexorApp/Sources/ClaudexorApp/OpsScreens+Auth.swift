@@ -33,7 +33,9 @@ extension SettingsScreen {
                     ? "Open \(family.label) auth details and fallback key management."
                     : "Open setup/auth actions for \(family.label).")
             Button {
-                Task { await model.refreshHarnesses(fresh: true) }
+                Task {
+                    await model.refreshHarnesses(fresh: true, markStaleOnFailure: true)
+                }
             } label: {
                 Label("Recheck", systemImage: "arrow.clockwise")
             }

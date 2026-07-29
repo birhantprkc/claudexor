@@ -7,15 +7,6 @@ import ClaudexorKit
 // AccountsPopover.swift (readability ratchet). The views live in
 // AccountsPopover.swift; the SSOT projection lives here.
 
-extension HarnessFamily {
-    /// The api-key META-HOSTS: routed purely by a stored key, no subscription/CLI
-    /// login. Both raw-api AND the openrouter raw-API instance (registry.ts:
-    /// `createRawApiAdapter({ id: "openrouter" })`) qualify — the gating must match
-    /// the copy, or a live openrouter host renders as a native-login row it can
-    /// never satisfy. They appear as accounts rows only when configured (item g).
-    var isApiKeyMetaHost: Bool { self == .raw || self == .openrouter }
-}
-
 /// Readiness verdict for one account row (the worst wins for the trigger dot).
 enum AccountReadiness: Int, Comparable {
     case unavailable = 0, unknown = 1, ready = 2
@@ -58,11 +49,6 @@ struct AccountRowModel: Identifiable {
     /// row's secondary line (`identityLine`); nil for hosts with no readable
     /// store, an undisclosed identity, or an older daemon.
     var identity: AccountIdentity? = nil
-    /// An api-key META-HOST row (raw-api / openrouter): rendered only when a key is
-    /// configured (batch-6 item g). Its Enabled is the harness `enabled` setting
-    /// (no per-account rotation — one key), and it has no CLI login.
-    var isApiKeyHost: Bool = false
-
     var isProfile: Bool { profileId != nil }
 
     /// The row's secondary line derived from the identity projection:
@@ -75,7 +61,7 @@ struct AccountRowModel: Identifiable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
     /// The native vendor login row (not one of Claudexor's credential profiles).
-    var isCliLogin: Bool { profileId == nil && !isApiKeyHost }
+    var isCliLogin: Bool { profileId == nil }
 
     /// The single worst usage window across the account's quota groups; drives
     /// the ONE compact quota line the popover shows per account.
@@ -93,6 +79,7 @@ enum AccountsPresentation {
     @MainActor
     static func rows(model: AppModel) -> [AccountRowModel] {
         let groups = QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
+        let readinessFresh = model.activeHarnessReadinessFresh
         var rows: [AccountRowModel] = []
 
         // Default logins: one per native-login family the doctor knows.
@@ -108,16 +95,20 @@ enum AccountsPresentation {
                 harnessId: family.rawValue,
                 family: family,
                 readiness: readiness(
-                    availability: source?.availability, verification: source?.verification),
-                verified: source?.isVerifiedNativeSession == true,
+                    availability: readinessFresh ? source?.availability : "unknown",
+                    verification: readinessFresh ? source?.verification : "not_run"),
+                verified: readinessFresh && source?.isVerifiedNativeSession == true,
                 profileId: nil,
-                detail: source?.detail,
+                detail: readinessFresh
+                    ? source?.detail
+                    : "Readiness is stale; refresh Accounts or Harness Doctor.",
                 quotaGroups: groups.filter { $0.subjectId == nil && $0.harness == family.rawValue },
                 // The native/CLI login's "Enabled" is the harness setting
                 // `native_credentials_enabled` (V11b) — LIVE via the settings
                 // PATCH surface. Absent projection => symmetrically enabled.
                 enabled: accounts?.nativeCredentialsEnabled ?? true,
-                nextUp: accounts?.nextUp.isNative ?? false,
+                nextUp: model.authoritativeNextUp(for: family.rawValue)?
+                    .isDefaultRoute("local_session", legacyFallback: true) ?? false,
                 identity: accounts?.identity
             ))
         }
@@ -126,7 +117,6 @@ enum AccountsPresentation {
         for entry in model.activeCredentialProfiles {
             let availability = entry.status.availability
             let verification = entry.status.verification
-            let accounts = model.harnessAccounts(for: entry.profile.harnessId)
             rows.append(AccountRowModel(
                 id: "profile/\(entry.profile.harnessId)/\(entry.profile.profileId)",
                 displayName: entry.profile.displayName,
@@ -140,34 +130,12 @@ enum AccountsPresentation {
                     $0.subjectId == entry.profile.profileId && $0.harness == entry.profile.harnessId
                 },
                 enabled: entry.profile.enabled,
-                nextUp: accounts?.nextUp.isProfile(entry.profile.profileId) ?? false,
+                nextUp: model.authoritativeNextUp(for: entry.profile.harnessId)?
+                    .isProfile(entry.profile.profileId) ?? false,
                 identity: entry.identity
             ))
         }
 
-        // API-key meta-hosts (raw-api / openrouter): a symmetric account row, but
-        // ONLY when a key is actually configured (routable per the wire). An
-        // unconfigured meta-host is hidden ENTIRELY — no dead "log in" row (item g).
-        for info in model.harnesses
-        where info.family.isApiKeyMetaHost && !info.routableIntents.isEmpty {
-            let family = info.family
-            rows.append(AccountRowModel(
-                id: "apikey/\(family.rawValue)",
-                displayName: family.label,
-                harnessId: family.rawValue,
-                family: family,
-                readiness: .ready,   // routable ⇒ a key is present and usable.
-                verified: true,
-                profileId: nil,
-                detail: "API key",
-                quotaGroups: groups.filter { $0.subjectId == nil && $0.harness == family.rawValue },
-                // The meta-host has no per-account rotation — Enabled IS the
-                // harness routing-enable setting.
-                enabled: model.activeSettingsSnapshot?.harnesses?[family.rawValue]?.enabled ?? true,
-                nextUp: false,
-                isApiKeyHost: true
-            ))
-        }
         return rows
     }
 
@@ -212,12 +180,15 @@ enum AccountsPresentation {
         }
         // No pin → follow the harness's next-up identity from the server
         // projection (what routing would pick — informational).
-        guard let identity = model.harnessAccounts(for: harnessId)?.nextUp else {
+        guard let identity = model.authoritativeNextUp(for: harnessId) else {
             return AccountSegment(pinned: false, label: "Default", systemImage: "person.crop.circle")
         }
         switch identity {
         case .profile(let id): return AccountSegment(pinned: false, label: profileName(id), systemImage: "person.crop.circle")
-        case .native: return AccountSegment(pinned: false, label: "CLI login", systemImage: "person.crop.circle")
+        case .native(let route):
+            let label = route == "api_key" ? "API key"
+                : route == "local_session" ? "CLI login" : "Default"
+            return AccountSegment(pinned: false, label: label, systemImage: "person.crop.circle")
         case .none: return AccountSegment(pinned: false, label: "No account", systemImage: "exclamationmark.circle")
         }
     }

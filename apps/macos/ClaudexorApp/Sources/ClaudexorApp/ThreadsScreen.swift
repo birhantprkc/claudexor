@@ -293,7 +293,6 @@ struct ThreadsScreen: View {
         }
         .task {
             await model.refreshThreads()
-            await model.refreshQuota()
             await model.refreshTrust()
             for connection in model.remoteConnections where connection.enabled {
                 await model.connectRemote(connection.id, allowInteraction: false)

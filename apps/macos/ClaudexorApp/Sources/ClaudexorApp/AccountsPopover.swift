@@ -138,18 +138,14 @@ struct FooterProfileRow: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text(footer.harnessLabel)
                     .font(.caption.weight(.medium)).foregroundStyle(.primary)
-                if let name = footer.profileName {
-                    Text("·").font(.caption).foregroundStyle(.tertiary)
-                    Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                } else {
-                    Text("· auto routing").font(.caption2).foregroundStyle(.tertiary)
-                }
+                Text("·").font(.caption).foregroundStyle(.tertiary)
+                Text(footer.accountLabel)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, Theme.Spacing.md)
             .padding(.top, Theme.Spacing.xs)
-            .help(footer.profileName.map { "Next turn authenticates as \(footer.harnessLabel) · \($0)." }
-                  ?? "Next turn uses automatic account routing for \(footer.harnessLabel).")
+            .help("Next turn authenticates as \(footer.harnessLabel) · \(footer.accountLabel).")
         }
     }
 }
@@ -265,8 +261,7 @@ struct AccountsPopover: View {
             Button {
                 refreshing = true
                 Task {
-                    await model.refreshQuota(force: true)
-                    await model.refreshCredentialProfiles()
+                    _ = await model.refreshAccounts()
                     refreshing = false
                 }
             } label: {
@@ -402,9 +397,6 @@ struct AccountsSurface: View {
                 if let profileId = row.profileId {
                     await model.setProfileEnabled(
                         harnessId: row.harnessId, profileId: profileId, enabled: enabled)
-                } else if row.isApiKeyHost {
-                    // Meta-host (raw-api/openrouter): Enabled is the harness setting.
-                    await model.setHarnessEnabled(harnessId: row.harnessId, enabled: enabled)
                 } else {
                     await model.setNativeCredentialsEnabled(
                         harnessId: row.harnessId, enabled: enabled)
@@ -502,7 +494,7 @@ struct AccountsSurface: View {
     /// reason + retry, not the empty "No accounts yet".
     private func loadAccounts() async {
         if loadState != .loaded { loadState = .loading }
-        if let error = await model.loadCredentialProfiles() {
+        if let error = await model.refreshAccounts() {
             loadState = .failed(error)
         } else {
             loadState = .loaded

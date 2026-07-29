@@ -193,6 +193,7 @@ enum RunReasonLabel {
         case "cost_unverifiable": return "Cost unverifiable"
         case "not_converged": return "Not converged"
         case "stuck_no_progress": return "Stuck/no progress"
+        case "workspace_unavailable": return "Workspace unavailable"
         case "wall_clock_exceeded": return "Time limit reached"
         case "crash_interrupted": return "Interrupted"
         case "user_cancelled": return "Cancelled"

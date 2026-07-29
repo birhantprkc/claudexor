@@ -165,6 +165,10 @@ extension SettingsScreen {
                 value: model.endpoint.isEmpty ? "—" : "http://\(model.endpoint)",
                 mono: true
             )
+            GitReadinessCard(
+                capability: model.activeGitCapability,
+                readinessFresh: model.activeHarnessReadinessFresh
+            )
             ForEach(model.selectableHarnesses.filter { $0 != .raw }) { family in
                 nativeAuthRow(family)
             }

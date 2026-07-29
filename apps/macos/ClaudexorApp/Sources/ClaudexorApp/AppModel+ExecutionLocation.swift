@@ -17,6 +17,12 @@ extension AppModel {
             : (remoteHarnesses[activeExecutionLocation] ?? [])
     }
 
+    var activeHarnessReadinessFresh: Bool {
+        activeExecutionLocation == .local
+            ? harnessReadinessFresh != false
+            : remoteHarnessReadinessFresh[activeExecutionLocation] != false
+    }
+
     var activeGitCapability: WorkspaceGitCapability? {
         activeExecutionLocation == .local
             ? gitCapability

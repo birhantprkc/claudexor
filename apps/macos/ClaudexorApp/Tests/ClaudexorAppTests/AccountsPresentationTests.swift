@@ -137,6 +137,7 @@ import Testing
         """
         model.harnessAccounts = try JSONDecoder().decode(
             [HarnessAccounts].self, from: Data(accountsJSON.utf8))
+        model.accountsNextUpAuthorityFresh[.local] = true
 
         let rows = AccountsPresentation.rows(model: model)
         let cli = try #require(rows.first { $0.isCliLogin })
@@ -168,10 +169,11 @@ import Testing
         // Projection: routing would pick the native/CLI login next.
         let accountsJSON = """
         [{"harness_id":"claude","native_credentials_enabled":true,
-          "native_login_detected":true,"next_up":{"kind":"native"}}]
+          "native_login_detected":true,"next_up":{"kind":"native","route":"local_session"}}]
         """
         model.harnessAccounts = try JSONDecoder().decode(
             [HarnessAccounts].self, from: Data(accountsJSON.utf8))
+        model.accountsNextUpAuthorityFresh[.local] = true
 
         let rows = AccountsPresentation.rows(model: model)
         let cli = try #require(rows.first { $0.isCliLogin })
@@ -179,6 +181,45 @@ import Testing
         #expect(cli.nextUp == true)
         let work = try #require(rows.first { $0.profileId == "work" })
         #expect(work.nextUp == false)
+    }
+
+    @MainActor
+    @Test func apiKeyRouteUsesTheExistingRouteLabelWithoutCreatingAnAccount() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.liveHarnesses = [HarnessInfo(
+            family: .raw, health: .ok, version: "1", auth: "key ready",
+            intents: ["implement"], routableIntents: ["implement"])]
+        model.harnessAccounts = try JSONDecoder().decode(
+            [HarnessAccounts].self,
+            from: Data(#"[{"harness_id":"raw-api","native_credentials_enabled":true,"native_login_detected":false,"next_up":{"kind":"native","route":"api_key"}}]"#.utf8))
+        model.accountsNextUpAuthorityFresh[.local] = true
+
+        #expect(AccountsPresentation.rows(model: model).isEmpty)
+        #expect(AccountsPresentation.composerAccountSegment(
+            model: model, harnessId: "raw-api", pinnedProfileId: nil
+        ).label == "API key")
+    }
+
+    @MainActor
+    @Test func apiKeyFallbackDoesNotMarkTheCliLoginRowAsNextUp() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.liveHarnesses = [HarnessInfo(
+            family: .claude, health: .ok, version: "1", auth: "key ready",
+            intents: ["implement"])]
+        model.exactAuthSources[.claude] = [
+            .nativeSession: HarnessAuthSource(
+                source: "native_session", availability: "unavailable", verification: "failed"),
+        ]
+        model.harnessAccounts = try JSONDecoder().decode(
+            [HarnessAccounts].self,
+            from: Data(#"[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":false,"next_up":{"kind":"native","route":"api_key"}}]"#.utf8))
+        model.accountsNextUpAuthorityFresh[.local] = true
+
+        let cli = try #require(AccountsPresentation.rows(model: model).first { $0.isCliLogin })
+        #expect(cli.nextUp == false)
+        #expect(AccountsPresentation.composerAccountSegment(
+            model: model, harnessId: "claude", pinnedProfileId: nil
+        ).label == "API key")
     }
 
     @MainActor
@@ -216,7 +257,7 @@ import Testing
         let accountsJSON = """
         [{"harness_id":"claude","native_credentials_enabled":true,
           "native_login_detected":true,"identity":{"email":"native@example.test","plan":"claude_pro"},
-          "next_up":{"kind":"native"}}]
+          "next_up":{"kind":"native","route":"local_session"}}]
         """
         model.harnessAccounts = try JSONDecoder().decode(
             [HarnessAccounts].self, from: Data(accountsJSON.utf8))
@@ -279,12 +320,23 @@ import Testing
         // Projection: the native CLI login is next up.
         model.harnessAccounts = try JSONDecoder().decode([HarnessAccounts].self, from: Data("""
         [{"harness_id":"claude","native_credentials_enabled":true,
-          "native_login_detected":true,"next_up":{"kind":"native"}}]
+          "native_login_detected":true,"next_up":{"kind":"native","route":"local_session"}}]
         """.utf8))
+        model.accountsNextUpAuthorityFresh[.local] = true
         seg = AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil)
         #expect(seg.pinned == false)
         #expect(seg.label == "CLI login")
+
+        // The same unprofiled/default identity may honestly route through an
+        // API key when the native source is unavailable or config requests it.
+        model.harnessAccounts = try JSONDecoder().decode([HarnessAccounts].self, from: Data("""
+        [{"harness_id":"claude","native_credentials_enabled":true,
+          "native_login_detected":false,"next_up":{"kind":"native","route":"api_key"}}]
+        """.utf8))
+        seg = AccountsPresentation.composerAccountSegment(
+            model: model, harnessId: "claude", pinnedProfileId: nil)
+        #expect(seg.label == "API key")
 
         // A thread pin overrides the default and resolves to the profile's name.
         seg = AccountsPresentation.composerAccountSegment(

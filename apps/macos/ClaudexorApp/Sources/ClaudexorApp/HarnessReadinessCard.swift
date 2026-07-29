@@ -2,6 +2,101 @@ import SwiftUI
 import AppKit
 import ClaudexorKit
 
+/// Location-wide workspace prerequisite shown beside (not folded into) the
+/// per-harness Doctor rows. Git availability can block write strategies while
+/// every provider remains healthy, so the two truths must stay orthogonal.
+struct GitReadinessPresentation: Equatable {
+    var title: String
+    var status: String
+    var detail: String
+    var remediation: String?
+    var tone: StatusTone
+    var glyph: String
+
+    static func from(
+        capability: WorkspaceGitCapability?,
+        readinessFresh: Bool
+    ) -> GitReadinessPresentation {
+        guard readinessFresh, let capability else {
+            return GitReadinessPresentation(
+                title: "Workspace Git",
+                status: "Unknown",
+                detail: "Refresh Harness Doctor to check workspace prerequisites.",
+                remediation: nil,
+                tone: .neutral,
+                glyph: "questionmark.circle")
+        }
+        switch capability.status {
+        case "available":
+            return GitReadinessPresentation(
+                title: "Workspace Git",
+                status: "Available",
+                detail: capability.version ?? "Available in this engine environment.",
+                remediation: nil,
+                tone: .positive,
+                glyph: "checkmark.circle.fill")
+        case "developer_tools_stub":
+            return GitReadinessPresentation(
+                title: "Workspace Git",
+                status: "Developer tools required",
+                detail: capability.detail ?? "Git cannot run until Apple Command Line Tools are installed.",
+                remediation: capability.remediation,
+                tone: .warn,
+                glyph: "exclamationmark.triangle.fill")
+        case "missing":
+            return GitReadinessPresentation(
+                title: "Workspace Git",
+                status: "Missing",
+                detail: capability.detail ?? "Git is not installed or is not on this engine's PATH.",
+                remediation: capability.remediation,
+                tone: .warn,
+                glyph: "exclamationmark.triangle.fill")
+        default:
+            return GitReadinessPresentation(
+                title: "Workspace Git",
+                status: "Failed",
+                detail: capability.detail ?? "The engine found Git but could not run it successfully.",
+                remediation: capability.remediation,
+                tone: .warn,
+                glyph: "exclamationmark.triangle.fill")
+        }
+    }
+}
+
+struct GitReadinessCard: View {
+    let capability: WorkspaceGitCapability?
+    let readinessFresh: Bool
+
+    private var presentation: GitReadinessPresentation {
+        .from(capability: capability, readinessFresh: readinessFresh)
+    }
+
+    var body: some View {
+        AlignedList(verticalSpacing: Theme.Spacing.xxs) {
+            AlignedListRow(identity: AlignedRowIdentity(
+                dotColor: Theme.status(presentation.tone),
+                dotSystemImage: presentation.glyph,
+                dotHelp: presentation.status,
+                title: presentation.title,
+                badges: [AlignedRowBadge(
+                    presentation.status,
+                    emphasis: presentation.tone == .positive ? .positive
+                        : presentation.tone == .warn ? .warning : .secondary)],
+                details: [
+                    AlignedRowDetail(0, presentation.detail),
+                    presentation.remediation.map {
+                        AlignedRowDetail(1, $0, emphasis: .warning)
+                    },
+                ].compactMap { $0 }
+            )) { EmptyView() }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(presentation.title)
+        .accessibilityValue([presentation.status, presentation.detail, presentation.remediation]
+            .compactMap { $0 }.joined(separator: " "))
+    }
+}
+
 /// ONE readiness presentation for the three surfaces that used to carry
 /// verbatim copies of the harness row (Settings, Onboarding, AuthSheet —
 /// W4.7/W4.9, sol #19). Pure derivation from HarnessInfo: identity, the

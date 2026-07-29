@@ -109,6 +109,8 @@ import Testing
             model.remoteTrustEntries[locationID] = []
             model.remoteProjects[locationID] = []
             model.remoteTasks[locationID] = []
+            model.runApplicabilityProjections[locationID] = .loading(
+                repoRoot: "/tmp/\(locationID.rawValue)")
         }
 
         model.settingsSnapshot = settings
@@ -127,6 +129,7 @@ import Testing
         #expect(model.remoteTrustEntries[locationA] == nil)
         #expect(model.remoteProjects[locationA] == nil)
         #expect(model.remoteTasks[locationA] == nil)
+        #expect(model.runApplicabilityProjections[locationA] == nil)
 
         #expect(model.remoteCredentialProfiles[locationB] != nil)
         #expect(model.remoteHarnessAccounts[locationB] != nil)
@@ -139,6 +142,7 @@ import Testing
         #expect(model.remoteTrustEntries[locationB] != nil)
         #expect(model.remoteProjects[locationB] != nil)
         #expect(model.remoteTasks[locationB] != nil)
+        #expect(model.runApplicabilityProjections[locationB] != nil)
 
         #expect(model.settingsSnapshot == settings)
         #expect(model.quotaResponse == quota)

@@ -558,7 +558,7 @@ import Testing
         // renders this as the inline refusal card (never an empty bubble).
         let json = #"""
         {"id":"tn-3","threadId":"th-1","runId":null,"prompt":"risky work",
-         "enqueueError":{"message":"access profile 'full' requires allow_full_access: true","code":"trust_full_access_required","failedAt":"t1"},
+         "enqueueError":{"message":"access profile 'full' requires allow_full_access: true","code":"trust_full_access_required","requiredActions":["Grant access"],"context":{"turnId":"tn-3"},"failedAt":"t1"},
          "createdAt":"t"}
         """#
         let turn = try JSONDecoder().decode(ThreadTurnInfo.self, from: Data(json.utf8))
@@ -566,6 +566,8 @@ import Testing
         // The one-click remedy keys on the typed CODE, never the message text.
         #expect(turn.enqueueError?.code == TurnEnqueueErrorInfo.trustFullAccessCode)
         #expect(turn.enqueueError?.failedAt == "t1")
+        #expect(turn.enqueueError?.requiredActions == ["Grant access"])
+        #expect(turn.enqueueError?.context["turnId"]?.stringValue == "tn-3")
         // An untyped, NON-retryable refusal (enqueue threw before any job):
         // code null, retryable false — the card offers "send a new message".
         let untyped = #"""
@@ -576,6 +578,8 @@ import Testing
         let refusedNoJob = try JSONDecoder().decode(ThreadTurnInfo.self, from: Data(untyped.utf8))
         #expect(refusedNoJob.enqueueError?.code == nil)
         #expect(refusedNoJob.enqueueError?.retryable == false)
+        #expect(refusedNoJob.enqueueError?.requiredActions.isEmpty == true)
+        #expect(refusedNoJob.enqueueError?.context.isEmpty == true)
         // Legacy refusal without the field reads as retryable (runner-hook path).
         #expect(turn.enqueueError?.retryable == nil)
         // Legacy turn (no field) and a cleared refusal both decode to nil.
@@ -2111,13 +2115,17 @@ import Testing
             {"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"identity":{"email":"native@example.test","plan":"claude_pro"},"next_up":{"kind":"profile","profileId":"work"}},
             {"harness_id":"codex","native_credentials_enabled":false,"native_login_detected":false,"identity":null,"next_up":{"kind":"none","reason":"CLI login disabled"}},
             {"harness_id":"cursor","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}
-          ]
+          ],
+          "quotaEventCursor": "global-epoch-1:42",
+          "quota": {"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}
         }
         """#
         let response = try JSONDecoder().decode(CredentialProfilesResponse.self, from: Data(json.utf8))
         #expect(response.profiles.count == 2)
         #expect(response.profiles[1].profile.enabled == false)
         #expect(response.harnessAccounts.count == 3)
+        #expect(response.quota?.refreshedAt == "2026-07-28T00:00:00Z")
+        #expect(response.quotaEventCursor == "global-epoch-1:42")
 
         // Non-secret identity projection (INV-067): decoded on both the profile
         // entry and the native-login account row; null/absent → nil.
@@ -2153,6 +2161,7 @@ import Testing
             CredentialProfilesResponse.self, from: Data(#"{"profiles":[]}"#.utf8))
         #expect(response.profiles.isEmpty)
         #expect(response.harnessAccounts.isEmpty)
+        #expect(response.quotaEventCursor == nil)
     }
 
     @Test func credentialProfileEntryToleratesOmittedIdentity() throws {
@@ -2469,6 +2478,19 @@ private final class RequestStubURLProtocol: URLProtocol {
 }
 
 extension ClaudexorKitTests {
+    @Test func harnessListDecodesGitPrerequisiteAndOlderDaemonOmission() throws {
+        let json = #"{"git":{"status":"developer_tools_stub","version":null,"detail":"xcode-select","remediation":"Install Command Line Tools."},"harnesses":[]}"#
+        let response = try JSONDecoder().decode(
+            HarnessListResponse.self, from: Data(json.utf8))
+        let git = try #require(response.git)
+        #expect(git.status == "developer_tools_stub")
+        #expect(!git.available)
+        #expect(git.remediation == "Install Command Line Tools.")
+        let legacy = try JSONDecoder().decode(
+            HarnessListResponse.self, from: Data(#"{"harnesses":[]}"#.utf8))
+        #expect(legacy.git == nil)
+    }
+
     /// DELETE /v2/credential-profiles receipt: camelCase fields decode, the
     /// snake_case `profile` object is deliberately skipped (plain JSONDecoder
     /// ignores unknown keys), and `cleanupWarning` is absent-or-present —

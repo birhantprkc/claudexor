@@ -30,21 +30,6 @@ import ClaudexorKit
     }
 }
 
-/// Batch-6 item g: the api-key meta-hosts (raw-api AND the openrouter raw-API
-/// instance) render an accounts row only when configured, hidden otherwise.
-@Suite struct ApiKeyMetaHostTests {
-    /// W2-A3: BOTH raw-api and openrouter are api-key meta-hosts — the gating must
-    /// match the copy, or a live openrouter host mis-renders as a native-login row.
-    @Test func rawAndOpenRouterAreMetaHosts() {
-        #expect(HarnessFamily.raw.isApiKeyMetaHost)
-        #expect(HarnessFamily.openrouter.isApiKeyMetaHost)
-        #expect(!HarnessFamily.claude.isApiKeyMetaHost)
-        #expect(!HarnessFamily.codex.isApiKeyMetaHost)
-        #expect(!HarnessFamily.cursor.isApiKeyMetaHost)
-        #expect(!HarnessFamily.opencode.isApiKeyMetaHost)
-    }
-}
-
 /// D42 item 4: the sidebar row status precedence (running outranks needs-decision).
 @Suite struct ThreadRowStatusTests {
     @Test func runningWins() {

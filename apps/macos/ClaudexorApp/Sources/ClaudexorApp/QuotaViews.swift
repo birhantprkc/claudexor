@@ -22,7 +22,7 @@ struct QuotaDetailView: View {
                 HStack {
                     Text("Quota").font(.headline)
                     Spacer()
-                    Button { Task { await model.refreshQuota(force: true) } } label: {
+                    Button { Task { _ = await model.refreshAccounts() } } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)

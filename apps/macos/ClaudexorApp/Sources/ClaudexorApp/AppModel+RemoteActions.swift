@@ -144,12 +144,15 @@ extension AppModel {
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return }
         do {
-            let harnesses = try await client.listHarnesses(fresh: true)
-            remoteHarnesses[location] = Self.mapHarnessStatuses(harnesses)
+            let snapshot = try await client.listHarnessStatus(fresh: true)
+            let harnesses = snapshot.harnesses
+            storeHarnessSnapshot(harnesses, git: snapshot.git, at: location)
             let ready = harnesses.filter { !$0.routableIntents.isEmpty }.count
             remoteConnectionMessages[connectionID] =
                 "Harness Doctor: \(ready) of \(harnesses.count) harnesses ready."
         } catch {
+            remoteHarnessReadinessFresh[location] = false
+            remoteGitCapabilities.removeValue(forKey: location)
             remoteConnectionMessages[connectionID] = userMessageForRemote(error)
         }
     }
@@ -306,8 +309,9 @@ extension AppModel {
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return nil }
         do {
-            let harnesses = try await client.listHarnesses(fresh: true)
-            remoteHarnesses[location] = Self.mapHarnessStatuses(harnesses)
+            let snapshot = try await client.listHarnessStatus(fresh: true)
+            let harnesses = snapshot.harnesses
+            storeHarnessSnapshot(harnesses, git: snapshot.git, at: location)
             guard let harness = harnesses.first(where: { $0.id == harnessID }) else {
                 remoteConnectionMessages[connectionID] =
                     "Harness Doctor did not return \(harnessID)."
@@ -326,6 +330,8 @@ extension AppModel {
             }
             return readiness
         } catch {
+            remoteHarnessReadinessFresh[location] = false
+            remoteGitCapabilities.removeValue(forKey: location)
             remoteConnectionMessages[connectionID] = userMessageForRemote(error)
             return nil
         }
@@ -514,13 +520,6 @@ extension AppModel {
         requestClient: GatewayClient,
         streamToken: UUID
     ) async {
-        if event.type == "quota.snapshot.upserted" {
-            guard let requestClient = remoteClients[locationID] else { return }
-            if let response = try? await requestClient.quota(refresh: false) {
-                remoteQuotaResponses[locationID] = response
-            }
-            return
-        }
         guard event.type == "thread.head.updated" else { return }
         await refreshRemoteThreads(locationID)
         guard isCurrentGateway(requestClient, at: locationID),
@@ -534,6 +533,7 @@ extension AppModel {
     }
 
     func cancelRemoteStreams(_ locationID: ExecutionLocationID) {
+        suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
         remoteGlobalStreamTokens.removeValue(forKey: locationID)
         remoteGlobalStreamTasks.removeValue(forKey: locationID)?.cancel()
         remoteGlobalEventCursors.removeValue(forKey: locationID)

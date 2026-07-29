@@ -9,24 +9,71 @@ import ClaudexorKit
 // module internals only where the extension boundary required it.
 
 extension AppModel {
+    func storeHarnessSnapshot(
+        _ harnesses: [HarnessStatus],
+        git: WorkspaceGitCapability?,
+        at locationID: ExecutionLocationID
+    ) {
+        let mapped = Self.mapHarnessStatuses(harnesses)
+        var exactSources: [HarnessFamily: [AuthSourceKind: HarnessAuthSource]] = [:]
+        for info in mapped {
+            for source in info.authSources {
+                guard let kind = AuthSourceKind(rawValue: source.source) else { continue }
+                exactSources[info.family, default: [:]][kind] = source
+            }
+        }
+        if locationID == .local {
+            liveHarnesses = mapped
+            exactAuthSources = exactSources
+            harnessReadinessFresh = true
+            gitCapability = git
+        } else {
+            remoteHarnesses[locationID] = mapped
+            remoteExactAuthSources[locationID] = exactSources
+            remoteHarnessReadinessFresh[locationID] = true
+            if let git { remoteGitCapabilities[locationID] = git }
+            else { remoteGitCapabilities.removeValue(forKey: locationID) }
+        }
+    }
+
     @discardableResult
     func refreshHarnesses(
         fresh: Bool = false,
-        locationID requestedLocationID: ExecutionLocationID? = nil
+        locationID requestedLocationID: ExecutionLocationID? = nil,
+        markStaleOnFailure: Bool = false
     ) async -> Bool {
         let locationID = requestedLocationID ?? activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else { return false }
-        do {
-            let mapped = Self.mapHarnessStatuses(
-                try await requestClient.listHarnesses(fresh: fresh))
-            if locationID == .local {
-                liveHarnesses = mapped
-            } else {
-                remoteHarnesses[locationID] = mapped
+        guard let requestClient = gateway(for: locationID) else {
+            if locationID == .local { gitCapability = nil }
+            else { remoteGitCapabilities.removeValue(forKey: locationID) }
+            if markStaleOnFailure {
+                if locationID == .local {
+                    harnessReadinessFresh = false
+                } else {
+                    remoteHarnessReadinessFresh[locationID] = false
+                }
             }
+            return false
+        }
+        do {
+            let response = try await requestClient.listHarnessStatus(fresh: fresh)
+            guard gateway(for: locationID) === requestClient else { return false }
+            storeHarnessSnapshot(response.harnesses, git: response.git, at: locationID)
             return true
         } catch {
-            // Keep last-known harness rows.
+            guard gateway(for: locationID) === requestClient else { return false }
+            // Keep the last server-authored rows unchanged. An explicit
+            // Accounts refresh expires their CLIENT freshness instead of
+            // fabricating a synthetic server health verdict.
+            if markStaleOnFailure {
+                if locationID == .local {
+                    harnessReadinessFresh = false
+                } else {
+                    remoteHarnessReadinessFresh[locationID] = false
+                }
+            }
+            if locationID == .local { gitCapability = nil }
+            else { remoteGitCapabilities.removeValue(forKey: locationID) }
             return false
         }
     }
@@ -84,7 +131,7 @@ extension AppModel {
         let refreshed = await refreshAuthReadiness(for: family, request: request)
         // The card renders daemon-NORMALIZED rows, which only a harness-list
         // refresh rebuilds — else the sheet's own recheck left them stale.
-        _ = await refreshHarnesses(fresh: true)
+        _ = await refreshHarnesses(fresh: true, markStaleOnFailure: true)
         return refreshed
     }
 
@@ -95,6 +142,7 @@ extension AppModel {
         do {
             let response = try await requestClient.refreshAuthReadiness(
                 harnessId: family.rawValue, request: request)
+            guard gateway(for: locationID) === requestClient else { return false }
             let source = HarnessAuthSource(
                 source: response.readiness.source.rawValue,
                 availability: response.readiness.availability.rawValue,

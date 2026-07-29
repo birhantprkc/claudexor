@@ -90,18 +90,18 @@ public struct CredentialProfileEntry: Codable, Sendable, Identifiable, Equatable
 public enum ControlNextUpIdentity: Decodable, Sendable, Equatable {
     /// An enabled credential profile is who an unpinned run routes to next.
     case profile(profileId: String)
-    /// The native/CLI login is the next-up subject of an unpinned run.
-    case native
+    /// The unprofiled/default credential is the next-up subject of an unpinned run.
+    case native(route: String?)
     /// An unpinned run has nothing routable (CLI login disabled, nothing pinned).
     case none(reason: String)
 
-    enum CodingKeys: String, CodingKey { case kind, profileId, reason }
+    enum CodingKeys: String, CodingKey { case kind, profileId, reason, route }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "profile": self = .profile(profileId: try c.decode(String.self, forKey: .profileId))
-        case "native": self = .native
+        case "native": self = .native(route: try c.decodeIfPresent(String.self, forKey: .route))
         case "none": self = .none(reason: try c.decode(String.self, forKey: .reason))
         case let other:
             throw DecodingError.dataCorrupted(.init(
@@ -112,6 +112,19 @@ public enum ControlNextUpIdentity: Decodable, Sendable, Equatable {
 
     /// True when the native/CLI login is the next-up identity.
     public var isNative: Bool { if case .native = self { return true }; return false }
+    /// Effective source route when the unprofiled/default subject is next-up.
+    public var defaultRoute: String? {
+        if case .native(let route) = self { return route }
+        return nil
+    }
+    /// True when the unprofiled/default identity resolves through `route`.
+    /// Older daemons omit the route, so the caller supplies the row that owned
+    /// the legacy undifferentiated native projection.
+    public func isDefaultRoute(_ route: String, legacyFallback: Bool) -> Bool {
+        guard case .native(let selectedRoute) = self else { return false }
+        guard let selectedRoute else { return legacyFallback }
+        return selectedRoute == route
+    }
     /// True when `id` is the next-up credential profile.
     public func isProfile(_ id: String) -> Bool {
         if case .profile(let profileId) = self { return profileId == id }
@@ -162,13 +175,26 @@ public struct CredentialProfilesResponse: Decodable, Sendable {
     /// daemon that omits the projection still decodes; surfaces then fall back
     /// to client-derived state.
     public let harnessAccounts: [HarnessAccounts]
+    /// Present only for `?snapshot=true`; omission is an older/legacy response.
+    public let harnesses: [HarnessStatus]?
+    public let git: WorkspaceGitCapability?
+    public let quota: ControlQuotaResponse?
+    /// Opaque global-journal boundary for the dedicated quota observer.
+    /// Present on a current complete snapshot; nil for a legacy daemon.
+    public let quotaEventCursor: String?
 
-    enum CodingKeys: String, CodingKey { case profiles, harnessAccounts }
+    enum CodingKeys: String, CodingKey {
+        case profiles, harnessAccounts, harnesses, git, quota, quotaEventCursor
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         profiles = try c.decode([CredentialProfileEntry].self, forKey: .profiles)
         harnessAccounts = try c.decodeIfPresent([HarnessAccounts].self, forKey: .harnessAccounts) ?? []
+        harnesses = try c.decodeIfPresent([HarnessStatus].self, forKey: .harnesses)
+        git = try c.decodeIfPresent(WorkspaceGitCapability.self, forKey: .git)
+        quota = try c.decodeIfPresent(ControlQuotaResponse.self, forKey: .quota)
+        quotaEventCursor = try c.decodeIfPresent(String.self, forKey: .quotaEventCursor)
     }
 }
 
@@ -214,14 +240,25 @@ public struct DeleteCredentialProfileReceipt: Decodable, Sendable {
 }
 
 public extension GatewayClient {
-    func credentialProfiles() async throws -> CredentialProfilesResponse {
-        let req = request("credential-profiles", method: "GET")
+    func credentialProfiles(snapshot: Bool = false) async throws -> CredentialProfilesResponse {
+        let query = snapshot ? [URLQueryItem(name: "snapshot", value: "true")] : []
+        let req = request("credential-profiles", method: "GET", queryItems: query)
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw GatewayError.http(status: status, body: String(decoding: data, as: UTF8.self))
         }
         return try Self.decoder.decode(CredentialProfilesResponse.self, from: data)
+    }
+
+    /// Prefer the opt-in atomic snapshot; retry the legacy shape only when an
+    /// older strict daemon rejects the new query parameter.
+    func credentialProfilesSnapshot() async throws -> CredentialProfilesResponse {
+        do {
+            return try await credentialProfiles(snapshot: true)
+        } catch let GatewayError.http(status, _) where status == 400 {
+            return try await credentialProfiles()
+        }
     }
 
     /// Register a new credential profile. The 200 body is one `{profile, status}`

@@ -49,6 +49,8 @@ struct AppModelRefreshTests {
         #expect(model.selectedThreadId == nil)
         #expect(model.selectedThreadDetail == nil)
         #expect(model.liveHarnesses.isEmpty)
+        #expect(model.harnessReadinessFresh == nil)
+        #expect(model.gitCapability == nil)
         #expect(model.settingsSnapshot == nil)
         #expect(model.quotaResponse == nil)
         #expect(model.storedSecrets.isEmpty)
@@ -140,7 +142,7 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
-    @Test func runlessGlobalQuotaEventRefreshesQuotaProjection() async throws {
+    @Test func generalGlobalStreamLeavesQuotaProjectionToDedicatedObserver() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -151,7 +153,9 @@ struct AppModelRefreshTests {
         )
         let model = AppModel(client: client, requestNotificationAuthorization: false)
         model.health = .connected
+        let quotaCalls = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in
+            quotaCalls.increment()
             guard request.url?.path == "/v2/quota" else { throw AppRefreshTestError.badRequest }
             return (appResponse(for: request), Data(#"{"snapshots":[],"refreshed_at":null}"#.utf8))
         }
@@ -164,7 +168,8 @@ struct AppModelRefreshTests {
             payload: .object([:])
         ))
 
-        #expect(model.quotaResponse?.snapshots.isEmpty == true)
+        #expect(quotaCalls.count == 0)
+        #expect(model.quotaResponse == nil)
         #expect(model.quotaStatus == nil)
     }
 
@@ -446,6 +451,74 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func terminalEventCarriesDeadlineFactsBeforeTheDetailRefresh() {
+        let model = AppModel(requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-deadline", title: "Run", prompt: "", mode: .agent, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+        let facts: JSONValue = .object([
+            "lifecycle": .string("cancelled"),
+            "noChanges": .bool(false),
+            "checks": .string("not_configured"),
+            "review": .string("not_run"),
+            "reason": .string("wall_clock_exceeded"),
+        ])
+
+        model.apply(BusEnvelope(
+            seq: 1,
+            kind: "run.failed",
+            event: .object([
+                "type": .string("run.failed"),
+                "payload": .object([
+                    "lifecycle": .string("cancelled"),
+                    "facts": facts,
+                ]),
+            ])), to: "run-deadline")
+
+        #expect(model.liveTasks[0].phase == .cancelled)
+        #expect(model.liveTasks[0].outcomeFacts?.reason == "wall_clock_exceeded")
+        #expect(AppModel.terminalOutcomeFacts(
+            from: .object(["facts": facts]), expectedLifecycle: "failed") == nil)
+    }
+
+    @MainActor
+    @Test func interactionCancellationNeverPresentsAsAnAutomaticTimeout() {
+        let model = AppModel(requestNotificationAuthorization: false)
+        model.liveTasks = [TaskRun(
+            id: "run-interaction", title: "Run", prompt: "", mode: .ask, phase: .running,
+            project: "Project", harnesses: [], n: 1,
+            createdAt: .now, updatedAt: .now,
+            spendUsd: 0, capUsd: 0, spendKnown: false, capKnown: false,
+            routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
+            candidates: [], findings: [], diff: []
+        )]
+
+        model.apply(BusEnvelope(seq: 1, kind: "interaction.timeout", event: .object([
+            "type": .string("interaction.timeout"),
+            "payload": .object([
+                "interaction_id": .string("int-cancelled"),
+                "reason": .string("cancelled"),
+            ]),
+        ])), to: "run-interaction")
+        let cancelledTitle = model.liveBoxes["run-interaction"]?.activity.last?.title ?? ""
+        #expect(cancelledTitle == "Question closed — run cancelled")
+        #expect(!cancelledTitle.localizedCaseInsensitiveContains("timed out"))
+        #expect(!cancelledTitle.localizedCaseInsensitiveContains("assumptions"))
+
+        model.apply(BusEnvelope(seq: 2, kind: "interaction.timeout", event: .object([
+            "type": .string("interaction.timeout"),
+            "payload": .object(["interaction_id": .string("int-timeout")]),
+        ])), to: "run-interaction")
+        #expect(model.liveBoxes["run-interaction"]?.activity.last?.title ==
+            "Question timed out — continuing with assumptions")
+    }
+
+    @MainActor
     @Test func availabilityReadsServerRoutableIntentsNotLocalDerivation() {
         let model = AppModel(requestNotificationAuthorization: false)
         // Healthy + intent enabled, but the SERVER says not routable (e.g.
@@ -634,6 +707,302 @@ struct AppModelRefreshTests {
         }
         #expect(!(await model.refreshHarnesses(fresh: true)))
         #expect(model.liveHarnesses.map(\.family) == [.claude])
+
+        let offline = AppModel(requestNotificationAuthorization: false)
+        offline.liveHarnesses = model.liveHarnesses
+        offline.harnessReadinessFresh = true
+        #expect(!(await offline.refreshHarnesses(fresh: true, markStaleOnFailure: true)))
+        #expect(offline.harnessReadinessFresh == false)
+        #expect(offline.liveHarnesses.map(\.family) == [.claude])
+    }
+
+    @MainActor
+    @Test func accountsRefreshUsesFreshReadinessProfilesAndQuotaInOneCycle() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path, request.url?.query) {
+            case ("GET", "/v2/credential-profiles", "snapshot=true"):
+                calls.increment()
+                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"ok","manifest":null,"routableIntents":["implement"],"authSources":[{"source":"native_session","availability":"available","verification":"passed"}]}],"quotaEventCursor":"quota:1","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        #expect(await model.refreshAccounts() == nil)
+        #expect(calls.count == 1)
+        #expect(model.liveHarnesses.first?.routableIntents == ["implement"])
+        #expect(model.harnessReadinessFresh == true)
+        #expect(model.harnessAccounts.first?.nextUp.isNative == true)
+        #expect(model.quotaResponse != nil)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:00Z")
+        #expect(model.gitCapability?.available == true)
+    }
+
+    @MainActor
+    @Test func legacyAccountsResponseFallsBackToOneFreshHarnessReadAndDropsUnfencedNextUp() async {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path, request.url?.query) {
+            case ("GET", "/v2/credential-profiles", "snapshot=true"):
+                calls.increment()
+                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}]}"#.utf8))
+            case ("GET", "/v2/harnesses", "fresh=true"):
+                calls.increment()
+                return (appResponse(for: request), Data(#"{"git":{"status":"available","version":"git version legacy","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"ok","manifest":null,"routableIntents":["implement"]}]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        #expect(await model.loadCredentialProfiles(discardOnFailure: true) == nil)
+        #expect(calls.count == 2)
+        #expect(model.liveHarnesses.first?.routableIntents == ["implement"])
+        #expect(model.gitCapability?.version == "git version legacy")
+        // The old response's next_up is not atomically fenced to these rows.
+        #expect(model.harnessAccounts.isEmpty)
+    }
+
+    @MainActor
+    @Test func completeAccountsSnapshotReplacesOlderPointProbeReadiness() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.exactAuthSources[.claude] = [
+            .nativeSession: HarnessAuthSource(
+                source: "native_session", availability: "available", verification: "passed"),
+        ]
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            let body = #"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":false,"next_up":{"kind":"none","reason":"Native login is unavailable"}}],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"degraded","manifest":null,"routableIntents":[],"authSources":[{"source":"native_session","availability":"unavailable","verification":"failed"}]}],"quotaEventCursor":"quota:2","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}}"#
+            return (appResponse(for: request), Data(body.utf8))
+        }
+
+        #expect(await model.refreshAccounts() == nil)
+        let source = model.authSource(for: .claude, source: .nativeSession)
+        #expect(source?.availability == "unavailable")
+        #expect(source?.verification == "failed")
+        #expect(AccountsPresentation.rows(model: model).first?.readiness == .unavailable)
+    }
+
+    @MainActor
+    @Test func failedAccountsRefreshExpiresReadyRowsAndDiscardsAccountProjection() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        model.liveHarnesses = [HarnessInfo(
+            family: .claude, health: .ok, version: "1", auth: "Ready by doctor.",
+            authSources: [HarnessAuthSource(
+                source: "native_session", availability: "available", verification: "passed")],
+            intents: ["implement"], routableIntents: ["implement"],
+            readiness: [ReadinessCheck(
+                kind: "auth", id: "native", title: "Native", status: "pass")]
+        )]
+        model.credentialProfiles = [try JSONDecoder().decode(
+            CredentialProfileEntry.self,
+            from: Data(#"{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","isolation_locator":null,"enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}"#.utf8))]
+        model.harnessAccounts = [try JSONDecoder().decode(
+            HarnessAccounts.self,
+            from: Data(#"{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}"#.utf8))]
+        AppRequestStubURLProtocol.handler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                headerFields: nil)!
+            return (response, Data(#"{"error":"refresh failed"}"#.utf8))
+        }
+
+        #expect(await model.refreshAccounts() != nil)
+        // Server facts remain verbatim; only their client freshness expires.
+        #expect(model.liveHarnesses.first?.health == .ok)
+        #expect(model.liveHarnesses.first?.routableIntents == ["implement"])
+        #expect(model.harnessReadinessFresh == false)
+        let row = AccountsPresentation.rows(model: model).first
+        #expect(row?.readiness == .unknown)
+        #expect(row?.verified == false)
+        #expect(model.credentialProfiles.isEmpty)
+        #expect(model.harnessAccounts.isEmpty)
+    }
+
+    @MainActor
+    @Test func newerAccountsSuccessWinsWhenAnOlderSuccessCompletesLast() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        let oldArrived = AppRefreshCallCounter()
+        let releaseOld = DispatchSemaphore(value: 0)
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            if calls.incrementAndGet() == 1 {
+                oldArrived.increment()
+                _ = releaseOld.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "old", displayName: "Old", observedAt: "2026-07-28T00:00:01Z"))
+            }
+            return (appResponse(for: request), appAccountsSnapshot(
+                profileID: "new", displayName: "New", observedAt: "2026-07-28T00:00:02Z"))
+        }
+
+        let older = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while oldArrived.count == 0 {
+            try #require(ContinuousClock.now <= deadline, "older Accounts load never reached the stub")
+            await Task.yield()
+        }
+        let newer = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        #expect(await newer.value == nil)
+        releaseOld.signal()
+        #expect(await older.value == nil)
+
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["new"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("new") == true)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:02Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+    }
+
+    @MainActor
+    @Test func newerAccountsSuccessSurvivesAnOlderFailureCompletingLast() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        let oldArrived = AppRefreshCallCounter()
+        let releaseOld = DispatchSemaphore(value: 0)
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            if calls.incrementAndGet() == 1 {
+                oldArrived.increment()
+                _ = releaseOld.wait(timeout: .now() + 5)
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!,
+                    Data(#"{"error":"old failed"}"#.utf8)
+                )
+            }
+            return (appResponse(for: request), appAccountsSnapshot(
+                profileID: "new", displayName: "New", observedAt: "2026-07-28T00:00:03Z"))
+        }
+
+        let older = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while oldArrived.count == 0 {
+            try #require(ContinuousClock.now <= deadline, "older Accounts load never reached the stub")
+            await Task.yield()
+        }
+        let newer = Task { await model.loadCredentialProfiles(discardOnFailure: true) }
+        #expect(await newer.value == nil)
+        releaseOld.signal()
+        #expect(await older.value == nil)
+
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["new"])
+        #expect(model.harnessReadinessFresh == true)
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("new") == true)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+    }
+
+    @MainActor
+    @Test func quotaProjectionExpiryKeepsAccountIdentityButDropsDerivedAuthority() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.credentialProfiles = try JSONDecoder().decode(
+            [CredentialProfileEntry].self,
+            from: Data(#"[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null},"identity":{"email":"work@example.test","plan":"max"}}]"#.utf8))
+        model.harnessAccounts = try JSONDecoder().decode(
+            [HarnessAccounts].self,
+            from: Data(#"[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"profile","profileId":"work"}}]"#.utf8))
+        model.quotaResponse = try JSONDecoder().decode(
+            ControlQuotaResponse.self,
+            from: appQuotaResponse(subjectID: "work", observedAt: "2026-07-28T00:00:04Z"))
+        model.accountsNextUpAuthorityFresh[.local] = true
+
+        model.expireAccountsQuotaProjection(at: .local)
+
+        #expect(model.quotaResponse == nil)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.credentialProfiles.first?.identity?.email == "work@example.test")
+        #expect(model.credentialProfiles.first?.status.verification == "passed")
+    }
+
+    @MainActor
+    @Test func staleQuotaCursorExpiresOnceAndNeverStartsAnAutomaticResnapshotLoop() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let requestClient = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config))
+        let model = AppModel(client: requestClient, requestNotificationAuthorization: false)
+        let snapshotCalls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/v2/global/events":
+                return (
+                    HTTPURLResponse(
+                        url: request.url!, statusCode: 409, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!,
+                    Data(#"{"error":"stale cursor"}"#.utf8)
+                )
+            case "/v2/credential-profiles":
+                snapshotCalls.increment()
+                throw AppRefreshTestError.badRequest
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        model.accountsNextUpAuthorityFresh[.local] = true
+        model.quotaResponse = try JSONDecoder().decode(
+            ControlQuotaResponse.self,
+            from: appQuotaResponse(subjectID: "old", observedAt: "2026-07-28T00:00:01Z"))
+        model.startAccountsQuotaObserver(
+            at: .local, client: requestClient, after: "stale-cursor")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while model.accountsQuotaStreamTokens[.local] != nil {
+            try #require(ContinuousClock.now <= deadline, "stale observer did not stop")
+            await Task.yield()
+        }
+
+        #expect(snapshotCalls.count == 0)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.quotaResponse == nil)
     }
 
     @MainActor
@@ -905,6 +1274,17 @@ struct AppModelRefreshTests {
         #expect(message.contains("auth_readiness_probe_failed"))
         #expect(message.contains("probe unavailable"))
         #expect(message.contains("retry_auth_readiness_refresh"))
+    }
+
+    @MainActor
+    @Test func refusedTurnReadsTypedContextAndKeepsLegacyFallback() {
+        let typed = GatewayError.http(status: 503, body: #"{"code":"git_missing","message":"Git unavailable","retryable":true,"context":{"turnId":"tn-context"}}"#)
+        #expect(AppModel.refusedTurn(from: typed)?.turnId == "tn-context")
+        #expect(AppModel.refusedTurn(from: typed)?.retryable == true)
+
+        let legacy = GatewayError.http(status: 400, body: #"{"error":"old","turnId":"tn-legacy","retryable":false}"#)
+        #expect(AppModel.refusedTurn(from: legacy)?.turnId == "tn-legacy")
+        #expect(AppModel.refusedTurn(from: legacy)?.retryable == false)
     }
 
     @Test(arguments: [
@@ -2655,11 +3035,53 @@ private func appSetupJob(
 
 private enum AppRefreshTestError: Error { case badRequest }
 
+private func appQuotaResponse(subjectID: String, observedAt: String) -> Data {
+    Data("""
+    {"snapshots":[{"subject":{"harness":"claude","credential_route":"profile",
+      "plan_label":"max","subject_id":"\(subjectID)"},"constraints":[],"source":"test",
+      "observed_at":"\(observedAt)","freshness":"fresh"}],"absences":[],
+      "refreshed_at":"\(observedAt)"}
+    """.utf8)
+}
+
+private func appAccountsSnapshot(
+    profileID: String,
+    displayName: String,
+    observedAt: String,
+    nativeEnabled: Bool = true,
+    quotaEventCursor: String = "quota-snapshot-cursor"
+) -> Data {
+    Data("""
+    {"profiles":[{"profile":{"profile_id":"\(profileID)","harness_id":"claude",
+      "display_name":"\(displayName)","credential_kind":"config_dir_login",
+      "isolation_locator":null,"enabled":true},"status":{"availability":"available",
+      "verification":"passed","detail":null,"last_verified_at":null},
+      "identity":{"email":"\(profileID)@example.test","plan":"max"}}],
+      "harnessAccounts":[{"harness_id":"claude",
+      "native_credentials_enabled":\(nativeEnabled),"native_login_detected":true,
+      "identity":{"email":"native@example.test","plan":"pro"},
+      "next_up":{"kind":"profile","profileId":"\(profileID)"}}],
+      "harnesses":[{"id":"claude","status":"ok","manifest":null,
+      "routableIntents":["implement"],"authSources":[{"source":"native_session",
+      "availability":"available","verification":"passed"}]}],
+      "git":{"status":"available","version":"git version test","detail":null,"remediation":null},
+      "quotaEventCursor":"\(quotaEventCursor)",
+      "quota":\(String(decoding: appQuotaResponse(
+          subjectID: profileID, observedAt: observedAt), as: UTF8.self))}
+    """.utf8)
+}
+
 /// Thread-safe request counter (the URLProtocol handler runs off the main actor).
 private final class AppRefreshCallCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
     func increment() { lock.lock(); value += 1; lock.unlock() }
+    func incrementAndGet() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
     var count: Int {
         lock.lock()
         defer { lock.unlock() }

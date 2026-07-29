@@ -52,6 +52,8 @@ import ClaudexorKit
         #expect(line(.succeeded).stateWord == RunPhase.succeeded.label)
         #expect(attention(.succeeded) == nil)
         #expect(line(.cancelled).stateWord == RunPhase.cancelled.label)
+        #expect(line(.cancelled, reason: "user_cancelled").stateWord == "Cancelled")
+        #expect(line(.cancelled, reason: "wall_clock_exceeded").stateWord == "Time limit reached")
         #expect(attention(.cancelled) == nil)
     }
 

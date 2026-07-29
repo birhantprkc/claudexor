@@ -306,6 +306,11 @@ struct TurnRefusalCard: View {
                 Text("Not started").font(.caption.weight(.semibold)).foregroundStyle(Theme.status(.negative))
                 Text(refusal.message)
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                ForEach(Array(refusal.requiredActions.prefix(3).enumerated()), id: \.offset) { _, action in
+                    Label(action, systemImage: "arrow.right.circle")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 if refusal.retryable == false {
                     // No recorded job to replay (the enqueue itself threw):
                     // Retry would 409 — say so instead of offering it.
