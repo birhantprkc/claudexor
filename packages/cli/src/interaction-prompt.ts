@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import type { InteractionAnswerSet, InteractionQuestion } from "@claudexor/schema";
+import { parseChoiceIndexes } from "./choice-input.js";
 
 const print = (line: string): void => {
   process.stdout.write(line + "\n");
@@ -111,14 +112,11 @@ export async function collectInteractionAnswers(
           : await reader.question(`   answer (${hint}): `)
       ).trim();
       if (!raw) continue;
-      const picks = raw
-        .split(",")
-        .map((part) => Number.parseInt(part.trim(), 10))
-        .filter((value) => Number.isInteger(value) && value >= 1 && value <= q.options.length);
-      if (picks.length > 0 && picks.length === raw.split(",").length) {
+      const picks = parseChoiceIndexes(raw, q.options.length, q.multi_select);
+      if (picks) {
         answers.push({
           question_id: q.id,
-          selected_labels: picks.map((value) => q.options[value - 1]?.label ?? "").filter(Boolean),
+          selected_labels: picks.map((index) => q.options[index]?.label ?? "").filter(Boolean),
           free_text: null,
         });
       } else {

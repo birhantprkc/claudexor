@@ -245,8 +245,15 @@ invariant or owner decision before proceeding.
 - **INV-042** Reviews are trusted only when reviewer output is parseable,
   route proof is observed (stream- or transcript-observed model, never an
   argv echo), reviewer telemetry is persisted, and the reviewer read the
-  candidate evidence files rather than a giant prompt-only diff. verify:
-  reviewEngine route-proof tests; per-reviewer artifact checklist.
+  candidate evidence files rather than a giant prompt-only diff. A reviewer
+  workspace is an explicit candidate projection, never a recursive copy of
+  the live checkout: Git-visible files plus exact diff-touched paths, subject to
+  the shared sensitive-resource boundary, are the candidate plane; the
+  sealed/redacted evidence packet is a separate explicit plane. Gitignored
+  local state that is absent from the diff never crosses the reviewer boundary.
+  verify: reviewEngine route-proof,
+  candidate-inventory, and ignored-sibling tests; per-reviewer artifact
+  checklist.
 - **INV-043** Tool success is evidence, not prose. `tool_result.is_error ===
   true` is a hard warning that blocks a green verified claim unless later
   verified recovery exists, but it does not by itself discard a produced

@@ -12,6 +12,7 @@ import {
   REQUIRED_TRIAD_MODELS,
   TRIAD_ITEMS,
   buildTouchedFilePack,
+  compactRepositoryAtlas,
   completionTermination,
   exactPanelMatch,
   parseChecklistJson,
@@ -67,6 +68,30 @@ function liveScope(findings: ChecklistFinding[] = []): SlotRecord {
 }
 
 describe("release review fail-closed contract", () => {
+  it("serializes every repository-atlas path compactly without delimiter ambiguity", () => {
+    const rows = [
+      { path: "plain.ts", bytes: 12 },
+      { path: "space and unicode/кот.ts", bytes: 0 },
+      { path: "control/tab\tnewline\n.ts", bytes: 34 },
+      { path: "unreadable.bin", bytes: null },
+    ];
+    const encoded = compactRepositoryAtlas(rows);
+    const decoded = encoded.split("\n").map((line) => {
+      const delimiter = line.indexOf("\t");
+      const size = line.slice(0, delimiter);
+      return {
+        path: JSON.parse(line.slice(delimiter + 1)),
+        bytes: size === "?" ? null : Number(size),
+      };
+    });
+
+    expect(decoded).toEqual(rows);
+    expect(encoded).not.toContain("control/tab\tnewline\n.ts");
+    expect(Buffer.byteLength(encoded)).toBeLessThan(
+      Buffer.byteLength(JSON.stringify(rows, null, 2)),
+    );
+  });
+
   it("accepts only full-SHA candidate or stable-tag publish inputs", () => {
     expect(validateReleaseInput("candidate", "a".repeat(40)).ok).toBe(true);
     expect(validateReleaseInput("candidate", "main").ok).toBe(false);

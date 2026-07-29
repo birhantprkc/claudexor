@@ -20,6 +20,9 @@ export function reviewPromptContextPreflight(
   contextTokens?: number;
   modelMaxOutputTokens?: number;
 };
+export function compactRepositoryAtlas(
+  rows: readonly { path: string; bytes: number | null }[],
+): string;
 export function reviewSplitOptionContract(
   packSubset: unknown,
   diffSubset: unknown,

@@ -275,6 +275,11 @@ with a typed blocker contract (`docs/CHECKLISTS.md`). Reviewers find defects;
 they do not author concept — owner decisions and the Bible outrank reviewer
 preference, and a finding without evidence blocks nothing.
 
+Reviewer access is also evidence-scoped. The candidate workspace is projected
+from version-control-visible files plus the reviewed diff, while the review
+packet crosses through a separate sealed or redacted channel. Ignored local
+operator state is therefore not silently promoted into reviewer context.
+
 Rejected alternative: per-commit blocking review of the repository's own
 commits. It was tried and retired — it optimized for ceremony over
 convergence; the release-cycle protocol with sealed packets and one

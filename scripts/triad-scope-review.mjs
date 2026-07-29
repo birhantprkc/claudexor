@@ -37,6 +37,9 @@
  * Prepare the immutable lock in a separate no-network invocation by adding
  * `--prepare-panel-lock`; a review invocation refuses a missing lock before it
  * creates its output directory or calls a reviewer.
+ * Add `--prepare-prompts` to run every candidate/packet/context/privacy
+ * preflight and persist the exact prompts plus a no-network receipt without
+ * starting a reviewer. The later live invocation rebuilds the same bytes.
  * Environment overrides, substitutions, direct-provider routes, and
  * --skip-scope fail before evidence leaves the machine.
  *
@@ -84,6 +87,7 @@ import {
   buildTouchedFilePack,
   changedFileInventorySection,
   completionTermination,
+  compactRepositoryAtlas,
   decodeReviewUtf8,
   parseChecklistJson,
   livenessFloorMs,
@@ -239,7 +243,7 @@ function loadFrozenPacket(candidateRoot, candidateSha, candidateTree, packetMani
   }
 
   const sections = sealed.files
-    .filter((file) => file !== "DIFF.patch")
+    .filter((file) => file !== "DIFF.patch" && file !== "MANIFEST.sha256")
     .map((file) => `### ${file}\n\n${readFileSync(join(packet, file), "utf8")}`);
   // The reviewer must be able to VERIFY the binding it is told to check
   // (round-18 sol critical): show the complete MANIFEST.sha256 and the
@@ -479,7 +483,7 @@ function repoAtlas() {
       return { path, bytes: null, error: "unreadable" };
     }
   });
-  return JSON.stringify(rows, null, 2);
+  return compactRepositoryAtlas(rows);
 }
 
 function checklistSection(title) {
@@ -617,6 +621,8 @@ ${readDoc("CLAUDEXOR_BIBLE.md")}
 ${readDoc("docs/ARCHITECTURE.md")}
 
 ## Repository atlas (every tracked path)
+
+Format: one row per tracked path as <byte-size-or-?> TAB <JSON-encoded-path>.
 
 ${repoAtlas()}
 
@@ -800,6 +806,11 @@ async function main() {
   if (arg("paths") !== null || arg("goal-file") !== null) {
     throw new Error("--paths and --goal-file are not allowed for a sealed cumulative review");
   }
+  const preparePanelLock = arg("prepare-panel-lock") !== null;
+  const preparePrompts = arg("prepare-prompts") !== null;
+  if (preparePanelLock && preparePrompts) {
+    throw new Error("--prepare-panel-lock and --prepare-prompts are separate no-network phases");
+  }
   const candidateSha = requiredArg("candidate-sha");
   const candidateTree = requiredArg("candidate-tree");
   const packetManifestDigest = requiredArg("packet-manifest-digest");
@@ -814,7 +825,7 @@ async function main() {
   if (pathIsWithin(frozen.packet, panelLockPath)) {
     throw new Error("panel lock must not mutate the sealed packet");
   }
-  if (arg("prepare-panel-lock") !== null) {
+  if (preparePanelLock) {
     if (existsSync(panelLockPath)) {
       const existing = validatePanelLock(readPanelLock(panelLockPath), {
         candidateSha,
@@ -951,6 +962,35 @@ async function main() {
     triad: createHash("sha256").update(readFileSync(triadPromptPath)).digest("hex"),
     scope: createHash("sha256").update(readFileSync(scopePromptPath)).digest("hex"),
   };
+  if (preparePrompts) {
+    writeFileSync(
+      join(outDir, "PREPARE_PROMPTS_RECEIPT.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          candidateSha,
+          candidateTree,
+          base,
+          packetManifestSha256: frozen.manifestSha256,
+          subWave: subWaveName,
+          promptSha256,
+          promptBytes: {
+            triad: Buffer.byteLength(submittedTriadPrompt, "utf8"),
+            scope: Buffer.byteLength(submittedScopePrompt, "utf8"),
+          },
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          contextPreflight,
+          reviewWaveId,
+          networkRequests: 0,
+          reviewersStarted: 0,
+        },
+        null,
+        2,
+      )}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    return;
+  }
   const reviewRunId = randomUUID();
   console.error(
     `triad prompt: ${submittedTriadPrompt.length} chars; models: ${TRIAD_MODELS.join(", ")}`,

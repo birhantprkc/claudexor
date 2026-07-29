@@ -11,6 +11,8 @@
   deadline without rewriting its sealed authorization; the daemon-owned job
   deadline remains the permit authority.
 - Align Plan attachments, per-command flag ownership, location-scoped settings and accounts, durable refused-turn retry, Git applicability, canonical terminal output, and Settings validation envelopes with the control-plane contracts.
+- Parse TTY Plan and interaction choices with one exact numeric grammar, keeping
+  numeric-prefixed prose and invalid multi-picks as the user's full text.
 - Validate successful run-detail responses, redact degraded MCP/ACP diagnostics,
   scrub vendor-installer child environments, and keep the machine-actionable
   Codex login fallback bound to the server-owned credential profile.

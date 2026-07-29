@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import ClaudexorApp
@@ -119,6 +120,67 @@ import Testing
         #expect(result.attachments.first?.name == url.lastPathComponent)
     }
 
+    @Test func sameSizePathReplacementIsRejectedByTheOpenedDescriptor() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claudexor-staging-replace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("picked.txt")
+        let replacement = root.appendingPathComponent("replacement.txt")
+        try Data("AAAA".utf8).write(to: url)
+        try Data("BBBB".utf8).write(to: replacement)
+
+        let result = ComposerAttachmentStager.stage(
+            sources: [.pickedFile(url)],
+            existing: [],
+            poolMode: .explicit,
+            lanes: [textLane],
+            open: { source in
+                let opened = try ComposerAttachmentStager.openFile(source)
+                let replaced = replacement.path.withCString { from in
+                    source.path.withCString { to in Darwin.rename(from, to) }
+                }
+                #expect(replaced == 0)
+                return opened
+            }
+        )
+
+        #expect(result.attachments.isEmpty)
+        #expect(result.notice?.contains("changed while it was being read") == true)
+    }
+
+    @Test func sameSizeInPlaceRewriteIsRejectedByTheDescriptorFingerprint() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claudexor-staging-rewrite-\(UUID().uuidString).txt")
+        try Data("AAAA".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let result = ComposerAttachmentStager.stage(
+            sources: [.pickedFile(url)],
+            existing: [],
+            poolMode: .explicit,
+            lanes: [textLane],
+            open: { source in
+                let opened = try ComposerAttachmentStager.openFile(source)
+                usleep(1_000)
+                let writer = Darwin.open(source.path, O_WRONLY | O_CLOEXEC)
+                #expect(writer >= 0)
+                if writer >= 0 {
+                    defer { Darwin.close(writer) }
+                    let bytes = Array("BBBB".utf8)
+                    let written = bytes.withUnsafeBytes { buffer in
+                        Darwin.write(writer, buffer.baseAddress, buffer.count)
+                    }
+                    #expect(written == bytes.count)
+                }
+                return opened
+            }
+        )
+
+        #expect(result.attachments.isEmpty)
+        #expect(result.notice?.contains("changed while it was being read") == true)
+    }
+
     @Test func sizeChangeDuringReadIsSkipped() {
         var metadataCall = 0
         let result = ComposerAttachmentStager.stage(
@@ -139,7 +201,7 @@ import Testing
         )
 
         #expect(result.attachments.isEmpty)
-        #expect(result.notice?.contains("changed size") == true)
+        #expect(result.notice?.contains("changed while it was being read") == true)
     }
 
     @Test func delayedFileCompletionCannotPublishAfterSelectionSwitch() async {

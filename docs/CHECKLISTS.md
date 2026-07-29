@@ -385,6 +385,11 @@ pnpm test
   remote OpenRouter chat models that cannot read local files, so its prompt IS
   the evidence transport. Its prompts and raw outputs are persisted
   untruncated per round.)
+- Reviewer workspaces must project one frozen source inventory: Git-visible
+  files plus exact diff-touched paths, or diff-touched postimages only when no
+  Git inventory exists. Prove that unrelated ignored local instructions and an
+  ignored sibling beside a diff-touched file are absent, while explicit evidence
+  remains available through its separate packet boundary.
 - Synthesis follows the same argv-size law: candidate diffs/findings are a
   temporary file inside the synthesis envelope, never concatenated into the
   process prompt. Verify the file is recreated on retry and removed before
@@ -529,7 +534,13 @@ itself). The v3 protocol bounds the loop mechanically.
     must be assigned to the same sub-wave. Full-text frames length-prefix path
     and content independently, and invalid UTF-8 fails before network instead
     of being replacement-decoded. `FILES_TO_READ_WHOLE.txt` is a JSON string
-    array so path bytes are never line-parsed. The transport also refuses before
+    array so path bytes are never line-parsed. Run each sub-wave once with
+    `--prepare-prompts` first: this no-network phase persists the exact triad and
+    scope prompts, context preflight, prompt digests, and a receipt proving zero
+    reviewers started, so coverage and size are checked before evidence leaves
+    the machine. This preparation receipt cannot occupy or satisfy a reviewer
+    slot. The later live invocation rebuilds those same bytes into a new output
+    directory. The transport also refuses before
     output creation or network access unless its conservative input-token upper
     bound plus configured max output fits every exact panel model's frozen
     context/output ceiling; `TRIAD_MAX_OUTPUT_TOKENS` defaults to 60000. The

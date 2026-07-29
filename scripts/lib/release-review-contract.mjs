@@ -86,6 +86,23 @@ export function reviewPromptContextPreflight(model, prompt, maxOutputTokens) {
   };
 }
 
+/**
+ * Lossless compact transport for the whole-repository scope atlas. Paths are
+ * JSON strings, so tabs/newlines and Unicode remain unambiguous without the
+ * whitespace cost of pretty-printing one object per file.
+ */
+export function compactRepositoryAtlas(rows) {
+  return rows
+    .map((row) => {
+      if (!row || typeof row.path !== "string") {
+        throw new Error("repository atlas rows require a string path");
+      }
+      const size = Number.isSafeInteger(row.bytes) && row.bytes >= 0 ? String(row.bytes) : "?";
+      return `${size}\t${JSON.stringify(row.path)}`;
+    })
+    .join("\n");
+}
+
 export function reviewSplitOptionContract(packSubset, diffSubset, subWave) {
   const splitRequested = packSubset !== null || diffSubset !== null;
   const reasons = [];

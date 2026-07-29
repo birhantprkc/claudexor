@@ -11,6 +11,7 @@
  */
 import { createInterface } from "node:readline/promises";
 import type { PlanQuestion } from "@claudexor/schema";
+import { parseChoiceIndexes } from "./choice-input.js";
 import { print } from "./cli-io.js";
 import {
   enqueueAndAwait,
@@ -30,16 +31,10 @@ export function resolvePlanAnswer(question: PlanQuestion, raw: string): string |
   if (question.kind === "text" || question.options.length === 0) return trimmed;
   // single/multi: numeric picks (1-based) resolve to option labels; anything
   // that is not a clean pick list is honest free text (the planner reads prose).
-  const parts = trimmed.split(",").map((part) => part.trim());
-  const picks = parts
-    .map((part) => Number.parseInt(part, 10))
-    .filter((n) => Number.isInteger(n) && n >= 1 && n <= question.options.length);
-  const allNumeric = picks.length > 0 && picks.length === parts.length;
-  if (!allNumeric) return trimmed;
-  const labels = picks.map((n) => question.options[n - 1]?.label ?? "").filter(Boolean);
-  // single-choice keeps only the first pick; multi keeps them all.
-  const chosen = question.kind === "single" ? labels.slice(0, 1) : labels;
-  return chosen.length > 0 ? chosen.join(", ") : trimmed;
+  const picks = parseChoiceIndexes(trimmed, question.options.length, question.kind === "multi");
+  if (!picks) return trimmed;
+  const labels = picks.map((index) => question.options[index]?.label ?? "").filter(Boolean);
+  return labels.length > 0 ? labels.join(", ") : trimmed;
 }
 
 /** Build the follow-up plan-turn prompt from the answered questions. */

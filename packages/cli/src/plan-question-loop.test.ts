@@ -36,10 +36,11 @@ const text = q({ id: "notes", kind: "text", prompt: "Any constraints?", allow_te
 describe("resolvePlanAnswer", () => {
   it("single: a numeric pick resolves to ONE option label", () => {
     expect(resolvePlanAnswer(single, "2")).toBe("SQLite");
+    expect(resolvePlanAnswer(single, "02")).toBe("SQLite");
   });
 
-  it("single: extra picks are ignored — only the first counts", () => {
-    expect(resolvePlanAnswer(single, "1,2")).toBe("Postgres");
+  it("single: multiple picks remain honest free text", () => {
+    expect(resolvePlanAnswer(single, "1,2")).toBe("1,2");
   });
 
   it("multi: comma-separated picks resolve to all labels", () => {
@@ -52,6 +53,7 @@ describe("resolvePlanAnswer", () => {
 
   it("choice question with prose falls back to honest free text", () => {
     expect(resolvePlanAnswer(single, "whatever is cheapest")).toBe("whatever is cheapest");
+    expect(resolvePlanAnswer(single, "1Password is required")).toBe("1Password is required");
   });
 
   it("blank input skips the question (null)", () => {

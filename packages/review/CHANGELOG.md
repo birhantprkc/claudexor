@@ -5,6 +5,9 @@
 ### Patch Changes
 
 - Retire the standalone Plan-review subject so the release reviewer remains a code-review owner while Plan uses its own read-only contract.
+- Build each native reviewer workspace from the Git-visible candidate inventory
+  plus exact diff postimages, keeping unrelated ignored local state outside the
+  separately copied evidence packet.
 - @claudexor/config@3.2.0
 - @claudexor/context@3.2.0
 - @claudexor/core@3.2.0

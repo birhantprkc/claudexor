@@ -74,3 +74,14 @@ describe("finding-discipline rules (pinned clause by clause)", () => {
     });
   }
 });
+
+describe("candidate inventory disclosure", () => {
+  it("tells a non-Git reviewer that unchanged sibling context is unavailable", () => {
+    const built = buildReviewPrompt("Cand", "/candidate", "/evidence", patch, {
+      candidateInventoryMode: "diff_only",
+    });
+    expect(built).toContain("disclosed diff-only projection");
+    expect(built).toContain("not unchanged sibling context");
+    expect(built).toContain("return INSUFFICIENT_EVIDENCE instead of guessing");
+  });
+});

@@ -112,8 +112,15 @@ Release history for Claudexor. The current version is declared in the root
   installer children receive no provider secrets, and offline signing keys are
   read only from same-user, non-symlinked 0600 files.
   Accounts and Settings share explicit location-scoped loading truth. File and
-  screenshot attachments are admitted from metadata before bounded reads,
-  revalidated on publication, and retired on an explicit conversation switch.
+  screenshot attachments are admitted from an opened regular-file descriptor
+  before a bounded read, reject same-size replacement or in-place mutation,
+  revalidate on publication, and retire on an explicit conversation switch.
+  TTY choice prompts accept only the complete numeric grammar they advertise,
+  so numeric-prefixed prose and multiple picks for a single-choice question are
+  preserved as prose. Native reviewer workspaces now project only Git-visible
+  candidate files plus exact diff postimages; unrelated ignored local state
+  stays outside the separately copied evidence plane. Formal release review can
+  persist and size-check its exact prompts in a no-network preparation phase.
   These dogfood repairs landed after the lockstep 3.2.0 versioning commit but
   before the first public 3.2.0 publication. The affected package changelogs
   therefore absorb them into their existing 3.2.0 sections; there is no second

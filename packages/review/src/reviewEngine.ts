@@ -1,4 +1,4 @@
-import { parseUnifiedDiff, runCapture, type HarnessAdapter } from "@claudexor/core";
+import { parseUnifiedDiff, runCapture, runCaptureRaw, type HarnessAdapter } from "@claudexor/core";
 import { preflightEvidence, type DiffEvidence, writeDiffEvidence } from "@claudexor/context";
 import type {
   AuthPreference,
@@ -12,7 +12,7 @@ import { HarnessRunSpec, ReviewFinding as ReviewFindingSchema } from "@claudexor
 import { existsSync, lstatSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
 import { cp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import {
   appendLine,
   containsSecretLikeToken,
@@ -141,6 +141,33 @@ function reviewerInfo(
 }
 
 export async function reviewCandidate(input: ReviewCandidateInput): Promise<ReviewCandidateResult> {
+  const sourceRoot = resolve(input.cwd);
+  const sourceExists = existsSync(sourceRoot);
+  const canonicalSourceRoot = sourceExists ? realpathSync(sourceRoot) : sourceRoot;
+  const sourceEvidencePath = resolve(input.evidenceDir);
+  const sourceEvidenceRoot = existsSync(input.evidenceDir)
+    ? realpathSync(input.evidenceDir)
+    : sourceEvidencePath;
+  if (sourceExists && isSameOrInside(sourceEvidenceRoot, canonicalSourceRoot)) {
+    throw new Error("review evidence directory must not contain the candidate root");
+  }
+  const evidenceInsideLexicalSource =
+    sourceExists && isSameOrInside(sourceRoot, sourceEvidencePath);
+  const evidenceInsideCanonicalSource =
+    sourceExists && isSameOrInside(canonicalSourceRoot, sourceEvidenceRoot);
+  const evidencePathInSourceNamespace = evidenceInsideCanonicalSource
+    ? resolve(sourceRoot, relative(canonicalSourceRoot, sourceEvidenceRoot))
+    : null;
+  const candidateEvidenceExcludeRoots =
+    evidenceInsideLexicalSource || evidenceInsideCanonicalSource
+      ? [
+          ...new Set(
+            [sourceEvidencePath, sourceEvidenceRoot, evidencePathInSourceNamespace].filter(
+              (path): path is string => path !== null,
+            ),
+          ),
+        ]
+      : [];
   const findingsByReviewer: ReviewFinding[][] = input.reviewers.map(() => []);
   const reviewerFamilies = input.reviewers.map((reviewer) => reviewer.providerFamily);
   const routeProofs: RouteProof[] = input.reviewers.map((reviewer, index) =>
@@ -197,6 +224,12 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     ].filter(Boolean);
     throw new Error(`mandatory evidence preflight failed (${parts.join("; ")})`);
   }
+  const postimagePaths = extractDiffPostimagePaths(input.diff);
+  const candidateInventory = await buildReviewerCandidateInventory(
+    input.cwd,
+    postimagePaths,
+    input.evidenceReadOnly === true,
+  );
   const artifactsBaseDir = input.artifactsDir ?? join(input.evidenceDir, "reviewer-artifacts");
   ensureDir(artifactsBaseDir);
   const persistentEvidenceDir = join(artifactsBaseDir, "evidence");
@@ -219,11 +252,12 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       diff_path: persistentPatch.diffPath,
       summary_path: persistentPatch.summaryPath,
       diff_sha256: persistentPatch.diffSha256,
+      candidate_inventory_mode: candidateInventory.mode,
+      candidate_inventory_reason: candidateInventory.reason,
       ...frozenMetadata,
     },
   );
   const artifacts: (ReviewerArtifactContext | undefined)[] = input.reviewers.map(() => undefined);
-  const preservePaths = extractDiffTouchedPaths(input.diff);
   const reviewerWorkspaceBaseDir = selectReviewerWorkspaceBaseDir(
     input.cwd,
     artifactsBaseDir,
@@ -242,8 +276,9 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         sourceEvidenceDir: persistentEvidenceDir,
         workspaceBaseDir: reviewerWorkspaceBaseDir,
         reviewerDirName: `${String(index + 1).padStart(2, "0")}-${safeFilePart(reviewer.adapter.id)}`,
-        excludeRoots: [artifactsBaseDir],
-        preservePaths,
+        excludeRoots: [artifactsBaseDir, ...candidateEvidenceExcludeRoots],
+        postimagePaths,
+        candidateCopyPaths: candidateInventory.copyPaths,
         preserveEvidenceBytes: input.evidenceReadOnly === true,
       });
       const reviewerPatch = input.evidenceReadOnly
@@ -259,6 +294,8 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         persistent_diff_path: persistentPatch.diffPath,
         persistent_summary_path: persistentPatch.summaryPath,
         diff_sha256: persistentPatch.diffSha256,
+        candidate_inventory_mode: candidateInventory.mode,
+        candidate_inventory_reason: candidateInventory.reason,
         ...frozenMetadata,
       });
       const runtimePrompt = buildReviewPrompt(
@@ -266,7 +303,10 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         reviewerWorkspace.root,
         reviewerWorkspace.evidenceDir,
         reviewerPatch,
-        input.evidenceReadOnly === true,
+        {
+          sealed: input.evidenceReadOnly === true,
+          candidateInventoryMode: candidateInventory.mode,
+        },
       );
       spec = HarnessRunSpec.parse({
         session_id: newId("rev"),
@@ -851,7 +891,7 @@ function isTemporaryReviewerWorkspaceBaseDir(baseDir: string): boolean {
   const rel = relative(tmpdir(), resolved);
   return (
     isSameOrInside(tmpdir(), resolved) &&
-    rel.split(/[\\/]+/)[0]?.startsWith("claudexor-review-workspaces-") === true
+    rel.split(sep)[0]?.startsWith("claudexor-review-workspaces-") === true
   );
 }
 
@@ -861,7 +901,8 @@ async function prepareReviewerWorkspace(input: {
   workspaceBaseDir: string;
   reviewerDirName: string;
   excludeRoots: string[];
-  preservePaths?: Set<string>;
+  postimagePaths?: Set<string>;
+  candidateCopyPaths: Set<string>;
   preserveEvidenceBytes?: boolean;
 }): Promise<ReviewerWorkspace> {
   const sourceRoot = resolve(input.sourceRoot);
@@ -888,7 +929,9 @@ async function prepareReviewerWorkspace(input: {
           resolvedSourceRoot,
           sourcePath,
           excludeRoots,
-          input.preservePaths,
+          input.postimagePaths,
+          true,
+          input.candidateCopyPaths,
         ),
     });
 
@@ -1079,25 +1122,32 @@ function shouldCopyReviewerPath(
   resolvedSourceRoot: string,
   sourcePath: string,
   excludeRoots: string[],
-  preservePaths = new Set<string>(),
+  postimagePaths = new Set<string>(),
   enforceContentPolicy = true,
+  candidateCopyPaths?: Set<string>,
 ): boolean {
   const resolvedSourcePath = resolve(sourcePath);
+  const rel = relative(sourceRoot, resolvedSourcePath);
+  if (rel && candidateCopyPaths) {
+    const normalized = normalizeReviewerRelativePath(rel);
+    if (!normalized || !candidateCopyPaths.has(normalized)) return false;
+  }
   if (
     !isCopyableReviewerSymlink(sourceRoot, resolvedSourceRoot, resolvedSourcePath, excludeRoots)
   ) {
     return false;
   }
   if (excludeRoots.some((root) => isSameOrInside(root, resolvedSourcePath))) return false;
-  const rel = relative(sourceRoot, resolvedSourcePath);
   if (!rel) return true;
-  const parts = rel.split(/[\\/]+/);
+  const normalizedRel = normalizeReviewerRelativePath(rel);
+  if (!normalizedRel) return false;
+  const parts = normalizedRel.split("/");
   if (sensitiveResourcePolicy.classifyPath(rel).sensitive) {
     return false;
   }
   if (parts[0] === ".claudexor") {
     return (
-      isCopyableReviewerClaudexorPath(rel, parts, preservePaths) &&
+      isCopyableReviewerClaudexorPath(rel, parts, postimagePaths) &&
       (!enforceContentPolicy || reviewerFileContentAllowed(resolvedSourcePath))
     );
   }
@@ -1108,7 +1158,7 @@ function shouldCopyReviewerPath(
   }
   if (
     parts.some((part) => [".next", ".cache", "coverage", "dist"].includes(part)) &&
-    !isPreservedReviewerPath(rel, preservePaths)
+    !isReviewerPostimagePath(rel, postimagePaths)
   ) {
     return false;
   }
@@ -1133,7 +1183,7 @@ function reviewerFileContentAllowed(path: string): boolean {
 function isCopyableReviewerClaudexorPath(
   rel: string,
   parts: string[],
-  preservePaths: Set<string>,
+  postimagePaths: Set<string>,
 ): boolean {
   if (parts.length === 1) {
     return true;
@@ -1143,29 +1193,31 @@ function isCopyableReviewerClaudexorPath(
   }
   const runtimeRoot = parts[1]?.toLowerCase();
   if (runtimeRoot && BLOCKED_REVIEWER_RUNTIME_ROOTS.has(runtimeRoot)) return false;
-  return isPreservedReviewerPath(rel, preservePaths);
+  return isReviewerPostimagePath(rel, postimagePaths);
 }
 
-function isPreservedReviewerPath(rel: string, preservePaths: Set<string>): boolean {
+function isReviewerPostimagePath(rel: string, postimagePaths: Set<string>): boolean {
   const normalized = normalizeReviewerRelativePath(rel);
   if (!normalized) return false;
-  if (preservePaths.has(normalized)) return true;
+  if (postimagePaths.has(normalized)) return true;
   const prefix = `${normalized}/`;
-  for (const preserved of preservePaths) {
-    if (preserved.startsWith(prefix)) return true;
+  for (const postimage of postimagePaths) {
+    if (postimage.startsWith(prefix)) return true;
   }
   return false;
 }
 
-export function __testExtractDiffTouchedPaths(diff: string): Set<string> {
-  return extractDiffTouchedPaths(diff);
+export function __testExtractDiffPostimagePaths(diff: string): Set<string> {
+  return extractDiffPostimagePaths(diff);
 }
 
-function extractDiffTouchedPaths(diff: string): Set<string> {
+function extractDiffPostimagePaths(diff: string): Set<string> {
   const paths = new Set<string>();
   for (const file of parseUnifiedDiff(diff).files) {
-    if (file.oldPath) addReviewerPreservePath(paths, file.oldPath);
-    if (file.newPath) addReviewerPreservePath(paths, file.newPath);
+    // Reviewer workspaces represent the candidate postimage. Old rename and
+    // deletion paths live in DIFF.patch; re-reading them from the live source
+    // could pick up an unrelated ignored file recreated at the retired path.
+    if (!file.deleted && file.newPath) addReviewerPreservePath(paths, file.newPath);
   }
   return paths;
 }
@@ -1177,11 +1229,66 @@ function addReviewerPreservePath(paths: Set<string>, value: string): void {
 
 function normalizeReviewerRelativePath(value: string): string | null {
   if (!value || value === "/dev/null" || isAbsolute(value)) return null;
-  const normalized = normalize(value).replace(/\\/g, "/");
+  const platformPath = normalize(value);
+  // Git paths are slash-delimited, but on POSIX a backslash is a literal file
+  // name byte. Convert it only where the host path implementation treats it as
+  // a separator; otherwise `safe\\file` must not authorize `safe/file`.
+  const normalized = sep === "\\" ? platformPath.replace(/\\/g, "/") : platformPath;
   if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
     return null;
   }
   return normalized;
+}
+
+interface ReviewerCandidateInventory {
+  mode: "git_visible" | "diff_only";
+  reason: string | null;
+  copyPaths: Set<string>;
+}
+
+async function buildReviewerCandidateInventory(
+  sourceRoot: string,
+  postimagePaths: Set<string>,
+  requireGit: boolean,
+): Promise<ReviewerCandidateInventory> {
+  const result = await runCaptureRaw(
+    "git",
+    ["-C", sourceRoot, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--"],
+    { env: reviewerGitEnv(), timeoutMs: 30_000 },
+  );
+  if (result.code !== 0) {
+    const detail = redactSecrets(
+      (result.stderr || result.stdout || `exit ${String(result.code)}`).trim(),
+    );
+    if (requireGit) {
+      throw new Error(`failed to inventory frozen reviewer candidate: ${detail}`);
+    }
+    return {
+      mode: "diff_only",
+      reason: detail || "Git inventory unavailable",
+      copyPaths: reviewerCopyPathClosure(postimagePaths),
+    };
+  }
+
+  const visiblePaths = result.stdout.split("\0").filter(Boolean);
+  return {
+    mode: "git_visible",
+    reason: null,
+    copyPaths: reviewerCopyPathClosure([...visiblePaths, ...postimagePaths]),
+  };
+}
+
+function reviewerCopyPathClosure(paths: Iterable<string>): Set<string> {
+  const closure = new Set<string>();
+  for (const value of paths) {
+    const normalized = normalizeReviewerRelativePath(value);
+    if (!normalized) continue;
+    const parts = normalized.split("/");
+    for (let length = 1; length <= parts.length; length += 1) {
+      closure.add(parts.slice(0, length).join("/"));
+    }
+  }
+  return closure;
 }
 
 function isCopyableReviewerSymlink(
@@ -1243,22 +1350,29 @@ async function initializeReviewerWorkspaceGit(root: string): Promise<void> {
 }
 
 async function runGitOrThrow(label: string, cwd: string, args: string[]): Promise<void> {
+  const result = await runCapture("git", args, {
+    cwd,
+    env: reviewerGitEnv(),
+    timeoutMs: 60_000,
+  });
+  if (result.code === 0) return;
+  const detail = redactSecrets((result.stderr || result.stdout || `exit ${result.code}`).trim());
+  throw new Error(`failed to prepare reviewer workspace (${label}): ${detail}`);
+}
+
+function reviewerGitEnv(): Record<string, string | null> {
   const gitEnv: Record<string, string | null> = Object.fromEntries(
     Object.keys(process.env)
       .filter((key) => key.startsWith("GIT_"))
       .map((key) => [key, null]),
   );
   gitEnv.GIT_CONFIG_NOSYSTEM = "1";
-  const result = await runCapture("git", args, { cwd, env: gitEnv, timeoutMs: 60_000 });
-  if (result.code === 0) return;
-  const detail = redactSecrets((result.stderr || result.stdout || `exit ${result.code}`).trim());
-  throw new Error(`failed to prepare reviewer workspace (${label}): ${detail}`);
+  return gitEnv;
 }
 
 function isSameOrInside(parent: string, target: string): boolean {
   const rel = relative(resolve(parent), resolve(target));
-  const firstPart = rel.split(/[\\/]+/)[0];
-  return rel === "" || (!!rel && firstPart !== ".." && !isAbsolute(rel));
+  return rel === "" || (!!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 function createReviewerArtifactContext(

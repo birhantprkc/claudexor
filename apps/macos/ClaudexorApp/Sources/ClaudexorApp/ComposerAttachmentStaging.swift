@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
@@ -27,6 +28,24 @@ struct ComposerAttachmentSource: Equatable, Sendable {
 
 struct ComposerAttachmentFileMetadata: Equatable, Sendable {
     var sizeBytes: Int
+}
+
+struct ComposerAttachmentOpenedFile {
+    var metadata: ComposerAttachmentFileMetadata
+    var read: (Int) throws -> Data
+    var unchanged: () throws -> Bool
+    var close: () -> Void
+}
+
+private struct ComposerAttachmentFileFingerprint: Equatable {
+    var device: UInt64
+    var inode: UInt64
+    var sizeBytes: Int
+    var modificationSeconds: Int64
+    var modificationNanoseconds: Int64
+    var changeSeconds: Int64
+    var changeNanoseconds: Int64
+    var linkCount: UInt64
 }
 
 struct ComposerAttachmentStagingResult: Equatable, Sendable {
@@ -70,6 +89,7 @@ struct ComposerAttachmentStagingRequest: Sendable {
 enum ComposerAttachmentStager {
     typealias MetadataProvider = (URL) throws -> ComposerAttachmentFileMetadata
     typealias DataLoader = (URL, Int) throws -> Data
+    typealias FileOpener = (URL) throws -> ComposerAttachmentOpenedFile
 
     static func stage(_ request: ComposerAttachmentStagingRequest) -> ComposerAttachmentStagingResult {
         stage(
@@ -91,8 +111,7 @@ enum ComposerAttachmentStager {
             existing: existing,
             poolMode: poolMode,
             lanes: lanes,
-            metadata: fileMetadata,
-            load: loadBounded
+            open: openFile
         )
     }
 
@@ -101,20 +120,46 @@ enum ComposerAttachmentStager {
         existing: [ComposerAttachmentDescriptor],
         poolMode: ComposerAttachmentPoolMode,
         lanes: [ComposerAttachmentLane],
-        metadata: MetadataProvider,
-        load: DataLoader
+        metadata: @escaping MetadataProvider,
+        load: @escaping DataLoader
+    ) -> ComposerAttachmentStagingResult {
+        stage(
+            sources: sources,
+            existing: existing,
+            poolMode: poolMode,
+            lanes: lanes,
+            open: { url in
+                let initial = try metadata(url)
+                return ComposerAttachmentOpenedFile(
+                    metadata: initial,
+                    read: { expectedSize in try load(url, expectedSize) },
+                    unchanged: { try metadata(url) == initial },
+                    close: {}
+                )
+            }
+        )
+    }
+
+    static func stage(
+        sources: [ComposerAttachmentSource],
+        existing: [ComposerAttachmentDescriptor],
+        poolMode: ComposerAttachmentPoolMode,
+        lanes: [ComposerAttachmentLane],
+        open: FileOpener
     ) -> ComposerAttachmentStagingResult {
         var result = ComposerAttachmentStagingResult()
         var prospective = existing
 
         for (index, source) in sources.enumerated() {
-            let file: ComposerAttachmentFileMetadata
+            let opened: ComposerAttachmentOpenedFile
             do {
-                file = try metadata(source.url)
+                opened = try open(source.url)
             } catch {
                 result.notices.append("Skipped \(source.name): \(message(for: error)).")
                 continue
             }
+            defer { opened.close() }
+            let file = opened.metadata
             guard file.sizeBytes >= 0 else {
                 result.notices.append("Skipped \(source.name): its size could not be determined.")
                 continue
@@ -140,17 +185,16 @@ enum ComposerAttachmentStager {
             }
 
             do {
-                let data = try load(source.url, file.sizeBytes)
+                let data = try opened.read(file.sizeBytes)
                 guard data.count == file.sizeBytes else {
                     result.notices.append(
-                        "Skipped \(source.name): the file changed size while it was being read."
+                        "Skipped \(source.name): the file changed while it was being read."
                     )
                     continue
                 }
-                let current = try metadata(source.url)
-                guard current == file else {
+                guard try opened.unchanged() else {
                     result.notices.append(
-                        "Skipped \(source.name): the file changed size while it was being read."
+                        "Skipped \(source.name): the file changed while it was being read."
                     )
                     continue
                 }
@@ -204,23 +248,69 @@ enum ComposerAttachmentStager {
         return result
     }
 
-    private static func fileMetadata(_ url: URL) throws -> ComposerAttachmentFileMetadata {
-        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true else {
-            throw ComposerAttachmentStagingError.notRegularFile
+    /// Open, classify, admit, and read one descriptor. The path is checked only
+    /// for final identity; the bytes and both fingerprints share this exact fd.
+    static func openFile(_ url: URL) throws -> ComposerAttachmentOpenedFile {
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw ComposerAttachmentStagingError.couldNotRead }
+        do {
+            let initial = try fingerprint(of: descriptor)
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+            return ComposerAttachmentOpenedFile(
+                metadata: .init(sizeBytes: initial.sizeBytes),
+                read: { expectedSize in try loadBounded(handle, expectedSize: expectedSize) },
+                unchanged: {
+                    try fingerprint(of: descriptor) == initial
+                        && pathIdentity(at: url) == (initial.device, initial.inode)
+                },
+                close: { try? handle.close() }
+            )
+        } catch {
+            Darwin.close(descriptor)
+            throw error
         }
-        guard let size = values.fileSize, size >= 0 else {
-            throw ComposerAttachmentStagingError.missingSize
-        }
-        return .init(sizeBytes: size)
     }
 
-    /// Reads at most the stat size plus one byte. The extra byte detects growth;
-    /// a short read detects truncation. No separate client limit competes with
-    /// the finite per-harness manifest limit that admitted the descriptor.
-    private static func loadBounded(_ url: URL, expectedSize: Int) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
+    private static func fingerprint(of descriptor: Int32) throws
+        -> ComposerAttachmentFileFingerprint
+    {
+        var status = stat()
+        guard fstat(descriptor, &status) == 0 else {
+            throw ComposerAttachmentStagingError.couldNotRead
+        }
+        guard status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw ComposerAttachmentStagingError.notRegularFile
+        }
+        guard status.st_size >= 0, let sizeBytes = Int(exactly: status.st_size) else {
+            throw ComposerAttachmentStagingError.missingSize
+        }
+        return ComposerAttachmentFileFingerprint(
+            device: UInt64(status.st_dev),
+            inode: UInt64(status.st_ino),
+            sizeBytes: sizeBytes,
+            modificationSeconds: Int64(status.st_mtimespec.tv_sec),
+            modificationNanoseconds: Int64(status.st_mtimespec.tv_nsec),
+            changeSeconds: Int64(status.st_ctimespec.tv_sec),
+            changeNanoseconds: Int64(status.st_ctimespec.tv_nsec),
+            linkCount: UInt64(status.st_nlink)
+        )
+    }
+
+    private static func pathIdentity(at url: URL) throws -> (UInt64, UInt64) {
+        var status = stat()
+        let result = url.path.withCString { stat($0, &status) }
+        guard result == 0,
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+        else {
+            throw ComposerAttachmentStagingError.fileChanged
+        }
+        return (UInt64(status.st_dev), UInt64(status.st_ino))
+    }
+
+    /// Reads at most the descriptor size plus one byte. The extra byte detects
+    /// growth; a short read detects truncation. No separate client limit
+    /// competes with the finite per-harness manifest limit that admitted it.
+    private static func loadBounded(_ handle: FileHandle, expectedSize: Int) throws -> Data {
         var data = Data()
         let chunkSize = 64 * 1_024
         while data.count <= expectedSize {
@@ -229,11 +319,11 @@ enum ComposerAttachmentStager {
             guard let chunk = try handle.read(upToCount: requested), !chunk.isEmpty else { break }
             data.append(chunk)
             if data.count > expectedSize {
-                throw ComposerAttachmentStagingError.sizeChanged
+                throw ComposerAttachmentStagingError.fileChanged
             }
         }
         guard data.count == expectedSize else {
-            throw ComposerAttachmentStagingError.sizeChanged
+            throw ComposerAttachmentStagingError.fileChanged
         }
         return data
     }
@@ -256,13 +346,15 @@ enum ComposerAttachmentStager {
 private enum ComposerAttachmentStagingError: Error {
     case notRegularFile
     case missingSize
-    case sizeChanged
+    case fileChanged
+    case couldNotRead
 
     var message: String {
         switch self {
         case .notRegularFile: return "it is not a regular file"
         case .missingSize: return "its size could not be determined"
-        case .sizeChanged: return "the file changed size while it was being read"
+        case .fileChanged: return "the file changed while it was being read"
+        case .couldNotRead: return "the file could not be read"
         }
     }
 }

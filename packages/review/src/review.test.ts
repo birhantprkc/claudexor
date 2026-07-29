@@ -72,6 +72,34 @@ function makeReviewer(id: string, family: ProviderFamily, findings: unknown[]): 
   return { adapter, providerFamily: family };
 }
 
+function makeWorkspaceProbeReviewer(id: string, probe: (cwd: string) => void): ReviewerSpec {
+  const adapter: HarnessAdapter = {
+    id,
+    async discover() {
+      return HarnessManifest.parse({
+        id,
+        display_name: id,
+        kind: "local_cli",
+        provider_family: "openai",
+        capabilities: { review: true, structured_output: true },
+      });
+    },
+    async doctor() {
+      return ConformanceReport.parse({
+        harness_id: id,
+        status: "ok",
+        enabled_intents: ["review"],
+      });
+    },
+    async *run(spec) {
+      probe(spec.cwd);
+      const ts = new Date().toISOString();
+      yield { type: "message", session_id: spec.session_id, ts, text: "[]\n" };
+    },
+  };
+  return { adapter, providerFamily: "openai" };
+}
+
 function makeReviewWorkspace(prefix = "claudexor-review-candidate-"): {
   cwd: string;
   evidenceDir: string;
@@ -90,6 +118,20 @@ function writeMandatoryReviewEvidence(evidenceDir: string): void {
   writeFileSync(join(evidenceDir, "PLAN_ACCEPTED.md"), "(none)\n");
   writeFileSync(join(evidenceDir, "TESTS.txt"), "(tests not run)\n");
   writeFileSync(join(evidenceDir, "DECIDED_TRADEOFFS.md"), "(none)\n");
+}
+
+function initGitFixture(cwd: string): void {
+  execFileSync(
+    "git",
+    ["-c", "init.templateDir=", "-c", "core.hooksPath=/dev/null", "init", "--quiet"],
+    { cwd },
+  );
+}
+
+function gitAddFixture(cwd: string, paths: string[]): void {
+  execFileSync("git", ["-c", "core.hooksPath=/dev/null", "add", "--force", "--", ...paths], {
+    cwd,
+  });
 }
 
 describe("reviewer progress event schema contract", () => {
@@ -118,6 +160,7 @@ describe("sealed release native reviewer contract", () => {
     writeFileSync(join(evidenceDir, "DIFF_SUMMARY.md"), "one release file changed\n");
     writeFileSync(join(evidenceDir, "FREEZE.json"), "{}\n");
     writeFileSync(join(evidenceDir, "MANIFEST.sha256"), "sealed fixture\n");
+    initGitFixture(cwd);
     let prompt = "";
     const adapter: HarnessAdapter = {
       id: "release-reviewer",
@@ -2156,6 +2199,15 @@ describe("reviewEngine", () => {
     );
     symlinkSync("review-artifacts/secret.txt", join(candidateRoot, "artifact-link"));
     symlinkSync(outsideSecret, join(candidateRoot, "outside-link"));
+    initGitFixture(candidateRoot);
+    gitAddFixture(candidateRoot, [
+      "candidate.txt",
+      "safe-target.txt",
+      "safe-link",
+      "relocates-outside-link",
+      "artifact-link",
+      "outside-link",
+    ]);
     writeFileSync(join(evidenceDir, "USER_INTENT.md"), "review symlink isolation\n");
     writeFileSync(join(evidenceDir, "FORBIDDEN_FINDINGS.md"), "(none)\n");
 
@@ -2368,6 +2420,8 @@ describe("reviewEngine", () => {
     writeFileSync(join(candidateRoot, ".claudexor", "runs", "run-x", "events.jsonl"), "{}\n");
     writeFileSync(join(candidateRoot, ".claudexor", ".gitignore"), "*\n");
     writeFileSync(join(candidateRoot, "README.md"), "candidate docs\n");
+    initGitFixture(candidateRoot);
+    gitAddFixture(candidateRoot, [".claudexor/config.yaml", "README.md"]);
     writeMandatoryReviewEvidence(evidenceDir);
 
     let sawProjectConfig = false;
@@ -2519,6 +2573,236 @@ describe("reviewEngine", () => {
     expect(sawRunArtifact).toBe(false);
   });
 
+  it("copies Git-visible and diff-touched files without ignored local siblings", async () => {
+    const candidateRoot = reapMk(join(tmpdir(), "claudexor-candidate-root-"));
+    const evidenceDir = reapMk(join(tmpdir(), "claudexor-review-evidence-"));
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
+    mkdirSync(join(candidateRoot, "ignored"), { recursive: true });
+    writeFileSync(
+      join(candidateRoot, ".gitignore"),
+      "AGENTS.md\nignored/\nold.txt\ndeleted.txt\nblob.bin\n",
+    );
+    writeFileSync(join(candidateRoot, "README.md"), "candidate docs\n");
+    writeFileSync(join(candidateRoot, "new.txt"), "renamed candidate postimage\n");
+    writeFileSync(join(candidateRoot, "visible-untracked.txt"), "ordinary candidate context\n");
+    writeFileSync(join(candidateRoot, "AGENTS.md"), "private local operator guidance\n");
+    writeFileSync(join(candidateRoot, "old.txt"), "private ignored rename replacement\n");
+    writeFileSync(join(candidateRoot, "deleted.txt"), "private ignored deletion replacement\n");
+    writeFileSync(join(candidateRoot, "blob.bin"), "private ignored binary replacement\n");
+    writeFileSync(join(candidateRoot, "ignored", "changed.ts"), "export const changed = true;\n");
+    writeFileSync(join(candidateRoot, "ignored", "private-notes.md"), "private sibling\n");
+    initGitFixture(candidateRoot);
+    gitAddFixture(candidateRoot, [".gitignore", "README.md", "new.txt"]);
+    writeMandatoryReviewEvidence(evidenceDir);
+
+    let visibility: Record<string, boolean> = {};
+    const reviewer = makeWorkspaceProbeReviewer("candidate-inventory-reviewer", (cwd) => {
+      visibility = {
+        tracked: existsSync(join(cwd, "README.md")),
+        untrackedVisible: existsSync(join(cwd, "visible-untracked.txt")),
+        diffTouchedIgnored: existsSync(join(cwd, "ignored", "changed.ts")),
+        ignoredSibling: existsSync(join(cwd, "ignored", "private-notes.md")),
+        localInstructions: existsSync(join(cwd, "AGENTS.md")),
+        renamePostimage: existsSync(join(cwd, "new.txt")),
+        renameOldReplacement: existsSync(join(cwd, "old.txt")),
+        deletedReplacement: existsSync(join(cwd, "deleted.txt")),
+        binaryDeletedReplacement: existsSync(join(cwd, "blob.bin")),
+      };
+    });
+
+    const diff = [
+      "diff --git a/README.md b/README.md",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "diff --git a/ignored/changed.ts b/ignored/changed.ts",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/ignored/changed.ts",
+      "@@ -0,0 +1 @@",
+      "+export const changed = true;",
+      "diff --git a/old.txt b/new.txt",
+      "similarity index 100%",
+      "rename from old.txt",
+      "rename to new.txt",
+      "diff --git a/deleted.txt b/deleted.txt",
+      "deleted file mode 100644",
+      "--- a/deleted.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-deleted candidate preimage",
+      "diff --git a/blob.bin b/blob.bin",
+      "deleted file mode 100644",
+      "index 1234567..0000000",
+      "GIT binary patch",
+      "literal 0",
+      "HcmV?d00001",
+    ].join("\n");
+    const res = await reviewCandidate({
+      candidateLabel: "Candidate A",
+      diff,
+      evidenceDir,
+      artifactsDir,
+      cwd: candidateRoot,
+      reviewers: [reviewer],
+    });
+
+    expect(res.findings).toEqual([]);
+    expect(visibility).toEqual({
+      tracked: true,
+      untrackedVisible: true,
+      diffTouchedIgnored: true,
+      ignoredSibling: false,
+      localInstructions: false,
+      renamePostimage: true,
+      renameOldReplacement: false,
+      deletedReplacement: false,
+      binaryDeletedReplacement: false,
+    });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "keeps POSIX backslashes distinct from directory separators in the candidate inventory",
+    async () => {
+      const candidateRoot = reapMk(join(tmpdir(), "claudexor-candidate-root-"));
+      const evidenceDir = join(candidateRoot, "..\\review-evidence");
+      const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
+      mkdirSync(join(candidateRoot, "safe"));
+      writeFileSync(join(candidateRoot, ".gitignore"), "safe/\n");
+      writeFileSync(join(candidateRoot, "README.md"), "candidate docs\n");
+      writeFileSync(join(candidateRoot, "safe\\private.txt"), "tracked literal backslash\n");
+      writeFileSync(
+        join(candidateRoot, "safe\\node_modules\\code.ts"),
+        "tracked literal separators\n",
+      );
+      writeFileSync(join(candidateRoot, "safe", "private.txt"), "ignored local sibling\n");
+      initGitFixture(candidateRoot);
+      gitAddFixture(candidateRoot, [
+        ".gitignore",
+        "README.md",
+        "safe\\private.txt",
+        "safe\\node_modules\\code.ts",
+      ]);
+      writeMandatoryReviewEvidence(evidenceDir);
+
+      let trackedBackslash = false;
+      let trackedBlockedName = false;
+      let ignoredSeparatorSibling = true;
+      let sourceEvidenceVisible = true;
+      const reviewer = makeWorkspaceProbeReviewer("posix-path-reviewer", (cwd) => {
+        trackedBackslash = existsSync(join(cwd, "safe\\private.txt"));
+        trackedBlockedName = existsSync(join(cwd, "safe\\node_modules\\code.ts"));
+        ignoredSeparatorSibling = existsSync(join(cwd, "safe", "private.txt"));
+        sourceEvidenceVisible = existsSync(join(cwd, "..\\review-evidence", "USER_INTENT.md"));
+      });
+
+      const res = await reviewCandidate({
+        candidateLabel: "Candidate A",
+        diff: "diff --git a/README.md b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        evidenceDir,
+        artifactsDir,
+        cwd: candidateRoot,
+        reviewers: [reviewer],
+      });
+
+      expect(res.findings).toEqual([]);
+      expect(trackedBackslash).toBe(true);
+      expect(trackedBlockedName).toBe(true);
+      expect(ignoredSeparatorSibling).toBe(false);
+      expect(sourceEvidenceVisible).toBe(false);
+    },
+  );
+
+  it("keeps an aliased in-tree source evidence directory out of the candidate plane", async () => {
+    const candidateRoot = reapMk(join(tmpdir(), "claudexor-candidate-root-"));
+    const aliasRoot = reapMk(join(tmpdir(), "claudexor-candidate-alias-"));
+    const candidateAlias = join(aliasRoot, "candidate");
+    symlinkSync(candidateRoot, candidateAlias, "dir");
+    const realEvidenceDir = join(candidateRoot, "real-evidence");
+    const evidenceDir = join(candidateAlias, "review-material");
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
+    writeFileSync(join(candidateRoot, "README.md"), "candidate docs\n");
+    writeMandatoryReviewEvidence(realEvidenceDir);
+    symlinkSync("real-evidence", join(candidateRoot, "review-material"), "dir");
+    initGitFixture(candidateRoot);
+    gitAddFixture(candidateRoot, ["README.md"]);
+
+    let sourceEvidenceVisible = true;
+    let sourceEvidenceTargetVisible = true;
+    let canonicalEvidenceVisible = false;
+    const reviewer = makeWorkspaceProbeReviewer("evidence-plane-reviewer", (cwd) => {
+      sourceEvidenceVisible = existsSync(join(cwd, "review-material", "USER_INTENT.md"));
+      sourceEvidenceTargetVisible = existsSync(join(cwd, "real-evidence", "USER_INTENT.md"));
+      canonicalEvidenceVisible = existsSync(
+        join(cwd, ".claudexor-review-evidence", "USER_INTENT.md"),
+      );
+    });
+
+    const res = await reviewCandidate({
+      candidateLabel: "Candidate A",
+      diff: "diff --git a/README.md b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+      evidenceDir,
+      artifactsDir,
+      cwd: candidateAlias,
+      reviewers: [reviewer],
+    });
+
+    expect(res.findings).toEqual([]);
+    expect(sourceEvidenceVisible).toBe(false);
+    expect(sourceEvidenceTargetVisible).toBe(false);
+    expect(canonicalEvidenceVisible).toBe(true);
+  });
+
+  it("rejects an evidence directory that contains the candidate root", async () => {
+    const evidenceDir = reapMk(join(tmpdir(), "claudexor-review-parent-evidence-"));
+    const candidateRoot = join(evidenceDir, "candidate");
+    mkdirSync(candidateRoot);
+    writeMandatoryReviewEvidence(evidenceDir);
+
+    await expect(
+      reviewCandidate({
+        candidateLabel: "Candidate A",
+        diff: "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
+        evidenceDir,
+        cwd: candidateRoot,
+        reviewers: [makeReviewer("must-not-start", "openai", [])],
+      }),
+    ).rejects.toThrow(/evidence directory must not contain the candidate root/);
+  });
+
+  it("limits non-Git reviewer workspaces to diff-touched postimages", async () => {
+    const candidateRoot = reapMk(join(tmpdir(), "claudexor-candidate-root-"));
+    const evidenceDir = reapMk(join(tmpdir(), "claudexor-review-evidence-"));
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-review-artifacts-"));
+    writeFileSync(join(candidateRoot, "changed.ts"), "export const changed = true;\n");
+    writeFileSync(join(candidateRoot, "private-notes.md"), "unrelated local prose\n");
+    writeMandatoryReviewEvidence(evidenceDir);
+
+    let sawChanged = false;
+    let sawSibling = true;
+    const reviewer = makeWorkspaceProbeReviewer("non-git-inventory-reviewer", (cwd) => {
+      sawChanged = existsSync(join(cwd, "changed.ts"));
+      sawSibling = existsSync(join(cwd, "private-notes.md"));
+    });
+
+    const res = await reviewCandidate({
+      candidateLabel: "Candidate A",
+      diff: ["diff --git a/changed.ts b/changed.ts", "@@ -1 +1 @@", "-old", "+new"].join("\n"),
+      evidenceDir,
+      artifactsDir,
+      cwd: candidateRoot,
+      reviewers: [reviewer],
+    });
+
+    expect(res.findings).toEqual([]);
+    expect(sawChanged).toBe(true);
+    expect(sawSibling).toBe(false);
+    expect(
+      JSON.parse(readFileSync(join(artifactsDir, "evidence", "metadata.json"), "utf8"))
+        .candidate_inventory_mode,
+    ).toBe("diff_only");
+  });
+
   it("tracks copied candidate files even when candidate gitignore ignores them", async () => {
     const candidateRoot = reapMk(join(tmpdir(), "claudexor-candidate-root-"));
     const evidenceDir = reapMk(join(tmpdir(), "claudexor-review-evidence-"));
@@ -2526,6 +2810,8 @@ describe("reviewEngine", () => {
     writeFileSync(join(candidateRoot, ".gitignore"), "ignored-but-versioned.txt\n");
     writeFileSync(join(candidateRoot, "ignored-but-versioned.txt"), "tracked despite ignore\n");
     writeFileSync(join(candidateRoot, "README.md"), "candidate docs\n");
+    initGitFixture(candidateRoot);
+    gitAddFixture(candidateRoot, [".gitignore", "ignored-but-versioned.txt", "README.md"]);
     writeMandatoryReviewEvidence(evidenceDir);
 
     let sawIgnoredFile = false;
@@ -2601,6 +2887,26 @@ describe("reviewEngine", () => {
     mkdirSync(join(candidateRoot, "secrets"), { recursive: true });
     writeFileSync(join(candidateRoot, "secrets", "service.json"), "{}\n");
     writeFileSync(join(candidateRoot, "README.md"), "candidate docs\n");
+    initGitFixture(candidateRoot);
+    gitAddFixture(candidateRoot, [
+      ".env",
+      ".envrc",
+      ".env.local",
+      ".env.example",
+      "signing.key",
+      "credentials.json",
+      "notes.txt",
+      "env-alias",
+      ".npmrc",
+      ".netrc",
+      ".ssh/id_ed25519",
+      ".cursor/state.json",
+      ".codex/auth.json",
+      ".claude/session.json",
+      "packages/secrets/src/index.ts",
+      "secrets/service.json",
+      "README.md",
+    ]);
     writeMandatoryReviewEvidence(evidenceDir);
 
     let sawDotEnv = true;
@@ -3304,7 +3610,7 @@ describe("reviewEngine", () => {
 
 describe("reviewer preserve set uses the shared quote-aware diff parser (INV-050)", () => {
   it("decodes git C-quoted non-ASCII paths (octal escapes) into real touched paths", async () => {
-    const { __testExtractDiffTouchedPaths } = await import("./reviewEngine.js");
+    const { __testExtractDiffPostimagePaths } = await import("./reviewEngine.js");
     const diff = [
       'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"',
       "index 000..111 100644",
@@ -3315,7 +3621,32 @@ describe("reviewer preserve set uses the shared quote-aware diff parser (INV-050
       "+b",
       "",
     ].join("\n");
-    const paths = __testExtractDiffTouchedPaths(diff);
+    const paths = __testExtractDiffPostimagePaths(diff);
     expect([...paths]).toContain("café.txt");
+  });
+
+  it("includes only candidate postimages for renames and deletions", async () => {
+    const { __testExtractDiffPostimagePaths } = await import("./reviewEngine.js");
+    const diff = [
+      "diff --git a/old.txt b/new.txt",
+      "similarity index 100%",
+      "rename from old.txt",
+      "rename to new.txt",
+      "diff --git a/deleted.txt b/deleted.txt",
+      "deleted file mode 100644",
+      "--- a/deleted.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-deleted candidate preimage",
+      "diff --git a/blob.bin b/blob.bin",
+      "deleted file mode 100644",
+      "index 1234567..0000000",
+      "GIT binary patch",
+      "literal 0",
+      "HcmV?d00001",
+      "",
+    ].join("\n");
+
+    expect([...__testExtractDiffPostimagePaths(diff)]).toEqual(["new.txt"]);
   });
 });

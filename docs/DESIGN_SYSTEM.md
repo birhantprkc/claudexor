@@ -807,8 +807,10 @@ views in the shared design-system files; screens compose them.
   button (system `screencapture` region select, off the main thread; a
   denied/cancelled grab yields no attachment — never a blank fake image) are
   gated by the pool's finite `capability_profile.attachment_inputs` declarations.
-  The picker and capture path stat and admit each regular file before reading
-  bytes, then use a bounded read and revalidate size/admission at publication.
+  The picker and capture path open and `fstat` one regular-file descriptor before
+  admission, then use a bounded read from that same descriptor and reject any
+  identity, size, modification/status-change timestamp, or current-path change
+  before publication.
   Async results belong to the exact composer selection generation; explicitly
   switching conversations retires in-flight loads and clears already staged
   file context, while draft-to-thread materialization retains it.

@@ -311,6 +311,58 @@ describe("claudexor follow", () => {
 });
 
 describe("interactive TTY prompt lifetime", () => {
+  it("selects only exact numeric grammar and preserves invalid single picks as prose", async () => {
+    const inputs = ["1Password is required", "1,2", "1, 2"];
+    let index = 0;
+    const result = await collectInteractionAnswers(
+      "int-choice-grammar",
+      [
+        {
+          id: "q-prefix",
+          question: "Prefix?",
+          header: null,
+          options: [
+            { label: "A", description: null },
+            { label: "B", description: null },
+          ],
+          multi_select: false,
+        },
+        {
+          id: "q-single",
+          question: "Single?",
+          header: null,
+          options: [
+            { label: "A", description: null },
+            { label: "B", description: null },
+          ],
+          multi_select: false,
+        },
+        {
+          id: "q-multi",
+          question: "Multi?",
+          header: null,
+          options: [
+            { label: "A", description: null },
+            { label: "B", description: null },
+          ],
+          multi_select: true,
+        },
+      ] as never,
+      {
+        reader: {
+          question: async () => inputs[index++] ?? "",
+          close: () => {},
+        },
+      },
+    );
+
+    expect(result?.answers).toEqual([
+      { question_id: "q-prefix", selected_labels: [], free_text: "1Password is required" },
+      { question_id: "q-single", selected_labels: [], free_text: "1,2" },
+      { question_id: "q-multi", selected_labels: ["A", "B"], free_text: null },
+    ]);
+  });
+
   it("is abortable without a deadline when the run terminates", async () => {
     const controller = new AbortController();
     let closed = false;

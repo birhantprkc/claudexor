@@ -1073,7 +1073,11 @@ The interactive CLI (a TTY plan turn on a thread) offers to answer inline
 (numbered pick for `single`, comma-separated for `multi`, free line for `text`,
 blank to skip) and submits the composed answers as an ordinary follow-up plan
 turn through `POST /v2/threads/:id/turns` — the same lane, no separate answer
-channel; non-TTY/`--json` prints readiness + guidance only. The ACP surface
+channel. The shared CLI choice parser accepts only complete in-range decimal
+tokens; a single-choice question requires exactly one. Numeric-prefixed prose
+or a comma list supplied to a single-choice question remains the user's whole
+free-text answer instead of silently selecting an option. Non-TTY/`--json`
+prints readiness + guidance only. The ACP surface
 (chat-first, Zed) renders the question set as TURN TEXT (numbered, options
 inline, marked which accept multiple picks or free text) and ends the turn
 normally; the user's next prompt is an ordinary follow-up plan turn. ACP's
@@ -1323,6 +1327,8 @@ run's global or `project:<id>` partition before exposing it via
 `GET /v2/runs/:id` (`pendingInteractions`, `summary.waitingOnUser`). Answers
 arrive via `POST /v2/runs/:id/interactions/:id/answer` and are delivered into the
 live session only after the resolution is journaled (`interaction.answered`).
+TTY delivery uses the same exact choice grammar as plan questions; it never
+coerces a numeric prose prefix or multiple picks for a single-choice question.
 After daemon restart an unresolved question becomes interrupted rather than
 resurrecting a dead in-process continuation. `interaction_timeout_ms` is one
 finite-or-disabled policy: absent uses the 15-minute default, a positive value
@@ -1982,6 +1988,20 @@ requested model/effort, observed model/source, route proof, timing, raw
 normalized stream or transcript, parsed JSON blocks, and parse errors. These
 artifacts are local/redacted run evidence, not public documentation.
 
+The engine computes reviewer candidate membership once before panel fan-out.
+For a Git-backed source it is the union of tracked files, untracked files not
+excluded by Git, and exact paths named by the reviewed diff; only the ancestor
+directories needed to reach those files are traversed. This retains a tracked
+file that later became ignored and an ignored generated file explicitly present
+in the diff, while excluding unrelated ignored local notes and their siblings.
+The shared sensitive-resource path/content policy remains a final exclusion over
+that inventory. Membership follows host path semantics: a literal backslash in
+a POSIX file name is never normalized into a directory separator. Without a Git
+inventory the candidate plane is limited to diff-touched postimages. The evidence
+directory never inherits either rule: it is copied through its own explicit
+redacted or sealed-packet boundary. Each reviewer artifact records which
+inventory mode was used.
+
 Files are the source of truth. UI and terminal output are projections. The
 control API also projects `primaryOutput`, `timeline`, and `budget` from these
 files/events so clients do not have to guess which artifact is the main result or
@@ -2041,8 +2061,12 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   support every mandatory attachment. The daemon revalidates finalized bytes at
   enqueue and adapters recheck the digest immediately before vendor serialization.
   The macOS staging owner applies that same pool admission to file metadata
-  before allocation, reads no more than the admitted stat size plus one byte,
-  and rechecks both file size and the live attachment set before publication.
+  before allocation. One nonblocking descriptor owns the regular-file check,
+  size admission, bounded read, and before/after identity plus timestamp
+  fingerprint; the current path must still name that descriptor's file before
+  publication. This rejects same-size replacement and torn in-place mutation,
+  while reading no more than the admitted size plus one byte. The live attachment
+  set is rechecked separately at publication.
   Picker/capture staging is an explicit in-flight composer owner: Send remains
   blocked with visible progress until every operation settles, and Cancel
   retires the whole generation so a late read can never enter the next turn.
