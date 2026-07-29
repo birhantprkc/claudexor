@@ -107,7 +107,13 @@ struct AuthSheet: View {
                             model.authSheetTarget = AuthSheetTarget(family: family)
                         },
                         done: requestClose)
-                    readinessPanel
+                    AuthSheetReadinessPanel(
+                        family: family,
+                        profileId: profileId,
+                        targetVerified: targetVerified,
+                        profileStatus: profileStatus,
+                        isReady: isReady,
+                        info: currentInfo)
                     if nativeHarness != nil, !supportsAccountsPanel { nativeSetupPanel }
                     if supportsAccountsPanel {
                         AuthSheetAccountsPanel(
@@ -217,37 +223,6 @@ struct AuthSheet: View {
             owner = "the default account"
         }
         return "This setup job belongs to \(owner). Its controls continue that exact login; your selected account is unchanged."
-    }
-
-    /// W4.7-UI: the shared readiness card for the DEFAULT store; a profile target
-    /// shows ITS doctor projection (the default card would misattribute readiness).
-    private var readinessPanel: some View {
-        Panel {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                if let profileId {
-                    SectionLabel("Account readiness",
-                                 systemImage: targetVerified ? "checkmark.seal.fill" : "exclamationmark.triangle")
-                    HStack(spacing: Theme.Spacing.sm) {
-                        Circle()
-                            .fill(targetVerified ? Theme.status(.positive)
-                                : profileStatus?.availability == "unknown" ? Theme.status(.caution)
-                                : Theme.status(.negative))
-                            .frame(width: 8, height: 8)
-                        Text(profileStatus.map {
-                            "\($0.availability) · verification \($0.verification)"
-                        } ?? "No doctor probe yet for \(profileId)")
-                            .font(.caption)
-                        Spacer()
-                    }
-                    if let detail = profileStatus?.detail {
-                        Text(detail).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
-                } else {
-                    SectionLabel("Readiness", systemImage: isReady ? "checkmark.seal.fill" : "exclamationmark.triangle")
-                    HarnessReadinessCard(presentation: .from(family: family, info: currentInfo)) { EmptyView() }
-                }
-            }
-        }
     }
 
     /// Account-capable default surface: the implicit default login and every named
