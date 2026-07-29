@@ -83,16 +83,13 @@ import {
   FinalVerifyRecord,
   ModeKind as ModeKindSchema,
   QuotaSnapshot as QuotaSnapshotSchema,
-  SCHEMA_VERSION,
-  TRUST_FULL_ACCESS_CODE,
-  FrozenTaskContractArtifact as TaskContractSchema,
   isBlocking,
   makeOutcomeFacts,
   normalizeUserOutputSchema,
   strictifyOutputSchema,
   estimateEffectiveAuthRoute,
 } from "@claudexor/schema";
-import { globalConfigDir, loadConfig, trustConfigPath } from "@claudexor/config";
+import { globalConfigDir, loadConfig } from "@claudexor/config";
 import type { AdapterRegistry, HarnessAdapter, InteractionChannel } from "@claudexor/core";
 import {
   AnswerAssembly,
@@ -205,11 +202,8 @@ import {
   synthesizeContinuationRequest,
 } from "./continuation.js";
 import { interactionChannelFor } from "./interaction.js";
-import {
-  gateSpecsFromContract,
-  renderTestsEvidence,
-  resolveContractGates,
-} from "./contract-gates.js";
+import { gateSpecsFromContract, renderTestsEvidence } from "./contract-gates.js";
+import { buildTaskContract } from "./task-contract-builder.js";
 import { ArtifactStore, type RunPaths } from "@claudexor/artifact-store";
 import type { EventLog } from "@claudexor/event-log";
 import {
@@ -269,7 +263,6 @@ import {
   hashJson,
   newId,
   noProjectRepoRoot,
-  nowIso,
   redactSecrets,
   safeInvoke,
   sha256,
@@ -1844,130 +1837,9 @@ export class Orchestrator {
   }
 
   private buildContract(input: RunInput, taskId: string, mode: ModeKind): TaskContract {
-    const resolvedCfg = this.config(input.repoRoot);
-    const cfg = resolvedCfg.project;
-    const readOnlyMode = mode === "ask" || mode === "plan";
-    const requestedAccess =
-      input.access ?? (readOnlyMode ? "readonly" : resolvedCfg.trust.access_default);
-    // Effective access is COMPUTED by the engine, never echoed from a client:
-    // read-only modes clamp to readonly regardless of the request.
-    const effectiveAccess: AccessProfile = readOnlyMode ? "readonly" : requestedAccess;
-    // TrustConfig is USER-LEVEL only (versioned repo config must never
-    // self-grant sensitive powers): unsandboxed full access requires an
-    // explicit allow in ~/.claudexor trust settings — loud error, no downgrade.
-    // The gate applies to the EFFECTIVE profile: a read-only run clamped to
-    // readonly never runs unsandboxed and needs no trust allow.
-    if (effectiveAccess === "full" && !resolvedCfg.trust.allow_full_access) {
-      // Typed refusal: the `code` rides the daemon job record onto the thread
-      // turn (TurnEnqueueError.code), so surfaces key remedies on the CODE —
-      // never on substring-matching this human message.
-      throw Object.assign(
-        new Error(
-          `access profile 'full' requires allow_full_access: true in the user-level trust file for this repo ` +
-            `(${trustConfigPath(input.repoRoot)}); enable it with \`claudexor trust --allow-full-access\` — refusing to run unsandboxed`,
-        ),
-        // Refusal semantics are born at the throw (W24): the one-time grant is
-        // a 403, and the daemon persists this status onto the job record.
-        { code: TRUST_FULL_ACCESS_CODE, status: 403 },
-      );
-    }
-    const externalContextPolicy = input.web ?? input.externalContextPolicy ?? "auto";
-    // Deterministic gate commands come from explicit run input, then versioned
-    // project config. Without these, gateSpecs is empty and convergence is
-    // review-only; with them, convergence is test-driven.
-    const resolvedGates = resolveContractGates({
-      repoRoot: input.repoRoot,
-      effectiveAccess,
-      config: cfg,
-      trustGrants: resolvedCfg.trust.test_command_grants,
-      operatorCommands: input.tests ?? [],
-      projectCommands: cfg.tests?.commands ?? [],
-    });
-    const commands = resolvedGates.commands;
-    const protectedPaths = [...new Set(cfg.constraints.protected_paths)];
-    const autoProtectedPaths = resolvedGates.autoProtectedPaths;
-    const protectedPathApprovals = [
-      ...new Map(
-        [...(input.protectedPathApprovals ?? [])].map((approval) => [approval.path, approval]),
-      ).values(),
-    ];
-    return TaskContractSchema.parse({
-      schema_version: SCHEMA_VERSION,
-      task_id: taskId,
-      created_at: nowIso(),
-      repo: { root: input.repoRoot, base_ref: input.baseRef ?? "HEAD", dirty_policy: "snapshot" },
-      mode: { kind: mode },
-      delegation_requested: input.delegate === true,
-      run_lineage: {
-        parent_run_id: input.parentRunId ?? null,
-        delegated_from_run_id: input.delegatedFromRunId ?? null,
-      },
-      user_intent: { raw: redactSecrets(input.prompt) },
-      // Redacted for symmetry with user_intent.raw — a no-op on fenced input
-      // (the inline-secret fence already blocked any secret-like value at every
-      // ingress incl. this engine boundary), so task-producing lanes read back
-      // the real instructions via harnessSpecKnobs().
-      instructions:
-        input.instructions === undefined ? undefined : redactSecrets(input.instructions),
-      // Already normalized/strictified at the engine boundary (run() refuses
-      // unsupported shapes before any run dir exists).
-      output_schema: input.outputSchema ?? null,
-      auth_preference: input.authPreference ?? "auto",
-      credential_profile_id: input.credentialProfileId ?? null,
-      max_turns: input.maxTurns ?? null,
-      constraints: {
-        protected_paths: protectedPaths,
-        deny_paths: [...new Set(input.denyPaths ?? [])],
-        auto_protected_paths: autoProtectedPaths,
-        protected_path_approvals: protectedPathApprovals,
-      },
-      tests: { commands },
-      access: {
-        requested_profile: requestedAccess,
-        effective_profile: effectiveAccess,
-      },
-      external_context: {
-        policy: externalContextPolicy,
-        web_required: externalContextPolicy === "cached" || externalContextPolicy === "live",
-        // Per-route upgrades (e.g. claude cached->live) are disclosed in events
-        // and telemetry.yaml; the immutable contract records the requested policy.
-        effective_mode: externalContextPolicy,
-      },
-      // Harness-native tool names are adapter knowledge; the neutral contract
-      // carries only the policy plus user-configured allow/deny lists (wired
-      // from per-harness settings).
-      tool_permission_policy: {
-        web: externalContextPolicy,
-        allow: [],
-        deny: [],
-      },
-      budget: {
-        routing_goal:
-          input.routingGoal ?? this.deps.routingGoal ?? cfg?.budget?.routing_goal ?? "auto",
-        paid_budget: this.resolvePaidBudget(input.paidBudget, resolvedCfg),
-      },
-      // The resolved harness-scoped model map (scalar already expanded to the
-      // primary by resolveRunInput). The contract is what route spec building
-      // reads — there is no run-global model (INV-103).
-      routing_models: input.models ?? {},
-      // QA-035: freeze the RESOLVED reasoning-effort per known lane so Exact
-      // Retry replays it instead of re-resolving current settings. Precedence
-      // (specific beats general): the harness-scoped `efforts` map entry, then a
-      // per-turn scalar `input.effort`, then the harness settings default — the
-      // same map that Exact Retry replays so a NON-PRIMARY lane keeps its own
-      // frozen effort (QA-035 completeness). Only known-pool lanes are frozen
-      // here (a pure auto pool's lanes resolve later — documented seam).
-      routing_efforts: Object.fromEntries(
-        [...new Set([...(input.harnesses ?? []), ...Object.keys(input.efforts ?? {})])]
-          .map((hid) => [
-            hid,
-            input.efforts?.[hid] ??
-              input.effort ??
-              resolvedCfg.global.harnesses?.[hid]?.effort ??
-              null,
-          ])
-          .filter((entry): entry is [string, string] => entry[1] !== null),
-      ),
+    return buildTaskContract(input, taskId, mode, {
+      paidBudget: this.deps.paidBudget,
+      routingGoal: this.deps.routingGoal,
     });
   }
 
@@ -6378,13 +6250,6 @@ export class Orchestrator {
       },
       announce,
     );
-  }
-
-  private resolvePaidBudget(
-    inputBudget: PaidBudget | undefined,
-    cfg: ReturnType<typeof loadConfig>,
-  ): PaidBudget {
-    return inputBudget ?? this.deps.paidBudget ?? cfg.global.budget.paid_budget_per_run;
   }
 
   private quotaSnapshotPreflight(): QuotaSnapshot[] {
