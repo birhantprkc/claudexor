@@ -45,7 +45,7 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
     "Dry-check whether a run's patch would apply; an already-delivered run reports the safe already-applied no-op.",
   "GET /v2/runs/:id/artifacts": "List a run tree's technical artifacts.",
   "GET /v2/runs/:id/artifacts/<path>": "Fetch one artifact file from a run tree.",
-  "POST /v2/runs/:id/control": "Send a control signal (cancel/pause) to a run.",
+  "POST /v2/runs/:id/control": "Cancel a queued or running run.",
   "POST /v2/runs/:id/decision": "Record an operator unblock/rerun decision on a run.",
   "GET /v2/runs/:id/events": "Replay + tail a run's event stream (SSE).",
   "POST /v2/runs/:id/interactions/:id/answer": "Answer a run's pending interactive question.",

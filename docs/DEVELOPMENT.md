@@ -162,8 +162,9 @@ engine-runtime closure and an UNSIGNED `runtime-manifest.json`; on a trusted
 machine the owner signs it offline against the exact promoted-artifact digest:
 
 ```
+# The candidate's unsigned manifest and the promoted runtime archive digest:
 pnpm sign:runtime-manifest \
-  --in       runtime-manifest.json           # the candidate's unsigned manifest
+  --in       runtime-manifest.json \
   --sha256   <sha256 of the promoted claudexor-runtime-<v>.tar.gz> \
   --private-key ~/.claudexor/keys/runtime-update-ed25519.pem \
   --authority   release/runtime-update-authority.json \

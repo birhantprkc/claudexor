@@ -131,9 +131,10 @@ pnpm test
   headless test exists yet:
   - Enable macOS Keyboard navigation (System Settings → Keyboard, or `Ctrl-F7`).
   - In the main window, Tab/Shift-Tab through the composer and, with the workspace
-    open, the Changes/Artifacts/Evidence tabs: every visible enabled control is
-    reachable exactly once, focus never dead-ends on one tab or falls back to the
-    window, and Shift-Tab is the exact inverse. Activate each with Space/Return.
+    open, the Changes/Artifacts/Evidence tabs and the remote-only Terminal tab:
+    every visible enabled control is reachable exactly once, focus never
+    dead-ends on one tab or falls back to the window, and Shift-Tab is the exact
+    inverse. Activate each with Space/Return.
   - In Settings, Tab must ENTER the window (never leave focus on the window) and
     reach each pane's enabled buttons/fields; switch panes and repeat.
   - Negative control (reduced Tab mode OFF): plain Tab visiting only text/list

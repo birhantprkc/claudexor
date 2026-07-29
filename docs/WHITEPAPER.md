@@ -229,6 +229,16 @@ brokers callbacks or reads the one-time code into anything durable. An
 interactive login survives an ordinary daemon restart; an explicit cancel or
 the login's own 15-minute deadline (extendable) are what end a pending login.
 
+Remote execution extends the same local-first boundary rather than turning
+Claudexor into a credential broker. The user's system OpenSSH owns transport,
+host verification, and authentication; Claudexor installs only a signed,
+version-pinned runtime, reaches its loopback-only daemon through an SSH tunnel,
+and keeps harness credentials on that remote host. The local app receives typed
+control-plane results, not copies of the remote vendor stores. A remote target
+therefore has its own explicit trust decision and execution location, while the
+signed runtime and tunnel preserve the same engine-owned contract as a local
+run.
+
 ## Workspace Semantics
 
 Chat write turns run in-place on the live tree (the way local coding agents

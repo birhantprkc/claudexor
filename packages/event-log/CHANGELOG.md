@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Prepare and durably persist the canonical terminal receipt before publishing
+  a run terminal, with retry-safe rollback and single-terminal fencing.
 - @claudexor/schema@3.2.0
 - @claudexor/util@3.2.0
 

@@ -1366,7 +1366,7 @@ component.
   visible enabled control and never dead-end. The app relies on SwiftUI's
   implicit focus graph, so a CUSTOM cohort needs an explicit boundary:
   1. **Custom tab groups get `.focusSection()`.** The workspace `SegmentedTabs`
-     are three independent `.plain` buttons with no native tab-group behavior —
+     are independent `.plain` buttons with no native tab-group behavior —
      forward Tab used to enter the selected tab and self-loop. `.focusSection()`
      groups the cohort so focus visits each tab then continues past the group.
   2. **A `TabView` window needs a focusable entry.** The Settings scene left

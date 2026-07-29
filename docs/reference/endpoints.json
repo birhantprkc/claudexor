@@ -583,7 +583,7 @@
       "path": "/v2/runs/:id/control",
       "mutating": true,
       "applicability": "run",
-      "summary": "Send a control signal (cancel/pause) to a run.",
+      "summary": "Cancel a queued or running run.",
       "auth": "loopback_bearer",
       "request_schema": "ControlRunControlRequest",
       "parameters": [],
