@@ -67,6 +67,25 @@ struct AppModelRefreshTests {
         #expect(model.appearance == preservedAppearance)
     }
 
+    @MainActor
+    @Test func localOfflineKeepsRemoteSubmissionAndCancellationState() {
+        let model = AppModel(requestNotificationAuthorization: false)
+        let remote = ExecutionLocationID.remote(UUID())
+        model.selectedExecutionLocation = remote
+        model.selectedThreadId = "remote-thread"
+        model.turnSubmitting = true
+        model.rememberRunCancelled("local-run", at: .local)
+        model.rememberRunCancelled("remote-run", at: remote)
+
+        model.enterHardOffline()
+
+        #expect(model.turnSubmitting)
+        #expect(!model.wasRunCancelled("local-run", at: .local))
+        #expect(model.wasRunCancelled("remote-run", at: remote))
+        #expect(model.selectedThreadId == "remote-thread")
+        #expect(model.selectedExecutionLocation == remote)
+    }
+
     /// D26: with no thread selected, the sticky write scope is a DRAFT value the
     /// composer edits and `newThread` carries onto the created thread; clearing
     /// it (nil) falls back to the repo trust default (composer shows Workspace).
@@ -572,6 +591,34 @@ struct AppModelRefreshTests {
         // Offline again: the projection is gone, no verdict — no wizard.
         model.health = .offline
         #expect(!model.needsOnboarding(userDismissed: false))
+    }
+
+    @MainActor
+    @Test func onboardingUsesTheActiveRemoteGatewayAndHarnessProjection() {
+        let model = AppModel(requestNotificationAuthorization: false)
+        model.health = .connected
+        model.liveHarnesses = [HarnessInfo(
+            family: .claude, health: .degraded, version: "1", auth: "expired",
+            intents: ["implement"], routableIntents: []
+        )]
+
+        let remote = ExecutionLocationID.remote(UUID())
+        model.draftExecutionLocation = remote
+        model.remoteClients[remote] = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test")
+        model.remoteHarnesses[remote] = [HarnessInfo(
+            family: .codex, health: .ok, version: "1", auth: "native",
+            intents: ["implement"], routableIntents: ["implement"]
+        )]
+
+        #expect(model.hasRoutableHarness)
+        #expect(!model.needsOnboarding(userDismissed: false))
+
+        model.remoteHarnesses[remote] = [HarnessInfo(
+            family: .codex, health: .degraded, version: "1", auth: "expired",
+            intents: ["implement"], routableIntents: []
+        )]
+        #expect(model.needsOnboarding(userDismissed: false))
     }
 
     @MainActor

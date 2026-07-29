@@ -41,7 +41,7 @@ extension AppModel {
     /// reconnect path repopulates these from `/v2`; user preferences and the
     /// current composer draft remain local and are intentionally preserved.
     func enterHardOffline() {
-        let keepRemoteSelection = selectedExecutionLocation != .local
+        let keepRemoteSelection = activeExecutionLocation != .local
         health = .offline
         endpoint = ""
         client = nil
@@ -57,12 +57,12 @@ extension AppModel {
 
         if !keepRemoteSelection { route = .threads }
         liveTasks.removeAll()
-        cancelledRunIds.removeAll()
+        discardCancelledRunMemory(at: .local)
         transcripts.removeAll()
         liveBoxes.removeAll()
         retireRunDetailState(cancelInFlight: true)
         runListReconciliationNeeded = false
-        turnSubmitting = false
+        if !keepRemoteSelection { turnSubmitting = false }
 
         threads.removeAll()
         projectListingProblems.removeAll()

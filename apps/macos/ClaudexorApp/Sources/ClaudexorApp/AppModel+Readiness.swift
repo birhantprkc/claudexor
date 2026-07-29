@@ -13,7 +13,7 @@ extension AppModel {
     /// SERVER projection (W15/R18). Secrets are deliberately not consulted:
     /// a stored key is not readiness.
     var hasRoutableHarness: Bool {
-        liveHarnesses.contains { $0.family != .fake && $0.family != .raw && !$0.routableIntents.isEmpty }
+        harnesses.contains { $0.family != .fake && $0.family != .raw && !$0.routableIntents.isEmpty }
     }
 
     /// Onboarding is DERIVED, never a sticky completion flag (W15/R18):
@@ -23,7 +23,14 @@ extension AppModel {
     /// While connecting / before the first doctor load there is no verdict,
     /// so the wizard must not flash.
     func needsOnboarding(userDismissed: Bool) -> Bool {
-        guard health == .connected, !liveHarnesses.isEmpty else { return false }
+        let locationID = activeExecutionLocation
+        let connected = locationID == .local
+            ? health == .connected
+            : gateway(for: locationID) != nil
+        guard connected,
+              activeHarnessReadinessFresh,
+              !harnesses.isEmpty
+        else { return false }
         return !userDismissed && !hasRoutableHarness
     }
 
