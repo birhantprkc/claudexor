@@ -4260,6 +4260,104 @@ describe("DaemonControlApiServer", () => {
     );
   });
 
+  it("keeps upload request, service, and response failures distinct", async () => {
+    const { daemon } = fakeDaemon();
+    let serviceCalls = 0;
+    const services: DaemonControlApiOptions["services"] = {
+      createUpload: async (input) => {
+        serviceCalls += 1;
+        if (input.name === "service") throw new Error("upload store unavailable");
+        return input.name === "invalid"
+          ? { unexpected: true }
+          : { uploadId: "upl-1", state: "open", receivedBytes: 0, expectedBytes: 5 };
+      },
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const create = (body: unknown) =>
+          apiFetch(`${base}/uploads`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "idempotency-key": crypto.randomUUID(),
+            },
+            body: JSON.stringify(body),
+          });
+
+        const malformed = await create({ kind: "file", mime: 42, sizeBytes: 5 });
+        expect(malformed.status).toBe(400);
+        expect(await malformed.json()).toMatchObject({ code: "invalid_request" });
+        expect(serviceCalls).toBe(0);
+
+        const failed = await create({
+          kind: "file",
+          mime: "text/plain",
+          name: "service",
+          sizeBytes: 5,
+        });
+        expect(failed.status).toBe(500);
+        expect(await failed.json()).toMatchObject({
+          code: "internal_error",
+          message: "upload store unavailable",
+        });
+
+        const invalid = await create({
+          kind: "file",
+          mime: "text/plain",
+          name: "invalid",
+          sizeBytes: 5,
+        });
+        expect(invalid.status).toBe(500);
+        expect(await invalid.json()).toMatchObject({ code: "invalid_service_response" });
+      },
+      undefined,
+      services,
+    );
+  });
+
+  it("keeps retention request, service, and response failures distinct", async () => {
+    const { daemon } = fakeDaemon();
+    let serviceCalls = 0;
+    const services: DaemonControlApiOptions["services"] = {
+      runRetention: async (request) => {
+        serviceCalls += 1;
+        if (!request.dry_run) throw new Error("retention store unavailable");
+        return { unexpected: true } as never;
+      },
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const collect = (body: unknown) =>
+          apiFetch(`${base}/maintenance/gc`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+
+        const malformed = await collect({ dry_run: "yes" });
+        expect(malformed.status).toBe(400);
+        expect(await malformed.json()).toMatchObject({ code: "invalid_request" });
+        expect(serviceCalls).toBe(0);
+
+        const failed = await collect({});
+        expect(failed.status).toBe(500);
+        expect(await failed.json()).toMatchObject({
+          code: "internal_error",
+          message: "retention store unavailable",
+        });
+
+        const invalid = await collect({ dry_run: true });
+        expect(invalid.status).toBe(500);
+        expect(await invalid.json()).toMatchObject({ code: "invalid_service_response" });
+      },
+      undefined,
+      services,
+    );
+  });
+
   it("summarizes no-project Ask runs without exposing the synthetic repo root as a project", async () => {
     const { daemon, record } = fakeDaemon();
     record.params = { prompt: "2+2?", mode: "ask", scope: { kind: "none" } };

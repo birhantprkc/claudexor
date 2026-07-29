@@ -9,6 +9,7 @@ import {
 } from "@claudexor/schema";
 import { assertNoInlineSecretValues } from "@claudexor/util";
 import { requiredIdempotencyKey } from "./run-start.js";
+import { routeValue, serviceResponse } from "./route-stages.js";
 
 export interface ProjectRouteServices {
   listProjects?: () => Promise<{ projects: unknown[] }>;
@@ -169,43 +170,6 @@ export async function handleProjectRoute(
 
 function unsupported(ctx: ProjectRouteContext, res: ServerResponse): true {
   ctx.json(res, 501, { error: "projects are not supported by this build" });
-  return true;
-}
-
-type RouteValue<T> = { ok: true; value: T } | { ok: false };
-
-async function routeValue<T>(
-  ctx: ProjectRouteContext,
-  res: ServerResponse,
-  fallbackStatus: 400 | 500,
-  load: () => T | Promise<T>,
-): Promise<RouteValue<T>> {
-  try {
-    return { ok: true, value: await load() };
-  } catch (error) {
-    ctx.requestError(res, error, fallbackStatus);
-    return { ok: false };
-  }
-}
-
-function serviceResponse(
-  ctx: ProjectRouteContext,
-  res: ServerResponse,
-  service: string,
-  send: () => void,
-): true {
-  try {
-    send();
-  } catch {
-    ctx.requestError(
-      res,
-      Object.assign(new Error(`${service} returned a response that violates its schema`), {
-        status: 500,
-        code: "invalid_service_response",
-      }),
-      500,
-    );
-  }
   return true;
 }
 
