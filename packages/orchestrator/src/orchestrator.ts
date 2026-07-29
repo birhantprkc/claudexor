@@ -111,13 +111,11 @@ import { runBounded } from "./run-bounded.js";
 import { planPrompt } from "./plan-prompt.js";
 import { verifiedPlanBrief, withPlanBrief } from "./planBrief.js";
 import { resolveRunInputDefaults } from "./run-input-resolution.js";
-import { createRunEventLog, prepareRunAnnouncement } from "./runEventLog.js";
-import { createRootLedger } from "./root-ledger.js";
+import { beginAnnouncedRun } from "./runEventLog.js";
 import { arbitrationBudgetOptions, decisionBudgetSummary } from "./decisionBudget.js";
 import { buildRevisePrompt } from "./revisePrompt.js";
 import {
   type AnnouncedRunContext,
-  announcedRunContext,
   cancelledResult,
   failTerminally,
   guardAnnouncedRun,
@@ -497,18 +495,6 @@ export interface RunInput {
    * ignored knob instead of silently dropping it.
    */
   maxTurns?: number | null;
-}
-
-function announcePreparedProjectGitInitialization(input: RunInput, log: EventLog): void {
-  const result = input.projectGitInitialization;
-  if (!result || (!result.initialized && !result.baselineCommitted)) return;
-  log.emit("project.git.initialized", {
-    repo_root: input.repoRoot,
-    initialized: result.initialized,
-    baseline_committed: result.baselineCommitted,
-    gitignore_seeded: result.gitignoreSeeded,
-    head_sha: result.headSha,
-  });
 }
 
 /** Context handed to RunInput.onInteraction for one pending question. */
@@ -2807,7 +2793,7 @@ export class Orchestrator {
   private async runRace(
     input: RunInput,
     mode: ModeKind,
-    announce?: (a: AnnouncedRunContext) => void,
+    announce: (a: AnnouncedRunContext) => void,
   ): Promise<OrchestratorResult> {
     const taskId = input.taskId ?? newId("task");
     const runId = input.runId ?? newId("run");
@@ -2817,22 +2803,20 @@ export class Orchestrator {
     const contract = this.buildContract(input, taskId, mode);
     const planBrief = verifiedPlanBrief(input);
     const quotaSnapshots = this.quotaSnapshotPreflight();
-    const store = this.artifactStore(input);
-    const paths = store.createRun(runId);
-    const log = createRunEventLog(paths.eventsPath, runId, taskId, input);
-    const ledger = prepareRunAnnouncement(log, () => {
-      const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
-      safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
-      log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
-      announcePreparedProjectGitInitialization(input, log);
-      return preparedLedger;
-    });
-    announce?.(
-      announcedRunContext(
-        { log, store, paths, runId, taskId, mode, phase: "race" },
-        ledger,
-        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
-      ),
+    const { store, paths, log, ledger } = beginAnnouncedRun(
+      {
+        input,
+        contract,
+        quotaSnapshots,
+        store: this.artifactStore(input),
+        authority: this.deps.delegationBudgetAuthority,
+        runId,
+        taskId,
+        mode,
+        phase: "race",
+        prompt: input.prompt,
+      },
+      announce,
     );
     input = withPlanBrief(input, store, paths, log, planBrief);
     // The execution root is the tree the harness mutates: the project itself
@@ -4555,7 +4539,7 @@ export class Orchestrator {
     input: RunInput,
     mode: ModeKind,
     maxAttempts: number | null,
-    announce?: (a: AnnouncedRunContext) => void,
+    announce: (a: AnnouncedRunContext) => void,
   ): Promise<OrchestratorResult> {
     const taskId = input.taskId ?? newId("task");
     const runId = input.runId ?? newId("run");
@@ -4563,22 +4547,20 @@ export class Orchestrator {
     const contract = this.buildContract(input, taskId, mode);
     const planBrief = verifiedPlanBrief(input);
     const quotaSnapshots = this.quotaSnapshotPreflight();
-    const store = this.artifactStore(input);
-    const paths = store.createRun(runId);
-    const log = createRunEventLog(paths.eventsPath, runId, taskId, input);
-    const ledger = prepareRunAnnouncement(log, () => {
-      const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
-      safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
-      log.emit("run.created", { mode, prompt: redactSecrets(input.prompt) });
-      announcePreparedProjectGitInitialization(input, log);
-      return preparedLedger;
-    });
-    announce?.(
-      announcedRunContext(
-        { log, store, paths, runId, taskId, mode, phase: "convergence" },
-        ledger,
-        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
-      ),
+    const { store, paths, log, ledger } = beginAnnouncedRun(
+      {
+        input,
+        contract,
+        quotaSnapshots,
+        store: this.artifactStore(input),
+        authority: this.deps.delegationBudgetAuthority,
+        runId,
+        taskId,
+        mode,
+        phase: "convergence",
+        prompt: input.prompt,
+      },
+      announce,
     );
     input = withPlanBrief(input, store, paths, log, planBrief);
     // The execution root is the tree the harness mutates (thread worktree for an
@@ -5870,7 +5852,7 @@ export class Orchestrator {
 
   private async runPlan(
     input: RunInput,
-    announce?: (a: AnnouncedRunContext) => void,
+    announce: (a: AnnouncedRunContext) => void,
   ): Promise<OrchestratorResult> {
     const taskId = input.taskId ?? newId("task");
     const runId = input.runId ?? newId("run");
@@ -5878,22 +5860,20 @@ export class Orchestrator {
     // contract validation runs BEFORE the run is announced (see runRace).
     const contract = this.buildContract(input, taskId, "plan");
     const quotaSnapshots = this.quotaSnapshotPreflight();
-    const store = this.artifactStore(input);
-    const paths = store.createRun(runId);
-    const log = createRunEventLog(paths.eventsPath, runId, taskId, input);
-    const ledger = prepareRunAnnouncement(log, () => {
-      const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
-      safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
-      log.emit("run.created", { mode: "plan", prompt: redactSecrets(input.prompt) });
-      announcePreparedProjectGitInitialization(input, log);
-      return preparedLedger;
-    });
-    announce?.(
-      announcedRunContext(
-        { log, store, paths, runId, taskId, mode: "plan", phase: "plan" },
-        ledger,
-        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
-      ),
+    const { store, paths, log, ledger } = beginAnnouncedRun(
+      {
+        input,
+        contract,
+        quotaSnapshots,
+        store: this.artifactStore(input),
+        authority: this.deps.delegationBudgetAuthority,
+        runId,
+        taskId,
+        mode: "plan",
+        phase: "plan",
+        prompt: input.prompt,
+      },
+      announce,
     );
     store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
     log.emit("task.contract.created", { task_contract_hash: hashJson(contract) });
@@ -6250,7 +6230,7 @@ export class Orchestrator {
   /** ask: one selected harness answers read-only questions; no patch/apply controls. */
   private async runAsk(
     input: RunInput,
-    announce?: (a: AnnouncedRunContext) => void,
+    announce: (a: AnnouncedRunContext) => void,
   ): Promise<OrchestratorResult> {
     return this.runReadOnlyReport(
       input,
@@ -6270,7 +6250,7 @@ export class Orchestrator {
    * (the old `audit --swarm` / `explore`). */
   private async runDeepScan(
     input: RunInput,
-    announce?: (a: AnnouncedRunContext) => void,
+    announce: (a: AnnouncedRunContext) => void,
   ): Promise<OrchestratorResult> {
     return this.runReadOnlyReport(
       input,
@@ -6291,21 +6271,6 @@ export class Orchestrator {
     return [...(this.deps.quotaSnapshots?.() ?? [])].map((snapshot) =>
       QuotaSnapshotSchema.parse(snapshot),
     );
-  }
-
-  private rootLedger(
-    input: RunInput,
-    contract: TaskContract,
-    log: EventLog,
-    quotaSnapshots: readonly QuotaSnapshot[],
-  ): BudgetLedger {
-    return createRootLedger({
-      input,
-      contract,
-      log,
-      authority: this.deps.delegationBudgetAuthority,
-      quotaSnapshots,
-    });
   }
 
   private routeBillingKnowledge(input: RunInput, harnessId: string): "metered" | "unknown" {
@@ -6400,7 +6365,7 @@ export class Orchestrator {
       defaultPrompt: string;
       contractIntent?: string;
     },
-    announce?: (a: AnnouncedRunContext) => void,
+    announce: (a: AnnouncedRunContext) => void,
   ): Promise<OrchestratorResult> {
     const taskId = input.taskId ?? newId("task");
     const runId = input.runId ?? newId("run");
@@ -6413,22 +6378,20 @@ export class Orchestrator {
       opts.mode,
     );
     const quotaSnapshots = this.quotaSnapshotPreflight();
-    const store = this.artifactStore(input);
-    const paths = store.createRun(runId);
-    const log = createRunEventLog(paths.eventsPath, runId, taskId, input);
-    const ledger = prepareRunAnnouncement(log, () => {
-      const preparedLedger = this.rootLedger(input, contract, log, quotaSnapshots);
-      safeInvoke(input.onRunStart, { runId, taskId, runDir: paths.root });
-      log.emit("run.created", { mode: opts.mode, prompt: redactSecrets(prompt) });
-      announcePreparedProjectGitInitialization(input, log);
-      return preparedLedger;
-    });
-    announce?.(
-      announcedRunContext(
-        { log, store, paths, runId, taskId, mode: opts.mode, phase: "report" },
-        ledger,
-        () => this.deps.delegationBudgetAuthority?.hasParent(runId) === true,
-      ),
+    const { store, paths, log, ledger } = beginAnnouncedRun(
+      {
+        input,
+        contract,
+        quotaSnapshots,
+        store: this.artifactStore(input),
+        authority: this.deps.delegationBudgetAuthority,
+        runId,
+        taskId,
+        mode: opts.mode,
+        phase: "report",
+        prompt,
+      },
+      announce,
     );
     store.writeYaml(join(paths.contextDir, "task.yaml"), contract);
     log.emit("task.contract.created", { task_contract_hash: hashJson(contract) });

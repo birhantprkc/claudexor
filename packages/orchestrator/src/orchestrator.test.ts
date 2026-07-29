@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { BudgetLedger } from "@claudexor/budget";
+import { EventLog } from "@claudexor/event-log";
 
 const shellGate = (command: string) => ({
   program: "sh",
@@ -10470,33 +10471,104 @@ describe("delegation belt injection (D32)", () => {
     required: true,
   };
 
-  it("releases an attached child authority when convergence fails before run announcement", async () => {
+  it.each([
+    ["race", { mode: "agent" as const }],
+    ["convergence", { mode: "agent" as const, attempts: 1 }],
+    ["plan", { mode: "plan" as const }],
+    ["ask/deep-scan report", { mode: "ask" as const }],
+  ] as const)(
+    "rejecting durable run.created keeps %s unannounced and releases startup ownership",
+    async (strategy, strategyInput) => {
+      const repo = await initRepo();
+      const suffix = strategy.replace(/\W+/g, "-");
+      const runId = `run-child-${suffix}`;
+      const taskId = `task-child-${suffix}`;
+      const parentRunId = `run-parent-${suffix}`;
+      const admissionId = `job-child-${suffix}`;
+      const authority = new DelegationBudgetAuthority();
+      authority.registerParent(parentRunId, new BudgetLedger());
+      authority.noteChildAccepted(parentRunId, admissionId);
+      const runStarts: string[] = [];
+      const published: string[] = [];
+      const orch = new Orchestrator({
+        registry: new Map(),
+        reviewers: [],
+        delegationBudgetAuthority: authority,
+      });
+
+      await expect(
+        orch.run({
+          repoRoot: repo,
+          prompt: "x",
+          ...strategyInput,
+          runId,
+          taskId,
+          delegatedFromRunId: parentRunId,
+          delegationAdmissionId: admissionId,
+          onRunStart: ({ runId: startedRunId }) => runStarts.push(startedRunId),
+          onEventPersist: (event) => {
+            if (event.type === "run.created") throw new Error("event sink failed before announce");
+          },
+          onEvent: (event) => published.push(event.type),
+        }),
+      ).rejects.toThrow(/event sink failed before announce/);
+
+      expect(runStarts).toEqual([]);
+      expect(published).toEqual([]);
+      const paths = new ArtifactStore(repo).runPaths(runId);
+      expect(readRunEvents(paths.root).map((event) => event.type)).toEqual(["run.created"]);
+      expect(() => new EventLog(paths.eventsPath, runId, taskId).dispose()).not.toThrow();
+      authority.beginParentClose(parentRunId);
+      await expect(authority.waitForChildren(parentRunId, 20)).resolves.toBeUndefined();
+    },
+  );
+
+  it("terminalizes a preamble event failure after durable run.created exactly once", async () => {
     const repo = await initRepo();
-    const authority = new DelegationBudgetAuthority();
-    authority.registerParent("run-parent", new BudgetLedger());
-    authority.noteChildAccepted("run-parent", "job-child");
-    const orch = new Orchestrator({
-      registry: new Map([["deleg", delegatingAdapter("deleg", true)]]),
-      reviewers: [],
-      delegationBudgetAuthority: authority,
+    const head = (await runCapture("git", ["-C", repo, "rev-parse", "HEAD"])).stdout.trim();
+    const runStarts: string[] = [];
+    const published: string[] = [];
+    const startupOrder: string[] = [];
+    const result = await new Orchestrator({ registry: new Map(), reviewers: [] }).run({
+      repoRoot: repo,
+      prompt: "read",
+      mode: "ask",
+      runId: "run-post-created-preamble-failure",
+      projectGitInitialization: {
+        initialized: true,
+        baselineCommitted: true,
+        gitignoreSeeded: false,
+        headSha: head,
+      },
+      onRunStart: ({ runId }) => {
+        runStarts.push(runId);
+        startupOrder.push("onRunStart");
+      },
+      onEventPersist: (event) => {
+        startupOrder.push(`persist:${event.type}`);
+        if (event.type === "project.git.initialized") {
+          throw new Error("project initialization journal refused");
+        }
+      },
+      onEvent: (event) => published.push(event.type),
     });
-    await expect(
-      orch.run({
-        repoRoot: repo,
-        prompt: "x",
-        mode: "agent",
-        harnesses: ["deleg"],
-        attempts: 1,
-        runId: "run-child",
-        delegatedFromRunId: "run-parent",
-        delegationAdmissionId: "job-child",
-        onEventPersist: (event) => {
-          if (event.type === "run.created") throw new Error("event sink failed before announce");
-        },
-      }),
-    ).rejects.toThrow(/event sink failed before announce/);
-    authority.beginParentClose("run-parent");
-    await expect(authority.waitForChildren("run-parent", 20)).resolves.toBeUndefined();
+
+    expect(runStarts).toEqual(["run-post-created-preamble-failure"]);
+    expect(startupOrder.slice(0, 3)).toEqual([
+      "persist:run.created",
+      "onRunStart",
+      "persist:project.git.initialized",
+    ]);
+    expect(result.lifecycle).toBe("failed");
+    const eventTypes = readRunEvents(result.runDir).map((event) => event.type);
+    expect(eventTypes.slice(0, 2)).toEqual(["run.created", "project.git.initialized"]);
+    expect(eventTypes.filter((type) => type === "run.failed")).toHaveLength(1);
+    expect(eventTypes.filter((type) => type === "run.completed" || type === "run.blocked")).toEqual(
+      [],
+    );
+    expect(published).toContain("run.created");
+    expect(published).not.toContain("project.git.initialized");
+    expect(published.filter((type) => type === "run.failed")).toHaveLength(1);
   });
 
   it("does not release an unrelated authority on a caller-supplied run-id collision", async () => {
