@@ -171,7 +171,11 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
       // "stop requested" is not "stopped" (W3.5): confirm the daemon's death
       // before reporting success, so scripts and test disposers can trust the
       // exit code instead of racing a still-live process.
-      const termination = await awaitDaemonTermination(defaultSocketPath());
+      const termination = await awaitDaemonTermination(defaultSocketPath(), {
+        // This command is the user's explicit forceful operator stop. Runtime
+        // replacement never inherits this signal authority implicitly.
+        allowSigkill: true,
+      });
       if (termination.outcome === "still_alive") {
         // D-7 projector: one failure envelope; the stop-state facts ride as
         // per-command extras (previously a message-less {ok:false,...} straggler).

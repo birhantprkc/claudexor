@@ -25,6 +25,7 @@ import { ensureDaemon, connectDaemonIfRunning } from "./daemon-run.js";
 import { controlApiFetch, CONTROL_PROTOCOL_MAJOR, handshakeControlApi } from "./live.js";
 import { printJson, printUsageError } from "./cli-io.js";
 import { resolveSetupLoginRunnerPath } from "./setup-job-support.js";
+import { admitAndAwaitRuntimeReplacementStop } from "./runtime-replacement-stop.js";
 
 function runtimeTarget(): string {
   return `${platform()}-${arch()}`;
@@ -99,18 +100,10 @@ async function stop(expectedVersion: string, expectedBuildSha: string): Promise<
   }
   const identity = await handshakeControlApi(daemon.addr, "claudexor-macos-remote-stop");
   assertRemoteEngineIdentity(identity, expectedVersion, expectedBuildSha);
-  try {
-    await daemon.client.shutdownForRuntimeReplacement();
-  } catch (error) {
-    const code =
-      error && typeof error === "object" && "code" in error
-        ? (error as { code: unknown }).code
-        : null;
-    if (code === "runtime_replacement_busy" || code === "runtime_activity_unknown") throw error;
-    // An accepted replacement shutdown can close the socket before its response
-    // lands. The pinned writer-lease confirmation below is authoritative.
-  }
-  const termination = await awaitDaemonTermination(defaultSocketPath());
+  const termination = await admitAndAwaitRuntimeReplacementStop(
+    () => daemon.client.shutdownForRuntimeReplacement(),
+    (options) => awaitDaemonTermination(defaultSocketPath(), options),
+  );
   if (termination.outcome === "still_alive") {
     throw new Error(`remote daemon did not stop: ${termination.detail}`);
   }

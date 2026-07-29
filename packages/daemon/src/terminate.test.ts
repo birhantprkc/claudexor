@@ -103,7 +103,7 @@ describe("awaitDaemonTermination", () => {
     let oldAlive = true;
     const result = await awaitDaemonTermination(
       socketPath,
-      { deadlineMs: 2_000, killAfterMs: 500, pollMs: 100 },
+      { deadlineMs: 2_000, killAfterMs: 500, pollMs: 100, allowSigkill: true },
       deps({
         isAlive: (pid) => {
           write({ pid: 5151, token: "new", identity: replacement });
@@ -128,7 +128,7 @@ describe("awaitDaemonTermination", () => {
     let alive = true;
     const result = await awaitDaemonTermination(
       socketPath,
-      { deadlineMs: 2_000, killAfterMs: 500, pollMs: 100 },
+      { deadlineMs: 2_000, killAfterMs: 500, pollMs: 100, allowSigkill: true },
       deps({
         isAlive: () => alive,
         kill: (pid, signal) => {
@@ -141,11 +141,24 @@ describe("awaitDaemonTermination", () => {
     expect(result).toMatchObject({ outcome: "killed" });
   });
 
+  it("withholds SIGKILL when the caller has no signal authority", async () => {
+    const socketPath = leaseFor({ pid: 4242, token: "t", identity: IDENTITY });
+    const kills: Array<[number, string]> = [];
+    const result = await awaitDaemonTermination(
+      socketPath,
+      { deadlineMs: 1_000, killAfterMs: 300, pollMs: 100, allowSigkill: false },
+      deps({ kill: (pid, signal) => kills.push([pid, signal]) }),
+    );
+    expect(kills).toEqual([]);
+    expect(result).toMatchObject({ outcome: "still_alive" });
+    expect(result.detail).toContain("caller has no signal authority");
+  });
+
   it("fails closed to an honest still_alive when no birth identity was recorded", async () => {
     const socketPath = leaseFor({ pid: 4242, token: "t" }); // legacy lease shape
     const result = await awaitDaemonTermination(
       socketPath,
-      { deadlineMs: 1_000, killAfterMs: 300, pollMs: 100 },
+      { deadlineMs: 1_000, killAfterMs: 300, pollMs: 100, allowSigkill: true },
       deps({}),
     );
     expect(result).toMatchObject({ outcome: "still_alive" });
@@ -162,7 +175,7 @@ describe("awaitDaemonTermination", () => {
     };
     const result = await awaitDaemonTermination(
       socketPath,
-      { deadlineMs: 1_000, killAfterMs: 300, pollMs: 100 },
+      { deadlineMs: 1_000, killAfterMs: 300, pollMs: 100, allowSigkill: true },
       deps({ read: () => unknown }),
     );
     expect(result).toMatchObject({ outcome: "still_alive" });

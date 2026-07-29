@@ -1237,9 +1237,12 @@ active setup authority, and only an idle result enters `beginShutdown`, whose
 synchronous prefix fences setup, Control API, and daemon admission before any
 shutdown await. Busy is a retryable `runtime_replacement_busy`; unreadable or
 missing authority is `runtime_activity_unknown`; either refusal leaves the
-serving daemon and every ingress open. Explicit operator shutdown keeps its
-forceful semantics. The daemon records its birth identity in
-the writer lease at startup; `claudexor daemon stop` then CONFIRMS death
+serving daemon and every ingress open. A lost, untyped, or incompatible RPC
+response may passively prove that the pinned daemon exited, but only an exact
+`{ok:true,fenced:true}` admission receipt grants SIGKILL authority; uncertainty
+therefore cannot turn an old or newly busy daemon into a replacement casualty.
+Explicit operator shutdown keeps its forceful semantics. The daemon records its
+birth identity in the writer lease at startup; `claudexor daemon stop` then CONFIRMS death
 (released lease, gone pid, or identity-verified SIGKILL escalation — a
 recycled pid is never signalled) before reporting success, so scripts and
 test disposers can trust its exit code. Stdio bridges (`mcp serve`/`acp

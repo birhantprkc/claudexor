@@ -19,6 +19,11 @@ export interface AwaitDaemonTerminationOptions {
   deadlineMs?: number;
   /** Graceful window before the SIGKILL escalation (default 17s). */
   killAfterMs?: number;
+  /** Whether this caller has authority to escalate to SIGKILL (default false).
+   * Runtime
+   * replacement grants that authority only after an explicit fenced admission
+   * receipt; an ambiguous RPC failure may observe death but never cause it. */
+  allowSigkill?: boolean;
   pollMs?: number;
 }
 
@@ -55,6 +60,7 @@ export async function awaitDaemonTermination(
 ): Promise<DaemonTerminationOutcome> {
   const deadlineMs = options.deadlineMs ?? 20_000;
   const killAfterMs = options.killAfterMs ?? 17_000;
+  const allowSigkill = options.allowSigkill ?? false;
   const pollMs = options.pollMs ?? 150;
   const identity = deps.identity ?? defaultProcessIdentityService;
   const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
@@ -124,6 +130,11 @@ export async function awaitDaemonTermination(
       };
     }
     if (!killed && elapsed >= killAfterMs) {
+      if (!allowSigkill) {
+        noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (caller has no signal authority)`;
+        await sleep(pollMs);
+        continue;
+      }
       // Escalate ONLY under a verified identity match observed THIS iteration.
       const observed = owner.identity ? identity.read(owner.pid) : null;
       if (
