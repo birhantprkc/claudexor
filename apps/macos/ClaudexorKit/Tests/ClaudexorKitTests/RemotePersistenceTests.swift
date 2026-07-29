@@ -161,6 +161,20 @@ import Testing
         }
     }
 
+    @Test func loadRefusesHardLinkedMetadata() throws {
+        let root = try makePrivateDirectory("remote-store-hardlink")
+        defer { try? manager.removeItem(at: root) }
+        let target = root.appendingPathComponent("target.json")
+        let file = root.appendingPathComponent("connections.json")
+        try Data("[]".utf8).write(to: target)
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+        try manager.linkItem(at: target, to: file)
+
+        #expect(throws: RemotePersistenceError.self) {
+            try RemoteConnectionStore(fileURL: file).load()
+        }
+    }
+
     @Test func missingStoreStillLoadsAsEmpty() throws {
         let root = manager.temporaryDirectory
             .appendingPathComponent("remote-store-missing-\(UUID().uuidString)")

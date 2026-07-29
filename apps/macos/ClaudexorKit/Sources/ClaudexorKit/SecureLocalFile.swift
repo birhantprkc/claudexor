@@ -59,6 +59,7 @@ enum SecureLocalFile {
         guard fstat(fileFD, &fileStatus) == 0,
               fileType(fileStatus) == mode_t(S_IFREG),
               fileStatus.st_uid == expectedOwner,
+              fileStatus.st_nlink == 1,
               permissionBits(fileStatus) == 0o600
         else {
             throw SecureLocalFileError.insecureFile(url.path)

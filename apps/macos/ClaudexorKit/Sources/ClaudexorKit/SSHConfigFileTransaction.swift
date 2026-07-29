@@ -49,12 +49,14 @@ enum SSHConfigFileTransaction {
             throw failure("\(configPath) is not valid UTF-8")
         }
         if !opened.created { try validateExisting(existing) }
-        try requireCurrentPath(
+        try requireCurrentSnapshot(
             directoryPath: directoryPath,
             directoryIdentity: directoryIdentity,
             directoryFD: directoryFD,
             leaf: leaf,
             fileIdentity: fileIdentity,
+            fileFD: opened.fd,
+            expectedData: existingData,
             configPath: configPath)
 
         let backupPath = opened.created ? nil : try backUp(
@@ -64,12 +66,14 @@ enum SSHConfigFileTransaction {
             directoryFD: directoryFD,
             leaf: leaf,
             date: backupDate)
-        try requireCurrentPath(
+        try requireCurrentSnapshot(
             directoryPath: directoryPath,
             directoryIdentity: directoryIdentity,
             directoryFD: directoryFD,
             leaf: leaf,
             fileIdentity: fileIdentity,
+            fileFD: opened.fd,
+            expectedData: existingData,
             configPath: configPath)
 
         guard lseek(opened.fd, 0, SEEK_END) >= 0 else {
@@ -132,12 +136,14 @@ enum SSHConfigFileTransaction {
             permissions: status.st_mode & 0o777)
     }
 
-    private static func requireCurrentPath(
+    private static func requireCurrentSnapshot(
         directoryPath: String,
         directoryIdentity: Identity,
         directoryFD: Int32,
         leaf: String,
         fileIdentity: Identity,
+        fileFD: Int32,
+        expectedData: Data,
         configPath: String
     ) throws {
         let currentDirectoryFD = open(directoryPath, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
@@ -159,6 +165,9 @@ enum SSHConfigFileTransaction {
         defer { close(currentFD) }
         guard try identity(of: currentFD, requiring: mode_t(S_IFREG)) == fileIdentity else {
             throw failure("\(configPath) changed during write")
+        }
+        guard try readAll(from: fileFD) == expectedData else {
+            throw failure("\(configPath) contents changed during write")
         }
     }
 

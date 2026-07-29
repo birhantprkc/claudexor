@@ -193,6 +193,32 @@ import Testing
         #expect(try String(contentsOfFile: replacement, encoding: .utf8) == replacementBytes)
     }
 
+    @Test func refusesWhenConfigContentsChangeInPlaceAfterTheScannedSnapshot() throws {
+        let root = try makeTempDirectory()
+        let config = "\(root)/config"
+        let include = "\(root)/included.conf"
+        let original = "Include \(include)\nHost old\n  HostName old.internal\n"
+        let replacement = "Host replacement\n  HostName replacement.internal\n"
+        try original.write(toFile: config, atomically: true, encoding: .utf8)
+        try "# included\n".write(toFile: include, atomically: true, encoding: .utf8)
+        let scanner = SSHConfigScanner(readFile: { path in
+            if path == include {
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: config))
+                try handle.truncate(atOffset: 0)
+                try handle.write(contentsOf: Data(replacement.utf8))
+                try handle.close()
+            }
+            return try String(contentsOfFile: path, encoding: .utf8)
+        })
+
+        #expect(throws: SSHConfigWriteError.self) {
+            try SSHConfigWriter(scanner: scanner).appendHost(
+                SSHHostDraft(alias: "fresh", hostName: "fresh.internal"),
+                toConfigAt: config)
+        }
+        #expect(try String(contentsOfFile: config, encoding: .utf8) == replacement)
+    }
+
     @Test func previewBytesEqualAppendedBytes() throws {
         let config = try makeTempDirectory() + "/config"
         try "Host old\n  HostName o.internal\n".write(
