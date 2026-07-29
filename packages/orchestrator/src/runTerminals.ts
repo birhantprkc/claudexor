@@ -34,7 +34,7 @@ import {
   terminalOutcomeFacts,
 } from "./terminalOutcome.js";
 
-export { announcedRunContext, type AnnouncedRunContext } from "./runTerminalContext.js";
+export type { AnnouncedRunContext } from "./runTerminalContext.js";
 export { cancelledResult, failTerminally, writeFailure };
 
 function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
