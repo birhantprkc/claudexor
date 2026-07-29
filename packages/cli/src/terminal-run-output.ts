@@ -9,6 +9,11 @@ type TerminalRunOutputOptions = {
   summary?: string | undefined;
 };
 
+/** Human terminal projection of the daemon-owned typed remedies. */
+export function terminalRunRequiredActionLines(out: DaemonRunOutcome): string[] {
+  return (out.errorRequiredActions ?? []).map((action) => `  next: ${action}`);
+}
+
 /** One owner for the identical terminal envelope emitted by JSON and NDJSON runs. */
 export function projectTerminalRunOutput(
   out: DaemonRunOutcome,

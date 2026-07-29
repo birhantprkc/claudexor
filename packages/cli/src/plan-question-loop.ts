@@ -17,8 +17,10 @@ import {
   fetchOutcomeBanner,
   fetchPlanQuestions,
   fetchPlanReadiness,
+  mergeDaemonRunOutcome,
 } from "./daemon-run.js";
 import { followRun, type ControlApiAddress } from "./live.js";
+import { terminalRunRequiredActionLines } from "./terminal-run-output.js";
 
 /** One question's resolved answer text, or null to SKIP it (blank input). */
 export function resolvePlanAnswer(question: PlanQuestion, raw: string): string | null {
@@ -159,16 +161,20 @@ export async function runPlanQuestionLoop(opts: {
       print(
         `  follow-up turn did not start: ${next.status}${next.error ? ` — ${next.error}` : ""}`,
       );
+      for (const line of terminalRunRequiredActionLines(next)) print(line);
       break;
     }
     await followRun(next.runId, false);
     const nextFinal = next.jobId ? await client.status(next.jobId) : null;
-    const nextStatus = nextFinal?.state ?? next.status;
+    const nextOutcome = mergeDaemonRunOutcome(next, nextFinal);
+    const nextStatus = nextOutcome.status;
     print("");
     print(`run ${next.runId} [${nextStatus}]`);
     const nextBanner = await fetchOutcomeBanner(addr, next.runId);
     if (nextBanner) print(`  ${nextBanner}`);
-    print(`  artifacts: ${nextFinal?.runDir ?? next.runDir}`);
+    print(`  artifacts: ${nextOutcome.runDir}`);
+    if (nextOutcome.error) print(`  error: ${nextOutcome.error}`);
+    for (const line of terminalRunRequiredActionLines(nextOutcome)) print(line);
     currentRunId = next.runId;
     readiness = await fetchPlanReadiness(addr, currentRunId);
     printPlanReadiness(readiness);

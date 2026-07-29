@@ -25,6 +25,10 @@ export function daemonOutcomeProblemFields(out: DaemonRunOutcome): Record<string
     code: out.errorCode,
     ...(out.errorStatus !== undefined ? { errorStatus: out.errorStatus } : {}),
     ...(out.errorRetryable !== undefined ? { retryable: out.errorRetryable } : {}),
+    ...(out.errorRequiredActions !== undefined
+      ? { requiredActions: out.errorRequiredActions }
+      : {}),
+    ...(out.errorContext !== undefined ? { context: out.errorContext } : {}),
     ...(out.errorCode === "unsupported_schema_dialect"
       ? {
           supportedDialects: OUTPUT_SCHEMA_DIALECTS.map(({ dialect, uri }) => ({ dialect, uri })),
@@ -41,6 +45,9 @@ export function mergeDaemonRunOutcome(
     error?: string;
     errorCode?: string;
     errorStatus?: number;
+    errorRetryable?: boolean;
+    errorRequiredActions?: string[];
+    errorContext?: Record<string, unknown>;
   } | null,
 ): DaemonRunOutcome {
   return {
@@ -50,5 +57,8 @@ export function mergeDaemonRunOutcome(
     error: final?.error ?? started.error,
     errorCode: final?.errorCode ?? started.errorCode,
     errorStatus: final?.errorStatus ?? started.errorStatus,
+    errorRetryable: final?.errorRetryable ?? started.errorRetryable,
+    errorRequiredActions: final?.errorRequiredActions ?? started.errorRequiredActions,
+    errorContext: final?.errorContext ?? started.errorContext,
   };
 }

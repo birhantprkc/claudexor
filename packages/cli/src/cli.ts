@@ -85,7 +85,10 @@ import {
   terminalDelegationLines,
 } from "./delegation-output.js";
 import { readRunFactsArtifact } from "./run-facts-projection.js";
-import { projectTerminalRunOutput } from "./terminal-run-output.js";
+import {
+  projectTerminalRunOutput,
+  terminalRunRequiredActionLines,
+} from "./terminal-run-output.js";
 import { runPlanQuestionLoop } from "./plan-question-loop.js";
 import { resolveDecisionBody } from "./decision.js";
 import { primaryOutputForCli } from "./primary-output.js";
@@ -686,12 +689,14 @@ async function daemonRun(
     const started = await enqueueAndAwait(client, addr, body, { waitForTerminal: false });
     if (!started.runId) {
       print(`run did not start: ${started.status}${started.error ? ` — ${started.error}` : ""}`);
+      for (const line of terminalRunRequiredActionLines(started)) print(line);
       return exitCodeForState(started.status);
     }
     terminalRunId = started.runId;
     await followRun(started.runId, false);
     const final = started.jobId ? await client.status(started.jobId) : null;
-    const status = final?.state ?? started.status;
+    const out = mergeDaemonRunOutcome(started, final);
+    const status = out.status;
     const publicStatus = status;
     print("");
     print(`run ${started.runId} [${publicStatus}]`);
@@ -700,7 +705,9 @@ async function daemonRun(
     const terminalBanner = projectOutcomeBanner(terminalDetail);
     if (terminalBanner) print(`  ${terminalBanner}`);
     for (const line of terminalDelegationLines(projectDelegation(terminalDetail))) print(line);
-    print(`  artifacts: ${final?.runDir ?? started.runDir}`);
+    print(`  artifacts: ${out.runDir}`);
+    if (out.error) print(`  error: ${out.error}`);
+    for (const line of terminalRunRequiredActionLines(out)) print(line);
     // A succeeded lifecycle exits 0 — INCLUDING a "Done · needs review" run
     // (review blocked / checks failed). The apply-eligibility verdict (state
     // needs_review) is the ONE source for the unblock guidance (D8).

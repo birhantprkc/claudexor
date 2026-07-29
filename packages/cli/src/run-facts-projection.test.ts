@@ -8,7 +8,7 @@ import {
   projectTerminalDetailFields,
   readRunFactsArtifact,
 } from "./run-facts-projection.js";
-import { projectTerminalRunOutput } from "./terminal-run-output.js";
+import { projectTerminalRunOutput, terminalRunRequiredActionLines } from "./terminal-run-output.js";
 
 const terminalReceipt = validateRunFactsInvariants({
   schema_version: SCHEMA_VERSION,
@@ -190,33 +190,35 @@ describe("RunFacts CLI projections (GH #29)", () => {
   });
 
   it("keeps an early JSON failure typed while reporting a missing legacy receipt", () => {
-    expect(
-      projectTerminalRunOutput(
-        {
-          runId: "",
-          runDir: "",
-          status: "failed",
-          jobId: "",
-          error: "invalid output schema",
-          errorCode: "invalid_output_schema",
-          errorStatus: 400,
-          errorRetryable: false,
-        },
-        "agent",
-        null,
-      ),
-    ).toEqual({
+    const refused = {
+      runId: "",
+      runDir: "",
+      status: "failed",
+      jobId: "",
+      error: "Git is unavailable",
+      errorCode: "git_developer_tools_stub",
+      errorStatus: 503,
+      errorRetryable: false,
+      errorRequiredActions: ["Install Apple Command Line Tools with xcode-select --install."],
+      errorContext: { capability: "git", capabilityStatus: "developer_tools_stub" },
+    } as Parameters<typeof projectTerminalRunOutput>[0];
+    expect(projectTerminalRunOutput(refused, "agent", null)).toEqual({
       runId: "",
       runDir: "",
       status: "failed",
       jobId: "",
       mode: "agent",
-      error: "invalid output schema",
-      code: "invalid_output_schema",
-      errorStatus: 400,
+      error: "Git is unavailable",
+      code: "git_developer_tools_stub",
+      errorStatus: 503,
       retryable: false,
+      requiredActions: ["Install Apple Command Line Tools with xcode-select --install."],
+      context: { capability: "git", capabilityStatus: "developer_tools_stub" },
       runFacts: null,
     });
+    expect(terminalRunRequiredActionLines(refused)).toEqual([
+      "  next: Install Apple Command Line Tools with xcode-select --install.",
+    ]);
   });
 
   it("reads the exact canonical artifact for inspect", () => {

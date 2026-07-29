@@ -177,6 +177,8 @@ export interface DaemonRunOutcome {
   errorCode?: string;
   errorStatus?: number;
   errorRetryable?: boolean;
+  errorRequiredActions?: string[];
+  errorContext?: Record<string, unknown>;
 }
 
 /**
@@ -303,6 +305,9 @@ export async function enqueueAndAwait(
           error: rec.error,
           errorCode: rec.errorCode,
           errorStatus: rec.errorStatus,
+          errorRetryable: rec.errorRetryable,
+          errorRequiredActions: rec.errorRequiredActions,
+          errorContext: rec.errorContext,
         };
       }
       await sleep(120);
@@ -315,7 +320,18 @@ export async function enqueueAndAwait(
       // The caller keeps watching this run (text mode streams it); hand the
       // signal responsibility back with the outcome.
       const rec = jobId ? await client.status(jobId) : null;
-      return { runId, runDir, status: rec?.state ?? "running", jobId };
+      return {
+        runId,
+        runDir,
+        status: rec?.state ?? "running",
+        jobId,
+        error: rec?.error,
+        errorCode: rec?.errorCode,
+        errorStatus: rec?.errorStatus,
+        errorRetryable: rec?.errorRetryable,
+        errorRequiredActions: rec?.errorRequiredActions,
+        errorContext: rec?.errorContext,
+      };
     }
 
     // Poll the daemon socket for the terminal job state (the canonical outcome).
@@ -330,6 +346,9 @@ export async function enqueueAndAwait(
           error: rec.error,
           errorCode: rec.errorCode,
           errorStatus: rec.errorStatus,
+          errorRetryable: rec.errorRetryable,
+          errorRequiredActions: rec.errorRequiredActions,
+          errorContext: rec.errorContext,
         };
       }
       if (opts.onPollTick) await opts.onPollTick({ runId: rec.runId ?? runId });

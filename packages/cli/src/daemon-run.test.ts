@@ -1,6 +1,11 @@
 import { makeOutcomeFacts } from "@claudexor/schema";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { daemonOutcomeSummary, enqueueAndAwait, exitCodeForState } from "./daemon-run.js";
+import {
+  daemonOutcomeSummary,
+  enqueueAndAwait,
+  exitCodeForState,
+  mergeDaemonRunOutcome,
+} from "./daemon-run.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -91,6 +96,74 @@ describe("enqueueAndAwait typed ControlProblem transport", () => {
       retryable: false,
       requiredActions: [expect.stringContaining("xcode-select --install")],
       context: { capability: "git", capabilityStatus: "developer_tools_stub" },
+    });
+  });
+
+  it("preserves the durable daemon status problem when a run is refused before materialization", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ jobId: "job-git-refused" }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const client = {
+      status: vi.fn().mockResolvedValue({
+        id: "job-git-refused",
+        state: "failed",
+        error: "Git is unavailable because Apple Command Line Tools are not installed.",
+        errorCode: "git_developer_tools_stub",
+        errorStatus: 503,
+        errorRetryable: false,
+        errorRequiredActions: ["Install Apple Command Line Tools with `xcode-select --install`."],
+        errorContext: { capability: "git", capabilityStatus: "developer_tools_stub" },
+      }),
+    };
+
+    await expect(
+      enqueueAndAwait(
+        client as never,
+        { baseUrl: "http://127.0.0.1:1", token: "t" },
+        { prompt: "go", mode: "agent" },
+        { waitForTerminal: true },
+      ),
+    ).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "git_developer_tools_stub",
+      errorRetryable: false,
+      errorRequiredActions: [expect.stringContaining("xcode-select --install")],
+      errorContext: { capability: "git", capabilityStatus: "developer_tools_stub" },
+    });
+  });
+
+  it("preserves the typed terminal problem when an NDJSON/human run merges final status", () => {
+    expect(
+      mergeDaemonRunOutcome(
+        {
+          runId: "run-git-refused",
+          runDir: "/runs/run-git-refused",
+          status: "running",
+          jobId: "job-git-refused",
+        },
+        {
+          state: "failed",
+          error: "Git is unavailable",
+          errorCode: "git_developer_tools_stub",
+          errorStatus: 503,
+          errorRetryable: false,
+          errorRequiredActions: ["Install Apple Command Line Tools with xcode-select --install."],
+          errorContext: { capability: "git", capabilityStatus: "developer_tools_stub" },
+        },
+      ),
+    ).toMatchObject({
+      status: "failed",
+      errorCode: "git_developer_tools_stub",
+      errorRetryable: false,
+      errorRequiredActions: [expect.stringContaining("xcode-select --install")],
+      errorContext: { capability: "git", capabilityStatus: "developer_tools_stub" },
     });
   });
 });
