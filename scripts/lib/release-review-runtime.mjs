@@ -75,7 +75,7 @@ function assertExactCandidateInputs(root, inputs) {
 }
 
 function smokeRuntimeApi(bytes) {
-  const moduleUrl = `data:text/javascript;base64,${bytes.toString("base64")}`;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(bytes).toString("base64")}`;
   const script = [
     `const runtime = await import(${JSON.stringify(moduleUrl)});`,
     `const expected = ${JSON.stringify(REQUIRED_RUNTIME_EXPORTS)};`,
