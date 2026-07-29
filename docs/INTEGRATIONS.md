@@ -198,7 +198,10 @@ verified only on observed evidence), `primaryOutput`, `timeline`, `budget`,
 answer/report, streamed activity, known spend state, tool/web status, and the
 immutable terminal receipt without scraping artifacts. `runFacts` is null for
 active and legacy runs; terminal clients consume it verbatim rather than
-reconstructing deliverable, participant, gate, review, or required-action facts.
+reconstructing outcome, deliverable, presentation, participant, gate, review,
+or required-action facts. Its optional `presentation` member is the shared
+terminal authority for output-ready state and the primary artifact; only older
+receipts without that member use the legacy artifact/failure fallback.
 Web/tool evidence is projected from the engine-owned
 `final/telemetry.yaml`; runs that predate it report `available: false`. Unknown
 quota or spend remains unknown; do not render missing values as `$0`. Large

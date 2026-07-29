@@ -1834,10 +1834,13 @@ whole window remains indistinguishable from a hang and is killed.
 
 Run detail includes terminal state and output-ready state. `summary.state` is the
 daemon terminal/lifecycle state. `summary.outputReadyState` is
-`pending | finalizing | ready | diagnostic` and is derived from primary output
-and failure artifacts. Terminal run detail also carries `runFacts`, read as the
-exact validated value from `final/run_facts.yaml`; it is null while the run is
-active and for legacy runs without the receipt. Terminal CLI JSON and
+`pending | finalizing | ready | diagnostic`. New terminal runs consume the
+optional `presentation` member of `RunFacts`, written from the last validated
+`output.ready` state and the terminal-selected primary artifact; `primaryOutput` consumes the
+same receipt. Only legacy runs whose RunFacts predates `presentation` fall back
+to artifact/failure inference. Terminal run detail also carries `runFacts`, read
+as the exact validated value from `final/run_facts.yaml`; it is null while the
+run is active and for legacy runs without the receipt. Terminal CLI JSON and
 JSON-stream output project that same run-detail value, while artifact-only
 `claudexor inspect --json` reads the canonical file directly. None of these
 surfaces reconstructs shared terminal facts. `summary.webEvidence` and
@@ -1904,9 +1907,12 @@ Surfaces project it; they never recompute evidence from raw events or model pros
 
 `final/run_facts.yaml` (`RunFacts` in the schema) is the canonical immutable
 terminal-fact receipt. It binds the terminal outcome, canonical deliverable,
-role-labelled participant roster and planner count, configured-gate execution,
-review blocker ids, apply eligibility and operator-decision presence, and the
-typed required actions. The schema-owned invariant validator rejects
+immutable presentation state and primary artifact, role-labelled participant
+roster and planner count, configured-gate execution, review blocker ids, apply
+eligibility and operator-decision presence, and the typed required actions. A
+successful `final/summary.md` receipt may prove presentation is ready, but the
+summary is never selected as the model's primary answer; a no-change success is
+therefore `ready` with a null presentation primary. The schema-owned invariant validator rejects
 cross-axis contradictions before persistence: examples include a succeeded
 plan without a deliverable, merge/reviewer roles inflating the planner count,
 configured tests presented as both `not_configured` and passed, or required
