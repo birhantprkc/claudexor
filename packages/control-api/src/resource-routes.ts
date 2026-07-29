@@ -6,6 +6,7 @@ import {
   ControlUploadStatus,
   type ResourceAttachmentRef,
 } from "@claudexor/schema";
+import { requiredIdempotencyKey } from "./run-start.js";
 import { routeValue, serviceResponse } from "./route-stages.js";
 
 export interface ResourceRouteServices {
@@ -117,16 +118,4 @@ export async function handleResourceRoute(
     );
   }
   return false;
-}
-
-function requiredIdempotencyKey(req: IncomingMessage): string {
-  const raw = req.headers["idempotency-key"];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  if (!value || value.length > 256) {
-    throw Object.assign(new Error("Idempotency-Key is required for this create operation"), {
-      status: 400,
-      code: value ? "invalid_idempotency_key" : "idempotency_key_required",
-    });
-  }
-  return value;
 }
