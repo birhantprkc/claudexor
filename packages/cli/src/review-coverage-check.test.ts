@@ -260,7 +260,7 @@ describe("review-coverage-check", () => {
             candidate,
           ),
         ).toThrow(/digest mismatch/);
-        expect(() => bindCoverageReceipt({ ...honest, schemaVersion: 1 }, candidate)).toThrow(
+        expect(() => bindCoverageReceipt({ ...honest, schemaVersion: 1 as 2 }, candidate)).toThrow(
           /schemaVersion 1 is not 2/,
         );
         expect(() => bindCoverageReceipt(honest, base)).toThrow(/not the sealed candidate/);
