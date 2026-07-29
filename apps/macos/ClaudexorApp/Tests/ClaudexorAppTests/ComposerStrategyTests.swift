@@ -60,6 +60,26 @@ import ClaudexorKit
         #expect(!uc.council)
     }
 
+    @Test func singleDefaultCarriesThreeActualRepairAttempts() {
+        let options = TurnOptions()
+        #expect(options.maxAttempts == 3)
+        #expect(composerRepairWire(
+            mode: .agent,
+            requestedAttempts: options.maxAttempts,
+            requestedUntilClean: false
+        ).attempts == 3)
+        #expect(composerRepairWire(
+            mode: .bestOfN,
+            requestedAttempts: options.maxAttempts,
+            requestedUntilClean: false
+        ).attempts == nil)
+        #expect(composerRepairWire(
+            mode: .agent,
+            requestedAttempts: options.maxAttempts,
+            requestedUntilClean: true
+        ).attempts == nil)
+    }
+
     /// The turn body actually encodes delegate/council when set (D32/D31 fields).
     @Test func turnRequestEncodesDelegateAndCouncil() throws {
         let body = ThreadTurnRequest(prompt: "hi", mode: "plan", n: 3, council: true)

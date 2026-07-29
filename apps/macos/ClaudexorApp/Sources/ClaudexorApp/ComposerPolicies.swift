@@ -114,7 +114,7 @@ struct ComposerDraftSnapshot: Equatable {
     var selectedWebPolicy: String = "auto"
     var authRoutePreference: String = ""
     var effortPreference: String = ""
-    var maxAttempts: Int = 3
+    var maxAttempts: Int = TurnOptions.singleDefaultAttempts
     var agentStrategy: AgentStrategy = .single
     var delegate: Bool = false
     var councilEnabled: Bool = false

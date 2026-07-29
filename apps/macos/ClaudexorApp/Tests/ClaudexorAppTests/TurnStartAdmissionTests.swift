@@ -45,7 +45,7 @@ struct TurnStartAdmissionTests {
             eligibleHarnesses: [])
         model.runApplicabilityProjections[.local] = .ready(
             try testRunApplicabilityResponse(
-                root: target.repoRoot, isolatedAgentOther: false))
+                root: target.repoRoot, isolatedAgentConvergence: false))
         let requests = TurnStartRecorder()
         TurnStartStubURLProtocol.handler = { request in
             requests.record(request)
@@ -167,7 +167,7 @@ struct TurnStartAdmissionTests {
             eligibleHarnesses: [])
         model.runApplicabilityProjections[.local] = .ready(
             try testRunApplicabilityResponse(
-                root: localTarget.repoRoot, inPlaceAgentOther: false))
+                root: localTarget.repoRoot, inPlaceAgentConvergence: false))
         let blocked = model.turnStartAdmission(
             target: localTarget, mode: .agent, options: .init())
         let reason = try #require(blocked.interactionBlocker)
@@ -548,7 +548,7 @@ struct TurnStartAdmissionTests {
             eligibleHarnesses: [])
         model.runApplicabilityProjections[locationID] = .ready(
             try testRunApplicabilityResponse(
-                root: target.repoRoot, inPlaceAgentOther: false))
+                root: target.repoRoot, inPlaceAgentConvergence: false))
         let clientB = turnStartClient(port: 12_369)
         model.adoptRemoteClientForReconnect(clientB, at: locationID)
         #expect(model.runApplicabilityProjections[locationID] == nil)

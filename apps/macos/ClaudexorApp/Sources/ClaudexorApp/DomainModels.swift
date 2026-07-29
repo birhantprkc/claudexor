@@ -316,11 +316,13 @@ enum RunMode: String, CaseIterable, Identifiable, Hashable {
 /// access, web policy, agent repair strategies) — NOT new UI-only semantics.
 /// primary/pool are NOT here: they are sticky on the thread (PATCHed separately).
 struct TurnOptions: Equatable {
+    static let singleDefaultAttempts = 3
+
     var maxUsd: Double? = nil
     var access: String? = nil          // AccessProfile.wire
     var web: String? = nil             // auto | off | cached | live
     var untilClean: Bool = false
-    var maxAttempts: Int? = nil        // nil => engine default repair cap
+    var maxAttempts: Int? = TurnOptions.singleDefaultAttempts
     /// Agent delegation belt (D32); agent-only. Sent as `delegate` on the turn.
     var delegate: Bool = false
     /// Plan council (D31); plan-only. Sent as `council`; `councilN` sets width.

@@ -152,7 +152,7 @@ extension ThreadsScreen {
         effortPreference = ""
         selectedAccess = model.effectiveThreadAccess.flatMap(AccessProfile.init(wire:))
             ?? model.composerAccessDefault
-        maxAttempts = 3
+        maxAttempts = TurnOptions.singleDefaultAttempts
         showOptions = false
         browser = false
         agentStrategy = .single

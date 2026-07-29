@@ -24,7 +24,7 @@ struct ThreadsScreen: View {
     @State var authRoutePreference = ""  // "" = Thread default; see authRouteRequest (sol #1)
     /// Per-turn reasoning effort ("" = harness default). Not sticky.
     @State var effortPreference = ""
-    @State var maxAttempts = 3
+    @State var maxAttempts = TurnOptions.singleDefaultAttempts
     /// Agent STRATEGY knob (D24): Single / Best-of / Until-clean / Create. Was a
     /// set of distinct intents; now a per-turn knob inside Agent. Not sticky.
     @State var agentStrategy: AgentStrategy = .single
@@ -170,7 +170,7 @@ struct ThreadsScreen: View {
             // resolved Agent/Plan strategy (resolveComposerStrategy). Delegate
             // is additionally masked there by requestedForWire so a stale ON
             // value cannot cross a known-unavailable route.
-            maxAttempts: maxAttempts == 3 ? nil : maxAttempts,
+            maxAttempts: maxAttempts,
             browser: effectiveBrowserArmed,
             models: composerModels,
             reviewerPanel: runControlApplicability.reviewers.applicable && !reviewerPanelEntries.isEmpty
