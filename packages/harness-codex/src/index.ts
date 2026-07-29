@@ -424,8 +424,7 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           effort_levels_verified_against: efforts.live
             ? version
             : CODEX_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-          // Manifest model truth source (strict model-truth validation: an explicit model outside
-          // this list is refused, never forwarded to die as a native error).
+          // Explicit models outside this verified list fail before native execution.
           // Current + still-API-available ids per the vendor Codex models page,
           // verified against the installed CLI recorded below.
           known_models: [
