@@ -7,6 +7,15 @@ import Testing
 /// generator must always emit a server-valid slug, unique per harness.
 @Suite struct AccountsPresentationTests {
     @MainActor
+    @Test func authSheetBoundaryPreservesTheOneActionLoginTarget() {
+        let sheet = AuthSheet(target: AuthSheetTarget(
+            family: .claude, profileId: "work", autoStartLogin: true))
+        #expect(sheet.family == .claude)
+        #expect(sheet.profileId == "work")
+        #expect(sheet.autoStartLogin)
+    }
+
+    @MainActor
     @Test func accountReadinessRequiresExactPassedSourceVerification() throws {
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         model.liveHarnesses = [HarnessInfo(

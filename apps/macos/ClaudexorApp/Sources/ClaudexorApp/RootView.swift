@@ -66,7 +66,7 @@ struct RootView: View {
             model.isFullScreen = false
         }
         .sheet(item: $model.authSheetTarget) { target in
-            AuthSheet(family: target.family, profileId: target.profileId).environment(model)
+            AuthSheet(target: target).environment(model)
         }
         .sheet(item: $model.remoteDirectoryBrowser) { request in
             RemoteDirectoryBrowser(request: request).environment(model)
