@@ -482,7 +482,8 @@ struct RemoteScopedProjectImage: View {
     private var loadIdentity: String {
         let location = locationID ?? model.selectedExecutionLocation
         let root = repoRoot ?? model.currentThread?.repoRoot ?? ""
-        return "\(location.rawValue)|\(root)|\(target)"
+        let generation = model.executionLocationGeneration(for: location)
+        return "\(location.rawValue)|\(generation)|\(root)|\(target)"
     }
 
     var body: some View {
@@ -508,6 +509,7 @@ struct RemoteScopedProjectImage: View {
         .task(id: loadIdentity) {
             let scopeLocationID = locationID ?? model.selectedExecutionLocation
             let scopeRoot = repoRoot ?? model.currentThread?.repoRoot
+            let generation = model.executionLocationGeneration(for: scopeLocationID)
             image = nil
             status = nil
             guard let reference = model.remoteProjectFileReference(
@@ -523,7 +525,9 @@ struct RemoteScopedProjectImage: View {
                 let response = try await client.fetchProjectFile(
                     projectID: reference.projectID,
                     relativePath: reference.relativePath)
-                guard !Task.isCancelled else { return }
+                guard requestIsCurrent(
+                    client: client, locationID: scopeLocationID, generation: generation)
+                else { return }
                 guard response.contentType.hasPrefix("image/") else {
                     status = "The remote file is not an image."
                     return
@@ -532,7 +536,9 @@ struct RemoteScopedProjectImage: View {
                 let decoded = await Task.detached(priority: .userInitiated) {
                     Self.thumbnail(data)
                 }.value
-                guard !Task.isCancelled else { return }
+                guard requestIsCurrent(
+                    client: client, locationID: scopeLocationID, generation: generation)
+                else { return }
                 guard let decoded else {
                     status = "The remote image could not be decoded."
                     return
@@ -540,9 +546,22 @@ struct RemoteScopedProjectImage: View {
                 image = decoded.image
                 status = nil
             } catch {
+                guard requestIsCurrent(
+                    client: client, locationID: scopeLocationID, generation: generation)
+                else { return }
                 status = model.userMessage(for: error)
             }
         }
+    }
+
+    private func requestIsCurrent(
+        client: GatewayClient,
+        locationID: ExecutionLocationID,
+        generation: Int
+    ) -> Bool {
+        !Task.isCancelled
+            && model.executionLocationGeneration(for: locationID) == generation
+            && model.isCurrentGateway(client, at: locationID)
     }
 
     nonisolated private static func thumbnail(_ data: Data) -> ImageBox? {
