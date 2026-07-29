@@ -1,6 +1,7 @@
 import { z } from "zod/v3";
 import { AuthCapabilityLifecycle } from "./auth.js";
 import { Id } from "./primitives.js";
+import * as SetupLoginProtocol from "./setup-login-protocol.js";
 import * as SetupTransport from "./setup-transport.js";
 export * from "./setup-transport.js";
 
@@ -547,24 +548,20 @@ export type ControlSetupJobListResponse = z.infer<typeof ControlSetupJobListResp
 /** Internal, file-backed protocol between claudexord and the detached native-login runner. */
 export const SetupLoginProtocolVersion = z.literal(2);
 
-const SetupLoginJobId = z.string().regex(/^setup-[A-Za-z0-9-]+$/);
-const SetupLoginExecutionId = z.string().regex(/^[A-Za-z0-9-]+$/);
-const AbsolutePath = z.string().startsWith("/");
-
 export const SetupLoginManifest = z
   .object({
     version: SetupLoginProtocolVersion,
-    jobId: SetupLoginJobId,
-    executionId: SetupLoginExecutionId,
+    jobId: SetupLoginProtocol.SetupLoginJobId,
+    executionId: SetupLoginProtocol.SetupLoginExecutionId,
     harness: z.enum(["codex", "claude", "cursor"]),
-    jobDir: AbsolutePath,
-    binary: AbsolutePath,
+    jobDir: SetupLoginProtocol.SetupLoginAbsolutePath,
+    binary: SetupLoginProtocol.SetupLoginAbsolutePath,
     args: z.array(z.string()),
-    cwd: AbsolutePath,
+    cwd: SetupLoginProtocol.SetupLoginAbsolutePath,
     /** Scoped config dir for an INV-135 profile login (claude CLAUDE_CONFIG_DIR /
      * codex CODEX_HOME). OPTIONAL, not defaulted: absent on default-store jobs so
      * pre-existing manifests keep their sealed digest across a daemon upgrade. */
-    profileConfigDir: AbsolutePath.optional(),
+    profileConfigDir: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
     /** D-17: how the runner performs the login. Absent (or "terminal") = the
      * legacy Terminal-hosted vendor `codex login`. "device_code" = the primary
      * flow: the runner hosts `codex app-server --stdio` and drives typed
@@ -577,11 +574,12 @@ export const SetupLoginManifest = z
     /** Sidecar the device_code runner writes its transient disclosure to; read
      * by the daemon for the snapshot overlay, never journaled. Present only with
      * loginMode "device_code" (optional so terminal manifests keep their digest). */
-    deviceCodePath: AbsolutePath.optional(),
-    statePath: AbsolutePath,
-    resultPath: AbsolutePath,
-    permitPath: AbsolutePath,
+    deviceCodePath: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
+    statePath: SetupLoginProtocol.SetupLoginAbsolutePath,
+    resultPath: SetupLoginProtocol.SetupLoginAbsolutePath,
+    permitPath: SetupLoginProtocol.SetupLoginAbsolutePath,
     permitDeadlineAt: SetupTimestamp,
+    permitWaitMs: SetupLoginProtocol.SetupClientPtyPermitWaitMs,
     executable: SetupExecutableEvidence,
     commandDigest: Sha256Hex,
     manifestDigest: Sha256Hex,
@@ -623,8 +621,8 @@ export type SetupLoginManifest = z.infer<typeof SetupLoginManifest>;
 export const SetupLoginDeviceCode = z
   .object({
     version: SetupLoginProtocolVersion,
-    jobId: SetupLoginJobId,
-    executionId: SetupLoginExecutionId,
+    jobId: SetupLoginProtocol.SetupLoginJobId,
+    executionId: SetupLoginProtocol.SetupLoginExecutionId,
     flow: SetupAppServerLoginFlow,
     verificationUrl: z.string().url(),
     userCode: z.string(),
@@ -636,8 +634,8 @@ export type SetupLoginDeviceCode = z.infer<typeof SetupLoginDeviceCode>;
 export const SetupLoginRunnerState = z
   .object({
     version: SetupLoginProtocolVersion,
-    jobId: SetupLoginJobId,
-    executionId: SetupLoginExecutionId,
+    jobId: SetupLoginProtocol.SetupLoginJobId,
+    executionId: SetupLoginProtocol.SetupLoginExecutionId,
     processGroup: SetupProcessGroupHandle,
     stage: z.enum(["awaiting_permit", "running"]),
     observedAt: SetupTimestamp,
@@ -650,8 +648,8 @@ export type SetupLoginRunnerState = z.infer<typeof SetupLoginRunnerState>;
 export const SetupLoginPermit = z
   .object({
     version: SetupLoginProtocolVersion,
-    jobId: SetupLoginJobId,
-    executionId: SetupLoginExecutionId,
+    jobId: SetupLoginProtocol.SetupLoginJobId,
+    executionId: SetupLoginProtocol.SetupLoginExecutionId,
     issuedAt: SetupTimestamp,
     commandDigest: Sha256Hex,
     manifestDigest: Sha256Hex,
@@ -662,7 +660,7 @@ export type SetupLoginPermit = z.infer<typeof SetupLoginPermit>;
 export const SetupLoginRunnerResult = z
   .object({
     version: SetupLoginProtocolVersion,
-    jobId: SetupLoginJobId,
+    jobId: SetupLoginProtocol.SetupLoginJobId,
     ...SetupNativeCommandReceiptShape,
     /** Bounded, ANSI-stripped tail of the vendor command's captured output —
      * diagnostic evidence for classifying a failed login (e.g. the device-code

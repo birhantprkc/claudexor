@@ -122,8 +122,15 @@ export function commandDigest(
 export function sealLoginManifest(
   value: Omit<SetupLoginManifest, "manifestDigest">,
 ): SetupLoginManifest {
-  const manifestDigest = digestJson(value);
-  return SetupLoginManifestSchema.parse({ ...value, manifestDigest });
+  // Hash the schema-normalized shape. Optional fields supplied by a caller can
+  // otherwise land in a different insertion order than the parsed manifest,
+  // even though both values are semantically identical.
+  const parsed = SetupLoginManifestSchema.parse({
+    ...value,
+    manifestDigest: "0".repeat(64),
+  });
+  const { manifestDigest: _placeholder, ...unsigned } = parsed;
+  return { ...unsigned, manifestDigest: digestJson(unsigned) };
 }
 
 export function verifyExecutableEvidence(expected: SetupExecutableEvidence): boolean {

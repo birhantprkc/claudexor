@@ -7,6 +7,9 @@
 - Make local and remote runtime activation and rollback use daemon-owned atomic
   run/setup admission fencing while preserving explicit operator shutdown
   semantics.
+- Keep an extended remote client-PTY login attachable after its original
+  deadline without rewriting its sealed authorization; the daemon-owned job
+  deadline remains the permit authority.
 - Align Plan attachments, per-command flag ownership, location-scoped settings and accounts, durable refused-turn retry, Git applicability, canonical terminal output, and Settings validation envelopes with the control-plane contracts.
 - @claudexor/acp-server@3.2.0
 - @claudexor/artifact-store@3.2.0

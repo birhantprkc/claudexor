@@ -30,6 +30,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   atomicPrivateJson,
   readLoginManifest,
+  readRunnerPermit,
   readRunnerResult,
   SETUP_LOGIN_PROTOCOL_VERSION,
 } from "./setup-login-protocol.js";
@@ -452,6 +453,7 @@ describe("setup jobs", () => {
     });
     const manifest = readLoginManifest(manager._store.paths(job.jobId).manifest);
     expect(manifest.permitDeadlineAt).toBe(job.deadlineAt);
+    expect(manifest.permitWaitMs).toBe(10_000);
 
     nowMs += 11_000;
     await new Promise((resolve) => setTimeout(resolve, 15));
@@ -463,6 +465,80 @@ describe("setup jobs", () => {
 
     nowMs = Date.parse(job.deadlineAt!) + 1;
     expect(await waitForTerminal(manager, job.jobId)).toBe("timed_out");
+    await manager.shutdown();
+  });
+
+  it("permits a client_pty attach after its journaled deadline was extended", async () => {
+    let nowMs = Date.parse("2026-07-25T00:00:00.000Z");
+    const group = processGroupFixture({ leader: knownLeader(12) });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "client-pty-extended-attach"),
+      platform: "linux",
+      runnerPath: resolveSetupLoginRunnerPath(),
+      now: () => new Date(nowMs),
+      launcherTimeoutMs: 10_000,
+      loginTimeoutMs: 15 * 60_000,
+      monitorPollMs: 2,
+      processGroups: group.service,
+    });
+    await manager.start();
+    const original = manager.create({ ...LOGIN_REQUEST, transport: "client_pty" });
+    const manifestPath = manager._store.paths(original.jobId).manifest;
+    const manifest = readLoginManifest(manifestPath);
+    const extended = manager.extend({ jobId: original.jobId });
+
+    expect(Date.parse(extended.deadlineAt!)).toBe(Date.parse(original.deadlineAt!) + 15 * 60_000);
+    expect(readLoginManifest(manifestPath)).toEqual(manifest);
+    expect(manifest.permitWaitMs).toBe(10_000);
+
+    // The immutable manifest's legacy absolute deadline is now in the past,
+    // while the journaled job remains active because Extend moved its owner.
+    nowMs = Date.parse(original.deadlineAt!) + 1;
+    writeRunnerStateV2(
+      manager,
+      original.jobId,
+      group.leader,
+      "awaiting_permit",
+      new Date(nowMs).toISOString(),
+    );
+    await waitForPhase(manager, original.jobId, "awaiting_user");
+
+    expect(readRunnerPermit(manager._store.paths(original.jobId).runnerPermit)).toMatchObject({
+      jobId: original.jobId,
+      executionId: manifest.executionId,
+      manifestDigest: manifest.manifestDigest,
+    });
+    expect(manager.status({ jobId: original.jobId }).state).toBe("waiting_for_input");
+    await manager.shutdown();
+  });
+
+  it("does not permit a deferred runner after the journaled job deadline", async () => {
+    let nowMs = Date.parse("2026-07-25T00:00:00.000Z");
+    const group = processGroupFixture({ leader: knownLeader(13) });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "client-pty-expired-attach"),
+      platform: "linux",
+      runnerPath: resolveSetupLoginRunnerPath(),
+      now: () => new Date(nowMs),
+      launcherTimeoutMs: 10_000,
+      loginTimeoutMs: 15 * 60_000,
+      monitorPollMs: 2,
+      processGroups: group.service,
+    });
+    await manager.start();
+    const job = manager.create({ ...LOGIN_REQUEST, transport: "client_pty" });
+
+    nowMs = Date.parse(job.deadlineAt!) + 1;
+    writeRunnerStateV2(
+      manager,
+      job.jobId,
+      group.leader,
+      "awaiting_permit",
+      new Date(nowMs).toISOString(),
+    );
+
+    expect(await waitForTerminal(manager, job.jobId)).toBe("timed_out");
+    expect(readRunnerPermit(manager._store.paths(job.jobId).runnerPermit)).toBeNull();
     await manager.shutdown();
   });
 
@@ -1500,6 +1576,62 @@ describe("setup jobs", () => {
     });
     expect(opened).toBe(1);
     expect(group.signals).toEqual([]);
+    await restarted.shutdown();
+  });
+
+  it("does not redeliver a durable client_pty permit after its deadline on restart", async () => {
+    let nowMs = Date.parse("2026-07-25T00:00:00.000Z");
+    const group = processGroupFixture({ leader: knownLeader(102) });
+    const opts = {
+      rootDir: join(root, "expired-client-pty-restart"),
+      platform: "linux" as const,
+      runnerPath: resolveSetupLoginRunnerPath(),
+      now: () => new Date(nowMs),
+      processGroups: group.service,
+      terminationGraceMs: 1,
+      sleep: async (delay: number) => {
+        nowMs += delay;
+      },
+    };
+    const first = createSetupJobManager(opts);
+    const job = first.create({ ...LOGIN_REQUEST, transport: "client_pty" });
+    const manifest = writeRunnerStateV2(
+      first,
+      job.jobId,
+      group.leader,
+      "awaiting_permit",
+      new Date(nowMs).toISOString(),
+    );
+    first._store.update(job.jobId, {
+      execution: {
+        executionId: manifest.executionId,
+        commandDigest: manifest.commandDigest,
+        manifestDigest: manifest.manifestDigest,
+        processGroup: { schemaVersion: 1, pgid: group.leader.pid, leader: group.leader },
+        observedAt: new Date(nowMs).toISOString(),
+      },
+    });
+    first._store.update(job.jobId, {
+      execution: {
+        ...first.status({ jobId: job.jobId }).execution!,
+        permitIssuedAt: new Date(nowMs).toISOString(),
+      },
+    });
+    // Crash after the journal transition but before its one-use sidecar was
+    // delivered. The successor must honor the expired journal deadline rather
+    // than replaying that authorization into the relative runner window.
+    first.beginDrain();
+    first._store.journal.close();
+    nowMs = Date.parse(job.deadlineAt!) + 1;
+
+    const restarted = createSetupJobManager(opts);
+    await restarted.start();
+    expect(restarted.status({ jobId: job.jobId })).toMatchObject({
+      state: "timed_out",
+      outcome: { reason: "timed_out" },
+    });
+    expect(readRunnerPermit(restarted._store.paths(job.jobId).runnerPermit)).toBeNull();
+    expect(group.signals).toEqual(["SIGTERM", "SIGKILL"]);
     await restarted.shutdown();
   });
 

@@ -1413,7 +1413,11 @@ skips the capability smoke, which attests only the default route; the job
 schema's success invariant is scoped accordingly.
 
 Login launch has a 10-second watchdog and a 15-minute deadline. Extend adds 15
-minutes without a cumulative limit. Duplicate create for the SAME target store
+minutes without a cumulative limit. For a deferred `client_pty` attach, the
+journaled job deadline remains the mutable authority across extensions; the
+immutable manifest instead seals a 10-second permit window measured from the
+actual runner start, and the daemon refuses to issue that permit after the
+journaled deadline. Duplicate create for the SAME target store
 (default, or one profile) returns the same active action instead of launching
 a second Terminal; a create naming a DIFFERENT target while a login is active
 refuses with a typed 409, and a conflicting active mutating

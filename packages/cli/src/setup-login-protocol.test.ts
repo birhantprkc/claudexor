@@ -260,6 +260,60 @@ describe("setup-login sidecar protocol v2", () => {
     });
   });
 
+  it("starts a deferred runner within its sealed relative permit window", async () => {
+    const legacyDeadline = new Date(Date.now() - 10_000).toISOString();
+    const runnerStartedAt = new Date(Date.parse(legacyDeadline) + 20_000);
+    const { manifestPath, spec } = prepare("#!/bin/sh\nexit 0\n", {
+      permitDeadlineAt: legacyDeadline,
+      permitWaitMs: 5_000,
+    });
+    issuePermit(spec, runnerStartedAt.toISOString());
+
+    expect(
+      await runSetupLoginWorker(manifestPath, {
+        processGroupService: processGroups(),
+        selfPid: 4242,
+        now: () => runnerStartedAt,
+      }),
+    ).toBe(0);
+    expect(readRunnerResult(spec.resultPath)).toMatchObject({
+      commandStarted: true,
+      permitIssuedAt: runnerStartedAt.toISOString(),
+      exitCode: 0,
+    });
+  });
+
+  it("rejects a permit left by an earlier deferred runner", async () => {
+    const runnerStartedAt = Date.now();
+    const { manifestPath, spec } = prepare("#!/bin/sh\nexit 0\n", {
+      permitWaitMs: 100,
+    });
+    issuePermit(spec, new Date(runnerStartedAt - 60_000).toISOString());
+    let currentTime = runnerStartedAt;
+    let spawned = 0;
+
+    expect(
+      await runSetupLoginWorker(manifestPath, {
+        processGroupService: processGroups(),
+        selfPid: 4242,
+        now: () => new Date(currentTime),
+        sleep: async (ms) => {
+          currentTime += ms;
+        },
+        spawnProcess: (() => {
+          spawned += 1;
+          throw new Error("must not spawn");
+        }) as never,
+      }),
+    ).toBe(1);
+    expect(spawned).toBe(0);
+    expect(readRunnerResult(spec.resultPath)).toMatchObject({
+      commandStarted: false,
+      permitIssuedAt: null,
+      errorCode: "permit_timeout",
+    });
+  });
+
   it("refuses an executable changed after authorization even with a valid permit", async () => {
     let spawned = 0;
     const { manifestPath, spec } = prepare("#!/bin/sh\nexit 0\n");

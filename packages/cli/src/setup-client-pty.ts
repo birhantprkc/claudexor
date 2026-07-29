@@ -7,22 +7,6 @@ import type {
 import { ACTIVE_SETUP_STATES } from "./setup-job-store.js";
 import { readRunnerDeviceCode } from "./setup-login-protocol.js";
 
-export function setupLoginDeadlines(
-  startedAt: Date,
-  loginTimeoutMs: number,
-  launcherTimeoutMs: number,
-  transport: ControlSetupJobTransport,
-): { loginDeadlineAt: string; permitDeadlineAt: string } {
-  const loginDeadlineAt = new Date(startedAt.getTime() + loginTimeoutMs).toISOString();
-  return {
-    loginDeadlineAt,
-    permitDeadlineAt:
-      transport === "client_pty"
-        ? loginDeadlineAt
-        : new Date(startedAt.getTime() + launcherTimeoutMs).toISOString(),
-  };
-}
-
 export function clientPtyWaitingPatch(input: {
   job: ControlSetupJob;
   deadlineAt: string;

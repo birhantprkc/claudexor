@@ -87,6 +87,9 @@ Release history for Claudexor. The current version is declared in the root
   engine-generated fixture. Settings autosave is location- and
   lane-scoped, failed initial loads never become editable defaults, and the
   interaction wait offers either a positive duration or no automatic expiry.
+  Extended remote login jobs remain attachable after their original deadline:
+  the mutable journal deadline authorizes a fresh, bounded client-PTY permit
+  without rewriting the sealed runner manifest.
   Deep Research resets inactivity only for genuine agent progress, while typed
   refusals, Git readiness, retry remedies, terminal output, and final RunFacts
   retain the same durable reason across UI, CLI, API, MCP, and ACP.

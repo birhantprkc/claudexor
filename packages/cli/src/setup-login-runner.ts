@@ -16,19 +16,17 @@ import {
   type JsonRpcFrame,
 } from "./codex-device-login.js";
 import { nativeLoginEnv } from "./native-login.js";
+import { waitForSetupLoginPermit } from "./setup-login-permit.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
   atomicPrivateJson,
   readLoginManifest,
-  readRunnerPermit,
   verifyExecutableEvidence,
   type SetupLoginManifest,
   type SetupLoginPermit,
   type SetupLoginRunnerResult,
   type SetupLoginRunnerState,
 } from "./setup-login-protocol.js";
-
-const PERMIT_POLL_MS = 50;
 
 export interface SetupLoginRunnerOptions {
   now?: () => Date;
@@ -89,7 +87,7 @@ export async function runSetupLoginWorker(
   };
   atomicPrivateJson(manifest.statePath, awaitingPermit);
 
-  const permit = await waitForPermit(manifest, now, sleep);
+  const permit = await waitForSetupLoginPermit(manifest, now, sleep, observedAt);
   if (!permit) {
     persistResult(manifest, {
       permitIssuedAt: null,
@@ -512,27 +510,6 @@ function validateManifest(manifestPath: string): SetupLoginManifest {
       throw new Error("setup-login sidecar escapes its job directory");
   }
   return manifest;
-}
-
-async function waitForPermit(
-  manifest: SetupLoginManifest,
-  now: () => Date,
-  sleep: (ms: number) => Promise<void>,
-) {
-  const deadline = Date.parse(manifest.permitDeadlineAt);
-  while (now().getTime() <= deadline) {
-    const permit = readRunnerPermit(manifest.permitPath);
-    if (
-      permit &&
-      permit.jobId === manifest.jobId &&
-      permit.executionId === manifest.executionId &&
-      permit.commandDigest === manifest.commandDigest &&
-      permit.manifestDigest === manifest.manifestDigest
-    )
-      return permit;
-    await sleep(Math.min(PERMIT_POLL_MS, Math.max(1, deadline - now().getTime())));
-  }
-  return null;
 }
 
 function persistResult(

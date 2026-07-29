@@ -45,7 +45,6 @@ import {
   readRunnerState,
   sealLoginManifest,
   verifyExecutableEvidence,
-  type SetupLoginPermit,
   type SetupLoginManifest,
   type SetupLoginRunnerResult,
   type SetupLoginRunnerState,
@@ -57,9 +56,9 @@ import {
   isDeviceCodeSetupJob,
   projectSetupDeviceCode,
   removeSetupDeviceCodeSidecar,
-  setupLoginDeadlines,
   setupTransportConflict,
 } from "./setup-client-pty.js";
+import { persistSetupLoginPermit, setupLoginDeadlines } from "./setup-login-permit.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
@@ -557,19 +556,6 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       : null;
   }
 
-  function persistPermit(job: ControlSetupJob, manifest: SetupLoginManifest): void {
-    const issuedAt = job.execution?.permitIssuedAt;
-    if (!issuedAt)
-      throw new Error("cannot issue a setup-login permit before its durable journal transition");
-    atomicPrivateJson(manifest.permitPath, {
-      version: SETUP_LOGIN_PROTOCOL_VERSION,
-      jobId: job.jobId,
-      executionId: manifest.executionId,
-      issuedAt,
-      commandDigest: manifest.commandDigest,
-      manifestDigest: manifest.manifestDigest,
-    } satisfies SetupLoginPermit);
-  }
   async function observeAndPermit(jobId: string, state: SetupLoginRunnerState): Promise<void> {
     let job = store.status(jobId);
     const manifest = manifestFor(jobId);
@@ -637,7 +623,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         message: `Durably authorized ${job.harness} native login execution.`,
       });
     }
-    persistPermit(job, manifest);
+    persistSetupLoginPermit(job, manifest);
     if (job.phase === "launching") {
       update(jobId, {
         phase: "awaiting_user",
@@ -878,6 +864,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     }
   }
 
+  function loginDeadlineReached(job: ControlSetupJob): boolean {
+    return Boolean(job.deadlineAt && now().getTime() >= Date.parse(job.deadlineAt));
+  }
+
   async function monitorLogin(jobId: string): Promise<void> {
     if (processing.has(jobId)) return;
     const job = store.status(jobId);
@@ -886,6 +876,13 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     if (result) {
       markAwaitingUser(jobId);
       await consumeLoginResult(jobId, result);
+      return;
+    }
+    // Extend updates this journaled authority without rewriting the sealed
+    // client_pty manifest. Check it before any freshly observed runner can be
+    // permitted, not only after the monitor handles that runner.
+    if (loginDeadlineReached(job)) {
+      await terminateLogin(jobId, "timed_out");
       return;
     }
     const state = matchingState(jobId);
@@ -906,9 +903,6 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       );
       return;
     }
-    const current = store.status(jobId);
-    if (current.deadlineAt && now().getTime() >= Date.parse(current.deadlineAt))
-      await terminateLogin(jobId, "timed_out");
   }
 
   async function tick(): Promise<void> {
@@ -963,8 +957,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         // Replay an honest reason: cancelling is entered for user cancels AND
         // deadline timeouts; the durable deadline decides which one this was
         // (wave-2 finding — no prose classification needed).
-        const deadlinePassed =
-          typeof job.deadlineAt === "string" && Date.parse(job.deadlineAt) <= now().getTime();
+        const deadlinePassed = loginDeadlineReached(job);
         await terminateLogin(job.jobId, deadlinePassed ? "timed_out" : "cancelled_by_user");
         continue;
       }
@@ -972,6 +965,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       if (result) {
         markAwaitingUser(job.jobId);
         await consumeLoginResult(job.jobId, result);
+        continue;
+      }
+      // A durable result wins, but an expired unfinished runner cannot regain
+      // authorization during restart adoption.
+      if (loginDeadlineReached(job)) {
+        await terminateLogin(job.jobId, "timed_out");
         continue;
       }
       const state = matchingState(job.jobId);
@@ -1073,7 +1072,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const executionId = randomUUID();
       const executable = captureExecutableEvidence(spec.binary);
       const authorizedCommandDigest = commandDigest(executable, spec.args);
-      const { loginDeadlineAt, permitDeadlineAt } = setupLoginDeadlines(
+      const { loginDeadlineAt, permitDeadlineAt, permitWaitMs } = setupLoginDeadlines(
         now(),
         loginTimeoutMs,
         launcherTimeoutMs,
@@ -1105,6 +1104,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         resultPath: paths.runnerResult,
         permitPath: paths.runnerPermit,
         permitDeadlineAt,
+        ...(permitWaitMs === undefined ? {} : { permitWaitMs }),
         executable,
         commandDigest: authorizedCommandDigest,
       });

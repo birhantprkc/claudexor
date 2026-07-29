@@ -5,6 +5,8 @@
 ### Patch Changes
 
 - Add shared contracts for nullable interaction waits, run applicability and Git capability, atomic credential snapshots, durable problems, and canonical run strategy and presentation truth.
+- Add the optional sealed relative permit window used by deferred client-PTY
+  setup runners after a deadline extension.
 - @claudexor/util@3.2.0
 
 ## 3.1.2
