@@ -1483,6 +1483,131 @@ describe("DaemonServer", () => {
     authority.journal.close();
   });
 
+  it("replacement stop refuses running work without calling shutdown or fencing admission", async () => {
+    const dir = tempDir("rep-busy");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let shutdownRequests = 0;
+    let aborted = false;
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      maxConcurrent: 1,
+      onRuntimeReplacementRequested: async () => {
+        shutdownRequests += 1;
+      },
+      runner: async (_params, ctx) =>
+        new Promise((resolve) => {
+          ctx.signal.addEventListener("abort", () => {
+            aborted = true;
+            resolve({ lifecycle: "cancelled" });
+          });
+        }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await client.enqueue({ id: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await expect(client.shutdownForRuntimeReplacement()).rejects.toMatchObject({
+        code: "runtime_replacement_busy",
+        status: 409,
+        retryable: true,
+      });
+      expect(shutdownRequests).toBe(0);
+      expect(aborted).toBe(false);
+      await expect(client.enqueue({ id: 2 })).resolves.toMatchObject({ state: "queued" });
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("replacement stop refuses queued work even when no runner is active", async () => {
+    const dir = tempDir("rep-queue");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let shutdownRequests = 0;
+    authority.store.accept({
+      id: "queued-before-replacement",
+      params: { id: 1 },
+      idempotencyKey: "queued-before-replacement",
+      clientId: "test",
+    });
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      onRuntimeReplacementRequested: async () => {
+        shutdownRequests += 1;
+      },
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await expect(client.shutdownForRuntimeReplacement()).rejects.toMatchObject({
+        code: "runtime_replacement_busy",
+        retryable: true,
+      });
+      expect(shutdownRequests).toBe(0);
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("replacement stop fails closed when composition admission is missing", async () => {
+    const dir = tempDir("rep-noauth");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await expect(client.shutdownForRuntimeReplacement()).rejects.toMatchObject({
+        code: "runtime_activity_unknown",
+        status: 503,
+        retryable: true,
+      });
+      await expect(client.enqueue({ id: 1 })).resolves.toBeDefined();
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("accepted replacement stop fences admission before another command can persist", async () => {
+    const dir = tempDir("rep-idle");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let server!: DaemonServer;
+    server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      onRuntimeReplacementRequested: () => server.stop(),
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await client.shutdownForRuntimeReplacement().catch(() => undefined);
+      await expect(client.enqueue({ id: 1 })).rejects.toThrow();
+      expect(authority.store.records()).toHaveLength(0);
+      await server.waitForShutdown();
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
   it("records pre-run turn failures, preserves typed codes, and rejects inline secrets", async () => {
     const dir = tempDir("refusal");
     const authority = commandAuthority(dir);

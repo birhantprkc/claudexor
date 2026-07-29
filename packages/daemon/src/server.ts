@@ -33,6 +33,7 @@ import {
 } from "./job-record.js";
 import { settleJobError } from "./job-settlement.js";
 import { socketAlive } from "./socket-probe.js";
+import { dispatchShutdownRpc, replacementRefusal } from "./daemon-shutdown-rpc.js";
 import {
   TurnEnqueueProblem,
   type TurnEnqueueProblem as TurnEnqueueProblemValue,
@@ -67,9 +68,8 @@ export interface DaemonOptions {
    * The observer persists one sanitized typed problem on the turn so it is
    * never a silent orphan bubble and no recovery field is dropped. */
   onTurnEnqueueFailed?: (turnId: string, problem: TurnEnqueueProblemValue) => void;
-  /** Composition-root shutdown hook. When present, RPC shutdown must drain
-   * every daemon-owned subsystem, not only this socket queue. */
   onShutdownRequested?: () => Promise<void>;
+  onRuntimeReplacementRequested?: () => Promise<void>;
   /** Test-only barriers around command authority acquisition. */
   startupBarrier?: (
     barrier: "before_registry_load" | "after_registry_load",
@@ -264,12 +264,21 @@ export class DaemonServer {
           ...(err && typeof err === "object" && "status" in err
             ? { status: Number((err as { status: unknown }).status) }
             : {}),
+          ...(replacementRefusal(err) ? { retryable: true } : {}),
         },
       });
     }
   }
 
   private async dispatch(method: string, params: any): Promise<unknown> {
+    const shutdown = dispatchShutdownRpc(
+      method,
+      this.queue.length + this.active + this.activeTasks.size,
+      () => this.allRecords(),
+      this.opts.onShutdownRequested ?? (() => this.stop()),
+      this.opts.onRuntimeReplacementRequested,
+    );
+    if (shutdown) return shutdown;
     switch (method) {
       case "claudexor.health":
         return {
@@ -367,15 +376,6 @@ export class DaemonServer {
         this.opts.delegationAuthority.beginParentClose(runId);
         return { runId, fenced: true };
       }
-      case "claudexor.shutdown":
-        setTimeout(() => {
-          const operation = this.opts.onShutdownRequested?.() ?? this.stop();
-          void operation.catch(() => {
-            // Fail closed: the process and ownership lease remain alive. The
-            // composition root records the detailed failure in its private log.
-          });
-        }, 10);
-        return { ok: true };
       default:
         throw new Error(`unknown method: ${method}`);
     }

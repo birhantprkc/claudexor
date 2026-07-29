@@ -2,6 +2,7 @@ import { JournalRecoveryRequiredError } from "@claudexor/journal";
 
 export interface SetupLifecycleHandle {
   start(): Promise<void>;
+  list(filter: { active: true }): readonly unknown[];
   beginDrain(): void;
   shutdown(): Promise<void>;
 }
@@ -63,6 +64,13 @@ export class SetupLifecycleBinding<TStore, THandle extends SetupLifecycleHandle>
 
   isBoundToCurrentGeneration(): boolean {
     return this.active !== null && this.activeGeneration === this.slot.generation();
+  }
+
+  /** Synchronous setup admission fact for atomic runtime replacement. A missing
+   * or recovery-blocked generation throws so the caller fails closed as
+   * activity-unknown rather than treating absence as idle. */
+  hasActiveWork(): boolean {
+    return this.current().list({ active: true }).length > 0;
   }
 
   beginDrain(): void {

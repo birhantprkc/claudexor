@@ -1230,7 +1230,15 @@ disclosed in the log). Awaiting-user interactive login runners are the one
 exemption: the shutdown drain does NOT signal them (a detached Terminal login
 survives an ordinary daemon bounce and is reconciled on the next start;
 explicit cancel is the only killer). A hung participant cannot immortalize the
-daemon whichever trigger asked it to die. The daemon records its birth identity in
+daemon whichever trigger asked it to die. Runtime replacement uses a separate
+internal socket operation: in one synchronous event-loop turn the daemon checks
+its queued/running/in-flight command authority, the composition root checks the
+active setup authority, and only an idle result enters `beginShutdown`, whose
+synchronous prefix fences setup, Control API, and daemon admission before any
+shutdown await. Busy is a retryable `runtime_replacement_busy`; unreadable or
+missing authority is `runtime_activity_unknown`; either refusal leaves the
+serving daemon and every ingress open. Explicit operator shutdown keeps its
+forceful semantics. The daemon records its birth identity in
 the writer lease at startup; `claudexor daemon stop` then CONFIRMS death
 (released lease, gone pid, or identity-verified SIGKILL escalation — a
 recycled pid is never signalled) before reporting success, so scripts and
@@ -2095,14 +2103,16 @@ failure remains visible instead of being swallowed. If the mutating SSH response
 is lost, the exact candidate/previous payload remains `uncertain`: recovery must
 observe the candidate and roll it back, prove and restart the previous closure,
 or stay visibly blocked. An unreadable pointer is never collapsed into a proven
-absent pointer.
-Every reconnect binds one exact chain before publication: the current-pointer
-probe, bootstrap closure, bootstrap-disclosed engine, tunneled Control handshake,
-and final current-pointer probe must agree on the runtime identity. Activation
-commit additionally rechecks the lease-owned pointer target. Once that exact
-commit succeeds, a later final-probe mismatch is treated as a newer external
-pointer transition and fails the reconnect without rolling it back through the
-settled lease.
+absent pointer. Both forward activation and rollback call the serving closure's
+internal runtime-replacement stop before changing `current`: a late run or setup
+admission returns a typed retryable refusal and leaves the working pointer
+untouched. Every reconnect then binds one exact chain before publication: the
+current-pointer probe, bootstrap closure, bootstrap-disclosed engine, tunneled
+Control handshake, and final current-pointer probe must agree on the runtime
+identity. Activation commit additionally rechecks the lease-owned pointer target.
+Once that exact commit succeeds, a later final-probe mismatch is treated as a
+newer external pointer transition and fails the reconnect without rolling it
+back through the settled lease.
 
 Vendor harness CLIs land on a host only through the disclosed installer
 (`claudexor harness install`, reachable from Settings → Harnesses for a
@@ -2217,11 +2227,11 @@ daemon with the app-bundled Node via `claudexord --probe` (prints
 `{version,buildSha}` and exits without binding a socket or opening the journal) →
 require that exact pair to equal the signed manifest → claim one process-session
 lifecycle lease shared with steady daemon reconciliation before the first async
-install step →
-idle-gate (ask the daemon for active jobs; refuse while any run — an unknown
-state is treated as busy) → identity-proven daemon stop (`claudexord --stop`
-reuses the socket `claudexor.shutdown` + termination confirmation, never a raw
-kill) → ATOMIC `current.json`
+install step → advisory idle probe (cheap early deferral) → daemon-atomic
+runtime-replacement admission (`claudexord --stop`: synchronously prove no
+queued/running run or active setup job and fence every ingress; busy/unknown
+refuses without stopping) → identity-proven termination confirmation (never a
+raw kill) → ATOMIC `current.json`
 swap (write a temp file + a single rename, inside a `flock` over the whole
 check-then-swap critical section) → relaunch → handshake-verify the new engine
 identity against the signed manifest → rollback to `last-known-good.json` on
@@ -2261,9 +2271,10 @@ the closure.
   different bytes under the same version. On connection, the app side-effect-
   free probes the selected script and compares its exact `{version, buildSha}`
   with the live handshake before hydrating daemon state. A mismatch is replaced
-  only after the daemon proves idle; busy or unknown activity keeps the
-  compatible daemon alive and visibly defers reconciliation. A successful
-  replacement retires the old client and re-reads discovery before hydrating;
+  only after the daemon atomically proves idle and fences admission; busy or
+  unknown activity keeps the compatible daemon alive and visibly defers
+  reconciliation. A successful replacement retires the old client and re-reads
+  discovery before hydrating;
   any failure after lifecycle work begins goes offline rather than reusing an
   ambiguous process. An installed selection's probe must also equal the pointer's
   exact `{version,engineSha}` authority; the signed bundled selection uses its

@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Add an internal atomic runtime-replacement stop that refuses queued, running,
+  or indeterminate activity without fencing the live daemon.
 - Support finite-or-disabled interaction waits and preserve profile readiness, settlement, refused-turn context, and retry truth across restart and projection reload.
 - @claudexor/core@3.2.0
 - @claudexor/journal@3.2.0

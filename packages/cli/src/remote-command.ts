@@ -100,10 +100,15 @@ async function stop(expectedVersion: string, expectedBuildSha: string): Promise<
   const identity = await handshakeControlApi(daemon.addr, "claudexor-macos-remote-stop");
   assertRemoteEngineIdentity(identity, expectedVersion, expectedBuildSha);
   try {
-    await daemon.client.shutdown();
-  } catch {
-    // A clean shutdown often closes the socket before the RPC response lands.
-    // The pinned writer-lease confirmation below is authoritative.
+    await daemon.client.shutdownForRuntimeReplacement();
+  } catch (error) {
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code: unknown }).code
+        : null;
+    if (code === "runtime_replacement_busy" || code === "runtime_activity_unknown") throw error;
+    // An accepted replacement shutdown can close the socket before its response
+    // lands. The pinned writer-lease confirmation below is authoritative.
   }
   const termination = await awaitDaemonTermination(defaultSocketPath());
   if (termination.outcome === "still_alive") {

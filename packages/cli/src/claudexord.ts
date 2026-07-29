@@ -3,8 +3,6 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DaemonClient,
-  awaitDaemonTermination,
-  readToken,
   commandProjection,
   interactionProjection,
   operatorDecisionProjection,
@@ -55,6 +53,7 @@ import { preflightRunGitRequirement } from "./request-preflight.js";
 import { dispatchClaudexordEntry, runIfDirectEntry } from "./claudexord-entry.js";
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 import { quotaSubjectUniverseFromConfig } from "./quota-subject-universe.js";
+import { runStopIfRequested } from "./runtime-replacement-stop.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 
 /** Public daemon-composition hook retained for embedders and tests. */
@@ -72,37 +71,6 @@ export function runProbeIfRequested(argv: readonly string[]): boolean {
   if (!argv.includes("--probe")) return false;
   const id = engineBuildIdentity();
   process.stdout.write(`${JSON.stringify({ version: id.version, buildSha: id.sha })}\n`);
-  return true;
-}
-
-/** Handle `claudexord --stop`: the IDENTITY-PROVEN shutdown the macOS installer
- * runs before an atomic pointer swap. It reuses the exact machinery the CLI's
- * `claudexor daemon stop` uses — the socket `claudexor.shutdown` RPC plus
- * `awaitDaemonTermination` (which proves the specific daemon PROCESS died, never
- * a raw kill) — so the app can drive it as a subprocess with the app-bundled
- * Node. Prints ONE JSON line and exits 0 when stopped (or already stopped),
- * nonzero when a live daemon could not be confirmed dead. */
-export async function runStopIfRequested(argv: readonly string[]): Promise<boolean> {
-  if (!argv.includes("--stop")) return false;
-  const socketPath = defaultSocketPath();
-  const token = readToken();
-  // No token or no live socket → nothing to stop; a vacuous success.
-  if (!token || !(await socketAlive(socketPath))) {
-    process.stdout.write(`${JSON.stringify({ stopped: true, alreadyStopped: true })}\n`);
-    return true;
-  }
-  try {
-    await new DaemonClient(socketPath, token).shutdown();
-  } catch {
-    // The shutdown RPC often drops the connection as the daemon exits — the
-    // authoritative signal is the termination confirmation below, not this call.
-  }
-  const termination = await awaitDaemonTermination(socketPath);
-  const stopped = termination.outcome !== "still_alive";
-  process.stdout.write(
-    `${JSON.stringify({ stopped, outcome: termination.outcome, detail: termination.detail })}\n`,
-  );
-  if (!stopped) process.exitCode = 1;
   return true;
 }
 
@@ -217,6 +185,16 @@ export async function main(): Promise<void> {
       onShutdownRequested: () =>
         shutdownRuntime?.beginShutdown("socket-rpc stop") ??
         Promise.reject(new Error("daemon shutdown coordinator is not initialized")),
+      onRuntimeReplacementRequested: () => {
+        if (!shutdownRuntime) {
+          throw Object.assign(new Error("daemon shutdown coordinator is not initialized"), {
+            code: "runtime_activity_unknown",
+            status: 503,
+            retryable: true,
+          });
+        }
+        return shutdownRuntime.beginRuntimeReplacement();
+      },
       runner: async (params, ctx) => {
         const p = normalizeRunStartRequest(params);
         const mode = p.mode;

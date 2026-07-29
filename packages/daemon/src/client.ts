@@ -47,6 +47,9 @@ export class DaemonClient {
             const error = Object.assign(new Error(msg.error.message), {
               ...(typeof msg.error.code === "string" ? { code: msg.error.code } : {}),
               ...(typeof msg.error.status === "number" ? { status: msg.error.status } : {}),
+              ...(typeof msg.error.retryable === "boolean"
+                ? { retryable: msg.error.retryable }
+                : {}),
             });
             finish(() => reject(error));
           } else finish(() => resolve(msg.result as T));
@@ -137,5 +140,8 @@ export class DaemonClient {
   }
   shutdown() {
     return this.call("claudexor.shutdown");
+  }
+  shutdownForRuntimeReplacement() {
+    return this.call<{ ok: true; fenced: true }>("claudexor.shutdownForRuntimeReplacement");
   }
 }

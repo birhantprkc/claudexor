@@ -20,10 +20,14 @@ Release history for Claudexor. The current version is declared in the root
   the remote runtime, so a local daemon answers 501. The release pipeline
   builds, attests, SBOMs, and publishes the four remote-runtime archives, the
   signed remote manifest, and the remote SBOM as first-class assets (a
-  12-asset publish allowlist, provenance verified before any use). Canonical
-  RunFacts receipt (GH #29, Alex Basis): every terminal run seals its outcome
-  into one immutable, invariant-validated object built once from canonical
-  artifacts, embedded in the terminal journal event, persisted as
+  12-asset publish allowlist, provenance verified before any use). Runtime
+  activation is admission-safe across local install, steady
+  reconciliation, remote install, and rollback: the daemon atomically proves
+  run/setup idleness and fences every ingress before stopping, while a late
+  busy or unknown result leaves the serving process and runtime pointer intact.
+  Canonical RunFacts receipt (GH #29, Alex Basis): every terminal run seals its
+  outcome into one immutable, invariant-validated object built once from
+  canonical artifacts, embedded in the terminal journal event, persisted as
   `final/run_facts.yaml`, and served verbatim by the control API, terminal
   CLI JSON/NDJSON, and `claudexor inspect` through one shared validation
   owner. Fail-loud throughout: a present-but-invalid receipt is a typed

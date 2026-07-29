@@ -43,6 +43,7 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
     var handshakeNilCount = 0
     var busyDelayNanoseconds: UInt64 = 0
     var stopThrows = false
+    var replacementStopRefusal: RuntimeReplacementStopError?
     var startThrows = false
     private(set) var busyProbes = 0
     private(set) var stops = 0
@@ -55,9 +56,10 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
         return lock.withLock { busy }
     }
 
-    func stop() async throws {
+    func stopForRuntimeReplacement() async throws {
         try lock.withLock {
             stops += 1
+            if let replacementStopRefusal { throw replacementStopRefusal }
             if stopThrows { throw ReconciliationTestError() }
         }
     }
@@ -175,6 +177,33 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
 
         #expect(result == .deferred(.activityUnknown, serving: old, target: target))
         #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
+    }
+
+    @Test func atomicStopDefersWhenWorkArrivesAfterTheAdvisoryIdleSnapshot() async {
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.busy = false
+        daemon.replacementStopRefusal = .busy
+
+        let result = await reconciler(daemon).reconcile(serving: old)
+
+        #expect(result == .deferred(.busy, serving: old, target: target))
+        #expect(daemon.busyProbes == 1)
+        #expect(daemon.stops == 1)
+        #expect(daemon.starts == 0)
+    }
+
+    @Test func atomicStopMapsALateAuthorityFailureToActivityUnknown() async {
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.busy = false
+        daemon.replacementStopRefusal = .activityUnknown
+
+        let result = await reconciler(daemon).reconcile(serving: old)
+
+        #expect(result == .deferred(.activityUnknown, serving: old, target: target))
+        #expect(daemon.stops == 1)
         #expect(daemon.starts == 0)
     }
 

@@ -196,7 +196,11 @@ actor LocalDaemonReconciler {
         }
 
         do {
-            try await daemon.stop()
+            try await daemon.stopForRuntimeReplacement()
+        } catch RuntimeReplacementStopError.busy {
+            return .deferred(.busy, serving: serving, target: target)
+        } catch RuntimeReplacementStopError.activityUnknown {
+            return .deferred(.activityUnknown, serving: serving, target: target)
         } catch {
             return .failed(.stopFailed)
         }

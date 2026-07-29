@@ -33,6 +33,9 @@ import Testing
               process.stdout.write(JSON.stringify({ version: "3.4.0", buildSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }) + "\\n");
             } else if (a.includes("--stop")) {
               process.stdout.write(JSON.stringify({ stopped: true, outcome: "clean" }) + "\\n");
+            } else if (a.includes("--busy-stop")) {
+              process.stdout.write(JSON.stringify({ stopped: false, code: "runtime_replacement_busy", retryable: true }) + "\\n");
+              process.exit(1);
             } else {
               process.exit(3);
             }
@@ -60,6 +63,16 @@ import Testing
         defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
         // No recognized flag → the fake daemon exits 3 → fail-closed nil.
         #expect(AppRuntimeDaemonControl.runNodeJSON([script.path], node: node, timeout: 10) == nil)
+    }
+
+    @Test func preservesTypedJSONFromANonZeroReplacementRefusal() throws {
+        guard let node = resolveNode() else { return }
+        let script = try writeScript()
+        defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+        let execution = try #require(AppRuntimeDaemonControl.runNodeJSONExecution(
+            [script.path, "--busy-stop"], node: node, timeout: 10))
+        #expect(execution.status == 1)
+        #expect(execution.payload?["code"] as? String == "runtime_replacement_busy")
     }
 
     @Test func exactIdentityParserRejectsMissingOrUnstampedBuildSha() {

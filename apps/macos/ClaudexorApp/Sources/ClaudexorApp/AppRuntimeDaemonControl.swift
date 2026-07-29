@@ -6,9 +6,9 @@ import ClaudexorKit
 // Wires the install coordinator's daemon-lifecycle port to the REAL machinery:
 //  - probeIdentity: spawn the app-bundled Node against the unpacked closure's
 //    daemon with `--probe` (side-effect-free exact identity, no socket).
-//  - stop: spawn the app-bundled Node against the app-bundled daemon with
-//    `--stop`, which reuses the daemon's socket `claudexor.shutdown` +
-//    identity-proven termination confirmation (never a raw kill).
+//  - stopForRuntimeReplacement: spawn the app-bundled Node against the
+//    app-bundled daemon with `--stop`, which uses the daemon-owned atomic
+//    idle/admission fence plus identity-proven termination confirmation.
 //  - start: DaemonLauncher (relaunch against the ACTIVE pointer).
 //  - isBusy / handshakeIdentity: injected async closures over the app's
 //    GatewayClient (active-runs listing / protocol handshake), so this struct
@@ -44,12 +44,25 @@ struct AppRuntimeDaemonControl: RuntimeDaemonControl {
         }
     }
 
-    func stop() async throws {
+    func stopForRuntimeReplacement() async throws {
         guard let node = DaemonLauncher.bundledNode, let daemon = DaemonLauncher.bundledDaemon else {
             throw RuntimeInstallError.io("no bundled daemon to drive the identity-proven stop")
         }
-        let result = Self.runNodeJSON([daemon.path, "--stop"], node: node, timeout: 30)
-        guard let result, (result["stopped"] as? Bool) == true else {
+        guard let execution = Self.runNodeJSONExecution(
+            [daemon.path, "--stop"], node: node, timeout: 30)
+        else {
+            throw RuntimeInstallError.io("identity-proven daemon stop did not run")
+        }
+        let result = execution.payload
+        switch result?["code"] as? String {
+        case "runtime_replacement_busy":
+            throw RuntimeReplacementStopError.busy
+        case "runtime_activity_unknown":
+            throw RuntimeReplacementStopError.activityUnknown
+        default:
+            break
+        }
+        guard execution.status == 0, let result, (result["stopped"] as? Bool) == true else {
             throw RuntimeInstallError.io(
                 "identity-proven daemon stop did not confirm termination"
                     + (result.flatMap { ($0["detail"] as? String).map { d in ": \(d)" } } ?? ""))
@@ -84,6 +97,18 @@ struct AppRuntimeDaemonControl: RuntimeDaemonControl {
     /// JSON-object line. Returns nil on spawn failure, timeout, or unparseable
     /// output (fail-closed — the coordinator treats a nil probe/stop as failure).
     static func runNodeJSON(_ args: [String], node: URL, timeout: TimeInterval) -> [String: Any]? {
+        guard let execution = runNodeJSONExecution(args, node: node, timeout: timeout),
+              execution.status == 0
+        else { return nil }
+        return execution.payload
+    }
+
+    /// Preserve the final JSON refusal even when the subprocess exits nonzero;
+    /// runtime replacement needs its typed busy/unknown result to remain a safe
+    /// deferral rather than becoming an ambiguous lifecycle failure.
+    static func runNodeJSONExecution(
+        _ args: [String], node: URL, timeout: TimeInterval
+    ) -> (status: Int32, payload: [String: Any]?)? {
         let proc = Process()
         proc.executableURL = node
         proc.arguments = args
@@ -102,13 +127,14 @@ struct AppRuntimeDaemonControl: RuntimeDaemonControl {
         let data = out.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         killer.cancel()
-        guard proc.terminationStatus == 0 else { return nil }
+        var payload: [String: Any]?
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n").reversed() {
             if let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
-                return obj
+                payload = obj
+                break
             }
         }
-        return nil
+        return (proc.terminationStatus, payload)
     }
 
     /// Minimal environment for the probe/stop child: inherit the app's env but

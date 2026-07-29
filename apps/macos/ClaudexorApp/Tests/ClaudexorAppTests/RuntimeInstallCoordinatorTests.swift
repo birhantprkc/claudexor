@@ -36,6 +36,13 @@ private final class PhaseRecorder: @unchecked Sendable {
 
 private struct StubStartError: Error {}
 
+private enum StubReplacementStopResult {
+    case stopped
+    case busy
+    case activityUnknown
+    case failed
+}
+
 private actor RuntimeLifecycleTestGate {
     private var entered = false
     private var open = false
@@ -87,6 +94,7 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
     /// mutate filesystem state between the failed forward write and the rollback
     /// restore (e.g. drop a permissions obstruction).
     var onStop: (@Sendable () -> Void)?
+    var replacementStopResults: [StubReplacementStopResult] = []
     var stops = 0
     var starts = 0
 
@@ -95,9 +103,20 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         if let gate { await gate.pause() }
         return value
     }
-    func stop() async throws {
-        let hook: (@Sendable () -> Void)? = lock.withLock { stops += 1; return onStop }
+    func stopForRuntimeReplacement() async throws {
+        let (hook, result): ((@Sendable () -> Void)?, StubReplacementStopResult) = lock.withLock {
+            stops += 1
+            let result = replacementStopResults.isEmpty
+                ? .stopped : replacementStopResults.removeFirst()
+            return (onStop, result)
+        }
         hook?()
+        switch result {
+        case .stopped: break
+        case .busy: throw RuntimeReplacementStopError.busy
+        case .activityUnknown: throw RuntimeReplacementStopError.activityUnknown
+        case .failed: throw StubStartError()
+        }
     }
     func start() throws {
         try lock.withLock {
@@ -290,6 +309,31 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         #expect(daemon.stops == 0)  // never stopped an active daemon
     }
 
+    @Test func atomicStopRefusesWorkAdmittedAfterTheAdvisoryIdleSnapshot() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = RuntimeInstaller(root: root)
+        let (bytes, sha) = try fixtureClosure()
+        let daemon = StubDaemon()
+        daemon.busy = false
+        daemon.probeReturns = "3.4.0"
+        daemon.replacementStopResults = [.busy]
+        let coord = RuntimeInstallCoordinator(
+            installer: installer, transport: LocalTransport(bytes), daemon: daemon,
+            lifecycleOwner: testInstallLifecycleOwner,
+            rollbackSelection: { testBundledSelection })
+
+        await #expect(throws: RuntimeInstallError.daemonBusy) {
+            try await coord.install(
+                manifest: manifest(version: "3.4.0", sha: sha), assetURL: assetURL)
+        }
+        #expect(installer.readCurrent() == nil)
+        #expect(daemon.stops == 1)
+        #expect(daemon.starts == 0)
+        #expect(!FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("versions/3.4.0").path))
+    }
+
     @Test func refusesBeforeStopWhenExactRollbackAuthorityIsUnavailable() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -447,6 +491,36 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
             got: wrongCandidate))
         #expect(installer.readCurrent() == previousPointer())
         #expect(recorder.contains(.rolledBack(reason: "post-relaunch handshake mismatch")))
+    }
+
+    @Test func rollbackRefusesToMoveThePointerBeneathACandidateThatAcceptedWork() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = RuntimeInstaller(root: root)
+        try installer.writeCurrentAtomic(previousPointer())
+        let (bytes, sha) = try fixtureClosure()
+        let daemon = StubDaemon()
+        daemon.probeReturns = "3.4.0"
+        daemon.handshakeIdentitySequence = [
+            RuntimeClosureIdentity(version: "3.4.0", buildSha: wrongBuildSha)
+        ]
+        daemon.replacementStopResults = [.stopped, .busy]
+        let coord = RuntimeInstallCoordinator(
+            installer: installer, transport: LocalTransport(bytes), daemon: daemon,
+            lifecycleOwner: testInstallLifecycleOwner)
+
+        let error = await captureError {
+            try await coord.install(
+                manifest: manifest(version: "3.4.0", sha: sha), assetURL: assetURL)
+        }
+        guard case let .recoveryFailed(step, _) = error as? RuntimeInstallError else {
+            Issue.record("expected recoveryFailed when candidate replacement stop is refused")
+            return
+        }
+        #expect(step.contains("stop the active candidate runtime"))
+        #expect(installer.readCurrent()?.version == "3.4.0")
+        #expect(daemon.stops == 2)
+        #expect(daemon.starts == 1)
     }
 
     @Test func rollsBackWhenRelaunchStartThrowsAfterSwap() async throws {

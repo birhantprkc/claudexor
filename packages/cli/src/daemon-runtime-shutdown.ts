@@ -3,6 +3,7 @@ export interface RuntimeStopParticipant {
 }
 
 export interface RuntimeSetupParticipant {
+  hasActiveWork(): boolean;
   beginDrain(): void;
   shutdown(): Promise<void>;
 }
@@ -57,6 +58,34 @@ export class DaemonRuntimeShutdown {
       this.rejectCompletion = reject;
     });
     void this.completion.catch(() => undefined);
+  }
+
+  /** Atomic continuation of daemon-owned runtime-replacement admission.
+   * DaemonServer has already checked its queue/runners in the same event-loop
+   * turn. This synchronous prefix checks setup authority and, only when idle,
+   * enters beginShutdown; beginShutdown fences setup/control/daemon admission
+   * before its first await. A refusal leaves every ingress untouched. */
+  beginRuntimeReplacement(reason = "runtime replacement stop"): Promise<void> {
+    if (this.requestedValue) return this.completion;
+    let active: boolean;
+    try {
+      active = this.options.setup.hasActiveWork();
+    } catch (cause) {
+      throw Object.assign(new Error("runtime replacement could not prove setup activity state"), {
+        code: "runtime_activity_unknown",
+        status: 503,
+        retryable: true,
+        cause,
+      });
+    }
+    if (active) {
+      throw Object.assign(new Error("runtime replacement is deferred while setup work is active"), {
+        code: "runtime_replacement_busy",
+        status: 409,
+        retryable: true,
+      });
+    }
+    return this.beginShutdown(reason);
   }
 
   beginShutdown(reason: string): Promise<void> {

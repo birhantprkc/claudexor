@@ -648,6 +648,10 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
               "remote stop")
                 test "$3" = "3.4.0"
                 test "$4" = "\(buildSha)"
+                if test -f "$HOME/refuse-stop-\(marker)"; then
+                  printf '%s\\n' '{"ok":false,"code":"runtime_replacement_busy","retryable":true}'
+                  exit 1
+                fi
                 printf '%s\\n' "\(marker)" >> "$HOME/stops"
                 printf '%s\\n' '{"ok":true,"stopped":true}'
                 ;;
@@ -799,5 +803,62 @@ private final class RemoteRuntimeArchiveURLProtocol: URLProtocol {
         #expect(raced.status == 75)
         #expect(!FileManager.default.fileExists(
             atPath: home.appendingPathComponent(".claudexor/remote/current").path))
+    }
+
+    @Test func installStopRefusalLeavesThePreviousPointerUntouched() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let first = try runtimeArchive(home: home, marker: "old", buildSha: oldBuild)
+        try stageArchive(first.url, digest: first.digest, home: home)
+        #expect(try run(
+            script: RemoteRuntimeInstaller.installScript,
+            arguments: ["3.4.0", first.digest, "-", "-", "-"],
+            home: home).status == 0)
+        let root = home.appendingPathComponent(".claudexor/remote")
+        let oldTarget = "versions/3.4.0-\(first.digest)"
+        try Data().write(to: home.appendingPathComponent("refuse-stop-old"))
+
+        let second = try runtimeArchive(home: home, marker: "new", buildSha: newBuild)
+        try stageArchive(second.url, digest: second.digest, home: home)
+        let refused = try run(
+            script: RemoteRuntimeInstaller.installScript,
+            arguments: ["3.4.0", second.digest, oldTarget, "3.4.0", oldBuild],
+            home: home)
+
+        #expect(refused.status != 0)
+        #expect(try FileManager.default.destinationOfSymbolicLink(
+            atPath: root.appendingPathComponent("current").path) == oldTarget)
+    }
+
+    @Test func rollbackStopRefusalLeavesTheWorkingCandidatePointerUntouched() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let first = try runtimeArchive(home: home, marker: "old", buildSha: oldBuild)
+        try stageArchive(first.url, digest: first.digest, home: home)
+        #expect(try run(
+            script: RemoteRuntimeInstaller.installScript,
+            arguments: ["3.4.0", first.digest, "-", "-", "-"],
+            home: home).status == 0)
+        let oldTarget = "versions/3.4.0-\(first.digest)"
+        let second = try runtimeArchive(home: home, marker: "new", buildSha: newBuild)
+        try stageArchive(second.url, digest: second.digest, home: home)
+        #expect(try run(
+            script: RemoteRuntimeInstaller.installScript,
+            arguments: ["3.4.0", second.digest, oldTarget, "3.4.0", oldBuild],
+            home: home).status == 0)
+        let candidateTarget = "versions/3.4.0-\(second.digest)"
+        try Data().write(to: home.appendingPathComponent("refuse-stop-new"))
+
+        let refused = try run(
+            script: RemoteRuntimeInstaller.rollbackScript,
+            arguments: [
+                candidateTarget, oldTarget, "3.4.0", newBuild, "3.4.0", oldBuild,
+            ],
+            home: home)
+
+        #expect(refused.status != 0)
+        #expect(try FileManager.default.destinationOfSymbolicLink(
+            atPath: home.appendingPathComponent(".claudexor/remote/current").path)
+            == candidateTarget)
     }
 }

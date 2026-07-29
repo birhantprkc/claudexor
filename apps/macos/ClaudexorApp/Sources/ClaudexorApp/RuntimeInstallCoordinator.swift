@@ -83,9 +83,10 @@ public protocol RuntimeDaemonControl: Sendable {
     /// `nil` = the daemon could not be asked (treated as busy — fail-closed, we
     /// never stop a daemon whose state we cannot confirm).
     func isBusy() async -> Bool?
-    /// Stop the running daemon, identity-proven (existing machinery). Throws if
-    /// the stop could not be confirmed.
-    func stop() async throws
+    /// Atomically prove the daemon idle, fence every daemon-owned admission
+    /// surface, and stop the exact running process. A typed refusal leaves the
+    /// daemon serving and every ingress open.
+    func stopForRuntimeReplacement() async throws
     /// Relaunch the daemon (DaemonLauncher) against the ACTIVE pointer.
     func start() throws
     /// Relaunch one already-resolved closure. Reconciliation uses this overload
@@ -96,6 +97,11 @@ public protocol RuntimeDaemonControl: Sendable {
     func probeIdentity(scriptURL: URL) async -> RuntimeClosureIdentity?
     /// Exact identity of the currently serving daemon.
     func handshakeIdentity() async -> RuntimeClosureIdentity?
+}
+
+public enum RuntimeReplacementStopError: Error, Sendable, Equatable {
+    case busy
+    case activityUnknown
 }
 
 public extension RuntimeDaemonControl {
@@ -235,8 +241,20 @@ public actor RuntimeInstallCoordinator {
             throw RuntimeInstallError.rollbackIdentityUnavailable
         }
 
-        // 7. Identity-proven daemon stop.
-        try await daemon.stop()
+        // 7. Daemon-owned atomic idle proof + admission fence + exact stop. The
+        // advisory probe above keeps the common busy path cheap; this call is
+        // the authority that closes its admission race.
+        do {
+            try await daemon.stopForRuntimeReplacement()
+        } catch RuntimeReplacementStopError.busy {
+            try? installer.removeVersionDir(manifest.version)
+            fail(.failed(reason: "engine became busy before replacement admission"))
+            throw RuntimeInstallError.daemonBusy
+        } catch RuntimeReplacementStopError.activityUnknown {
+            try? installer.removeVersionDir(manifest.version)
+            fail(.failed(reason: "engine activity became unknown before replacement admission"))
+            throw RuntimeInstallError.daemonBusy
+        }
 
         // 8. ATOMIC swap: promote the prior pointer to last-known-good, then a
         // single-rename write of the new current.json.
@@ -359,10 +377,16 @@ public actor RuntimeInstallCoordinator {
         expectedIdentity: RuntimeClosureIdentity,
         reason: String
     ) async -> RollbackOutcome {
-        // Stop the wrong/broken daemon. A stop failure alone is not decisive — the
-        // restore + relaunch + handshake below is the real proof — so it is not
-        // treated as a recovery failure on its own.
-        try? await daemon.stop()
+        // The candidate may have accepted work after its handshake. Never move
+        // the pointer beneath that live process: rollback needs the same atomic
+        // idle proof and admission fence as forward activation.
+        do {
+            try await daemon.stopForRuntimeReplacement()
+        } catch {
+            return rollbackFailed(
+                reason, step: "stop the active candidate runtime before restoring the pointer",
+                remediation: "Wait for active work to finish, then retry the update or reopen Claudexor.")
+        }
 
         // 1. Restore (or clear) the active pointer.
         if let previous {

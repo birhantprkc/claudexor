@@ -13,7 +13,11 @@ function machine(overrides: Partial<DaemonRuntimeShutdownOptions> = {}): {
   const log: string[] = [];
   const runtime = new DaemonRuntimeShutdown({
     daemon: { stop: async () => undefined },
-    setup: { beginDrain: () => undefined, shutdown: async () => undefined },
+    setup: {
+      hasActiveWork: () => false,
+      beginDrain: () => undefined,
+      shutdown: async () => undefined,
+    },
     control: () => null,
     journal: { close: () => undefined },
     log: (message) => log.push(message),
@@ -24,11 +28,74 @@ function machine(overrides: Partial<DaemonRuntimeShutdownOptions> = {}): {
 }
 
 describe("DaemonRuntimeShutdown", () => {
+  it("refuses active setup without fencing any writer", () => {
+    const events: string[] = [];
+    const runtime = new DaemonRuntimeShutdown({
+      daemon: { stop: async () => void events.push("daemon-stop") },
+      setup: {
+        hasActiveWork: () => true,
+        beginDrain: () => void events.push("setup-fence"),
+        shutdown: async () => void events.push("setup-stop"),
+      },
+      control: () => ({ stop: async () => void events.push("control-stop") }),
+      journal: { close: () => void events.push("journal-close") },
+      forceExit: () => undefined,
+    });
+
+    expect(() => runtime.beginRuntimeReplacement()).toThrowError(
+      expect.objectContaining({ code: "runtime_replacement_busy", status: 409, retryable: true }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it("maps setup authority failure to activity-unknown without fencing any writer", () => {
+    const events: string[] = [];
+    const runtime = new DaemonRuntimeShutdown({
+      daemon: { stop: async () => void events.push("daemon-stop") },
+      setup: {
+        hasActiveWork: () => {
+          throw new Error("setup journal unavailable");
+        },
+        beginDrain: () => void events.push("setup-fence"),
+        shutdown: async () => void events.push("setup-stop"),
+      },
+      control: () => ({ stop: async () => void events.push("control-stop") }),
+      journal: { close: () => void events.push("journal-close") },
+      forceExit: () => undefined,
+    });
+
+    expect(() => runtime.beginRuntimeReplacement()).toThrowError(
+      expect.objectContaining({ code: "runtime_activity_unknown", status: 503, retryable: true }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it("fences setup, control, and daemon synchronously after replacement admission", async () => {
+    const events: string[] = [];
+    const runtime = new DaemonRuntimeShutdown({
+      daemon: { stop: async () => void events.push("daemon-stop") },
+      setup: {
+        hasActiveWork: () => false,
+        beginDrain: () => void events.push("setup-fence"),
+        shutdown: async () => void events.push("setup-stop"),
+      },
+      control: () => ({ stop: async () => void events.push("control-stop") }),
+      journal: { close: () => void events.push("journal-close") },
+      forceExit: () => undefined,
+    });
+
+    const stopping = runtime.beginRuntimeReplacement();
+    expect(events).toEqual(["setup-fence", "control-stop", "daemon-stop", "setup-stop"]);
+    await stopping;
+    expect(events.at(-1)).toBe("journal-close");
+  });
+
   it("fences setup, stops every writer, then closes the journal once", async () => {
     const events: string[] = [];
     const runtime = new DaemonRuntimeShutdown({
       daemon: { stop: async () => void events.push("daemon-stop") },
       setup: {
+        hasActiveWork: () => false,
         beginDrain: () => void events.push("setup-fence"),
         shutdown: async () => void events.push("setup-stop"),
       },

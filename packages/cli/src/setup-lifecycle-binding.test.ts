@@ -20,6 +20,10 @@ class FakeHandle implements SetupLifecycleHandle {
     this.events.push(`start:${this.generation}`);
   }
 
+  list(): readonly unknown[] {
+    return [];
+  }
+
   beginDrain(): void {
     this.events.push(`drain:${this.generation}`);
   }
@@ -191,6 +195,7 @@ describe("SetupLifecycleBinding", () => {
       generation: () => generation,
     };
     const binding = new SetupLifecycleBinding(slot, (store) => ({
+      list: () => [],
       beginDrain: () => {
         events.push(`drain:${store.generation}`);
       },
