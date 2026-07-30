@@ -54,21 +54,23 @@ export function readStableReviewFile(path, label) {
   }
 }
 
-function assertExactCandidateInputs(root, inputs) {
-  for (const input of Object.keys(inputs)) {
-    const absolute = resolve(root, input);
-    if (!pathIsWithin(root, absolute)) {
+export function assertExactCandidateInputs(root, inputs) {
+  const candidateRoot = realpathSync(resolve(root));
+  for (const input of inputs) {
+    const absolute = resolve(candidateRoot, input);
+    if (!pathIsWithin(candidateRoot, absolute)) {
       throw new Error(`release review verifier input escapes candidate: ${input}`);
     }
-    const repoPath = relative(root, absolute).split(sep).join("/");
+    const repoPath = relative(candidateRoot, absolute).split(sep).join("/");
     const stat = lstatSync(absolute);
     if (stat.isSymbolicLink() || !stat.isFile() || realpathSync(absolute) !== absolute) {
       throw new Error(`release review verifier input is not a regular tracked file: ${repoPath}`);
     }
     let committed;
     try {
-      committed = execFileSync("git", ["-C", root, "show", `HEAD:${repoPath}`], {
+      committed = execFileSync("git", ["-C", candidateRoot, "show", `HEAD:${repoPath}`], {
         maxBuffer: 64 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
       });
     } catch {
       throw new Error(`release review verifier input is not tracked at HEAD: ${repoPath}`);
@@ -97,25 +99,11 @@ function smokeVerifierApi(bytes) {
   }
 }
 
-/** Build one tiny verifier and copy the exact packaged candidate CLI beside it. */
-export async function buildReleaseReviewRuntimeArtifacts(repoRoot, artifactRoot, candidateSha) {
+/** Build the real verifier graph without executing or trusting its output. */
+export async function bundleReleaseReviewVerifier(repoRoot, outfile) {
   const root = realpathSync(resolve(repoRoot));
-  const outputRoot = realpathSync(resolve(artifactRoot));
   const entryPath = join(root, "scripts/lib/release-review-runtime-entry.ts");
-  const verifierPath = join(outputRoot, RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH);
-  const cliSource = join(
-    root,
-    "apps/macos/dist/Claudexor.app/Contents/Resources/claudexor.bundle.cjs",
-  );
-  const cliPath = join(outputRoot, RELEASE_REVIEW_CLI_ARTIFACT_PATH);
-  for (const path of [verifierPath, cliPath]) {
-    if (existsSync(path))
-      throw new Error(`release review runtime artifact already exists: ${path}`);
-  }
-  if (!/^[0-9a-f]{40}$/.test(candidateSha ?? "")) {
-    throw new Error("release review runtime requires the exact candidate SHA");
-  }
-
+  const verifierPath = resolve(outfile ?? join(root, RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH));
   const { build } = await import("esbuild");
   const result = await build({
     absWorkingDir: root,
@@ -137,7 +125,6 @@ export async function buildReleaseReviewRuntimeArtifacts(repoRoot, artifactRoot,
     treeShaking: true,
     write: false,
   });
-  assertExactCandidateInputs(root, result.metafile.inputs);
   const output = Object.values(result.metafile.outputs).find(
     (record) => resolve(root, record.entryPoint ?? "") === entryPath,
   );
@@ -159,7 +146,30 @@ export async function buildReleaseReviewRuntimeArtifacts(repoRoot, artifactRoot,
   if (!outputFile || outputFile.contents.length === 0) {
     throw new Error("release review verifier bundle emitted no bytes");
   }
-  smokeVerifierApi(outputFile.contents);
+  return { contents: outputFile.contents, inputs: Object.keys(result.metafile.inputs) };
+}
+
+/** Build one tiny verifier and copy the exact packaged candidate CLI beside it. */
+export async function buildReleaseReviewRuntimeArtifacts(repoRoot, artifactRoot, candidateSha) {
+  const root = realpathSync(resolve(repoRoot));
+  const outputRoot = realpathSync(resolve(artifactRoot));
+  const verifierPath = join(outputRoot, RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH);
+  const cliSource = join(
+    root,
+    "apps/macos/dist/Claudexor.app/Contents/Resources/claudexor.bundle.cjs",
+  );
+  const cliPath = join(outputRoot, RELEASE_REVIEW_CLI_ARTIFACT_PATH);
+  for (const path of [verifierPath, cliPath]) {
+    if (existsSync(path))
+      throw new Error(`release review runtime artifact already exists: ${path}`);
+  }
+  if (!/^[0-9a-f]{40}$/.test(candidateSha ?? "")) {
+    throw new Error("release review runtime requires the exact candidate SHA");
+  }
+
+  const verifier = await bundleReleaseReviewVerifier(root, verifierPath);
+  assertExactCandidateInputs(root, verifier.inputs);
+  smokeVerifierApi(verifier.contents);
 
   const cliStat = lstatSync(cliSource);
   if (cliStat.isSymbolicLink() || !cliStat.isFile() || realpathSync(cliSource) !== cliSource) {
@@ -170,7 +180,7 @@ export async function buildReleaseReviewRuntimeArtifacts(repoRoot, artifactRoot,
     throw new Error("packaged release review CLI is not stamped with the candidate SHA");
   }
 
-  writeFileSync(verifierPath, outputFile.contents, { flag: "wx", mode: 0o600 });
+  writeFileSync(verifierPath, verifier.contents, { flag: "wx", mode: 0o600 });
   writeFileSync(cliPath, cliBytes, { flag: "wx", mode: 0o700 });
   return snapshotReleaseReviewRuntimeArtifacts(outputRoot);
 }

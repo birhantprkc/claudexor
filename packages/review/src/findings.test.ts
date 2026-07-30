@@ -231,17 +231,17 @@ describe("parseSealedReviewEnvelopeDetailed", () => {
   });
 
   it("rejects PASS with a blocker and FAIL without one", () => {
-    expect(
-      parseSealedReviewEnvelopeDetailed(
-        JSON.stringify(
-          sealedEnvelope(
-            [{ severity: "FIX_FIRST", category: "regression", claim: "must fix" }],
-            "PASS",
-          ),
+    const mismatched = parseSealedReviewEnvelopeDetailed(
+      JSON.stringify(
+        sealedEnvelope(
+          [{ severity: "FIX_FIRST", category: "regression", claim: "must fix" }],
+          "PASS",
         ),
-        sealedReviewer,
-      ).error,
-    ).toMatch(/must be FAIL/);
+      ),
+      sealedReviewer,
+    );
+    expect(mismatched.error).toMatch(/must be FAIL/);
+    expect(mismatched.findings.map((finding) => finding.claim)).toEqual(["must fix"]);
     expect(
       parseSealedReviewEnvelopeDetailed(JSON.stringify(sealedEnvelope([], "FAIL")), sealedReviewer)
         .error,
@@ -249,15 +249,36 @@ describe("parseSealedReviewEnvelopeDetailed", () => {
   });
 
   it("rejects malformed findings and extra envelope fields", () => {
-    const malformed = sealedEnvelope([{ category: "correctness", claim: "missing severity" }]);
-    expect(
-      parseSealedReviewEnvelopeDetailed(JSON.stringify(malformed), sealedReviewer).error,
-    ).toMatch(/malformed/);
+    const malformed = sealedEnvelope([
+      { severity: "WARN", category: "test_gap", claim: "retained warning" },
+      { category: "correctness", claim: "missing severity" },
+    ]);
+    const parsed = parseSealedReviewEnvelopeDetailed(JSON.stringify(malformed), sealedReviewer);
+    expect(parsed.error).toMatch(/malformed/);
+    expect(parsed.malformed).toBe(1);
+    expect(parsed.findings.map((finding) => finding.claim)).toEqual(["retained warning"]);
 
     const extra = { ...sealedEnvelope(), explanation: "not part of the contract" };
     expect(parseSealedReviewEnvelopeDetailed(JSON.stringify(extra), sealedReviewer).error).toMatch(
       /envelope shape/,
     );
+  });
+
+  it.each([
+    ["unknown severity", { severity: "CRITICAL", claim: "bad severity" }],
+    ["unknown category", { severity: "WARN", category: "style", claim: "bad category" }],
+    [
+      "malformed file evidence",
+      { severity: "WARN", claim: "bad evidence", evidence: { files: [{ path: 42 }] } },
+    ],
+    ["malformed proposed fix", { severity: "WARN", claim: "bad fix", proposed_fix: 42 }],
+  ])("rejects %s before a sealed decision is trusted", (_name, finding) => {
+    const parsed = parseSealedReviewEnvelopeDetailed(
+      JSON.stringify(sealedEnvelope([finding])),
+      sealedReviewer,
+    );
+    expect(parsed.error).toMatch(/malformed/);
+    expect(parsed.findings).toEqual([]);
   });
 });
 

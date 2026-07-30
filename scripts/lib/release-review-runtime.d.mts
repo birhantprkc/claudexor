@@ -15,6 +15,11 @@ export function buildReleaseReviewRuntimeArtifacts(
   artifactRoot: string,
   candidateSha: string,
 ): Promise<ReleaseReviewRuntimeArtifact[]>;
+export function bundleReleaseReviewVerifier(
+  repoRoot: string,
+  outfile?: string,
+): Promise<{ contents: Uint8Array; inputs: string[] }>;
+export function assertExactCandidateInputs(root: string, inputs: readonly string[]): void;
 export function readStableReviewFile(path: string, label: string): Buffer;
 export function snapshotReleaseReviewRuntimeArtifacts(
   artifactRoot: string,

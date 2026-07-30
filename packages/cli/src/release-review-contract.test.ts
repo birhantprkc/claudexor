@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { buildSync } from "esbuild";
 import { FROZEN_REVIEW_EVIDENCE_FILES } from "../../context/src/evidence.js";
 import { describe, expect, it } from "vitest";
 import {
@@ -27,6 +26,7 @@ import {
   validateReleaseInput,
   verifyArchivedReleaseAttestationSignature,
 } from "../../../scripts/lib/release-review-contract.mjs";
+import { bundleReleaseReviewVerifier } from "../../../scripts/lib/release-review-runtime.mjs";
 
 const candidateSha = "a".repeat(40);
 const candidateTree = "b".repeat(40);
@@ -302,7 +302,7 @@ describe("native owner-review publishing contract", () => {
 });
 
 describe("native owner-review sealer", () => {
-  it("derives a signed pass/warn pair from clean on-disk artifacts", () => {
+  it("derives a signed pass/warn pair from clean on-disk artifacts", async () => {
     const root = mkdtempSync(join(tmpdir(), "claudexor-v5-sealer-"));
     const candidate = join(root, "candidate");
     const evidence = join(root, "evidence");
@@ -336,22 +336,8 @@ describe("native owner-review sealer", () => {
       });
       const verifierPath = join(gateDir, "release-review-verifier.mjs");
       const cliPath = join(gateDir, "claudexor.bundle.cjs");
-      const verifierBuild = buildSync({
-        absWorkingDir: repoRoot,
-        alias: {
-          "@claudexor/core": resolve(repoRoot, "packages/core/src/diff.ts"),
-          "@claudexor/schema": resolve(repoRoot, "packages/schema/src/index.ts"),
-          "@claudexor/util": resolve(repoRoot, "packages/util/src/index.ts"),
-        },
-        bundle: true,
-        entryPoints: [resolve(repoRoot, "scripts/lib/release-review-runtime-entry.ts")],
-        format: "esm",
-        outfile: verifierPath,
-        platform: "node",
-        target: ["node20"],
-        write: false,
-      });
-      write(verifierPath, Buffer.from(verifierBuild.outputFiles[0]!.contents));
+      const verifierBuild = await bundleReleaseReviewVerifier(repoRoot, verifierPath);
+      write(verifierPath, Buffer.from(verifierBuild.contents));
       const reviewEnginePath = resolve(repoRoot, "packages/review/src/reviewEngine.ts");
       write(
         cliPath,

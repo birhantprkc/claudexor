@@ -1,11 +1,6 @@
 import type { DiffEvidence } from "@claudexor/context";
-
-export const RELEASE_NATIVE_CHECKLIST_ITEMS = [
-  "sealed_evidence",
-  "intent_and_scope",
-  "runtime_and_security",
-  "tests_and_release",
-] as const;
+import { RELEASE_NATIVE_CHECKLIST_ITEMS } from "./sealedReviewEnvelope.js";
+export { RELEASE_NATIVE_CHECKLIST_ITEMS } from "./sealedReviewEnvelope.js";
 
 export function buildReviewPrompt(
   label: string,

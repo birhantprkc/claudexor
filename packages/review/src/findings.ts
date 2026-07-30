@@ -1,7 +1,11 @@
 import type { ReviewFinding, RouteProofStatus, Severity } from "@claudexor/schema";
 import { ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
 import { newId } from "@claudexor/util";
-import { RELEASE_NATIVE_CHECKLIST_ITEMS } from "./reviewPrompt.js";
+import { parseSealedReviewDecisionEnvelopeDetailed } from "./sealedReviewEnvelope.js";
+export {
+  sealedReviewTranscriptChunk,
+  sealedReviewTranscriptFromEvents,
+} from "./sealedReviewEnvelope.js";
 
 const MAX_BALANCED_JSON_CANDIDATES = 64;
 
@@ -149,24 +153,6 @@ export interface ReviewerInfo {
   route_proof_status?: RouteProofStatus;
 }
 
-/** Deterministic persisted transcript projection for sealed native reviews.
- * The producer feeds the already-redacted normalized event through this owner;
- * the sealer replays the JSONL through the same bundled candidate function. */
-export function sealedReviewTranscriptChunk(event: unknown): string | null {
-  if (!isRecord(event) || event["type"] !== "message") return null;
-  if (isRecord(event["payload"]) && event["payload"]["auth_switched"] === true) return null;
-  const text = event["text"];
-  if (typeof text !== "string" || text.length === 0) return null;
-  return text.endsWith("\n") ? text : `${text}\n`;
-}
-
-export function sealedReviewTranscriptFromEvents(events: readonly unknown[]): string {
-  return events
-    .map(sealedReviewTranscriptChunk)
-    .filter((text): text is string => text !== null)
-    .join("");
-}
-
 export function parseFindingsDetailed(
   text: string,
   reviewer: ReviewerInfo,
@@ -236,105 +222,29 @@ export function parseSealedReviewEnvelopeDetailed(
   text: string,
   reviewer: ReviewerInfo,
 ): SealedReviewEnvelopeParse {
-  const source = text.trim();
-  if (source.length === 0) {
-    return { findings: [], malformed: 0, error: "no sealed review envelope", blocks: [] };
-  }
-  let envelope: unknown;
-  try {
-    envelope = JSON.parse(source);
-  } catch {
+  const decision = parseSealedReviewDecisionEnvelopeDetailed(text);
+  const shouldNormalize =
+    decision.error === null || decision.findings.length > 0 || decision.malformed > 0;
+  const parsed = shouldNormalize
+    ? parseFindingsDetailed(JSON.stringify({ findings: decision.rawFindings }), reviewer)
+    : { findings: [], malformed: decision.malformed };
+  if (decision.error !== null) {
     return {
-      findings: [],
-      malformed: 0,
-      error: "sealed review output must be exactly one JSON object with no surrounding prose",
-      blocks: [],
+      findings: parsed.findings,
+      malformed: parsed.malformed,
+      error: decision.error,
+      blocks: decision.blocks,
     };
   }
-  const blocks = [envelope];
-  if (!isRecord(envelope) || !hasExactKeys(envelope, ["completion", "findings"])) {
-    return { findings: [], malformed: 0, error: "invalid sealed review envelope shape", blocks };
-  }
-  const completion = envelope["completion"];
-  const rawFindings = envelope["findings"];
-  if (
-    !isRecord(completion) ||
-    !hasExactKeys(completion, ["checklist", "findingCount", "verdict"]) ||
-    !Array.isArray(rawFindings)
-  ) {
-    return { findings: [], malformed: 0, error: "invalid sealed completion shape", blocks };
-  }
-  const checklist = completion["checklist"];
-  if (
-    !Array.isArray(checklist) ||
-    checklist.length !== RELEASE_NATIVE_CHECKLIST_ITEMS.length ||
-    checklist.some((row, index) => {
-      if (!isRecord(row) || !hasOnlyKeys(row, ["item", "completed", "note"])) return true;
-      if (row["item"] !== RELEASE_NATIVE_CHECKLIST_ITEMS[index] || row["completed"] !== true)
-        return true;
-      return row["note"] !== undefined && typeof row["note"] !== "string";
-    })
-  ) {
-    return {
-      findings: [],
-      malformed: 0,
-      error: "sealed checklist must contain the four exact completed items in order",
-      blocks,
-    };
-  }
-  const findingCount = completion["findingCount"];
-  if (!Number.isSafeInteger(findingCount) || (findingCount as number) < 0) {
-    return {
-      findings: [],
-      malformed: 0,
-      error: "findingCount must be a non-negative integer",
-      blocks,
-    };
-  }
-  if (findingCount !== rawFindings.length) {
-    return {
-      findings: [],
-      malformed: 0,
-      error: "findingCount does not match findings.length",
-      blocks,
-    };
-  }
-  const parsed = parseFindingsDetailed(JSON.stringify({ findings: rawFindings }), reviewer);
-  if (parsed.malformed > 0 || parsed.findings.length !== rawFindings.length) {
+  if (parsed.malformed > 0 || parsed.findings.length !== decision.rawFindings.length) {
     return {
       findings: parsed.findings,
       malformed: parsed.malformed,
       error: "sealed findings contain malformed items",
-      blocks,
+      blocks: decision.blocks,
     };
   }
-  const expectedVerdict = parsed.findings.some((finding) =>
-    ["BLOCK", "FIX_FIRST", "NEEDS_HUMAN", "INSUFFICIENT_EVIDENCE"].includes(finding.severity),
-  )
-    ? "FAIL"
-    : "PASS";
-  if (completion["verdict"] !== expectedVerdict) {
-    return {
-      findings: parsed.findings,
-      malformed: 0,
-      error: `completion verdict must be ${expectedVerdict} for these findings`,
-      blocks,
-    };
-  }
-  return { findings: parsed.findings, malformed: 0, error: null, blocks };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return Object.keys(value).length === keys.length && hasOnlyKeys(value, keys);
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const allowed = new Set(keys);
-  return Object.keys(value).every((key) => allowed.has(key));
+  return { findings: parsed.findings, malformed: 0, error: null, blocks: decision.blocks };
 }
 
 const SEVERITY_ORDER: Severity[] = [

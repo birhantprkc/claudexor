@@ -7,8 +7,8 @@ export {
   writeEvidencePacket,
 } from "../../packages/context/src/evidence.js";
 export {
-  parseSealedReviewEnvelopeDetailed,
+  parseSealedReviewDecisionEnvelopeDetailed as parseSealedReviewEnvelopeDetailed,
   sealedReviewTranscriptFromEvents,
-} from "../../packages/review/src/findings.js";
+} from "../../packages/review/src/sealedReviewEnvelope.js";
 export { containsSecretLikeToken, redactSecrets } from "../../packages/util/src/index.js";
 export { validateFullGateReceipt } from "./release-review-contract.mjs";
