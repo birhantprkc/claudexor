@@ -1947,9 +1947,9 @@ export class Orchestrator {
   /**
    * D-16: the WorkReport transport envelope for one route. Called at every
    * task-producing spec-build site AFTER harnessSpecKnobs so it OVERRIDES the
-   * plain caller-schema transport with the compiled `{work_report, output}`
-   * envelope on capable routes. The returned `mode` is retained by the caller
-   * and handed to `unwrapWorkReportEnvelope` when the answer is finalized.
+   * plain caller-schema transport with the resolved WorkReport channel on
+   * capable routes. The returned `mode` is retained by the caller and handed
+   * to `unwrapWorkReportEnvelope` when the answer is finalized.
    */
   private workReportEnvelopeFor(
     routed: RoutedAdapter,
@@ -1968,7 +1968,7 @@ export class Orchestrator {
   /**
    * D-16: apply the resolved WorkReport transport to a built spec — set the
    * envelope output_schema (constrained/side_tool routes) and APPEND the fenced
-   * envelope instruction (validated routes, e.g. cursor). Mutates the spec in
+   * metadata instruction (validated routes, e.g. cursor). Mutates the spec in
    * place and returns the mode the answer unwrap consumes. Called at every
    * task-producing spec-build site so the transport is never wired one-off.
    */
@@ -2572,7 +2572,7 @@ export class Orchestrator {
     if (webUnsatisfied(telemetry)) {
       errors.push(webEvidenceFailure(telemetry.web));
     }
-    // D-16: un-nest {work_report, output} so answer.md persists the OUTPUT, not the envelope.
+    // D-16: remove the WorkReport transport so answer.md persists only the deliverable.
     const unwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", workReportMode, {
       sideToolReport: telemetry.sideToolWorkReport ?? undefined,
     });
@@ -6774,7 +6774,7 @@ export class Orchestrator {
         });
       }
       attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry });
-      // D-16: un-nest the {work_report, output} envelope; the OUTPUT is the report.
+      // D-16: remove the WorkReport transport; the deliverable is the report.
       const roUnwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", readonlyWorkMode, {
         sideToolReport: telemetry.sideToolWorkReport ?? undefined,
       });

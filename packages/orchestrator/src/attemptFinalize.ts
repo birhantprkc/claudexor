@@ -33,9 +33,9 @@ import type { ToolErrorRecord, WebEvidenceState } from "./attemptTelemetry.js";
  * - `side_tool`: a `{work_report}`-only schema arms claude's StructuredOutput
  *   TOOL; the markdown final message stays the deliverable and the report rides
  *   the tool payload (surfaced on the final message's `work_report_side_tool`).
- * - `instructed_fence`: no native constraint — the model is INSTRUCTED to end
- *   its answer with a fenced `{work_report, output}` JSON block, validated off
- *   the last fenced JSON (cursor).
+ * - `instructed_fence`: no native constraint — the model writes its complete
+ *   markdown answer, then appends a fenced `{work_report}` metadata block
+ *   validated off the last fenced JSON (cursor).
  */
 export type WorkReportChannel = "constrained_json" | "side_tool" | "instructed_fence";
 
@@ -53,16 +53,19 @@ export interface WorkReportEnvelopeMode {
 
 /**
  * The instruction appended to an `instructed_fence` (cursor) route so the model
- * emits the WorkReport envelope the finalizer validates. No native schema
+ * emits the WorkReport footer the finalizer validates. No native schema
  * constrains cursor, so the contract is instructed and validated off the last
- * fenced JSON block (D-16c). The `output` string carries the deliverable prose.
+ * fenced JSON block (D-16c). The normal markdown before that footer is the
+ * deliverable; a historical fence-only `output` remains a read fallback.
  */
 export const WORK_REPORT_FENCE_INSTRUCTION = [
-  "When you have finished, end your reply with a single fenced ```json code block",
+  "Write your complete final answer as normal Markdown.",
+  "When you have finished, append a single fenced ```json code block",
   "containing exactly this object and nothing after it:",
   '{"work_report": {"state": "completed" | "needs_input" | "incomplete",',
   '"required_inputs": [{"kind": "file"|"context"|"credential"|"permission"|"decision"|"external_dependency",',
-  '"locator": string|null, "description": string}]}, "output": "<your final answer as a string>"}.',
+  '"locator": string|null, "description": string}]}}.',
+  "Do not duplicate or summarize your answer inside this block.",
   'Use state "completed" only when the task is fully done with an empty required_inputs list;',
   'use "needs_input" (with at least one required_inputs entry) when you are blocked on a missing input;',
   'use "incomplete" when partial work remains. This block is mandatory.',
@@ -182,9 +185,9 @@ export interface UnwrappedAnswer {
   contractViolation: string | null;
 }
 
-/** The `output` slot of a `{work_report, output}` envelope, resolved to the
- * deliverable string, or a typed contract violation when the slot is malformed
- * for the route's schema mode. */
+/** The `output` slot of a constrained `{work_report, output}` envelope (or a
+ * historical fence-only Cursor envelope), resolved to the deliverable string,
+ * or a typed contract violation when the slot is malformed. */
 type ExtractedOutput = { deliverable: string } | { violation: string };
 
 function extractOutput(
@@ -210,9 +213,10 @@ function extractOutput(
 }
 
 /** Extract the LAST fenced ```…``` block's body (its optional language tag
- * stripped), or null when the text has no closed fence. No-regex, mechanical
- * transport parsing (INV-049 governs the typed WorkReport, not this seam). */
-function lastFencedBlock(text: string): string | null {
+ * stripped) and the complete prefix before its opening fence, or null when the
+ * text has no closed fence. No-regex, mechanical transport parsing (INV-049
+ * governs the typed WorkReport, not this seam). */
+function lastFencedBlock(text: string): { body: string; prefix: string } | null {
   const FENCE = "```";
   const end = text.lastIndexOf(FENCE);
   if (end <= 0) return null;
@@ -230,15 +234,21 @@ function lastFencedBlock(text: string): string | null {
       ![...firstLine].some((ch) => ch === " " || ch === "{" || ch === "[" || ch === '"');
     if (firstLine === "" || isLangTag) inner = inner.slice(nl + 1);
   }
-  return inner.trim();
+  return {
+    body: inner.trim(),
+    // Remove only the separator before the metadata footer. The caller owns
+    // any further presentation trimming; all authored markdown stays intact.
+    prefix: text.slice(0, start).trimEnd(),
+  };
 }
 
 /**
  * Un-nest the WorkReport envelope from an active route's answer (D-16 §2). The
  * behavior forks on `mode.channel`:
  * - `constrained_json`: the whole answer IS `{work_report, output}` JSON.
- * - `instructed_fence`: the envelope is the LAST fenced JSON block; prose
- *   before it is discarded (the `output` string is the deliverable).
+ * - `instructed_fence`: the LAST fenced JSON block carries metadata; the
+ *   markdown before it is the deliverable. Historical fence-only envelopes
+ *   fall back to their string `output`.
  * - `side_tool`: the answer text IS the markdown deliverable; the report rides
  *   `opts.sideToolReport` (the tool payload the adapter surfaced).
  * A non-active mode passes the answer through untouched. The WorkReport
@@ -278,6 +288,7 @@ export function unwrapWorkReportEnvelope(
     return validateWorkReport(answerText, opts.sideToolReport, mode.source);
   }
   let text = answerText.trim();
+  let instructedPrefix: string | null = null;
   if (mode.channel === "instructed_fence") {
     const fenced = lastFencedBlock(answerText);
     if (fenced === null) {
@@ -288,7 +299,8 @@ export function unwrapWorkReportEnvelope(
         contractViolation: "final answer has no fenced work_report envelope",
       };
     }
-    text = fenced;
+    text = fenced.body;
+    instructedPrefix = fenced.prefix;
   }
   let parsed: unknown;
   try {
@@ -310,6 +322,19 @@ export function unwrapWorkReportEnvelope(
     };
   }
   const obj = parsed as Record<string, unknown>;
+  // Cursor's current contract makes the complete normal markdown canonical.
+  // The legacy output slot is consulted only for historical fence-only replies;
+  // when both exist the prefix wins deterministically, without length/heading
+  // heuristics that could silently replace a full answer with a summary.
+  if (mode.channel === "instructed_fence" && instructedPrefix?.trim()) {
+    return validateWorkReport(instructedPrefix, obj["work_report"], mode.source);
+  }
+  // A footer-only reply is still a valid report. Read-only modes will reject
+  // its empty deliverable honestly, while a mutating attempt may have produced
+  // a real diff. Only a PRESENT legacy output must satisfy the old string shape.
+  if (mode.channel === "instructed_fence" && obj["output"] === undefined) {
+    return validateWorkReport("", obj["work_report"], mode.source);
+  }
   const extracted = extractOutput(obj, mode);
   if ("violation" in extracted) {
     return {

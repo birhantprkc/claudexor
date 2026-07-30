@@ -147,8 +147,8 @@ export const HarnessCapabilities = z
      * and the attempt finalizer demands a report only from them.
      * - `constrained`: a native schema-constrained transport carries it
      *   (codex --output-schema, claude StructuredOutput tool).
-     * - `validated`: no native flag; the whole final answer is validated JSON
-     *   (cursor's instructed fenced envelope on the existing parse path).
+     * - `validated`: no native flag; an instructed terminal metadata block is
+     *   validated (cursor's fenced WorkReport footer on the existing parse path).
      * - `unsupported`: the route cannot carry a WorkReport; the work_state axis
      *   stays `unverified` (a disclosed absence, never a failure).
      */
@@ -156,7 +156,7 @@ export const HarnessCapabilities = z
       .enum(["constrained", "validated", "unsupported"])
       .default("unsupported")
       .describe(
-        "How the harness carries the D-16 WorkReport envelope: constrained (native schema transport), validated (whole-answer JSON), or unsupported (work_state stays unverified).",
+        "How the harness carries the D-16 WorkReport envelope: constrained (native schema transport), validated (instructed terminal metadata), or unsupported (work_state stays unverified).",
       ),
     /**
      * Where a schema-constrained structured answer surfaces relative to the
@@ -164,9 +164,9 @@ export const HarnessCapabilities = z
      * shape (D-16). `side_tool` (claude --json-schema materializes a
      * StructuredOutput tool; the prose message stays markdown) lets a
      * WorkReport-only envelope ride the tool while the markdown remains the
-     * deliverable. `final_message` (codex --output-schema, cursor fenced JSON)
-     * consumes the final message, so a no-caller WorkReport envelope must wrap
-     * the markdown deliverable as `output: string`.
+     * deliverable. `final_message` (codex --output-schema) consumes the final
+     * message, so its no-caller envelope wraps markdown as `output: string`;
+     * Cursor's validated footer is separate.
      */
     structured_output_channel: z
       .enum(["side_tool", "final_message"])
