@@ -7,10 +7,29 @@ import {
   ACP_MAX_REPLAY_TURNS,
   acpTerminalRecordMode,
   acpTerminalSummary,
+  projectAcpRunControls,
   projectTerminalTurnDetail,
   selectReplayTurns,
   typedFetchReason,
 } from "./acp-surface-runner.js";
+
+describe("ACP run-control projection", () => {
+  it("maps the Agent race alias to the strict n vocabulary", () => {
+    expect(
+      projectAcpRunControls({
+        mode: "__acp_session_prompt",
+        runMode: "agent",
+        race: true,
+        harness: "codex",
+      }),
+    ).toEqual({ mode: "agent", n: 2, harnesses: ["codex"] });
+    expect(projectAcpRunControls({ runMode: "agent", race: true, n: 3 })).toEqual({
+      mode: "agent",
+      n: 3,
+    });
+    expect(projectAcpRunControls({ runMode: "agent", race: false })).toEqual({ mode: "agent" });
+  });
+});
 
 const tempDirs: string[] = [];
 afterEach(() => {

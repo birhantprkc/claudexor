@@ -38,8 +38,11 @@ for (let i = 0; i < argv.length; i += 2) {
   if (!argv[i].startsWith("--")) usage();
   options[argv[i].slice(2)] = argv[i + 1];
 }
-for (const name of ["in", "private-key", "authority", "out"]) {
+for (const name of ["in", "sha256", "private-key", "authority", "out"]) {
   if (!options[name]) usage(`missing --${name}`);
+}
+if (!/^[0-9a-f]{64}$/.test(options.sha256)) {
+  usage("--sha256 must be exactly 64 lowercase hexadecimal characters");
 }
 
 try {
@@ -52,14 +55,12 @@ try {
   // The owner-supplied --sha256 binds the signature to the EXACT promoted
   // artifact digest. If the unsigned manifest already carries a sha256 it must
   // match — a divergence means the manifest and the artifact drifted apart.
-  if (options.sha256 !== undefined) {
-    if (unsigned.sha256 !== undefined && unsigned.sha256 !== options.sha256) {
-      throw new Error(
-        `--sha256 ${options.sha256} disagrees with the manifest sha256 ${unsigned.sha256}`,
-      );
-    }
-    unsigned.sha256 = options.sha256;
+  if (unsigned.sha256 !== undefined && unsigned.sha256 !== options.sha256) {
+    throw new Error(
+      `--sha256 ${options.sha256} disagrees with the manifest sha256 ${unsigned.sha256}`,
+    );
   }
+  unsigned.sha256 = options.sha256;
   if (unsigned.archiveName === undefined && typeof unsigned.version === "string") {
     unsigned.archiveName = runtimeArchiveName(unsigned.version);
   }
@@ -94,7 +95,7 @@ function atomicWrite(path, data) {
 function usage(detail = "") {
   if (detail) console.error(detail);
   console.error(
-    "usage: sign-runtime-manifest.mjs --in UNSIGNED.json [--sha256 HEX] --private-key FILE --authority release/runtime-update-authority.json --out SIGNED.json",
+    "usage: sign-runtime-manifest.mjs --in UNSIGNED.json --sha256 HEX --private-key FILE --authority release/runtime-update-authority.json --out SIGNED.json",
   );
   process.exit(2);
 }

@@ -113,24 +113,20 @@ After review, `publish` accepts only an annotated stable tag on the exact
 `origin/main` commit plus a base64 signed review attestation. The workflow
 verifies its Ed25519 signature against the pinned public release-review key
 before reading any review claims, then recomputes the commit tree and
-validates the attestation's payload for its schema: schemaVersion 4 (the
-current contract) binds the candidate SHA/tree, the full-gate receipt
-digest, and the panel reviewer report digests with non-blocking verdicts;
-a packet-split wave names each sub-wave on its panel slots
-(`triad@<subwave>=model`), must bind a FULL triad+scope panel per sub-wave,
-and must embed the `review-coverage-check --receipt` coverage receipt. The
-sealer recomputes both role-specific prompt digests, reconstructs the packet's
-complete sealed diff from each role's exact slice union, and proves every
-required hand-written file appears whole exactly once beside its diff, so one
-sub-wave's report can never stand in for the union — the workflow enforces the structural
-floors defined by the Release review protocol in `docs/CHECKLISTS.md`,
-where the panel composition, wave discipline, reviewer count, and round
-bound live as process law. The outer attestation remains schema v4; its signed
-inner coverage receipt is independently versioned and current publish accepts
-only coverage schema v2. Historical signed outer-v4/coverage-v1 bytes remain
+validates the current schemaVersion 5 payload. It binds the candidate SHA/tree,
+exact `pnpm release:verify` receipt, sealed evidence manifest/diff/wave, and
+exactly two native full-context reviewer artifact sets: Claude Code
+`claude-fable-5` at `max` and Codex `gpt-5.6-sol` at `xhigh`, both on verified
+vendor-native local sessions. The sealer recomputes every evidence and reviewer
+digest, verifies requested equals observed model/effort, refuses auth switches
+or ignored settings, requires live external context and web policy, distinct
+overlapping sessions of at least one second, and requires each strict completion
+envelope to derive a non-blocking `pass` or `warn` verdict. The v5 attestation
+seals the final confirmation pair; the initial review and adjudication remain
+ledgered evidence. Panel composition and wave discipline
+live only in `docs/CHECKLISTS.md`. Historical signed schemas 2, 3, and 4 remain
 cryptographically verifiable as archives but fail current semantic publish
-validation. Older outer schemas (v2's six-slot panel, v3 without packet-split
-coverage) are likewise not accepted for new seals.
+validation.
 Only after that authority check does the workflow promote the candidate run's
 DMG, ZIP, and SBOM byte-for-byte instead of rebuilding the app; publish
 generates only the signed runtime manifest, review attestation, and final
@@ -228,16 +224,47 @@ blocker contract, wave discipline) is defined ONCE, in `docs/CHECKLISTS.md`
 Do not hand-author the attestation JSON. Run
 `scripts/seal-owner-review-attestation.mjs` with the gate receipt
 (`scripts/run-full-gate-receipt.mjs` runs `pnpm release:verify` and seals
-it), the reviewer report files + verdicts, the external 0600 private key,
-the tracked `release/review-attestation-authority.json`, and an external
-output path; it refuses blocking verdicts and structural-floor violations,
-and can emit the base64 transport with `--base64-out`.
+it), the external sealed evidence directory, Claudexor's external native-review
+artifacts directory, the external 0600 private key, the tracked
+`release/review-attestation-authority.json`, and a new external output path:
 
-The RETIRED schemaVersion-2 six-slot protocol stays verifiable for
-already-sealed evidence; its orchestration machinery was deleted in v3.0.0
-(the OpenRouter transport was refitted for the current triad+scope wave).
-Never put raw transcripts, the private key, or secrets in the repository or
-workflow input.
+```bash
+node scripts/run-full-gate-receipt.mjs <external-gate-dir>
+
+CLAUDEXOR_REVIEW_WAVE_ID=<uuid-v4> \
+  ~/.claudexor/node/bin/node <external-gate-dir>/claudexor.bundle.cjs review \
+  --evidence-dir <sealed-evidence-dir> \
+  --artifacts-dir <native-review-artifacts-dir> \
+  --candidate-sha <candidate-sha> \
+  --candidate-tree <candidate-tree> \
+  --packet-manifest-digest <manifest-sha256> \
+  --reviewer-panel claude=claude-fable-5:max \
+  --reviewer-panel codex=gpt-5.6-sol:xhigh
+
+node scripts/seal-owner-review-attestation.mjs \
+  --full-gate-receipt <external-gate-dir>/full-gate-receipt.json \
+  --evidence-dir <sealed-evidence-dir> \
+  --review-artifacts <native-review-artifacts-dir> \
+  --private-key ~/.claudexor/keys/review-attestation-ed25519.pem \
+  --authority release/review-attestation-authority.json \
+  --out <attestation.json> \
+  --base64-out <attestation.b64>
+```
+
+The signer executes only receipt-bound candidate verifier bytes after the exact
+full gate passes. That gate writes a tiny self-contained verifier and a copy of
+the packaged app's self-contained `claudexor.bundle.cjs` beside the receipt in
+an output directory outside the candidate and evidence/artifact trees, with
+both byte digests in the receipt. Invoke formal review through
+that copied CLI. The sealer imports only the verified verifier bytes, checks
+the recorded CLI realpath and digest, replays normalized message events into
+the exact transcript, and derives verdicts from the strict envelope; callers
+cannot supply a report digest or verdict. A failed frozen slot is not retried
+inside its session: rerun it with fresh artifacts and a fresh wave. The retired
+packet-split OpenRouter transport and its broad coverage/runtime-bundle tools
+are deleted, not fallback paths. Schemas 2-4 stay signature-verifiable only for
+already-sealed historical evidence. Never put raw transcripts, the private
+key, or secrets in the repository or workflow input.
 
 Release review is cumulative and SHA-bound. First commit a clean candidate,
 then freeze its exact tree. The panel reviews that frozen SHA against the

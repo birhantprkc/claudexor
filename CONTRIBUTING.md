@@ -51,12 +51,19 @@ packaging checks. CI remains authoritative for signed/notarized artifacts.
 
 Review authority is the cumulative diff on an exact, clean, committed and
 frozen candidate SHA, reviewed under the Owner-review release protocol in
-[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (the exact slot-bound triad plus
-scope reviewer panel, one wave plus one confirmation wave under the owner's
-decision, sealed schema-v4 attestation — Bible INV-125); any tracked
+[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (the exact native Fable and Codex
+full-context pair, one wave plus one confirmation wave under the owner's
+decision, sealed schema-v5 attestation — Bible INV-125); any tracked
 mutation invalidates the evidence
 and requires a new freeze. Claudexor intentionally has no per-commit review
 hook or staged-diff review authority.
+
+Reviewer findings are hypotheses, not patches to apply on trust. Reproduce an
+accepted issue, trace its root and canonical owner, search sibling surfaces,
+and fix the class only when multiple surfaces or a broken SSOT boundary prove
+it; otherwise make the smallest local correction. Reviewers receive the whole
+candidate and evidence so architecture stays visible; do not trade that context
+for many tiny batches.
 
 **External contributors:** the CI gate suite above is what your PR must pass.
 The maintainer runs the frozen-SHA owner-review wave; contributors are not

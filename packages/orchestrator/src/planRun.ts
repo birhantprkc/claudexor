@@ -17,6 +17,7 @@ import { cancelledResult, writeFailure } from "./runTerminals.js";
 import { type BudgetDenial, budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import { extractPlanQuestions } from "./planQuestions.js";
 import { emitPlanTerminal, resolvePlanTerminalFacts } from "./planTerminal.js";
+import { dominantHarnessFailureCategory, harnessFailureNextActions } from "./harnessFailure.js";
 import {
   buildCouncilProjection,
   councilDegradationNote,
@@ -24,14 +25,8 @@ import {
   councilMergePrompt,
   resolveCouncilWidth,
 } from "./council.js";
-import type {
-  OrchestratorResult,
-  PlannerAttemptArgs,
-  PlannerAttemptOutcome,
-  RoutedAdapter,
-  RunInput,
-} from "./orchestrator.js";
-
+import type { OrchestratorResult, RoutedAdapter, RunInput } from "./orchestrator.js";
+import type { PlannerAttemptArgs, PlannerAttemptOutcome } from "./plannerAttempt.js";
 /**
  * Council plan strategy (INV-031 / D31) + the shared plan-run finalize/failure
  * tails, extracted from orchestrator.ts so the god-file does not absorb the new
@@ -522,9 +517,11 @@ export function writePlanHarnessFailure(
   const preserved = planAttempts
     .filter((p) => p.status === "success")
     .map((p) => `${p.attemptId}/${p.harnessId}`);
-  const message = budgetMapping
-    ? budgetMapping.safeMessage
-    : `${failedLines.length > 0 ? failedLines.join("\n") : fallbackMessage}${preserved.length > 0 ? `\nPreserved drafts: ${preserved.join(", ")}` : ""}`.trim();
+  const message = redactSecrets(
+    budgetMapping
+      ? budgetMapping.safeMessage
+      : `${failedLines.length > 0 ? failedLines.join("\n") : fallbackMessage}${preserved.length > 0 ? `\nPreserved drafts: ${preserved.join(", ")}` : ""}`.trim(),
+  );
   deps.writeRunTelemetry(
     store,
     paths,
@@ -549,13 +546,16 @@ export function writePlanHarnessFailure(
       }),
     );
   } else {
+    const harnessCategory = dominantHarnessFailureCategory(
+      ctx.attemptTelemetries.flatMap((attempt) => attempt.telemetry.transientFailures),
+    );
     writeFailure(store, paths, {
       phase: "harness",
       category: blocked ? "policy" : "harness_error",
       safeMessage: message,
       eventRefs: planAttempts.map((p) => `attempts/${p.attemptId}/events.jsonl`),
       runDir: paths.root,
-      nextActions: ["Open diagnostics", "Check harness authentication", "Retry after setup"],
+      nextActions: harnessFailureNextActions(harnessCategory),
     });
   }
   // D-16 r9: when NO planner blocked/budget-failed and some ran out of

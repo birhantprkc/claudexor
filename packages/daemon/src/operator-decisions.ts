@@ -10,6 +10,11 @@ export interface OperatorDecisionRecord {
   decidedAt: string;
 }
 
+export interface RecordedOperatorDecision {
+  record: OperatorDecisionRecord;
+  reused: boolean;
+}
+
 const RECORDED = "operator.decision_recorded";
 
 interface DecisionBinding {
@@ -41,25 +46,34 @@ export class OperatorDecisionStore {
     return decision ? structuredClone(decision) : null;
   }
 
+  findByIdempotency(
+    runId: string,
+    idempotency: { key: string; client: string; request: unknown },
+  ): OperatorDecisionRecord | null {
+    const binding = decisionBinding(this.journal.options.partition, runId, idempotency);
+    if (!binding) return null;
+    const prior = this.byKey.get(binding.keyDigest);
+    if (!prior) return null;
+    if (prior.requestDigest !== binding.requestDigest) throw conflict();
+    const existing = this.byRun.get(prior.runId);
+    if (!existing) throw new Error("operator decision idempotency index is dangling");
+    return structuredClone(existing);
+  }
+
   record(
     input: OperatorDecisionRecord,
     idempotency?: { key: string; client: string; request: unknown },
-  ): OperatorDecisionRecord {
+  ): RecordedOperatorDecision {
     const decision = parseDecision(input);
     const binding = decisionBinding(this.journal.options.partition, decision.runId, idempotency);
     if (binding) {
-      const prior = this.byKey.get(binding.keyDigest);
-      if (prior) {
-        if (prior.requestDigest !== binding.requestDigest) throw conflict();
-        const existing = this.byRun.get(prior.runId);
-        if (!existing) throw new Error("operator decision idempotency index is dangling");
-        return structuredClone(existing);
-      }
+      const existing = this.findByIdempotency(decision.runId, idempotency!);
+      if (existing) return { record: existing, reused: true };
     }
     const mutation = { decision, ...(binding ? { idempotency: binding } : {}) };
     this.journal.append(RECORDED, mutation);
     this.apply(mutation);
-    return structuredClone(decision);
+    return { record: structuredClone(decision), reused: false };
   }
 
   validateProjection(): void {

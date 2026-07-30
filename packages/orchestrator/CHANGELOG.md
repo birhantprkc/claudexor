@@ -5,6 +5,9 @@
 ### Patch Changes
 
 - Centralize Plan attachment and pool admission, finite-or-disabled interactions, credential readiness and rotation, Git preconditions, useful-progress inactivity, and terminal RunFacts presentation.
+- Bound Deep Research synthesis from admission through teardown, preserve
+  terminal usage/death-proof evidence without accepting late output, and settle
+  every admitted planner, scout, council, and continuation path exactly once.
 - @claudexor/arbitration@3.2.0
 - @claudexor/artifact-store@3.2.0
 - @claudexor/budget@3.2.0

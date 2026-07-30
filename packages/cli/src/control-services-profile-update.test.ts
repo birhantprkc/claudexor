@@ -68,6 +68,19 @@ vi.mock("./registry.js", async (importOriginal) => {
   };
 });
 
+vi.mock("@claudexor/workspace", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@claudexor/workspace")>();
+  return {
+    ...original,
+    probeGitCapability: async () => ({
+      status: "missing",
+      version: null,
+      detail: "No executable named git was found on PATH.",
+      remediation: "Install Git and make it available on PATH, then retry.",
+    }),
+  };
+});
+
 // PATCH /credential-profiles/:harness/:id (the Enabled toggle of the accounts
 // symmetry, INV-135) + the per-harness accounts-authority projection served on
 // the listing so no surface re-derives Active/native truth.

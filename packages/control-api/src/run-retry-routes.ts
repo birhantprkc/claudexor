@@ -15,12 +15,14 @@ import type {
   DaemonRunRecord,
 } from "./daemon-server.js";
 import { recordTurnEnqueueFailure, turnEnqueueProblemResponse } from "./thread-turn-routes.js";
+import { resolveThreadRecoveryTurn } from "./thread-recovery.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
 import * as runStart from "./run-start.js";
 
 type RetryServices = Pick<
   NonNullable<DaemonControlApiOptions["services"]>,
   | "createThreadTurn"
+  | "findThreadTurnByIdempotency"
   | "setTurnEnqueueError"
   | "threadDetail"
   | "validateResources"
@@ -32,8 +34,9 @@ export interface RunRetryRouteContext {
   services?: RetryServices;
   findRun(id: string): Promise<DaemonRunRecord | null>;
   waitForRunStart(jobId: string): Promise<DaemonRunRecord>;
+  serializeThreadMutation<T>(threadId: string, work: () => Promise<T>): Promise<T>;
   json(response: ServerResponse, status: number, body: unknown): void;
-  requestError(response: ServerResponse, error: unknown): void;
+  requestError(response: ServerResponse, error: unknown, fallbackStatus?: 400 | 500): void;
 }
 
 export async function handleRunRetryRoute(
@@ -78,11 +81,12 @@ async function exactRetry(
   }
   let idempotencyKey: string;
   let params: ControlRunStartRequest;
+  let sourceTurnProvenance: SourceTurnProvenance = {};
   try {
     idempotencyKey = runStart.requiredIdempotencyKey(req);
-    const parsed = ControlRunStartRequest.parse(
-      await sourceParamsWithThreadAttachments(ctx, source),
-    );
+    const replay = await sourceReplayInput(ctx, source);
+    sourceTurnProvenance = replay.turn;
+    const parsed = ControlRunStartRequest.parse(replay.params);
     const { turnId: _turnId, retryOf: _retryOf, ...original } = parsed;
     // QA-035: Exact Retry replays the IMMUTABLE original request. The stored
     // params omit any model/effort the caller left to settings, so re-reading
@@ -101,67 +105,136 @@ async function exactRetry(
       parentRunId: source.runId ?? source.id,
       retryOf: source.runId ?? source.id,
     });
-    await ctx.services?.validateResources?.(params.attachments ?? []);
-    await ctx.services?.preflightRunRequirements?.(params);
   } catch (error) {
     return ctx.requestError(res, error);
   }
   const sourceRunId = source.runId ?? source.id;
   const threadId = typeof params.threadId === "string" ? params.threadId : null;
-  let retryTurnId: string | undefined;
-  if (threadId && ctx.services?.createThreadTurn) {
-    const turn = (await ctx.services.createThreadTurn(threadId, params.prompt, {
-      kind: "followup",
-      parentRunId: sourceRunId,
-      planRunId: params.planRunId ?? null,
-      attachments: params.attachments,
-      idempotency: {
-        key: idempotencyKey,
-        client: "control-api",
-        request: { retryOf: sourceRunId },
-      },
-    })) as { id: string };
-    retryTurnId = turn.id;
-  }
-  const request = { ...params, ...(retryTurnId ? { turnId: retryTurnId } : {}) };
-  let job: { id: string };
+  const idempotencyRequest = { retryOf: sourceRunId };
+  // A durable daemon command is the canonical replay owner. Probe it before
+  // any mutable resource/Git/harness preflight so a later environment change
+  // cannot replace an already-accepted handle with a new admission error.
+  let preflightStarted = false;
   try {
-    job = await ctx.daemon.enqueue(request, {
-      idempotencyKey,
-      clientId: "control-api",
-      operation: "run.retry",
-      idempotencyRequest: { retryOf: sourceRunId },
-    });
-  } catch (error) {
-    const problem = recordTurnEnqueueFailure(ctx.services?.setTurnEnqueueError, retryTurnId, error);
-    const status =
-      error && typeof error === "object" && "status" in error
-        ? Number((error as { status: number }).status)
-        : 500;
-    return ctx.json(
-      res,
-      status,
-      turnEnqueueProblemResponse(problem, {
-        ...(threadId ? { threadId } : {}),
-        ...(retryTurnId ? { turnId: retryTurnId } : {}),
-      }),
+    const prior = await runStart.findAcceptedAroundPreflight(
+      () =>
+        ctx.daemon.findAccepted?.(params, {
+          idempotencyKey,
+          clientId: "control-api",
+          operation: "run.retry",
+          idempotencyRequest,
+        }) ?? Promise.resolve(null),
+      async () => {
+        preflightStarted = true;
+        await ctx.services?.validateResources?.(params.attachments ?? []);
+        await ctx.services?.preflightRunRequirements?.(params);
+      },
     );
+    if (prior) {
+      const priorParams = paramsRecord(prior);
+      const priorTurnId =
+        typeof priorParams["turnId"] === "string" ? priorParams["turnId"] : undefined;
+      return await respondToExactRetryJob(ctx, res, sourceRunId, prior, threadId, priorTurnId);
+    }
+  } catch (error) {
+    return ctx.requestError(res, error, preflightStarted ? undefined : 500);
   }
-  const accepted = await ctx.waitForRunStart(job.id);
+  const retry = async (): Promise<void> => {
+    let retryTurnId: string | undefined;
+    if (threadId) {
+      const turn = await resolveThreadRecoveryTurn(
+        ctx.daemon,
+        ctx.services,
+        source,
+        threadId,
+        params.prompt,
+        {
+          kind: "followup",
+          parentRunId: sourceRunId,
+          planRunId: params.planRunId ?? null,
+          planHash: sourceTurnProvenance.planHash ?? null,
+          planOverridden: sourceTurnProvenance.planOverridden === true,
+          attachments: params.attachments,
+        },
+        {
+          key: idempotencyKey,
+          client: "control-api",
+          request: idempotencyRequest,
+        },
+        (turnId) =>
+          ctx.daemon.findAccepted?.(
+            { ...params, turnId },
+            {
+              idempotencyKey,
+              clientId: "control-api",
+              operation: "run.retry",
+              idempotencyRequest,
+            },
+          ) ?? Promise.resolve(null),
+      );
+      retryTurnId = turn.id;
+    }
+    const request = { ...params, ...(retryTurnId ? { turnId: retryTurnId } : {}) };
+    let job: { id: string };
+    try {
+      job = await ctx.daemon.enqueue(request, {
+        idempotencyKey,
+        clientId: "control-api",
+        operation: "run.retry",
+        idempotencyRequest,
+      });
+    } catch (error) {
+      const problem = recordTurnEnqueueFailure(
+        ctx.services?.setTurnEnqueueError,
+        retryTurnId,
+        error,
+      );
+      const status =
+        error && typeof error === "object" && "status" in error
+          ? Number((error as { status: number }).status)
+          : 500;
+      return ctx.json(
+        res,
+        status,
+        turnEnqueueProblemResponse(problem, {
+          ...(threadId ? { threadId } : {}),
+          ...(retryTurnId ? { turnId: retryTurnId } : {}),
+        }),
+      );
+    }
+    return respondToExactRetryJob(ctx, res, sourceRunId, job, threadId, retryTurnId);
+  };
+  try {
+    return await (threadId ? ctx.serializeThreadMutation(threadId, retry) : retry());
+  } catch (error) {
+    return ctx.requestError(res, error, 500);
+  }
+}
+
+async function respondToExactRetryJob(
+  ctx: RunRetryRouteContext,
+  res: ServerResponse,
+  sourceRunId: string,
+  job: { id: string },
+  threadId: string | null,
+  retryTurnId?: string,
+): Promise<void> {
+  let accepted: DaemonRunRecord;
+  try {
+    accepted = await ctx.waitForRunStart(job.id);
+  } catch (error) {
+    return ctx.json(res, 500, {
+      error: `retry job ${job.id} was accepted but its start could not be observed: ${error instanceof Error ? error.message : String(error)}`,
+      jobId: job.id,
+      retryOf: sourceRunId,
+      ...(threadId ? { threadId } : {}),
+      ...(retryTurnId ? { turnId: retryTurnId } : {}),
+    });
+  }
   if (!accepted.runId && TERMINAL_STATES.has(accepted.state)) {
     // The replayed job died BEFORE it bound a run (e.g. the trust gate's typed
     // 403). A 202 here would hand the caller a durable handle for a run that
-    // will never exist, and `claudexor retry` would exit 0 on a refusal. POST
-    // /runs and POST /threads/:id/turns already project a pre-start terminal
-    // as its typed failure; Exact Retry was the one surface that did not.
-    //
-    // The status mapping deliberately follows POST /runs
-    // (`runStart.unboundRunStartResponse`): the persisted `errorStatus`
-    // verbatim, otherwise 500. The sibling turn surface
-    // (`preStartRefusalStatus` in thread-turn-routes.ts) additionally maps a
-    // status-less `trust_full_access_required` to 403, so a trust refusal
-    // recorded WITHOUT an errorStatus is mapped differently by the two
-    // surfaces. Unifying them is out of scope here.
+    // will never exist, and `claudexor retry` would exit 0 on it.
     const { status, body } = runStart.unboundRunStartResponse(accepted, true, {
       retryOf: sourceRunId,
       ...(threadId ? { threadId } : {}),
@@ -186,9 +259,7 @@ async function runAgain(ctx: RunRetryRouteContext, id: string, res: ServerRespon
   const source = await ctx.findRun(id);
   if (!source) return ctx.json(res, 404, { error: "no such run" });
   try {
-    const parsed = ControlRunStartRequest.parse(
-      await sourceParamsWithThreadAttachments(ctx, source),
-    );
+    const parsed = ControlRunStartRequest.parse((await sourceReplayInput(ctx, source)).params);
     // Strip EVERY server-owned binding, with disclosure: the draft is an
     // editable POST /runs request, and POST /runs 400s threadId/planRef (they
     // belong to the turn pipeline) — surviving here would make the draft
@@ -283,18 +354,22 @@ function readFrozenRouting(source: DaemonRunRecord): {
   return { ...(models ? { models } : {}), ...(efforts ? { efforts } : {}) };
 }
 
-async function sourceParamsWithThreadAttachments(
+interface SourceTurnProvenance {
+  planHash?: string | null;
+  planOverridden?: boolean;
+}
+
+async function sourceReplayInput(
   ctx: RunRetryRouteContext,
   source: DaemonRunRecord,
-): Promise<unknown> {
+): Promise<{ params: Record<string, unknown>; turn: SourceTurnProvenance }> {
   const params =
     source.params && typeof source.params === "object" && !Array.isArray(source.params)
       ? ({ ...source.params } as Record<string, unknown>)
       : {};
-  if (params["attachments"] !== undefined) return params;
   const threadId = typeof params["threadId"] === "string" ? params["threadId"] : null;
   const turnId = typeof params["turnId"] === "string" ? params["turnId"] : null;
-  if (!threadId || !turnId || !ctx.services?.threadDetail) return params;
+  if (!threadId || !turnId || !ctx.services?.threadDetail) return { params, turn: {} };
   const detail = await ctx.services.threadDetail(threadId);
   const turn = detail.turns.find(
     (candidate) =>
@@ -302,8 +377,14 @@ async function sourceParamsWithThreadAttachments(
       typeof candidate === "object" &&
       !Array.isArray(candidate) &&
       (candidate as { id?: unknown }).id === turnId,
-  ) as { attachments?: unknown } | undefined;
-  if (Array.isArray(turn?.attachments)) {
+  ) as
+    | {
+        attachments?: unknown;
+        plan_hash?: unknown;
+        plan_readiness_overridden?: unknown;
+      }
+    | undefined;
+  if (params["attachments"] === undefined && Array.isArray(turn?.attachments)) {
     params["attachments"] = turn.attachments.map((attachment) => ({
       resourceId:
         attachment && typeof attachment === "object"
@@ -311,5 +392,11 @@ async function sourceParamsWithThreadAttachments(
           : undefined,
     }));
   }
-  return params;
+  return {
+    params,
+    turn: {
+      planHash: typeof turn?.plan_hash === "string" ? turn.plan_hash : null,
+      planOverridden: turn?.plan_readiness_overridden === true,
+    },
+  };
 }

@@ -1,6 +1,7 @@
 import { type Socket, connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
+import type { RuntimeReplacementTarget } from "./daemon-shutdown-rpc.js";
 
 /** Thin JSON-RPC client for the daemon over a Unix socket. */
 export class DaemonClient {
@@ -72,7 +73,7 @@ export class DaemonClient {
       operation?: string;
     } = {},
   ) {
-    return this.call<{ id: string; state: string }>("claudexor.enqueue", {
+    return this.call<{ id: string; state: string; reused: boolean }>("claudexor.enqueue", {
       request,
       idempotencyKey: options.idempotencyKey ?? randomUUID(),
       clientId: options.clientId ?? "daemon-client",
@@ -102,13 +103,19 @@ export class DaemonClient {
   }
   findAccepted(
     request: unknown,
-    options: { idempotencyKey: string; clientId?: string; operation?: string },
+    options: {
+      idempotencyKey: string;
+      clientId?: string;
+      operation?: string;
+      idempotencyRequest?: unknown;
+    },
   ) {
     return this.call<Awaited<ReturnType<DaemonClient["status"]>> | null>("claudexor.findAccepted", {
       request,
       idempotencyKey: options.idempotencyKey,
       clientId: options.clientId ?? "daemon-client",
       operation: options.operation,
+      idempotencyRequest: options.idempotencyRequest,
     });
   }
   list() {
@@ -141,7 +148,10 @@ export class DaemonClient {
   shutdown() {
     return this.call("claudexor.shutdown");
   }
-  shutdownForRuntimeReplacement() {
-    return this.call<{ ok: true; fenced: true }>("claudexor.shutdownForRuntimeReplacement");
+  shutdownForRuntimeReplacement(expectedTarget: RuntimeReplacementTarget) {
+    return this.call<{ ok: true; fenced: true; targetBound: true }>(
+      "claudexor.shutdownForRuntimeReplacement",
+      expectedTarget,
+    );
   }
 }

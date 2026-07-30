@@ -18,36 +18,45 @@ export function resetRunListFingerprintProbeCountForTests(): void {
 /** Fingerprint only the mutable delivery overlay for settled runs; all other
  * terminal artifacts are immutable. Active runs retain the complete set. */
 export function summaryFingerprint(rec: DaemonRunRecord): string {
-  const mtime = (rel: string): number => {
+  const fileIdentity = (rel: string): string => {
     fingerprintProbeCount++;
-    if (!rec.runDir) return 0;
+    if (!rec.runDir) return "0";
     const path = safeArtifactPath(rec.runDir, rel);
-    if (!path) return 0;
+    if (!path) return "0";
     try {
-      return statSync(path).mtimeMs;
+      const stat = statSync(path, { bigint: true });
+      return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
     } catch {
-      return 0;
+      return "0";
     }
   };
   const identity = [rec.state, paramsFingerprint(rec), rec.finishedAt ?? "", rec.error ?? ""];
   if (TERMINAL_STATES.has(rec.state)) {
-    return [...identity, mtime("final/delivery_state.yaml")].join("|");
+    // Delivery is the only ordinary mutable terminal overlay. Retention is the
+    // other sanctioned transition: it atomically replaces the whole run tree
+    // with tombstone.yaml, so that marker must invalidate a previously cached
+    // ready summary without re-statting every immutable terminal artifact.
+    return [
+      ...identity,
+      fileIdentity("final/delivery_state.yaml"),
+      fileIdentity("tombstone.yaml"),
+    ].join("|");
   }
   return [
     ...identity,
-    mtime("events.jsonl"),
-    mtime("arbitration/decision.yaml"),
-    mtime("final/telemetry.yaml"),
-    mtime("final/run_facts.yaml"),
-    mtime("final/failure.yaml"),
-    mtime("final/summary.md"),
-    mtime("final/answer.md"),
-    mtime("final/plan.md"),
-    mtime("final/explore.md"),
-    mtime("final/report.md"),
-    mtime("final/patch.diff"),
-    mtime("final/work_product.yaml"),
-    mtime("final/delivery_state.yaml"),
+    fileIdentity("events.jsonl"),
+    fileIdentity("arbitration/decision.yaml"),
+    fileIdentity("final/telemetry.yaml"),
+    fileIdentity("final/run_facts.yaml"),
+    fileIdentity("final/failure.yaml"),
+    fileIdentity("final/summary.md"),
+    fileIdentity("final/answer.md"),
+    fileIdentity("final/plan.md"),
+    fileIdentity("final/explore.md"),
+    fileIdentity("final/report.md"),
+    fileIdentity("final/patch.diff"),
+    fileIdentity("final/work_product.yaml"),
+    fileIdentity("final/delivery_state.yaml"),
   ].join("|");
 }
 

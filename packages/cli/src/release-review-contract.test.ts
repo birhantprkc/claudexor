@@ -1,1244 +1,635 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { buildSync } from "esbuild";
+import { FROZEN_REVIEW_EVIDENCE_FILES } from "../../context/src/evidence.js";
 import { describe, expect, it } from "vitest";
 import {
+  ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS,
   OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
-  OWNER_REVIEW_MAX_ROUNDS,
   OWNER_REVIEW_PROTOCOL,
-  RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS,
-  REQUIRED_SCOPE_MODEL,
-  REQUIRED_TRIAD_MODELS,
-  TRIAD_ITEMS,
-  buildTouchedFilePack,
-  compactRepositoryAtlas,
-  completionTermination,
-  exactPanelMatch,
-  parseChecklistJson,
+  REQUIRED_NATIVE_REVIEWERS,
+  decodeReviewUtf8,
   pathIsWithin,
-  panelLockText,
-  blockerContractGaps,
-  releaseReviewDecision,
-  reviewPromptContextPreflight,
-  reviewSplitOptionContract,
-  reviewDecisionLivenessFloors,
   releaseAttestationSigningBytes,
-  livenessFloorMs,
-  reviewerLiveness,
-  validateFrozenReviewBinding,
-  validateNewReviewOutput,
-  validatePanelLock,
+  validateFullGateReceipt,
   validateReleaseAttestation,
-  validateReleaseReviewRuntimeArtifacts,
-  verifyReleaseAttestationSignature,
   validateReleaseInput,
-  validateSlotRecord,
-  validateChecklistResponse,
+  verifyArchivedReleaseAttestationSignature,
 } from "../../../scripts/lib/release-review-contract.mjs";
-import {
-  snapshotReleaseReviewRuntimeArtifacts,
-  verifyReleaseReviewRuntimeArtifacts,
-} from "../../../scripts/lib/release-review-runtime.mjs";
 
-function cleanRows() {
-  return TRIAD_ITEMS.map((item) => ({
-    item,
-    verdict: "PASS",
-    severity: "advisory",
-    reason: `${item} checked`,
+const candidateSha = "a".repeat(40);
+const candidateTree = "b".repeat(40);
+const digest = "d".repeat(64);
+const expected = { candidateSha, candidateTree, candidateVersion: "3.2.0" };
+const repoRoot = resolve(import.meta.dirname, "../../..");
+const sealer = resolve(repoRoot, "scripts/seal-owner-review-attestation.mjs");
+const fullGateReceiptRunner = resolve(repoRoot, "scripts/run-full-gate-receipt.mjs");
+
+const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+
+function write(path: string, contents: string | Buffer) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents);
+}
+
+function fixture() {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const authority = {
+    schemaVersion: 1,
+    keyId: "fixture-key",
+    algorithm: "Ed25519",
+    publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+  };
+  const reviews = REQUIRED_NATIVE_REVIEWERS.map((required, index) => ({
+    ...required,
+    sessionId: `session-${index + 1}`,
+    externalContextPolicy: "live",
+    toolWebPolicy: "live",
+    observedModel: required.requestedModel,
+    observedSource: index === 0 ? "stream_event" : "transcript",
+    routeProofStatus: "verified",
+    authMode: "local_session",
+    authSwitched: false,
+    effortHonored: true,
+    reviewRuntimeVersion: "3.2.0",
+    reviewRuntimeBuildSha: candidateSha,
+    reviewRuntimeEntrySha256: digest,
+    startedAt: `2026-07-30T00:00:0${index}.000Z`,
+    completedAt: `2026-07-30T00:00:0${index + 5}.000Z`,
+    durationMs: 5_000,
+    promptSha256: digest,
+    reportSha256: digest,
+    metadataSha256: digest,
+    eventsSha256: digest,
+    parsedSha256: digest,
+    verdict: index === 0 ? "pass" : "warn",
   }));
-}
-
-type ChecklistFinding = ReturnType<typeof validateChecklistResponse>["findings"][number];
-type SlotRecord = {
-  model_id?: string;
-  status: string;
-  duration_ms?: number;
-  findings?: ChecklistFinding[];
-};
-
-/** A full live triad panel: three responded slots with plausible durations. */
-function liveTriad(findings: ChecklistFinding[]): SlotRecord[] {
-  return REQUIRED_TRIAD_MODELS.map((model) => ({
-    model_id: model,
-    status: "responded",
-    duration_ms: 120_000,
-    findings,
-  }));
-}
-
-function liveScope(findings: ChecklistFinding[] = []): SlotRecord {
-  return { status: "responded", duration_ms: 120_000, findings };
-}
-
-describe("release review fail-closed contract", () => {
-  it("binds the exact ordered release-review runtime artifacts and detects drift", () => {
-    const root = mkdtempSync(join(tmpdir(), "claudexor-review-runtime-"));
-    try {
-      for (const [index, path] of RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.entries()) {
-        const absolute = join(root, path);
-        mkdirSync(join(absolute, ".."), { recursive: true });
-        writeFileSync(absolute, `artifact-${index}\n`);
-      }
-      const snapshot = snapshotReleaseReviewRuntimeArtifacts(root);
-      expect(validateReleaseReviewRuntimeArtifacts(snapshot)).toEqual([]);
-      expect(verifyReleaseReviewRuntimeArtifacts(root, snapshot)).toEqual(snapshot);
-      expect(
-        validateReleaseReviewRuntimeArtifacts([{ ...snapshot[0], path: "other-runtime.mjs" }]).join(
-          " ",
-        ),
-      ).toContain(RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS[0]);
-      expect(validateReleaseReviewRuntimeArtifacts([...snapshot, snapshot[0]]).join(" ")).toContain(
-        "extra entries",
-      );
-
-      const runtimePath = join(root, RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS[0]);
-      writeFileSync(runtimePath, "mutated\n");
-      expect(() => verifyReleaseReviewRuntimeArtifacts(root, snapshot)).toThrow(/drifted/);
-      rmSync(runtimePath);
-      const target = join(root, "runtime-target.mjs");
-      writeFileSync(target, "artifact-0\n");
-      symlinkSync(target, runtimePath);
-      expect(() => verifyReleaseReviewRuntimeArtifacts(root, snapshot)).toThrow();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("serializes every repository-atlas path compactly without delimiter ambiguity", () => {
-    const rows = [
-      { path: "plain.ts", bytes: 12 },
-      { path: "space and unicode/кот.ts", bytes: 0 },
-      { path: "control/tab\tnewline\n.ts", bytes: 34 },
-      { path: "unreadable.bin", bytes: null },
-    ];
-    const encoded = compactRepositoryAtlas(rows);
-    const decoded = encoded.split("\n").map((line) => {
-      const delimiter = line.indexOf("\t");
-      const size = line.slice(0, delimiter);
-      return {
-        path: JSON.parse(line.slice(delimiter + 1)),
-        bytes: size === "?" ? null : Number(size),
-      };
-    });
-
-    expect(decoded).toEqual(rows);
-    expect(encoded).not.toContain("control/tab\tnewline\n.ts");
-    expect(Buffer.byteLength(encoded)).toBeLessThan(
-      Buffer.byteLength(JSON.stringify(rows, null, 2)),
-    );
-  });
-
-  it("accepts only full-SHA candidate or stable-tag publish inputs", () => {
-    expect(validateReleaseInput("candidate", "a".repeat(40)).ok).toBe(true);
-    expect(validateReleaseInput("candidate", "main").ok).toBe(false);
-    expect(validateReleaseInput("publish", "v2.0.0").ok).toBe(true);
-    expect(validateReleaseInput("publish", "v2.0.0-rc.1").ok).toBe(false);
-    expect(validateReleaseInput("publish", "v2.0.0; echo nope").ok).toBe(false);
-  });
-
-  it("accepts only the exact ordered model panel", () => {
-    expect(exactPanelMatch(REQUIRED_TRIAD_MODELS, REQUIRED_SCOPE_MODEL)).toBe(true);
-    expect(exactPanelMatch([...REQUIRED_TRIAD_MODELS].reverse(), REQUIRED_SCOPE_MODEL)).toBe(false);
-    expect(exactPanelMatch(REQUIRED_TRIAD_MODELS, "anthropic/nearest-model")).toBe(false);
-    expect(exactPanelMatch(REQUIRED_TRIAD_MODELS.slice(0, 2), REQUIRED_SCOPE_MODEL)).toBe(false);
-  });
-
-  it("requires a pre-created panel lock bound to the exact frozen candidate", () => {
-    const expected = {
-      candidateSha: "a".repeat(40),
-      candidateTree: "b".repeat(40),
-      packetManifestSha256: "c".repeat(64),
-    };
-    expect(validatePanelLock(null, expected)).toEqual({
-      ok: false,
-      reasons: ["panel lock is missing"],
-    });
-    const parsed = Object.fromEntries(
-      panelLockText(expected)
-        .trim()
-        .split("\n")
-        .map((line) => line.split(/:\s+/, 2)),
-    );
-    expect(validatePanelLock(parsed, expected)).toEqual({ ok: true, reasons: [] });
-    expect(validatePanelLock({ ...parsed, candidate_tree: "d".repeat(40) }, expected)).toEqual({
-      ok: false,
-      reasons: ["candidate tree is not locked"],
-    });
-  });
-
-  it("distinguishes candidate/packet descendants from external review artifacts", () => {
-    expect(pathIsWithin("/candidate", "/candidate")).toBe(true);
-    expect(pathIsWithin("/candidate", "/candidate/reviews/round-1")).toBe(true);
-    expect(pathIsWithin("/candidate", "/candidate-sibling/reviews")).toBe(false);
-    expect(pathIsWithin("/packet", "/external/reviews/round-1")).toBe(false);
-    expect(
-      validateNewReviewOutput("/candidate", "/packet", "/external/reviews/round-1", true),
-    ).toMatchObject({ ok: false, reasons: ["review output already exists"] });
-  });
-
-  it("binds a clean worktree and sealed packet to the exact candidate SHA and tree", () => {
-    const candidateSha = "a".repeat(40);
-    const candidateTree = "b".repeat(40);
-    const clean = {
-      candidateSha,
-      candidateTree,
-      actualSha: candidateSha,
-      actualTree: candidateTree,
-      dirty: false,
-    };
-    expect(validateFrozenReviewBinding(clean)).toEqual({ ok: true, reasons: [] });
-    expect(validateFrozenReviewBinding({ ...clean, dirty: true }).ok).toBe(false);
-    expect(validateFrozenReviewBinding({ ...clean, actualTree: "c".repeat(40) }).ok).toBe(false);
-  });
-
-  it("builds touched-file context from Git blobs without following tracked symlinks", () => {
-    const root = mkdtempSync(join(tmpdir(), "claudexor-review-pack-"));
-    const repo = join(root, "repo");
-    const outside = join(root, "outside.txt");
-    const sentinel = "OUTSIDE_SENTINEL_NOT_IN_GIT";
-    mkdirSync(repo);
-    writeFileSync(outside, sentinel);
-    writeFileSync(join(repo, "regular.txt"), "committed regular content\n");
-    symlinkSync(outside, join(repo, "leak.txt"));
-    const git = (args: string[]): string =>
-      execFileSync("git", args, {
-        cwd: repo,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "fixture",
-          GIT_AUTHOR_EMAIL: "fixture@example.invalid",
-          GIT_COMMITTER_NAME: "fixture",
-          GIT_COMMITTER_EMAIL: "fixture@example.invalid",
-        },
-      });
-    try {
-      git(["init", "-q"]);
-      git(["add", "regular.txt", "leak.txt"]);
-      git(["commit", "-qm", "fixture"]);
-      expect(git(["ls-files", "-s", "--", "leak.txt"])).toMatch(/^120000 /);
-      const pack = buildTouchedFilePack(["regular.txt", "leak.txt"], git, 200_000, 3_000_000);
-      expect(pack).toContain("committed regular content");
-      expect(pack).toContain(outside);
-      expect(pack).not.toContain(sentinel);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it.each([null, "length", "max_tokens", "tool_calls"])(
-    "rejects non-terminal or truncated finish reason %s",
-    (finishReason) => {
-      expect(completionTermination(finishReason).complete).toBe(false);
+  const payload = {
+    contract: "owner-review-v5",
+    reviewProtocol: OWNER_REVIEW_PROTOCOL,
+    candidateSha,
+    candidateTree,
+    evidence: {
+      manifestSha256: digest,
+      diffSha256: digest,
+      reviewWaveId: "11111111-1111-4111-8111-111111111111",
+      metadataSha256: digest,
     },
-  );
-
-  it("accepts only the terminal stop finish reason", () => {
-    expect(completionTermination("stop")).toEqual({ complete: true, error: null });
+    fullGate: {
+      receiptSha256: digest,
+      program: "pnpm",
+      argv: ["pnpm", "release:verify"],
+      exitCode: 0,
+      candidateUnchanged: true,
+      beforeSha: candidateSha,
+      beforeTree: candidateTree,
+      afterSha: candidateSha,
+      afterTree: candidateTree,
+      stdoutSha256: digest,
+      stderrSha256: digest,
+    },
+    reviews,
+    sealedAt: "2026-07-30T00:00:00.000Z",
+  };
+  const resign = (unsigned: any) => ({
+    ...unsigned,
+    signature: sign(null, releaseAttestationSigningBytes(unsigned), privateKey).toString("base64"),
   });
-
-  it("parses a whole JSON-array response with at most one exact json fence", () => {
-    expect(parseChecklistJson(JSON.stringify(cleanRows()))).toEqual(cleanRows());
-    expect(parseChecklistJson(`\`\`\`json\n${JSON.stringify(cleanRows())}\n\`\`\``)).toEqual(
-      cleanRows(),
-    );
-    expect(parseChecklistJson(`review:\n${JSON.stringify(cleanRows())}`)).toBeNull();
-    expect(
-      parseChecklistJson(`before\n\`\`\`json\n${JSON.stringify(cleanRows())}\n\`\`\``),
-    ).toBeNull();
-    expect(
-      parseChecklistJson(
-        `\`\`\`json\n${JSON.stringify(cleanRows())}\n\`\`\`\n\`\`\`json\n[]\n\`\`\``,
-      ),
-    ).toBeNull();
+  const attestation = resign({
+    schemaVersion: OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
+    keyId: authority.keyId,
+    algorithm: "Ed25519",
+    payload,
   });
+  return { attestation, authority, resign };
+}
 
-  it.each([
-    ["empty array", []],
-    ["malformed row", [{ item: "review_protocol", verdict: "PASS" }]],
-    [
-      "unknown checklist item",
-      [{ item: "not_a_check", verdict: "PASS", severity: "advisory", reason: "x" }],
-    ],
-  ])("makes %s quorum-unusable", (_name, value) => {
-    expect(validateChecklistResponse(value, "model", TRIAD_ITEMS).status).not.toBe("responded");
-  });
-
-  it.each([
-    [
-      "an unknown row field",
-      cleanRows().map((row, index) => (index === 0 ? { ...row, unexpected: true } : row)),
-    ],
-  ])("makes a checklist with %s quorum-unusable", (_name, value) => {
-    expect(validateChecklistResponse(value, "model", TRIAD_ITEMS).status).toBe("parse_failure");
-  });
-
-  it("accepts MULTIPLE rows per item — one row per distinct finding (round-16 protocol root-cause)", () => {
-    // The prompt instructs "report every distinct problem as a separate
-    // entry"; the validator must accept exactly that instead of
-    // disqualifying the most thorough reviewers.
-    const rows = [
-      ...cleanRows(),
-      {
-        item: TRIAD_ITEMS[0],
-        verdict: "FAIL",
-        severity: "advisory",
-        reason: "second distinct finding on the same item",
-      },
-      {
-        item: TRIAD_ITEMS[0],
-        verdict: "FAIL",
-        severity: "critical",
-        reason: "third distinct finding on the same item",
-      },
-    ];
-    const result = validateChecklistResponse(rows, "model", TRIAD_ITEMS);
-    expect(result.status).toBe("responded");
-    expect(result.findings).toHaveLength(rows.length);
-    // Every per-finding row survives into the decision input: the critical
-    // FAIL among the repeats still blocks.
-    expect(
-      releaseReviewDecision({
-        triadActors: liveTriad(result.findings),
-        scope: liveScope(),
-      }).passed,
-    ).toBe(false);
-  });
-
-  it("refuses only a RUNAWAY row count, not a deep review", () => {
-    const runaway = Array.from({ length: TRIAD_ITEMS.length * 16 + 1 }, () => ({
-      item: TRIAD_ITEMS[0],
-      verdict: "FAIL",
-      severity: "advisory",
-      reason: "spam",
-    }));
-    expect(validateChecklistResponse(runaway, "model", TRIAD_ITEMS).status).toBe("parse_failure");
-  });
-
-  it("makes a missing checklist item partial rather than silently clean", () => {
-    const result = validateChecklistResponse(cleanRows().slice(0, 2), "model", TRIAD_ITEMS);
-    expect(result.status).toBe("partial");
-    expect(result.missingItems).toEqual(["security_and_secrets"]);
-  });
-
-  it("passes only a FULLY live panel — a failed required slot blocks sealing (v3, no quorum fallback)", () => {
-    const findings = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
-    expect(
-      releaseReviewDecision({ triadActors: liveTriad(findings), scope: liveScope() }).passed,
-    ).toBe(true);
-    const [first, second] = liveTriad(findings);
-    const decision = releaseReviewDecision({
-      triadActors: [first!, second!, { model_id: REQUIRED_TRIAD_MODELS[2], status: "timed_out" }],
-      scope: liveScope(),
-    });
-    expect(decision.passed).toBe(false);
-    expect(decision.reasons.join(" ")).toContain("not live");
-  });
-
-  it("scales the liveness floor with the submitted prompt size", () => {
-    // Megabyte-scale release packets keep the full 30s floor; a small hotfix
-    // packet gets a floor a flash-tier reviewer can legitimately clear, and
-    // instant/cache artifacts stay rejected at every size.
-    expect(livenessFloorMs(2_000_000)).toBe(30_000);
-    expect(livenessFloorMs(500_000)).toBe(20_000);
-    expect(livenessFloorMs(150_000)).toBe(10_000);
-    expect(livenessFloorMs(Number.NaN)).toBe(30_000);
-    expect(livenessFloorMs(0)).toBe(30_000);
-    expect(
-      reviewerLiveness({ status: "responded", duration_ms: 18_000 }, livenessFloorMs(150_000)).live,
-    ).toBe(true);
-    expect(
-      reviewerLiveness({ status: "responded", duration_ms: 900 }, livenessFloorMs(150_000)).live,
-    ).toBe(false);
-  });
-
-  it("refuses context/output overflow before a reviewer request", () => {
-    for (const model of [...REQUIRED_TRIAD_MODELS, REQUIRED_SCOPE_MODEL]) {
-      expect(reviewPromptContextPreflight(model, "small", 60_000).ok).toBe(true);
+describe("native owner-review publishing contract", () => {
+  it("requires the exact successful full-gate receipt shape", () => {
+    const receipt = {
+      program: "pnpm",
+      argv: ["pnpm", "release:verify"],
+      exitCode: 0,
+      gateExitCode: 0,
+      candidateUnchanged: true,
+      before: { head: candidateSha, tree: candidateTree, status: "" },
+      after: { head: candidateSha, tree: candidateTree, status: "" },
+      stdout: { path: "/external/full-gate.stdout.log", sha256: digest },
+      stderr: { path: "/external/full-gate.stderr.log", sha256: digest },
+      reviewRuntimeArtifacts: [
+        { path: "release-review-verifier.mjs", bytes: 1, sha256: digest },
+        { path: "claudexor.bundle.cjs", bytes: 1, sha256: digest },
+      ],
+      reviewRuntimeArtifactError: null,
+      finishedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const identity = { candidateSha, candidateTree };
+    expect(validateFullGateReceipt(receipt, identity)).toEqual([]);
+    for (const mutate of [
+      (value: any) => delete value.gateExitCode,
+      (value: any) => (value.gateExitCode = 1),
+      (value: any) => (value.before.status = " M package.json"),
+      (value: any) => (value.reviewRuntimeArtifactError = "bundle failed"),
+      (value: any) => delete value.stdout.path,
+      (value: any) => (value.finishedAt = "today"),
+      (value: any) => value.reviewRuntimeArtifacts.pop(),
+      (value: any) => (value.extra = true),
+    ]) {
+      const invalid = structuredClone(receipt);
+      mutate(invalid);
+      expect(validateFullGateReceipt(invalid, identity)).not.toEqual([]);
     }
-    expect(
-      reviewPromptContextPreflight("anthropic/claude-fable-5", "x".repeat(900_000), 60_000),
-    ).toMatchObject({
-      ok: true,
-      promptBytes: 900_000,
-      contextTokens: 1_000_000,
-    });
-    const overflow = reviewPromptContextPreflight(
-      "anthropic/claude-fable-5",
-      "x".repeat(940_000),
-      60_000,
-    );
-    expect(overflow.ok).toBe(false);
-    expect(overflow.reasons.join(" ")).toContain("exceeds anthropic/claude-fable-5 context");
-    const output = reviewPromptContextPreflight("google/gemini-3.5-flash", "small", 100_000);
-    expect(output.ok).toBe(false);
-    expect(output.reasons.join(" ")).toContain("maximum 65536");
-    expect(reviewPromptContextPreflight("google/gemini-3.5-flash", "small", 65_537).ok).toBe(false);
-    expect(
-      reviewPromptContextPreflight("unknown/model", "small", 60_000).reasons.join(" "),
-    ).toContain("no frozen context limit");
   });
 
-  it("cannot turn a split wave anonymous with a missing or blank selector value", () => {
-    expect(reviewSplitOptionContract("pack.json", "diff.json", "engine")).toEqual({
+  it("freezes the exact two native routes and accepts their signed v5 evidence", () => {
+    expect(OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION).toBe(5);
+    expect(OWNER_REVIEW_PROTOCOL).toBe("native-full-context-v1");
+    expect(REQUIRED_NATIVE_REVIEWERS).toEqual([
+      {
+        slot: "fable",
+        harnessId: "claude",
+        providerFamily: "anthropic",
+        requestedModel: "claude-fable-5",
+        requestedEffort: "max",
+      },
+      {
+        slot: "codex",
+        harnessId: "codex",
+        providerFamily: "openai",
+        requestedModel: "gpt-5.6-sol",
+        requestedEffort: "xhigh",
+      },
+    ]);
+    const { attestation, authority } = fixture();
+    expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
       ok: true,
       reasons: [],
-      splitRequested: true,
     });
-    for (const [pack, diff] of [
-      ["pack.json", ""],
-      ["", "diff.json"],
-      ["pack.json", null],
-      [null, "diff.json"],
+  });
+
+  it.each([
+    ["requested route", (a: any) => (a.payload.reviews[0].requestedModel = "claude-opus-5")],
+    ["observed model", (a: any) => (a.payload.reviews[1].observedModel = "gpt-5.5")],
+    ["observed source", (a: any) => (a.payload.reviews[0].observedSource = "request")],
+    ["route proof", (a: any) => (a.payload.reviews[1].routeProofStatus = "unverified")],
+    ["auth switch", (a: any) => (a.payload.reviews[0].authSwitched = true)],
+    ["ignored effort", (a: any) => (a.payload.reviews[1].effortHonored = false)],
+    ["cached context", (a: any) => (a.payload.reviews[0].externalContextPolicy = "cached")],
+    ["missing live web", (a: any) => (a.payload.reviews[1].toolWebPolicy = "deny")],
+    ["implausible duration", (a: any) => (a.payload.reviews[0].durationMs = 999)],
+    [
+      "implausible wall time",
+      (a: any) => {
+        a.payload.reviews[0].completedAt = a.payload.reviews[0].startedAt;
+        a.payload.reviews[0].durationMs = 1_000;
+      },
+    ],
+    ["reused session", (a: any) => (a.payload.reviews[1].sessionId = "session-1")],
+    [
+      "different runtime bytes",
+      (a: any) => (a.payload.reviews[1].reviewRuntimeEntrySha256 = "e".repeat(64)),
+    ],
+    [
+      "non-overlapping execution",
+      (a: any) => {
+        a.payload.reviews[1].startedAt = "2026-07-30T00:00:10.000Z";
+        a.payload.reviews[1].completedAt = "2026-07-30T00:00:15.000Z";
+      },
+    ],
+    [
+      "zero overlap boundary",
+      (a: any) => {
+        a.payload.reviews[1].startedAt = "2026-07-30T00:00:05.000Z";
+        a.payload.reviews[1].completedAt = "2026-07-30T00:00:10.000Z";
+      },
+    ],
+    ["runtime build", (a: any) => (a.payload.reviews[0].reviewRuntimeBuildSha = "c".repeat(40))],
+    ["blocking verdict", (a: any) => (a.payload.reviews[1].verdict = "block")],
+    ["evidence manifest", (a: any) => (a.payload.evidence.manifestSha256 = "bad")],
+    ["review wave", (a: any) => (a.payload.evidence.reviewWaveId = "wave-1")],
+    ["failed full gate", (a: any) => (a.payload.fullGate.exitCode = 1)],
+    ["changed candidate", (a: any) => (a.payload.candidateSha = "c".repeat(40))],
+    ["extra retired field", (a: any) => (a.payload.coverageReceipt = {})],
+  ])("rejects a freshly signed semantic forgery: %s", (_label, mutate) => {
+    const { attestation, authority, resign } = fixture();
+    const forged = structuredClone(attestation);
+    mutate(forged);
+    expect(validateReleaseAttestation(resign(forged), authority, expected).ok).toBe(false);
+  });
+
+  it("requires exactly the ordered Fable and Codex pair", () => {
+    const { attestation, authority, resign } = fixture();
+    for (const reviews of [
+      attestation.payload.reviews.slice(0, 1),
+      [...attestation.payload.reviews, attestation.payload.reviews[0]],
+      [...attestation.payload.reviews].reverse(),
     ]) {
-      expect(reviewSplitOptionContract(pack, diff, "engine").ok).toBe(false);
+      const changed = structuredClone(attestation);
+      changed.payload.reviews = reviews;
+      expect(validateReleaseAttestation(resign(changed), authority, expected).ok).toBe(false);
     }
-    expect(reviewSplitOptionContract("pack.json", "diff.json", null).ok).toBe(false);
-    expect(reviewSplitOptionContract(null, null, "engine").ok).toBe(false);
   });
 
-  it("uses the submitted prompt floors consistently in the final panel decision", () => {
-    const findings = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
-    const triad = liveTriad(findings).map((actor) => ({ ...actor, duration_ms: 20_740 }));
-    const scope = { ...liveScope(), metadata: { duration_ms: 20_740 } };
-    expect(releaseReviewDecision({ triadActors: triad, scope }).passed).toBe(false);
-    const mediumFloors = reviewDecisionLivenessFloors(505_000, 536_000);
-    expect(mediumFloors).toEqual({ minPlausibleMs: 20_000, scopeMinPlausibleMs: 20_000 });
-    expect(
-      releaseReviewDecision({
-        triadActors: triad,
-        scope,
-        ...mediumFloors,
-      }).passed,
-    ).toBe(true);
-    expect(
-      releaseReviewDecision({
-        triadActors: triad,
-        scope,
-        minPlausibleMs: livenessFloorMs(505_000),
-      }).passed,
-    ).toBe(false);
-    const largeScopeFloors = reviewDecisionLivenessFloors(505_000, 1_200_000);
-    expect(largeScopeFloors).toEqual({
-      minPlausibleMs: 20_000,
-      scopeMinPlausibleMs: 30_000,
-    });
-    expect(
-      releaseReviewDecision({
-        triadActors: triad,
-        scope,
-        ...largeScopeFloors,
-      }).passed,
-    ).toBe(false);
-  });
-
-  it("treats an implausibly fast slot as failed — the liveness floor", () => {
-    expect(reviewerLiveness({ status: "responded", duration_ms: 120_000 }).live).toBe(true);
-    expect(reviewerLiveness({ status: "responded", duration_ms: 900 }).live).toBe(false);
-    expect(reviewerLiveness({ status: "responded" }).live).toBe(false);
-    const findings = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
-    const triad = liveTriad(findings);
-    triad[1] = { ...triad[1]!, duration_ms: 500 };
-    const decision = releaseReviewDecision({ triadActors: triad, scope: liveScope() });
-    expect(decision.passed).toBe(false);
-    expect(decision.reasons.join(" ")).toContain("implausible duration");
-  });
-
-  it("accepts blocker-contract fields (invariant, reachable) and rejects malformed ones [INV-139]", () => {
-    const rows = cleanRows();
-    rows[0] = {
-      ...rows[0]!,
-      verdict: "FAIL",
-      severity: "critical",
-      reason: "concrete defect",
-      invariant: "INV-042",
-      reachable: true,
-    } as never;
-    const result = validateChecklistResponse(rows, "model", TRIAD_ITEMS);
-    expect(result.status).toBe("responded");
-    expect(result.findings[0]).toMatchObject({ invariant: "INV-042", reachable: true });
-    expect(
-      validateChecklistResponse(
-        rows.map((row, i) => (i === 0 ? { ...row, invariant: "  " } : row)),
-        "model",
-        TRIAD_ITEMS,
-      ).status,
-    ).toBe("parse_failure");
-    expect(
-      validateChecklistResponse(
-        rows.map((row, i) => (i === 0 ? { ...row, reachable: "yes" } : row)),
-        "model",
-        TRIAD_ITEMS,
-      ).status,
-    ).toBe("parse_failure");
-  });
-
-  it("surfaces blocker-contract gaps for adjudication without softening the block", () => {
-    const rows = cleanRows();
-    rows[0] = {
-      ...rows[0]!,
-      verdict: "FAIL",
-      severity: "critical",
-      reason: "uncited blocker",
-    };
-    const findings = validateChecklistResponse(rows, "model", TRIAD_ITEMS).findings;
-    // An uncited blocker with NO reachable claim carries BOTH gaps: omitting
-    // reachability is itself a contract gap (INV-139), distinct from an
-    // explicit reachable:false.
-    expect(blockerContractGaps(findings)).toEqual([
-      expect.objectContaining({
-        gaps: ["no invariant/criterion cited", "no reachable:true/false claim"],
-      }),
-    ]);
-    const clean = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
-    const triad = liveTriad(clean);
-    triad[0] = { ...triad[0]!, findings };
-    const decision = releaseReviewDecision({ triadActors: triad, scope: liveScope() });
-    // Fail-closed: an uncited critical FAIL still blocks the machine decision;
-    // the gap is adjudication input (ledger vs fix), never an auto-downgrade.
-    expect(decision.passed).toBe(false);
-    expect(decision.blockerContractGaps).toHaveLength(1);
-  });
-
-  it("preserves advisory FAIL verdicts without blocking a healthy panel", () => {
-    const rows = cleanRows();
-    rows[1] = { ...rows[1]!, verdict: "FAIL", severity: "advisory", reason: "concrete issue" };
-    const findings = validateChecklistResponse(rows, "model", TRIAD_ITEMS).findings;
-    const decision = releaseReviewDecision({
-      triadActors: liveTriad(findings),
-      scope: liveScope(),
-    });
-    expect(findings).toContainEqual(
-      expect.objectContaining({ verdict: "FAIL", severity: "advisory" }),
+  it("detects post-signature tampering", () => {
+    const { attestation, authority } = fixture();
+    attestation.payload.reviews[0].verdict = "warn";
+    expect(validateReleaseAttestation(attestation, authority, expected).reasons).toContain(
+      "review attestation signature is invalid",
     );
-    expect(decision.passed).toBe(true);
-    expect(decision.blockingFindings).toEqual([]);
-    expect(decision.reasons).toEqual([]);
   });
 
-  it("fails closed on a critical FAIL verdict even when quorum and scope are healthy", () => {
-    const rows = cleanRows();
-    rows[1] = { ...rows[1]!, verdict: "FAIL", severity: "critical", reason: "release blocker" };
-    const findings = validateChecklistResponse(rows, "model", TRIAD_ITEMS).findings;
-    const clean = validateChecklistResponse(cleanRows(), "other", TRIAD_ITEMS).findings;
-    const triad = liveTriad(clean);
-    triad[0] = { ...triad[0]!, findings };
-    const decision = releaseReviewDecision({ triadActors: triad, scope: liveScope() });
-    expect(decision.passed).toBe(false);
-    expect(decision.blockingFindings).toEqual([
-      expect.objectContaining({ verdict: "FAIL", severity: "critical" }),
-    ]);
-    expect(decision.reasons[0]).toContain("critical FAIL");
+  it("verifies schemas 2-4 only as historical signed bytes and never publishes them", () => {
+    const { attestation, authority, resign } = fixture();
+    for (const schemaVersion of ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS) {
+      const archived = resign({ ...attestation, schemaVersion, payload: { historical: true } });
+      expect(verifyArchivedReleaseAttestationSignature(archived, authority)).toEqual({
+        ok: true,
+        reasons: [],
+      });
+      expect(validateReleaseAttestation(archived, authority, expected).reasons.join(" ")).toContain(
+        "archive-signature-only",
+      );
+    }
+    expect(verifyArchivedReleaseAttestationSignature(attestation, authority).ok).toBe(false);
   });
 
-  it("fails closed when malformed output kills a required slot", () => {
-    const findings = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
-    const malformed = validateChecklistResponse([], "malformed", TRIAD_ITEMS);
-    const triad = liveTriad(findings);
-    triad[1] = { ...triad[1]!, status: malformed.status, findings: malformed.findings };
-    const decision = releaseReviewDecision({ triadActors: triad, scope: liveScope() });
-    expect(decision.passed).toBe(false);
-    expect(decision.responsiveTriad).toBe(2);
-    expect(decision.reasons.join(" ")).toContain("not live");
+  it("keeps input, path and strict UTF-8 checks small and fail-closed", () => {
+    expect(validateReleaseInput("candidate", candidateSha).ok).toBe(true);
+    expect(validateReleaseInput("candidate", "main").ok).toBe(false);
+    expect(validateReleaseInput("publish", "v3.2.0").ok).toBe(true);
+    expect(validateReleaseInput("publish", "v3.2.0-rc.1").ok).toBe(false);
+    expect(pathIsWithin("/candidate", "/candidate/evidence")).toBe(true);
+    expect(pathIsWithin("/candidate", "/candidate-sibling")).toBe(false);
+    expect(() => decodeReviewUtf8(Buffer.from([0xc3, 0x28]))).toThrow(/not valid UTF-8/);
   });
 
-  it("fails closed when the required scope slot is missing or partial", () => {
-    const findings = validateChecklistResponse(cleanRows(), "model", TRIAD_ITEMS).findings;
-    const decision = releaseReviewDecision({ triadActors: liveTriad(findings), scope: null });
-    expect(decision.passed).toBe(false);
-    expect(decision.reasons).toContain("scope reviewer is missing");
-    expect(
-      releaseReviewDecision({
-        triadActors: liveTriad(findings),
-        scope: { status: "partial", duration_ms: 120_000, findings: [] },
-      }).passed,
-    ).toBe(false);
+  it("requires the full-gate receipt output directory argument", () => {
+    const result = spawnSync(process.execPath, [fullGateReceiptRunner], { encoding: "utf8" });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("OUT_DIR");
+  });
+
+  it("refuses an in-candidate full-gate output before creating it", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-gate-boundary-"));
+    const candidate = join(root, "candidate");
+    const outDir = join(candidate, "ignored-gate");
+    try {
+      mkdirSync(candidate);
+      execFileSync("git", ["init", "-q"], { cwd: candidate });
+      const result = spawnSync(process.execPath, [fullGateReceiptRunner, outDir], {
+        cwd: candidate,
+        encoding: "utf8",
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("must be external");
+      expect(existsSync(outDir)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
-describe("owner-review attestation (current schema, owner protocol)", () => {
-  const ownerAttestation = () => {
-    const candidateSha = "a".repeat(40);
-    const candidateTree = "b".repeat(40);
-    const digest = "d".repeat(64);
-    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-    const authority = {
-      keyId: "fixture-key",
-      publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-    };
-    const payload: any = {
-      contract: `owner-review-v${OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION}`,
-      reviewProtocol: OWNER_REVIEW_PROTOCOL,
-      candidateSha,
-      candidateTree,
-      rounds: 2,
-      fullGate: {
-        receiptSha256: digest,
+describe("native owner-review sealer", () => {
+  it("derives a signed pass/warn pair from clean on-disk artifacts", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-v5-sealer-"));
+    const candidate = join(root, "candidate");
+    const evidence = join(root, "evidence");
+    const artifacts = join(root, "artifacts");
+    const gateDir = join(root, "gate");
+    const gatePath = join(gateDir, "full-gate-receipt.json");
+    const authorityPath = join(root, "authority.json");
+    const privateKeyPath = join(root, "private.pem");
+    const out = join(root, "attestation.json");
+    const wave = "11111111-1111-4111-8111-111111111111";
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: candidate, encoding: "utf8" }).trim();
+    try {
+      mkdirSync(candidate);
+      git("init", "-q");
+      git("config", "user.email", "fixture@example.invalid");
+      git("config", "user.name", "fixture");
+      write(join(candidate, "file.txt"), "base\n");
+      write(join(candidate, "package.json"), json({ version: "3.2.0" }));
+      git("add", "file.txt");
+      git("add", "package.json");
+      git("commit", "-qm", "base");
+      const baseSha = git("rev-parse", "HEAD");
+      write(join(candidate, "file.txt"), "candidate\n");
+      git("add", "file.txt");
+      git("commit", "-qm", "candidate");
+      const sha = git("rev-parse", "HEAD");
+      const tree = git("rev-parse", "HEAD^{tree}");
+      const diff = execFileSync("git", ["diff", "--binary", `${baseSha}..${sha}`], {
+        cwd: candidate,
+      });
+      const verifierPath = join(gateDir, "release-review-verifier.mjs");
+      const cliPath = join(gateDir, "claudexor.bundle.cjs");
+      const verifierBuild = buildSync({
+        absWorkingDir: repoRoot,
+        alias: {
+          "@claudexor/core": resolve(repoRoot, "packages/core/src/diff.ts"),
+          "@claudexor/schema": resolve(repoRoot, "packages/schema/src/index.ts"),
+          "@claudexor/util": resolve(repoRoot, "packages/util/src/index.ts"),
+        },
+        bundle: true,
+        entryPoints: [resolve(repoRoot, "scripts/lib/release-review-runtime-entry.ts")],
+        format: "esm",
+        outfile: verifierPath,
+        platform: "node",
+        target: ["node20"],
+        write: false,
+      });
+      write(verifierPath, Buffer.from(verifierBuild.outputFiles[0]!.contents));
+      const reviewEnginePath = resolve(repoRoot, "packages/review/src/reviewEngine.ts");
+      write(
+        cliPath,
+        `#!/usr/bin/env node
+// Candidate ${sha}
+const { readFileSync } = require("node:fs");
+const { pathToFileURL } = require("node:url");
+(async () => {
+  const config = JSON.parse(readFileSync(process.argv[2], "utf8"));
+  const { reviewCandidate } = await import(pathToFileURL(config.reviewEnginePath).href);
+  const reviewers = config.reviewers.map((required, index) => ({
+    providerFamily: required.providerFamily,
+    requestedModel: required.requestedModel,
+    requestedEffort: required.requestedEffort,
+    authPreference: "subscription",
+    adapter: {
+      id: required.harnessId,
+      async *run(spec) {
+        const started = new Date().toISOString();
+        const observedSource = index === 0 ? "stream_event" : "transcript";
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts: started,
+          observed_model: required.requestedModel,
+          credential_route: "vendor_native",
+          credential_source: "native_session",
+          payload: observedSource === "transcript" ? { observed_model_source: "transcript" } : {},
+        };
+        await new Promise((resolve) => setTimeout(resolve, 1_100));
+        const findings = index === 0 ? [] : [{
+          severity: "WARN",
+          category: "correctness",
+          claim: "Non-blocking fixture finding",
+          evidence: { files: [{ path: "file.txt", lines: "1" }] },
+        }];
+        const envelope = {
+          completion: {
+            verdict: "PASS",
+            checklist: [
+              "sealed_evidence",
+              "intent_and_scope",
+              "runtime_and_security",
+              "tests_and_release",
+            ].map((item) => ({ item, completed: true })),
+            findingCount: findings.length,
+          },
+          findings,
+        };
+        const completed = new Date().toISOString();
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: completed,
+          text: JSON.stringify(envelope) + "\\n",
+        };
+        yield {
+          type: "completed",
+          session_id: spec.session_id,
+          ts: completed,
+          payload: { exit_code: 0 },
+        };
+      },
+    },
+  }));
+  await reviewCandidate({
+    candidateLabel: "Release candidate",
+    diff: readFileSync(config.diffPath, "utf8"),
+    evidenceDir: config.evidenceDir,
+    evidenceReadOnly: true,
+    frozenIdentity: config.frozenIdentity,
+    env: { CLAUDEXOR_REVIEW_WAVE_ID: config.wave },
+    artifactsDir: config.artifactsDir,
+    cwd: config.candidate,
+    reviewers,
+  });
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+`,
+      );
+      const reviewRuntimeArtifacts = [verifierPath, cliPath].map((path) => ({
+        path: path.endsWith(".mjs") ? "release-review-verifier.mjs" : "claudexor.bundle.cjs",
+        bytes: readFileSync(path).length,
+        sha256: hash(readFileSync(path)),
+      }));
+      const gateStdoutPath = join(gateDir, "full-gate.stdout.log");
+      const gateStderrPath = join(gateDir, "full-gate.stderr.log");
+      write(gateStdoutPath, "release gate passed\n");
+      write(gateStderrPath, "");
+      const gate = {
         program: "pnpm",
         argv: ["pnpm", "release:verify"],
         exitCode: 0,
+        gateExitCode: 0,
         candidateUnchanged: true,
-        beforeSha: candidateSha,
-        beforeTree: candidateTree,
-        afterSha: candidateSha,
-        afterTree: candidateTree,
-        stdoutSha256: digest,
-        stderrSha256: digest,
-        reviewRuntimeArtifacts: RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.map((path) => ({
-          path,
-          bytes: 1,
-          sha256: digest,
-        })),
-      },
-      reviews: [
-        {
-          reviewer: "sol",
-          reportSha256: digest,
-          verdict: "pass",
-          panel: { slot: "triad", model: "openai/gpt-5.6-sol" },
-        },
-        {
-          reviewer: "fable-triad",
-          reportSha256: digest,
-          verdict: "warn",
-          panel: { slot: "triad", model: "anthropic/claude-fable-5" },
-        },
-        {
-          reviewer: "gemini",
-          reportSha256: digest,
-          verdict: "pass",
-          panel: { slot: "triad", model: "google/gemini-3.5-flash" },
-        },
-        {
-          reviewer: "fable-scope",
-          reportSha256: digest,
-          verdict: "pass",
-          panel: { slot: "scope", model: "anthropic/claude-fable-5" },
-        },
-      ],
-      sealedAt: "2026-07-18T00:00:00.000Z",
-    };
-    const attestation = {
-      schemaVersion: OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION as number,
-      keyId: authority.keyId,
-      algorithm: "Ed25519",
-      payload,
-      signature: "",
-    };
-    attestation.signature = sign(
-      null,
-      releaseAttestationSigningBytes(attestation),
-      privateKey,
-    ).toString("base64");
-    const resign = (next: typeof attestation) => ({
-      ...next,
-      signature: sign(null, releaseAttestationSigningBytes(next), privateKey).toString("base64"),
-    });
-    const expected = { candidateSha, candidateTree };
-    return { attestation, authority, resign, expected };
-  };
+        before: { head: sha, tree, status: "" },
+        after: { head: sha, tree, status: "" },
+        stdout: { path: gateStdoutPath, sha256: hash(readFileSync(gateStdoutPath)) },
+        stderr: { path: gateStderrPath, sha256: hash(readFileSync(gateStderrPath)) },
+        reviewRuntimeArtifacts,
+        reviewRuntimeArtifactError: null,
+        finishedAt: "2026-07-30T00:00:00.000Z",
+      };
+      const gateBytes = json(gate);
+      write(gatePath, gateBytes);
 
-  it("accepts a signed attestation binding the exact triad+scope panel on the exact candidate", () => {
-    const { attestation, authority, expected } = ownerAttestation();
-    expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
-      ok: true,
-      reasons: [],
-    });
-  });
-
-  it("rejects an attestation whose reviews do not cover the exact triad panel (B8)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    // Swap the gemini triad slot for an off-panel model — the >=2 floor still
-    // passes, but the exact-panel binding must fail closed.
-    const offPanel = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          attestation.payload.reviews[0],
-          attestation.payload.reviews[1],
-          {
-            reviewer: "impostor",
-            reportSha256: "d".repeat(64),
-            verdict: "pass",
-            panel: { slot: "triad", model: "openai/gpt-4o" },
+      for (const file of FROZEN_REVIEW_EVIDENCE_FILES) write(join(evidence, file), "fixture\n");
+      write(
+        join(evidence, "FREEZE.json"),
+        json({ candidateSha: sha, candidateTree: tree, baseSha, waveId: wave }),
+      );
+      write(join(evidence, "DIFF.patch"), diff);
+      write(join(evidence, "context/gates/FULL_GATE_RECEIPT.json"), gateBytes);
+      const packetFiles = [
+        ...FROZEN_REVIEW_EVIDENCE_FILES,
+        "context/gates/FULL_GATE_RECEIPT.json",
+      ].sort();
+      write(
+        join(evidence, "MANIFEST.sha256"),
+        packetFiles
+          .map((file) => `${hash(readFileSync(join(evidence, file)))}  ${file}`)
+          .join("\n") + "\n",
+      );
+      const manifestSha256 = hash(readFileSync(join(evidence, "MANIFEST.sha256")));
+      const reviewConfigPath = join(root, "review-config.json");
+      write(
+        reviewConfigPath,
+        json({
+          reviewEnginePath,
+          candidate,
+          evidenceDir: evidence,
+          artifactsDir: artifacts,
+          diffPath: join(evidence, "DIFF.patch"),
+          wave,
+          frozenIdentity: {
+            candidateSha: sha,
+            candidateTree: tree,
+            packetManifestSha256: manifestSha256,
           },
-          attestation.payload.reviews[3],
-        ],
-      },
-    });
-    const verdict = validateReleaseAttestation(offPanel, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toMatch(/exact triad panel/);
-  });
+          reviewers: REQUIRED_NATIVE_REVIEWERS,
+        }),
+      );
+      const engine = spawnSync(process.execPath, ["--import", "tsx", cliPath, reviewConfigPath], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: { ...process.env, CLAUDEXOR_BUILD_SHA: sha },
+      });
+      expect(engine.stderr).toBe("");
+      expect(engine.status).toBe(0);
 
-  it("rejects an attestation missing the scope panel slot (B8)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const noScope = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: attestation.payload.reviews.slice(0, 3), // three triad slots, no scope
-      },
-    });
-    const verdict = validateReleaseAttestation(noScope, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toMatch(/scope slot/);
-  });
-
-  it("rejects a panel slot with no report digest (B8)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const noDigest = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          { ...attestation.payload.reviews[0], reportSha256: "not-a-digest" },
-          attestation.payload.reviews[1],
-          attestation.payload.reviews[2],
-          attestation.payload.reviews[3],
-        ],
-      },
-    });
-    expect(validateReleaseAttestation(noDigest, authority, expected).ok).toBe(false);
-  });
-
-  it("accepts extra non-panel internal-critic reviews alongside the exact panel (B8)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const withCritic = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          ...attestation.payload.reviews,
-          { reviewer: "internal-critic-engine", reportSha256: "e".repeat(64), verdict: "pass" },
-        ],
-      },
-    });
-    expect(validateReleaseAttestation(withCritic, authority, expected)).toEqual({
-      ok: true,
-      reasons: [],
-    });
-  });
-
-  const subWaveDigest = (name: string, role: "triad" | "scope") =>
-    createHash("sha256").update(`${role}-prompt-of-${name}`).digest("hex");
-  const asSubWave = (reviews: any[], name: string) =>
-    reviews.map((review: any) => ({
-      ...review,
-      reviewer: `${review.reviewer}-${name}`,
-      promptSha256: subWaveDigest(name, review.panel.slot),
-      panel: { ...review.panel, subWave: name },
-    }));
-  const coverageReceipt = (candidateSha: string, subWaves: string[] = ["macos", "engine"]) => {
-    const diffEntries = 7;
-    const diffProof = {
-      ok: true,
-      covered: diffEntries,
-      total: diffEntries,
-      uncovered: [],
-      duplicates: [],
-      invalidSlices: [],
-    };
-    const fullTextProof = {
-      covered: 5,
-      uncovered: [],
-      duplicates: [],
-      invalidEnvelopes: [],
-      unexpectedSections: [],
-    };
-    const inventoryProof = {
-      ok: true,
-      covered: subWaves.length,
-      total: subWaves.length,
-      invalid: [],
-    };
-    return {
-      schemaVersion: 2,
-      receiptSha256: "f".repeat(64),
-      base: "9".repeat(40),
-      candidate: candidateSha,
-      ok: true,
-      packs: subWaves.map((subWave) => ({
-        subWave,
-        triadSha256: subWaveDigest(subWave, "triad"),
-        scopeSha256: subWaveDigest(subWave, "scope"),
-      })),
-      fullText: {
-        triad: fullTextProof,
-        scope: fullTextProof,
-        diffAuthoritativeSkips: 2,
-        deleted: 1,
-      },
-      diff: {
-        sealedSha256: "e".repeat(64),
-        sealedBytes: 1234,
-        entries: diffEntries,
-        triad: diffProof,
-        scope: diffProof,
-      },
-      inventory: { triad: inventoryProof, scope: inventoryProof },
-      subWaveMismatches: [],
-    };
-  };
-
-  it("accepts a packet-split panel: a full triad+scope per named sub-wave plus a coverage receipt (A-8)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const split = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          ...asSubWave(attestation.payload.reviews, "macos"),
-          ...asSubWave(attestation.payload.reviews, "engine"),
-        ],
-        coverageReceipt: coverageReceipt(expected.candidateSha),
-      },
-    });
-    expect(validateReleaseAttestation(split, authority, expected)).toEqual({
-      ok: true,
-      reasons: [],
-    });
-  });
-
-  it("binds triad and scope slots to their distinct role-specific prompt digests", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const reviews = asSubWave(attestation.payload.reviews, "macos");
-    const scopeIndex = reviews.findIndex((review: any) => review.panel.slot === "scope");
-    reviews[scopeIndex] = { ...reviews[scopeIndex], promptSha256: subWaveDigest("macos", "triad") };
-    const forged = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews,
-        coverageReceipt: coverageReceipt(expected.candidateSha, ["macos"]),
-      },
-    });
-    const verdict = validateReleaseAttestation(forged, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toContain("scope slot");
-    expect(verdict.reasons.join(" ")).toContain("coverage receipt binds prompt");
-  });
-
-  it("cryptographically verifies archived outer-v4/coverage-v1 bytes but rejects them for publish", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const archived = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: asSubWave(attestation.payload.reviews, "macos"),
-        coverageReceipt: {
+      const keys = generateKeyPairSync("ed25519");
+      write(
+        authorityPath,
+        json({
           schemaVersion: 1,
-          receiptSha256: "f".repeat(64),
-          base: "9".repeat(40),
-          candidate: expected.candidateSha,
-          ok: true,
-          packs: [{ subWave: "macos", sha256: "e".repeat(64) }],
-        },
-      },
-    });
-    expect(
-      verifyReleaseAttestationSignature(
-        archived,
-        authority,
-        OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
-      ),
-    ).toEqual({ ok: true, reasons: [] });
-    const verdict = validateReleaseAttestation(archived, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons).toContain("owner review coverageReceipt schemaVersion must be 2");
-  });
-
-  it("rejects a packet-split panel with NO coverage receipt — one sub-wave cannot stand for all (A-8)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const split = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          ...asSubWave(attestation.payload.reviews, "macos"),
-          ...asSubWave(attestation.payload.reviews, "engine"),
-        ],
-      },
-    });
-    const verdict = validateReleaseAttestation(split, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toContain("coverageReceipt");
-  });
-
-  it("rejects a sub-wave that binds only a partial panel — every named sub-wave needs the full triad+scope", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const split = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          ...asSubWave(attestation.payload.reviews, "macos"),
-          // engine sub-wave misses its scope slot
-          ...asSubWave(attestation.payload.reviews.slice(0, 3), "engine"),
-        ],
-        coverageReceipt: coverageReceipt(expected.candidateSha),
-      },
-    });
-    const verdict = validateReleaseAttestation(split, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toMatch(/scope slot \(sub-wave engine\)/);
-  });
-
-  it("rejects mixing named sub-wave slots with anonymous ones", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const mixed = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          ...asSubWave(attestation.payload.reviews, "macos"),
-          ...attestation.payload.reviews,
-        ],
-        coverageReceipt: coverageReceipt(expected.candidateSha),
-      },
-    });
-    const verdict = validateReleaseAttestation(mixed, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toContain("anonymous");
-  });
-
-  it("rejects a coverage receipt bound to the wrong candidate, a failed check, or missing pack digests", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const splitWith = (receipt: any) =>
-      resign({
-        ...attestation,
-        payload: {
-          ...attestation.payload,
-          reviews: [
-            ...asSubWave(attestation.payload.reviews, "macos"),
-            ...asSubWave(attestation.payload.reviews, "engine"),
-          ],
-          coverageReceipt: receipt,
-        },
-      });
-    const good = coverageReceipt(expected.candidateSha);
-    expect(
-      validateReleaseAttestation(
-        splitWith({ ...good, candidate: "c".repeat(40) }),
-        authority,
-        expected,
-      ).ok,
-    ).toBe(false);
-    expect(
-      validateReleaseAttestation(splitWith({ ...good, ok: false }), authority, expected).ok,
-    ).toBe(false);
-    expect(
-      validateReleaseAttestation(splitWith({ ...good, packs: [] }), authority, expected).ok,
-    ).toBe(false);
-  });
-
-  it("rejects a SINGLE-named-sub-wave seal without a coverage receipt — a named pack is a subset by construction (X115 evasion)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const oneNamed = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: asSubWave(attestation.payload.reviews, "macos"),
-      },
-    });
-    const verdict = validateReleaseAttestation(oneNamed, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toContain("coverageReceipt");
-    // With a receipt whose labels match, it seals.
-    const withReceipt = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: asSubWave(attestation.payload.reviews, "macos"),
-        coverageReceipt: coverageReceipt(expected.candidateSha, ["macos"]),
-      },
-    });
-    expect(validateReleaseAttestation(withReceipt, authority, expected)).toEqual({
-      ok: true,
-      reasons: [],
-    });
-  });
-
-  it("rejects a receipt whose pack labels do not EQUAL the panel's named sub-waves (report/receipt swap)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const mismatched = (subWaves: string[]) =>
-      resign({
-        ...attestation,
-        payload: {
-          ...attestation.payload,
-          reviews: [
-            ...asSubWave(attestation.payload.reviews, "macos"),
-            ...asSubWave(attestation.payload.reviews, "engine"),
-          ],
-          coverageReceipt: coverageReceipt(expected.candidateSha, subWaves),
-        },
-      });
-    // Receipt covers packs no slot reviewed.
-    const extra = validateReleaseAttestation(
-      mismatched(["macos", "engine", "docs"]),
-      authority,
-      expected,
-    );
-    expect(extra.ok).toBe(false);
-    expect(extra.reasons.join(" ")).toContain("no panel slots");
-    // A panel sub-wave with no pack in the receipt.
-    const missing = validateReleaseAttestation(mismatched(["macos"]), authority, expected);
-    expect(missing.ok).toBe(false);
-    expect(missing.reasons.join(" ")).toContain('no pack for panel sub-wave "engine"');
-  });
-
-  it("validateSlotRecord derives everything from the wave record and refuses forgeries (gate-6)", () => {
-    const candidateSha = "a".repeat(40);
-    const candidateTree = "b".repeat(40);
-    const manifest = "c".repeat(64);
-    const gateReceipt = "f".repeat(64);
-    const reviewRuntimeArtifacts = RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS.map((path) => ({
-      path,
-      bytes: 12,
-      sha256: "9".repeat(64),
-    }));
-    const waveId = "11111111-1111-4111-8111-111111111111";
-    const good = {
-      status: "responded",
-      error: null,
-      live: true,
-      duration_ms: 120_000,
-      liveness_floor_ms: 60_000,
-      verdict: "pass",
-      candidateSha,
-      candidateTree,
-      packetManifestSha256: manifest,
-      fullGateReceiptSha256: gateReceipt,
-      reviewRuntimeArtifacts,
-      reviewWaveId: waveId,
-      panel_slot: "triad",
-      sub_wave: "macos",
-      model_id: REQUIRED_TRIAD_MODELS[0],
-      requested_model: REQUIRED_TRIAD_MODELS[0],
-      observed_model: REQUIRED_TRIAD_MODELS[0],
-      report_sha256: "d".repeat(64),
-      promptSha256: "e".repeat(64),
-      raw_file: "triad-x.raw.txt",
-    };
-    const expected = {
-      candidateSha,
-      candidateTree,
-      packetManifestSha256: manifest,
-      fullGateReceiptSha256: gateReceipt,
-      reviewRuntimeArtifacts,
-      waveId: null,
-    };
-    expect(validateSlotRecord(good, expected)).toEqual([]);
-    // Off-panel model in a triad slot.
-    expect(
-      validateSlotRecord(
-        {
-          ...good,
-          model_id: "openai/gpt-4o",
-          requested_model: "openai/gpt-4o",
-          observed_model: "openai/gpt-4o",
-        },
-        expected,
-      ).join(" "),
-    ).toContain("not a frozen triad panel model");
-    // model_id disagreeing with the observed model.
-    expect(
-      validateSlotRecord({ ...good, model_id: REQUIRED_TRIAD_MODELS[1] }, expected).join(" "),
-    ).toContain("models do not agree");
-    // No wave liveness verdict / duration below the recorded floor.
-    expect(validateSlotRecord({ ...good, live: undefined }, expected).join(" ")).toContain(
-      "liveness",
-    );
-    for (const liveness_floor_ms of [undefined, 0, Number.NaN]) {
-      expect(validateSlotRecord({ ...good, liveness_floor_ms }, expected).join(" ")).toContain(
-        "liveness floor",
+          keyId: "fixture-key",
+          algorithm: "Ed25519",
+          publicKeyPem: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+        }),
       );
-    }
-    for (const reviewWaveId of [undefined, "wave-1", "11111111-1111-1111-1111-111111111111"]) {
-      expect(validateSlotRecord({ ...good, reviewWaveId }, expected).join(" ")).toContain(
-        "reviewWaveId",
-      );
-    }
-    expect(validateSlotRecord({ ...good, duration_ms: 1_000 }, expected).join(" ")).toContain(
-      "below its own recorded liveness floor",
-    );
-    // Blocked verdict cannot seal; wrong candidate; wrong packet; wave mix.
-    expect(validateSlotRecord({ ...good, verdict: "blocked" }, expected).join(" ")).toContain(
-      "cannot seal",
-    );
-    expect(
-      validateSlotRecord({ ...good, candidateSha: "f".repeat(40) }, expected).join(" "),
-    ).toContain("different candidate");
-    expect(
-      validateSlotRecord({ ...good, packetManifestSha256: "0".repeat(64) }, expected).join(" "),
-    ).toContain("different sealed packet");
-    expect(
-      validateSlotRecord({ ...good, fullGateReceiptSha256: "0".repeat(64) }, expected).join(" "),
-    ).toContain("different full-gate receipt");
-    expect(
-      validateSlotRecord(
-        {
-          ...good,
-          reviewRuntimeArtifacts: [{ ...reviewRuntimeArtifacts[0], sha256: "0".repeat(64) }],
-        },
-        expected,
-      ).join(" "),
-    ).toContain("different release-review runtime bytes");
-    expect(
-      validateSlotRecord(good, {
-        ...expected,
-        waveId: "22222222-2222-4222-8222-222222222222",
-      }).join(" "),
-    ).toContain("mixes wave");
-    // Scope slot with a non-scope model.
-    expect(
-      validateSlotRecord(
-        {
-          ...good,
-          panel_slot: "scope",
-          model_id: "google/gemini-3.5-flash",
-          requested_model: "google/gemini-3.5-flash",
-          observed_model: "google/gemini-3.5-flash",
-        },
-        expected,
-      ).join(" "),
-    ).toContain("not the frozen scope model");
-  });
-
-  it("rejects a coverage receipt with duplicate sub-wave labels (ambiguous slot binding)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const receipt = coverageReceipt(expected.candidateSha, ["macos"]);
-    const duplicated = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: asSubWave(attestation.payload.reviews, "macos"),
-        coverageReceipt: {
-          ...receipt,
-          packs: [
-            ...receipt.packs,
-            {
-              subWave: "macos",
-              triadSha256: "9".repeat(64),
-              scopeSha256: "8".repeat(64),
-            },
+      write(privateKeyPath, keys.privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      chmodSync(privateKeyPath, 0o600);
+      const runSealer = (output: string, receipt = gatePath) =>
+        spawnSync(
+          process.execPath,
+          [
+            sealer,
+            "--full-gate-receipt",
+            receipt,
+            "--evidence-dir",
+            evidence,
+            "--review-artifacts",
+            artifacts,
+            "--private-key",
+            privateKeyPath,
+            "--authority",
+            authorityPath,
+            "--out",
+            output,
           ],
-        },
-      },
-    });
-    const verdict = validateReleaseAttestation(duplicated, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toContain("duplicate sub-wave labels");
-  });
+          { cwd: candidate, encoding: "utf8" },
+        );
+      const result = runSealer(out);
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toMatchObject({
+        schemaVersion: 5,
+        payload: { candidateSha: sha, reviews: [{ verdict: "pass" }, { verdict: "warn" }] },
+      });
+      const partialGatePath = join(gateDir, "partial-full-gate-receipt.json");
+      const partialGate = structuredClone(gate) as any;
+      delete partialGate.gateExitCode;
+      write(partialGatePath, json(partialGate));
+      const partialGateRefused = runSealer(
+        join(root, "partial-gate-refused.json"),
+        partialGatePath,
+      );
+      expect(partialGateRefused.status).toBe(1);
+      expect(partialGateRefused.stderr).toContain("full-gate receipt shape is invalid");
 
-  it("a single anonymous wave still needs no coverage receipt (unsplit pack is whole by construction)", () => {
-    const { attestation, authority, expected } = ownerAttestation();
-    expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
-      ok: true,
-      reasons: [],
-    });
-  });
+      write(gateStdoutPath, "tampered gate output\n");
+      const logDriftRefused = runSealer(join(root, "log-drift-refused.json"));
+      expect(logDriftRefused.status).toBe(1);
+      expect(logDriftRefused.stderr).toContain("digest does not match");
+      write(gateStdoutPath, "release gate passed\n");
 
-  it("rejects tampering after signing — the signature covers the payload bytes", () => {
-    const { attestation, authority, expected } = ownerAttestation();
-    const tampered = {
-      ...attestation,
-      payload: { ...attestation.payload, rounds: 1 },
-    };
-    expect(validateReleaseAttestation(tampered, authority, expected).ok).toBe(false);
-  });
-
-  it("rejects an old-schema attestation replayed under the current version without resigning", () => {
-    const { attestation, authority, expected } = ownerAttestation();
-    expect(
-      validateReleaseAttestation({ ...attestation, schemaVersion: 2 }, authority, expected).ok,
-    ).toBe(false);
-  });
-
-  it("rejects even a properly-signed v2 attestation — the retired contract is removed", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const v2 = resign({ ...attestation, schemaVersion: 2 });
-    const verdict = validateReleaseAttestation(v2, authority, expected);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.reasons.join(" ")).toContain("not accepted");
-  });
-
-  it("a blocking verdict can never be sealed shippable (pass/warn only)", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const blocked = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [
-          attestation.payload.reviews[0],
-          { reviewer: "fable-reviewer-2", reportSha256: "d".repeat(64), verdict: "block" },
+      const inTreeGate = join(candidate, ".git", "review-gate");
+      const inTreeReceipt = join(inTreeGate, "full-gate-receipt.json");
+      write(inTreeReceipt, readFileSync(gatePath));
+      write(join(inTreeGate, "release-review-verifier.mjs"), readFileSync(verifierPath));
+      write(join(inTreeGate, "claudexor.bundle.cjs"), readFileSync(cliPath));
+      const inTreeGateRefused = runSealer(join(root, "in-tree-gate-refused.json"), inTreeReceipt);
+      expect(inTreeGateRefused.status).toBe(1);
+      expect(inTreeGateRefused.stderr).toContain("must be external and non-overlapping");
+      const verifierBytes = readFileSync(verifierPath);
+      write(verifierPath, Buffer.concat([verifierBytes, Buffer.from("\n// drift\n")]));
+      const runtimeDriftRefused = runSealer(join(root, "runtime-drift-refused.json"));
+      expect(runtimeDriftRefused.status).toBe(1);
+      expect(runtimeDriftRefused.stderr).toContain("drifted after full gate");
+      write(verifierPath, verifierBytes);
+      const sameOutput = join(root, "same-output.json");
+      const sameOutputRefused = spawnSync(
+        process.execPath,
+        [
+          sealer,
+          "--full-gate-receipt",
+          gatePath,
+          "--evidence-dir",
+          evidence,
+          "--review-artifacts",
+          artifacts,
+          "--private-key",
+          privateKeyPath,
+          "--authority",
+          authorityPath,
+          "--out",
+          sameOutput,
+          "--base64-out",
+          `${root}/unused/../same-output.json`,
         ],
-      },
-    });
-    const result = validateReleaseAttestation(blocked, authority, expected);
-    expect(result.ok).toBe(false);
-    expect(result.reasons.join(" ")).toMatch(/verdict/);
-  });
+        { cwd: candidate, encoding: "utf8" },
+      );
+      expect(sameOutputRefused.status).toBe(1);
+      expect(sameOutputRefused.stderr).toContain("must be different paths");
 
-  it("requires two UNIQUE reviewers and at most OWNER_REVIEW_MAX_ROUNDS rounds", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    const single = resign({
-      ...attestation,
-      payload: { ...attestation.payload, reviews: [attestation.payload.reviews[0]] },
-    });
-    expect(validateReleaseAttestation(single, authority, expected).ok).toBe(false);
-    const duplicated = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        reviews: [attestation.payload.reviews[0], attestation.payload.reviews[0]],
-      },
-    });
-    expect(validateReleaseAttestation(duplicated, authority, expected).ok).toBe(false);
-    const overRounds = resign({
-      ...attestation,
-      payload: { ...attestation.payload, rounds: OWNER_REVIEW_MAX_ROUNDS + 1 },
-    });
-    expect(validateReleaseAttestation(overRounds, authority, expected).ok).toBe(false);
-  });
+      const codexMetadataPath = join(artifacts, "02-codex", "metadata.json");
+      const codexMetadata = JSON.parse(readFileSync(codexMetadataPath, "utf8"));
+      write(codexMetadataPath, json({ ...codexMetadata, ignored_settings: ["effort=xhigh"] }));
+      const refused = runSealer(join(root, "refused.json"));
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("ignored requested settings");
 
-  it("binds to the exact candidate SHA/tree and a passing unchanged full gate", () => {
-    const { attestation, authority, resign, expected } = ownerAttestation();
-    expect(
-      validateReleaseAttestation(attestation, authority, {
-        ...expected,
-        candidateSha: "f".repeat(40),
-      }).ok,
-    ).toBe(false);
-    const dirtyGate = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        fullGate: { ...attestation.payload.fullGate, candidateUnchanged: false },
-      },
-    });
-    expect(validateReleaseAttestation(dirtyGate, authority, expected).ok).toBe(false);
-    const failedGate = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        fullGate: { ...attestation.payload.fullGate, exitCode: 1 },
-      },
-    });
-    expect(validateReleaseAttestation(failedGate, authority, expected).ok).toBe(false);
-    const missingRuntime = resign({
-      ...attestation,
-      payload: {
-        ...attestation.payload,
-        fullGate: { ...attestation.payload.fullGate, reviewRuntimeArtifacts: undefined },
-      },
-    });
-    const runtimeVerdict = validateReleaseAttestation(missingRuntime, authority, expected);
-    expect(runtimeVerdict.ok).toBe(false);
-    expect(runtimeVerdict.reasons.join(" ")).toContain("runtime artifacts are missing");
+      write(codexMetadataPath, json(codexMetadata));
+      const codexTranscriptPath = join(artifacts, "02-codex", "transcript.md");
+      const codexTranscript = readFileSync(codexTranscriptPath);
+      write(codexTranscriptPath, Buffer.concat([codexTranscript, Buffer.from("drift\n")]));
+      const transcriptRefused = runSealer(join(root, "transcript-refused.json"));
+      expect(transcriptRefused.status).toBe(1);
+      expect(transcriptRefused.stderr).toContain("exact normalized event projection");
+
+      write(codexTranscriptPath, codexTranscript);
+      write(
+        codexMetadataPath,
+        json({
+          ...codexMetadata,
+          start_time: "2026-07-30T00:00:10.000Z",
+          first_event_time: "2026-07-30T00:00:11.000Z",
+          completion_time: "2026-07-30T00:00:15.000Z",
+          duration_ms: 5_000,
+        }),
+      );
+      const overlapRefused = runSealer(join(root, "overlap-refused.json"));
+      expect(overlapRefused.status).toBe(1);
+      expect(overlapRefused.stderr).toContain("did not overlap");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

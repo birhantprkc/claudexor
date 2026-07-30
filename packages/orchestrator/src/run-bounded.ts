@@ -14,5 +14,12 @@ export async function runBounded<T>(
       await work(items[idx] as T, idx);
     }
   });
-  await Promise.all(workers);
+  // Do not let the first rejected worker release resources that its already
+  // admitted siblings still use. Preserve failure semantics, but only rethrow
+  // after every worker has settled.
+  const settled = await Promise.allSettled(workers);
+  const rejected = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (rejected) throw rejected.reason;
 }

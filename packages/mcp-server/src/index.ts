@@ -14,6 +14,7 @@ import {
 import {
   effortJsonSchema,
   ExternalContextPolicy,
+  type ModeKind,
   ProviderFamily,
   runControlApplicability,
   validateOptionalNonEmptyString,
@@ -74,6 +75,27 @@ const paidBudgetSchema = inlineJsonSchemaRefs(paidBudgetSchemaRaw);
 const agentCapabilityCatalogSchema = inlineJsonSchemaRefs(
   agentCapabilityCatalogSchemaRaw as Record<string, unknown>,
 );
+const RUN_STRATEGY_PROPERTIES = {
+  ask: {
+    deepScan: {
+      type: "boolean",
+      description: "Widen the answer into a bounded multi-scout research sweep with synthesis.",
+    },
+  },
+  plan: {
+    council: {
+      type: "boolean",
+      description: "Draft n (2..4) plans in parallel, then merge one plan and question set.",
+    },
+  },
+  agent: {
+    tests: {
+      type: "array",
+      items: testCommandInvocationSchema,
+      description: "Typed-argv deterministic gate commands for this run.",
+    },
+  },
+};
 
 /**
  * Claudexor's MCP surface on the official TypeScript SDK v2.
@@ -89,11 +111,7 @@ const agentCapabilityCatalogSchema = inlineJsonSchemaRefs(
  */
 
 export interface McpToolContext {
-  /**
-   * The request's cancellation signal (`notifications/cancelled` from the
-   * host) — runners abort the underlying run with it, exactly like Ctrl-C
-   * on the CLI.
-   */
+  /** Host cancellation aborts the underlying run, exactly like CLI Ctrl-C. */
   signal?: AbortSignal;
 }
 
@@ -114,6 +132,7 @@ export interface McpTool {
   /** JSON Schema of the structured result (declared to hosts as outputSchema). */
   outputSchema?: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+  runMode?: ModeKind;
   handler: (args: any, ctx: McpToolContext) => Promise<McpToolOutput>;
 }
 
@@ -141,8 +160,7 @@ export function buildMcpServer(opts: {
       {
         description: tool.description,
         inputSchema: fromJsonSchema(tool.inputSchema as any) as any,
-        // Structured results are DECLARED (outputSchema) and mirrored in text;
-        // annotations are the MCP behavior hints (read-only vs mutating).
+        // Structured results are declared, mirrored in text, and carry behavior hints.
         ...(tool.outputSchema
           ? { outputSchema: fromJsonSchema(tool.outputSchema as any) as any }
           : {}),
@@ -150,15 +168,11 @@ export function buildMcpServer(opts: {
       },
       (async (args: unknown, ctx: any) => {
         const provided = (args ?? {}) as Record<string, unknown>;
-        // Semantic checks a JSON Schema cannot express (absolute paths, the
-        // secret fence, cross-field equality). Structural validation already
-        // happened in the SDK against the same schema.
+        // Apply semantic checks that JSON Schema cannot express.
         const validation = validateToolArguments(tool, provided);
         if (validation) {
-          // The official SDK's contract: tool-argument failures surface as
-          // isError:true TOOL results (its own structural validation does the
-          // same), not JSON-RPC protocol errors — a thrown handler error maps
-          // there. The old hand-rolled -32602 contract is retired with it.
+          // The SDK maps thrown argument failures to isError tool results,
+          // matching its structural validation rather than JSON-RPC errors.
           throw new Error(validation);
         }
         const out = await tool.handler(provided, {
@@ -221,7 +235,9 @@ function validateToolArguments(tool: McpTool, args: unknown): string | null {
   if (obj.n !== undefined && (!Number.isInteger(obj.n) || (obj.n as number) < minN))
     return `n must be an integer >= ${minN}`;
   // Shared semantic run-control rules (ONE owner in @claudexor/schema).
-  const runControlError = validateSurfaceRunControls(obj);
+  const runControlError = validateSurfaceRunControls(
+    tool.runMode ? { ...obj, mode: tool.runMode } : obj,
+  );
   if (runControlError) return runControlError;
   return validateNoInlineSecrets(obj, "MCP tool arguments");
 }
@@ -302,24 +318,10 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
         minimum: minN,
         description: "Optional best-of-N width for candidate races (or deep-scan scout width).",
       },
-      deepScan: {
-        type: "boolean",
-        description:
-          "Ask only: widen the answer into a bounded multi-scout research sweep with synthesis.",
-      },
-      council: {
-        type: "boolean",
-        description:
-          "Plan only (claudexor_plan): N harnesses draft plans in parallel, the primary merges them into one unified plan + one question set. Pass n (2..4) to set the member count.",
-      },
+      ...RUN_STRATEGY_PROPERTIES[mode],
       repoPath: {
         type: "string",
         description: "Absolute path of the target project. Defaults to the MCP server cwd.",
-      },
-      tests: {
-        type: "array",
-        items: testCommandInvocationSchema,
-        description: "Typed-argv deterministic gate commands for this run.",
       },
       paidBudget: paidBudgetSchema,
       access: {
@@ -378,8 +380,7 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
     },
     required: ["prompt"],
   });
-  // Behavior hints derive from the tool's MODE (data, not per-name hardcode):
-  // ask/plan are read-only; agent tools mutate.
+  // Behavior hints derive from mode: ask/plan are read-only; agent tools mutate.
   const annotationsFor = (params: Record<string, unknown>): McpToolAnnotations =>
     params["mode"] === "agent"
       ? { readOnlyHint: false, destructiveHint: false }
@@ -398,13 +399,11 @@ export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
     ),
     outputSchema: mcpRunToolResultSchema,
     annotations: annotationsFor(params),
-    // Summary first, then the runId/artifacts trailer (hosts get a handle);
-    // the structured mirror carries the same facts machine-readably.
+    runMode: params["mode"] as ModeKind,
+    // Summary precedes the run handle; structured content mirrors the same facts.
     handler: async (args, ctx) => {
       const result = await runner(
-        // MCP Tasks are still experimental. Start daemon-owned work and return
-        // its durable handle instead of holding one JSON-RPC request open for
-        // the entire run; status/cancel/result are explicit stable tools below.
+        // Return a durable daemon handle while MCP Tasks remain experimental.
         { ...args, ...params, deferred: true },
         ctx.signal ? { signal: ctx.signal } : {},
       );

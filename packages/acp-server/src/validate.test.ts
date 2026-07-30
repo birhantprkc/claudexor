@@ -9,6 +9,17 @@ describe("ACP run-control applicability", () => {
     expect(
       validateRunControls({ mode, protectedPathApprovals: [{ path: "test/**" }] })?.message,
     ).toMatch(/protectedPathApprovals.*Agent/i);
+    expect(validateRunControls({ mode, tests: [] })?.message).toMatch(/tests.*agent/i);
+  });
+
+  it("rejects cross-mode Ask and Plan strategy fields at the ACP boundary", () => {
+    expect(validateRunControls({ mode: "agent", deepScan: true })?.message).toMatch(/ask strategy/);
+    expect(validateRunControls({ mode: "ask", council: true })?.message).toMatch(/plan strategy/);
+    expect(validateRunControls({ mode: "ask", deepScan: true })).toBeNull();
+    expect(validateRunControls({ mode: "plan", council: true })).toBeNull();
+    expect(validateRunControls({ mode: "ask", race: true })?.message).toMatch(/Agent strategy/);
+    expect(validateRunControls({ mode: "plan", race: true })?.message).toMatch(/Agent strategy/);
+    expect(validateRunControls({ mode: "agent", race: true })).toBeNull();
   });
 
   it("accepts reviewers and approvals on Agent", () => {

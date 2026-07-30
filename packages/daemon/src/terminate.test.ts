@@ -122,6 +122,41 @@ describe("awaitDaemonTermination", () => {
     expect(result.detail).toContain("5151"); // discloses who holds it now
   });
 
+  it("refuses a live successor for runtime replacement after the pinned owner exits", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-terminate-successor-"));
+    roots.push(root);
+    const socketPath = join(root, "daemon.sock");
+    const ownerPath = `${socketPath}.writer/owner.json`;
+    mkdirSync(`${socketPath}.writer`);
+    const expected = { pid: 4242, token: "old", identity: IDENTITY };
+    writeFileSync(
+      ownerPath,
+      `${JSON.stringify({
+        pid: 5151,
+        token: "new",
+        identity: { ...IDENTITY, pid: 5151, startToken: "linux:555555" },
+      })}\n`,
+    );
+
+    const kills: Array<[number, string]> = [];
+    const result = await awaitDaemonTermination(
+      socketPath,
+      {
+        expectedOwner: expected,
+        requireNoSuccessor: true,
+        allowSigkill: true,
+      },
+      deps({
+        isAlive: (pid) => pid === 5151,
+        kill: (pid, signal) => kills.push([pid, signal]),
+      }),
+    );
+
+    expect(result).toMatchObject({ outcome: "still_alive" });
+    expect(result.detail).toContain("successor pid 5151");
+    expect(kills).toEqual([]);
+  });
+
   it("escalates an identity-VERIFIED SIGKILL past the graceful window", async () => {
     const socketPath = leaseFor({ pid: 4242, token: "t", identity: IDENTITY });
     const kills: Array<[number, string]> = [];

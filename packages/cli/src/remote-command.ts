@@ -14,6 +14,8 @@ import { arch, homedir, platform } from "node:os";
 import { join } from "node:path";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import {
+  type RuntimeReplacementIdentity,
+  type RuntimeReplacementTarget,
   awaitDaemonTermination,
   daemonLeaseOwner,
   daemonDir,
@@ -77,7 +79,7 @@ export function assertRemoteEngineIdentity(
   observed: { engineVersion: string | null; engineBuildSha: string | null },
   expectedVersion: string,
   expectedBuildSha: string,
-): void {
+): RuntimeReplacementIdentity {
   if (!/^\d+\.\d+\.\d+$/.test(expectedVersion) || !/^[0-9a-f]{40}$/.test(expectedBuildSha)) {
     throw new Error("remote daemon stop received an invalid expected identity");
   }
@@ -87,6 +89,7 @@ export function assertRemoteEngineIdentity(
         `observed ${observed.engineVersion ?? "unknown"}/${observed.engineBuildSha ?? "unknown"})`,
     );
   }
+  return { version: expectedVersion, buildSha: expectedBuildSha };
 }
 
 async function stop(expectedVersion: string, expectedBuildSha: string): Promise<number> {
@@ -99,10 +102,19 @@ async function stop(expectedVersion: string, expectedBuildSha: string): Promise<
     return 0;
   }
   const identity = await handshakeControlApi(daemon.addr, "claudexor-macos-remote-stop");
-  assertRemoteEngineIdentity(identity, expectedVersion, expectedBuildSha);
+  const expectedIdentity = assertRemoteEngineIdentity(identity, expectedVersion, expectedBuildSha);
+  const expectedOwner = daemonLeaseOwner(defaultSocketPath());
+  if (!expectedOwner) {
+    throw new Error("remote daemon is live but its writer-lease identity cannot be verified");
+  }
+  const expectedTarget: RuntimeReplacementTarget = {
+    ...expectedIdentity,
+    leaseOwner: { pid: expectedOwner.pid, token: expectedOwner.token },
+  };
   const termination = await admitAndAwaitRuntimeReplacementStop(
-    () => daemon.client.shutdownForRuntimeReplacement(),
+    () => daemon.client.shutdownForRuntimeReplacement(expectedTarget),
     (options) => awaitDaemonTermination(defaultSocketPath(), options),
+    expectedOwner,
   );
   if (termination.outcome === "still_alive") {
     throw new Error(`remote daemon did not stop: ${termination.detail}`);

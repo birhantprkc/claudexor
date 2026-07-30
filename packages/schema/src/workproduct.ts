@@ -18,7 +18,6 @@ export const WorkProduct = z
     kind: WorkProductKind,
     source_task_id: Id.describe("Task the work product came from."),
     producer_attempt_id: Id.optional().describe("Attempt that produced it, when known."),
-    evidence_dir: z.string().optional().describe("Directory holding run evidence artifacts."),
     /** Kind-specific payload (validated loosely here; specialized per kind by callers). */
     files: z
       .record(z.string(), z.string())

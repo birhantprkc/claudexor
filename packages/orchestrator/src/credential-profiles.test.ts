@@ -13,6 +13,7 @@ import {
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
   selectedProfileAvailability,
+  staticRotationCandidates,
   profileStatusAdmits,
 } from "./credential-profiles.js";
 import { HarnessRunSpec as HarnessRunSpecSchema } from "@claudexor/schema";
@@ -56,9 +57,12 @@ describe("selectedProfileAvailability", () => {
       profileId: "work",
       harnessId: "claude",
       probe: async () => ({
+        profile_id: "work",
+        harness_id: "claude",
         availability: "available",
         verification: "failed",
         detail: "wrong credential route",
+        last_verified_at: null,
       }),
     });
     expect(failed).toBe("wrong credential route");
@@ -67,9 +71,12 @@ describe("selectedProfileAvailability", () => {
       profileId: "work",
       harnessId: "claude",
       probe: async () => ({
+        profile_id: "work",
+        harness_id: "claude",
         availability: "available",
         verification: "not_run",
         detail: "native session unverified",
+        last_verified_at: null,
       }),
     });
     expect(unverifiedNative).toBe("native session unverified");
@@ -84,12 +91,45 @@ describe("selectedProfileAvailability", () => {
       profileId: "work",
       harnessId: "claude",
       probe: async () => ({
+        profile_id: "work",
+        harness_id: "claude",
         availability: "available",
         verification: "not_run",
         detail: "secret present",
+        last_verified_at: null,
       }),
     });
     expect(presenceOnly).toBe("available");
+  });
+
+  it("fails closed and redacts both thrown and returned probe diagnostics", async () => {
+    const token = `sk-${"a".repeat(48)}`;
+    const thrown = await selectedProfileAvailability({
+      registry: [work],
+      profileId: "work",
+      harnessId: "claude",
+      probe: async () => {
+        throw new Error(`vendor probe rejected ${token}`);
+      },
+    });
+    expect(thrown).toContain("profile readiness probe failed");
+    expect(thrown).not.toContain(token);
+
+    const returned = await selectedProfileAvailability({
+      registry: [work],
+      profileId: "work",
+      harnessId: "claude",
+      probe: async () => ({
+        profile_id: "work",
+        harness_id: "claude",
+        availability: "unavailable",
+        verification: "failed",
+        detail: `credential rejected ${token}`,
+        last_verified_at: null,
+      }),
+    });
+    expect(returned).toContain("credential rejected");
+    expect(returned).not.toContain(token);
   });
 });
 
@@ -305,6 +345,34 @@ describe("nextEligibleProfile (W5.4 rotation order)", () => {
       "b",
     );
     expect(nextEligibleProfile([a], "claude", policy, null, [], ready())).toBeNull();
+  });
+
+  it("filters policy, current identity, kind, and tried profiles before readiness probing", () => {
+    const keyed = {
+      ...work,
+      profile_id: "keyed",
+      credential_kind: "api_key" as const,
+      isolation_locator: null,
+      secret_ref: "anthropic:keyed",
+    };
+    const outsidePolicy = { ...work, profile_id: "outside" };
+    expect(
+      staticRotationCandidates({
+        registry: [a, b, keyed, outsidePolicy],
+        harnessId: "claude",
+        policy: { ...policy, rotation_eligible: ["a", "keyed", "b"] },
+        current: a,
+        excluded: new Set(["b"]),
+      }),
+    ).toEqual([]);
+    expect(
+      staticRotationCandidates({
+        registry: [a, b, keyed, outsidePolicy],
+        harnessId: "claude",
+        policy: { ...policy, rotation_eligible: ["a", "keyed", "b"] },
+        current: a,
+      }).map((profile) => profile.profile_id),
+    ).toEqual(["b"]);
   });
 });
 

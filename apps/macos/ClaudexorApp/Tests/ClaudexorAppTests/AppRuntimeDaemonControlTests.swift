@@ -32,6 +32,7 @@ import Testing
             if (a.includes("--probe")) {
               process.stdout.write(JSON.stringify({ version: "3.4.0", buildSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }) + "\\n");
             } else if (a.includes("--stop")) {
+              if (a[1] !== "3.4.0" || a[2] !== "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") process.exit(4);
               process.stdout.write(JSON.stringify({ stopped: true, outcome: "clean" }) + "\\n");
             } else if (a.includes("--busy-stop")) {
               process.stdout.write(JSON.stringify({ stopped: false, code: "runtime_replacement_busy", retryable: true }) + "\\n");
@@ -53,7 +54,9 @@ import Testing
         #expect(AppRuntimeDaemonControl.runtimeIdentity(from: try #require(probe)) == RuntimeClosureIdentity(
             version: "3.4.0", buildSha: String(repeating: "b", count: 40)))
 
-        let stop = AppRuntimeDaemonControl.runNodeJSON([script.path, "--stop"], node: node, timeout: 10)
+        let stop = AppRuntimeDaemonControl.runNodeJSON([
+            script.path, "--stop", "3.4.0", String(repeating: "b", count: 40)
+        ], node: node, timeout: 10)
         #expect(stop?["stopped"] as? Bool == true)
     }
 

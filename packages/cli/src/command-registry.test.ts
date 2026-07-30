@@ -46,6 +46,13 @@ describe("command registry — the one owner of the CLI surface", () => {
     }
   });
 
+  it("documents every operand-bearing remote machine action", () => {
+    const remote = CLI_COMMANDS.find((command) => command.id === "remote");
+    expect(remote?.usageArgs).toContain("stop <expectedVersion> <expectedBuildSha>");
+    expect(remote?.usageArgs).toContain("activate <expectedTarget|-> <nextTarget|->");
+    expect(remote?.usageArgs).toContain("rollback <expectedTarget|-> <nextTarget|->");
+  });
+
   it("every declared flag is consumed by at least one command (no dead knobs)", () => {
     const consumed = new Set(CLI_COMMANDS.flatMap((c) => [...c.flags]));
     consumed.add("help").add("version"); // global preflight affordances

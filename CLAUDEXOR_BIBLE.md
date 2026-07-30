@@ -214,8 +214,10 @@ invariant or owner decision before proceeding.
   session, and only thread purge, credential-profile deletion, or orphan
   retention removes a lane home. Thread, turn, and session mutations are fsync-before-ACK
   journal records; create and Exact Retry bind `Idempotency-Key` to the
-  original request and never duplicate a turn. Exact Retry is a fresh linked
-  command with fresh preflight; Run Again is an editable draft with explicit
+  original request and never duplicate a turn. An already accepted command
+  remains the replay authority after later turns; a historical runless turn
+  with no accepted command is never admitted after it stops being the thread
+  tail. Exact Retry is a fresh linked command with fresh preflight; Run Again is an editable draft with explicit
   differences. verify: thread journal restart and idempotency tests; run retry
   and draft tests; session-resume orchestrator tests.
 - **INV-035** A v2 project has a stable daemon-owned id bound to one canonical
@@ -672,38 +674,25 @@ invariant or owner decision before proceeding.
   fix because appending is cheapest. verify:
   `scripts/complexity-ratchet.mjs` in CI.
 - **INV-125** Release tags additionally pass the owner-review gate: ONE
-  parallel review wave on the frozen candidate SHA — independent
-  full-context critic subagents plus the exact model-diverse triad
-  (`openai/gpt-5.6-sol`, `anthropic/claude-fable-5`,
-  `google/gemini-3.5-flash`) and a scope reviewer
-  (`anthropic/claude-fable-5`) — all reading one sealed packet; ONE
-  adjudication under INV-139; ONE batched fix commit; ONE confirmation wave
-  on the delta. A blocking verdict cannot be sealed. Rounds beyond the
-  confirmation wave require an explicit owner decision. The signed
-  owner-review attestation binds the candidate SHA/tree, the full-gate
-  receipt digest, and — CONCEPT-CHANGE(INV-125) — the EXACT triad+scope
-  panel: each of the three triad slots and the scope slot is bound by its
-  model identity and its report digest + verdict (a >=2 structural floor no
-  longer suffices; off-panel reports can ride along as extra critics but
-  never satisfy coverage). Substituting or skipping the panel without an
-  explicit owner override is a hard error; an override is a distinct recorded
-  fact, never a reviewer PASS. When one sealed packet exceeds a single
-  reviewable full-text pack, the wave is PACKET-SPLIT — CONCEPT-CHANGE(INV-125)
-  — into named sub-waves. The sealed packet still owns one complete binary
-  `DIFF.patch`; every sub-wave receives the full changed-file inventory plus
-  one exact readable diff slice and one partitioned full-current-text subset,
-  and EACH binds its own full triad+scope panel (slot
-  `triad@<subwave>=model`). The attestation additionally binds the
-  union-coverage receipt — RECOMPUTED by the sealer from disk bytes, never
-  trusted from a caller — mapping every sub-wave to its role-specific triad
-  and scope prompt digests. For BOTH roles the slice union must reconstruct
-  the sealed diff byte-for-byte and every required hand-written current file
-  must appear whole exactly once, paired with its diff in the same sub-wave
-  (`scripts/review-coverage-check.mjs`); a seal naming ANY sub-wave without
-  that receipt, or whose receipt labels differ from the panel's sub-waves, is
-  refused. Older-schema attestations are REJECTED as publish input;
-  already-sealed ones stay cryptographically verifiable only for their own
-  archived releases.
+  parallel native full-context wave on the frozen candidate SHA with EXACTLY
+  two required reviewers — Claude Code `claude-fable-5` at effort `max` and
+  Codex `gpt-5.6-sol` at effort `xhigh`, both on their vendor-native local
+  sessions. Each reviewer receives the same complete Git-visible candidate,
+  complete diff, sealed evidence, user dialogue and owner decisions, test and
+  gate receipts, and internet access; packet splitting and substitute models
+  cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched
+  correction commit; ONE parallel confirmation wave in the same full context,
+  focused on the correction delta. Any tracked mutation re-freezes the
+  candidate. A blocking, missing, malformed, route-unproven, or incomplete
+  required verdict cannot be sealed. Rounds beyond confirmation require an
+  explicit owner decision. The signed schema-v5 owner-review attestation binds
+  the candidate SHA/tree, exact full-gate receipt, sealed evidence manifest,
+  diff and wave, and both reviewers' requested and observed route/model/effort,
+  native auth, candidate-built review runtime, prompt/report/metadata/event
+  digests, and non-blocking verdicts. Extra critics are advisory and never
+  satisfy either required slot. Schema v2-v4 attestations remain
+  cryptographically verifiable only as historical records and are rejected as
+  current publish input.
   A whole-tree immune scan (docs-vs-code, dead surface,
   invariants-vs-tree) is a mandatory pre-release checklist step.
   verify: `scripts/seal-owner-review-attestation.mjs` (panel + round

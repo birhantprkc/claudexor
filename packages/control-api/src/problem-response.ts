@@ -35,13 +35,14 @@ function structuralZodIssues(error: unknown): StructuralZodIssue[] | null {
 }
 
 function truncateBytes(text: string, maxBytes: number): string {
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-  // Truncate on a whole UTF-16 code point boundary, then trim to the byte cap.
-  let sliced = text;
-  while (Buffer.byteLength(sliced, "utf8") > maxBytes && sliced.length > 0) {
-    sliced = sliced.slice(0, -1);
-  }
-  return sliced;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  // If the byte immediately outside the prefix continues a scalar, exclude
+  // that scalar's lead byte too. This is bounded to at most three steps for
+  // valid UTF-8, regardless of attacker-controlled input length.
+  while (end > 0 && (bytes[end]! & 0b1100_0000) === 0b1000_0000) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
 }
 
 /** JSON Pointer (RFC 9457-style) for one issue path, without echoing an

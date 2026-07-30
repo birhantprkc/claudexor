@@ -95,6 +95,21 @@ describe("claudexor follow", () => {
     ).toContain("browser=unavailable:manifest_unsupported");
   });
 
+  it("renders partial Git initialization as incomplete rather than a baseline success", () => {
+    expect(
+      formatRunEventLine({
+        type: "project.git.initialized",
+        payload: {
+          repo_root: "/tmp/project",
+          initialized: false,
+          baseline_committed: false,
+          partial: true,
+          failed_stage: "init",
+        },
+      }),
+    ).toBe("git repository setup stopped during init at /tmp/project; partial metadata may remain");
+  });
+
   it("renders deadline and operator cancellation from canonical terminal facts", () => {
     expect(
       formatRunEventLine({

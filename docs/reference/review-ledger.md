@@ -1,7 +1,7 @@
 # Release review findings ledger
 
 Every reviewer finding from a release wave gets exactly one row here with its
-adjudicated disposition (CHECKLISTS "Release review protocol (v3)"). The rows
+adjudicated disposition (CHECKLISTS "Release review protocol"). The rows
 for declined findings feed the next wave's sealed packet as
 `DECLINED_FINDINGS.md` — a reviewer re-raising a declined finding without new
 evidence is out of scope by construction. Fixed findings cite the batch-fix

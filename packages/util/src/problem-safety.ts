@@ -2,6 +2,7 @@ import { sensitiveResourcePolicy } from "./sensitive-resource.js";
 
 const MAX_ACTIONS = 16;
 const MAX_ACTION_CHARS = 512;
+const MAX_MESSAGE_CHARS = 2_000;
 const MAX_CONTEXT_KEYS = 32;
 const MAX_CONTEXT_ARRAY = 32;
 const MAX_CONTEXT_DEPTH = 3;
@@ -20,6 +21,12 @@ function boundedString(value: string, limit: number): string {
     prefixLength = Math.max(0, limit - suffix.length);
   }
   return `${safe.slice(0, prefixLength)}${suffix}`.slice(0, limit);
+}
+
+/** One safe problem message for both durable state and wire projections. */
+export function safeProblemMessage(value: unknown): string {
+  const message = value instanceof Error ? value.message : String(value);
+  return boundedString(message || "unknown error", MAX_MESSAGE_CHARS);
 }
 
 /** Redact and bound recovery actions before they enter durable or wire state. */

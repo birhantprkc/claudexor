@@ -550,6 +550,34 @@ describe("AcpServer official SDK projection", () => {
     );
   });
 
+  it("does not publish malformed legacy outcome facts as typed ACP metadata", async () => {
+    const cwd = project();
+    await withClient(
+      async (params) =>
+        params.mode === "__acp_session_new"
+          ? { sessionId: "thread-malformed-facts", cwd }
+          : {
+              runId: "run-malformed-facts",
+              status: "cancelled",
+              summary: "cancelled",
+              outcomeFacts: { reason: "wall_clock_exceeded" },
+            },
+      async (agent) => {
+        const session = await agent.request(acp.methods.agent.session.new, { cwd, mcpServers: [] });
+        const response = await agent.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "go" }],
+        });
+
+        expect(response.stopReason).toBe("cancelled");
+        expect(response._meta?.["claudexor"]).toMatchObject({
+          status: "cancelled",
+          outcomeFacts: null,
+        });
+      },
+    );
+  });
+
   it("routes Plan images and embedded resources through attachment descriptors, never inline paths", async () => {
     const cwd = project();
     let promptCall: any;

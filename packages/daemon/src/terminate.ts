@@ -3,7 +3,7 @@ import {
   defaultProcessIdentityService,
   type ProcessIdentityReader,
 } from "@claudexor/core";
-import { daemonLeaseOwner, processIsAlive } from "./writer-lease.js";
+import { daemonLeaseOwner, processIsAlive, type DaemonLeaseOwner } from "./writer-lease.js";
 
 export type DaemonTerminationOutcome =
   /** The daemon released its lease or its pid is gone — confirmed dead. */
@@ -24,6 +24,14 @@ export interface AwaitDaemonTerminationOptions {
    * replacement grants that authority only after an explicit fenced admission
    * receipt; an ambiguous RPC failure may observe death but never cause it. */
   allowSigkill?: boolean;
+  /** Exact daemon process instance selected before the stop RPC. Without this
+   * the waiter could pin a same-build successor that acquired the lease while
+   * the admission response was in flight. */
+  expectedOwner?: DaemonLeaseOwner;
+  /** Runtime replacement refuses a successor observed during this termination
+   * proof. The separately-adjudicated post-return/pointer-swap gap is outside
+   * this waiter's observation window. */
+  requireNoSuccessor?: boolean;
   pollMs?: number;
 }
 
@@ -73,7 +81,7 @@ export async function awaitDaemonTermination(
   let noKillReason: string | null = null;
   // The ONE owner this call is about. Everything below judges the world
   // against this snapshot — never against whoever holds the lease later.
-  const owner = daemonLeaseOwner(socketPath);
+  const owner = options.expectedOwner ?? daemonLeaseOwner(socketPath);
   if (!owner) return { outcome: "exited", detail: "no daemon owns the writer lease" };
   for (;;) {
     const current = daemonLeaseOwner(socketPath);
@@ -92,6 +100,12 @@ export async function awaitDaemonTermination(
       // before reporting exit; a still-alive old process keeps this loop
       // (and its escalation) on the case.
       if (!isAlive(owner.pid)) {
+        if (options.requireNoSuccessor) {
+          return {
+            outcome: "still_alive",
+            detail: `daemon pid ${owner.pid} exited but successor pid ${current.pid} owns the writer lease`,
+          };
+        }
         return {
           outcome: killed ? "killed" : "exited",
           detail: `daemon pid ${owner.pid} released its lease (now held by pid ${current.pid})`,

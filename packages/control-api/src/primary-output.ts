@@ -3,6 +3,7 @@ import { ControlPrimaryOutput, type RunFacts, type RunFailure } from "@claudexor
 import { redactSecrets } from "@claudexor/util";
 import { safeArtifactPath } from "./artifact-paths.js";
 import type { DaemonRunRecord } from "./daemon-server.js";
+import { readRunTombstone } from "./retention.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
 
 const PRIMARY_OUTPUT_PREVIEW_BYTES = 256 * 1024;
@@ -33,24 +34,28 @@ function preview(
   if (!rec.runDir) return null;
   const path = safeArtifactPath(rec.runDir, relPath);
   if (!path) return null;
-  const st = lstatSync(path);
-  if (st.isSymbolicLink() || st.isDirectory()) return null;
-  const length = Math.min(st.size, PRIMARY_OUTPUT_PREVIEW_BYTES + REDACTION_OVERLAP_BYTES);
-  const data = Buffer.alloc(length);
-  const fd = openSync(path, "r");
   try {
-    readSync(fd, data, 0, length, 0);
-  } finally {
-    closeSync(fd);
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || st.isDirectory()) return null;
+    const length = Math.min(st.size, PRIMARY_OUTPUT_PREVIEW_BYTES + REDACTION_OVERLAP_BYTES);
+    const data = Buffer.alloc(length);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, data, 0, length, 0);
+    } finally {
+      closeSync(fd);
+    }
+    const redacted = redactSecrets(decodeValidUtf8(data));
+    return {
+      text: truncateUtf8(redacted, PRIMARY_OUTPUT_PREVIEW_BYTES),
+      bytes: st.size,
+      truncated:
+        st.size > PRIMARY_OUTPUT_PREVIEW_BYTES ||
+        Buffer.byteLength(redacted, "utf8") > PRIMARY_OUTPUT_PREVIEW_BYTES,
+    };
+  } catch {
+    return null;
   }
-  const redacted = redactSecrets(decodeValidUtf8(data));
-  return {
-    text: truncateUtf8(redacted, PRIMARY_OUTPUT_PREVIEW_BYTES),
-    bytes: st.size,
-    truncated:
-      st.size > PRIMARY_OUTPUT_PREVIEW_BYTES ||
-      Buffer.byteLength(redacted, "utf8") > PRIMARY_OUTPUT_PREVIEW_BYTES,
-  };
 }
 
 export function boundedArtifactText(rec: DaemonRunRecord, relPath: string): string | null {
@@ -67,11 +72,28 @@ export function primaryOutput(
   failure: RunFailure | null,
   runFacts: RunFacts | null = null,
 ): ControlPrimaryOutput | null {
+  const tombstone = rec.runDir ? readRunTombstone(rec.runDir) : null;
+  if (tombstone) {
+    const text = "Run artifacts were reclaimed by retention; inspect tombstone.yaml.";
+    return ControlPrimaryOutput.parse({
+      kind: "diagnostic",
+      path: "tombstone.yaml",
+      text,
+      bytes: Buffer.byteLength(text, "utf8"),
+    });
+  }
   if (runFacts?.presentation) {
     const primary = runFacts.presentation.primary;
     if (!primary) return null;
     const output = preview(rec, primary.path);
-    return output?.text.trim() ? ControlPrimaryOutput.parse({ ...primary, ...output }) : null;
+    if (output?.text.trim()) return ControlPrimaryOutput.parse({ ...primary, ...output });
+    const text = `The canonical primary output (${primary.path}) is unavailable; inspect run retention and artifacts.`;
+    return ControlPrimaryOutput.parse({
+      kind: "diagnostic",
+      path: primary.path,
+      text,
+      bytes: Buffer.byteLength(text, "utf8"),
+    });
   }
   const candidates =
     mode === "ask"
@@ -121,7 +143,12 @@ export function outputReadyState(
   failure: RunFailure | null,
   runFacts: RunFacts | null = null,
 ): "pending" | "finalizing" | "ready" | "diagnostic" {
-  if (runFacts?.presentation) return runFacts.presentation.state;
+  if (runFacts?.presentation) {
+    if (!runFacts.presentation.primary) return runFacts.presentation.state;
+    return primaryOutput(rec, mode, failure, runFacts)?.kind === "diagnostic"
+      ? "diagnostic"
+      : runFacts.presentation.state;
+  }
   const primary = primaryOutput(rec, mode, failure, null);
   if (primary?.kind === "diagnostic") return "diagnostic";
   if (primary?.text?.trim()) return "ready";

@@ -84,6 +84,11 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
     /// detached daemon still booting), then `handshakeReturns` — the bounded-poll
     /// boot window.
     var handshakeNilCount = 0
+    /// Keep the forward candidate unreachable for its whole first-start boot
+    /// window, then expose `handshakeReturns` after rollback starts the prior
+    /// runtime. This models an absent/unreachable candidate without weakening
+    /// the exact-target stop contract.
+    var handshakeUnavailableOnFirstStart = false
     /// When true, the FIRST start() throws (the relaunch), later starts (rollback)
     /// succeed — the audit-6 relaunch-fails-after-swap case.
     var startThrowsOnce = false
@@ -97,15 +102,17 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
     var replacementStopResults: [StubReplacementStopResult] = []
     var stops = 0
     var starts = 0
+    private(set) var stoppedIdentities: [RuntimeClosureIdentity] = []
 
     func isBusy() async -> Bool? {
         let (value, gate) = lock.withLock { (busy, busyGate) }
         if let gate { await gate.pause() }
         return value
     }
-    func stopForRuntimeReplacement() async throws {
+    func stopForRuntimeReplacement(expectedIdentity: RuntimeClosureIdentity) async throws {
         let (hook, result): ((@Sendable () -> Void)?, StubReplacementStopResult) = lock.withLock {
             stops += 1
+            stoppedIdentities.append(expectedIdentity)
             let result = replacementStopResults.isEmpty
                 ? .stopped : replacementStopResults.removeFirst()
             return (onStop, result)
@@ -135,12 +142,13 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
     }
     func handshakeIdentity() async -> RuntimeClosureIdentity? {
         lock.withLock {
-            if handshakeNilCount > 0 { handshakeNilCount -= 1; return nil }
+            if handshakeUnavailableOnFirstStart && starts == 1 { return nil }
             if var sequence = handshakeIdentitySequence, !sequence.isEmpty {
                 let next = sequence.removeFirst()
                 handshakeIdentitySequence = sequence
                 return next
             }
+            if handshakeNilCount > 0 { handshakeNilCount -= 1; return nil }
             guard let version = handshakeReturns else { return nil }
             return RuntimeClosureIdentity(
                 version: version,
@@ -224,6 +232,30 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         #expect(daemon.stops == 1)
         #expect(daemon.starts == 1)
         #expect(recorder.contains(.done(version: "3.4.0")))
+    }
+
+    @Test func forwardStopBindsTheFreshObservedServingIdentityNotTheInstallTarget() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = RuntimeInstaller(root: root)
+        let (bytes, sha) = try fixtureClosure()
+        let daemon = StubDaemon()
+        daemon.probeReturns = "3.4.0"
+        let observed = RuntimeClosureIdentity(
+            version: "3.2.0", buildSha: previousBuildSha)
+        daemon.handshakeIdentitySequence = [
+            observed,
+            RuntimeClosureIdentity(version: "3.4.0", buildSha: candidateBuildSha),
+        ]
+        let coord = RuntimeInstallCoordinator(
+            installer: installer, transport: LocalTransport(bytes), daemon: daemon,
+            lifecycleOwner: testInstallLifecycleOwner,
+            rollbackSelection: { testBundledSelection })
+
+        _ = try await coord.install(
+            manifest: manifest(version: "3.4.0", sha: sha), assetURL: assetURL)
+
+        #expect(daemon.stoppedIdentities == [observed])
     }
 
     @Test func reconciliationAndInstallShareOneExactSessionLifecycleLease() async throws {
@@ -317,6 +349,7 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let daemon = StubDaemon()
         daemon.busy = false
         daemon.probeReturns = "3.4.0"
+        daemon.handshakeReturns = "3.2.0"
         daemon.replacementStopResults = [.busy]
         let coord = RuntimeInstallCoordinator(
             installer: installer, transport: LocalTransport(bytes), daemon: daemon,
@@ -472,6 +505,7 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let wrongCandidate = RuntimeClosureIdentity(
             version: "3.4.0", buildSha: wrongBuildSha)
         daemon.handshakeIdentitySequence = [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
             wrongCandidate,
             RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
         ]
@@ -489,6 +523,10 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
             expected: RuntimeClosureIdentity(
                 version: "3.4.0", buildSha: candidateBuildSha),
             got: wrongCandidate))
+        #expect(daemon.stoppedIdentities == [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
+            wrongCandidate,
+        ])
         #expect(installer.readCurrent() == previousPointer())
         #expect(recorder.contains(.rolledBack(reason: "post-relaunch handshake mismatch")))
     }
@@ -502,6 +540,7 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let daemon = StubDaemon()
         daemon.probeReturns = "3.4.0"
         daemon.handshakeIdentitySequence = [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
             RuntimeClosureIdentity(version: "3.4.0", buildSha: wrongBuildSha)
         ]
         daemon.replacementStopResults = [.stopped, .busy]
@@ -523,11 +562,7 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         #expect(daemon.starts == 1)
     }
 
-    @Test func rollsBackWhenRelaunchStartThrowsAfterSwap() async throws {
-        // Audit 6: daemon.start() THROWS on the post-swap relaunch. The
-        // coordinator must roll back to the previous pointer and end
-        // failed-but-safe, never strand the newly-swapped-but-unlaunchable
-        // pointer.
+    @Test func rollsBackWhenRelaunchThrowsAndTheExactCandidateCanBeStopped() async throws {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let installer = RuntimeInstaller(root: root)
@@ -543,9 +578,11 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let (bytes, sha) = try fixtureClosure()
         let daemon = StubDaemon()
         daemon.probeReturns = "3.4.0"  // probe OK → we reach the swap
-        // The recovered engine (rollback relaunch on the restored 3.2.0 pointer)
-        // reports 3.2.0 — so rollback is PROVEN and ends failed-but-safe.
         daemon.handshakeReturns = "3.2.0"
+        daemon.handshakeIdentitySequence = [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
+        ]
         daemon.startThrowsOnce = true  // the relaunch throws
         let coord = RuntimeInstallCoordinator(
             installer: installer, transport: LocalTransport(bytes), daemon: daemon,
@@ -560,6 +597,39 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         #expect(current.engineSha == previousBuildSha)
         // start() was attempted for the failed relaunch AND again in rollback.
         #expect(daemon.starts == 2)
+        #expect(daemon.stoppedIdentities == [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
+            RuntimeClosureIdentity(version: "3.4.0", buildSha: candidateBuildSha),
+        ])
+    }
+
+    @Test func relaunchThrowWithoutAServingIdentityRollsBackThroughExactStop() async throws {
+        let root = tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = RuntimeInstaller(root: root)
+        try installer.writeCurrentAtomic(previousPointer())
+        let (bytes, sha) = try fixtureClosure()
+        let daemon = StubDaemon()
+        daemon.probeReturns = "3.4.0"
+        daemon.handshakeReturns = "3.2.0"
+        daemon.handshakeUnavailableOnFirstStart = true
+        daemon.startThrowsOnce = true
+        let recorder = PhaseRecorder()
+        let coord = RuntimeInstallCoordinator(
+            installer: installer, transport: LocalTransport(bytes), daemon: daemon,
+            lifecycleOwner: testInstallLifecycleOwner,
+            onPhase: { recorder.record($0) })
+
+        let error = await captureError {
+            try await coord.install(
+                manifest: manifest(version: "3.4.0", sha: sha), assetURL: assetURL)
+        }
+
+        #expect(error is RuntimeInstallError)
+        #expect(installer.readCurrent()?.version == "3.2.0")
+        #expect(daemon.stops == 2)
+        #expect(daemon.starts == 2)
+        #expect(recorder.contains(.rolledBack(reason: "engine relaunch failed after swap")))
     }
 
     // MARK: - Bounded handshake poll (Fix 1: the boot window)
@@ -575,6 +645,9 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let daemon = StubDaemon()
         daemon.probeReturns = "3.4.0"
         daemon.handshakeReturns = "3.4.0"
+        daemon.handshakeIdentitySequence = [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha)
+        ]
         daemon.handshakeNilCount = 4  // still booting for the first 4 probes
         let recorder = PhaseRecorder()
         let coord = RuntimeInstallCoordinator(
@@ -600,15 +673,16 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let root = tempRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let installer = RuntimeInstaller(root: root)
+        try installer.writeCurrentAtomic(previousPointer())
         let (bytes, sha) = try fixtureClosure()
         let daemon = StubDaemon()
         daemon.probeReturns = "3.4.0"
-        daemon.handshakeReturns = nil  // never answers
+        daemon.handshakeReturns = "3.2.0"
+        daemon.handshakeUnavailableOnFirstStart = true
         let recorder = PhaseRecorder()
         let coord = RuntimeInstallCoordinator(
             installer: installer, transport: LocalTransport(bytes), daemon: daemon,
             lifecycleOwner: testInstallLifecycleOwner,
-            rollbackSelection: { testBundledSelection },
             handshakePollInterval: 0.005, handshakePollTimeout: 0.05,
             onPhase: { recorder.record($0) })
 
@@ -616,6 +690,10 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
             try await coord.install(manifest: manifest(version: "3.4.0", sha: sha), assetURL: assetURL)
         }
         #expect(!recorder.contains(.done(version: "3.4.0")))
+        #expect(installer.readCurrent()?.version == "3.2.0")
+        #expect(daemon.stops == 2)
+        #expect(daemon.starts == 2)
+        #expect(recorder.contains(.rolledBack(reason: "post-relaunch handshake timed out")))
     }
 
     // MARK: - Rollback verifies recovery (Fix 2)
@@ -711,6 +789,7 @@ private final class StubDaemon: RuntimeDaemonControl, @unchecked Sendable {
         let daemon = StubDaemon()
         daemon.probeReturns = "3.4.0"
         daemon.handshakeIdentitySequence = [
+            RuntimeClosureIdentity(version: "3.2.0", buildSha: previousBuildSha),
             RuntimeClosureIdentity(version: "3.4.0", buildSha: wrongBuildSha),
             RuntimeClosureIdentity(version: "3.2.0", buildSha: wrongBuildSha),
         ]

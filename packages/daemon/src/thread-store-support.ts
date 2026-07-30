@@ -127,6 +127,27 @@ export function idempotencyConflict(): Error & { code: string; status: number } 
   });
 }
 
+export function turnRunConflict(turnId: string, boundRunId: string, runId: string): Error {
+  return Object.assign(
+    new Error(`turn ${turnId} is already bound to run ${boundRunId}, not ${runId}`),
+    { code: "turn_run_conflict", status: 409, retryable: false },
+  );
+}
+
+export function findIdempotentTurn(
+  index: ReadonlyMap<string, { turnId: string; requestDigest: string }>,
+  getTurn: (id: string) => ThreadTurn | undefined,
+  input: ThreadMutation["idempotency"],
+): ThreadTurn | undefined {
+  if (!input) return undefined;
+  const prior = index.get(input.keyDigest);
+  if (!prior) return undefined;
+  if (prior.requestDigest !== input.requestDigest) throw idempotencyConflict();
+  const turn = getTurn(prior.turnId);
+  if (!turn) throw new Error(`idempotency record points to missing turn ${prior.turnId}`);
+  return turn;
+}
+
 export function upsert<T extends { id: string }>(items: T[], value: T): void {
   const index = items.findIndex((item) => item.id === value.id);
   if (index < 0) items.push(value);

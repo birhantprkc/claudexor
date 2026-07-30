@@ -165,7 +165,7 @@ describe("parseSealedReviewEnvelopeDetailed", () => {
     expect(parsed.findings.map((finding) => finding.claim)).toEqual(["real blocker"]);
   });
 
-  it("collapses repeated semantically identical envelopes", () => {
+  it("rejects repeated semantically identical envelopes", () => {
     const envelope = sealedEnvelope([
       { severity: "WARN", category: "test_gap", claim: "same warning" },
     ]);
@@ -174,22 +174,22 @@ describe("parseSealedReviewEnvelopeDetailed", () => {
       `${JSON.stringify(envelope)}\n${JSON.stringify(reordered)}`,
       sealedReviewer,
     );
-    expect(parsed.error).toBeNull();
-    expect(parsed.blocks).toHaveLength(2);
-    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.error).toMatch(/exactly one JSON object/);
+    expect(parsed.blocks).toEqual([]);
+    expect(parsed.findings).toEqual([]);
   });
 
-  it("rejects divergent or mixed semantic payloads", () => {
+  it("rejects divergent or mixed payloads at the one-object boundary", () => {
     const envelope = sealedEnvelope();
     expect(
       parseSealedReviewEnvelopeDetailed(
         `${JSON.stringify(envelope)}\n${JSON.stringify(sealedEnvelope([{ severity: "WARN", claim: "later" }]))}`,
         sealedReviewer,
       ).error,
-    ).toMatch(/divergent or mixed/);
+    ).toMatch(/exactly one JSON object/);
     expect(
       parseSealedReviewEnvelopeDetailed(`${JSON.stringify(envelope)}\n[]`, sealedReviewer).error,
-    ).toMatch(/divergent or mixed/);
+    ).toMatch(/exactly one JSON object/);
   });
 
   it.each([

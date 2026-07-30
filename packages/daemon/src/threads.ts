@@ -21,6 +21,7 @@ import {
   nowIso,
   redactSecrets,
   safeProblemContext,
+  safeProblemMessage,
   safeProblemRequiredActions,
 } from "@claudexor/util";
 import {
@@ -37,9 +38,11 @@ import { deriveThreadTitle } from "./thread-title.js";
 import {
   assertUnique,
   coercePrimaryToPool,
+  findIdempotentTurn,
   idempotencyConflict,
   parseMutation,
   threadCreationIdempotency,
+  turnRunConflict,
   turnIdempotency,
   upsert,
   type ThreadMutation,
@@ -380,14 +383,6 @@ export class ThreadStore {
     return resumeMapFrom(this.state.sessions, threadId, profileId);
   }
 
-  /**
-   * Create a turn BEFORE its run is enqueued (run_id is bound later via
-   * `bindTurnRun`). This is the single-writer entry point: the control API and
-   * the daemon runner both create here, so a run is recorded on its thread
-   * exactly once — there is no second "POST /runs with threadId silently skips
-   * the turn" path. `parentRunId` is captured here (head at creation time), so
-   * concurrent turns cannot both claim the same stale head.
-   */
   createTurn(threadId: string, prompt: string, input: CreateTurnInput = {}): ThreadTurn {
     const idempotency = turnIdempotency(
       this.journal.options.partition,
@@ -395,13 +390,8 @@ export class ThreadStore {
       input.idempotency,
     );
     if (idempotency) {
-      const prior = this.turnIdByKey.get(idempotency.keyDigest);
-      if (prior) {
-        if (prior.requestDigest !== idempotency.requestDigest) throw idempotencyConflict();
-        const existing = this.getTurn(prior.turnId);
-        if (!existing) throw new Error(`idempotency record points to missing turn ${prior.turnId}`);
-        return existing;
-      }
+      const existing = findIdempotentTurn(this.turnIdByKey, (id) => this.getTurn(id), idempotency);
+      if (existing) return existing;
     }
     const thread = this.getThread(threadId);
     if (!thread) throw Object.assign(new Error(`no such thread: ${threadId}`), { status: 404 });
@@ -441,10 +431,20 @@ export class ThreadStore {
     return turn;
   }
 
+  findTurnByIdempotency(
+    threadId: string,
+    input: NonNullable<CreateTurnInput["idempotency"]>,
+  ): ThreadTurn | undefined {
+    const idempotency = turnIdempotency(this.journal.options.partition, threadId, input);
+    return findIdempotentTurn(this.turnIdByKey, (id) => this.getTurn(id), idempotency);
+  }
+
   /** Bind a started run to its turn and advance the thread head (runner-owned). */
   bindTurnRun(turnId: string, runId: string): void {
     const turn = this.state.turns.find((t) => t.id === turnId);
     if (!turn) return;
+    if (turn.run_id === runId) return;
+    if (turn.run_id) throw turnRunConflict(turnId, turn.run_id, runId);
     const nextTurn = ThreadTurnSchema.parse({ ...turn, run_id: runId, enqueue_error: null });
     // A binding run supersedes any recorded refusal (the retry path): the
     // turn is no longer an orphan, so the stale error must not linger.
@@ -476,7 +476,7 @@ export class ThreadStore {
       ...turn,
       enqueue_error: {
         ...problem,
-        message: redactSecrets(problem.message),
+        message: safeProblemMessage(problem.message),
         required_actions: safeProblemRequiredActions(problem.required_actions),
         context: safeProblemContext(problem.context),
         failed_at: nowIso(),

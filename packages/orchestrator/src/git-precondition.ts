@@ -6,6 +6,7 @@ import { noProjectRepoRoot } from "@claudexor/util";
 import {
   ensureGitRepository,
   GitCapabilityError,
+  GitInitializationError,
   type EnsureGitRepositoryResult,
 } from "@claudexor/workspace";
 import { writeFailure } from "./runTerminalResults.js";
@@ -44,6 +45,17 @@ export async function ensureWriteModeGitBoundary(
   } catch (error) {
     const message = safeErrorMessage(error);
     const prerequisite = error instanceof GitCapabilityError;
+    if (error instanceof GitInitializationError) {
+      log.emit("project.git.initialized", {
+        repo_root: repoRoot,
+        initialized: error.progress.initialized,
+        baseline_committed: error.progress.baselineCommitted,
+        gitignore_seeded: error.progress.gitignoreSeeded,
+        head_sha: error.progress.headSha,
+        partial: true,
+        failed_stage: error.progress.failedStage,
+      });
+    }
     // This boundary runs before a harness is admitted. Capability, filesystem,
     // and repository-initialization failures are all workspace failures; none
     // is evidence that a provider process failed.

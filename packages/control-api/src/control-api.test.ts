@@ -675,7 +675,7 @@ describe("DaemonControlApiServer", () => {
     const cancelled: string[] = [];
     const daemon: DaemonFacadeClient = {
       async enqueue() {
-        return { id: record.id, state: "queued" };
+        return { id: record.id, state: "queued", reused: false };
       },
       async status(id: string) {
         if (id !== record.id) throw new Error("missing");
@@ -1089,6 +1089,10 @@ describe("DaemonControlApiServer", () => {
     bus?: DaemonControlApiOptions["bus"],
   ): Promise<void> {
     const operatorDecisions = new Map<string, ControlOperatorDecisionRecord>();
+    const operatorDecisionKeys = new Map<
+      string,
+      { request: string; record: ControlOperatorDecisionRecord }
+    >();
     const server = new DaemonControlApiServer({
       ...readyIdentity,
       token,
@@ -1097,9 +1101,35 @@ describe("DaemonControlApiServer", () => {
       runStartTimeoutMs,
       services: {
         operatorDecision: (runId) => operatorDecisions.get(runId) ?? null,
-        recordOperatorDecision: (runId, _params, decision) => {
+        findOperatorDecisionByIdempotency: (_runId, _params, idempotency) => {
+          const prior = operatorDecisionKeys.get(`${idempotency.client}:${idempotency.key}`);
+          if (!prior) return null;
+          if (prior.request !== JSON.stringify(idempotency.request)) {
+            throw Object.assign(
+              new Error("idempotency key was already used with a different request"),
+              { status: 409, code: "idempotency_conflict" },
+            );
+          }
+          return prior.record;
+        },
+        recordOperatorDecision: (runId, _params, decision, idempotency) => {
+          if (idempotency) {
+            const key = `${idempotency.client}:${idempotency.key}`;
+            const request = JSON.stringify(idempotency.request);
+            const prior = operatorDecisionKeys.get(key);
+            if (prior) {
+              if (prior.request !== request) {
+                throw Object.assign(
+                  new Error("idempotency key was already used with a different request"),
+                  { status: 409, code: "idempotency_conflict" },
+                );
+              }
+              return { record: prior.record, reused: true };
+            }
+            operatorDecisionKeys.set(key, { request, record: decision });
+          }
           operatorDecisions.set(runId, decision);
-          return decision;
+          return { record: decision, reused: false };
         },
         ...services,
       },
@@ -1255,9 +1285,9 @@ describe("DaemonControlApiServer", () => {
       const { body } = await fetchRunList(base, { limit: "2" });
       expect(body.runs).toHaveLength(2);
       // Only the 2 paged terminal records are fingerprinted, and each terminal
-      // fingerprint short-circuits to a SINGLE delivery_state probe: 2 total, not
-      // 6 records x 13 paths.
-      expect(runListFingerprintProbeCountForTests()).toBe(2);
+      // fingerprint short-circuits to delivery_state + the retention tombstone:
+      // 4 total, not 6 records x 13 paths.
+      expect(runListFingerprintProbeCountForTests()).toBe(4);
     });
 
     const running = [pagedRunRecord(0, "running", runDir)];
@@ -1283,6 +1313,42 @@ describe("DaemonControlApiServer", () => {
     lruSet(map, "d", 4, cap);
     expect([...map.keys()]).toEqual(["b", "d"]);
     expect(map.size).toBe(cap);
+  });
+
+  it("invalidates a ready list row into a tombstone diagnostic after retention", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.params = { ...(record.params as Record<string, unknown>), mode: "ask" };
+    writeFileSync(join(record.runDir as string, "final", "answer.md"), "Ready answer\n");
+
+    await withDaemonServer(daemon, async (base) => {
+      const first = (await (
+        await apiFetch(`${base}/runs`, { headers: { authorization: `Bearer ${token}` } })
+      ).json()) as { runs: Array<{ outputReadyState: string }> };
+      expect(first.runs[0]?.outputReadyState).toBe("ready");
+
+      rmSync(record.runDir as string, { recursive: true, force: true });
+      mkdirSync(record.runDir as string);
+      writeFileSync(
+        join(record.runDir as string, "tombstone.yaml"),
+        "run_id: run-d1\ndeleted_at: 2026-07-29T00:00:00.000Z\nreason: retention\n",
+      );
+
+      const second = (await (
+        await apiFetch(`${base}/runs`, { headers: { authorization: `Bearer ${token}` } })
+      ).json()) as { runs: Array<{ outputReadyState: string }> };
+      expect(second.runs[0]?.outputReadyState).toBe("diagnostic");
+
+      const detail = (await (
+        await apiFetch(`${base}/runs/run-d1`, {
+          headers: { authorization: `Bearer ${token}` },
+        })
+      ).json()) as {
+        summary: { outputReadyState: string };
+        primaryOutput: { kind: string; path: string } | null;
+      };
+      expect(detail.summary.outputReadyState).toBe("diagnostic");
+      expect(detail.primaryOutput).toMatchObject({ kind: "diagnostic", path: "tombstone.yaml" });
+    });
   });
 
   it("runs: preserves a typed pre-start refusal's code and status", async () => {
@@ -2285,12 +2351,13 @@ describe("DaemonControlApiServer", () => {
       state: "active",
     };
     const turns: Record<string, unknown>[] = [];
+    const rawToken = `sk-${"z".repeat(48)}`;
     const refusing: DaemonFacadeClient = {
       ...daemon,
       async enqueue() {
-        throw Object.assign(new Error("daemon socket is gone"), {
-          requiredActions: ["Restart the local daemon"],
-          context: { transport: "daemon" },
+        throw Object.assign(new Error(`daemon socket is gone (${rawToken})`), {
+          requiredActions: [`Restart the local daemon without ${rawToken}`],
+          context: { transport: "daemon", nested: { diagnostic: rawToken } },
         });
       },
     };
@@ -2337,9 +2404,10 @@ describe("DaemonControlApiServer", () => {
         expect(body.context.turnId).toBe("tn-refused");
         expect(body.context.threadId).toBe("th-r");
         expect(body.context.transport).toBe("daemon");
-        expect(body.requiredActions).toEqual(["Restart the local daemon"]);
+        expect(body.requiredActions).toHaveLength(1);
         expect(body.retryable).toBe(false);
         expect(body.message).toContain("daemon socket is gone");
+        expect(JSON.stringify(body)).not.toContain(rawToken);
         // The projection renders the refusal so a reloading client sees it.
         const detail = (await (
           await apiFetch(`${base}/threads/th-r`, { headers: { authorization: `Bearer ${token}` } })
@@ -2359,11 +2427,10 @@ describe("DaemonControlApiServer", () => {
         expect(detail.turns[0]?.enqueueError?.message).toContain("daemon socket is gone");
         expect(detail.turns[0]?.enqueueError?.code).toBeNull(); // untyped throw
         expect(detail.turns[0]?.enqueueError?.retryable).toBe(false); // nothing to replay
-        expect(detail.turns[0]?.enqueueError?.requiredActions).toEqual([
-          "Restart the local daemon",
-        ]);
+        expect(detail.turns[0]?.enqueueError?.requiredActions).toHaveLength(1);
         expect(detail.turns[0]?.enqueueError?.context.transport).toBe("daemon");
         expect(detail.turns[0]?.enqueueError?.failedAt).toBeTruthy();
+        expect(JSON.stringify(turns[0]?.["enqueue_error"])).not.toContain(rawToken);
       },
       undefined,
       services,
@@ -2444,6 +2511,103 @@ describe("DaemonControlApiServer", () => {
         expect(body.context.turnId).toBe("tn-t");
         expect(body.context.state).toBe("failed");
         expect(body.message).toContain("allow_full_access");
+      },
+      undefined,
+      services,
+    );
+  });
+
+  it("threads: same-key replay cannot re-admit an orphan after a newer turn", async () => {
+    const repo = reapMk(join(tmpdir(), "claudexor-thread-stale-idem-"));
+    const now = new Date().toISOString();
+    const threadObj: Record<string, unknown> = {
+      schema_version: 2,
+      id: "th-stale-idem",
+      created_at: now,
+      updated_at: now,
+      repo: { root: repo, base_ref: "HEAD" },
+      title: "stale replay thread",
+      mode: "agent",
+      workspace: { mode: "in_place", worktree_path: null, base_sha: null },
+      auth_preference: "auto",
+      primary_harness: null,
+      eligible_harnesses: [],
+      routingGoal: "auto",
+      run_ids: [],
+      head_run_id: null,
+      state: "active",
+    };
+    const turns: Record<string, unknown>[] = [];
+    const byKey = new Map<string, { id: string } & Record<string, unknown>>();
+    let creates = 0;
+    let enqueues = 0;
+    const daemon: DaemonFacadeClient = {
+      async enqueue() {
+        enqueues += 1;
+        throw new Error("daemon was unavailable before command acceptance");
+      },
+      async findAccepted() {
+        return null;
+      },
+      async status() {
+        throw new Error("no accepted command");
+      },
+      async list() {
+        return [];
+      },
+      async cancel() {
+        return { ok: true };
+      },
+    };
+    const services: DaemonControlApiOptions["services"] = {
+      threadDetail: async () => ({ thread: threadObj, sessions: [], turns }),
+      findThreadTurnByIdempotency: async (_id, idempotency) => byKey.get(idempotency.key) ?? null,
+      createThreadTurn: async (id, prompt, options) => {
+        const key = options.idempotency?.key ?? "";
+        const prior = byKey.get(key);
+        if (prior) return prior;
+        creates += 1;
+        const turn = {
+          id: "tn-orphan",
+          thread_id: id,
+          run_id: null,
+          prompt,
+          created_at: now,
+        };
+        turns.push(turn);
+        byKey.set(key, turn);
+        return turn;
+      },
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const request = () =>
+          apiFetch(`${base}/threads/th-stale-idem/turns`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Idempotency-Key": "stale-turn-key",
+            },
+            body: JSON.stringify({ prompt: "original message" }),
+          });
+        expect((await request()).status).toBe(500);
+        turns.push({
+          id: "tn-newer",
+          thread_id: "th-stale-idem",
+          run_id: "run-newer",
+          prompt: "newer message",
+          created_at: new Date(Date.now() + 1).toISOString(),
+        });
+
+        const replay = await request();
+        expect(replay.status).toBe(409);
+        expect(await replay.json()).toMatchObject({
+          code: "thread_turn_not_latest",
+          retryable: false,
+        });
+        expect(creates).toBe(1);
+        expect(enqueues).toBe(1);
       },
       undefined,
       services,
@@ -6321,7 +6485,7 @@ describe("DaemonControlApiServer", () => {
         operatorDecision: (runId) => operatorDecisions.get(runId) ?? null,
         recordOperatorDecision: (runId, _params, decision) => {
           operatorDecisions.set(runId, decision);
-          return decision;
+          return { record: decision, reused: false };
         },
         threadDetail: async () => ({ thread: threadObj, sessions: [], turns: [] }),
         applyThread: async () => {
@@ -8312,61 +8476,133 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
-  it("operator decision unblocks a blocked run for apply (accept_risk), scoped to the exact patch", async () => {
-    const { daemon, record } = fakeDaemon();
+  it.each(["accept_risk", "override_needs_human"] as const)(
+    "operator decision unblocks a blocked run for apply (%s), is idempotent, and stays scoped to the exact patch",
+    async (action) => {
+      const { daemon, record } = fakeDaemon();
+      record.state = "succeeded";
+      writeFileSync(
+        join(record.runDir as string, "arbitration", "decision.yaml"),
+        "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
+      );
+      await withDaemonServer(daemon, async (base) => {
+        // Blocked: apply/check refuses before any operator decision.
+        const before = await apiFetch(`${base}/runs/run-d1/apply/check`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: "{}",
+        });
+        expect(before.status).toBe(409);
+
+        // Operator accepts the risk (typed, audited, hash-bound).
+        const decideRequest = () =>
+          apiFetch(`${base}/runs/run-d1/decision`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Idempotency-Key": `decision-risk-${action}`,
+            },
+            body: JSON.stringify({
+              action,
+              findingIds: ["f-1"],
+              acceptedRisks: ["protected path change reviewed by hand"],
+            }),
+          });
+        const decide = await decideRequest();
+        expect(decide.status).toBe(200);
+        const decisionBody = (await decide.json()) as { accepted: boolean };
+        expect(decisionBody.accepted).toBe(true);
+        const replay = await decideRequest();
+        expect(replay.status).toBe(200);
+        expect(await replay.json()).toEqual(decisionBody);
+        const decisionAudit = readFileSync(join(record.runDir as string, "events.jsonl"), "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { type?: string; payload?: { decision?: string } })
+          .filter(
+            (event) => event.type === "control.applied" && event.payload?.decision === action,
+          );
+        expect(decisionAudit).toHaveLength(1);
+        // The journal-backed authority also emits the artifact-only compatibility projection.
+        const persisted = readFileSync(
+          join(record.runDir as string, "arbitration", "operator_decision.yaml"),
+          "utf8",
+        );
+        expect(persisted).toContain(action);
+        expect(persisted).toContain("patch_sha256");
+
+        // The gate now passes for THIS patch...
+        const after = await apiFetch(`${base}/runs/run-d1/apply/check`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: "{}",
+        });
+        expect(after.status).toBe(200);
+
+        // ...but a mutated patch invalidates the override (hash-bound).
+        writeFileSync(
+          join(record.runDir as string, "final", "patch.diff"),
+          "diff --git a/x b/x\n+tampered\n",
+        );
+        const tampered = await apiFetch(`${base}/runs/run-d1/apply/check`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+          body: "{}",
+        });
+        expect(tampered.status).toBe(409);
+      });
+    },
+  );
+
+  it("accept_risk same-key replay returns its durable decision while a newer turn runs", async () => {
+    const { daemon, record } = fakeDaemon({ runFacts: "blocked" });
     record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      threadId: "th-risk-replay",
+      turnId: "tn-source",
+    };
     writeFileSync(
       join(record.runDir as string, "arbitration", "decision.yaml"),
       "winner: a01\nfacts:\n  lifecycle: succeeded\n  review: blocked\n  checks: not_configured\n  noChanges: false\n  reason: review_blocked\nfinal_verify:\n  attempted: true\n  applied_cleanly: true\n  gates_passed: true\n",
     );
-    await withDaemonServer(daemon, async (base) => {
-      // Blocked: apply/check refuses before any operator decision.
-      const before = await apiFetch(`${base}/runs/run-d1/apply/check`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-        body: "{}",
-      });
-      expect(before.status).toBe(409);
+    let newerTurnRunning = false;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async list() {
+        const records = await daemon.list();
+        return newerTurnRunning
+          ? [
+              ...records,
+              {
+                id: "job-newer",
+                runId: "run-newer",
+                state: "running",
+                params: { threadId: "th-risk-replay", turnId: "tn-newer" },
+              },
+            ]
+          : records;
+      },
+    };
 
-      // Operator accepts the risk (typed, audited, hash-bound).
-      const decide = await apiFetch(`${base}/runs/run-d1/decision`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "Idempotency-Key": "decision-risk-1" },
-        body: JSON.stringify({
-          action: "accept_risk",
-          findingIds: ["f-1"],
-          acceptedRisks: ["protected path change reviewed by hand"],
-        }),
-      });
-      expect(decide.status).toBe(200);
-      expect(((await decide.json()) as { accepted: boolean }).accepted).toBe(true);
-      // The journal-backed authority also emits the artifact-only compatibility projection.
-      const persisted = readFileSync(
-        join(record.runDir as string, "arbitration", "operator_decision.yaml"),
-        "utf8",
-      );
-      expect(persisted).toContain("accept_risk");
-      expect(persisted).toContain("patch_sha256");
+    await withDaemonServer(wrapped, async (base) => {
+      const request = () =>
+        apiFetch(`${base}/runs/run-d1/decision`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "risk-before-busy",
+          },
+          body: JSON.stringify({ action: "accept_risk", acceptedRisks: ["reviewed"] }),
+        });
+      const original = await request();
+      expect(original.status).toBe(200);
+      const originalBody = await original.json();
 
-      // The gate now passes for THIS patch...
-      const after = await apiFetch(`${base}/runs/run-d1/apply/check`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-        body: "{}",
-      });
-      expect(after.status).toBe(200);
-
-      // ...but a mutated patch invalidates the override (hash-bound).
-      writeFileSync(
-        join(record.runDir as string, "final", "patch.diff"),
-        "diff --git a/x b/x\n+tampered\n",
-      );
-      const tampered = await apiFetch(`${base}/runs/run-d1/apply/check`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-        body: "{}",
-      });
-      expect(tampered.status).toBe(409);
+      newerTurnRunning = true;
+      const replay = await request();
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toEqual(originalBody);
     });
   });
 
@@ -8442,6 +8678,217 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  function concurrentDecisionRerunFixture() {
+    const { daemon, record } = fakeDaemon();
+    record.state = "succeeded";
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      threadId: "th-decision-concurrent",
+      turnId: "tn-source",
+    };
+
+    type TurnIdempotency = { key: string; client: string; request: unknown };
+    const turns = new Map<string, { turn: { id: string }; request: string }>();
+    const jobs = new Map<string, DaemonRunRecord>();
+    let createTurnCalls = 0;
+    let enqueueCalls = 0;
+    let signalFirstEnqueue!: () => void;
+    const firstEnqueueEntered = new Promise<void>((resolve) => {
+      signalFirstEnqueue = resolve;
+    });
+    let signalConcurrentRequest!: () => void;
+    const concurrentRequestObserved = new Promise<void>((resolve) => {
+      signalConcurrentRequest = resolve;
+    });
+    let releaseFirstEnqueue!: () => void;
+    const firstEnqueueHold = new Promise<void>((resolve) => {
+      releaseFirstEnqueue = resolve;
+    });
+    let firstAccepted = false;
+
+    const turnKey = (threadId: string, idempotency: TurnIdempotency): string =>
+      `${threadId}:${idempotency.client}:${idempotency.key}`;
+    const findTurn = (threadId: string, idempotency: TurnIdempotency) => {
+      const prior = turns.get(turnKey(threadId, idempotency));
+      if (!prior) return null;
+      if (prior.request !== JSON.stringify(idempotency.request)) {
+        throw Object.assign(
+          new Error("idempotency key was already used with a different request"),
+          {
+            code: "idempotency_conflict",
+            status: 409,
+          },
+        );
+      }
+      return prior.turn;
+    };
+
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(_params, options) {
+        return jobs.get(options.idempotencyKey) ?? null;
+      },
+      async enqueue(params, options) {
+        enqueueCalls += 1;
+        const key = String(options?.idempotencyKey ?? "");
+        const prior = jobs.get(key);
+        if (prior) return { id: prior.id, state: prior.state, reused: true };
+        const ordinal = jobs.size + 1;
+        const job: DaemonRunRecord = {
+          id: `job-decision-followup-${ordinal}`,
+          state: "running",
+          runId: `run-decision-followup-${ordinal}`,
+          taskId: `task-decision-followup-${ordinal}`,
+          runDir: record.runDir,
+          params,
+        };
+        jobs.set(key, job);
+        if (!firstAccepted) {
+          firstAccepted = true;
+          signalFirstEnqueue();
+          await firstEnqueueHold;
+        }
+        return { id: job.id, state: job.state, reused: false };
+      },
+      async status(id) {
+        if (id === record.id) return record;
+        const job = [...jobs.values()].find((candidate) => candidate.id === id);
+        if (!job) throw new Error(`missing job ${id}`);
+        return job;
+      },
+      async list() {
+        if (firstAccepted) signalConcurrentRequest();
+        return [record, ...jobs.values()];
+      },
+    };
+    const services: DaemonControlApiOptions["services"] = {
+      findThreadTurnByIdempotency: async (threadId, idempotency) => findTurn(threadId, idempotency),
+      createThreadTurn: async (threadId, _prompt, options) => {
+        const idempotency = options.idempotency as TurnIdempotency;
+        const existing = findTurn(threadId, idempotency);
+        if (existing) return existing;
+        createTurnCalls += 1;
+        const turn = { id: `tn-decision-followup-${createTurnCalls}` };
+        turns.set(turnKey(threadId, idempotency), {
+          turn,
+          request: JSON.stringify(idempotency.request),
+        });
+        return turn;
+      },
+    };
+    return {
+      daemon: wrapped,
+      services,
+      firstEnqueueEntered,
+      concurrentRequestObserved,
+      releaseFirstEnqueue,
+      turnCount: () => turns.size,
+      jobCount: () => jobs.size,
+      createTurnCalls: () => createTurnCalls,
+      enqueueCalls: () => enqueueCalls,
+    };
+  }
+
+  it("rerun_with_feedback replays the same durable turn and run while its first request is active", async () => {
+    const fixture = concurrentDecisionRerunFixture();
+    await withDaemonServer(
+      fixture.daemon,
+      async (base) => {
+        const request = () =>
+          apiFetch(`${base}/runs/run-d1/decision`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Idempotency-Key": "decision-concurrent-same",
+            },
+            body: JSON.stringify({
+              action: "rerun_with_feedback",
+              feedback: "Keep the repair focused.",
+            }),
+          });
+        const first = request();
+        await fixture.firstEnqueueEntered;
+        const replay = request();
+        await fixture.concurrentRequestObserved;
+        fixture.releaseFirstEnqueue();
+        const responses = await Promise.all([first, replay]);
+        expect(responses.map((response) => response.status)).toEqual([200, 200]);
+        const bodies = await Promise.all(
+          responses.map((response) => response.json() as Promise<{ newRunId?: string }>),
+        );
+        expect(bodies.map((body) => body.newRunId)).toEqual([
+          "run-decision-followup-1",
+          "run-decision-followup-1",
+        ]);
+        expect(fixture.turnCount()).toBe(1);
+        expect(fixture.jobCount()).toBe(1);
+        expect(fixture.createTurnCalls()).toBe(1);
+        expect(fixture.enqueueCalls()).toBe(2);
+        const audit = readFileSync(
+          (await fixture.daemon.status("job-d1")).runDir + "/events.jsonl",
+          "utf8",
+        )
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { type?: string; payload?: { decision?: string } })
+          .filter(
+            (event) =>
+              event.type === "control.applied" && event.payload?.decision === "rerun_with_feedback",
+          );
+        expect(audit).toHaveLength(1);
+      },
+      undefined,
+      fixture.services,
+    );
+  });
+
+  it("rerun_with_feedback refuses a distinct concurrent key before creating a sibling turn", async () => {
+    const fixture = concurrentDecisionRerunFixture();
+    await withDaemonServer(
+      fixture.daemon,
+      async (base) => {
+        const first = apiFetch(`${base}/runs/run-d1/decision`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "decision-concurrent-first",
+          },
+          body: JSON.stringify({
+            action: "rerun_with_feedback",
+            feedback: "Apply the first repair.",
+          }),
+        });
+        await fixture.firstEnqueueEntered;
+        const sibling = apiFetch(`${base}/runs/run-d1/decision`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "decision-concurrent-distinct",
+          },
+          body: JSON.stringify({
+            action: "rerun_with_feedback",
+            feedback: "Apply a different repair.",
+          }),
+        });
+        await fixture.concurrentRequestObserved;
+        fixture.releaseFirstEnqueue();
+        const [firstResponse, siblingResponse] = await Promise.all([first, sibling]);
+        expect(firstResponse.status).toBe(200);
+        expect(siblingResponse.status).toBe(409);
+        expect(await siblingResponse.json()).toMatchObject({
+          code: "thread_busy",
+          retryable: false,
+        });
+        expect(fixture.turnCount()).toBe(1);
+        expect(fixture.jobCount()).toBe(1);
+        expect(fixture.createTurnCalls()).toBe(1);
+        expect(fixture.enqueueCalls()).toBe(1);
+      },
+      undefined,
+      fixture.services,
+    );
+  });
+
   it("rerun_with_feedback preserves one typed enqueue refusal across HTTP and the durable turn", async () => {
     const { daemon, record } = fakeDaemon();
     record.state = "succeeded";
@@ -8467,6 +8914,7 @@ describe("DaemonControlApiServer", () => {
     };
     let durable: Record<string, unknown> | null = null;
     const services: DaemonControlApiOptions["services"] = {
+      findThreadTurnByIdempotency: async () => null,
       createThreadTurn: async () => ({ id: "tn-decision" }),
       setTurnEnqueueError: (_turnId, problem) => {
         durable = problem as unknown as Record<string, unknown>;
@@ -8538,6 +8986,7 @@ describe("DaemonControlApiServer", () => {
       },
     };
     const services: DaemonControlApiOptions["services"] = {
+      findThreadTurnByIdempotency: async () => null,
       createThreadTurn: async () => ({ id: "tn-decision-terminal" }),
     };
     await withDaemonServer(
@@ -8569,6 +9018,110 @@ describe("DaemonControlApiServer", () => {
       },
       undefined,
       services,
+    );
+  });
+
+  it("POST /runs replays a durable command before mutable preflight changes", async () => {
+    const { daemon, record } = fakeDaemon();
+    let accepted = false;
+    let enqueueCalls = 0;
+    let preflightCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params, options) {
+        expect(options.idempotencyRequest).toEqual(params);
+        return accepted ? record : null;
+      },
+      async enqueue() {
+        accepted = true;
+        enqueueCalls += 1;
+        return { id: record.id, state: "queued", reused: false };
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const request = () =>
+          apiFetch(`${base}/runs`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Idempotency-Key": "run-preflight-replay",
+            },
+            body: startAgentBody(),
+          });
+        expect((await request()).status).toBe(200);
+        expect((await request()).status).toBe(200);
+        expect(preflightCalls).toBe(1);
+        expect(enqueueCalls).toBe(1);
+      },
+      undefined,
+      {
+        preflightRunRequirements: async () => {
+          preflightCalls += 1;
+          if (preflightCalls > 1) {
+            throw Object.assign(new Error("Git became unavailable"), {
+              status: 503,
+              code: "git_unavailable",
+            });
+          }
+        },
+      },
+    );
+  });
+
+  it("POST /runs returns a command accepted concurrently while mutable preflight fails", async () => {
+    const { daemon, record } = fakeDaemon();
+    let accepted = false;
+    let findCalls = 0;
+    let enqueueCalls = 0;
+    let enterPreflight!: () => void;
+    let failPreflight!: (error: Error) => void;
+    const preflightEntered = new Promise<void>((resolve) => {
+      enterPreflight = resolve;
+    });
+    const preflightBarrier = new Promise<void>((_resolve, reject) => {
+      failPreflight = reject;
+    });
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(params, options) {
+        findCalls += 1;
+        expect(options.idempotencyRequest).toEqual(params);
+        return accepted ? record : null;
+      },
+      async enqueue() {
+        enqueueCalls += 1;
+        throw new Error("the replay path must not enqueue");
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const pending = apiFetch(`${base}/runs`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "run-preflight-concurrent-accept",
+          },
+          body: startAgentBody(),
+        });
+        await preflightEntered;
+        accepted = true;
+        failPreflight(Object.assign(new Error("Git became unavailable"), { status: 503 }));
+        const response = await pending;
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ jobId: record.id, runId: record.runId });
+        expect(findCalls).toBe(2);
+        expect(enqueueCalls).toBe(0);
+      },
+      undefined,
+      {
+        preflightRunRequirements: async () => {
+          enterPreflight();
+          await preflightBarrier;
+        },
+      },
     );
   });
 
@@ -8604,6 +9157,220 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("Exact Retry replays its durable command before mutable preflight changes", async () => {
+    const { daemon, record } = fakeDaemon();
+    const retryRecord: DaemonRunRecord = {
+      id: "job-retry-preflight",
+      state: "running",
+      runId: "run-retry-preflight",
+      taskId: "task-retry-preflight",
+      runDir: record.runDir,
+      params: undefined,
+    };
+    let accepted = false;
+    let enqueueCalls = 0;
+    let preflightCalls = 0;
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted(_params, options) {
+        expect(options).toMatchObject({
+          idempotencyKey: "exact-preflight-replay",
+          operation: "run.retry",
+          idempotencyRequest: { retryOf: "run-d1" },
+        });
+        return accepted ? retryRecord : null;
+      },
+      async enqueue(params) {
+        accepted = true;
+        enqueueCalls += 1;
+        retryRecord.params = params;
+        return { id: retryRecord.id, state: "queued", reused: false };
+      },
+      async status(id) {
+        if (id === record.id) return record;
+        if (id === retryRecord.id) return retryRecord;
+        throw new Error(`missing ${id}`);
+      },
+      async list() {
+        return [record, ...(accepted ? [retryRecord] : [])];
+      },
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const request = () =>
+          apiFetch(`${base}/runs/run-d1/retry`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Idempotency-Key": "exact-preflight-replay",
+            },
+            body: "{}",
+          });
+        expect((await request()).status).toBe(200);
+        expect((await request()).status).toBe(200);
+        expect(preflightCalls).toBe(1);
+        expect(enqueueCalls).toBe(1);
+      },
+      undefined,
+      {
+        preflightRunRequirements: async () => {
+          preflightCalls += 1;
+          if (preflightCalls > 1) {
+            throw Object.assign(new Error("Git became unavailable"), {
+              status: 503,
+              code: "git_unavailable",
+            });
+          }
+        },
+      },
+    );
+  });
+
+  it("Exact Retry preserves accepted handles when run-start observation fails", async () => {
+    const { daemon, record } = fakeDaemon();
+    record.params = {
+      ...(record.params as Record<string, unknown>),
+      threadId: "th-retry-observation",
+      turnId: "tn-source",
+    };
+    const wrapped: DaemonFacadeClient = {
+      ...daemon,
+      async findAccepted() {
+        return null;
+      },
+      async enqueue() {
+        return { id: "job-retry-accepted", state: "queued", reused: false };
+      },
+      async status(id) {
+        if (id === record.id) return record;
+        throw new Error("daemon status connection lost");
+      },
+    };
+    const services: DaemonControlApiOptions["services"] = {
+      findThreadTurnByIdempotency: async () => null,
+      createThreadTurn: async () => ({ id: "tn-retry-accepted" }),
+    };
+    await withDaemonServer(
+      wrapped,
+      async (base) => {
+        const response = await apiFetch(`${base}/runs/run-d1/retry`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "exact-observation-failure",
+          },
+          body: "{}",
+        });
+        expect(response.status).toBe(500);
+        expect(await response.json()).toMatchObject({
+          context: {
+            jobId: "job-retry-accepted",
+            retryOf: "run-d1",
+            threadId: "th-retry-observation",
+            turnId: "tn-retry-accepted",
+          },
+        });
+      },
+      undefined,
+      services,
+    );
+  });
+
+  it("Exact Retry replays the same durable turn, job, and run while its first request is active", async () => {
+    const fixture = concurrentDecisionRerunFixture();
+    await withDaemonServer(
+      fixture.daemon,
+      async (base) => {
+        const request = () =>
+          apiFetch(`${base}/runs/run-d1/retry`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Idempotency-Key": "exact-retry-concurrent-same",
+            },
+            body: "{}",
+          });
+        const first = request();
+        await fixture.firstEnqueueEntered;
+        const replay = request();
+        await fixture.concurrentRequestObserved;
+        fixture.releaseFirstEnqueue();
+        const responses = await Promise.all([first, replay]);
+        expect(responses.map((response) => response.status)).toEqual([200, 200]);
+        const bodies = await Promise.all(
+          responses.map(
+            (response) =>
+              response.json() as Promise<{ jobId: string; runId: string; turnId: string }>,
+          ),
+        );
+        expect(bodies).toEqual([
+          {
+            retryOf: "run-d1",
+            jobId: "job-decision-followup-1",
+            runId: "run-decision-followup-1",
+            turnId: "tn-decision-followup-1",
+            state: "running",
+          },
+          {
+            retryOf: "run-d1",
+            jobId: "job-decision-followup-1",
+            runId: "run-decision-followup-1",
+            turnId: "tn-decision-followup-1",
+            state: "running",
+          },
+        ]);
+        expect(fixture.turnCount()).toBe(1);
+        expect(fixture.jobCount()).toBe(1);
+        expect(fixture.createTurnCalls()).toBe(1);
+        expect(fixture.enqueueCalls()).toBe(1);
+      },
+      undefined,
+      fixture.services,
+    );
+  });
+
+  it("Exact Retry refuses a distinct concurrent key before creating a sibling turn", async () => {
+    const fixture = concurrentDecisionRerunFixture();
+    await withDaemonServer(
+      fixture.daemon,
+      async (base) => {
+        const first = apiFetch(`${base}/runs/run-d1/retry`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "exact-retry-concurrent-first",
+          },
+          body: "{}",
+        });
+        await fixture.firstEnqueueEntered;
+        const sibling = apiFetch(`${base}/runs/run-d1/retry`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "Idempotency-Key": "exact-retry-concurrent-distinct",
+          },
+          body: "{}",
+        });
+        await fixture.concurrentRequestObserved;
+        fixture.releaseFirstEnqueue();
+        const [firstResponse, siblingResponse] = await Promise.all([first, sibling]);
+        expect(firstResponse.status).toBe(200);
+        expect(siblingResponse.status).toBe(409);
+        expect(await siblingResponse.json()).toMatchObject({
+          code: "thread_busy",
+          retryable: false,
+        });
+        expect(fixture.turnCount()).toBe(1);
+        expect(fixture.jobCount()).toBe(1);
+        expect(fixture.createTurnCalls()).toBe(1);
+        expect(fixture.enqueueCalls()).toBe(1);
+      },
+      undefined,
+      fixture.services,
+    );
+  });
+
   it("Exact Retry preserves one typed enqueue refusal across HTTP and the durable turn", async () => {
     const { daemon, record } = fakeDaemon();
     record.params = {
@@ -8624,6 +9391,7 @@ describe("DaemonControlApiServer", () => {
     };
     let durable: Record<string, unknown> | null = null;
     const services: DaemonControlApiOptions["services"] = {
+      findThreadTurnByIdempotency: async () => null,
       createThreadTurn: async () => ({ id: "tn-retry-enqueue" }),
       setTurnEnqueueError: (_turnId, problem) => {
         durable = problem as unknown as Record<string, unknown>;
@@ -8781,6 +9549,7 @@ describe("DaemonControlApiServer", () => {
       },
     };
     const services: DaemonControlApiOptions["services"] = {
+      findThreadTurnByIdempotency: async () => null,
       createThreadTurn: async () => ({ id: "tn-retry" }),
     };
     await withDaemonServer(
@@ -8974,7 +9743,7 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
-  it("Exact Retry and Run Again restore threaded attachment references from the durable turn", async () => {
+  it("Exact Retry restores turn attachments and frozen-plan provenance; Run Again only restores attachments", async () => {
     const { daemon, record } = fakeDaemon();
     const attachmentPath = join(record.runDir as string, "context", "attached.txt");
     writeFileSync(attachmentPath, "attached sentinel");
@@ -8982,8 +9751,16 @@ describe("DaemonControlApiServer", () => {
       ...(record.params as Record<string, unknown>),
       threadId: "th-source",
       turnId: "tn-source",
+      planRunId: "run-plan",
+      planRef: {
+        runId: "run-plan",
+        sha256: "b".repeat(64),
+        path: "/tmp/final/plan.md",
+      },
     };
     let copiedAttachments: unknown;
+    let copiedPlanHash: unknown;
+    let copiedPlanOverridden: unknown;
     let enqueued: Record<string, unknown> | undefined;
     const wrapped: DaemonFacadeClient = {
       ...daemon,
@@ -8999,6 +9776,8 @@ describe("DaemonControlApiServer", () => {
         turns: [
           {
             id: "tn-source",
+            plan_hash: "b".repeat(64),
+            plan_readiness_overridden: true,
             attachments: [
               {
                 resource_id: "res-source",
@@ -9013,8 +9792,11 @@ describe("DaemonControlApiServer", () => {
           },
         ],
       }),
+      findThreadTurnByIdempotency: async () => null,
       createThreadTurn: async (_id, _prompt, options) => {
         copiedAttachments = options.attachments;
+        copiedPlanHash = options.planHash;
+        copiedPlanOverridden = options.planOverridden;
         return { id: "tn-retry" };
       },
     };
@@ -9028,6 +9810,8 @@ describe("DaemonControlApiServer", () => {
         });
         expect(retry.status).toBe(200);
         expect(copiedAttachments).toEqual([{ resourceId: "res-source" }]);
+        expect(copiedPlanHash).toBe("b".repeat(64));
+        expect(copiedPlanOverridden).toBe(true);
         expect(enqueued?.["attachments"]).toEqual([{ resourceId: "res-source" }]);
 
         const draft = await apiFetch(`${base}/runs/run-d1/run-again`, {

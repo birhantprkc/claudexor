@@ -8,14 +8,21 @@
  */
 import { spawnSync, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { buildReleaseReviewRuntimeBundle } from "./lib/release-review-runtime.mjs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { pathIsWithin } from "./lib/release-review-contract.mjs";
+import { buildReleaseReviewRuntimeArtifacts } from "./lib/release-review-runtime.mjs";
 
-const outDir = resolve(process.argv[2] ?? "");
-if (!outDir || process.argv.length > 3) {
+if (process.argv.length !== 3 || !process.argv[2]?.trim()) {
   console.error("usage: run-full-gate-receipt.mjs OUT_DIR");
   process.exit(2);
+}
+const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+const candidateRoot = realpathSync(git("rev-parse", "--show-toplevel"));
+const outDir = canonicalFuturePath(process.argv[2]);
+if (pathIsWithin(candidateRoot, outDir) || pathIsWithin(outDir, candidateRoot)) {
+  console.error("full-gate receipt OUT_DIR must be external to the candidate repository");
+  process.exit(1);
 }
 if (existsSync(join(outDir, "full-gate-receipt.json"))) {
   console.error("full-gate receipt already exists; gate evidence is never overwritten");
@@ -23,7 +30,6 @@ if (existsSync(join(outDir, "full-gate-receipt.json"))) {
 }
 mkdirSync(outDir, { recursive: true, mode: 0o700 });
 
-const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 const gitState = () => ({
   head: git("rev-parse", "HEAD"),
   tree: git("rev-parse", "HEAD^{tree}"),
@@ -52,9 +58,10 @@ let reviewRuntimeArtifacts = [];
 let reviewRuntimeArtifactError = null;
 if (gateExitCode === 0) {
   try {
-    reviewRuntimeArtifacts = await buildReleaseReviewRuntimeBundle(
+    reviewRuntimeArtifacts = await buildReleaseReviewRuntimeArtifacts(
       git("rev-parse", "--show-toplevel"),
       outDir,
+      before.head,
     );
   } catch (error) {
     reviewRuntimeArtifactError = error instanceof Error ? error.message : String(error);
@@ -86,3 +93,15 @@ console.log(
   `full gate exit ${exitCode}; candidateUnchanged=${receipt.candidateUnchanged}; receipt sealed`,
 );
 process.exit(exitCode === 0 && receipt.candidateUnchanged ? 0 : 1);
+
+function canonicalFuturePath(path) {
+  let ancestor = resolve(path);
+  const suffix = [];
+  while (!existsSync(ancestor)) {
+    suffix.unshift(basename(ancestor));
+    const parent = dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  return join(realpathSync(ancestor), ...suffix);
+}

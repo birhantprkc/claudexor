@@ -9,12 +9,14 @@ import type {
   RouteProof,
 } from "@claudexor/schema";
 import { HarnessRunSpec, ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
-import { existsSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import {
   appendLine,
   containsSecretLikeToken,
+  engineBuildIdentity,
   ensureDir,
   newId,
   nowIso,
@@ -29,6 +31,7 @@ import {
   extractJsonBlocks,
   parseFindingsDetailed,
   parseSealedReviewEnvelopeDetailed,
+  sealedReviewTranscriptChunk,
   type ReviewerInfo,
 } from "./findings.js";
 import { buildReviewPrompt } from "./reviewPrompt.js";
@@ -200,12 +203,26 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     throw new Error("sealed release review requires CLAUDEXOR_REVIEW_WAVE_ID UUID");
   }
   const frozenMetadata = input.frozenIdentity
-    ? {
-        candidate_sha: input.frozenIdentity.candidateSha,
-        candidate_tree: input.frozenIdentity.candidateTree,
-        packet_manifest_sha256: input.frozenIdentity.packetManifestSha256,
-        ...(reviewWaveId ? { review_wave_id: reviewWaveId } : {}),
-      }
+    ? (() => {
+        const runtime = engineBuildIdentity();
+        const runtimeEntry = realpathSync(runtime.entry);
+        const runtimeEntryStat = lstatSync(runtimeEntry);
+        if (!runtimeEntryStat.isFile() || runtimeEntryStat.isSymbolicLink()) {
+          throw new Error("sealed release review runtime entry is not a regular file");
+        }
+        return {
+          candidate_sha: input.frozenIdentity.candidateSha,
+          candidate_tree: input.frozenIdentity.candidateTree,
+          packet_manifest_sha256: input.frozenIdentity.packetManifestSha256,
+          review_runtime_version: runtime.version,
+          review_runtime_build_sha: runtime.sha,
+          review_runtime_entry: runtimeEntry,
+          review_runtime_entry_sha256: createHash("sha256")
+            .update(readFileSync(runtimeEntry))
+            .digest("hex"),
+          ...(reviewWaveId ? { review_wave_id: reviewWaveId } : {}),
+        };
+      })()
     : {};
   if (containsSecretLikeToken(input.diff || "(empty diff)\n")) {
     throw new Error(
@@ -236,6 +253,14 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     input.evidenceReadOnly === true,
   );
   const artifactsBaseDir = input.artifactsDir ?? join(input.evidenceDir, "reviewer-artifacts");
+  if (
+    input.evidenceReadOnly &&
+    input.frozenIdentity &&
+    existsSync(artifactsBaseDir) &&
+    readdirSync(artifactsBaseDir).length > 0
+  ) {
+    throw new Error("sealed release review requires a fresh empty artifacts directory");
+  }
   ensureDir(artifactsBaseDir);
   const persistentEvidenceDir = join(artifactsBaseDir, "evidence");
   await copyReviewEvidencePacket(
@@ -319,27 +344,25 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         prompt: runtimePrompt,
         cwd: reviewerWorkspace.root,
         access: "readonly",
+        ...(input.evidenceReadOnly && input.frozenIdentity
+          ? {
+              external_context_policy: "live",
+              tool_permission_policy: { web: "live", allow: [], deny: [] },
+            }
+          : {}),
         model_hint: reviewer.requestedModel ?? null,
         effort_hint: reviewer.requestedEffort ?? null,
         auth_preference: reviewer.authPreference ?? "auto",
         env_inheritance: input.envInheritance ?? "mirror_native",
         ...(input.env ? { env: input.env } : {}),
       });
-      writeText(
-        artifact.promptPath,
-        redactSecrets(`Persistent local replay evidence:
-- evidence_dir: ${persistentEvidenceDir}
-- candidate_root: ${reviewerWorkspace.root}
-- source_candidate_root: ${input.cwd}
-- source_candidate_evidence_dir: ${input.evidenceDir}
-- diff_path: ${persistentPatch.diffPath}
-- diff_sha256: ${persistentPatch.diffSha256}
-
-Runtime prompt used during review follows. Its candidate-tree paths may be transient after orchestrator cleanup; use the durable replay paths above for audit/replay.
-
-${runtimePrompt}
-`),
-      );
+      writeText(artifact.promptPath, spec.prompt);
+      updateReviewerMetadata(artifact, {
+        session_id: spec.session_id,
+        external_context_policy: spec.external_context_policy,
+        tool_web_policy: spec.tool_permission_policy.web,
+        submitted_prompt_sha256: createHash("sha256").update(spec.prompt).digest("hex"),
+      });
     } catch (err) {
       const failedAt = nowIso();
       const message = redactSecrets(err instanceof Error ? err.message : String(err));
@@ -378,7 +401,9 @@ ${runtimePrompt}
         reviewer,
         spec,
         reviewerTimeoutMs,
-        input.transientRetryPolicy ?? DEFAULT_REVIEWER_TRANSIENT_RETRY_POLICY,
+        input.evidenceReadOnly && input.frozenIdentity
+          ? { maxRetries: 0, initialDelayMs: 0, maxDelayMs: 0 }
+          : (input.transientRetryPolicy ?? DEFAULT_REVIEWER_TRANSIENT_RETRY_POLICY),
         artifact,
         input.onReviewerEvent,
         input.signal,
@@ -594,6 +619,8 @@ async function collectReviewerOutput(
   let observedSource: RouteProof["observed"]["evidence_source"] = "unavailable";
   let observedAuthMode: "local_session" | "api_key" | null = null;
   let currentAuthMode: "local_session" | "api_key" | null = null;
+  const observedAuthModes = new Set<"local_session" | "api_key">();
+  const ignoredSettings = new Set<string>();
   let costUsd = 0;
   let costEstimated = false;
   let cashUsd = 0;
@@ -617,7 +644,15 @@ async function collectReviewerOutput(
     let attemptObservedSource: RouteProof["observed"]["evidence_source"] = "unavailable";
     for await (const ev of iter) {
       const eventTime = nowIso();
-      appendLine(artifact.eventsPath, JSON.stringify(redactValue(ev)));
+      const persistedEvent = redactValue(ev);
+      appendLine(artifact.eventsPath, JSON.stringify(persistedEvent));
+      const ignored = ev.payload?.["ignored_settings"];
+      if (Array.isArray(ignored)) {
+        for (const item of ignored) if (typeof item === "string") ignoredSettings.add(item);
+        if (ignoredSettings.size > 0) {
+          updateReviewerMetadata(artifact, { ignored_settings: [...ignoredSettings] });
+        }
+      }
       if (ev.transient) sawTransient = true;
       if (ev.type === "error") {
         sawError = true;
@@ -635,7 +670,11 @@ async function collectReviewerOutput(
         });
       }
       const disclosedAuthMode = reviewerAuthMode(ev.credential_route);
-      if (disclosedAuthMode) currentAuthMode = disclosedAuthMode;
+      if (disclosedAuthMode) {
+        currentAuthMode = disclosedAuthMode;
+        observedAuthModes.add(disclosedAuthMode);
+        updateReviewerMetadata(artifact, { auth_modes: [...observedAuthModes] });
+      }
       costKnowledge.observeEvent(currentAuthMode);
       if (!observedAuthMode) {
         observedAuthMode = disclosedAuthMode;
@@ -674,10 +713,12 @@ async function collectReviewerOutput(
         });
       }
       if (ev.type === "message" && ev.text && ev.payload?.["auth_switched"] !== true) {
-        const safeText = redactSecrets(ev.text);
-        text += safeText + "\n";
-        partialText += safeText + "\n";
-        appendLine(artifact.transcriptPath, safeText);
+        const safeText = sealedReviewTranscriptChunk(persistedEvent);
+        if (safeText !== null) {
+          text += safeText;
+          partialText += safeText;
+          appendLine(artifact.transcriptPath, safeText);
+        }
       }
       if (ev.observed_model) {
         observedModel = ev.observed_model;

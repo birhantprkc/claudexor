@@ -33,9 +33,9 @@ describe("ACP stop-reason projection", () => {
   });
 
   it("preserves failed/interrupted refusal and successful end-turn buckets", () => {
-    expect(acpStopReason("failed")).toBe("refusal");
-    expect(acpStopReason("interrupted")).toBe("refusal");
-    expect(acpStopReason("succeeded")).toBe("end_turn");
+    expect(acpStopReason("failed", null)).toBe("refusal");
+    expect(acpStopReason("interrupted", null)).toBe("refusal");
+    expect(acpStopReason("succeeded", null)).toBe("end_turn");
   });
 });
 

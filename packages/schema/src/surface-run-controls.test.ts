@@ -9,6 +9,14 @@ describe("surface run-control applicability", () => {
     expect(
       validateSurfaceRunControls({ mode, protectedPathApprovals: [{ path: "test/**" }] }),
     ).toMatch(/protectedPathApprovals.*Agent/i);
+    expect(validateSurfaceRunControls({ mode, tests: [] })).toMatch(/tests.*agent/i);
+  });
+
+  it("projects Ask and Plan strategy applicability through the same owner", () => {
+    expect(validateSurfaceRunControls({ mode: "agent", deepScan: true })).toMatch(/ask strategy/);
+    expect(validateSurfaceRunControls({ mode: "ask", council: true })).toMatch(/plan strategy/);
+    expect(validateSurfaceRunControls({ mode: "ask", deepScan: true })).toBeNull();
+    expect(validateSurfaceRunControls({ mode: "plan", council: true })).toBeNull();
   });
 
   it("accepts the same controls on Agent", () => {

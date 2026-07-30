@@ -61,6 +61,9 @@ export function validateRunControls(params: unknown): RunControlError | null {
   ) {
     return msg("mode must be a valid mode");
   }
+  if (params.race === true && (params.mode ?? "agent") !== "agent") {
+    return msg(`race is an Agent strategy; mode is '${String(params.mode)}'`);
+  }
   const harnessError = validateOptionalNonEmptyString(params.harness, "harness");
   if (harnessError) return msg(harnessError);
   for (const flag of ["race", "untilClean", "deepScan", "create", "council"] as const) {

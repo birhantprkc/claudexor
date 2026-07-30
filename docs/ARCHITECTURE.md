@@ -718,7 +718,11 @@ deterministic baseline commit (author `Claudexor`) make worktree diffs honest
 from the first run. Claudexor never creates or edits the project's `.gitignore`;
 repo `.claudexor/` is user-owned config and runtime stays external. The action
 is announced via a `project.git.initialized` run event in the timeline — never
-a refusal, never a silent mutation.
+a refusal, never a silent mutation. If a non-transactional Git step fails after
+repository metadata may have changed, that same event carries `partial:true`,
+the failed stage, and the proven progress before the workspace failure; CLI and
+Control timeline render the incomplete initialization as a warning instead of
+hiding it behind the terminal error.
 
 Supported in-place non-Git shapes remain available: Ask and Plan do not require
 Git there, and the existing live Agent convergence path can use its copied
@@ -982,7 +986,18 @@ Endpoint semantics beyond the inventory:
   request, and performs fresh normalization/preflight. `GET
   /v2/runs/:id/run-again` instead returns an editable draft and explicitly
   lists server-owned fields omitted from that draft. The CLI projects these as
-  `claudexor retry` and `claudexor run-again`.
+  `claudexor retry` and `claudexor run-again`. Durable idempotent replay is
+  resolved before mutable resource, Git, or harness preflight: once a request
+  was accepted, a later environment change returns the original command/run
+  handle rather than replacing history with a new refusal. If no command was
+  accepted, a replay may reuse its one journaled runless turn only while that
+  turn is still the conversation tail; the recovery boundary refuses a
+  historical orphan before enqueue. Already accepted commands remain valid and
+  bind in daemon command order even when later turn bubbles exist. Thread
+  recovery mutations are serialized per thread, bind a turn to at most one run,
+  preserve frozen-plan hash/override provenance on Exact Retry, and emit
+  decision/rerun audit side effects only for the request that first accepted the
+  command.
 - `GET /v2/trust` + `POST /v2/trust` are the user-level trust surface: the GET
   enumerates per-repo trust files (`~/.claudexor/v3/trust/<repo-hash>.yaml`, each
   stamped with its `repo_root` provenance so the list is human-readable; legacy
@@ -1016,7 +1031,10 @@ Endpoint semantics beyond the inventory:
   `accept_risk` / `override_needs_human` append an auditable patch-hash-bound
   record to the owning global/project journal before ACK. The run artifact
   `arbitration/operator_decision.yaml` is only a compatibility projection for
-  artifact-only CLI reads; the apply gate reads journal authority;
+  artifact-only CLI reads; the apply gate reads journal authority. A same-key
+  replay reads that journal authority before the thread's current idle gate and
+  repeats the lookup inside the serialized mutation to close a concurrent-record
+  race;
   `accept_clean_patch` delivers; `rerun_with_feedback` enqueues a follow-up;
   `revert_run` uses an immutable external content-addressed anchor and restores
   only recorded postimage bytes that still match; overlapping later user edits
@@ -1035,8 +1053,9 @@ Endpoint semantics beyond the inventory:
   and page slicing all happen on raw records BEFORE any summary is materialized,
   so per-run artifact fingerprint/projection work is bounded by page size rather
   than total retained records; a terminal run's fingerprint further short-circuits
-  to a single `delivery_state.yaml` stat (all other artifacts are frozen once the
-  run is terminal). The bare parameterless call stays valid — it now yields the
+  to file identities for only the mutable `delivery_state.yaml` overlay and the
+  retention-owned `tombstone.yaml` transition (all other artifacts are frozen once
+  the run is terminal). The bare parameterless call stays valid — it now yields the
   newest 200 with a cursor to page the rest.
 - `claudexor settings show|set` is a thin client of `GET|POST /v2/settings`.
   Validation, persistence, cache invalidation, and the returned effective
@@ -1606,7 +1625,8 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    commit). This includes an explicitly isolated Ask, Plan, or Agent thread and
    Agent envelope paths; supported non-Git in-place shapes do not initialize.
    Fence: the mutation is announced via a typed `project.git.initialized` run
-   event — never silent.
+   event — never silent. A partial non-transactional failure emits the same
+   event with its failed stage and proven progress before terminalizing.
 6. **`revert_run`** — the server-owned in-place revert reads the immutable
    external patch anchor and reverses only bytes still equal to the recorded
    Claudexor postimage; a conflicting user edit is refused and left untouched.
@@ -1841,28 +1861,36 @@ detail as `candidates` from attempt/review/decision artifacts.
 Repository release review is cumulative and SHA-bound. The panel reviews the
 exact clean committed candidate against the checklists and docs; any tracked
 mutation invalidates every result and starts a new freeze, and the signed
-schemaVersion-4 attestation binds the candidate SHA/tree, gate receipt digest,
-reviewer report digests + verdicts, and — for a packet-split wave — one full
-triad+scope panel per named sub-wave plus the sealer-recomputed union-coverage
-receipt mapping each sub-wave to its exact pack digest (INV-125). (Older
-schemas are archival only: already-sealed attestations stay verifiable for
-their own releases, never as new publish input.) The operational protocol — panel composition, wave discipline,
-structural floors, and round bound — is defined ONCE in `docs/CHECKLISTS.md`
-(Release review protocol); this map does not restate it. The old per-commit
+schemaVersion-5 attestation binds the candidate SHA/tree, exact full-gate
+receipt, sealed evidence manifest/diff/wave, and exactly two native full-context
+reviewer artifact sets: Claude Code Fable/max and Codex sol/xhigh (INV-125).
+Each set binds requested and observed route/model/effort, native auth,
+live external-context/web policy, distinct session identity, overlapping
+plausible timing, candidate-built review runtime identity,
+prompt/transcript/metadata/event digests, and a non-blocking verdict. The
+transcript is a deterministic byte projection of the persisted normalized
+message events. Older schemas are archival only:
+already-sealed attestations stay signature-verifiable for their releases,
+never as new publish input. The operational protocol — panel composition, wave
+discipline, blocker contract, and round bound — is defined ONCE in
+`docs/CHECKLISTS.md` (Release review protocol); this map does not restate it. The old per-commit
 staged-diff hook, bypass log, and installer are removed so they cannot compete
 with or be mistaken for release authority. Product command `claudexor review
 --diff <file>` remains a normal engine capability; it is not this repository's
 release attestation.
 
-Formal review executes one gate-derived runtime bundle rather than mutable
-workspace build output. The full gate bundles the packet verifier, packet
-writer, and secret scanner/redactor from exact tracked candidate inputs into a
-single external ESM artifact with only `node:` imports, smoke-checks its exact
-API, and records its bytes and SHA-256. Preparation, live transport, and sealing
-read that artifact once through a no-follow descriptor and import the verified
-buffer; every live slot carries the same gate-receipt and runtime binding into
-the seal. Prepared and live prompt digests must also match before any remote
-request begins.
+After exact `pnpm release:verify` passes, the gate builds a small
+self-contained verifier from tracked candidate sources and copies the packaged
+app's self-contained CLI, binding both byte digests into its receipt. Formal
+review executes through that copied CLI, and the sealer imports only the
+receipt-verified verifier bytes rather than mutable workspace `dist`. Both native reviewers receive one
+manifest-bound persistent evidence copy and fresh read-only workspaces that
+project the complete Git-visible candidate plus explicit evidence while
+excluding unrelated ignored local state. The sealer re-verifies that evidence,
+the exact candidate diff, every persisted reviewer artifact, session/timing
+overlap, and the runtime entry realpath/build SHA/digest; it does not trust
+caller-supplied digests or hand-authored verdicts. Frozen release slots force
+live external context/web policy and disable internal transient retries.
 
 Runtime resilience is typed. Adapters translate native transient failures
 (network lookup failures, stream disconnects, retryable HTTP statuses, timeouts)
@@ -1890,7 +1918,10 @@ daemon terminal/lifecycle state. `summary.outputReadyState` is
 `pending | finalizing | ready | diagnostic`. New terminal runs consume the
 optional `presentation` member of `RunFacts`, written from the last validated
 `output.ready` state and the terminal-selected primary artifact; `primaryOutput` consumes the
-same receipt. Only legacy runs whose RunFacts predates `presentation` fall back
+same receipt. Retention truth wins that projection: `tombstone.yaml` yields a
+diagnostic primary output, and a declared primary file that is missing or blank
+yields an explicit diagnostic at the declared path rather than a false empty
+success. Only legacy runs whose RunFacts predates `presentation` fall back
 to artifact/failure inference. Terminal run detail also carries `runFacts`, read
 as the exact validated value from `final/run_facts.yaml`; it is null while the
 run is active and for legacy runs without the receipt. Terminal CLI JSON and
@@ -2162,7 +2193,11 @@ or stay visibly blocked. An unreadable pointer is never collapsed into a proven
 absent pointer. Both forward activation and rollback call the serving closure's
 internal runtime-replacement stop before changing `current`: a late run or setup
 admission returns a typed retryable refusal and leaves the working pointer
-untouched. Every reconnect then binds one exact chain before publication: the
+untouched. The stop request binds the freshly observed version/build SHA and
+writer-lease owner in the same synchronous turn as admission fencing; a stale
+handshake, missing lease, boot-window lease without a socket, or legacy
+unbound receipt can prove only passive exit and never grants kill authority.
+Every reconnect then binds one exact chain before publication: the
 current-pointer probe, bootstrap closure, bootstrap-disclosed engine, tunneled
 Control handshake, and final current-pointer probe must agree on the runtime
 identity. Activation commit additionally rechecks the lease-owned pointer target.
@@ -2290,8 +2325,9 @@ lifecycle lease shared with steady daemon reconciliation before the first async
 install step → advisory idle probe (cheap early deferral) → daemon-atomic
 runtime-replacement admission (`claudexord --stop`: synchronously prove no
 queued/running run or active setup job and fence every ingress; busy/unknown
-refuses without stopping) → identity-proven termination confirmation (never a
-raw kill) → ATOMIC `current.json`
+refuses without stopping; the request names the freshly observed serving
+version/build SHA and writer-lease owner) → identity-proven termination
+confirmation with no-successor proof (never a raw kill) → ATOMIC `current.json`
 swap (write a temp file + a single rename, inside a `flock` over the whole
 check-then-swap critical section) → relaunch → handshake-verify the new engine
 identity against the signed manifest → rollback to `last-known-good.json` on

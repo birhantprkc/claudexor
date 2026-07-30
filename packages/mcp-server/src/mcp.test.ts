@@ -196,8 +196,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
 
   it("no-argument tools (status/capabilities) are callable with {} — prompt is required only where the schema requires it", async () => {
     // The capabilities tool declares the FULL catalog outputSchema, so the
-    // fake must return a schema-valid catalog (an invalid one is an isError —
-    // that strictness is the point of declared structured outputs).
+    // fake must return a schema-valid current catalog.
     const fakeCatalog = {
       ok: true,
       version: "0.0.0-test",
@@ -273,12 +272,23 @@ describe("Claudexor MCP server (SDK v2)", () => {
     });
     const raceSchema = tools.find((t) => t.name === "claudexor_best_of")?.inputSchema as any;
     const runSchema = tools.find((t) => t.name === "claudexor_run")?.inputSchema as any;
+    const askSchema = tools.find((t) => t.name === "claudexor_ask")?.inputSchema as any;
+    const planSchema = tools.find((t) => t.name === "claudexor_plan")?.inputSchema as any;
     const statusSchema = tools.find((t) => t.name === "claudexor_status")?.inputSchema as any;
     expect(runSchema?.additionalProperties).toBe(false);
     expect(runSchema?.properties?.prompt?.pattern).toBe("\\S");
     expect(raceSchema?.properties?.n?.type).toBe("integer");
     expect(raceSchema?.properties?.n?.minimum).toBe(2);
     expect(statusSchema?.additionalProperties).toBe(false);
+    expect(askSchema?.properties?.deepScan?.type).toBe("boolean");
+    expect(askSchema?.properties).not.toHaveProperty("tests");
+    expect(askSchema?.properties).not.toHaveProperty("council");
+    expect(planSchema?.properties?.council?.type).toBe("boolean");
+    expect(planSchema?.properties).not.toHaveProperty("tests");
+    expect(planSchema?.properties).not.toHaveProperty("deepScan");
+    expect(runSchema?.properties?.tests?.type).toBe("array");
+    expect(runSchema?.properties).not.toHaveProperty("deepScan");
+    expect(runSchema?.properties).not.toHaveProperty("council");
 
     const w = wire(tools);
     await w.initialize();
@@ -349,6 +359,8 @@ describe("Claudexor MCP server (SDK v2)", () => {
       // refused on the MCP surface too (prompts are durable artifacts).
       { id: 23, name: "claudexor_run", arguments: { prompt: `deploy with ${secretLike}` } },
       { id: 24, name: "claudexor_ask", arguments: { prompt: `explain ${secretLike}` } },
+      { id: 25, name: "claudexor_run", arguments: { prompt: "go", deepScan: true } },
+      { id: 26, name: "claudexor_ask", arguments: { prompt: "go", council: true } },
     ];
     for (const call of invalidCalls) {
       w.send({

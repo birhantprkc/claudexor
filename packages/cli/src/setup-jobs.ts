@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
@@ -50,6 +50,7 @@ import {
   type SetupLoginRunnerState,
 } from "./setup-login-protocol.js";
 import { SetupSupervisor } from "./setup-supervisor.js";
+import { createDeviceCodeDisclosureWatcher } from "./setup-device-code-disclosure.js";
 import {
   awaitingSetupUserMessage,
   clientPtyWaitingPatch,
@@ -176,6 +177,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   ): ControlSetupJob {
     return store.update(jobId, patch, idempotency);
   }
+  const armDeviceCodeDisclosureWatcher = createDeviceCodeDisclosureWatcher({
+    status: (jobId) => store.status(jobId),
+    update: (jobId, patch) => void update(jobId, patch),
+    disclosurePath: (jobId) => store.paths(jobId).runnerDeviceCode,
+    now,
+  });
   function log(jobId: string, line: string): void {
     store.appendLog(jobId, line);
   }
@@ -818,41 +825,6 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     }
   }
 
-  /** D-17 disclosure race: awaiting_user flips before the one-time code
-   * sidecar exists, and a sidecar write is journal-less — SSE subscribers
-   * attached at the flip would never learn the code arrived. Armed at EVERY
-   * awaiting_user flip (create AND reconcile-adopt paths, one owner): watch
-   * for the sidecar (bounded by the job deadline) and bump ONE message event;
-   * the read-time projection then overlays the code as designed. */
-  const armedDisclosureWatchers = new Set<string>();
-  function armDeviceCodeDisclosureWatcher(jobId: string): void {
-    const job = store.status(jobId);
-    if (!isDeviceCodeSetupJob(job)) return;
-    // Idempotent: create, permit-flip, and reconcile-adopt may each arm.
-    if (armedDisclosureWatchers.has(jobId)) return;
-    armedDisclosureWatchers.add(jobId);
-    const disclosurePath = store.paths(jobId).runnerDeviceCode;
-    const deadline = job.deadlineAt ? Date.parse(job.deadlineAt) : now().getTime() + 60_000;
-    const watch = () => {
-      let current: ControlSetupJob;
-      try {
-        current = store.status(jobId);
-      } catch {
-        return; // journal closed (shutdown/restart) — the successor re-arms
-      }
-      if (!ACTIVE_SETUP_STATES.has(current.state) || current.phase === "cancelling") return;
-      if (existsSync(disclosurePath)) {
-        if (current.phase === "awaiting_user") {
-          update(jobId, {
-            message: `One-time code ready — enter it at the ${current.harness} verification page (shown in Claudexor).`,
-          });
-        }
-        return;
-      }
-      if (now().getTime() < deadline) setTimeout(watch, 300).unref();
-    };
-    setTimeout(watch, 300).unref();
-  }
   function markAwaitingUser(jobId: string): void {
     const current = store.status(jobId);
     if (current.phase === "launching") {
@@ -1476,7 +1448,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       ) {
         throw Object.assign(new Error("setup job cannot be extended"), { status: 409 });
       }
-      return update(
+      const extended = update(
         jobId,
         {
           deadlineAt: new Date(Date.parse(job.deadlineAt) + LOGIN_EXTENSION_MS).toISOString(),
@@ -1484,6 +1456,8 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         },
         idempotency,
       );
+      armDeviceCodeDisclosureWatcher(jobId);
+      return extended;
     },
     _store: store,
     _supervisorHealth: () => supervisor.health(),

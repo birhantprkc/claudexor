@@ -39,3 +39,26 @@ describe("timelineEvents projects harness.started ignored_settings (QA-070)", ()
     expect(rows[0]!.severity).toBe("info");
   });
 });
+
+describe("timelineEvents projects partial Git initialization honestly", () => {
+  it("uses an incomplete warning row with the failed stage", () => {
+    const rows = timelineEvents({}, [
+      {
+        type: "project.git.initialized",
+        payload: {
+          repo_root: "/tmp/project",
+          initialized: false,
+          baseline_committed: false,
+          partial: true,
+          failed_stage: "init",
+        },
+      },
+    ]);
+
+    expect(rows[0]).toMatchObject({
+      title: "Git repository initialization incomplete",
+      detail: "Stopped during init at /tmp/project; partial Git metadata may remain.",
+      severity: "warning",
+    });
+  });
+});

@@ -8,7 +8,16 @@ import {
   WorkspaceError,
 } from "@claudexor/core";
 import { containsSecretLikeToken } from "@claudexor/util";
-import { probeGitCapability, requireGitCapability } from "./git-capability.js";
+import {
+  initializeGitRepository,
+  type EnsureGitRepositoryDependencies,
+  type EnsureGitRepositoryResult,
+} from "./git-initialization.js";
+export {
+  GitInitializationError,
+  type EnsureGitRepositoryDependencies,
+  type EnsureGitRepositoryResult,
+} from "./git-initialization.js";
 
 /** BYTE-FAITHFUL git capture: raw buffers, never readline — CR
  * bytes in CRLF diff content survive, and no trailing newline is fabricated
@@ -49,17 +58,6 @@ export async function revParse(repo: string, ref: string): Promise<string> {
   return r.stdout.trim();
 }
 
-export interface EnsureGitRepositoryResult {
-  /** True when `git init` ran (the folder was not a repository). */
-  initialized: boolean;
-  /** True when a baseline commit was created (fresh repo or unborn HEAD). */
-  baselineCommitted: boolean;
-  /** Always false in v2: Claudexor never changes a project's `.gitignore`. */
-  gitignoreSeeded: boolean;
-  /** HEAD sha after the call. */
-  headSha: string;
-}
-
 /**
  * Make a project folder usable as a git boundary for write-mode runs.
  *
@@ -73,52 +71,11 @@ export interface EnsureGitRepositoryResult {
  * The baseline commit is authored as "Claudexor" deterministically — it is a
  * tool-created commit and must not depend on (or pollute) user git identity.
  */
-export async function ensureGitRepository(repo: string): Promise<EnsureGitRepositoryResult> {
-  requireGitCapability(await probeGitCapability());
-  const isRepo = await isGitRepo(repo);
-  const hasHead = isRepo && (await git(repo, ["rev-parse", "--verify", "HEAD"])).code === 0;
-  if (isRepo && hasHead) {
-    return {
-      initialized: false,
-      baselineCommitted: false,
-      gitignoreSeeded: false,
-      headSha: await revParse(repo, "HEAD"),
-    };
-  }
-
-  let initialized = false;
-  if (!isRepo) {
-    const init = await git(repo, ["init"]);
-    if (init.code !== 0) throw new WorkspaceError(`git init failed: ${init.stderr.trim()}`);
-    initialized = true;
-  }
-
-  const add = await git(repo, ["add", "-A"]);
-  if (add.code !== 0)
-    throw new WorkspaceError(
-      `git add failed during repository initialization: ${add.stderr.trim()}`,
-    );
-  const commit = await git(repo, [
-    "-c",
-    "user.name=Claudexor",
-    "-c",
-    "user.email=noreply@claudexor.local",
-    "commit",
-    "--allow-empty",
-    "--no-verify",
-    "-m",
-    "claudexor: initialize repository baseline",
-  ]);
-  if (commit.code !== 0)
-    throw new WorkspaceError(
-      `baseline commit failed during repository initialization: ${commit.stderr.trim()}`,
-    );
-  return {
-    initialized,
-    baselineCommitted: true,
-    gitignoreSeeded: false,
-    headSha: await revParse(repo, "HEAD"),
-  };
+export async function ensureGitRepository(
+  repo: string,
+  dependencies: EnsureGitRepositoryDependencies = {},
+): Promise<EnsureGitRepositoryResult> {
+  return initializeGitRepository(repo, dependencies.runGit ?? git, dependencies.probeCapability);
 }
 
 export async function statusPorcelain(repo: string): Promise<string> {

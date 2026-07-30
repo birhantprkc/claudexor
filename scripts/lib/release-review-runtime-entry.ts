@@ -1,8 +1,14 @@
-// Build-only entrypoint for the release-review trust boundary. The gate bundles
-// these exact APIs into one self-contained external artifact; review tooling
-// never executes mutable workspace dist files after the gate has passed.
+// Build-only entrypoint for the native release-review trust boundary. The full
+// gate bundles these exact candidate APIs into one small self-contained ESM
+// verifier. Live review executes the separately copied packaged CLI bundle;
+// sealing imports only these receipt-verified verifier bytes.
 export {
   verifySealedEvidencePacket,
   writeEvidencePacket,
 } from "../../packages/context/src/evidence.js";
+export {
+  parseSealedReviewEnvelopeDetailed,
+  sealedReviewTranscriptFromEvents,
+} from "../../packages/review/src/findings.js";
 export { containsSecretLikeToken, redactSecrets } from "../../packages/util/src/index.js";
+export { validateFullGateReceipt } from "./release-review-contract.mjs";

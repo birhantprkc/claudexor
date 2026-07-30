@@ -44,6 +44,13 @@ function tempDir(name = "daemon"): string {
   return realpathSync(reapMk(join(tmpdir(), `claudexor-${name}-`)));
 }
 
+const TEST_RUNTIME_IDENTITY = {
+  version: "3.2.0",
+  buildSha: "a".repeat(40),
+};
+const TEST_RUNTIME_LEASE = { pid: 4242, token: "runtime-lease" };
+const TEST_RUNTIME_TARGET = { ...TEST_RUNTIME_IDENTITY, leaseOwner: TEST_RUNTIME_LEASE };
+
 function commandAuthority(
   dir: string,
   partition = "global",
@@ -247,12 +254,42 @@ describe("DaemonServer", () => {
       const client = new DaemonClient(socketPath, "token");
       const first = await client.enqueue({ value: 1 }, { idempotencyKey: "same", clientId: "ui" });
       const again = await client.enqueue({ value: 1 }, { idempotencyKey: "same", clientId: "ui" });
+      expect(first.reused).toBe(false);
+      expect(again.reused).toBe(true);
       expect(again.id).toBe(first.id);
       await expect(
         client.enqueue({ value: 2 }, { idempotencyKey: "same", clientId: "ui" }),
       ).rejects.toMatchObject({ code: "idempotency_conflict", status: 409 });
       await terminal(client, first.id);
       expect(calls).toBe(1);
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("findAccepted uses the same canonical idempotency request as enqueue", async () => {
+    const dir = tempDir("find-idem");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    try {
+      const client = new DaemonClient(socketPath, "token");
+      const options = {
+        idempotencyKey: "canonical-request",
+        clientId: "control-api",
+        operation: "run.retry",
+        idempotencyRequest: { retryOf: "run-source" },
+      };
+      const accepted = await client.enqueue({ prompt: "first shape" }, options);
+      const replay = await client.findAccepted({ prompt: "reconstructed shape" }, options);
+      expect(replay?.id).toBe(accepted.id);
     } finally {
       await server.stop();
       authority.journal.close();
@@ -1497,6 +1534,8 @@ describe("DaemonServer", () => {
       onRuntimeReplacementRequested: async () => {
         shutdownRequests += 1;
       },
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
       runner: async (_params, ctx) =>
         new Promise((resolve) => {
           ctx.signal.addEventListener("abort", () => {
@@ -1510,11 +1549,13 @@ describe("DaemonServer", () => {
     try {
       await client.enqueue({ id: 1 });
       await new Promise((resolve) => setTimeout(resolve, 10));
-      await expect(client.shutdownForRuntimeReplacement()).rejects.toMatchObject({
-        code: "runtime_replacement_busy",
-        status: 409,
-        retryable: true,
-      });
+      await expect(client.shutdownForRuntimeReplacement(TEST_RUNTIME_TARGET)).rejects.toMatchObject(
+        {
+          code: "runtime_replacement_busy",
+          status: 409,
+          retryable: true,
+        },
+      );
       expect(shutdownRequests).toBe(0);
       expect(aborted).toBe(false);
       await expect(client.enqueue({ id: 2 })).resolves.toMatchObject({ state: "queued" });
@@ -1542,15 +1583,19 @@ describe("DaemonServer", () => {
       onRuntimeReplacementRequested: async () => {
         shutdownRequests += 1;
       },
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
       runner: async () => ({ lifecycle: "succeeded" }),
     });
     await server.start();
     const client = new DaemonClient(socketPath, "token");
     try {
-      await expect(client.shutdownForRuntimeReplacement()).rejects.toMatchObject({
-        code: "runtime_replacement_busy",
-        retryable: true,
-      });
+      await expect(client.shutdownForRuntimeReplacement(TEST_RUNTIME_TARGET)).rejects.toMatchObject(
+        {
+          code: "runtime_replacement_busy",
+          retryable: true,
+        },
+      );
       expect(shutdownRequests).toBe(0);
     } finally {
       await server.stop();
@@ -1566,16 +1611,20 @@ describe("DaemonServer", () => {
       socketPath,
       token: "token",
       commands: authority.slot,
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
       runner: async () => ({ lifecycle: "succeeded" }),
     });
     await server.start();
     const client = new DaemonClient(socketPath, "token");
     try {
-      await expect(client.shutdownForRuntimeReplacement()).rejects.toMatchObject({
-        code: "runtime_activity_unknown",
-        status: 503,
-        retryable: true,
-      });
+      await expect(client.shutdownForRuntimeReplacement(TEST_RUNTIME_TARGET)).rejects.toMatchObject(
+        {
+          code: "runtime_activity_unknown",
+          status: 503,
+          retryable: true,
+        },
+      );
       await expect(client.enqueue({ id: 1 })).resolves.toBeDefined();
     } finally {
       await server.stop();
@@ -1593,15 +1642,123 @@ describe("DaemonServer", () => {
       token: "token",
       commands: authority.slot,
       onRuntimeReplacementRequested: () => server.stop(),
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
       runner: async () => ({ lifecycle: "succeeded" }),
     });
     await server.start();
     const client = new DaemonClient(socketPath, "token");
     try {
-      await client.shutdownForRuntimeReplacement().catch(() => undefined);
+      await client.shutdownForRuntimeReplacement(TEST_RUNTIME_TARGET).catch(() => undefined);
       await expect(client.enqueue({ id: 1 })).rejects.toThrow();
       expect(authority.store.records()).toHaveLength(0);
       await server.waitForShutdown();
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("replacement stop rejects a stale serving identity before fencing admission", async () => {
+    const dir = tempDir("rep-identity");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let shutdownRequests = 0;
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
+      onRuntimeReplacementRequested: async () => {
+        shutdownRequests += 1;
+      },
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await expect(
+        client.shutdownForRuntimeReplacement({
+          version: TEST_RUNTIME_IDENTITY.version,
+          buildSha: "b".repeat(40),
+          leaseOwner: TEST_RUNTIME_LEASE,
+        }),
+      ).rejects.toMatchObject({
+        code: "runtime_activity_unknown",
+        status: 503,
+        retryable: true,
+      });
+      expect(shutdownRequests).toBe(0);
+      await expect(client.enqueue({ id: 1 })).resolves.toBeDefined();
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("rejects a same-build successor when the caller names the prior writer lease", async () => {
+    const dir = tempDir("rpi");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let shutdownRequests = 0;
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
+      onRuntimeReplacementRequested: async () => {
+        shutdownRequests += 1;
+      },
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await expect(
+        client.shutdownForRuntimeReplacement({
+          ...TEST_RUNTIME_IDENTITY,
+          leaseOwner: { pid: 3131, token: "prior-process" },
+        }),
+      ).rejects.toMatchObject({
+        code: "runtime_activity_unknown",
+        status: 503,
+        retryable: true,
+      });
+      expect(shutdownRequests).toBe(0);
+      await expect(client.enqueue({ id: 1 })).resolves.toBeDefined();
+    } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("returns an identity-bound receipt only for the exact serving identity", async () => {
+    const dir = tempDir("rep-id-ok");
+    const authority = commandAuthority(dir);
+    const socketPath = join(dir, "daemon.sock");
+    let shutdownRequests = 0;
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: authority.slot,
+      runtimeIdentity: TEST_RUNTIME_IDENTITY,
+      runtimeLeaseOwner: TEST_RUNTIME_LEASE,
+      onRuntimeReplacementRequested: async () => {
+        shutdownRequests += 1;
+      },
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    await server.start();
+    const client = new DaemonClient(socketPath, "token");
+    try {
+      await expect(client.shutdownForRuntimeReplacement(TEST_RUNTIME_TARGET)).resolves.toEqual({
+        ok: true,
+        fenced: true,
+        targetBound: true,
+      });
+      expect(shutdownRequests).toBe(1);
     } finally {
       await server.stop();
       authority.journal.close();

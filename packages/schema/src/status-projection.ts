@@ -310,7 +310,7 @@ export function requiredActionsFor(
  * reason remain cancelled because their initiator cannot be reconstructed. */
 export function acpStopReason(
   lifecycle: string,
-  reason?: RunReason | null,
+  reason: RunReason | null,
 ): "cancelled" | "refusal" | "end_turn" {
   if (lifecycle === "cancelled") return reason === "wall_clock_exceeded" ? "refusal" : "cancelled";
   if (lifecycle === "failed" || lifecycle === "interrupted") return "refusal";

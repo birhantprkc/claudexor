@@ -1,83 +1,112 @@
 #!/usr/bin/env node
-/**
- * Seal the OWNER-REVIEW release attestation (schemaVersion 4): the owner's
- * offline Ed25519 authority signs the exact candidate identity, the full
- * deterministic gate receipt, the panel reviewer report digests with
- * non-blocking verdicts, and — for packet-split panels — the RECOMPUTED
- * union-coverage receipt (one full triad+scope panel per named sub-wave).
- * Older schemas are archival only; the verifier accepts exactly the current
- * schema for new seals.
- *
- * usage:
- *   seal-owner-review-attestation.mjs \
- *     --full-gate-receipt FILE --rounds N \
- *     --slot-record FILE [...]  # typed wave metadata, one per panel slot \
- *     [--review reviewer=FILE:verdict [...]]  # non-panel critic reports \
- *     [--packet DIR]             # sealed packet: FREEZE base authority \
- *     [--coverage-receipt FILE   # required when slots name sub-waves] \
- *     --private-key FILE --authority FILE --out FILE [--base64-out FILE]
- */
+/** Seal schema-v5 evidence from one frozen native Fable/Codex review wave. */
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { bindCoverageReceipt } from "./review-coverage-check.mjs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
   OWNER_REVIEW_PROTOCOL,
   RELEASE_REVIEW_ATTESTATION_ALGORITHM,
-  releaseAttestationSigningBytes,
-  deriveSlotVerdict,
-  validateReleaseAttestation,
-  validateFullGateEvidence,
-  validateSlotRecord,
+  REQUIRED_NATIVE_REVIEWERS,
+  canonicalJson,
+  decodeReviewUtf8,
   pathIsWithin,
+  releaseAttestationSigningBytes,
+  validateFullGateEvidence,
+  validateFullGateReceipt,
+  validateReleaseAttestation,
 } from "./lib/release-review-contract.mjs";
+import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
 import {
-  readStableReviewFile,
-  readVerifiedReleaseReviewRuntimeArtifact,
+  readVerifiedReleaseReviewRuntime,
   releaseReviewRuntimeArtifactRoot,
 } from "./lib/release-review-runtime.mjs";
-import { readPrivateSigningKey } from "./lib/private-signing-key.mjs";
 
-const options = { review: [], slotRecord: [] };
-const argv = process.argv.slice(2);
-if (argv.length % 2 !== 0) usage();
-for (let index = 0; index < argv.length; index += 2) {
-  if (!argv[index].startsWith("--")) usage();
-  const key = argv[index].slice(2);
-  if (key === "review") options.review.push(argv[index + 1]);
-  else if (key === "slot-record") options.slotRecord.push(argv[index + 1]);
-  else options[key] = argv[index + 1];
-}
-for (const name of ["full-gate-receipt", "rounds", "private-key", "authority", "out"]) {
-  if (!options[name]) usage(`missing --${name}`);
-}
-if (options.slotRecord.length === 0 && options.review.length < 2) {
-  usage("at least two --slot-record FILE (wave metadata records) or --review entries");
-}
+const options = parseArgs(process.argv.slice(2));
 
 try {
-  if (existsSync(options.out) || (options["base64-out"] && existsSync(options["base64-out"]))) {
-    throw new Error("attestation output already exists; sealed evidence is never overwritten");
-  }
-  const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+  const git = (...args) =>
+    execFileSync("git", args, { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 }).trim();
   const candidateSha = git("rev-parse", "HEAD");
   const candidateTree = git("rev-parse", "HEAD^{tree}");
   const candidateRoot = realpathSync(git("rev-parse", "--show-toplevel"));
-  if (git("status", "--porcelain") !== "") {
-    throw new Error("candidate worktree is dirty; the attestation binds a committed tree only");
+  const candidateVersion = parseJson(
+    readStable(join(candidateRoot, "package.json"), "candidate package.json"),
+    "candidate package.json",
+  ).version;
+  if (typeof candidateVersion !== "string" || candidateVersion.length === 0) {
+    throw new Error("candidate package.json has no version");
+  }
+  if (git("status", "--porcelain=v1", "--untracked-files=all")) {
+    throw new Error("candidate worktree is dirty; only a committed tree can be sealed");
   }
 
-  const sha256File = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
-  const receiptPath = resolve(options["full-gate-receipt"]);
-  if (pathIsWithin(candidateRoot, receiptPath)) {
-    throw new Error("full-gate receipt must be outside the candidate worktree");
+  const evidenceDir = realDirectory(options["evidence-dir"], "evidence directory");
+  const artifactsDir = realDirectory(options["review-artifacts"], "review artifacts directory");
+  if (
+    pathIsWithin(candidateRoot, evidenceDir) ||
+    pathIsWithin(candidateRoot, artifactsDir) ||
+    pathsOverlap(evidenceDir, artifactsDir)
+  ) {
+    throw new Error("candidate, evidence and review artifacts must be separate directories");
   }
-  const receiptBytes = readStableReviewFile(receiptPath, "full-gate receipt");
-  const receipt = JSON.parse(receiptBytes.toString("utf8"));
+  const outputs = [options.out, options["base64-out"]]
+    .filter(Boolean)
+    .map((output) => canonicalFuturePath(output));
+  if (new Set(outputs).size !== outputs.length) {
+    throw new Error("attestation JSON and base64 outputs must be different paths");
+  }
+  for (const target of outputs) {
+    if (
+      pathIsWithin(candidateRoot, target) ||
+      pathIsWithin(evidenceDir, target) ||
+      pathIsWithin(artifactsDir, target) ||
+      existsSync(target)
+    ) {
+      throw new Error("attestation output must be a new path outside candidate and evidence");
+    }
+  }
+
+  const receiptPath = resolve(options["full-gate-receipt"]);
+  const runtimeRoot = releaseReviewRuntimeArtifactRoot(receiptPath);
+  if ([candidateRoot, evidenceDir, artifactsDir].some((root) => pathsOverlap(root, runtimeRoot))) {
+    throw new Error(
+      "full-gate receipt and review runtime artifacts must be external and non-overlapping",
+    );
+  }
+  const receiptBytes = readStable(receiptPath, "full-gate receipt");
+  const receipt = parseJson(receiptBytes, "full-gate receipt");
+  const receiptReasons = validateFullGateReceipt(receipt, { candidateSha, candidateTree });
+  if (receiptReasons.length > 0) throw new Error(receiptReasons.join("; "));
+  const stdoutBytes = readReceiptLog(
+    runtimeRoot,
+    receipt.stdout.path,
+    receipt.stdout.sha256,
+    "full-gate stdout",
+  );
+  const stderrBytes = readReceiptLog(
+    runtimeRoot,
+    receipt.stderr.path,
+    receipt.stderr.sha256,
+    "full-gate stderr",
+  );
+  const runtime = readVerifiedReleaseReviewRuntime(runtimeRoot, receipt.reviewRuntimeArtifacts);
   const fullGate = {
-    receiptSha256: createHash("sha256").update(receiptBytes).digest("hex"),
+    receiptSha256: sha256(receiptBytes),
     program: receipt.program,
     argv: receipt.argv,
     exitCode: receipt.exitCode,
@@ -86,191 +115,548 @@ try {
     beforeTree: receipt.before?.tree,
     afterSha: receipt.after?.head,
     afterTree: receipt.after?.tree,
-    stdoutSha256: receipt.stdout?.sha256,
-    stderrSha256: receipt.stderr?.sha256,
-    reviewRuntimeArtifacts: receipt.reviewRuntimeArtifacts,
+    stdoutSha256: sha256(stdoutBytes),
+    stderrSha256: sha256(stderrBytes),
   };
   const gateReasons = validateFullGateEvidence(fullGate, { candidateSha, candidateTree });
-  if (gateReasons.length > 0) {
-    throw new Error(`full-gate receipt is not an exact candidate PASS: ${gateReasons.join("; ")}`);
-  }
-  const runtimeRoot = releaseReviewRuntimeArtifactRoot(receiptPath);
-  if (pathIsWithin(candidateRoot, runtimeRoot)) {
-    throw new Error("release review runtime must be outside the candidate worktree");
-  }
-  const verifiedRuntime = readVerifiedReleaseReviewRuntimeArtifact(
-    runtimeRoot,
-    receipt.reviewRuntimeArtifacts,
-  );
-  const runtime = await import(
-    `data:text/javascript;base64,${verifiedRuntime.bytes.toString("base64")}`
-  );
-  if (typeof runtime.verifySealedEvidencePacket !== "function") {
-    throw new Error("release review runtime lacks verifySealedEvidencePacket");
-  }
-  // Non-panel reviews (the owner's fable-subagent reports, internal critics):
-  // reviewer=FILE:verdict. These carry NO panel identity — panel slots come
-  // ONLY from typed --slot-record wave metadata below, so a CLI label can
-  // never impersonate the triad/scope panel (gate-5 critical).
-  const reviews = options.review.map((entry) => {
-    const match = /^([A-Za-z0-9._-]+)=(.+):(pass|warn)$/.exec(entry);
-    if (!match) {
-      throw new Error(
-        `--review must be reviewer=FILE:pass|warn (panel slots seal ONLY via --slot-record), got "${entry}"`,
-      );
-    }
-    return { reviewer: match[1], reportSha256: sha256File(match[2]), verdict: match[3] };
-  });
+  if (gateReasons.length > 0) throw new Error(gateReasons.join("; "));
 
-  // Panel slots: PARSED from the wave transport's typed slot-attestation
-  // records (triad-scope-review.mjs metadata) — the sealer derives reviewer
-  // identity, verdict, sub-wave, and report digest, verifying every binding
-  // from disk instead of trusting caller prose. Record semantics live in
-  // validateSlotRecord (contract-owned, unit-tested); the sealed packet is
-  // REQUIRED so the manifest binding can never be evaded by omission.
-  const packetDir = options.packet ?? null;
-  if (options.slotRecord.length > 0 && !packetDir) {
-    throw new Error("--slot-record requires --packet (the sealed-packet manifest binding)");
-  }
-  // The packet is VERIFIED, never raw-read (gate-7 critical): the sealed
-  // verifier hashes every MANIFEST entry and binds FREEZE's candidate
-  // SHA/tree, so an altered FREEZE.json (e.g. a narrowed baseSha) beside an
-  // authentic manifest text can never become the coverage base authority.
-  const sealedPacket = packetDir
-    ? runtime.verifySealedEvidencePacket({ evidenceDir: packetDir, candidateSha, candidateTree })
-    : null;
-  const packetManifestSha256 = sealedPacket?.manifestSha256 ?? null;
-  let waveId = null;
-  let maxRound = 0;
-  for (const recordPath of options.slotRecord) {
-    const record = JSON.parse(readFileSync(recordPath, "utf8"));
-    const where = `slot record ${recordPath}`;
-    const reasons = validateSlotRecord(record, {
-      candidateSha,
-      candidateTree,
-      packetManifestSha256,
-      fullGateReceiptSha256: fullGate.receiptSha256,
-      reviewRuntimeArtifacts: fullGate.reviewRuntimeArtifacts,
-      waveId,
-    });
-    if (reasons.length > 0) {
-      throw new Error(`${where}: ${reasons.join("; ")}`);
-    }
-    if (waveId === null) waveId = record.reviewWaveId;
-    const rawBytes = readFileSync(join(dirname(recordPath), record.raw_file));
-    const reportDigest = createHash("sha256").update(rawBytes).digest("hex");
-    if (reportDigest !== record.report_sha256) {
-      throw new Error(
-        `${where}: raw report bytes (${reportDigest.slice(0, 12)}…) do not match the recorded digest`,
-      );
-    }
-    // Verdict is RE-DERIVED from the digest-bound raw bytes (gate-8): a
-    // mutated record cannot upgrade a blocked/warn report to pass.
-    const derived = deriveSlotVerdict(rawBytes.toString("utf8"), record.panel_slot);
-    if (derived !== record.verdict) {
-      throw new Error(
-        `${where}: recorded verdict "${record.verdict}" does not match the raw report's derived "${derived}"`,
-      );
-    }
-    // The round count seals from the records, never CLI prose (gate-8).
-    if (!Number.isInteger(record.round) || record.round < 1) {
-      throw new Error(`${where}: slot record carries no valid round number`);
-    }
-    maxRound = Math.max(maxRound, record.round);
-    const review = {
-      reviewer: `${record.panel_slot}${record.sub_wave ? `@${record.sub_wave}` : ""}:${record.model_id}`,
-      reportSha256: record.report_sha256,
-      verdict: record.verdict,
-      promptSha256: record.promptSha256,
-      panel: { slot: record.panel_slot, model: record.model_id },
-    };
-    if (record.sub_wave) review.panel.subWave = record.sub_wave;
-    reviews.push(review);
+  // Execute only the full-gate receipt's verified, self-contained candidate
+  // verifier bytes. Mutable workspace dist is never release authority.
+  const verifierUrl = `data:text/javascript;base64,${runtime.verifierBytes.toString("base64")}`;
+  const {
+    containsSecretLikeToken,
+    parseSealedReviewEnvelopeDetailed,
+    sealedReviewTranscriptFromEvents,
+    verifySealedEvidencePacket,
+  } = await import(verifierUrl);
+
+  const packet = verifySealedEvidencePacket({ evidenceDir, candidateSha, candidateTree });
+  const freeze = parseJson(
+    readStable(join(evidenceDir, "FREEZE.json"), "FREEZE.json"),
+    "FREEZE.json",
+  );
+  if (!isUuidV4(freeze.waveId)) throw new Error("FREEZE.json has no UUID-v4 review wave");
+  const actualDiff = execFileSync(
+    "git",
+    ["diff", "--binary", `${packet.baseSha}..${candidateSha}`],
+    {
+      maxBuffer: 512 * 1024 * 1024,
+    },
+  );
+  const packetDiff = readStable(join(evidenceDir, "DIFF.patch"), "sealed diff");
+  if (!packetDiff.equals(actualDiff))
+    throw new Error("DIFF.patch is not the exact base..candidate diff");
+  const packetReceipt = readStable(
+    join(evidenceDir, "context/gates/FULL_GATE_RECEIPT.json"),
+    "packet full-gate receipt",
+  );
+  if (!packetReceipt.equals(receiptBytes)) {
+    throw new Error("review packet did not contain the exact supplied full-gate receipt");
   }
 
-  if (maxRound > 0 && Number(options.rounds) !== maxRound) {
-    throw new Error(
-      `--rounds ${options.rounds} does not match the slot records' max round ${maxRound} — the round count seals from the wave records`,
-    );
-  }
-  const authority = JSON.parse(readFileSync(options.authority, "utf8"));
-  const payload = {
-    contract: `owner-review-v${OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION}`,
-    reviewProtocol: OWNER_REVIEW_PROTOCOL,
+  const persistentEvidenceDir = realDirectory(
+    join(artifactsDir, "evidence"),
+    "persistent reviewer evidence directory",
+  );
+  verifySealedEvidencePacket({
+    evidenceDir: persistentEvidenceDir,
     candidateSha,
     candidateTree,
-    rounds: maxRound > 0 ? maxRound : Number(options.rounds),
-    fullGate,
-    reviews,
-    sealedAt: new Date().toISOString(),
-  };
-  if (options["coverage-receipt"]) {
-    // The union-coverage proof for a packet-split panel (audit A-8). The
-    // sealer NEVER trusts the caller's receipt: the review BASE and the
-    // whole-file list come from the sealed packet's OWN FREEZE.json and
-    // FILES_TO_READ_WHOLE.txt (--packet, required here), the coverage is
-    // re-run over the receipt's referenced packs against THIS candidate,
-    // and every role-specific prompt digest is recomputed from disk — a hand-authored
-    // ok:true (or a shrunken base≈candidate) cannot seal. Only the
-    // RECOMPUTED result is embedded (signature-bound). Trust boundary: the
-    // verifier (no pack files at publish time) checks the signature and
-    // structure; the recomputation lives here, before signing.
-    if (!sealedPacket) {
-      throw new Error("--coverage-receipt requires --packet (the verified FREEZE base authority)");
-    }
-    const wholeFileListPath = join(sealedPacket.evidenceDir, "FILES_TO_READ_WHOLE.txt");
-    const receipt = JSON.parse(readFileSync(options["coverage-receipt"], "utf8"));
-    payload.coverageReceipt = {
-      receiptSha256: sha256File(options["coverage-receipt"]),
-      ...bindCoverageReceipt(receipt, candidateSha, {
-        baseSha: sealedPacket.baseSha,
-        wholeFileListPath: existsSync(wholeFileListPath) ? wholeFileListPath : null,
-        diffPath: join(sealedPacket.evidenceDir, "DIFF.patch"),
-      }),
-    };
+    expectedManifestSha256: packet.manifestSha256,
+  });
+  const evidenceMetadataBytes = readArtifact(
+    join(artifactsDir, "evidence-metadata.json"),
+    "review evidence metadata",
+    containsSecretLikeToken,
+  );
+  const evidenceMetadata = parseJson(evidenceMetadataBytes, "review evidence metadata");
+  validateEvidenceMetadata(evidenceMetadata, {
+    candidateSha,
+    candidateTree,
+    evidenceDir,
+    persistentEvidenceDir,
+    manifestSha256: packet.manifestSha256,
+    diffSha256: sha256(packetDiff),
+    reviewWaveId: freeze.waveId,
+  });
+
+  const reviewerEntries = readdirSync(artifactsDir, { withFileTypes: true }).filter((entry) =>
+    /^\d{2}-/.test(entry.name),
+  );
+  if (
+    reviewerEntries.length !== REQUIRED_NATIVE_REVIEWERS.length ||
+    reviewerEntries.some((entry) => !entry.isDirectory() || entry.isSymbolicLink())
+  ) {
+    throw new Error("review artifacts must contain exactly two real reviewer directories");
+  }
+  const artifacts = reviewerEntries.map((entry) =>
+    readReviewerArtifact(
+      realDirectory(join(artifactsDir, entry.name), `reviewer ${entry.name}`),
+      containsSecretLikeToken,
+    ),
+  );
+  const reviews = REQUIRED_NATIVE_REVIEWERS.map((required) => {
+    const matches = artifacts.filter(
+      (artifact) => artifact.metadata.harness_id === required.harnessId,
+    );
+    if (matches.length !== 1)
+      throw new Error(`expected exactly one ${required.harnessId} reviewer`);
+    return validateReviewerArtifact(matches[0], required, {
+      candidateSha,
+      candidateTree,
+      evidenceDir,
+      persistentEvidenceDir,
+      manifestSha256: packet.manifestSha256,
+      diffSha256: sha256(packetDiff),
+      reviewWaveId: freeze.waveId,
+      parseSealedReviewEnvelopeDetailed,
+      sealedReviewTranscriptFromEvents,
+      reviewRuntime: runtime.cli,
+    });
+  });
+
+  validateReviewerOverlap(reviews);
+
+  const authority = parseJson(readStable(resolve(options.authority), "authority"), "authority");
+  if (authority.algorithm !== RELEASE_REVIEW_ATTESTATION_ALGORITHM) {
+    throw new Error("authority algorithm is not Ed25519");
   }
   const attestation = {
     schemaVersion: OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
     keyId: authority.keyId,
     algorithm: RELEASE_REVIEW_ATTESTATION_ALGORITHM,
-    payload,
+    payload: {
+      contract: "owner-review-v5",
+      reviewProtocol: OWNER_REVIEW_PROTOCOL,
+      candidateSha,
+      candidateTree,
+      evidence: {
+        manifestSha256: packet.manifestSha256,
+        diffSha256: sha256(packetDiff),
+        reviewWaveId: freeze.waveId,
+        metadataSha256: sha256(evidenceMetadataBytes),
+      },
+      fullGate,
+      reviews,
+      sealedAt: new Date().toISOString(),
+    },
   };
   const key = createPrivateKey(readPrivateSigningKey(options["private-key"]));
   attestation.signature = sign(null, releaseAttestationSigningBytes(attestation), key).toString(
     "base64",
   );
-
-  // Self-check with the EXACT verifier publish runs — a sealed attestation
-  // that would not publish must never be written.
   const verified = validateReleaseAttestation(attestation, authority, {
     candidateSha,
     candidateTree,
+    candidateVersion,
   });
-  if (!verified.ok) {
-    throw new Error(`sealed attestation fails its own verifier: ${verified.reasons.join("; ")}`);
-  }
+  if (!verified.ok) throw new Error(`self-verification failed: ${verified.reasons.join("; ")}`);
 
   const json = `${JSON.stringify(attestation, null, 2)}\n`;
-  atomicWrite(options.out, json, 0o600);
+  atomicWrite(outputs[0], json);
   if (options["base64-out"]) {
-    atomicWrite(options["base64-out"], Buffer.from(json.trim(), "utf8").toString("base64"), 0o600);
+    atomicWrite(outputs[1], `${Buffer.from(json.trim()).toString("base64")}\n`);
   }
-  console.log(`signed owner-review attestation sealed: ${options.out}`);
+  console.log(`signed native owner-review attestation sealed: ${options.out}`);
 } catch (error) {
-  console.error(`owner-review attestation refused: ${String(error)}`);
+  console.error(
+    `owner-review attestation refused: ${error instanceof Error ? error.message : String(error)}`,
+  );
   process.exit(1);
 }
 
-function atomicWrite(path, data, mode) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(`${path}.tmp-${process.pid}`, data, { mode, flag: "wx" });
-  execFileSync("mv", [`${path}.tmp-${process.pid}`, path]);
+function validateEvidenceMetadata(metadata, expected) {
+  requireIdentity(metadata, expected, "review evidence metadata");
+  requireSamePath(metadata.source_evidence_dir, expected.evidenceDir, "source evidence root");
+  requireSamePath(
+    metadata.persistent_evidence_dir,
+    expected.persistentEvidenceDir,
+    "persistent evidence root",
+  );
+  requireGitCandidate(metadata.candidate_root, expected);
 }
 
-function usage(detail = "") {
-  if (detail) console.error(detail);
+function readReviewerArtifact(dir, containsSecretLikeToken) {
+  if (existsSync(join(dir, "parse-error.json")))
+    throw new Error(`${dir} contains parse-error.json`);
+  const read = (name, label) => readArtifact(join(dir, name), label, containsSecretLikeToken);
+  const metadataBytes = read("metadata.json", "reviewer metadata");
+  const promptBytes = read("prompt.md", "reviewer prompt");
+  const reportBytes = read("transcript.md", "reviewer transcript");
+  const eventsBytes = read("raw-normalized-stream.jsonl", "reviewer events");
+  const parsedBytes = read("parsed-json-blocks.json", "reviewer parsed blocks");
+  return {
+    dir,
+    metadata: parseJson(metadataBytes, "reviewer metadata"),
+    metadataBytes,
+    promptBytes,
+    reportBytes,
+    eventsBytes,
+    parsedBytes,
+  };
+}
+
+function validateReviewerArtifact(artifact, required, expected) {
+  const metadata = artifact.metadata;
+  requireIdentity(metadata, expected, `${required.slot} reviewer metadata`);
+  for (const [field, value] of [
+    ["harness_id", required.harnessId],
+    ["provider_family", required.providerFamily],
+    ["requested_model", required.requestedModel],
+    ["requested_effort", required.requestedEffort],
+    ["observed_model", required.requestedModel],
+    ["route_proof_status", "verified"],
+    ["auth_mode", "local_session"],
+    ["status", "completed"],
+    ["reviewer_workspace_cleanup", "removed"],
+    ["review_runtime_build_sha", expected.candidateSha],
+    ["external_context_policy", "live"],
+    ["tool_web_policy", "live"],
+  ]) {
+    if (metadata[field] !== value) throw new Error(`${required.slot} metadata ${field} mismatch`);
+  }
+  if (
+    typeof metadata.review_runtime_version !== "string" ||
+    !metadata.review_runtime_version ||
+    canonicalJson(metadata.auth_modes) !== canonicalJson(["local_session"]) ||
+    metadata.auth_switch != null ||
+    metadata.error != null ||
+    metadata.transient_retry != null ||
+    !Number.isSafeInteger(metadata.duration_ms) ||
+    metadata.duration_ms < 1_000 ||
+    typeof metadata.session_id !== "string" ||
+    metadata.session_id.length === 0 ||
+    metadata.submitted_prompt_sha256 !== sha256(artifact.promptBytes) ||
+    metadata.review_runtime_entry_sha256 !== expected.reviewRuntime.sha256
+  ) {
+    throw new Error(`${required.slot} reviewer is not a clean native completion`);
+  }
+  requireSamePath(
+    metadata.review_runtime_entry,
+    expected.reviewRuntime.absolutePath,
+    `${required.slot} review runtime entry`,
+  );
+  const startMs = exactIsoMs(metadata.start_time, `${required.slot} start_time`);
+  const firstEventMs = exactIsoMs(metadata.first_event_time, `${required.slot} first_event_time`);
+  const completionMs = exactIsoMs(metadata.completion_time, `${required.slot} completion_time`);
+  if (
+    firstEventMs < startMs ||
+    firstEventMs > completionMs ||
+    completionMs < startMs ||
+    completionMs - startMs < 1_000 ||
+    Math.abs(completionMs - startMs - metadata.duration_ms) > 1_000
+  ) {
+    throw new Error(`${required.slot} reviewer timestamps are inconsistent`);
+  }
+  const ignored = metadata.ignored_settings ?? [];
+  if (!Array.isArray(ignored) || ignored.length > 0) {
+    throw new Error(`${required.slot} reviewer ignored requested settings`);
+  }
+  requireSamePath(metadata.artifact_dir, artifact.dir, `${required.slot} artifact directory`);
+  requireSamePath(
+    metadata.source_candidate_evidence_dir,
+    expected.evidenceDir,
+    `${required.slot} source evidence root`,
+  );
+  requireSamePath(
+    metadata.persistent_evidence_dir,
+    expected.persistentEvidenceDir,
+    `${required.slot} persistent evidence root`,
+  );
+  requireGitCandidate(metadata.source_candidate_root, expected);
+
+  const proof = metadata.route_proof;
+  if (
+    proof?.status !== "verified" ||
+    proof.requested?.harness_id !== required.harnessId ||
+    proof.requested?.provider_family !== required.providerFamily ||
+    proof.requested?.model_hint !== required.requestedModel ||
+    proof.observed?.provider !== required.providerFamily ||
+    proof.observed?.model_id !== required.requestedModel ||
+    proof.observed?.evidence_source !== metadata.observed_source ||
+    !["stream_event", "transcript"].includes(metadata.observed_source)
+  ) {
+    throw new Error(`${required.slot} route proof is incomplete or inconsistent`);
+  }
+
+  const events = validateEvents(
+    artifact.eventsBytes,
+    required,
+    metadata.observed_source,
+    metadata.session_id,
+  );
+  const reportText = decodeReviewUtf8(artifact.reportBytes, `${required.slot} transcript`);
+  const replayedTranscript = expected.sealedReviewTranscriptFromEvents(events);
+  if (!artifact.reportBytes.equals(Buffer.from(replayedTranscript, "utf8"))) {
+    throw new Error(`${required.slot} transcript is not the exact normalized event projection`);
+  }
+  const parsed = expected.parseSealedReviewEnvelopeDetailed(reportText, {
+    harness_id: required.harnessId,
+    requested_model: required.requestedModel,
+    requested_effort: required.requestedEffort,
+    observed_model: required.requestedModel,
+    route_proof_status: "verified",
+  });
+  if (parsed.error || parsed.malformed > 0) {
+    throw new Error(`${required.slot} report cannot seal: ${parsed.error ?? "malformed findings"}`);
+  }
+  if (
+    canonicalJson(parseJson(artifact.parsedBytes, "reviewer parsed blocks")) !==
+    canonicalJson(parsed.blocks)
+  ) {
+    throw new Error(`${required.slot} parsed blocks do not match the transcript`);
+  }
+  const blocking = new Set(["BLOCK", "FIX_FIRST", "NEEDS_HUMAN", "INSUFFICIENT_EVIDENCE"]);
+  if (parsed.findings.some((finding) => blocking.has(finding.severity))) {
+    throw new Error(`${required.slot} report contains a blocking or inconclusive finding`);
+  }
+  return {
+    ...required,
+    sessionId: metadata.session_id,
+    externalContextPolicy: metadata.external_context_policy,
+    toolWebPolicy: metadata.tool_web_policy,
+    observedModel: metadata.observed_model,
+    observedSource: metadata.observed_source,
+    routeProofStatus: metadata.route_proof_status,
+    authMode: metadata.auth_mode,
+    authSwitched: false,
+    effortHonored: true,
+    reviewRuntimeVersion: metadata.review_runtime_version,
+    reviewRuntimeBuildSha: metadata.review_runtime_build_sha,
+    reviewRuntimeEntrySha256: metadata.review_runtime_entry_sha256,
+    startedAt: metadata.start_time,
+    completedAt: metadata.completion_time,
+    durationMs: metadata.duration_ms,
+    promptSha256: sha256(artifact.promptBytes),
+    reportSha256: sha256(artifact.reportBytes),
+    metadataSha256: sha256(artifact.metadataBytes),
+    eventsSha256: sha256(artifact.eventsBytes),
+    parsedSha256: sha256(artifact.parsedBytes),
+    verdict: parsed.findings.length === 0 ? "pass" : "warn",
+  };
+}
+
+function validateEvents(bytes, required, observedSource, sessionId) {
+  const lines = decodeReviewUtf8(bytes, `${required.slot} events`).split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) throw new Error(`${required.slot} reviewer emitted no events`);
+  const events = lines.map((line, index) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      throw new Error(`${required.slot} event ${index + 1} is malformed JSON`);
+    }
+  });
+  for (const [index, event] of events.entries()) {
+    if (event.session_id !== sessionId) {
+      throw new Error(`${required.slot} event ${index + 1} session identity mismatch`);
+    }
+    exactIsoMs(event.ts, `${required.slot} event ${index + 1} timestamp`);
+  }
+  const ignoredSettings = events.some((event) => event.payload?.ignored_settings !== undefined);
+  if (
+    ignoredSettings ||
+    events.some(
+      (event) =>
+        event.type === "error" || event.transient != null || event.payload?.auth_switched === true,
+    ) ||
+    !events.some((event) => event.type === "completed" && event.payload?.exit_code === 0)
+  ) {
+    throw new Error(`${required.slot} events contain a failure, auth switch or ignored setting`);
+  }
+  const routed = events.filter((event) => event.credential_route != null);
+  if (
+    routed.length === 0 ||
+    routed.some(
+      (event) =>
+        event.credential_route !== "vendor_native" || event.credential_source !== "native_session",
+    )
+  ) {
+    throw new Error(`${required.slot} events do not prove a native local session`);
+  }
+  const observed = events.filter((event) => event.observed_model != null);
+  const sources = new Set(
+    observed.map((event) =>
+      event.payload?.observed_model_source === "transcript" ? "transcript" : "stream_event",
+    ),
+  );
+  if (
+    observed.length === 0 ||
+    observed.some((event) => event.observed_model !== required.requestedModel) ||
+    !sources.has(observedSource)
+  ) {
+    throw new Error(`${required.slot} events do not prove the exact observed model`);
+  }
+  if (events.every((event) => event.type !== "message" || typeof event.text !== "string")) {
+    throw new Error(`${required.slot} events contain no reviewer transcript messages`);
+  }
+  return events;
+}
+
+function validateReviewerOverlap(reviews) {
+  const starts = reviews.map((review) => exactIsoMs(review.startedAt, `${review.slot} start`));
+  const completions = reviews.map((review) =>
+    exactIsoMs(review.completedAt, `${review.slot} completion`),
+  );
+  if (Math.max(...starts) >= Math.min(...completions)) {
+    throw new Error("native reviewer executions did not overlap");
+  }
+  if (new Set(reviews.map((review) => review.sessionId)).size !== reviews.length) {
+    throw new Error("native reviewer session identities are not distinct");
+  }
+}
+
+function requireIdentity(metadata, expected, label) {
+  for (const [field, value] of [
+    ["candidate_sha", expected.candidateSha],
+    ["candidate_tree", expected.candidateTree],
+    ["packet_manifest_sha256", expected.manifestSha256],
+    ["review_wave_id", expected.reviewWaveId],
+    ["diff_sha256", `sha256:${expected.diffSha256}`],
+  ]) {
+    if (metadata?.[field] !== value) throw new Error(`${label} ${field} mismatch`);
+  }
+}
+
+function requireGitCandidate(path, expected) {
+  const root = realDirectory(path, "review source candidate");
+  const git = (...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+  if (
+    git("rev-parse", "HEAD") !== expected.candidateSha ||
+    git("rev-parse", "HEAD^{tree}") !== expected.candidateTree ||
+    git("status", "--porcelain=v1", "--untracked-files=all")
+  ) {
+    throw new Error("review source is not the exact clean candidate");
+  }
+}
+
+function readArtifact(path, label, containsSecretLikeToken) {
+  const bytes = readStable(path, label);
+  const text = decodeReviewUtf8(bytes, label);
+  if (containsSecretLikeToken(text)) throw new Error(`${label} contains a secret-like token`);
+  return bytes;
+}
+
+function readStable(path, label, allowEmpty = false) {
+  let fd;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile()) throw new Error(`${label} is not a regular file`);
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd, { bigint: true });
+    for (const key of ["dev", "ino", "size", "mtimeNs", "ctimeNs"]) {
+      if (before[key] !== after[key]) throw new Error(`${label} changed while it was read`);
+    }
+    if ((!allowEmpty && bytes.length === 0) || BigInt(bytes.length) !== before.size) {
+      throw new Error(`${label} has an invalid byte length`);
+    }
+    return bytes;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function readReceiptLog(root, rawPath, expectedSha256, label) {
+  if (typeof rawPath !== "string" || rawPath.trim() === "") {
+    throw new Error(`${label} path is missing from the full-gate receipt`);
+  }
+  const lexical = resolve(root, rawPath);
+  const stat = lstatSync(lexical);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${label} is not a regular file`);
+  const canonical = realpathSync(lexical);
+  if (!pathIsWithin(root, canonical)) {
+    throw new Error(`${label} escapes the full-gate receipt directory`);
+  }
+  const bytes = readStable(canonical, label, true);
+  if (sha256(bytes) !== expectedSha256) {
+    throw new Error(`${label} digest does not match the full-gate receipt`);
+  }
+  return bytes;
+}
+
+function parseJson(bytes, label) {
+  try {
+    return JSON.parse(decodeReviewUtf8(bytes, label));
+  } catch (error) {
+    throw new Error(
+      `${label} is invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function realDirectory(path, label) {
+  const lexical = resolve(path);
+  const stat = lstatSync(lexical);
+  if (stat.isSymbolicLink() || !stat.isDirectory())
+    throw new Error(`${label} must be a real directory`);
+  return realpathSync(lexical);
+}
+
+function canonicalFuturePath(path) {
+  const lexical = resolve(path);
+  const parent = realDirectory(dirname(lexical), "attestation output directory");
+  return join(parent, basename(lexical));
+}
+
+function exactIsoMs(value, label) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`${label} is not an exact ISO timestamp`);
+  }
+  const date = new Date(value);
+  if (date.toISOString() !== value) throw new Error(`${label} is not an exact ISO timestamp`);
+  return date.getTime();
+}
+
+function requireSamePath(raw, expected, label) {
+  if (typeof raw !== "string" || realpathSync(raw) !== expected)
+    throw new Error(`${label} mismatch`);
+}
+
+function pathsOverlap(left, right) {
+  return pathIsWithin(left, right) || pathIsWithin(right, left);
+}
+
+function isUuidV4(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value ?? "");
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function atomicWrite(path, data) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.tmp-${process.pid}`;
+  writeFileSync(temporary, data, { mode: 0o600, flag: "wx" });
+  renameSync(temporary, path);
+}
+
+function parseArgs(argv) {
+  const required = [
+    "full-gate-receipt",
+    "evidence-dir",
+    "review-artifacts",
+    "private-key",
+    "authority",
+    "out",
+  ];
+  const allowed = new Set([...required, "base64-out"]);
+  const parsed = {};
+  if (argv.length % 2 !== 0) usage();
+  for (let index = 0; index < argv.length; index += 2) {
+    const flag = argv[index];
+    const key = flag?.startsWith("--") ? flag.slice(2) : "";
+    if (!allowed.has(key) || parsed[key] !== undefined || !argv[index + 1]) usage();
+    parsed[key] = argv[index + 1];
+  }
+  if (required.some((key) => !parsed[key])) usage();
+  return parsed;
+}
+
+function usage() {
   console.error(
-    "usage: seal-owner-review-attestation.mjs --full-gate-receipt FILE --rounds N --slot-record FILE (one per panel slot: the wave's typed metadata record; the sealer derives reviewer/verdict/sub-wave and verifies candidate, observed model, report digest) [--review reviewer=FILE:pass|warn (non-panel critic reports only)] [--packet DIR (sealed packet; REQUIRED with --coverage-receipt: FREEZE base + whole-file-list authority)] [--coverage-receipt FILE (required for packet-split panels)] --private-key FILE --authority FILE --out FILE [--base64-out FILE]",
+    "usage: seal-owner-review-attestation.mjs --full-gate-receipt FILE --evidence-dir DIR --review-artifacts DIR --private-key FILE --authority FILE --out FILE [--base64-out FILE]",
   );
   process.exit(2);
 }

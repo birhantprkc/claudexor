@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
 import { BudgetLedger, routeCostEvidence } from "@claudexor/budget";
@@ -166,6 +166,43 @@ function makeDeps(mode: WorkReportEnvelopeMode): DeepScanReducerDeps {
   };
 }
 
+function makeFiniteFixture(onPersist?: ConstructorParameters<typeof EventLog>[3]) {
+  const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
+  __dirs.push(root);
+  const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+  const paths = store.createRun("run-reducer");
+  return {
+    root,
+    paths,
+    log: new EventLog(paths.eventsPath, "run-reducer", "task-reducer", onPersist),
+    ledger: new BudgetLedger({ kind: "finite", maxUsd: 1 }),
+  };
+}
+
+function runFiniteReducer(
+  fixture: ReturnType<typeof makeFiniteFixture>,
+  adapter: HarnessAdapter,
+  options: {
+    deps?: Partial<DeepScanReducerDeps>;
+    args?: Partial<Parameters<typeof runDeepScanReducer>[1]>;
+  } = {},
+) {
+  return runDeepScanReducer(
+    { ...makeDeps(inactiveMode), ...options.deps },
+    {
+      taskId: "task-reducer",
+      goal: "merge the scout reports",
+      routed: { adapter } as unknown as RoutedAdapter,
+      scoutReports: [],
+      ledger: fixture.ledger,
+      log: fixture.log,
+      paths: fixture.paths,
+      attemptTelemetries: [],
+      ...options.args,
+    },
+  );
+}
+
 async function runWith(mode: WorkReportEnvelopeMode, finalText: string) {
   const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
   __dirs.push(root);
@@ -301,6 +338,368 @@ describe("runDeepScanReducer WorkReport contract parity (D-16)", () => {
         expect(result.error).toMatch(/inactivity watchdog/i);
       }
       expect(result).not.toHaveProperty("report");
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("settles the lease and disposes the home when async spec preparation rejects", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
+    __dirs.push(root);
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-reducer");
+    const log = new EventLog(paths.eventsPath, "run-reducer", "task-reducer");
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const dispose = vi.fn();
+    const token = `sk-${"a".repeat(48)}`;
+    const telemetry: Parameters<typeof runDeepScanReducer>[1]["attemptTelemetries"] = [];
+    try {
+      const result = await runDeepScanReducer(
+        {
+          ...makeDeps(inactiveMode),
+          newReadOnlyHome: () => ({ env: {}, dispose }),
+          buildSpec: async () => {
+            throw new Error(`profile preparation rejected ${token}`);
+          },
+        },
+        {
+          taskId: "task-reducer",
+          goal: "merge the scout reports",
+          routed: { adapter: reducerAdapter("unused") } as unknown as RoutedAdapter,
+          scoutReports: [],
+          ledger,
+          log,
+          paths,
+          attemptTelemetries: telemetry,
+        },
+      );
+      expect(result.status).toBe("failed");
+      if (result.status === "failed") {
+        expect(result.error).toContain("setup failed");
+        expect(result.error).not.toContain(token);
+      }
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(ledger.remainingUsd()).toBe(1);
+      expect(telemetry).toHaveLength(1);
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("keeps HOME alive while late spec preparation settles inside the cleanup grace", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
+    __dirs.push(root);
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-reducer");
+    const log = new EventLog(paths.eventsPath, "run-reducer", "task-reducer");
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    let homeAlive = true;
+    let preparationObservedHomeAlive = false;
+    const dispose = vi.fn(() => {
+      homeAlive = false;
+    });
+    try {
+      const startedAt = Date.now();
+      const result = await runDeepScanReducer(
+        {
+          ...makeDeps(inactiveMode),
+          hardTimeoutMs: 20,
+          cleanupGraceMs: 300,
+          newReadOnlyHome: () => ({ env: {}, dispose }),
+          buildSpec: async (...args) => {
+            await new Promise((resolve) => setTimeout(resolve, 60));
+            preparationObservedHomeAlive = homeAlive;
+            return makeDeps(inactiveMode).buildSpec(...args);
+          },
+        },
+        {
+          taskId: "task-reducer",
+          goal: "merge the scout reports",
+          routed: { adapter: reducerAdapter("unused") } as unknown as RoutedAdapter,
+          scoutReports: [],
+          ledger,
+          log,
+          paths,
+          attemptTelemetries: [],
+        },
+      );
+      expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 20ms" });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(45);
+      expect(Date.now() - startedAt).toBeLessThan(250);
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(ledger.remainingUsd()).toBe(1);
+      expect(preparationObservedHomeAlive).toBe(true);
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("bounds cleanup for never-settling preparation and emits no false harness activity", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
+    __dirs.push(root);
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-reducer");
+    const log = new EventLog(paths.eventsPath, "run-reducer", "task-reducer");
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const dispose = vi.fn();
+    const observed: HarnessEvent[] = [];
+    const timerSpy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const startedAt = Date.now();
+      const result = await runDeepScanReducer(
+        {
+          ...makeDeps(inactiveMode),
+          hardTimeoutMs: 20,
+          cleanupGraceMs: 37,
+          newReadOnlyHome: () => ({ env: {}, dispose }),
+          buildSpec: () => new Promise<never>(() => {}),
+        },
+        {
+          taskId: "task-reducer",
+          goal: "merge the scout reports",
+          routed: { adapter: reducerAdapter("unused") } as unknown as RoutedAdapter,
+          scoutReports: [],
+          ledger,
+          log,
+          paths,
+          onHarnessEvent: (event) => observed.push(event),
+          attemptTelemetries: [],
+        },
+      );
+      expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 20ms" });
+      const elapsed = Date.now() - startedAt;
+      expect(elapsed).toBeGreaterThanOrEqual(45);
+      expect(elapsed).toBeLessThan(250);
+      expect(observed).toEqual([]);
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(ledger.remainingUsd()).toBe(1);
+      const cleanupTimerIndex = timerSpy.mock.calls.findIndex((call) => call[1] === 37);
+      const cleanupTimer = timerSpy.mock.results[cleanupTimerIndex]?.value as
+        ReturnType<typeof setTimeout> | undefined;
+      expect(cleanupTimerIndex).toBeGreaterThanOrEqual(0);
+      expect(cleanupTimer && "hasRef" in cleanupTimer ? cleanupTimer.hasRef() : false).toBe(true);
+      const events = readFileSync(paths.eventsPath, "utf8");
+      expect(events).not.toContain('"type":"harness.started"');
+      expect(events).not.toContain('"type":"harness.event"');
+    } finally {
+      timerSpy.mockRestore();
+      log.dispose();
+    }
+  });
+
+  it("wakes a stalled stream at the deadline and settles cleanup before HOME disposal", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
+    __dirs.push(root);
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-reducer");
+    const log = new EventLog(paths.eventsPath, "run-reducer", "task-reducer");
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    let homeAlive = true;
+    let streamObservedHomeAlive = false;
+    const dispose = vi.fn(() => {
+      homeAlive = false;
+    });
+    const adapter: HarnessAdapter = {
+      ...reducerAdapter("unused"),
+      async *run(spec) {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        streamObservedHomeAlive = homeAlive;
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: nowIso(),
+          text: "late output must not be accepted",
+          final: true,
+        };
+      },
+    };
+    const observed: HarnessEvent[] = [];
+    try {
+      const startedAt = Date.now();
+      const result = await runDeepScanReducer(
+        {
+          ...makeDeps(inactiveMode),
+          hardTimeoutMs: 20,
+          cleanupGraceMs: 300,
+          inactivityTimeoutMs: 1_000,
+          newReadOnlyHome: () => ({ env: {}, dispose }),
+        },
+        {
+          taskId: "task-reducer",
+          goal: "merge the scout reports",
+          routed: { adapter } as unknown as RoutedAdapter,
+          scoutReports: [],
+          ledger,
+          log,
+          paths,
+          onHarnessEvent: (event) => observed.push(event),
+          attemptTelemetries: [],
+        },
+      );
+      expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 20ms" });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
+      expect(Date.now() - startedAt).toBeLessThan(400);
+      expect(observed).toEqual([]);
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(ledger.remainingUsd()).toBe(1);
+      expect(streamObservedHomeAlive).toBe(true);
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("retains post-deadline usage and terminal evidence while rejecting late output", async () => {
+    const fixture = makeFiniteFixture();
+    const { paths, log, ledger } = fixture;
+    const telemetry: Parameters<typeof runDeepScanReducer>[1]["attemptTelemetries"] = [];
+    const observed: HarnessEvent[] = [];
+    const adapter: HarnessAdapter = {
+      ...reducerAdapter("unused"),
+      async *run(spec) {
+        const ts = nowIso();
+        const signal = spec.extra["abortSignal"] as AbortSignal;
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          credential_route: "managed_api_key",
+        };
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: nowIso(),
+          text: "late output must not be accepted",
+          final: true,
+        };
+        yield {
+          type: "usage",
+          session_id: spec.session_id,
+          ts: nowIso(),
+          credential_route: "managed_api_key",
+          usage: { cost_usd: 0.25 },
+        };
+        yield {
+          type: "error",
+          session_id: spec.session_id,
+          ts: nowIso(),
+          error: "termination unconfirmed",
+          payload: { termination_unconfirmed: true },
+        };
+        yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
+      },
+    };
+    try {
+      const result = await runFiniteReducer(fixture, adapter, {
+        deps: {
+          hardTimeoutMs: 20,
+          cleanupGraceMs: 300,
+          inactivityTimeoutMs: 1_000,
+        },
+        args: {
+          onHarnessEvent: (event) => observed.push(event),
+          attemptTelemetries: telemetry,
+        },
+      });
+      expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 20ms" });
+      expect(observed.map((event) => event.type)).toEqual([
+        "started",
+        "usage",
+        "error",
+        "completed",
+      ]);
+      expect(ledger.remainingUsd()).toBeCloseTo(0.75);
+      expect(telemetry[0]?.telemetry.usageCost.cashUsd).toBeCloseTo(0.25);
+      const events = readFileSync(paths.eventsPath, "utf8");
+      expect(events).toContain("termination unconfirmed");
+      expect(events).not.toContain("late output must not be accepted");
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("settles the admitted attempt when durable harness.started persistence fails", async () => {
+    const fixture = makeFiniteFixture((event) => {
+      if (event.type === "harness.started") throw new Error("durable journal append failed");
+    });
+    const { paths, log, ledger } = fixture;
+    const dispose = vi.fn();
+    const telemetry: Parameters<typeof runDeepScanReducer>[1]["attemptTelemetries"] = [];
+    try {
+      const result = await runFiniteReducer(fixture, reducerAdapter("unused"), {
+        deps: { newReadOnlyHome: () => ({ env: {}, dispose }) },
+        args: { attemptTelemetries: telemetry },
+      });
+      expect(result).toEqual({ status: "failed", error: "durable journal append failed" });
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(ledger.remainingUsd()).toBe(1);
+      expect(telemetry).toHaveLength(1);
+      expect(
+        readFileSync(paths.eventsPath, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { type: string })
+          .filter((event) => event.type === "harness.started" || event.type === "harness.completed")
+          .map((event) => event.type),
+      ).toEqual(["harness.started", "harness.completed"]);
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("does not attribute a pre-start cancellation to a harness error", async () => {
+    const fixture = makeFiniteFixture();
+    const { log, ledger } = fixture;
+    const signal = new AbortController();
+    signal.abort();
+    const buildSpec = vi.fn(makeDeps(inactiveMode).buildSpec);
+    const telemetry: Parameters<typeof runDeepScanReducer>[1]["attemptTelemetries"] = [];
+    try {
+      const result = await runFiniteReducer(fixture, reducerAdapter("unused"), {
+        deps: { buildSpec },
+        args: { signal: signal.signal, attemptTelemetries: telemetry },
+      });
+      expect(result).toEqual({ status: "cancelled" });
+      expect(buildSpec).not.toHaveBeenCalled();
+      expect(telemetry[0]?.telemetry.outcome).toMatchObject({
+        harnessErrored: false,
+        status: "failed",
+      });
+      expect(ledger.remainingUsd()).toBe(1);
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("deduplicates inactivity and hard-deadline cancellation", async () => {
+    const fixture = makeFiniteFixture();
+    const { log, ledger } = fixture;
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const dispose = vi.fn();
+    const adapter: HarnessAdapter = {
+      ...reducerAdapter("unused"),
+      async *run(spec) {
+        yield { type: "started", session_id: spec.session_id, ts: nowIso() };
+        await new Promise<void>(() => {});
+      },
+      cancel,
+    };
+    try {
+      const result = await runFiniteReducer(fixture, adapter, {
+        deps: {
+          hardTimeoutMs: 35,
+          cleanupGraceMs: 20,
+          inactivityTimeoutMs: 10,
+          newReadOnlyHome: () => ({ env: {}, dispose }),
+        },
+      });
+      expect(result).toEqual({ status: "failed", error: "deep-scan reducer timed out after 35ms" });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(dispose).toHaveBeenCalledOnce();
+      expect(ledger.remainingUsd()).toBe(1);
     } finally {
       log.dispose();
     }

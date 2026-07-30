@@ -272,19 +272,24 @@ export function timelineEvents(
         : {};
     const harnessId = stringOrNull(payload["harness_id"] ?? payload["harness"]);
     const attemptId = stringOrNull(payload["attempt_id"] ?? payload["attemptId"]);
+    const partialGitInitialization =
+      type === "project.git.initialized" && payload["partial"] === true;
     const title =
-      stringOrNull(
-        payload["title"] ??
-          payload["message"] ??
-          payload["summary"] ??
-          payload["text"] ??
-          payload["error"],
-      ) ?? prettyEventType(type);
+      (partialGitInitialization
+        ? "Git repository initialization incomplete"
+        : stringOrNull(
+            payload["title"] ??
+              payload["message"] ??
+              payload["summary"] ??
+              payload["text"] ??
+              payload["error"],
+          )) ?? prettyEventType(type);
     const errorSummary = stringOrNull(tool["error_summary"] ?? payload["error"]);
-    const detail =
-      stringOrNull(payload["detail"] ?? payload["text"] ?? payload["error"]) ??
-      stringOrNull(tool["content_summary"]) ??
-      errorSummary;
+    const detail = partialGitInitialization
+      ? `Stopped during ${String(payload["failed_stage"] ?? "unknown")} at ${String(payload["repo_root"] ?? "?")}; partial Git metadata may remain.`
+      : (stringOrNull(payload["detail"] ?? payload["text"] ?? payload["error"]) ??
+        stringOrNull(tool["content_summary"]) ??
+        errorSummary);
     const toolName = stringOrNull(tool["name"]);
     const target = stringOrNull(tool["target"]);
     // INV-105 disclosure (QA-070): unsupported per-harness knobs the route could
@@ -296,7 +301,10 @@ export function timelineEvents(
           .map((s) => stringOrNull(s))
           .filter((s): s is string => s !== null)
       : [];
-    const severity = ignoredSettings.length > 0 ? "warning" : timelineSeverity(type, payload, tool);
+    const severity =
+      ignoredSettings.length > 0 || partialGitInitialization
+        ? "warning"
+        : timelineSeverity(type, payload, tool);
     out.push(
       ControlTimelineEvent.parse({
         type,

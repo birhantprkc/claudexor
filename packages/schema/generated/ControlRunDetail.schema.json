@@ -2402,10 +2402,6 @@
                   "$ref": "#/definitions/ControlRunDetail/properties/summary/properties/parentRunId/anyOf/0",
                   "description": "Attempt that produced it, when known."
                 },
-                "evidence_dir": {
-                  "type": "string",
-                  "description": "Directory holding run evidence artifacts."
-                },
                 "files": {
                   "type": "object",
                   "additionalProperties": {

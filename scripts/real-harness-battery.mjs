@@ -14,6 +14,7 @@
  * - never prints secret values.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -75,6 +76,9 @@ if (existsSync(join(home, ".claudexor", "node", "bin", "codex"))) {
 if (existsSync(join(home, ".claudexor", "node", "bin", "claude"))) {
   env.CLAUDEXOR_CLAUDE_BIN = join(home, ".claudexor", "node", "bin", "claude");
 }
+// The in-process Control API phase must resolve the same isolated daemon and
+// harness binaries as child CLI invocations.
+Object.assign(process.env, env);
 
 const results = [];
 const evidence = {
@@ -423,13 +427,31 @@ function assertRunStatus(
 }
 
 function assertPrimaryOutput(phase, name, out, kind) {
-  const r = assertRunStatus(phase, name, out, ["success", "blocked"]);
+  const r = assertRunStatus(phase, name, out, ["success", "succeeded"]);
   if (r.status === "fail" || !out.json?.runId) return out.json;
   const detail = inspectRun(out.json.runId, out.cwd ?? root);
-  const path = detail?.primaryOutput?.path ?? "";
-  if (!path.includes(kind))
-    fail(phase, `${name} primary output`, { expected: kind, path, runId: out.json.runId });
-  else pass(phase, `${name} primary output`, { path, runId: out.json.runId });
+  const primary = detail?.primaryOutput;
+  const expectedKind = kind.replace(/\.md$/, "");
+  const runDir = detail?.runDir;
+  const artifactPath =
+    typeof runDir === "string" && typeof primary?.path === "string"
+      ? join(runDir, primary.path)
+      : null;
+  const evidence = {
+    runId: out.json.runId,
+    lifecycle: detail?.lifecycle ?? null,
+    outputReadyState: detail?.outputReadyState ?? null,
+    expectedKind,
+    actualKind: primary?.kind ?? null,
+    path: primary?.path ?? null,
+    artifactNonEmpty: artifactPath !== null && nonEmpty(artifactPath),
+  };
+  const valid =
+    evidence.lifecycle === "succeeded" &&
+    evidence.outputReadyState === "ready" &&
+    evidence.actualKind === expectedKind &&
+    evidence.artifactNonEmpty;
+  (valid ? pass : fail)(phase, `${name} primary output`, evidence);
   return detail;
 }
 
@@ -449,13 +471,14 @@ function assertCouncilArtifacts(phase, name, detail, runDir = detail?.runDir) {
     members: members.map((member) => ({
       harnessId: member?.harnessId,
       status: member?.status,
+      error: member?.error ?? null,
     })),
     membership: Boolean(runDir && artifactExists(runDir, "council/membership.yaml")),
     draftFiles,
   };
   const valid =
     Number(council?.requested) >= 2 &&
-    Number(council?.drafted) >= 2 &&
+    Number(council?.drafted) >= 1 &&
     council?.drafted === draftedMembers.length &&
     typeof council?.mergedBy === "string" &&
     council.mergedBy.length > 0 &&
@@ -464,7 +487,23 @@ function assertCouncilArtifacts(phase, name, detail, runDir = detail?.runDir) {
     ) &&
     evidence.membership &&
     draftFiles.every(Boolean);
-  return valid ? pass(phase, name, evidence) : fail(phase, name, evidence);
+  const failedMembers = members.filter((member) => member?.status === "failed");
+  const degradedExpected = Number(council?.drafted) < Number(council?.requested);
+  const disclosureValid =
+    council?.degraded === degradedExpected &&
+    (!degradedExpected ||
+      (failedMembers.length === Number(council?.requested) - Number(council?.drafted) &&
+        failedMembers.every(
+          (member) => typeof member?.error === "string" && member.error.trim().length > 0,
+        )));
+  const result = valid ? pass(phase, name, evidence) : fail(phase, name, evidence);
+  (disclosureValid ? pass : fail)(phase, `${name} degradation disclosure`, {
+    requested: council?.requested,
+    drafted: council?.drafted,
+    degraded: council?.degraded,
+    failed: evidence.members.filter((member) => member.status === "failed"),
+  });
+  return result;
 }
 
 function recordRunEvidence(phase, name, out, cwd) {
@@ -635,6 +674,22 @@ function needHarness(phase, h, label = h) {
 
 function runReadonlyPhase() {
   const phase = "phase1";
+  for (const retired of ["audit", "explore"]) {
+    const out = runCliJson([retired, "retired verb probe"], {
+      cwd: repos.readonly,
+      name: `${phase}-${retired}-retired`,
+      envRetry: false,
+    });
+    if (out.code === 2 && /retired|deep-scan/i.test(out.stdout + out.stderr)) {
+      pass(phase, `${retired} retired verb fails loud`, { exit: out.code });
+    } else {
+      fail(phase, `${retired} retired verb fails loud`, {
+        exit: out.code,
+        stdout: out.stdout.slice(0, 200),
+        stderr: out.stderr.slice(0, 200),
+      });
+    }
+  }
   for (const h of requestedHarnesses) {
     if (!needHarness(phase, h, `${h} read-only`)) continue;
     assertPrimaryOutput(
@@ -648,11 +703,12 @@ function runReadonlyPhase() {
     );
     assertPrimaryOutput(
       phase,
-      `${h} audit`,
+      `${h} repository deep scan`,
       runCliJson(
         [
-          "audit",
+          "ask",
           "Briefly map this repository: files, tests, and the math bug. Do not edit files.",
+          "--deep-scan",
           "--harness",
           h,
           "--effort",
@@ -660,7 +716,7 @@ function runReadonlyPhase() {
           "--max-usd",
           maxUsd,
         ],
-        { cwd: repos.readonly, name: `${phase}-${h}-audit` },
+        { cwd: repos.readonly, name: `${phase}-${h}-deep-scan-map` },
       ),
       "report.md",
     );
@@ -684,11 +740,12 @@ function runReadonlyPhase() {
     );
     assertPrimaryOutput(
       phase,
-      `${h} explore`,
+      `${h} focused deep scan`,
       runCliJson(
         [
-          "explore",
+          "ask",
           "Find where add is implemented and tested. Keep it concise.",
+          "--deep-scan",
           "--harness",
           h,
           "--n",
@@ -698,9 +755,9 @@ function runReadonlyPhase() {
           "--max-usd",
           maxUsd,
         ],
-        { cwd: repos.readonly, name: `${phase}-${h}-explore` },
+        { cwd: repos.readonly, name: `${phase}-${h}-deep-scan-focused` },
       ),
-      "explore.md",
+      "report.md",
     );
   }
   const multi = available(requestedHarnesses);
@@ -725,8 +782,9 @@ function runReadonlyPhase() {
     }
     const exp = runCliJson(
       [
-        "explore",
+        "ask",
         "Find where add is implemented and tested; each explorer should take a distinct slice.",
+        "--deep-scan",
         "--harness",
         multi.join(","),
         "--n",
@@ -736,11 +794,11 @@ function runReadonlyPhase() {
         "--max-usd",
         maxUsd,
       ],
-      { cwd: repos.readonly, name: `${phase}-multi-explore` },
+      { cwd: repos.readonly, name: `${phase}-multi-deep-scan` },
     );
-    const ed = assertPrimaryOutput(phase, "multi explore", exp, "explore.md");
+    const ed = assertPrimaryOutput(phase, "multi deep scan", exp, "report.md");
     if (ed?.runDir) {
-      pass(phase, "multi explore artifacts", {
+      pass(phase, "multi deep scan artifacts", {
         findings: existsSync(join(ed.runDir, "findings")),
         exploreFindings: artifactExists(ed.runDir, "final/explore-findings.yaml"),
         omissions: artifactExists(ed.runDir, "final/omissions.md"),
@@ -1502,7 +1560,7 @@ function runWebPhase() {
   } else skip(phase, "cursor web negative", { reason: "cursor not ok" });
 }
 
-function runPlanPhase() {
+async function runPlanPhase() {
   const phase = "phase8";
   const multi = available(requestedHarnesses);
   if (multi.length < 2) {
@@ -1515,69 +1573,202 @@ function runPlanPhase() {
     testMultiply: true,
   });
   const prompt =
-    "Add a multiply feature and fix math so all node:test tests pass. Use a small public API. Surface material open questions if ambiguous.";
-  // Plan lifecycle step 1: multi-harness read-only planning produces a plan
-  // (final/plan.md) and never mutates the repo.
-  const plan = runCliJson(
-    [
-      "plan",
-      prompt,
-      "--harness",
-      multi.join(","),
-      ...councilFlags(Math.min(3, multi.length)),
-      "--effort",
-      "low",
-      "--max-usd",
-      maxUsd,
-    ],
-    { cwd: repo, name: `${phase}-plan`, timeoutMs: 30 * 60_000 },
-  );
-  if (plan.code !== 0 || plan.json?.status !== "success") {
-    fail(phase, "plan produced", { exit: plan.code, json: plan.json, log: rel(plan.log) });
-    return;
-  }
-  const planMd = plan.json?.runDir ? join(plan.json.runDir, "final", "plan.md") : null;
-  if (planMd && existsSync(planMd)) {
-    pass(phase, "plan produced", { runId: plan.json?.runId });
-    const planDetail = inspectRun(plan.json.runId, repo);
-    assertCouncilArtifacts(phase, "plan council artifacts", planDetail, plan.json.runDir);
-  } else {
-    fail(phase, "plan produced", { reason: "no final/plan.md", json: plan.json });
-    return;
-  }
-  // Plan lifecycle step 2: implement the work as an ordinary gated race and
-  // verify a non-empty, gate-verified patch results.
-  const runOut = runCliJson(
-    [
-      "best-of",
-      prompt,
-      "--harness",
-      multi.join(","),
-      "--n",
-      String(Math.min(3, multi.length)),
-      "--test",
-      testCmd(),
-      "--effort",
-      "low",
-      "--max-usd",
-      maxUsd,
-    ],
-    { cwd: repo, name: `${phase}-implement`, timeoutMs: 30 * 60_000 },
-  );
-  const ev = recordRunEvidence(phase, "implement evidence", runOut, repo);
-  if (runOut.envFailure) return;
-  if (ev?.patchNonEmpty)
-    pass(phase, "implement patch", {
-      runId: runOut.json?.runId,
-      status: runOut.json?.status,
-      basis: ev.decision?.verification_basis,
+    "Add a multiply feature and fix math so all node:test tests pass. Use the existing tiny public API. There are no product choices to ask the owner; record an empty Open Questions set.";
+  try {
+    const [{ ensureDaemon, enqueueAndAwait }, { controlApiFetch }] = await Promise.all([
+      import("../packages/cli/dist/daemon-run.js"),
+      import("../packages/cli/dist/live.js"),
+    ]);
+    const { client, addr } = await ensureDaemon();
+    const requestJson = async (path, init = {}) => {
+      const response = await controlApiFetch(addr, path, init);
+      const text = await response.text();
+      const body = text ? JSON.parse(text) : {};
+      if (!response.ok) {
+        throw new Error(
+          `${init.method ?? "GET"} ${path} failed (HTTP ${response.status}): ${JSON.stringify(body)}`,
+        );
+      }
+      return body;
+    };
+    const thread = await requestJson("/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Real-harness Plan to Implement proof",
+        scope: { kind: "project", root: repo },
+        mode: "plan",
+        workspace: "in_place",
+        authPreference: "auto",
+        primaryHarness: multi[0],
+        eligibleHarnesses: multi,
+        access: "workspace_write",
+      }),
     });
-  else
-    fail(phase, "implement patch", {
-      status: runOut.json?.status,
-      error: runOut.json?.error,
-      log: rel(runOut.log),
+    const shared = {
+      threadId: thread.id,
+      scope: { kind: "project", root: repo },
+      execution: { isolation: "live" },
+      harnesses: multi,
+      primaryHarness: multi[0],
+      effort: "low",
+      paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
+      maxSeconds: 30 * 60,
+    };
+    const planOutcome = await enqueueAndAwait(
+      client,
+      addr,
+      {
+        ...shared,
+        prompt,
+        mode: "plan",
+        council: true,
+        n: Math.min(3, multi.length),
+      },
+      { waitForTerminal: true },
+    );
+    const planMd = join(planOutcome.runDir, "final", "plan.md");
+    if (planOutcome.status !== "succeeded" || !nonEmpty(planMd)) {
+      fail(phase, "plan produced", {
+        threadId: thread.id,
+        runId: planOutcome.runId,
+        status: planOutcome.status,
+        error: planOutcome.error,
+        plan: nonEmpty(planMd),
+      });
+      return;
+    }
+    const frozenPlan = readFileSync(planMd);
+    const planHash = createHash("sha256").update(frozenPlan).digest("hex");
+    pass(phase, "plan produced", {
+      threadId: thread.id,
+      runId: planOutcome.runId,
+      sha256: planHash,
     });
+    const planDetail = inspectRun(planOutcome.runId, repo);
+    assertCouncilArtifacts(phase, "plan council artifacts", planDetail, planOutcome.runDir);
+
+    // This is the product's actual Implement action: a second turn in the SAME
+    // thread names the exact plan run. The server freezes plan.md, mints
+    // planRef, forces agent mode, and materializes context/PLAN.md.
+    const implementOutcome = await enqueueAndAwait(
+      client,
+      addr,
+      {
+        ...shared,
+        prompt: "Implement this plan.",
+        mode: "agent",
+        planRunId: planOutcome.runId,
+        n: Math.min(3, multi.length),
+        tests: [{ program: "node", args: ["--test"] }],
+      },
+      { waitForTerminal: true },
+    );
+    const runOut = {
+      code: implementOutcome.status === "succeeded" ? 0 : 1,
+      json: {
+        runId: implementOutcome.runId,
+        runDir: implementOutcome.runDir,
+        status: implementOutcome.status,
+        error: implementOutcome.error,
+      },
+      cwd: repo,
+      envFailure: false,
+      log: logPath(`${phase}-implement-control-api`),
+    };
+    writeFileSync(
+      runOut.log,
+      redactSecrets(
+        JSON.stringify(
+          {
+            threadId: thread.id,
+            planRunId: planOutcome.runId,
+            implementRunId: implementOutcome.runId,
+            status: implementOutcome.status,
+            error: implementOutcome.error ?? null,
+          },
+          null,
+          2,
+        ),
+      ),
+    );
+    const ev = recordRunEvidence(phase, "implement evidence", runOut, repo);
+    if (
+      implementOutcome.status === "succeeded" &&
+      ev?.patchNonEmpty &&
+      gatePassed(ev.detail) &&
+      ev.decision?.status === "success"
+    ) {
+      pass(phase, "implement patch+gate", {
+        runId: implementOutcome.runId,
+        status: implementOutcome.status,
+        basis: ev.decision.verification_basis,
+      });
+    } else {
+      fail(phase, "implement patch+gate", {
+        runId: implementOutcome.runId,
+        status: implementOutcome.status,
+        patch: ev?.patchNonEmpty ?? false,
+        gatePassed: gatePassed(ev?.detail),
+        decision: ev?.decision ?? null,
+        error: implementOutcome.error,
+      });
+    }
+
+    const threadDetail = await requestJson(`/threads/${encodeURIComponent(thread.id)}`);
+    const implementTurn = (threadDetail.turns ?? []).find(
+      (turn) => turn.runId === implementOutcome.runId,
+    );
+    const materializedPath = join(implementOutcome.runDir, "context", "PLAN.md");
+    const materialized = existsSync(materializedPath) ? readFileSync(materializedPath) : null;
+    const eventsPath = join(implementOutcome.runDir, "events.jsonl");
+    const planEvent = existsSync(eventsPath)
+      ? readFileSync(eventsPath, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => {
+            try {
+              return JSON.parse(line);
+            } catch {
+              return null;
+            }
+          })
+          .find(
+            (event) =>
+              event?.type === "plan.brief.materialized" &&
+              event?.payload?.plan_run_id === planOutcome.runId &&
+              event?.payload?.sha256 === planHash &&
+              event?.payload?.path === "context/PLAN.md",
+          )
+      : null;
+    const lineage = threadDetail.thread?.runIds ?? [];
+    const proof = {
+      threadId: thread.id,
+      planRunId: planOutcome.runId,
+      implementRunId: implementOutcome.runId,
+      bothRunsInThread:
+        lineage.includes(planOutcome.runId) && lineage.includes(implementOutcome.runId),
+      turnPlanRunId: implementTurn?.planRunId ?? null,
+      turnPlanHash: implementTurn?.planHash ?? null,
+      readinessOverridden: implementTurn?.planReadinessOverridden ?? null,
+      planArtifactUnchanged: readFileSync(planMd).equals(frozenPlan),
+      materializedByteExact: materialized?.equals(frozenPlan) ?? false,
+      materializedEvent: Boolean(planEvent),
+    };
+    const proofValid =
+      proof.bothRunsInThread &&
+      proof.turnPlanRunId === planOutcome.runId &&
+      proof.turnPlanHash === planHash &&
+      proof.readinessOverridden === false &&
+      proof.planArtifactUnchanged &&
+      proof.materializedByteExact &&
+      proof.materializedEvent;
+    (proofValid ? pass : fail)(phase, "same-thread planRunId Implement freeze", proof);
+  } catch (error) {
+    fail(phase, "plan lifecycle control API", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function runDelegationPhase() {
@@ -1955,7 +2146,7 @@ async function main() {
     if (phaseEnabled("phase5")) runCreatePhase();
     if (phaseEnabled("phase6")) runVisionPhase();
     if (phaseEnabled("phase7")) runWebPhase();
-    if (phaseEnabled("phase8")) runPlanPhase();
+    if (phaseEnabled("phase8")) await runPlanPhase();
     if (phaseEnabled("phase9")) runDelegationPhase();
     if (phaseEnabled("phase10")) await runMcpServePhase();
     if (phaseEnabled("phase11")) await runAcpServePhase();

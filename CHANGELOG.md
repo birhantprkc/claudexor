@@ -106,7 +106,13 @@ Release history for Claudexor. The current version is declared in the root
   publication. Failed activation still rolls back through the same opaque lease.
   The packaged app probes the selected local daemon closure and reconciles exact
   version plus build identity before hydrating state, deferring safely while
-  work is active.
+  work is active. A failed or unreachable post-swap relaunch now restores and
+  proves the prior exact runtime through the same admission-safe stop instead of
+  leaving an unverified candidate pointer active. Idempotent thread recovery
+  returns an already accepted command, but refuses a historical runless orphan
+  after the conversation advances; Exact Retry also preserves the implemented
+  plan hash and readiness override, and recorded risk-decision replays precede a
+  later turn's idle gate.
   Both local-update and remote-runtime manifests reject unsigned extension
   fields in every JS, TypeScript, and Swift verifier;
   installer children receive no provider secrets, and offline signing keys are
@@ -119,11 +125,22 @@ Release history for Claudexor. The current version is declared in the root
   so numeric-prefixed prose and multiple picks for a single-choice question are
   preserved as prose. Native reviewer workspaces now project only Git-visible
   candidate files plus exact diff postimages; unrelated ignored local state
-  stays outside the separately copied evidence plane. Formal release review can
-  persist and size-check its exact prompts in a no-network preparation phase,
-  requires those prepared digests before the live wave, and executes one
-  full-gate-bound self-contained verifier/redactor bundle instead of mutable
-  workspace build output.
+  stays outside the separately copied evidence plane. Formal release review is
+  now one native full-context pair on the complete frozen repository: Claude
+  Code Fable/max and Codex sol/xhigh share the same manifest-bound evidence,
+  owner dialogue, complete diff, tests, and internet access. Schema-v5 sealing
+  derives both verdicts from candidate-built Claudexor artifacts and binds their
+  observed routes, prompts, transcripts, normalized events, and runtime
+  identity to the exact full-gate receipt. Frozen reviewers now force live web
+  context, run without hidden transient retries, record distinct overlapping
+  sessions, and seal transcripts re-derived from normalized events. Sealed
+  completions accept exactly one JSON value, with no surrounding prose or
+  duplicate envelope. The full gate emits a small candidate verifier plus the
+  packaged CLI, binds both byte digests and its real stdout/stderr logs into the
+  receipt, and the sealer revalidates those receipt-owned bytes. The packet-split OpenRouter panel, coverage
+  checker, and old broad runtime bundle are deleted rather than kept as
+  competing or fallback release paths; schemas 2-4 remain archive-verifiable
+  but cannot publish a new release.
   These dogfood repairs landed after the lockstep 3.2.0 versioning commit but
   before the first public 3.2.0 publication. The affected package changelogs
   therefore absorb them into their existing 3.2.0 sections; there is no second

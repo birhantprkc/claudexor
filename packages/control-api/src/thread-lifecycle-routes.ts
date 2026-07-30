@@ -7,9 +7,9 @@ import {
 import { assertNoInlineSecretValues } from "@claudexor/util";
 import type { DaemonControlApiOptions, DaemonRunRecord } from "./daemon-server.js";
 import { projectThread } from "./thread-projection.js";
-import { chainThreadMutation, type ThreadTurnRouteCtx } from "./thread-turn-routes.js";
+import type { ThreadTurnRouteCtx } from "./thread-turn-routes.js";
 import type { verifyAndDeliver } from "@claudexor/delivery";
-import { findActiveMutatingThreadRun } from "./thread-mutation.js";
+import { chainThreadMutation, findActiveMutatingThreadRun } from "./thread-mutation.js";
 
 export interface ThreadLifecycleRouteCtx {
   turnCtx: ThreadTurnRouteCtx;
@@ -42,7 +42,7 @@ async function lifecycle(
     ctx.json(res, 501, { error: "thread lifecycle is not supported by this build" });
     return;
   }
-  await chainThreadMutation(ctx.turnCtx, threadId, async () => {
+  await chainThreadMutation(ctx.turnCtx.threadTurnChains, threadId, async () => {
     try {
       ctx.json(res, 200, ControlThread.parse(projectThread(await service(threadId), false)));
     } catch (error) {
@@ -106,7 +106,7 @@ export async function handleThreadLifecycleRoutes(
     ctx.requestError(res, error);
     return true;
   }
-  await chainThreadMutation(ctx.turnCtx, threadId, async () => {
+  await chainThreadMutation(ctx.turnCtx.threadTurnChains, threadId, async () => {
     try {
       const body = ControlThreadApplyRequest.parse(await ctx.readBody(req));
       assertNoInlineSecretValues(body);

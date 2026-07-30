@@ -4,6 +4,8 @@
 
 ### Patch Changes
 
+- Seal the redacted user dialogue into every frozen release-review evidence
+  manifest and reject non-UTF-8 evidence bytes before a reviewer can run.
 - @claudexor/core@3.2.0
 - @claudexor/schema@3.2.0
 - @claudexor/util@3.2.0

@@ -15,6 +15,8 @@ import {
   type CodexAppServerConnection,
   type JsonRpcFrame,
 } from "./codex-device-login.js";
+import { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
+export { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 import { nativeLoginEnv } from "./native-login.js";
 import { waitForSetupLoginPermit } from "./setup-login-permit.js";
 import {
@@ -276,20 +278,13 @@ async function runDeviceCodeLogin(
   const onSignal = () => abort.abort();
   process.on("SIGTERM", onSignal);
   process.on("SIGINT", onSignal);
-  const killChild = () => {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      /* best-effort */
-    }
-  };
   try {
     const start = await startCodexDeviceLogin(connection, {
       flow: manifest.appServerFlow,
       signal: abort.signal,
     });
     if (start.kind === "not_supported") {
-      killChild();
+      await terminateAppServerChild(child, connection);
       // Typed capability-probe miss: reuse the existing not_supported outcome
       // so the daemon offers the legacy Terminal fallback (no stdout regex).
       persistResult(manifest, {
@@ -314,7 +309,7 @@ async function runDeviceCodeLogin(
       disclosedAt: now().toISOString(),
     });
     const outcome = await start.awaitCompletion();
-    killChild();
+    await terminateAppServerChild(child, connection);
     if (outcome.kind === "completed") {
       persistResult(manifest, {
         permitIssuedAt: permit.issuedAt,
@@ -335,7 +330,7 @@ async function runDeviceCodeLogin(
     });
     return 1;
   } catch (error) {
-    killChild();
+    await terminateAppServerChild(child, connection);
     persistResult(manifest, {
       permitIssuedAt: permit.issuedAt,
       commandStarted: true,
@@ -431,6 +426,10 @@ export function boundedTail(text: string, truncated = false): string {
     .replace(/\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
+  // Redact the complete sanitized input before any boundary is selected. A
+  // tail-first clamp can retain only the suffix of a token and thereby remove
+  // the prefix the detector needs to recognize it.
+  const redacted = redactSecrets(plain);
   // When the source was truncated at the front (ring overflow, or a
   // direct-string caller over the byte budget), a secret split by that
   // boundary could leave a prefix-less fragment redactSecrets cannot anchor.
@@ -438,10 +437,14 @@ export function boundedTail(text: string, truncated = false): string {
   // The caller's flag is authoritative (a ring string is already <= the cap,
   // so a length check here cannot see the cut); direct callers OR in their
   // own over-budget check.
-  const cut = truncated || Buffer.byteLength(plain, "utf8") > OUTPUT_TAIL_BYTES;
-  let bounded = plain.slice(-OUTPUT_TAIL_BYTES);
+  const bytes = Buffer.from(redacted, "utf8");
+  const cut = truncated || bytes.length > OUTPUT_TAIL_BYTES;
+  const tail = bytes.subarray(Math.max(0, bytes.length - OUTPUT_TAIL_BYTES));
+  let start = 0;
+  while (start < tail.length && (tail[start]! & 0b1100_0000) === 0b1000_0000) start += 1;
+  let bounded = tail.subarray(start).toString("utf8");
   if (cut) bounded = bounded.replace(/^\S+/, "");
-  return redactSecrets(bounded.trim().slice(0, 4000));
+  return bounded.trim();
 }
 
 /** Run `<binary> login --help` captured, bounded to 10s. Fails OPEN: only a

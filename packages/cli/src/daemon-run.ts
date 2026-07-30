@@ -581,6 +581,6 @@ export function daemonOutcomeSummary(out: {
     return `run needs a human decision — claudexor decision ${out.runId} --accept-risk | --rerun --feedback "..."`;
   }
   if (out.error) return out.error;
-  if (exitCodeForState(out.status) === 0) return undefined;
+  if (exitCodeForState(out.status, facts) === 0) return undefined;
   return `run ${out.status}${facts?.reason ? ` (${facts.reason})` : ""}`;
 }

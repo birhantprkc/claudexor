@@ -1,6 +1,12 @@
 import { accessSync, constants, realpathSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { labelStreams, runCaptureRaw, type CaptureResult } from "@claudexor/core";
+import {
+  composeBaseEnv,
+  isLaunchableExecutable,
+  labelStreams,
+  runCaptureRaw,
+  type CaptureResult,
+} from "@claudexor/core";
 import { GitCapability, type GitCapability as GitCapabilityValue } from "@claudexor/schema";
 
 const INSTALL_COMMAND_LINE_TOOLS =
@@ -40,12 +46,13 @@ function appleDeveloperToolsStub(detail: string): boolean {
   return normalized.includes("xcode-select") && normalized.includes("developer tools");
 }
 
-function executableOnPath(name: string, path = process.env.PATH ?? ""): string | null {
+export function resolveGitExecutable(
+  path = composeBaseEnv("mirror_native").PATH ?? "",
+): string | null {
   for (const entry of path.split(delimiter)) {
-    const candidate = join(entry || ".", name);
+    const candidate = join(entry || ".", "git");
     try {
-      accessSync(candidate, constants.X_OK);
-      return realpathSync(candidate);
+      if (isLaunchableExecutable(candidate)) return realpathSync(candidate);
     } catch {
       // Continue to the next PATH entry.
     }
@@ -66,7 +73,7 @@ function executableFile(path: string): boolean {
 export async function probeGitCapability(
   dependencies: GitProbeDependencies = {},
 ): Promise<GitCapabilityValue> {
-  const executable = (dependencies.resolveGit ?? (() => executableOnPath("git")))();
+  const executable = (dependencies.resolveGit ?? resolveGitExecutable)();
   if (!executable) {
     return GitCapability.parse({
       status: "missing",

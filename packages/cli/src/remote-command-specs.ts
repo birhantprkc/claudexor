@@ -12,7 +12,8 @@ export const REMOTE_COMMAND_SPECS = [
       { prefix: ["activate"], min: 3, max: 3 },
       { prefix: ["rollback"], min: 3, max: 3 },
     ],
-    usageArgs: "probe|bootstrap --json",
+    usageArgs:
+      "probe|bootstrap|stop <expectedVersion> <expectedBuildSha>|activate <expectedTarget|-> <nextTarget|->|rollback <expectedTarget|-> <nextTarget|-> --json",
     summary: "Internal SSH runtime bootstrap interface",
     flags: ["json"],
     mutability: "ops",

@@ -4,21 +4,23 @@ export interface ReleaseReviewRuntimeArtifact {
   sha256: string;
 }
 
-export function buildReleaseReviewRuntimeBundle(
+export interface VerifiedReleaseReviewRuntime {
+  artifacts: ReleaseReviewRuntimeArtifact[];
+  verifierBytes: Buffer;
+  cli: ReleaseReviewRuntimeArtifact & { absolutePath: string };
+}
+
+export function buildReleaseReviewRuntimeArtifacts(
   repoRoot: string,
   artifactRoot: string,
+  candidateSha: string,
 ): Promise<ReleaseReviewRuntimeArtifact[]>;
 export function readStableReviewFile(path: string, label: string): Buffer;
-
 export function snapshotReleaseReviewRuntimeArtifacts(
   artifactRoot: string,
 ): ReleaseReviewRuntimeArtifact[];
-export function verifyReleaseReviewRuntimeArtifacts(
+export function readVerifiedReleaseReviewRuntime(
   artifactRoot: string,
   expected: unknown,
-): ReleaseReviewRuntimeArtifact[];
-export function readVerifiedReleaseReviewRuntimeArtifact(
-  artifactRoot: string,
-  expected: unknown,
-): { artifacts: ReleaseReviewRuntimeArtifact[]; bytes: Buffer };
+): VerifiedReleaseReviewRuntime;
 export function releaseReviewRuntimeArtifactRoot(receiptPath: string): string;

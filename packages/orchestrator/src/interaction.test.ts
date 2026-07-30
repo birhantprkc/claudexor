@@ -63,8 +63,22 @@ describe("interactionChannelFor finite-or-disabled policy", () => {
   it("discloses an answer that loses the cancellation race without emitting a timeout", async () => {
     const events: CapturedEvent[] = [];
     const controller = new AbortController();
-    let resolveAnswer!: (value: { interaction_id: string; answers: string[] }) => void;
-    const answer = new Promise<{ interaction_id: string; answers: string[] }>((resolve) => {
+    let resolveAnswer!: (value: {
+      interaction_id: string;
+      answers: Array<{
+        question_id: string;
+        selected_labels: string[];
+        free_text: string | null;
+      }>;
+    }) => void;
+    const answer = new Promise<{
+      interaction_id: string;
+      answers: Array<{
+        question_id: string;
+        selected_labels: string[];
+        free_text: string | null;
+      }>;
+    }>((resolve) => {
       resolveAnswer = resolve;
     });
     const channel = interactionChannelFor(
@@ -85,7 +99,10 @@ describe("interactionChannelFor finite-or-disabled policy", () => {
     const pending = channel!.request(request() as never);
     controller.abort();
     await expect(pending).resolves.toBeNull();
-    resolveAnswer({ interaction_id: "int-1", answers: ["A"] });
+    resolveAnswer({
+      interaction_id: "int-1",
+      answers: [{ question_id: "q1", selected_labels: ["A"], free_text: null }],
+    });
     await answer;
     await Promise.resolve();
 

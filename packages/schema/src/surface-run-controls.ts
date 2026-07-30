@@ -113,12 +113,10 @@ export function validateSurfaceRunControls(obj: Record<string, unknown>): string
     }
   }
   const parsedMode = ModeKind.safeParse(obj.mode);
+  const strategyInput = obj as Parameters<typeof runStartStrategyViolations>[0];
   const applicabilityError = runStartStrategyViolations({
+    ...strategyInput,
     mode: parsedMode.success ? parsedMode.data : undefined,
-    reviewerPanel: obj.reviewerPanel,
-    reviewerModels: obj.reviewerModels,
-    reviewerEfforts: obj.reviewerEfforts,
-    protectedPathApprovals: obj.protectedPathApprovals,
   })[0];
   if (applicabilityError) return applicabilityError;
   return null;

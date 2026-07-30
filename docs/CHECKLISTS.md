@@ -274,9 +274,10 @@ pnpm test
   `waitingOnUser` child answered from its inline card. Detail failure must show
   its cause plus Retry instead of an endless spinner. Run this in the isolated
   macOS VM with real HID clicks and screenshot evidence, not UI automation alone.
-- Review gate: the Release review protocol (see the section below) — one
-  sealed-packet wave (critic subagents + exact triad + scope reviewer), one
-  adjudication, one batched fix commit, one confirmation wave on the delta.
+- Review gate: the Release review protocol (see the section below) — optional
+  pre-freeze internal critics, then one parallel native full-context wave with
+  the exact Fable and Codex reviewers, one adjudication, one batched correction
+  commit, and one full-context confirmation focused on that delta.
 - Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
   come from GitHub Actions `candidate` then `publish` mode; missing signing or
   notarization credentials block publication. Publish promotes the exact
@@ -293,13 +294,13 @@ pnpm test
   from the promoted unsigned manifest and must `cmp` byte-identical to the
   candidate SBOM before the candidate bytes ship.
 - The publish input is an annotated stable tag on exact `origin/main` plus a
-  signed attestation: the owner-review attestation binds the candidate
-  SHA/tree, the full-gate receipt digest, and every panel reviewer report
-  digest with non-blocking verdicts plus the wave count (see the Release
-  review protocol); already-sealed older-schema attestations stay verifiable.
-  Verify the Ed25519 signature against the tracked pinned public key before
-  semantic validation; reject schema 1, unsigned, unknown-key, and tampered
-  inputs.
+  signed schema-v5 attestation. It binds the candidate SHA/tree, exact full-gate
+  receipt, sealed evidence manifest/diff/wave, and the two required native
+  reviewer artifacts with non-blocking verdicts (see the Release review
+  protocol). Verify the Ed25519 signature against the tracked pinned public key
+  before semantic validation. Reject non-v5, unsigned, unknown-key, tampered,
+  substituted, incomplete, or route-unproven publish inputs; schema v2-v4 stays
+  signature-verifiable only as archived evidence.
 - Verify app, ZIP-contained app, and DMG signatures, notarization tickets,
   staples, checksums, SBOM, and GitHub provenance. Do not upload stale local
   `apps/macos/dist` artifacts.
@@ -361,6 +362,13 @@ pnpm test
   correctness and security.
 - Classify each finding as accepted, rejected, duplicate, deferred, or out of
   scope. Fix only accepted findings verified against current code/docs.
+- Treat every reviewer finding and proposed patch as a hypothesis. Before
+  accepting it, reproduce the behavior, identify the root cause and canonical
+  owner/SSOT, search sibling surfaces and other instances of the same failure
+  class, and check the governing invariant or owner criterion. Repair the class
+  only when multiple surfaces or a broken SSOT boundary prove it; otherwise
+  prefer the smallest local correction. Investigate over believe; generalize
+  over overfit; meta over patch.
 - Reject scope drift and overengineering that does not serve the accepted user
   intent.
 - Before release, run the local multi-review protocol and Claudexor dogfood
@@ -378,13 +386,12 @@ pnpm test
 - Review-panel spend is route-scoped: native subscription reviewers settle to
   valuation, API-key reviewers to cash. Verify mixed panels preserve both
   totals and never debit the aggregate as cash.
-- Reviewers must read file-backed evidence (`DIFF.patch`, `DIFF_SUMMARY.md`,
-  user intent, decided tradeoffs, tests) from the candidate tree. Do not pass the
-  full diff through the process argv or a giant prompt as the normal review path.
-  (Exception by construction: `scripts/triad-scope-review.mjs` reviews via
-  remote OpenRouter chat models that cannot read local files, so its prompt IS
-  the evidence transport. Its prompts and raw outputs are persisted
-  untruncated per round.)
+- Reviewers must inspect the complete Git-visible candidate and read file-backed
+  evidence (`DIFF.patch`, user dialogue, decided tradeoffs, tests, gate receipt)
+  from the sealed evidence directory. Do not divide the repository into tiny
+  batches that hide architecture, and do not pass the full diff through argv.
+  The native harness reads files directly and may use the internet where source
+  verification is useful.
 - Reviewer workspaces must project one frozen source inventory: Git-visible
   files plus exact diff-touched paths, or diff-touched postimages only when no
   Git inventory exists. Prove that unrelated ignored local instructions and an
@@ -428,33 +435,33 @@ pnpm test
   model/source, route proof, start/first-event/completion-or-timeout timestamps,
   duration, raw normalized stream or transcript, parsed JSON blocks, and parse
   errors.
-- Bind both tiers to the same external sealed packet (`FREEZE.json` plus the
-  expected digest of a complete `MANIFEST.sha256`) and exact clean candidate SHA/tree. Tier 1
-  consumes that packet read-only and starts its required critics concurrently;
-  Tier 2 additionally requires an external panel lock prepared in a separate
-  no-network `--prepare-panel-lock` invocation, then starts the three exact
-  triad slots plus required scope slot at one concurrency boundary. A missing
-  lock, packet, worktree, or lock mismatch fails before output-directory
-  creation or any reviewer request. Each attempt
-  uses a new external output directory; existing reviewer artifacts are never
-  overwritten.
+- Bind every required reviewer to the same external sealed evidence directory
+  (`FREEZE.json`, complete `MANIFEST.sha256`, exact `DIFF.patch`, and
+  `USER_DIALOGUE.md`) and exact clean candidate SHA/tree. Start both native
+  reviewers at one concurrency boundary in fresh read-only workspaces; a
+  missing packet, worktree, manifest match, or exact route fails before either
+  slot can count. Each wave uses a new external output directory; existing
+  reviewer artifacts are never overwritten.
 - Emit reviewer progress events (`reviewer.started`, `reviewer.first_event`,
   `reviewer.completed`, `reviewer.timed_out`, `reviewer.failed`) so a concurrent
   panel is diagnosable and does not look like a hang.
 
-### Release review protocol (v3, owner-locked — INV-125/INV-139)
+### Release review protocol (native v5, owner-locked — INV-125/INV-139)
 
 This is the ONLY release review protocol. History for context: the 2.1.0
 release ran 18 wave rounds without converging (~40% of findings re-surfaced
 earlier "accepted" fixes; ~26% of the release diff was authored by the loop
-itself). The v3 protocol bounds the loop mechanically.
+itself). This protocol bounds the loop mechanically while preserving the full
+repository context that small review packets lost.
 
-- **One wave, in parallel, on a frozen candidate SHA**: independent
-  full-context critic subagents + the exact model-diverse triad
-  (`openai/gpt-5.6-sol`, `anthropic/claude-fable-5`,
-  `google/gemini-3.5-flash` via OpenRouter) + a scope reviewer
-  (`anthropic/claude-fable-5`). No substitute models, no "closest
-  equivalents".
+- **One wave, in parallel, on a frozen candidate SHA**: exactly two formal
+  native reviewers, Claude Code `claude-fable-5` at effort `max` and Codex
+  `gpt-5.6-sol` at effort `xhigh`, both through vendor-native local sessions.
+  They receive the complete Git-visible repository, complete diff, same sealed
+  evidence, owner dialogue/decisions, tests, and live internet access. Frozen
+  review specs must record `external_context_policy=live` and web tool policy
+  `live`; an automatic or cached policy is not release evidence. No substitute
+  model, API-key fallback, packet split, or extra critic can fill either slot.
 - **One sealed packet** for every reviewer: `MANIFEST.sha256`,
   `FREEZE.json`, `DIFF.patch` + digest, `TESTS.txt`, the decision registry
   (change → D#/invariant mapping), `FORBIDDEN_FINDINGS.md`,
@@ -472,9 +479,9 @@ itself). The v3 protocol bounds the loop mechanically.
   "while I'm here" fixes inside the batch. EVERY finding gets exactly one
   row in `docs/reference/review-ledger.md` (the findings ledger); its
   declined rows are the next wave's `DECLINED_FINDINGS.md`.
-- **One confirmation wave on the delta** (the fix diff + every file a fix
-  touched; complete diff coverage is reviewed exactly once, in wave 1). A
-  confirmation blocker on UNCHANGED code without new evidence is invalid.
+- **One confirmation wave with the same full context**, focused on the fix diff
+  and every file it touched. A confirmation blocker on unchanged code without
+  new evidence is invalid.
 - **Stop.** New proven blockers after confirmation get a fix + targeted
   re-check of exactly those findings. Anything beyond that requires an
   explicit owner decision — the protocol never self-extends.
@@ -482,101 +489,46 @@ itself). The v3 protocol bounds the loop mechanically.
   (each with its FEATURES/BACKLOG/DECLINED row) is releasable. A perfectly
   clean board is not required.
 - **Reviewer liveness**: a slot counts only with a parsed typed verdict and
-  a plausible duration; an empty/instant/unparseable response is an
-  infrastructure failure — one retry on the same SHA, then the slot is
-  reported failed. A failed required slot blocks sealing.
-- **Review-harness self-test**: the packet/verdict validator is exercised
+  a duration of at least one second. The two executions must actually overlap
+  and use distinct recorded session identities. An empty, instant, or
+  unparseable response is an infrastructure failure. Frozen slots have no
+  internal transient retry; an operator retry uses fresh artifacts and a fresh
+  review wave on the same still-clean SHA. A failed required slot blocks
+  sealing.
+- **Review-harness self-test**: the evidence/verdict validator is exercised
   in CI against synthetic fixtures (deep multi-row review, hostile JSON,
   empty output, instant null verdict). Two identical failures from
   different models mean the PROTOCOL is wrong, not the models.
-- **Review-evidence coverage is a deterministic pre-seal gate (audit A-8).**
-  Across each role's named sub-wave program, reviewers receive the FULL CURRENT
-  TEXT of every required hand-written changed file. A
-  disclosed "omission note" is NOT that guarantee: on a large phase (e.g. Ф3,
-  ~157 changed source files, ~3.68MB) the touched-file pack silently dropped
-  files past its byte budget, so reviewers did not receive every changed
-  file's full text. The posture "an omission note is acceptable" is retired.
-  Instead:
-  - `buildTouchedFilePack` in the release transport runs in strict mode: a
-    would-be omission FAILS LOUDLY (non-zero) instead of emitting a note, so no
-    wave can under-cover without the operator noticing.
-  - Large phases run as N **packet-split sub-waves**. The sealed packet keeps
-    one complete `git diff --find-renames=50% --binary` as `DIFF.patch`.
-    Each sub-wave keeps the full JSON changed-file inventory and blocker
-    contract, but receives only a NAMED exact readable diff slice plus the FULL
-    TEXT of a NAMED SUBSET of current files. Select both with JSON string arrays:
-    `--diff-subset <file> --pack-subset <file> --sub-wave <name>` (paths or
-    top-level area prefixes, e.g.
-    `packages/orchestrator/`, `packages/control-api/`, `apps/macos/ClaudexorApp/`,
-    `apps/macos/ClaudexorKit/`, `packages/schema/`, `docs/`). Size each subset
-    so `buildTouchedFilePack` supplies full text within `TRIAD_MAX_PACK_BYTES`
-    (no omission). Every sub-wave keeps the identical reviewer contract — same
-    triad + scope models, same blocker contract, its own per-sub-wave findings.
-  - The **union proof is role-specific and exact.**
-    `scripts/review-coverage-check.mjs --base <sha> --candidate <sha>
-    --pack <subwave>=<triad-prompt> --scope-pack
-    <subwave>=<scope-prompt> …` is REQUIRED before the seal. Independently for
-    triad and scope it proves every canonical diff entry (including deletions,
-    binaries, generated files, renames, and mode changes) appears exactly once
-    and concatenates byte-for-byte to the sealed `DIFF.patch`; it also proves
-    every required hand-written current file appears whole exactly once. It
-    enumerates `git diff --find-renames=50% -z --name-status
-    base..candidate` (NUL-safe — `--name-only`
-    was retired because it C-quotes space/unicode paths), classifies each file as
-    hand-written source vs DIFF-AUTHORITATIVE (generated schema under
-    `packages/schema/generated/`, `docs/reference/endpoints.json`, swift wire
-    fixtures `apps/macos/**/Tests/**/Fixtures/wire/**`, harness fixtures
-    `packages/harness-*/fixtures/**`, and a small documented generated-artifact
-    allowlist), and exits non-zero unless every hand-written file's complete
-    current bytes appear (untruncated) in exactly one supplied prompt. A file
-    listed only in an omission note, or present with altered/truncated bytes,
-    counts as NOT covered; every live hand-written path's diff and full text
-    must be assigned to the same sub-wave. Full-text frames length-prefix path
-    and content independently, and invalid UTF-8 fails before network instead
-    of being replacement-decoded. `FILES_TO_READ_WHOLE.txt` is a JSON string
-    array so path bytes are never line-parsed. Run each sub-wave once with
-    `--prepare-prompts` first: this no-network phase persists the exact triad and
-    scope prompts, context preflight, prompt digests, and a receipt proving zero
-    reviewers started, so coverage and size are checked before evidence leaves
-    the machine. This preparation receipt cannot occupy or satisfy a reviewer
-    slot. The later live invocation rebuilds those same bytes into a new output
-    directory and requires the prepared triad and scope SHA-256 values; either
-    mismatch is rejected before output creation, progress telemetry, or network
-    access. The transport also refuses before
-    output creation or network access unless its conservative input-token upper
-    bound plus configured max output fits every exact panel model's frozen
-    context/output ceiling; `TRIAD_MAX_OUTPUT_TOKENS` defaults to 60000. The
-    frozen limits come from `https://openrouter.ai/api/v1/models`, verified
-    2026-07-29.
-- **Attestation:** `scripts/run-full-gate-receipt.mjs` runs
-  `pnpm release:verify`, then builds one self-contained review runtime beside
-  the external receipt from exact-HEAD tracked inputs. Its build may leave only
-  `node:` imports external, its four-function API is smoke-tested, and its exact
-  bytes and SHA-256 are sealed into the gate receipt. Preparation, live panel
-  transport, and sealing re-read those bytes through a no-follow descriptor and
-  execute that verified buffer, never mutable workspace `dist` output.
-  `scripts/seal-owner-review-attestation.mjs` signs the attestation (exact
-  candidate SHA/tree, gate receipt digest, every panel reviewer report
-  digest + verdict, wave count) with the offline Ed25519 authority. Panel
-  slots seal ONLY via `--slot-record <metadata.json>` — the wave transport's
-  typed records (panel_slot, sub_wave, derived verdict, liveness verdict +
-  floor, prompt/report digests); the sealer verifies candidate/tree,
-  observed==requested==recorded model, frozen-panel membership, one wave id,
-  the sealed-packet manifest binding (`--packet` REQUIRED with slot
-  records), and recomputes the raw report digest from disk. CLI
-  `--review reviewer=FILE:verdict` entries remain for NON-panel critic
-  reports only. Every slot record also binds the exact full-gate receipt and
-  review-runtime artifact that produced its packet/prompt checks. A packet-split
-  wave binds one full triad+scope panel PER
-  named sub-wave and MUST pass `--coverage-receipt` (the
-  `review-coverage-check --receipt` output over the union of sub-wave
-  triad+scope prompt pairs, labels unique); the verifier refuses a packet-split
-  seal without it — a single sub-wave's report can never stand in for all, and
-  every triad or scope slot's prompt digest must equal its role-specific digest
-  in the receipt.
-  The outer attestation stays schema v4; the signed inner coverage receipt is
-  independently schema v2. `verify-release-input.mjs` verifies the signature
-  before semantic validation. Historical outer-v4/coverage-v1 bytes remain
-  cryptographically verifiable as archives but are rejected by current publish
-  semantics. An owner override is a distinct recorded fact in the attestation,
-  never a reviewer PASS.
+- **Evidence completeness is deterministic.** The sealed evidence packet owns
+  the complete binary `DIFF.patch`, complete manifest, frozen SHA/tree and wave,
+  full-gate receipt, and `USER_DIALOGUE.md`. Both reviewers read that same
+  evidence plus the complete candidate repository through their native
+  workspaces. Missing, changed, ignored-only, or secret-bearing evidence fails
+  before a review can count; no omission note or partial pack substitutes for
+  access to the whole tree.
+- **Attestation:** `scripts/run-full-gate-receipt.mjs` runs exact
+  `pnpm release:verify` on the clean candidate into a required external output
+  directory, builds one small self-contained
+  verifier from exact tracked HEAD sources, copies the packaged app's
+  self-contained `claudexor.bundle.cjs`, and hashes both into the receipt. The
+  formal review must run through that copied CLI. Claudexor then runs the two
+  reviewers concurrently and persists each exact submitted prompt, normalized
+  stream, transcript, parsed verdict, session/timing/runtime metadata, and the
+  persistent evidence copy.
+  `scripts/seal-owner-review-attestation.mjs --full-gate-receipt <file>
+  --evidence-dir <dir> --review-artifacts <dir> --private-key <file>
+  --authority release/review-attestation-authority.json --out <file>` reads the
+  receipt-bound verifier only after that exact gate passed, recomputes all
+  hashes from the sealed packet and regular non-symlink artifact files, and
+  re-derives the transcript byte-for-byte from normalized message events. It
+  signs schema v5 only for the final confirmation pair; the initial review and
+  adjudication remain in the ledger and sealed evidence, not a second signed
+  graph. It refuses anything
+  except exactly one completed Fable slot and one completed Codex slot with
+  observed=requested model, honored effort, verified native route, no auth
+  switch or ignored setting, live external context/web policy, plausible
+  overlapping timing, distinct sessions, the same receipt-bound packaged CLI
+  bytes, a strict parsed completion envelope, and `pass` or `warn`.
+  `verify-release-input.mjs` verifies
+  the signature before semantic validation. Schema v2-v4 remains
+  signature-verifiable only for archived releases and cannot publish now.

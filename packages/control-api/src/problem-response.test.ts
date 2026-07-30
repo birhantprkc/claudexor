@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { controlProblemError, revertRefusedProblem } from "./problem-response.js";
+import {
+  controlProblemError,
+  normalizeRequestValidationError,
+  revertRefusedProblem,
+} from "./problem-response.js";
 
 describe("controlProblemError context projection", () => {
   it("keeps explicit context flat and merges legacy top-level recovery ids", () => {
@@ -16,6 +20,25 @@ describe("controlProblemError context projection", () => {
       capability: "git",
     });
     expect(error.context).not.toHaveProperty("context");
+  });
+});
+
+describe("request validation bounds", () => {
+  it("bounds a huge attacker-controlled issue path without quadratic truncation", () => {
+    const started = performance.now();
+    const error = normalizeRequestValidationError({
+      issues: [
+        {
+          code: "custom",
+          path: ["x".repeat(10 * 1024 * 1024)],
+          message: "invalid",
+        },
+      ],
+    }) as Error & { fieldErrors: Record<string, string[]> };
+    const elapsed = performance.now() - started;
+    const [pointer] = Object.keys(error.fieldErrors);
+    expect(Buffer.byteLength(pointer ?? "", "utf8")).toBeLessThanOrEqual(256);
+    expect(elapsed).toBeLessThan(2_000);
   });
 });
 

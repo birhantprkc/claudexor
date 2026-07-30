@@ -37,3 +37,38 @@ export async function assertThreadIdle(
     );
   }
 }
+
+/** Serialize one thread mutation and retire the chain entry after settlement. */
+export function chainThreadMutation<T>(
+  chains: Map<string, Promise<void>>,
+  threadId: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  const previous = chains.get(threadId) ?? Promise.resolve();
+  const chained = previous.catch(() => undefined).then(work);
+  const entry: Promise<void> = chained
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      if (chains.get(threadId) === entry) chains.delete(threadId);
+    });
+  chains.set(threadId, entry);
+  return chained;
+}
+
+/** Existing apply/decision mutations require an idle thread but create no turn. */
+export function chainIdleRunMutation<T>(
+  chains: Map<string, Promise<void>>,
+  daemon: { list(): Promise<DaemonRunRecord[]> },
+  record: DaemonRunRecord,
+  work: () => Promise<T>,
+): Promise<T> {
+  const threadId = threadIdOfRun(record);
+  if (!threadId) return work();
+  return chainThreadMutation(chains, threadId, async () => {
+    await assertThreadIdle(record, () => daemon.list());
+    return work();
+  });
+}

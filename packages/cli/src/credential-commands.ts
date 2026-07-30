@@ -49,6 +49,16 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     if (!harness || !profileId) {
       return printUsageError(json, "usage: claudexor profiles login <harness> <profile-id>");
     }
+    // Claude profile login is deliberately the vendor's interactive TTY flow.
+    // Inheriting its stdout while also promising one JSON object would corrupt
+    // the machine surface, so refuse before discovery, prose, or spawn. Codex
+    // keeps its daemon-owned device-code JSON flow below.
+    if (json && harness !== "codex") {
+      return printUsageError(
+        true,
+        `claudexor profiles login ${harness} is interactive and does not support --json`,
+      );
+    }
     const listing = ControlCredentialProfilesResponse.parse(
       await daemonGet("/credential-profiles"),
     );

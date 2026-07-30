@@ -6,7 +6,7 @@ import type {
   HarnessEvent,
   HarnessRunSpec,
 } from "@claudexor/schema";
-import { attemptUsageCostSettlement, type BudgetLedger } from "@claudexor/budget";
+import type { BudgetLedger } from "@claudexor/budget";
 import { AnswerAssembly, countsAsAgentProgress, withInactivityWatchdog } from "@claudexor/core";
 import { appendLine, redactSecrets, safeInvoke } from "@claudexor/util";
 import type { RunPaths } from "@claudexor/artifact-store";
@@ -33,19 +33,34 @@ import {
   telemetrySummary,
   toolWarnings,
 } from "./attemptTelemetry.js";
+import { settleGrantedAttemptLease } from "./attemptUsageCost.js";
 
 /** The reducer runs under the fixed `synth` attempt id (roster/cost visible). */
 export const DEEP_SCAN_REDUCER_ATTEMPT_ID = "synth";
+const REDUCER_CLEANUP_GRACE_MS = 8_000;
+const REDUCER_CLEANUP_EVENT_TYPES = new Set<HarnessEvent["type"]>([
+  "started",
+  "usage",
+  "error",
+  "status",
+  "context",
+  "completed",
+]);
 
-/**
- * #27 / D-6: the HONEST fallback artifact for a deep scan whose bounded
- * synthesis reducer did not run or did not succeed. It is explicitly labeled a
- * raw scout bundle (a marker heading), never presented as a merged synthesis:
- * the per-scout reports are concatenated verbatim with attribution, the roster
- * denominator stays honest, and omissions are preserved. `skipped` (a single
- * width-1 report) and `failed` (reducer error/timeout/budget-denial or no
- * synthesize-capable route) get distinct honest intros.
- */
+/** Keep the scoped HOME alive for cooperative teardown, but never forever. */
+async function waitForCleanup(work: Promise<unknown>, graceMs: number): Promise<void> {
+  let timer!: ReturnType<typeof setTimeout>;
+  await Promise.race([
+    work.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      // Referenced: this timer owns eventual HOME/lease cleanup.
+      timer = setTimeout(resolve, Math.max(1, graceMs));
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/** Honest attributed fallback; never presents raw scout reports as a merge. */
 export function rawScoutBundle(args: {
   succeeded: {
     attemptId: string;
@@ -98,16 +113,10 @@ export interface ReducerHome {
   dispose: () => void;
 }
 
-/** The engine-owned bits the reducer needs. `buildSpec` keeps the orchestrator's
- * private route/session/knob machinery on the caller side and hands back only a
- * finished, public `HarnessRunSpec` plus the disclosed web policy/model, so this
- * module stays free of those private types (mirrors the council extraction). */
+/** Engine-owned dependencies; private route/session machinery stays with the caller. */
 export interface DeepScanReducerDeps {
-  /** Provision a fresh disposable read-only home (auth is home-independent). */
   newReadOnlyHome: () => ReducerHome;
-  /** Per-attempt budget cost evidence (finite estimate floor + billing knowledge). */
   costEvidence: (harnessId: string, attemptId: string) => CostEvidence;
-  /** Build the finished readonly/synthesize spec bound to the reducer home. */
   buildSpec: (
     routed: RoutedAdapter,
     homeEnv: Record<string, string>,
@@ -119,10 +128,6 @@ export interface DeepScanReducerDeps {
         webPolicy: ExternalContextPolicy;
         effectiveWeb: ExternalContextPolicy;
         model: string | null;
-        /** D-16: the WorkReport transport mode compiled onto the reducer spec, so the
-         * reducer output is unwrapped + finalized through the SAME contract as every
-         * other attempt (never a fourth divergent deliverable predicate). Inactive on
-         * a route with no work_report transport (the report passes through untouched). */
         workReportMode: WorkReportEnvelopeMode;
       }>
     | {
@@ -132,13 +137,11 @@ export interface DeepScanReducerDeps {
         model: string | null;
         workReportMode: WorkReportEnvelopeMode;
       };
-  /** Hard (total) timeout for the single bounded pass. */
   hardTimeoutMs: number;
-  /** Inactivity watchdog timeout (shared with the scout lane). */
+  /** Production defaults to the process-reap proof window. */
+  cleanupGraceMs?: number;
   inactivityTimeoutMs: number;
-  /** Whether the run's contract requires web evidence (telemetry seed). */
   webRequired: boolean;
-  /** Optional quota event sink (same owner as the agent loop). */
   quotaEventSink?: (harnessId: string, ev: HarnessEvent) => void;
 }
 
@@ -159,21 +162,10 @@ export type DeepScanReducerResult =
   | { status: "success"; report: string }
   | { status: "failed"; error: string }
   | { status: "budget_denied"; denial: BudgetDenial }
-  // INV-116: the OUTER run signal aborted mid-reducer. A cancellation is NOT a
-  // failed synthesis — no error is manufactured and any partial output is
-  // discarded; the caller degrades honestly and the run terminalizes cancelled.
+  // Outer cancellation discards partial synthesis and stays distinct from failure.
   | { status: "cancelled" };
 
-/**
- * #27 / D-6: the deep-scan bounded synthesis reducer. After the scouts finish,
- * ONE synthesize-intent attempt merges the raw scout reports into a real
- * synthesis. It is READ-ONLY and file-backed (the scout report files are pointed
- * at by absolute path — the argv-size law: reports ride a file, never argv),
- * reserves a budget lease like any attempt, and is bounded by a hard timeout. Its
- * telemetry is pushed to the run roster (cost/route visible). On
- * failure/timeout/budget-denial the caller degrades to an HONEST raw bundle; this
- * function never fabricates a synthesis.
- */
+/** One budgeted, bounded, read-only synthesis over file-backed scout reports. */
 export async function runDeepScanReducer(
   deps: DeepScanReducerDeps,
   args: DeepScanReducerArgs,
@@ -210,21 +202,123 @@ export async function runDeepScanReducer(
       },
     };
   }
-  // A fresh disposable read-only home: the scouts' shared route context was
-  // already disposed, and auth truth is home-independent (credentials come from
-  // the profile/keychain/default store), so a fresh home shares the auth source.
-  const reducerHome = deps.newReadOnlyHome();
-  const prompt = buildDeepScanReducerPrompt(args.goal, args.scoutReports);
-  const built = await deps.buildSpec(args.routed, reducerHome.env, prompt, attemptId);
-  const spec = built.spec;
-  // Hard (total) timeout — one attempt, no failover/transient retry loop.
+
+  type ReducerStop = "timeout" | "cancelled";
+  const cleanupGraceMs = deps.cleanupGraceMs ?? REDUCER_CLEANUP_GRACE_MS;
   const reducerAbort = new AbortController();
-  let timedOut = false;
-  const hardTimer = setTimeout(() => {
-    timedOut = true;
+  let resolveStop!: (reason: ReducerStop) => void;
+  const stopped = new Promise<ReducerStop>((resolve) => {
+    resolveStop = resolve;
+  });
+  let stopReason: ReducerStop | null = null;
+  let activeSessionId: string | null = null;
+  let cancelTask: Promise<unknown> | null = null;
+  const cancelActiveSession = (): void => {
+    if (!activeSessionId || cancelTask) return;
+    cancelTask = Promise.resolve()
+      .then(() => adapter.cancel?.(activeSessionId ?? ""))
+      .catch(() => undefined);
+  };
+  const requestStop = (reason: ReducerStop): void => {
+    if (stopReason) return;
+    stopReason = reason;
     reducerAbort.abort();
-    void adapter.cancel?.(spec.session_id)?.catch(() => {});
-  }, deps.hardTimeoutMs);
+    resolveStop(reason);
+    cancelActiveSession();
+  };
+
+  // The one total deadline starts immediately after admission, before HOME or
+  // async route preparation can retain either the HOME or budget lease.
+  const hardTimer = setTimeout(() => requestStop("timeout"), deps.hardTimeoutMs);
+  const onOuterAbort = () => requestStop("cancelled");
+  if (args.signal?.aborted) onOuterAbort();
+  else args.signal?.addEventListener("abort", onOuterAbort, { once: true });
+
+  let reducerHome: ReducerHome | null = null;
+  let settlementTelemetry: AttemptTelemetry | null = null;
+  let cost = 0;
+  let costEstimated = false;
+  const cleanupAttempt = (): void => {
+    clearTimeout(hardTimer);
+    args.signal?.removeEventListener("abort", onOuterAbort);
+    try {
+      reducerHome?.dispose();
+    } finally {
+      settleGrantedAttemptLease({
+        ledger,
+        leaseId: lease.lease?.lease_id ?? "",
+        attemptId,
+        harnessId: adapter.id,
+        costUsd: cost,
+        costEstimated,
+        authMode: settlementTelemetry?.authMode,
+        usageCost: settlementTelemetry?.usageCost,
+        preStreamFailureSource: "deep-scan-reducer-pre-stream",
+      });
+    }
+  };
+  const finishBeforeHarness = (result: DeepScanReducerResult): DeepScanReducerResult => {
+    const telemetry =
+      settlementTelemetry ?? createAttemptTelemetry("auto", deps.webRequired, "auto", [], null);
+    setAttemptOutcome(telemetry, {
+      deliverablePresent: false,
+      gatesPassed: null,
+      harnessErrored: result.status === "failed",
+      webRequiredUnsatisfied: false,
+    });
+    args.attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry });
+    cleanupAttempt();
+    return result;
+  };
+  const resultForStop = (reason: ReducerStop): DeepScanReducerResult =>
+    reason === "cancelled"
+      ? { status: "cancelled" }
+      : { status: "failed", error: `deep-scan reducer timed out after ${deps.hardTimeoutMs}ms` };
+
+  if (stopReason) return finishBeforeHarness(resultForStop(stopReason));
+  let prompt: string;
+  try {
+    // A fresh disposable read-only home: auth remains home-independent.
+    reducerHome = deps.newReadOnlyHome();
+    prompt = buildDeepScanReducerPrompt(args.goal, args.scoutReports);
+  } catch (error) {
+    return finishBeforeHarness({
+      status: "failed",
+      error: `deep-scan reducer setup failed: ${safeErrorMessage(error)}`,
+    });
+  }
+  const buildTask = Promise.resolve().then(() =>
+    deps.buildSpec(args.routed, reducerHome?.env ?? {}, prompt, attemptId),
+  );
+  const prepared = await Promise.race([
+    buildTask.then(
+      (built) => ({ kind: "built" as const, built }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    ),
+    stopped.then((reason): { kind: "stopped"; reason: ReducerStop } => ({
+      kind: "stopped",
+      reason,
+    })),
+  ]);
+  if (prepared.kind === "stopped") {
+    await waitForCleanup(buildTask, cleanupGraceMs);
+    return finishBeforeHarness(resultForStop(prepared.reason));
+  }
+  if (prepared.kind === "error") {
+    return finishBeforeHarness({
+      status: "failed",
+      error: `deep-scan reducer setup failed: ${safeErrorMessage(prepared.error)}`,
+    });
+  }
+
+  const built = prepared.built;
+  const spec = built.spec;
+  activeSessionId = spec.session_id;
+  if (stopReason) {
+    cancelActiveSession();
+    if (cancelTask) await waitForCleanup(cancelTask, cleanupGraceMs);
+    return finishBeforeHarness(resultForStop(stopReason));
+  }
   spec.extra["abortSignal"] = args.signal
     ? AbortSignal.any([args.signal, reducerAbort.signal])
     : reducerAbort.signal;
@@ -235,71 +329,110 @@ export async function runDeepScanReducer(
     [],
     built.model,
   );
+  settlementTelemetry = telemetry;
   const answer = new AnswerAssembly();
   const attemptEventsPath = join(paths.attemptsDir, attemptId, "events.jsonl");
   const budgetSignalState = { quotaPressureDisclosed: false };
-  let cost = 0;
-  let costEstimated = false;
   let harnessError: string | null = null;
-  log.emit("harness.started", {
-    harness_id: adapter.id,
-    attempt_id: attemptId,
-    external_context_policy: built.webPolicy,
-  });
+  let stoppedDuringRun: ReducerStop | null = null;
+  const observeEvent = (event: HarnessEvent, acceptDeliverable: boolean): void => {
+    const safeEv = redactHarnessEvent(event);
+    if (!acceptDeliverable && !REDUCER_CLEANUP_EVENT_TYPES.has(safeEv.type)) return;
+    safeInvoke(args.onHarnessEvent, safeEv);
+    log.emit("harness.event", harnessEventPayload(adapter.id, attemptId, safeEv));
+    appendLine(attemptEventsPath, JSON.stringify(safeEv));
+    observeAttemptTelemetry(telemetry, safeEv);
+    observeBudgetSignals(ledger, log, adapter.id, attemptId, safeEv, budgetSignalState);
+    deps.quotaEventSink?.(adapter.id, safeEv);
+    if (safeEv.type === "usage" && safeEv.usage?.cost_usd) {
+      cost += safeEv.usage.cost_usd;
+      if (safeEv.usage.estimated) costEstimated = true;
+      log.emit("budget.observation", {
+        harness_id: adapter.id,
+        attempt_id: attemptId,
+        kind: "spend",
+        usd: safeEv.usage.cost_usd,
+        estimated: safeEv.usage.estimated === true,
+      });
+    }
+    if (acceptDeliverable) answer.observe(safeEv);
+    if (safeEv.type === "error") {
+      harnessError = safeEv.error ? redactSecrets(safeEv.error) : "harness emitted an error";
+    }
+  };
+  const drainAfterStop = async (
+    iterator: AsyncIterator<HarnessEvent>,
+    pending: Promise<IteratorResult<HarnessEvent>>,
+  ): Promise<void> => {
+    let timer!: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), Math.max(1, cleanupGraceMs));
+    });
+    try {
+      let current = pending;
+      for (;;) {
+        const next = await Promise.race([current.catch(() => null), deadline]);
+        if (!next || next.done) break;
+        observeEvent(next.value, false);
+        current = iterator.next();
+      }
+      const cleanup: Promise<unknown>[] = cancelTask ? [cancelTask] : [];
+      try {
+        const returned = iterator.return?.(undefined as never);
+        if (returned) cleanup.push(Promise.resolve(returned));
+      } catch {}
+      if (cleanup.length > 0) await Promise.race([Promise.allSettled(cleanup), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   try {
+    log.emit("harness.started", {
+      harness_id: adapter.id,
+      attempt_id: attemptId,
+      external_context_policy: built.webPolicy,
+    });
     const watched = withInactivityWatchdog(adapter.run(spec), {
       timeoutMs: deps.inactivityTimeoutMs,
       countsAsProgress: countsAsAgentProgress,
       onTimeout: () => {
         reducerAbort.abort();
-        void adapter.cancel?.(spec.session_id)?.catch(() => {});
+        cancelActiveSession();
       },
       isSuspended: () => false,
+      cleanupDeadlineMs: cleanupGraceMs,
     });
-    for await (const ev of watched) {
-      // Outer cancellation and the separately tracked hard deadline may stop
-      // consumption. `reducerAbort` alone is ambiguous: the inactivity
-      // watchdog also aborts it, and that path must finish its terminal drain
-      // and throw the typed timeout before buffered report text can be accepted.
-      if (args.signal?.aborted || timedOut) break;
-      const safeEv = redactHarnessEvent(ev);
-      safeInvoke(args.onHarnessEvent, safeEv);
-      log.emit("harness.event", harnessEventPayload(adapter.id, attemptId, safeEv));
-      appendLine(attemptEventsPath, JSON.stringify(safeEv));
-      observeAttemptTelemetry(telemetry, safeEv);
-      observeBudgetSignals(ledger, log, adapter.id, attemptId, safeEv, budgetSignalState);
-      deps.quotaEventSink?.(adapter.id, safeEv);
-      if (safeEv.type === "usage" && safeEv.usage?.cost_usd) {
-        cost += safeEv.usage.cost_usd;
-        if (safeEv.usage.estimated) costEstimated = true;
-        log.emit("budget.observation", {
-          harness_id: adapter.id,
-          attempt_id: attemptId,
-          kind: "spend",
-          usd: safeEv.usage.cost_usd,
-          estimated: safeEv.usage.estimated === true,
-        });
+    const iterator = watched[Symbol.asyncIterator]();
+    for (;;) {
+      const pending = iterator.next();
+      const next = await Promise.race([
+        pending.then(
+          (result) => ({ kind: "next" as const, result }),
+          (error: unknown) => ({ kind: "error" as const, error }),
+        ),
+        stopped.then((reason): { kind: "stopped"; reason: ReducerStop } => ({
+          kind: "stopped",
+          reason,
+        })),
+      ]);
+      if (next.kind === "stopped") {
+        stoppedDuringRun = next.reason;
+        await drainAfterStop(iterator, pending);
+        break;
       }
-      answer.observe(safeEv);
-      if (safeEv.type === "error")
-        harnessError = safeEv.error ? redactSecrets(safeEv.error) : "harness emitted an error";
+      if (stopReason) {
+        stoppedDuringRun = stopReason;
+        await drainAfterStop(iterator, pending);
+        break;
+      }
+      if (next.kind === "error") throw next.error;
+      if (next.result.done) break;
+      observeEvent(next.result.value, true);
     }
   } catch (err) {
     harnessError = safeErrorMessage(err);
   } finally {
-    clearTimeout(hardTimer);
-    reducerHome.dispose();
-    ledger.settle(
-      lease.lease?.lease_id ?? "",
-      attemptUsageCostSettlement(
-        cost,
-        costEstimated,
-        attemptId,
-        adapter.id,
-        telemetry.authMode,
-        telemetry.usageCost,
-      ),
-    );
+    cleanupAttempt();
   }
   // D-16: unwrap the WorkReport envelope and finalize through the SAME contract as
   // every other attempt — a capable reducer route that broke its WorkReport
@@ -319,7 +452,7 @@ export async function runDeepScanReducer(
     workReportViolation: unwrapped.contractViolation,
     contextTerminalExhausted: telemetry.contextExhausted,
   });
-  if (timedOut && !harnessError)
+  if (stoppedDuringRun === "timeout")
     harnessError = `deep-scan reducer timed out after ${deps.hardTimeoutMs}ms`;
   // A reducer must produce a CLEAN merged synthesis: a broken WorkReport contract,
   // a needs_input/incomplete attestation, or a terminal context exhaustion is a
@@ -337,11 +470,11 @@ export async function runDeepScanReducer(
   // reducer streamed is a cancellation — not a clean synthesis and not a typed
   // failure. Any partial output is discarded (deliverablePresent forced false)
   // so it can never be accepted as a merge, and the run terminalizes cancelled.
-  const runCancelled = args.signal?.aborted === true;
+  const runCancelled = stoppedDuringRun === "cancelled";
   setAttemptOutcome(telemetry, {
     deliverablePresent: reportPresent && !runCancelled,
     gatesPassed: null,
-    harnessErrored: harnessError !== null || runCancelled,
+    harnessErrored: harnessError !== null,
     webRequiredUnsatisfied: false,
     workState: finalized.workState,
   });
@@ -375,14 +508,7 @@ export async function runDeepScanReducer(
   return { status: "success", report };
 }
 
-/**
- * #27 / D-6: decide the deep-scan synthesis outcome and, when warranted, run the
- * bounded reducer. Returns the typed `DeepScanSynthesis` telemetry status plus
- * the merged report (non-null only on a clean reducer success; the caller writes
- * an honest raw bundle otherwise). A width-1 (single-report) scan skips the
- * reducer; a budget-stopped/cancelled scan degrades without spending on a merge;
- * a scan with no synthesize-capable route degrades honestly.
- */
+/** Run the reducer only when multiple reports and an eligible route exist. */
 export async function resolveDeepScanSynthesis(
   deps: DeepScanReducerDeps,
   args: {
@@ -406,43 +532,29 @@ export async function resolveDeepScanSynthesis(
     attemptTelemetries: { attemptId: string; harnessId: string; telemetry: AttemptTelemetry }[];
   },
 ): Promise<{ deepScanSynthesis: DeepScanSynthesis; reducedReport: string | null }> {
+  const unreduced = (
+    status: "skipped" | "failed",
+    reason: string,
+    reducerAttemptId: string | null = null,
+  ) => ({
+    deepScanSynthesis: { status, reducer_attempt_id: reducerAttemptId, reason },
+    reducedReport: null,
+  });
   if (args.succeeded.length < 2) {
-    return {
-      deepScanSynthesis: {
-        status: "skipped",
-        reducer_attempt_id: null,
-        reason: "single scout report needs no merge",
-      },
-      reducedReport: null,
-    };
+    return unreduced("skipped", "single scout report needs no merge");
   }
   if (args.budgetStopped || args.aborted) {
-    return {
-      deepScanSynthesis: {
-        status: "failed",
-        reducer_attempt_id: null,
-        reason: args.aborted
-          ? "run cancelled before synthesis"
-          : "budget exhausted before synthesis",
-      },
-      reducedReport: null,
-    };
+    return unreduced(
+      "failed",
+      args.aborted ? "run cancelled before synthesis" : "budget exhausted before synthesis",
+    );
   }
-  // Eligible route: a successful scout whose harness manifest supports the
-  // synthesize intent. Deep-scan repeats a surviving harness, so any routed slot
-  // for that harness id is a valid reducer route.
+  // A successful scout's synthesize-capable route owns the merge.
   const eligible = args.succeeded
     .map((s) => args.adapters.find((a) => a.adapter.id === s.harnessId && a.supportsSynthesize))
     .find((a): a is RoutedAdapter => Boolean(a));
   if (!eligible) {
-    return {
-      deepScanSynthesis: {
-        status: "failed",
-        reducer_attempt_id: null,
-        reason: "no synthesize-capable route among the scout harnesses",
-      },
-      reducedReport: null,
-    };
+    return unreduced("failed", "no synthesize-capable route among the scout harnesses");
   }
   const reduced = await runDeepScanReducer(deps, {
     taskId: args.taskId,
@@ -470,30 +582,13 @@ export async function resolveDeepScanSynthesis(
       reducedReport: reduced.report,
     };
   }
-  // INV-116: a mid-reducer cancellation degrades with NO merged report (the
-  // partial output is discarded). The schema status has no `cancelled` member,
-  // so it is disclosed as a failed synthesis whose reason names the cancel; the
-  // run's own terminal is routed to `cancelled` by the caller's re-check.
+  // DeepScanSynthesis has no cancelled member; the outer run still terminalizes cancelled.
   if (reduced.status === "cancelled") {
-    return {
-      deepScanSynthesis: {
-        status: "failed",
-        reducer_attempt_id: DEEP_SCAN_REDUCER_ATTEMPT_ID,
-        reason: "run cancelled during synthesis",
-      },
-      reducedReport: null,
-    };
+    return unreduced("failed", "run cancelled during synthesis", DEEP_SCAN_REDUCER_ATTEMPT_ID);
   }
   const reason =
     reduced.status === "budget_denied"
       ? `reducer budget-denied: ${classifyBudgetFailure({ denial: reduced.denial, terminal: args.ledger.terminal() }).safeMessage}`
       : reduced.error;
-  return {
-    deepScanSynthesis: {
-      status: "failed",
-      reducer_attempt_id: DEEP_SCAN_REDUCER_ATTEMPT_ID,
-      reason,
-    },
-    reducedReport: null,
-  };
+  return unreduced("failed", reason, DEEP_SCAN_REDUCER_ATTEMPT_ID);
 }

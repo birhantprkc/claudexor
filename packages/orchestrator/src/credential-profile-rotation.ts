@@ -16,6 +16,42 @@ export interface HeadroomBreach {
 }
 
 /**
+ * Static rotation candidates, before any credential-backed readiness probe.
+ * One owner applies policy order, enabled/harness scope, current identity,
+ * already-tried exclusions, and the payment-kind fence. Callers then probe
+ * only identities that could actually be selected.
+ */
+export function staticRotationCandidates(args: {
+  registry: readonly CredentialProfile[];
+  harnessId: string;
+  policy: ProfilePolicy;
+  current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null;
+  excluded?: ReadonlySet<string>;
+}): CredentialProfile[] {
+  const pool = args.registry.filter(
+    (profile) => profile.harness_id === args.harnessId && profile.enabled,
+  );
+  const ordered =
+    args.policy.rotation_eligible.length > 0
+      ? args.policy.rotation_eligible
+          .map((id) => pool.find((profile) => profile.profile_id === id))
+          .filter((profile): profile is CredentialProfile => profile !== undefined)
+      : pool;
+  const excluded = args.excluded ?? new Set<string>();
+  return ordered.filter((candidate) => {
+    if (candidate.profile_id === args.current?.profile_id) return false;
+    if (excluded.has(candidate.profile_id)) return false;
+    if (args.current !== null && candidate.credential_kind !== args.current.credential_kind) {
+      return false;
+    }
+    // The default subject is vendor-native subscription state; it never probes
+    // or rotates into a metered API-key identity.
+    if (args.current === null && candidate.credential_kind === "api_key") return false;
+    return true;
+  });
+}
+
+/**
  * Proactive headroom check (W5.4 `profile_headroom_preflight`): the SELECTED
  * profile's freshest snapshot windows against the policy threshold. Unknown
  * usage is NOT a breach — rotation never triggers on missing data.
@@ -67,25 +103,13 @@ export function nextEligibleProfile(
   readyProfileIds: ReadonlySet<string>,
   excluded: ReadonlySet<string> = new Set(),
 ): CredentialProfile | null {
-  const pool = registry.filter((p) => p.harness_id === harnessId && p.enabled);
-  const ordered =
-    policy.rotation_eligible.length > 0
-      ? policy.rotation_eligible
-          .map((id) => pool.find((p) => p.profile_id === id))
-          .filter((p): p is CredentialProfile => p !== undefined)
-      : pool;
-  for (const candidate of ordered) {
-    if (candidate.profile_id === current?.profile_id) continue;
-    if (excluded.has(candidate.profile_id)) continue;
-    // Fail-CLOSED kind guard (round-17 hardening of the round-16 BLOCK): the
-    // kind comes from the TYPED current profile in hand — never re-found in
-    // a freshly reloaded pool, where a mid-flight disable/remove of the
-    // current profile would have silently dropped the cross-kind prohibition.
-    if (current !== null && candidate.credential_kind !== current.credential_kind) continue;
-    // `current === null` is the DEFAULT subject (the vendor-native store): the
-    // same round-16 BLOCK applies — rotating the subscription default INTO an
-    // api_key profile would silently change the payment model mid-attempt.
-    if (current === null && candidate.credential_kind === "api_key") continue;
+  for (const candidate of staticRotationCandidates({
+    registry,
+    harnessId,
+    policy,
+    current,
+    excluded,
+  })) {
     if (!readyProfileIds.has(candidate.profile_id)) continue;
     if (
       profileHeadroomBreach(snapshots, harnessId, candidate.profile_id, policy.headroom_threshold)

@@ -97,6 +97,33 @@ describe("ProjectPartitions", () => {
     restarted.manager.close();
   });
 
+  it("redacts delivery failures before the command journal accepts them (INV-062)", () => {
+    const f = fixture();
+    const token = `sk-${"a".repeat(48)}`;
+    const delivery = f.partitions.beginDelivery(
+      {},
+      {
+        key: "delivery-secret-failure",
+        client: "test",
+        operation: "run.apply",
+        request: { runId: "run-secret" },
+      },
+    );
+
+    f.partitions.failDelivery(
+      delivery.id,
+      new Error(`provider rejected ${token} ${"diagnostic ".repeat(1_000)}`),
+    );
+
+    const durable = JSON.stringify(f.manager.events());
+    const projected = f.partitions.findById(delivery.id)?.get(delivery.id)?.error;
+    expect(durable).not.toContain(token);
+    expect(projected).not.toContain(token);
+    expect(projected?.length).toBeLessThanOrEqual(2_000);
+    f.partitions.close();
+    f.manager.close();
+  });
+
   it("routes registered project commands and threads through stable project partitions", () => {
     const f = fixture();
     const projectA = join(f.root, "project-a");
@@ -132,6 +159,20 @@ describe("ProjectPartitions", () => {
       idempotency: { key: "same", client: "test", request: { prompt: "B" } },
     });
     expect(turnA.id).not.toBe(turnB.id);
+    expect(
+      f.partitions.findTurnByIdempotency(threadA.id, {
+        key: "same",
+        client: "test",
+        request: { prompt: "A" },
+      })?.id,
+    ).toBe(turnA.id);
+    expect(
+      f.partitions.findTurnByIdempotency(threadB.id, {
+        key: "same",
+        client: "test",
+        request: { prompt: "B" },
+      })?.id,
+    ).toBe(turnB.id);
     const aInteractions = f.partitions.interactionsForRequest({
       scope: { kind: "project", root: projectA },
     });
@@ -163,6 +204,18 @@ describe("ProjectPartitions", () => {
         .some((event) => event.type === "run.event"),
     ).toBe(true);
     const decisionRequest = { runId: "run-a", action: "accept_risk" };
+    const decisionIdempotency = {
+      key: "decision-1",
+      client: "test",
+      request: decisionRequest,
+    };
+    expect(
+      f.partitions.findOperatorDecisionByIdempotency(
+        { scope: { kind: "project", root: projectA } },
+        "run-a",
+        decisionIdempotency,
+      ),
+    ).toBeNull();
     const recordedDecision = f.partitions.recordOperatorDecision(
       { scope: { kind: "project", root: projectA } },
       {
@@ -173,19 +226,27 @@ describe("ProjectPartitions", () => {
         patchSha256: `sha256:${"a".repeat(64)}`,
         decidedAt: "2026-01-01T00:00:00.000Z",
       },
-      { key: "decision-1", client: "test", request: decisionRequest },
+      decisionIdempotency,
     );
+    expect(recordedDecision.reused).toBe(false);
+    expect(
+      f.partitions.findOperatorDecisionByIdempotency(
+        { scope: { kind: "project", root: projectA } },
+        "run-a",
+        decisionIdempotency,
+      ),
+    ).toEqual(recordedDecision.record);
     expect(
       f.partitions.recordOperatorDecision(
         { scope: { kind: "project", root: projectA } },
-        { ...recordedDecision, decidedAt: "2099-01-01T00:00:00.000Z" },
+        { ...recordedDecision.record, decidedAt: "2099-01-01T00:00:00.000Z" },
         { key: "decision-1", client: "test", request: decisionRequest },
       ),
-    ).toEqual(recordedDecision);
+    ).toEqual({ record: recordedDecision.record, reused: true });
     expect(() =>
       f.partitions.recordOperatorDecision(
         { scope: { kind: "project", root: projectA } },
-        recordedDecision,
+        recordedDecision.record,
         { key: "decision-1", client: "test", request: { ...decisionRequest, action: "other" } },
       ),
     ).toThrow(/different request/);
@@ -208,6 +269,13 @@ describe("ProjectPartitions", () => {
       restarted.partitions.operatorDecision({ scope: { kind: "project", root: projectA } }, "run-a")
         ?.patchSha256,
     ).toBe(`sha256:${"a".repeat(64)}`);
+    expect(
+      restarted.partitions.findOperatorDecisionByIdempotency(
+        { scope: { kind: "project", root: projectA } },
+        "run-a",
+        decisionIdempotency,
+      ),
+    ).toEqual(recordedDecision.record);
     expect(
       restarted.partitions
         .journal(`project:${a.id}`)

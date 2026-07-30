@@ -16,6 +16,11 @@ import {
   commandStores,
   type CommandAuthority,
 } from "./command-authority.js";
+import {
+  commandAcceptanceReceipt,
+  findAcceptedCommand,
+  publicAcceptedCommand,
+} from "./command-rpc.js";
 import { productCommandRecords, prunableCommandIds } from "./command-retention.js";
 import {
   admitDelegatedRequest,
@@ -33,7 +38,11 @@ import {
 } from "./job-record.js";
 import { settleJobError } from "./job-settlement.js";
 import { socketAlive } from "./socket-probe.js";
-import { dispatchShutdownRpc, replacementRefusal } from "./daemon-shutdown-rpc.js";
+import {
+  dispatchShutdownRpc,
+  replacementRefusal,
+  type RuntimeReplacementAuthority,
+} from "./daemon-shutdown-rpc.js";
 import {
   TurnEnqueueProblem,
   type TurnEnqueueProblem as TurnEnqueueProblemValue,
@@ -48,7 +57,7 @@ export interface RunContext {
 
 export type RunnerFn = (params: unknown, ctx: RunContext) => Promise<unknown>;
 
-export interface DaemonOptions {
+export interface DaemonOptions extends RuntimeReplacementAuthority {
   socketPath: string;
   token: string;
   runner: RunnerFn;
@@ -273,10 +282,13 @@ export class DaemonServer {
   private async dispatch(method: string, params: any): Promise<unknown> {
     const shutdown = dispatchShutdownRpc(
       method,
+      params,
       this.queue.length + this.active + this.activeTasks.size,
       () => this.allRecords(),
       this.opts.onShutdownRequested ?? (() => this.stop()),
       this.opts.onRuntimeReplacementRequested,
+      this.opts.runtimeIdentity,
+      this.opts.runtimeLeaseOwner,
     );
     if (shutdown) return shutdown;
     switch (method) {
@@ -313,15 +325,8 @@ export class DaemonServer {
         // must keep returning its durable job even after the parent is fenced
         // or its monotonic eight-child allowance is full. A different request
         // under the same key still conflicts inside find().
-        const store = commandStoreForRequest(this.opts.commands, rawRequest);
-        const replay = store.find({
-          params: rawRequest,
-          idempotencyKey,
-          clientId,
-          operation,
-          idempotencyParams: envelope.idempotencyRequest,
-        });
-        if (replay) return { id: replay.id, state: replay.state };
+        const replay = findAcceptedCommand(this.opts.commands, envelope);
+        if (replay) return commandAcceptanceReceipt(replay, true);
         const request = this.admitDelegatedRequest(rawRequest, operation);
         const delegatedFrom = delegatedParentOf(request);
         const accepted = this.acceptCommand(
@@ -336,7 +341,7 @@ export class DaemonServer {
         }
         if (!accepted.reused) this.queue.push(accepted.record.id);
         void this.drain();
-        return { id: accepted.record.id, state: accepted.record.state };
+        return commandAcceptanceReceipt(accepted.record, accepted.reused);
       }
       case "claudexor.status": {
         const rec = this.getRecord(String(params?.id));
@@ -344,14 +349,7 @@ export class DaemonServer {
         return publicJobRecord(rec);
       }
       case "claudexor.findAccepted": {
-        const store = commandStoreForRequest(this.opts.commands, params?.request);
-        const record = store.find({
-          params: params?.request,
-          idempotencyKey: String(params?.idempotencyKey ?? ""),
-          clientId: String(params?.clientId ?? "daemon-client"),
-          operation: typeof params?.operation === "string" ? params.operation : undefined,
-        });
-        return record ? publicJobRecord(record) : null;
+        return publicAcceptedCommand(this.opts.commands, params);
       }
       case "claudexor.list":
         return productCommandRecords(this.allRecords()).map(publicJobRecord);

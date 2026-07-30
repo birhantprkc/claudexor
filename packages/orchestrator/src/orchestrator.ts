@@ -11,6 +11,7 @@ import {
   resumeSessionForProfile,
   rotateSpecOnTypedLimit,
   selectedProfileAvailability,
+  staticRotationCandidates,
   type ProfilePolicy,
 } from "./credential-profiles.js";
 import { writeRunTelemetryArtifact } from "./runTelemetryWriter.js";
@@ -77,6 +78,13 @@ import {
   runCouncilPlan,
   writePlanHarnessFailure,
 } from "./planRun.js";
+import {
+  runPlannerAttempt as executePlannerAttempt,
+  type PlannerAttemptArgs,
+  type PlannerAttemptDeps,
+  type PlannerAttemptOutcome,
+} from "./plannerAttempt.js";
+export type { PlannerAttemptArgs, PlannerAttemptOutcome } from "./plannerAttempt.js";
 import {
   HarnessRunSpec,
   type ExtraMcpServer,
@@ -601,48 +609,6 @@ const MAX_PARALLEL_CANDIDATES = 4;
 /** Default wait for one interactive answer before a benign decline. */
 const DEFAULT_INTERACTION_TIMEOUT_MS = 900_000;
 
-/** Result of one planner spawn (solo pool member, council draft, or the
- * council merge iteration). Bookkeeping that differs per path — artifact
- * naming, fallback disclosure, accumulation — stays with the caller. */
-export interface PlannerAttemptOutcome {
-  attemptId: string;
-  harnessId: string;
-  status: "success" | "failed" | "blocked";
-  /** D-16 r9: the finalizer's outcome class — interrupted/veto planners are
-   * NEVER accepted as clean plans; terminals project these facts. */
-  outcomeClass: AttemptOutcomeClass;
-  error: string | null;
-  /** Plan/merge body on success; null otherwise. */
-  text: string | null;
-  telemetry: AttemptTelemetry | null;
-  /** True when the budget lease was denied — the solo loop stops trying
-   * further fallbacks; council treats it as a failed member. */
-  budgetDenied: boolean;
-  /** QA-050: the ledger's TYPED denial (route/slot + sub-code), so the plan
-   * terminal emits a budget failure with real remediation instead of collapsing
-   * to "all planners failed". Null when the attempt was not budget-denied. */
-  budgetDenial?: BudgetDenial | null;
-}
-
-/** Inputs to one planner spawn. Shared by the solo plan loop and the Council
- * strategy (planRun.ts) so both drive the SAME machinery. */
-export interface PlannerAttemptArgs {
-  input: RunInput;
-  contract: TaskContract;
-  taskId: string;
-  runId: string;
-  log: EventLog;
-  store: ArtifactStore;
-  paths: RunPaths;
-  ledger: BudgetLedger;
-  routed: RoutedAdapter;
-  attemptId: string;
-  laneRun: boolean;
-  fallbackHome: Record<string, string>;
-  promptBody: string;
-  intent: Intent;
-}
-
 export class Orchestrator {
   private readonly gateway: HarnessGateway;
   private readonly requestRequirements = new RequestRequirementsResolver();
@@ -1062,10 +1028,16 @@ export class Orchestrator {
   private async readyProfileIdsForRotation(
     input: RunInput,
     harnessId: string,
+    current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null,
+    excluded: ReadonlySet<string> = new Set(),
   ): Promise<ReadonlySet<string>> {
-    const profiles = (this.config(input.repoRoot)?.global.credential_profiles ?? []).filter(
-      (profile) => profile.enabled && profile.harness_id === harnessId,
-    );
+    const profiles = staticRotationCandidates({
+      registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
+      harnessId,
+      policy: this.profilePolicy(input.repoRoot, harnessId),
+      current,
+      excluded,
+    });
     const adapter = this.deps.registry.get(harnessId);
     const entries = await Promise.all(
       profiles.map(async (profile) => ({
@@ -1105,7 +1077,7 @@ export class Orchestrator {
       policy.limit_action === "rotate" &&
       breach !== null &&
       (profile !== null || defaultRoute === "local_session")
-        ? await this.readyProfileIdsForRotation(input, harnessId)
+        ? await this.readyProfileIdsForRotation(input, harnessId, profile)
         : new Set<string>();
     if (!profile) {
       // Unpinned runs (INV-135 auto-balance): under `rotate`, a fresh
@@ -2515,7 +2487,12 @@ export class Orchestrator {
           const rotationPolicy = this.profilePolicy(contract.repo.root, adapter.id);
           const readyProfileIds =
             sawTypedLimit && deliverableEmpty && rotationPolicy.limit_action === "rotate"
-              ? await this.readyProfileIdsForRotation(runInput, adapter.id)
+              ? await this.readyProfileIdsForRotation(
+                  runInput,
+                  adapter.id,
+                  spec.credential_profile ?? null,
+                  triedProfiles,
+                )
               : new Set<string>();
           const rotated = rotateSpecOnTypedLimit({
             spec,
@@ -3215,6 +3192,13 @@ export class Orchestrator {
                 cause: run.telemetry.contextExhaustedCause,
                 continuation_count: candidateContinuationCount,
                 packet_turns: packet.continuity.disclosure.packetTurns,
+              });
+              log.emit("harness.started", {
+                harness_id: adapter.id,
+                attempt_id: contAttemptId,
+                external_context_policy: knobs.webPolicy,
+                ...(knobs.ignored.length > 0 ? { ignored_settings: knobs.ignored } : {}),
+                continuation_of: run.attemptId,
               });
               const contLeaseId = contLease.lease?.lease_id ?? "";
               try {
@@ -5565,291 +5549,84 @@ export class Orchestrator {
     };
   }
 
-  /** One read-only planner spawn shared by solo fallback, Council drafts, and merge. */
-  async runPlannerAttempt(args: PlannerAttemptArgs): Promise<PlannerAttemptOutcome> {
-    const { input, contract, taskId, runId, log, store, paths, ledger, routed, attemptId } = args;
-    const adapter = routed.adapter;
-    const lease = ledger.reserve({
-      taskId,
-      attemptId,
-      intent: args.intent,
-      harnessId: adapter.id,
-      cost: attemptCostEvidence(
-        adapter.id,
-        attemptId,
-        undefined,
-        this.routeBillingKnowledge(input, adapter.id),
-      ),
-    });
-    if (!lease.granted) {
-      log.emit("budget.lease.created", {
-        granted: false,
-        reason: lease.reason,
-        denied: lease.denied,
-        attempt_id: attemptId,
-        harness_id: adapter.id,
-      });
-      return {
-        attemptId,
-        harnessId: adapter.id,
-        status: "failed",
-        outcomeClass: "clean", // never spawned: refused pre-flight by the budget gate
-        error: lease.reason ?? "budget lease denied",
-        text: null,
-        telemetry: null,
-        budgetDenied: true,
-        budgetDenial: {
-          code: lease.denied ?? "hard_cap",
-          reason: lease.reason ?? "budget lease denied",
-          harnessId: adapter.id,
-          attemptId,
-        },
-      };
-    }
-    const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
-    const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
-    const planSessionFields = await this.sessionSpecFields(
-      input,
-      adapter.id,
-      log,
-      routed.authRouteEstimate,
-    );
-    // Continuity (INV-137): a thread PLAN turn is a chat turn — hydrate a
-    // lane switch/gap with a packet and disclose it.
-    const laneContinuity = args.laneRun
-      ? await this.resolveContinuity(
+  /** Bind private route/session preparation to the planner-attempt owner. */
+  private plannerAttemptDeps(): PlannerAttemptDeps {
+    return {
+      billingKnowledge: (input, harnessId) => this.routeBillingKnowledge(input, harnessId),
+      inactivityTimeoutMs: (repoRoot) => harnessInactivityTimeoutMs(this.config(repoRoot)),
+      quotaEventSink: this.deps.quotaEventSink,
+      prepare: async (args) => {
+        const { input, contract, taskId, runId, log, store, paths, routed, attemptId } = args;
+        const adapter = routed.adapter;
+        const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
+        const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
+        const sessionFields = await this.sessionSpecFields(
           input,
           adapter.id,
-          planSessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
-          planSessionFields.resume_session_id !== null,
-          planSessionFields,
-          store,
-          paths,
-          this.execRootOf(input),
           log,
-        )
-      : null;
-    const spec = HarnessRunSpec.parse({
-      session_id: newId("ses"),
-      intent: args.intent,
-      prompt: laneContinuity?.pointerLine
-        ? `${args.promptBody}\n\n${laneContinuity.pointerLine}`
-        : args.promptBody,
-      cwd: this.execRootOf(input),
-      access: "readonly",
-      // Planners must SEE any image/file the user attached (e.g. "plan a fix for
-      // what's in this screenshot"), not just agent/race runs.
-      attachments: input.attachments ?? [],
-      ...planSessionFields,
-      ...this.harnessSpecKnobs(contract, knobs, args.intent),
-      env_inheritance: envInheritance(this.config(input.repoRoot)),
-      // A thread plan turn spawns in its DURABLE per-lane home so its native
-      // session is reachable for resume next turn (INV-034); a non-thread
-      // plan keeps the disposable route-context home.
-      env: (args.laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? args.fallbackHome,
-    });
-    const plannerAbort = new AbortController();
-    spec.extra["abortSignal"] = input.signal
-      ? AbortSignal.any([input.signal, plannerAbort.signal])
-      : plannerAbort.signal;
-    const planInteraction = this.interactionChannelFor(
-      input,
-      log,
-      runId,
-      taskId,
-      attemptId,
-      adapter.id,
-      routed.supportsInteractive,
-    );
-    if (planInteraction) spec.extra["interactionChannel"] = planInteraction;
-    // D-16: compile the WorkReport envelope for the plan lane (require plan text
-    // below folds the deliverable; the veto rides work_state).
-    const planWorkEnvelope = this.workReportEnvelopeFor(routed, contract, Boolean(planInteraction));
-    const planWorkMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(spec, planWorkEnvelope);
-    const attemptEventsPath = join(paths.attemptsDir, attemptId, "events.jsonl");
-    const answer = new AnswerAssembly();
-    const telemetry = createAttemptTelemetry(
-      knobs.webPolicy,
-      contract.external_context.web_required ||
-        knobs.webPolicy === "cached" ||
-        knobs.webPolicy === "live",
-      effectiveWeb,
-      [],
-      // Requested-model capture: a plan lane silently downgraded to another
-      // model surfaces the mismatch in its route receipt, just like agent.
-      knobs.model,
-    );
-    const onAbort = () => {
-      void adapter.cancel?.(spec.session_id)?.catch(() => {});
-    };
-    if (input.signal) {
-      if (input.signal.aborted) onAbort();
-      else input.signal.addEventListener("abort", onAbort, { once: true });
-    }
-    let cost = 0;
-    let costEstimated = false;
-    let harnessError: string | null = null;
-    const budgetSignalState = { quotaPressureDisclosed: false };
-    try {
-      log.emit("harness.started", {
-        harness_id: adapter.id,
-        attempt_id: attemptId,
-        external_context_policy: knobs.webPolicy,
-        ...(knobs.ignored.length > 0 ? { ignored_settings: knobs.ignored } : {}),
-      });
-      if (!input.signal?.aborted) {
-        const watchedPlan = withInactivityWatchdog(adapter.run(spec), {
-          timeoutMs: harnessInactivityTimeoutMs(this.config(input.repoRoot)),
-          countsAsProgress: countsAsAgentProgress,
-          onTimeout: () => {
-            plannerAbort.abort();
-            void adapter.cancel?.(spec.session_id)?.catch(() => {});
-          },
-          isSuspended: () => (planInteraction?.pendingCount?.() ?? 0) > 0,
-          suspensionVersion: () => planInteraction?.suspensionVersion?.() ?? 0,
+          routed.authRouteEstimate,
+        );
+        const laneContinuity = args.laneRun
+          ? await this.resolveContinuity(
+              input,
+              adapter.id,
+              sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+              sessionFields.resume_session_id !== null,
+              sessionFields,
+              store,
+              paths,
+              this.execRootOf(input),
+              log,
+            )
+          : null;
+        const spec = HarnessRunSpec.parse({
+          session_id: newId("ses"),
+          intent: args.intent,
+          prompt: laneContinuity?.pointerLine
+            ? `${args.promptBody}\n\n${laneContinuity.pointerLine}`
+            : args.promptBody,
+          cwd: this.execRootOf(input),
+          access: "readonly",
+          attachments: input.attachments ?? [],
+          ...sessionFields,
+          ...this.harnessSpecKnobs(contract, knobs, args.intent),
+          env_inheritance: envInheritance(this.config(input.repoRoot)),
+          env: (args.laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? args.fallbackHome,
         });
-        for await (const ev of watchedPlan) {
-          if (input.signal?.aborted) break;
-          const safeEv = redactHarnessEvent(ev);
-          safeInvoke(input.onHarnessEvent, safeEv);
-          // A thread PLAN turn IS a chat turn now (INV-034): its native
-          // session lives in the DURABLE per-lane home, so record it for the
-          // next lane turn's resume. Council members are distinct lanes.
-          if (args.laneRun) observeNativeSessionEvent(input, adapter.id, safeEv);
-          observeAuthSwitch(log, adapter.id, attemptId, safeEv);
-          log.emit("harness.event", harnessEventPayload(adapter.id, attemptId, safeEv));
-          appendLine(attemptEventsPath, JSON.stringify(safeEv));
-          observeAttemptTelemetry(telemetry, safeEv);
-          if (safeEv.plan_progress) {
-            log.emit("plan.progress", {
-              attempt_id: attemptId,
-              harness_id: adapter.id,
-              items: safeEv.plan_progress.items,
-            });
-          }
-          // read-only routes burn quota too — same single owner as the agent loop.
-          observeBudgetSignals(ledger, log, adapter.id, attemptId, safeEv, budgetSignalState);
-          this.deps.quotaEventSink?.(adapter.id, safeEv);
-          if (safeEv.type === "usage" && safeEv.usage?.cost_usd) {
-            cost += safeEv.usage.cost_usd;
-            if (safeEv.usage.estimated) costEstimated = true;
-            log.emit("budget.observation", {
-              harness_id: adapter.id,
-              attempt_id: attemptId,
-              kind: "spend",
-              usd: safeEv.usage.cost_usd,
-              estimated: safeEv.usage.estimated === true,
-            });
-          }
-          // A TYPED final message wins verbatim over joined narration.
-          answer.observe(safeEv);
-          if (safeEv.type === "error")
-            harnessError = safeEv.error ? redactSecrets(safeEv.error) : "harness emitted an error";
-        }
-      }
-    } catch (err) {
-      harnessError = safeErrorMessage(err);
-    } finally {
-      input.signal?.removeEventListener("abort", onAbort);
-      ledger.settle(
-        lease.lease?.lease_id ?? "",
-        attemptUsageCostSettlement(
-          cost,
-          costEstimated,
+        const plannerAbort = new AbortController();
+        spec.extra["abortSignal"] = input.signal
+          ? AbortSignal.any([input.signal, plannerAbort.signal])
+          : plannerAbort.signal;
+        const planInteraction = this.interactionChannelFor(
+          input,
+          log,
+          runId,
+          taskId,
           attemptId,
           adapter.id,
-          telemetry.authMode,
-          telemetry.usageCost,
-        ),
-      );
-    }
-    // D-16: unwrap and require PLAN TEXT — a plan with no text is not delivered.
-    // The unwrap runs BEFORE the error axes: the deliverable it yields is what
-    // decides whether an unrecovered tool error is fatal (explorer parity).
-    const planUnwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", planWorkMode, {
-      sideToolReport: telemetry.sideToolWorkReport ?? undefined,
-    });
-    const planText = redactSecrets(planUnwrapped.deliverable).trim();
-    const unrecovered = unrecoveredToolErrors(telemetry);
-    const webBlocked = webUnsatisfied(telemetry);
-    if (!harnessError && webBlocked) {
-      harnessError = webEvidenceFailure(telemetry.web);
-    }
-    // INV-043/INV-044, explorer parity: a DELIVERED plan keeps an unrecovered
-    // non-web tool error as warning evidence instead of discarding the plan (see
-    // the helper). Web keeps its hard gate above; the finalizer outranks both.
-    harnessError ??= unrecoveredToolErrorFailure(unrecovered, planText.length > 0);
-    const planFinalized = finalizeAttempt({
-      deliverableEvidence: planText.length > 0,
-      harnessErrored: harnessError !== null && !webBlocked,
-      workReport: planUnwrapped.workReport,
-      workReportSource: planUnwrapped.source,
-      workReportViolation: planUnwrapped.contractViolation,
-      contextTerminalExhausted: telemetry.contextExhausted,
-    });
-    // A broken WorkReport contract is a hard failure only when the finalizer
-    // ranked it so (a terminal context exhaustion outranks it).
-    if (!harnessError && planFinalized.outcomeClass === "contract_failure") {
-      harnessError = `work_report contract: ${planUnwrapped.contractViolation}`;
-    }
-    // D-16 r9: an interrupted (context-exhausted) planner is NEVER a clean
-    // plan — partial text must not become final/plan.md as success. A VETO
-    // (needs_input/incomplete work_state) is DIFFERENT by the sealed D-16
-    // contract (X35, INV-116 canaries): the plan still delivers, lifecycle
-    // succeeded, and the work_state veto rides the OUTCOME (non-zero exit) —
-    // it must not be laundered into a harness failure either direction.
-    if (!harnessError && planFinalized.outcomeClass === "interrupted") {
-      harnessError = "context capacity exhausted before the plan completed";
-    }
-    const attemptError =
-      harnessError ??
-      (planFinalized.deliverablePresent ? null : "planner produced no plan text") ??
-      (input.signal?.aborted ? "planner cancelled" : null);
-    setAttemptOutcome(telemetry, {
-      deliverablePresent: planFinalized.deliverablePresent,
-      gatesPassed: null,
-      harnessErrored: (harnessError !== null && !webBlocked) || planFinalized.harnessErrored,
-      webRequiredUnsatisfied: webBlocked,
-      workState: planFinalized.workState,
-    });
-    if (attemptError) {
-      log.emit("harness.completed", {
-        harness_id: adapter.id,
-        attempt_id: attemptId,
-        status: webBlocked ? "blocked" : "failed",
-        error: attemptError,
-        ...telemetrySummary(telemetry),
-      });
-      return {
-        attemptId,
-        harnessId: adapter.id,
-        status: webBlocked ? "blocked" : "failed",
-        outcomeClass: planFinalized.outcomeClass,
-        error: attemptError,
-        text: null,
-        telemetry,
-        budgetDenied: false,
-      };
-    }
-    const text = planText || "(no output)";
-    log.emit("harness.completed", {
-      harness_id: adapter.id,
-      attempt_id: attemptId,
-      status: "success",
-      ...telemetrySummary(telemetry),
-    });
-    return {
-      attemptId,
-      harnessId: adapter.id,
-      status: "success",
-      outcomeClass: planFinalized.outcomeClass,
-      error: null,
-      text,
-      telemetry,
-      budgetDenied: false,
+          routed.supportsInteractive,
+        );
+        if (planInteraction) spec.extra["interactionChannel"] = planInteraction;
+        const planWorkMode = this.applyWorkEnvelope(
+          spec,
+          this.workReportEnvelopeFor(routed, contract, Boolean(planInteraction)),
+        );
+        return {
+          knobs,
+          effectiveWeb,
+          spec,
+          plannerAbort,
+          planInteraction,
+          planWorkMode,
+        };
+      },
     };
   }
 
+  /** One read-only planner spawn shared by solo fallback, Council drafts, and merge. */
+  async runPlannerAttempt(args: PlannerAttemptArgs): Promise<PlannerAttemptOutcome> {
+    return executePlannerAttempt(this.plannerAttemptDeps(), args);
+  }
   private async runPlan(
     input: RunInput,
     announce: (a: AnnouncedRunContext) => void,
@@ -6620,102 +6397,174 @@ export class Orchestrator {
         }
         return { status: "budget_denied", reason: lease.reason ?? "budget lease denied" };
       }
-      // Lease granted: the attempt is now committed to run — disclose the launch.
-      onLaunch?.();
-      const knobs = this.routeSpecKnobs(routed, contract, modelOverride, input.effort);
-      const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
-      const explorerPrompt =
-        (opts.deepScan
-          ? `${prompt}\n\nExplorer ${idx + 1}/${adapters.length}: focus on a distinct slice. Emit evidence-cited findings, explicit unknowns/omissions, and follow-up questions. Do not edit files.`
-          : prompt) + contextSection;
-      const sessionFields = await this.sessionSpecFields(
-        input,
-        adapter.id,
-        log,
-        routed.authRouteEstimate,
+      // As with planners, the granted lease owns profile/continuity/spec
+      // preparation. Contain a pre-stream rejection as this attempt's failure;
+      // parallel siblings can then finish before the shared HOME is disposed.
+      const preparation = await (async () => {
+        // Lease granted: the attempt is now committed to run — disclose the launch.
+        onLaunch?.();
+        const knobs = this.routeSpecKnobs(routed, contract, modelOverride, input.effort);
+        const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
+        const explorerPrompt =
+          (opts.deepScan
+            ? `${prompt}\n\nExplorer ${idx + 1}/${adapters.length}: focus on a distinct slice. Emit evidence-cited findings, explicit unknowns/omissions, and follow-up questions. Do not edit files.`
+            : prompt) + contextSection;
+        const sessionFields = await this.sessionSpecFields(
+          input,
+          adapter.id,
+          log,
+          routed.authRouteEstimate,
+        );
+        const grantResume =
+          sessionFields.resume_session_id !== null && !resumeGranted.has(adapter.id);
+        if (grantResume) resumeGranted.add(adapter.id);
+        // Continuity (INV-137): a thread ASK turn is a chat turn — hydrate a lane
+        // switch/gap with a packet and disclose it. Gated on laneRun (deep-scan
+        // scouts are excluded from laneRun); native resume is available only when
+        // this slot was granted the lane's recorded session.
+        const laneContinuity = laneRun
+          ? await this.resolveContinuity(
+              input,
+              adapter.id,
+              sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+              grantResume,
+              sessionFields,
+              store,
+              paths,
+              this.execRootOf(input),
+              log,
+            )
+          : null;
+        // D-16d: the continuation packet pointer rides after the lane pointer so
+        // the fresh session is re-grounded in the exhausted attempt's work.
+        const promptWithPointers = [
+          explorerPrompt,
+          laneContinuity?.pointerLine,
+          continuationPointer,
+        ]
+          .filter((p): p is string => Boolean(p))
+          .join("\n\n");
+        const spec = HarnessRunSpec.parse({
+          session_id: newId("ses"),
+          intent: opts.intent,
+          prompt: promptWithPointers,
+          cwd: this.execRootOf(input),
+          access: "readonly",
+          // ASK/EXPLORE/AUDIT read-only runs must forward the user's attachments —
+          // a live "describe this image" turn sent an image that was being dropped here, so
+          // the model honestly reported it saw nothing (the v0.13 attachment bug).
+          attachments: input.attachments ?? [],
+          auth_preference: sessionFields.auth_preference,
+          credential_profile: sessionFields.credential_profile,
+          resume_session_id: grantResume ? sessionFields.resume_session_id : null,
+          ...this.harnessSpecKnobs(contract, knobs, opts.intent),
+          env_inheritance: envInheritance(this.config(input.repoRoot)),
+          // A thread lane turn spawns in its DURABLE per-lane home so the native
+          // session it records is reachable for resume next turn; everything else
+          // uses the disposable route-context home.
+          env: (laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? roHome.env,
+        });
+        const reportAbort = new AbortController();
+        spec.extra["abortSignal"] = input.signal
+          ? AbortSignal.any([input.signal, reportAbort.signal])
+          : reportAbort.signal;
+        const reportInteraction = this.interactionChannelFor(
+          input,
+          log,
+          runId,
+          taskId,
+          attemptId,
+          adapter.id,
+          routed.supportsInteractive,
+        );
+        if (reportInteraction) spec.extra["interactionChannel"] = reportInteraction;
+        // D-16: compile the WorkReport envelope for the read-only lane.
+        const readonlyWorkEnvelope = this.workReportEnvelopeFor(
+          routed,
+          contract,
+          Boolean(reportInteraction),
+        );
+        const readonlyWorkMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(
+          spec,
+          readonlyWorkEnvelope,
+        );
+        const attemptEventsPath = join(paths.attemptsDir, attemptId, "events.jsonl");
+        const answer = new AnswerAssembly();
+        const telemetry = createAttemptTelemetry(
+          knobs.webPolicy,
+          contract.external_context.web_required ||
+            knobs.webPolicy === "cached" ||
+            knobs.webPolicy === "live",
+          effectiveWeb,
+          [],
+          // Requested-model capture so ask/audit route receipts detect a silent
+          // model downgrade (typed model_mismatch), not just agent runs.
+          knobs.model,
+        );
+        return {
+          knobs,
+          spec,
+          reportAbort,
+          reportInteraction,
+          readonlyWorkMode,
+          attemptEventsPath,
+          answer,
+          telemetry,
+        };
+      })().then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
       );
-      const grantResume =
-        sessionFields.resume_session_id !== null && !resumeGranted.has(adapter.id);
-      if (grantResume) resumeGranted.add(adapter.id);
-      // Continuity (INV-137): a thread ASK turn is a chat turn — hydrate a lane
-      // switch/gap with a packet and disclose it. Gated on laneRun (deep-scan
-      // scouts are excluded from laneRun); native resume is available only when
-      // this slot was granted the lane's recorded session.
-      const laneContinuity = laneRun
-        ? await this.resolveContinuity(
-            input,
-            adapter.id,
-            sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
-            grantResume,
-            sessionFields,
-            store,
-            paths,
-            this.execRootOf(input),
-            log,
-          )
-        : null;
-      // D-16d: the continuation packet pointer rides after the lane pointer so
-      // the fresh session is re-grounded in the exhausted attempt's work.
-      const promptWithPointers = [explorerPrompt, laneContinuity?.pointerLine, continuationPointer]
-        .filter((p): p is string => Boolean(p))
-        .join("\n\n");
-      let spec = HarnessRunSpec.parse({
-        session_id: newId("ses"),
-        intent: opts.intent,
-        prompt: promptWithPointers,
-        cwd: this.execRootOf(input),
-        access: "readonly",
-        // ASK/EXPLORE/AUDIT read-only runs must forward the user's attachments —
-        // a live "describe this image" turn sent an image that was being dropped here, so
-        // the model honestly reported it saw nothing (the v0.13 attachment bug).
-        attachments: input.attachments ?? [],
-        auth_preference: sessionFields.auth_preference,
-        credential_profile: sessionFields.credential_profile,
-        resume_session_id: grantResume ? sessionFields.resume_session_id : null,
-        ...this.harnessSpecKnobs(contract, knobs, opts.intent),
-        env_inheritance: envInheritance(this.config(input.repoRoot)),
-        // A thread lane turn spawns in its DURABLE per-lane home so the native
-        // session it records is reachable for resume next turn; everything else
-        // uses the disposable route-context home.
-        env: (laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? roHome.env,
-      });
-      const reportAbort = new AbortController();
-      spec.extra["abortSignal"] = input.signal
-        ? AbortSignal.any([input.signal, reportAbort.signal])
-        : reportAbort.signal;
-      const reportInteraction = this.interactionChannelFor(
-        input,
-        log,
-        runId,
-        taskId,
-        attemptId,
-        adapter.id,
-        routed.supportsInteractive,
-      );
-      if (reportInteraction) spec.extra["interactionChannel"] = reportInteraction;
-      // D-16: compile the WorkReport envelope for the read-only lane.
-      const readonlyWorkEnvelope = this.workReportEnvelopeFor(
-        routed,
-        contract,
-        Boolean(reportInteraction),
-      );
-      const readonlyWorkMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(
-        spec,
-        readonlyWorkEnvelope,
-      );
-      const attemptEventsPath = join(paths.attemptsDir, attemptId, "events.jsonl");
-      const answer = new AnswerAssembly();
-      const telemetry = createAttemptTelemetry(
-        knobs.webPolicy,
-        contract.external_context.web_required ||
-          knobs.webPolicy === "cached" ||
-          knobs.webPolicy === "live",
-        effectiveWeb,
-        [],
-        // Requested-model capture so ask/audit route receipts detect a silent
-        // model downgrade (typed model_mismatch), not just agent runs.
-        knobs.model,
-      );
+      if (!preparation.ok) {
+        const message = `read-only attempt setup failed: ${safeErrorMessage(preparation.error)}`;
+        AC.settleGrantedAttemptLease({
+          ledger,
+          leaseId: lease.lease?.lease_id ?? "",
+          attemptId,
+          harnessId: adapter.id,
+          costUsd: 0,
+          costEstimated: false,
+          preStreamFailureSource: "readonly-pre-stream",
+        });
+        const telemetry = createAttemptTelemetry(
+          contract.external_context.policy,
+          contract.external_context.web_required,
+          contract.external_context.effective_mode,
+        );
+        setAttemptOutcome(telemetry, {
+          deliverablePresent: false,
+          gatesPassed: null,
+          harnessErrored: true,
+          webRequiredUnsatisfied: false,
+        });
+        attempts.push({
+          attemptId,
+          harnessId: adapter.id,
+          status: "failed",
+          report: "",
+          error: message,
+          telemetry,
+        });
+        attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry });
+        if (opts.deepScan) {
+          store.writeText(
+            join(paths.findingsDir, `${attemptId}-error.md`),
+            `# Explorer ${attemptId} failed\n\n${message}\n`,
+          );
+        }
+        return { status: "launched" };
+      }
+      const {
+        knobs,
+        spec: preparedSpec,
+        reportAbort,
+        reportInteraction,
+        readonlyWorkMode,
+        attemptEventsPath,
+        answer,
+        telemetry,
+      } = preparation.value;
+      let spec = preparedSpec;
       const retryPolicy = transientRetryPolicy(this.config(input.repoRoot));
       let activeSessionId = spec.session_id;
       const onAbort = () => {
@@ -6826,7 +6675,12 @@ export class Orchestrator {
             const rotationPolicy = this.profilePolicy(input.repoRoot, adapter.id);
             const readyProfileIds =
               sawTypedLimit && reportSoFar.length === 0 && rotationPolicy.limit_action === "rotate"
-                ? await this.readyProfileIdsForRotation(input, adapter.id)
+                ? await this.readyProfileIdsForRotation(
+                    input,
+                    adapter.id,
+                    spec.credential_profile ?? null,
+                    triedProfiles,
+                  )
                 : new Set<string>();
             const rotated = rotateSpecOnTypedLimit({
               spec,
@@ -6883,17 +6737,17 @@ export class Orchestrator {
         }
       } finally {
         input.signal?.removeEventListener("abort", onAbort);
-        ledger.settle(
-          lease.lease?.lease_id ?? "",
-          attemptUsageCostSettlement(
-            cost,
-            costEstimated,
-            attemptId,
-            adapter.id,
-            telemetry.authMode,
-            telemetry.usageCost,
-          ),
-        );
+        AC.settleGrantedAttemptLease({
+          ledger,
+          leaseId: lease.lease?.lease_id ?? "",
+          attemptId,
+          harnessId: adapter.id,
+          costUsd: cost,
+          costEstimated,
+          authMode: telemetry.authMode,
+          usageCost: telemetry.usageCost,
+          preStreamFailureSource: "readonly-pre-stream",
+        });
       }
       if (harnessError && telemetry.transientFailures.length > 0) {
         log.emit("route.transient.exhausted", {
@@ -7469,7 +7323,7 @@ export class Orchestrator {
       deepScanSynthesis,
     );
     log.emit("output.ready", {
-      kind: opts.mode === "ask" ? "answer" : "report",
+      kind: opts.deepScan ? "report" : "answer",
       path: `final/${opts.artifactName}`,
     });
     if (opts.deepScan) {

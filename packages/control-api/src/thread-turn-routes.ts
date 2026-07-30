@@ -15,7 +15,14 @@ import {
   TRUST_FULL_ACCESS_CODE,
 } from "@claudexor/schema";
 import type { ResourceAttachmentRef, TurnEnqueueProblem } from "@claudexor/schema";
+import {
+  safeProblemContext,
+  safeProblemMessage,
+  safeProblemRequiredActions,
+} from "@claudexor/util";
 import type { DaemonFacadeClient, DaemonRunRecord } from "./daemon-server.js";
+import { assertLatestThreadTurn, inspectThreadTurnCreateReplay } from "./thread-recovery.js";
+import { chainThreadMutation } from "./thread-mutation.js";
 
 export interface ThreadTurnRouteCtx {
   json(res: ServerResponse, status: number, body: unknown): void;
@@ -43,32 +50,13 @@ export interface ThreadTurnRouteCtx {
       idempotency?: { key: string; client: string; request: unknown };
     },
   ): Promise<unknown>;
+  findThreadTurnByIdempotency?: (
+    id: string,
+    idempotency: { key: string; client: string; request: unknown },
+  ) => Promise<{ id: string } | null>;
   setTurnEnqueueError?: (turnId: string, problem: TurnEnqueueProblem) => void;
   /** Per-thread promise chain (owned by the server; shared with turn creation). */
   threadTurnChains: Map<string, Promise<void>>;
-}
-
-/**
- * Chain `work` onto the thread's serialization chain and drop the entry once
- * settled so the Map cannot grow unbounded across a thread's lifetime.
- */
-export function chainThreadMutation<T>(
-  ctx: Pick<ThreadTurnRouteCtx, "threadTurnChains">,
-  threadId: string,
-  work: () => Promise<T>,
-): Promise<T> {
-  const previous = ctx.threadTurnChains.get(threadId) ?? Promise.resolve();
-  const chained = previous.catch(() => undefined).then(work);
-  const entry: Promise<void> = chained
-    .then(
-      () => undefined,
-      () => undefined,
-    )
-    .finally(() => {
-      if (ctx.threadTurnChains.get(threadId) === entry) ctx.threadTurnChains.delete(threadId);
-    });
-  ctx.threadTurnChains.set(threadId, entry);
-  return chained;
 }
 
 function errStatus(err: unknown, fallback = 400): number {
@@ -131,18 +119,13 @@ export function recordTurnEnqueueFailure(
 function problemFromError(err: unknown, retryable: boolean): TurnEnqueueProblem {
   const source = err && typeof err === "object" ? (err as Record<string, unknown>) : {};
   return {
-    message: err instanceof Error ? err.message : String(err),
+    // This exact object feeds BOTH setTurnEnqueueError and the HTTP response.
+    // Sanitize once here so the durable and wire views cannot diverge.
+    message: safeProblemMessage(err),
     code: errCode(err),
     retryable,
-    required_actions: Array.isArray(source["requiredActions"])
-      ? source["requiredActions"].filter((value): value is string => typeof value === "string")
-      : [],
-    context:
-      source["context"] &&
-      typeof source["context"] === "object" &&
-      !Array.isArray(source["context"])
-        ? (source["context"] as Record<string, unknown>)
-        : {},
+    required_actions: safeProblemRequiredActions(source["requiredActions"]),
+    context: safeProblemContext(source["context"]),
   };
 }
 
@@ -245,13 +228,22 @@ export function handleThreadTurnCreate(
   body: import("@claudexor/schema").ControlThreadTurnRequest,
   idempotencyKey: string,
 ): Promise<void> {
-  return chainThreadMutation(ctx, threadId, async () => {
+  return chainThreadMutation(ctx.threadTurnChains, threadId, async () => {
     // Once the turn record exists, any later failure in this handler must
     // land ON the turn (honest inline refusal) — not only in one HTTP
     // response that a reloading client never sees.
     let createdTurnId: string | null = null;
     try {
-      const detail = await ctx.threadDetail(threadId);
+      const idempotency = {
+        key: idempotencyKey,
+        client: "control-api",
+        request: { threadId, body },
+      };
+      const replay = await inspectThreadTurnCreateReplay(ctx.daemon, ctx, threadId, idempotency);
+      const detail = replay.detail;
+      if (replay.accepted && replay.existingId) {
+        return respondToTurnJob(ctx, res, replay.accepted.id, threadId, replay.existingId);
+      }
       const thread = detail.thread as {
         repo: { root: string } | null;
         mode: string;
@@ -392,11 +384,7 @@ export function handleThreadTurnCreate(
         planOverridden,
         planRunId,
         attachments: params.attachments,
-        idempotency: {
-          key: idempotencyKey,
-          client: "control-api",
-          request: { threadId, body },
-        },
+        idempotency,
       })) as { id: string };
       createdTurnId = turn.id;
       // Preflight AFTER the turn exists (W19/INV-093): a browser/requirements
@@ -479,7 +467,7 @@ export function handleThreadTurnRetry(
 ): Promise<void> {
   // Same per-thread serialization as turn creation: a retry racing a new
   // turn would otherwise interleave lineage bookkeeping.
-  return chainThreadMutation(ctx, threadId, async () => {
+  return chainThreadMutation(ctx.threadTurnChains, threadId, async () => {
     try {
       const detail = await ctx.threadDetail(threadId);
       const turns = detail.turns as Array<Record<string, unknown>>;
@@ -528,15 +516,7 @@ export function handleThreadTurnRetry(
       // refused turn would bind its run as the thread's new head (bindTurnRun
       // advances head_run_id unconditionally) and silently reorder lineage
       // that later turns already advanced — refuse loudly instead.
-      const lastTurn = turns[turns.length - 1];
-      if (lastTurn && lastTurn["id"] !== turnId) {
-        throw Object.assign(
-          new Error(
-            `turn ${turnId} is not the latest turn of this thread; the conversation moved on — send a new message instead`,
-          ),
-          { status: 409 },
-        );
-      }
+      assertLatestThreadTurn(turns, turnId);
       if (!last) {
         // The refusal happened before any job existed (enqueue itself threw):
         // there are no recorded params to replay faithfully — honest refusal.

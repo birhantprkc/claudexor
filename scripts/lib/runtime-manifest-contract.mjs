@@ -10,9 +10,9 @@
  * module by the cross-language test vectors under
  * apps/macos/.../Fixtures/runtime-update/.
  *
- * Wire shape of `runtime-manifest.json` (flat, so an old 3.0 check that only
- * reads {version,sha256,minAppVersion} still parses it; the signing fields are
- * additive and 3.1+ verifies them fail-closed):
+ * Wire shape of `runtime-manifest.json`. This is a CLOSED field set: current
+ * producers and consumers reject missing, unknown, or extra fields rather than
+ * treating signing fields as an additive extension:
  *
  *   {
  *     "schemaVersion": 1,
@@ -20,6 +20,7 @@
  *     "sha256":        "<64 lowercase hex of claudexor-runtime-<version>.tar.gz>",
  *     "minAppVersion": "2.1.0",
  *     "archiveName":   "claudexor-runtime-3.1.0.tar.gz",
+ *     "archiveUrl":    "https://github.com/razzant/claudexor/releases/download/v3.1.0/claudexor-runtime-3.1.0.tar.gz",
  *     "buildSha":      "<40 lowercase hex git sha of the build>",
  *     "notes":         "…",
  *     "keyId":         "claudexor-runtime-update-…",

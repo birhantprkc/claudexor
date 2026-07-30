@@ -49,6 +49,9 @@ export function formatRunEventLine(ev: Record<string, unknown>): string | null {
     case "run.created":
       return `run created (${String(p["mode"] ?? "?")})`;
     case "project.git.initialized":
+      if (p["partial"] === true) {
+        return `git repository setup stopped during ${String(p["failed_stage"] ?? "unknown")} at ${String(p["repo_root"] ?? "?")}; partial metadata may remain`;
+      }
       return `initialized git repository at ${String(p["repo_root"] ?? "?")} (baseline commit)`;
     case "project.claude_bridge.created":
       return `bridged ${String(p["source"] ?? "AGENTS.md")} → ${String(p["path"] ?? "CLAUDE.md")} for Claude Code`;

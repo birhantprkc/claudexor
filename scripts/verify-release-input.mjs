@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import {
+  decodeReviewUtf8,
   validateReleaseAttestation,
   validateReleaseInput,
 } from "./lib/release-review-contract.mjs";
@@ -56,11 +57,12 @@ if (mode === "publish") {
     fail(["publish mode requires a base64-encoded review attestation"]);
   }
   try {
-    attestationText = Buffer.from(encoded, "base64").toString("utf8");
+    attestationText = decodeReviewUtf8(Buffer.from(encoded, "base64"), "review attestation");
     const attestation = JSON.parse(attestationText);
     const reviewed = validateReleaseAttestation(attestation, reviewAuthority, {
       candidateSha,
       candidateTree,
+      candidateVersion: version,
     });
     if (!reviewed.ok) fail(reviewed.reasons);
   } catch (error) {

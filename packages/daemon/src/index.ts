@@ -4,6 +4,7 @@ export * from "./delegation-admission.js";
 export * from "./writer-lease.js";
 export * from "./terminate.js";
 export * from "./client.js";
+export * from "./daemon-shutdown-rpc.js";
 export * from "./events.js";
 export * from "./interactions.js";
 export * from "./operator-decisions.js";

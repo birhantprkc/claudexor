@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { TextDecoder } from "node:util";
 import { parseUnifiedDiff } from "@claudexor/core";
 import {
   containsSecretLikeToken,
@@ -40,6 +41,7 @@ export const MANDATORY_EVIDENCE_FILES = [
 /** One sealed packet contract shared by the cumulative Tier-1 and Tier-2 reviewers. */
 export const FROZEN_REVIEW_EVIDENCE_FILES = [
   "USER_INTENT.md",
+  "USER_DIALOGUE.md",
   "FORBIDDEN_FINDINGS.md",
   "PLAN_ACCEPTED.md",
   "DECIDED_TRADEOFFS.md",
@@ -295,10 +297,16 @@ export function verifySealedEvidencePacket(input: SealedEvidencePacketInput): Se
   }
 
   const actualFiles = collectPacketFiles(evidenceDir);
-  const manifest = validatePacketManifest(manifestBytes.toString("utf8"), actualFiles);
+  const manifest = validatePacketManifest(
+    decodeEvidenceUtf8(manifestBytes, "MANIFEST.sha256"),
+    actualFiles,
+  );
   if (!manifest.ok) throw new Error(`packet manifest failed: ${manifest.reasons.join("; ")}`);
   for (const file of actualFiles) {
-    const text = readFileSync(join(evidenceDir, file.path), "utf8");
+    const text = decodeEvidenceUtf8(
+      readFileSync(join(evidenceDir, file.path)),
+      `sealed packet file ${file.path}`,
+    );
     if (containsSecretLikeToken(file.path) || containsSecretLikeToken(text)) {
       throw new Error(`sealed packet contains a secret-like token: ${file.path}`);
     }
@@ -347,6 +355,16 @@ export function verifySealedEvidencePacket(input: SealedEvidencePacketInput): Se
     manifestSha256,
     files: manifest.files,
   };
+}
+
+const FATAL_UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+function decodeEvidenceUtf8(bytes: Buffer, label: string): string {
+  try {
+    return FATAL_UTF8.decode(bytes);
+  } catch {
+    throw new Error(`${label} is not valid UTF-8`);
+  }
 }
 
 function collectPacketFiles(root: string, current = root): PacketManifestFile[] {

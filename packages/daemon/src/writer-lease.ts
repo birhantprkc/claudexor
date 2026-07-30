@@ -9,6 +9,10 @@ import {
 
 export interface DaemonWriterLease {
   readonly path: string;
+  /** Exact owner written into the lease. Runtime replacement binds its
+   * admission and termination proof to this process instance, not just the
+   * closure version shared by successive daemon processes. */
+  readonly owner: DaemonLeaseOwner;
   release(): void;
 }
 
@@ -60,6 +64,7 @@ export function acquireDaemonWriterLease(
   let released = false;
   return {
     path,
+    owner,
     release: () => {
       if (released) return;
       released = true;

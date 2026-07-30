@@ -83,10 +83,10 @@ public protocol RuntimeDaemonControl: Sendable {
     /// `nil` = the daemon could not be asked (treated as busy — fail-closed, we
     /// never stop a daemon whose state we cannot confirm).
     func isBusy() async -> Bool?
-    /// Atomically prove the daemon idle, fence every daemon-owned admission
-    /// surface, and stop the exact running process. A typed refusal leaves the
-    /// daemon serving and every ingress open.
-    func stopForRuntimeReplacement() async throws
+    /// Atomically require the exact freshly observed serving identity, prove
+    /// the daemon idle, fence every daemon-owned admission surface, and stop
+    /// that process. A typed refusal leaves the daemon and every ingress open.
+    func stopForRuntimeReplacement(expectedIdentity: RuntimeClosureIdentity) async throws
     /// Relaunch the daemon (DaemonLauncher) against the ACTIVE pointer.
     func start() throws
     /// Relaunch one already-resolved closure. Reconciliation uses this overload
@@ -241,11 +241,21 @@ public actor RuntimeInstallCoordinator {
             throw RuntimeInstallError.rollbackIdentityUnavailable
         }
 
+        // Observe the exact daemon that is serving immediately before the
+        // authoritative stop. The daemon compares this pair in the same
+        // synchronous turn as its admission fence, closing the handshake/stop
+        // race without guessing from either pointer or install target.
+        guard let forwardServing = await daemon.handshakeIdentity() else {
+            try? installer.removeVersionDir(manifest.version)
+            fail(.failed(reason: "engine identity became unavailable before replacement admission"))
+            throw RuntimeInstallError.daemonBusy
+        }
+
         // 7. Daemon-owned atomic idle proof + admission fence + exact stop. The
         // advisory probe above keeps the common busy path cheap; this call is
         // the authority that closes its admission race.
         do {
-            try await daemon.stopForRuntimeReplacement()
+            try await daemon.stopForRuntimeReplacement(expectedIdentity: forwardServing)
         } catch RuntimeReplacementStopError.busy {
             try? installer.removeVersionDir(manifest.version)
             fail(.failed(reason: "engine became busy before replacement admission"))
@@ -275,6 +285,7 @@ public actor RuntimeInstallCoordinator {
             throw await rollbackAndClassify(
                 to: previous, reason: "pointer write failed",
                 expectedIdentity: rollbackExpected,
+                stoppingIdentity: forwardServing,
                 recoveredError: .io("could not write current.json: \(error.localizedDescription)"))
         }
 
@@ -289,6 +300,10 @@ public actor RuntimeInstallCoordinator {
             throw await rollbackAndClassify(
                 to: previous, reason: "engine relaunch failed after swap",
                 expectedIdentity: rollbackExpected,
+                // The exact-target stop is the authority here: it stops only
+                // this candidate, accepts its proven absence, and fails closed
+                // while a candidate is still booting or its activity is unknown.
+                stoppingIdentity: expectedCandidate,
                 recoveredError: .io(
                     "engine relaunch failed after swap; rolled back to the previous runtime: \(error.localizedDescription)"))
         }
@@ -306,11 +321,13 @@ public actor RuntimeInstallCoordinator {
             throw await rollbackAndClassify(
                 to: previous, reason: "post-relaunch handshake mismatch",
                 expectedIdentity: rollbackExpected,
+                stoppingIdentity: got,
                 recoveredError: .handshakeMismatch(expected: expectedCandidate, got: got))
         case .unreachable:
             throw await rollbackAndClassify(
                 to: previous, reason: "post-relaunch handshake timed out",
                 expectedIdentity: rollbackExpected,
+                stoppingIdentity: expectedCandidate,
                 recoveredError: .handshakeMismatch(expected: expectedCandidate, got: nil))
         }
     }
@@ -353,10 +370,12 @@ public actor RuntimeInstallCoordinator {
     private func rollbackAndClassify(
         to previous: RuntimeCurrent?, reason: String,
         expectedIdentity: RuntimeClosureIdentity,
+        stoppingIdentity: RuntimeClosureIdentity,
         recoveredError: RuntimeInstallError
     ) async -> RuntimeInstallError {
         switch await rollback(
-            to: previous, expectedIdentity: expectedIdentity, reason: reason)
+            to: previous, expectedIdentity: expectedIdentity,
+            stoppingIdentity: stoppingIdentity, reason: reason)
         {
         case .recovered:
             return recoveredError
@@ -375,13 +394,15 @@ public actor RuntimeInstallCoordinator {
     private func rollback(
         to previous: RuntimeCurrent?,
         expectedIdentity: RuntimeClosureIdentity,
+        stoppingIdentity: RuntimeClosureIdentity,
         reason: String
     ) async -> RollbackOutcome {
         // The candidate may have accepted work after its handshake. Never move
         // the pointer beneath that live process: rollback needs the same atomic
         // idle proof and admission fence as forward activation.
         do {
-            try await daemon.stopForRuntimeReplacement()
+            try await daemon.stopForRuntimeReplacement(
+                expectedIdentity: stoppingIdentity)
         } catch {
             return rollbackFailed(
                 reason, step: "stop the active candidate runtime before restoring the pointer",

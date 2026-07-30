@@ -160,6 +160,27 @@ export function typedFetchReason(error: unknown): string {
   return "detail_unavailable";
 }
 
+/** Translate ACP aliases into the strict Control API run-start vocabulary. */
+export function projectAcpRunControls(input: Record<string, unknown>): Record<string, unknown> {
+  const controls = Object.fromEntries(
+    Object.entries(input).filter(
+      ([key]) =>
+        !["mode", "sessionId", "repoPath", "prompt", "attachments", "deferred"].includes(key),
+    ),
+  );
+  if (controls["runMode"] !== undefined) {
+    controls["mode"] = controls["runMode"];
+    delete controls["runMode"];
+  }
+  if (controls["race"] === true && typeof controls["n"] !== "number") controls["n"] = 2;
+  delete controls["race"];
+  if (typeof controls["harness"] === "string") {
+    controls["harnesses"] = [controls["harness"]];
+    delete controls["harness"];
+  }
+  return controls;
+}
+
 type Hooks = {
   onInteraction?: (ctx: any) => Promise<any | null>;
   signal?: AbortSignal;
@@ -311,20 +332,7 @@ export async function acpSessionQuery(
   if (p.mode !== "__acp_session_prompt") throw new Error(`unknown ACP action ${p.mode}`);
 
   const attachments = await uploadAttachments(addr, p.attachments);
-  const controls = Object.fromEntries(
-    Object.entries(p).filter(
-      ([key]) =>
-        !["mode", "sessionId", "repoPath", "prompt", "attachments", "deferred"].includes(key),
-    ),
-  );
-  if (controls["runMode"] !== undefined) {
-    controls["mode"] = controls["runMode"];
-    delete controls["runMode"];
-  }
-  if (typeof controls["harness"] === "string") {
-    controls["harnesses"] = [controls["harness"]];
-    delete controls["harness"];
-  }
+  const controls = projectAcpRunControls(p);
   const started = await request(`/threads/${encodeURIComponent(sessionId)}/turns`, {
     method: "POST",
     headers: { "content-type": "application/json", "Idempotency-Key": randomUUID() },

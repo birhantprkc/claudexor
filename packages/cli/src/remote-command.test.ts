@@ -32,9 +32,9 @@ describe("remote setup attach", () => {
 describe("remote runtime lifecycle", () => {
   it("requires the running daemon version and build SHA to match before stopping", () => {
     const sha = "a".repeat(40);
-    expect(() =>
+    expect(
       assertRemoteEngineIdentity({ engineVersion: "3.4.0", engineBuildSha: sha }, "3.4.0", sha),
-    ).not.toThrow();
+    ).toEqual({ version: "3.4.0", buildSha: sha });
     expect(() =>
       assertRemoteEngineIdentity(
         { engineVersion: "3.4.0", engineBuildSha: "b".repeat(40) },

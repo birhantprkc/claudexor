@@ -114,6 +114,32 @@ export interface RunCreateRouteContext {
   preflightRunRequirements?: (request: ControlRunStartRequest) => Promise<void>;
 }
 
+/**
+ * Preserve a concurrently accepted idempotent command when mutable preflight
+ * fails after the first durable lookup missed it. The second lookup is a
+ * single race-closing probe, not polling; if it still misses (or cannot be
+ * read), the original preflight error remains the response authority.
+ */
+export async function findAcceptedAroundPreflight<T>(
+  findAccepted: () => Promise<T | null | undefined>,
+  preflight: () => Promise<void>,
+): Promise<T | null> {
+  const prior = await findAccepted();
+  if (prior) return prior;
+  try {
+    await preflight();
+  } catch (preflightError) {
+    try {
+      const raced = await findAccepted();
+      if (raced) return raced;
+    } catch {
+      // Preserve the causal preflight refusal when the race-closing probe itself fails.
+    }
+    throw preflightError;
+  }
+  return null;
+}
+
 export function unboundRunStartResponse(
   rec: DaemonRunRecord,
   terminal: boolean,
@@ -179,16 +205,26 @@ export async function handleRunCreate(
     const body = await ctx.readBody(req);
     assertNoInlineSecretValues(body);
     params = normalizeRunStart(ControlRunStartRequest.parse(body));
-    await ctx.validateResources?.(params.attachments ?? []);
-    await ctx.preflightRunRequirements?.(params);
   } catch (error) {
     return ctx.requestError(res, error);
   }
+  // Replay precedes every mutable capability/resource preflight. Once the
+  // daemon durably accepted this exact key+request, a later Git, account, or
+  // resource-state change must not replace its original handle with a new
+  // admission result.
   try {
-    const prior = await ctx.daemon.findAccepted?.(params, {
-      idempotencyKey,
-      clientId: "control-api",
-    });
+    const prior = await findAcceptedAroundPreflight(
+      () =>
+        ctx.daemon.findAccepted?.(params, {
+          idempotencyKey,
+          clientId: "control-api",
+          idempotencyRequest: params,
+        }) ?? Promise.resolve(null),
+      async () => {
+        await ctx.validateResources?.(params.attachments ?? []);
+        await ctx.preflightRunRequirements?.(params);
+      },
+    );
     if (prior) return ctx.respondToAcceptedJob(res, prior.id);
   } catch (error) {
     return ctx.requestError(res, error);

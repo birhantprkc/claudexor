@@ -1,5 +1,10 @@
 import type { CostKnowledge, HarnessEvent } from "@claudexor/schema";
-import { unknownCostSettlement, type BudgetSettlement } from "@claudexor/budget";
+import {
+  attemptUsageCostSettlement,
+  unknownCostSettlement,
+  type BudgetLedger,
+  type BudgetSettlement,
+} from "@claudexor/budget";
 
 export interface AttemptUsageCost {
   cashUsd: number;
@@ -30,6 +35,37 @@ export interface AttemptFailureCost {
   totalUsd: number;
   estimated: boolean;
   settlement: BudgetSettlement;
+}
+
+/**
+ * Settle a granted attempt lease exactly where its owning outer finally runs.
+ * Before telemetry exists, the honest settlement is unknown (no fabricated
+ * zero); after preparation, the normal route-aware usage settlement applies.
+ */
+export function settleGrantedAttemptLease(args: {
+  ledger: Pick<BudgetLedger, "settle">;
+  leaseId: string;
+  attemptId: string;
+  harnessId: string;
+  costUsd: number;
+  costEstimated: boolean;
+  authMode?: "local_session" | "api_key" | null;
+  usageCost?: AttemptUsageCost;
+  preStreamFailureSource: string;
+}): void {
+  args.ledger.settle(
+    args.leaseId,
+    args.usageCost
+      ? attemptUsageCostSettlement(
+          args.costUsd,
+          args.costEstimated,
+          args.attemptId,
+          args.harnessId,
+          args.authMode ?? null,
+          args.usageCost,
+        )
+      : unknownCostSettlement(args.preStreamFailureSource),
+  );
 }
 
 export class AttemptPostStreamError extends Error {

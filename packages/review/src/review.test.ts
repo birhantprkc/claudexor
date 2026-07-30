@@ -23,7 +23,13 @@ import {
   RunEventType,
 } from "@claudexor/schema";
 import { evaluateConvergence } from "./convergence.js";
-import { dedupeFindings, extractJsonBlocks, parseFindingsDetailed } from "./findings.js";
+import {
+  dedupeFindings,
+  extractJsonBlocks,
+  parseFindingsDetailed,
+  parseSealedReviewEnvelopeDetailed,
+  sealedReviewTranscriptFromEvents,
+} from "./findings.js";
 import { buildTestCommandGrant, gatesPassed, runGate } from "./gates.js";
 import { ReadinessLedger, failureSignature } from "./readiness.js";
 import { revalidateFindings } from "./revalidate.js";
@@ -163,6 +169,43 @@ describe("reviewer progress event schema contract", () => {
 });
 
 describe("sealed release native reviewer contract", () => {
+  it("accepts only one exact JSON envelope and rejects surrounding reviewer prose", () => {
+    const reviewer = {
+      harness_id: "codex",
+      requested_model: "gpt-5.6-sol",
+      requested_effort: "xhigh",
+      observed_model: "gpt-5.6-sol",
+      route_proof_status: "verified",
+    } as const;
+    const envelope = JSON.stringify({
+      completion: {
+        verdict: "PASS",
+        checklist: [
+          "sealed_evidence",
+          "intent_and_scope",
+          "runtime_and_security",
+          "tests_and_release",
+        ].map((item) => ({ item, completed: true })),
+        findingCount: 0,
+      },
+      findings: [],
+    });
+
+    expect(parseSealedReviewEnvelopeDetailed(`  ${envelope}\n`, reviewer).error).toBeNull();
+    for (const output of [
+      `CRITICAL: omitted from JSON\n${envelope}`,
+      `${envelope}\nAdditional caveat`,
+      `\`\`\`json\n${envelope}\n\`\`\``,
+      `${envelope}\n${envelope}`,
+    ]) {
+      expect(parseSealedReviewEnvelopeDetailed(output, reviewer)).toMatchObject({
+        findings: [],
+        malformed: 0,
+        error: "sealed review output must be exactly one JSON object with no surrounding prose",
+      });
+    }
+  });
+
   it("prompts for an explicit completion envelope while preserving generic findings", async () => {
     const { cwd, evidenceDir } = makeReviewWorkspace("claudexor-release-review-");
     const artifactsDir = reapMk(join(tmpdir(), "claudexor-release-review-artifacts-"));
@@ -173,6 +216,9 @@ describe("sealed release native reviewer contract", () => {
     writeFileSync(join(evidenceDir, "MANIFEST.sha256"), "sealed fixture\n");
     initGitFixture(cwd);
     let prompt = "";
+    let submittedSessionId = "";
+    let submittedExternalContextPolicy = "";
+    let submittedWebPolicy = "";
     let reviewPayload = {
       completion: {
         verdict: "PASS",
@@ -206,12 +252,16 @@ describe("sealed release native reviewer contract", () => {
       },
       async *run(spec) {
         prompt = spec.prompt;
+        submittedSessionId = spec.session_id;
+        submittedExternalContextPolicy = spec.external_context_policy;
+        submittedWebPolicy = spec.tool_permission_policy.web;
         const ts = new Date().toISOString();
         yield {
           type: "message",
           session_id: spec.session_id,
           ts,
           observed_model: "release-model",
+          credential_route: "vendor_native",
           text: JSON.stringify(reviewPayload),
         };
       },
@@ -244,6 +294,11 @@ describe("sealed release native reviewer contract", () => {
         "sealed_evidence, intent_and_scope, runtime_and_security, tests_and_release",
       );
       expect(prompt).toContain("findingCount must exactly equal findings.length");
+      expect(submittedExternalContextPolicy).toBe("live");
+      expect(submittedWebPolicy).toBe("live");
+      expect(readFileSync(join(artifactsDir, "01-release-reviewer", "prompt.md"), "utf8")).toBe(
+        prompt,
+      );
       expect(result.findings.map((finding) => finding.claim)).toContain("release wrapper finding");
       expect(
         JSON.parse(
@@ -251,9 +306,22 @@ describe("sealed release native reviewer contract", () => {
         ),
       ).not.toHaveProperty("review_subject");
       expect(
-        JSON.parse(readFileSync(join(artifactsDir, "01-release-reviewer", "metadata.json"), "utf8"))
-          .review_wave_id,
-      ).toBe("11111111-1111-4111-8111-111111111111");
+        JSON.parse(
+          readFileSync(join(artifactsDir, "01-release-reviewer", "metadata.json"), "utf8"),
+        ),
+      ).toMatchObject({
+        review_wave_id: "11111111-1111-4111-8111-111111111111",
+        review_runtime_version: expect.any(String),
+        review_runtime_build_sha: expect.stringMatching(/^(?:[0-9a-f]{40}|unknown)$/),
+        review_runtime_entry: expect.any(String),
+        review_runtime_entry_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        session_id: submittedSessionId,
+        external_context_policy: "live",
+        tool_web_policy: "live",
+        submitted_prompt_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        auth_mode: "local_session",
+        auth_modes: ["local_session"],
+      });
       expect(readFileSync(join(artifactsDir, "reviewer-progress.jsonl"), "utf8")).toContain(
         '"review_wave_id":"11111111-1111-4111-8111-111111111111"',
       );
@@ -301,6 +369,98 @@ describe("sealed release native reviewer contract", () => {
       } finally {
         rmSync(invalidArtifactsDir, { recursive: true, force: true });
       }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(artifactsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never retries a transient failure inside one frozen review slot", async () => {
+    const { cwd, evidenceDir } = makeReviewWorkspace("claudexor-release-no-retry-");
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-release-no-retry-artifacts-"));
+    const diff = "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    for (const [name, contents] of [
+      ["DIFF.patch", diff],
+      ["DIFF_SUMMARY.md", "one release file changed\n"],
+      ["FREEZE.json", "{}\n"],
+      ["MANIFEST.sha256", "sealed fixture\n"],
+    ] as const) {
+      writeFileSync(join(evidenceDir, name), contents);
+    }
+    initGitFixture(cwd);
+    let calls = 0;
+    const adapter: HarnessAdapter = {
+      id: "release-no-retry",
+      async discover() {
+        throw new Error("not used");
+      },
+      async doctor() {
+        throw new Error("not used");
+      },
+      async *run(spec) {
+        calls += 1;
+        const ts = new Date().toISOString();
+        yield {
+          type: "error",
+          session_id: spec.session_id,
+          ts,
+          error: "stream disconnected",
+          transient: { kind: "stream_disconnect", retry_delay_ms: 0 },
+        };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    try {
+      const result = await reviewCandidate({
+        candidateLabel: "Release candidate",
+        diff,
+        evidenceDir,
+        evidenceReadOnly: true,
+        frozenIdentity: {
+          candidateSha: "a".repeat(40),
+          candidateTree: "b".repeat(40),
+          packetManifestSha256: "c".repeat(64),
+        },
+        env: { CLAUDEXOR_REVIEW_WAVE_ID: "33333333-3333-4333-8333-333333333333" },
+        artifactsDir,
+        cwd,
+        reviewers: [
+          {
+            adapter,
+            providerFamily: "openai",
+            requestedModel: "gpt-5.6-sol",
+            requestedEffort: "xhigh",
+          },
+        ],
+        transientRetryPolicy: { maxRetries: 9, initialDelayMs: 0, maxDelayMs: 0 },
+      });
+      expect(calls).toBe(1);
+      expect(result.findings.some((finding) => finding.severity === "INSUFFICIENT_EVIDENCE")).toBe(
+        true,
+      );
+      expect(
+        JSON.parse(
+          readFileSync(join(artifactsDir, "01-release-no-retry", "metadata.json"), "utf8"),
+        ),
+      ).not.toHaveProperty("transient_retry");
+      await expect(
+        reviewCandidate({
+          candidateLabel: "Release candidate",
+          diff,
+          evidenceDir,
+          evidenceReadOnly: true,
+          frozenIdentity: {
+            candidateSha: "a".repeat(40),
+            candidateTree: "b".repeat(40),
+            packetManifestSha256: "c".repeat(64),
+          },
+          env: { CLAUDEXOR_REVIEW_WAVE_ID: "44444444-4444-4444-8444-444444444444" },
+          artifactsDir,
+          cwd,
+          reviewers: [{ adapter, providerFamily: "openai" }],
+        }),
+      ).rejects.toThrow(/fresh empty artifacts directory/);
+      expect(calls).toBe(1);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(artifactsDir, { recursive: true, force: true });
@@ -602,6 +762,18 @@ describe("route proof", () => {
 });
 
 describe("findings", () => {
+  it("projects normalized message events to exact single-newline transcript bytes", () => {
+    expect(
+      sealedReviewTranscriptFromEvents([
+        { type: "started", text: "ignored" },
+        { type: "message", text: "first" },
+        { type: "message", text: "second\n" },
+        { type: "message", text: "ignored auth", payload: { auth_switched: true } },
+        { type: "message", text: "" },
+      ]),
+    ).toBe("first\nsecond\n");
+  });
+
   it("parses fenced json then dedupes keeping most severe", () => {
     const text =
       "```json\n" +
@@ -1885,12 +2057,9 @@ describe("reviewEngine", () => {
     expect(metadata).toContain("persistent_diff_path");
     expect(metadata).toContain(candidateRoot);
     expect(metadata).toContain(reviewerCwd);
-    expect(
-      readFileSync(join(artifactsDir, "01-file-backed-reviewer", "prompt.md"), "utf8"),
-    ).toContain(`source_candidate_root: ${candidateRoot}`);
-    expect(
-      readFileSync(join(artifactsDir, "01-file-backed-reviewer", "prompt.md"), "utf8"),
-    ).toContain(`candidate_root: ${reviewerCwd}`);
+    expect(readFileSync(join(artifactsDir, "01-file-backed-reviewer", "prompt.md"), "utf8")).toBe(
+      prompt,
+    );
     expect(
       readFileSync(
         join(artifactsDir, "01-file-backed-reviewer", "raw-normalized-stream.jsonl"),

@@ -41,6 +41,7 @@ import { createSetupJobManager } from "./setup-jobs.js";
 let root: string;
 let codexBinary: string;
 let oldCodexBin: string | undefined;
+let oldConfigDir: string | undefined;
 
 // The shared setup state machine is exercised over the Terminal (browser_redirect)
 // flow; the D-17 device-code launch has its own focused suite below. Default
@@ -313,12 +314,15 @@ beforeEach(() => {
   writeFileSync(codexBinary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   chmodSync(codexBinary, 0o700);
   oldCodexBin = process.env.CLAUDEXOR_CODEX_BIN;
+  oldConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
   process.env.CLAUDEXOR_CODEX_BIN = codexBinary;
 });
 
 afterEach(() => {
   if (oldCodexBin === undefined) delete process.env.CLAUDEXOR_CODEX_BIN;
   else process.env.CLAUDEXOR_CODEX_BIN = oldCodexBin;
+  if (oldConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+  else process.env.CLAUDEXOR_CONFIG_DIR = oldConfigDir;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -2000,6 +2004,53 @@ describe("setup jobs", () => {
       };
       expect(snap.deviceCode?.userCode).toBe("ABCD-EFGH");
       expect(snap.job.message).toContain("One-time code ready");
+    });
+    await manager.shutdown();
+  });
+
+  it("keeps watching for a device code through an extended journal deadline", async () => {
+    let nowMs = Date.parse("2026-07-29T00:00:00.000Z");
+    const group = processGroupFixture();
+    const manager = createSetupJobManager({
+      rootDir: join(root, "device-code-extended-disclosure"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      spawn: (() => fakeOpener()) as unknown as typeof import("node:child_process").spawn,
+      now: () => new Date(nowMs),
+      loginTimeoutMs: 1_000,
+      monitorPollMs: 1,
+      processGroups: group.service,
+    });
+    await manager.start();
+    const job = manager.create(DEVICE_CODE_REQUEST);
+    writeRunnerStateV2(
+      manager,
+      job.jobId,
+      group.leader,
+      "awaiting_permit",
+      new Date(nowMs).toISOString(),
+    );
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    const originalDeadline = Date.parse(manager.status({ jobId: job.jobId }).deadlineAt!);
+    const extended = manager.extend({ jobId: job.jobId });
+
+    nowMs = originalDeadline + 1;
+    expect(Date.parse(extended.deadlineAt!)).toBeGreaterThan(nowMs);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const manifest = readLoginManifest(manager._store.paths(job.jobId).manifest);
+    atomicPrivateJson(manager._store.paths(job.jobId).runnerDeviceCode, {
+      version: SETUP_LOGIN_PROTOCOL_VERSION,
+      jobId: job.jobId,
+      executionId: manifest.executionId,
+      flow: "chatgptDeviceCode",
+      verificationUrl: "https://chatgpt.com/device",
+      userCode: "EXTD-CODE",
+      disclosedAt: new Date(nowMs).toISOString(),
+    });
+
+    await vi.waitFor(() => {
+      expect(manager.status({ jobId: job.jobId }).message).toContain("One-time code ready");
     });
     await manager.shutdown();
   });

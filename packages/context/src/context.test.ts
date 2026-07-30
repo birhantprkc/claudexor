@@ -242,6 +242,23 @@ describe("evidence packet", () => {
     }
   });
 
+  it("rejects digest-valid packet text with invalid UTF-8", () => {
+    const dir = join(tmp(), "packet-invalid-utf8");
+    const baseSha = "a".repeat(40);
+    const candidateSha = "b".repeat(40);
+    const candidateTree = "c".repeat(40);
+    writeSealedPacket(dir, { baseSha, candidateSha, candidateTree });
+    writeFileSync(join(dir, "TESTS.txt"), Buffer.from([0x74, 0x65, 0x73, 0x74, 0xff]));
+    const manifest = FROZEN_REVIEW_EVIDENCE_FILES.map(
+      (file) => `${digest(readFileSync(join(dir, file)))}  ${file}`,
+    ).join("\n");
+    writeFileSync(join(dir, "MANIFEST.sha256"), `${manifest}\n`);
+
+    expect(() =>
+      verifySealedEvidencePacket({ evidenceDir: dir, candidateSha, candidateTree }),
+    ).toThrow(/sealed packet file TESTS\.txt is not valid UTF-8/);
+  });
+
   it("fails closed on manifest identity, unsealed files, traversal, and stale FREEZE", () => {
     const baseSha = "a".repeat(40);
     const candidateSha = "b".repeat(40);

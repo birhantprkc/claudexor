@@ -75,12 +75,10 @@ export function runProbeIfRequested(argv: readonly string[]): boolean {
 }
 
 export async function main(): Promise<void> {
-  // The probe MUST run before any durable startup so it never binds a socket or
-  // opens the journal (probing a candidate closure must be side-effect-free).
+  // Probe and identity-proven stop must run before any durable startup.
   if (runProbeIfRequested(process.argv.slice(2))) return;
-  // The identity-proven stop reuses the socket-shutdown machinery; it likewise
-  // starts nothing durable.
   if (await runStopIfRequested(process.argv.slice(2))) return;
+  const servingIdentity = engineBuildIdentity();
   ensureDaemonRuntimeRoot();
   const socketPath = defaultSocketPath();
   const writerLease = acquireDaemonWriterLease(socketPath);
@@ -195,6 +193,8 @@ export async function main(): Promise<void> {
         }
         return shutdownRuntime.beginRuntimeReplacement();
       },
+      runtimeIdentity: { version: servingIdentity.version, buildSha: servingIdentity.sha },
+      runtimeLeaseOwner: writerLease.owner,
       runner: async (params, ctx) => {
         const p = normalizeRunStartRequest(params);
         const mode = p.mode;

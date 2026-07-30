@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeOutcomeFacts } from "@claudexor/schema";
 import { makeInteractionBridge } from "./mcp-runner.js";
@@ -244,6 +247,26 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it.each(["__run_cancel", "__run_answer", "__apply_check"])(
+    "fails %s when no daemon can perform the action",
+    async (mode) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(null);
+      try {
+        await expect(
+          mcpSurfaceRunner()({
+            mode,
+            runId: "run-offline",
+            ...(mode === "__run_answer" ? { interactionId: "int-1", answers: { q1: "A" } } : {}),
+          }),
+        ).rejects.toMatchObject({ code: "daemon_unavailable", retryable: true });
+      } finally {
+        connectSpy.mockRestore();
+      }
+    },
+  );
+
   it("preserves the daemon's typed error field for a missing-run belt roundtrip", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
@@ -272,50 +295,58 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
-  it("degrades a raised post-terminal detail problem into detailProblem instead of eating the result", async () => {
-    // The run FINISHED: a typed 500 (e.g. run_facts_invalid) on the follow-up
-    // GET /runs/:id must ride the result as detailProblem with the runId
-    // preserved — never erase the terminal outcome by rethrowing.
-    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
-    const daemonRun = await import("./daemon-run.js");
-    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
-      client: {} as never,
-      addr: { baseUrl: "http://x", token: "t" } as never,
-    });
-    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
-      runId: "run-done",
-      runDir: "",
-      status: "succeeded",
-      jobId: "job-done",
-    });
-    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockRejectedValue(
-      Object.assign(new Error("canonical RunFacts receipt is invalid"), {
-        code: "run_facts_invalid",
-        retryable: false,
-      }),
-    );
-    try {
-      const result = (await mcpSurfaceRunner()({ mode: "agent", prompt: "go" })) as Record<
-        string,
-        unknown
-      >;
-      expect(result).toMatchObject({
-        runId: "run-done",
-        status: "succeeded",
-        detailProblem: {
-          code: "run_facts_invalid",
-          message: "canonical RunFacts receipt is invalid",
-          retryable: false,
-        },
+  it.each(["run_facts_invalid", "invalid_service_response"])(
+    "preserves a post-terminal %s problem without trusting local artifacts",
+    async (problemCode) => {
+      // The run FINISHED: a typed 500 (e.g. run_facts_invalid) on the follow-up
+      // GET /runs/:id must ride the result as detailProblem with the runId
+      // preserved — never erase the terminal outcome by rethrowing.
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
       });
-      expect(result["applyEligibility"]).toBeNull();
-      expect(result["spendUsd"]).toBeNull();
-    } finally {
-      ensureSpy.mockRestore();
-      enqueueSpy.mockRestore();
-      detailSpy.mockRestore();
-    }
-  });
+      const runDir = mkdtempSync(join(tmpdir(), "claudexor-mcp-detail-problem-"));
+      mkdirSync(join(runDir, "final"));
+      writeFileSync(join(runDir, "final", "patch.diff"), "local fallback must not be trusted\n");
+      const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+        runId: "run-done",
+        runDir,
+        status: "succeeded",
+        jobId: "job-done",
+      });
+      const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockRejectedValue(
+        Object.assign(new Error("canonical run detail is invalid"), {
+          code: problemCode,
+          retryable: false,
+        }),
+      );
+      try {
+        const result = (await mcpSurfaceRunner()({ mode: "agent", prompt: "go" })) as Record<
+          string,
+          unknown
+        >;
+        expect(result).toMatchObject({
+          runId: "run-done",
+          status: "succeeded",
+          summary: "run succeeded",
+          detailProblem: {
+            code: problemCode,
+            message: "canonical run detail is invalid",
+            retryable: false,
+          },
+        });
+        expect(result["applyEligibility"]).toBeNull();
+        expect(result["spendUsd"]).toBeNull();
+      } finally {
+        ensureSpy.mockRestore();
+        enqueueSpy.mockRestore();
+        detailSpy.mockRestore();
+        rmSync(runDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("marks an unexpected post-terminal throw with the child terminal evidence for the belt", async () => {
     // Field contract with the delegation belt (childTerminalEvidence): a throw

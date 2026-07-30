@@ -23,12 +23,29 @@ if (!existsSync(distEntry)) {
 }
 const { defaultClaudexorTools } = await import(distEntry);
 const tools = defaultClaudexorTools(async () => "");
-const runTool = tools.find((t) => t.name === "claudexor_run");
-if (!runTool) {
-  console.error("mcp-cli-parity: claudexor_run tool missing from defaultClaudexorTools");
+const RUN_TOOL_NAMES = [
+  "claudexor_ask",
+  "claudexor_run",
+  "claudexor_best_of",
+  "claudexor_plan",
+  "claudexor_create",
+];
+const AGENT_RUN_TOOL_NAMES = ["claudexor_run", "claudexor_best_of", "claudexor_create"];
+const runTools = RUN_TOOL_NAMES.map((name) => tools.find((tool) => tool.name === name));
+if (runTools.some((tool) => !tool)) {
+  const missing = RUN_TOOL_NAMES.filter((_, index) => !runTools[index]);
+  console.error(`mcp-cli-parity: run tool(s) missing: ${missing.join(", ")}`);
   process.exit(1);
 }
-const mcpArgs = Object.keys(runTool.inputSchema.properties ?? {}).sort();
+const mcpArgTools = new Map();
+for (const tool of runTools) {
+  for (const arg of Object.keys(tool.inputSchema.properties ?? {})) {
+    const owners = mcpArgTools.get(arg) ?? [];
+    owners.push(tool.name);
+    mcpArgTools.set(arg, owners);
+  }
+}
+const mcpArgs = [...mcpArgTools.keys()].sort();
 
 // The CLI side: the built command registry (the ONE owner of the CLI
 // surface) — no source regex; a refactor that breaks the registry import
@@ -66,27 +83,29 @@ const MCP_TO_CLI = {
   n: { cli: "n" },
   deepScan: {
     cli: null,
+    tools: ["claudexor_ask"],
     reason: "boolean strategy flag; the CLI spells it --deep-scan (see BOOLEAN_FLAG_MAP)",
   },
   council: {
     cli: null,
+    tools: ["claudexor_plan"],
     reason: "boolean plan strategy flag; the CLI spells it --council (see BOOLEAN_FLAG_MAP)",
   },
   repoPath: {
     cli: null,
     reason: "the CLI runs in its cwd; MCP hosts pass the project root explicitly",
   },
-  tests: { cli: "test" },
+  tests: { cli: "test", tools: AGENT_RUN_TOOL_NAMES },
   paidBudget: {
     cli: "max-usd",
     reason:
       "the CLI scalar projects to PaidBudget.finite; omission preserves the configured tagged budget",
   },
   access: { cli: "access" },
-  reviewerPanel: { cli: "reviewer-panel" },
-  reviewerModels: { cli: "reviewer-model" },
-  reviewerEfforts: { cli: "reviewer-effort" },
-  protectedPathApprovals: { cli: "allow-protected-path" },
+  reviewerPanel: { cli: "reviewer-panel", tools: AGENT_RUN_TOOL_NAMES },
+  reviewerModels: { cli: "reviewer-model", tools: AGENT_RUN_TOOL_NAMES },
+  reviewerEfforts: { cli: "reviewer-effort", tools: AGENT_RUN_TOOL_NAMES },
+  protectedPathApprovals: { cli: "allow-protected-path", tools: AGENT_RUN_TOOL_NAMES },
 };
 
 // BOOLEAN CLI strategy flags -> how MCP expresses them (or a reason).
@@ -96,8 +115,8 @@ const BOOLEAN_FLAG_MAP = {
     reason:
       "codex login flow opt-in on `claudexor auth login` (an ops verb, not a run tool); MCP hosts never drive native logins — setup jobs carry loginFlow on the control API instead",
   },
-  "deep-scan": { mcp: "deepScan", reason: "ask deep-scan strategy; same arg on every run tool" },
-  council: { mcp: "council", reason: "plan council strategy; same arg on every run tool" },
+  "deep-scan": { mcp: "deepScan", reason: "ask-only deep-scan strategy" },
+  council: { mcp: "council", reason: "plan-only council strategy" },
   "until-clean": { mcp: null, reason: "convergence strategy; not exposed one-shot (CLI/app only)" },
   create: { mcp: null, reason: "encoded in the claudexor_create TOOL NAME" },
   delegate: {
@@ -202,11 +221,18 @@ for (const arg of mcpArgs) {
       `MCP arg '${arg}' maps to CLI flag '--${mapping.cli}' which is not in VALUE_FLAGS`,
     );
   }
+  const expectedTools = mapping.tools ?? RUN_TOOL_NAMES;
+  const actualTools = mcpArgTools.get(arg) ?? [];
+  if (JSON.stringify(actualTools) !== JSON.stringify(expectedTools)) {
+    failures.push(
+      `MCP arg '${arg}' is exposed by [${actualTools.join(", ")}] but its declared scope is [${expectedTools.join(", ")}]`,
+    );
+  }
 }
 for (const declared of Object.keys(MCP_TO_CLI)) {
-  if (!mcpArgs.includes(declared)) {
+  if (!mcpArgTools.has(declared)) {
     failures.push(
-      `MCP_TO_CLI declares '${declared}' but the claudexor_run schema does not expose it — stale mapping`,
+      `MCP_TO_CLI declares '${declared}' but no run-tool schema exposes it — stale mapping`,
     );
   }
 }

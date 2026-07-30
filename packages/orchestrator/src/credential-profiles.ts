@@ -6,6 +6,7 @@ import type {
   HarnessEvent,
   QuotaSnapshot,
 } from "@claudexor/schema";
+import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import { estimateEffectiveAuthRoute } from "@claudexor/schema";
 import {
@@ -21,6 +22,7 @@ export {
   profileHeadroomBreach,
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
+  staticRotationCandidates,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
 
@@ -49,11 +51,7 @@ export async function selectedProfileAvailability(input: {
   registry: readonly CredentialProfile[];
   profileId?: string | null;
   harnessId: string;
-  probe?: (profile: CredentialProfile) => Promise<{
-    availability: string;
-    verification: string;
-    detail?: string | null;
-  }>;
+  probe?: (profile: CredentialProfile) => Promise<CredentialProfileStatus>;
 }): Promise<string | null> {
   if (!input.profileId) return null;
   let profile: CredentialProfile;
@@ -63,7 +61,7 @@ export async function selectedProfileAvailability(input: {
     return error instanceof Error ? error.message : String(error);
   }
   if (!input.probe) return `harness "${input.harnessId}" has no profile probe`;
-  const result = await input.probe(profile);
+  const result = await probeCredentialProfileStatus(profile, input.probe);
   return profileStatusAdmits(profile, result)
     ? "available"
     : (result.detail ?? `${result.availability}/${result.verification}`);
@@ -97,7 +95,14 @@ export async function probeCredentialProfileStatus(
     };
   }
   try {
-    return await probe(profile);
+    const result = CredentialProfileStatusSchema.parse(await probe(profile));
+    if (result.profile_id !== profile.profile_id || result.harness_id !== profile.harness_id) {
+      throw new Error("profile readiness probe returned status for a different profile");
+    }
+    return {
+      ...result,
+      ...(result.detail === undefined ? {} : { detail: redactSecrets(result.detail) }),
+    };
   } catch (error) {
     return {
       profile_id: profile.profile_id,

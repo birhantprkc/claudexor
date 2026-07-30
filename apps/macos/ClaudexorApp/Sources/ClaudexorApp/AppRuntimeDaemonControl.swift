@@ -7,8 +7,9 @@ import ClaudexorKit
 //  - probeIdentity: spawn the app-bundled Node against the unpacked closure's
 //    daemon with `--probe` (side-effect-free exact identity, no socket).
 //  - stopForRuntimeReplacement: spawn the app-bundled Node against the
-//    app-bundled daemon with `--stop`, which uses the daemon-owned atomic
-//    idle/admission fence plus identity-proven termination confirmation.
+//    app-bundled daemon with `--stop <observed-version> <observed-sha>`, which
+//    uses the daemon-owned identity/idle/admission fence plus identity-proven
+//    termination confirmation.
 //  - start: DaemonLauncher (relaunch against the ACTIVE pointer).
 //  - isBusy / handshakeIdentity: injected async closures over the app's
 //    GatewayClient (active-runs listing / protocol handshake), so this struct
@@ -44,12 +45,13 @@ struct AppRuntimeDaemonControl: RuntimeDaemonControl {
         }
     }
 
-    func stopForRuntimeReplacement() async throws {
+    func stopForRuntimeReplacement(expectedIdentity: RuntimeClosureIdentity) async throws {
         guard let node = DaemonLauncher.bundledNode, let daemon = DaemonLauncher.bundledDaemon else {
             throw RuntimeInstallError.io("no bundled daemon to drive the identity-proven stop")
         }
         guard let execution = Self.runNodeJSONExecution(
-            [daemon.path, "--stop"], node: node, timeout: 30)
+            [daemon.path, "--stop", expectedIdentity.version, expectedIdentity.buildSha],
+            node: node, timeout: 30)
         else {
             throw RuntimeInstallError.io("identity-proven daemon stop did not run")
         }

@@ -27,10 +27,15 @@ export interface DaemonFacadeClient {
       idempotencyRequest?: unknown;
       operation?: string;
     },
-  ): Promise<{ id: string; state: string }>;
+  ): Promise<{ id: string; state: string; reused?: boolean }>;
   findAccepted?(
     params: unknown,
-    options: { idempotencyKey: string; clientId?: string; operation?: string },
+    options: {
+      idempotencyKey: string;
+      clientId?: string;
+      operation?: string;
+      idempotencyRequest?: unknown;
+    },
   ): Promise<DaemonRunRecord | null>;
   status(id: string): Promise<DaemonRunRecord>;
   list(): Promise<DaemonRunRecord[]>;

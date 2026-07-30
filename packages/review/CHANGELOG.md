@@ -8,6 +8,16 @@
 - Build each native reviewer workspace from the Git-visible candidate inventory
   plus exact diff postimages, keeping unrelated ignored local state outside the
   separately copied evidence packet.
+- Persist candidate review-runtime identity, native auth routes, ignored-setting
+  evidence, and strict sealed completion envelopes so schema-v5 release sealing
+  can derive both required full-context verdicts from disk instead of trusting
+  caller labels.
+- For frozen release review, persist the exact submitted prompt, session,
+  live external-context/web policy, runtime-entry digest, normalized events,
+  and deterministic transcript projection; disable internal transient retries
+  so an operator retry starts a fresh evidence wave.
+- Require a sealed reviewer completion to be exactly one JSON value, with no
+  prose, code fence, or duplicate envelope around it.
 - @claudexor/config@3.2.0
 - @claudexor/context@3.2.0
 - @claudexor/core@3.2.0

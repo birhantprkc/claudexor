@@ -14,10 +14,8 @@ import {
 } from "./run-detail-projections.js";
 import { primaryOutputForCli } from "./primary-output.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
+import { absentDaemonRecovery, BELT_DAEMON_LOST } from "./mcp-daemon-unavailable.js";
 import { projectImmediateRunDetail, projectRecoveryRunDetail } from "./mcp-run-projections.js";
-
-const BELT_DAEMON_LOST =
-  "the Claudexor delegation belt cannot reach its parent daemon; retry the parent run after repairing or restarting the runtime";
 
 export interface SurfaceRunnerHooks {
   onEvent?: (event: any) => void;
@@ -186,7 +184,10 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       // second normal-path artifact owner.
       const canonicalPrimary = projectRunPrimaryOutput(detail);
       const localFallback =
-        (p?.deferred !== true || isTerminalLifecycle(out.status)) && !detail && out.runDir
+        (p?.deferred !== true || isTerminalLifecycle(out.status)) &&
+        !detail &&
+        !detailProblem &&
+        out.runDir
           ? primaryOutputForCli(out.runDir, mode, {
               failure: projectRunFailure(detail),
               lifecycle: isTerminalLifecycle(out.status)
@@ -268,13 +269,7 @@ async function recoveryQuery(
   // Read-only recovery must not BOOT a daemon: with no daemon there are no
   // daemon-tracked runs to recover — say so instead of spawning one.
   const conn = await connectDaemonIfRunning();
-  if (!conn) {
-    return {
-      summary: context.beltContext
-        ? BELT_DAEMON_LOST
-        : "the Claudexor daemon is not running — there are no live daemon-tracked runs to recover (start one with `claudexor daemon start` or run a mutating tool first)",
-    };
-  }
+  if (!conn) return absentDaemonRecovery(mode, context.beltContext);
   const { addr } = conn;
   const get = async (path: string): Promise<Record<string, unknown>> => {
     const res = await controlApiFetch(addr, path, {

@@ -5,6 +5,7 @@ import {
   AttemptPostStreamError,
   attemptFailureCost,
   attemptFailureRecord,
+  settleGrantedAttemptLease,
   withAttemptFailureCost,
 } from "./attemptUsageCost.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
@@ -94,6 +95,33 @@ describe("processAttemptUsage", () => {
       phase: "harness",
       errors: ["redacted failure"],
     });
+  });
+
+  it("releases a granted lease on a pre-stream failure without inventing exact-zero cost", () => {
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const first = ledger.reserve({
+      taskId: "task",
+      attemptId: "p01",
+      intent: "plan",
+      harnessId: "claude",
+    });
+    expect(first.granted).toBe(true);
+    settleGrantedAttemptLease({
+      ledger,
+      leaseId: first.lease?.lease_id ?? "",
+      attemptId: "p01",
+      harnessId: "claude",
+      costUsd: 0,
+      costEstimated: false,
+      preStreamFailureSource: "planner-pre-stream",
+    });
+    const second = ledger.reserve({
+      taskId: "task",
+      attemptId: "p02",
+      intent: "plan",
+      harnessId: "claude",
+    });
+    expect(second.granted).toBe(true);
   });
 
   it("splits usage by each event route when a retry changes auth", () => {

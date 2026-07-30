@@ -6,7 +6,7 @@ import type {
   Thread,
   ThreadTurn,
 } from "@claudexor/schema";
-import { hashJson, isClaudexorOwnedRuntimePath, newId, nowIso } from "@claudexor/util";
+import { hashJson, isClaudexorOwnedRuntimePath } from "@claudexor/util";
 import { commandProjection, type CommandStore } from "./command-store.js";
 import { JournalManager, type JournalProjectionSlot } from "./journal-manager.js";
 import { interactionProjection, type InteractionStore } from "./interactions.js";
@@ -14,6 +14,7 @@ import {
   operatorDecisionProjection,
   type OperatorDecisionRecord,
   type OperatorDecisionStore,
+  type RecordedOperatorDecision,
 } from "./operator-decisions.js";
 import { runEventProjection, type RunEventStore } from "./run-events.js";
 import type { ProjectStore } from "./projects.js";
@@ -26,6 +27,11 @@ import {
   type UpdateThreadInput,
 } from "./threads.js";
 import type { CommandAuthority } from "./command-authority.js";
+import {
+  beginDeliveryCommand,
+  completeDeliveryCommand,
+  failDeliveryCommand,
+} from "./delivery-command.js";
 
 interface ProjectPartition {
   manager: JournalManager;
@@ -79,11 +85,19 @@ export class ProjectPartitions implements CommandAuthority {
     return this.decisionStoreForRequest(params).get(runId);
   }
 
+  findOperatorDecisionByIdempotency(
+    params: unknown,
+    runId: string,
+    idempotency: { key: string; client: string; request: unknown },
+  ): OperatorDecisionRecord | null {
+    return this.decisionStoreForRequest(params).findByIdempotency(runId, idempotency);
+  }
+
   recordOperatorDecision(
     params: unknown,
     decision: OperatorDecisionRecord,
     idempotency?: { key: string; client: string; request: unknown },
-  ): OperatorDecisionRecord {
+  ): RecordedOperatorDecision {
     return this.decisionStoreForRequest(params).record(decision, idempotency);
   }
 
@@ -112,41 +126,15 @@ export class ProjectPartitions implements CommandAuthority {
     params: unknown,
     input: { key: string; client: string; operation: string; request: unknown },
   ) {
-    const store = this.forRequest(params);
-    const accepted = store.accept({
-      id: newId("delivery"),
-      params,
-      idempotencyKey: input.key,
-      clientId: input.client,
-      operation: `delivery.${input.operation}`,
-      idempotencyParams: input.request,
-    });
-    const record = accepted.reused
-      ? accepted.record
-      : store.update(accepted.record.id, { state: "running", startedAt: nowIso() });
-    return { ...record, reused: accepted.reused };
+    return beginDeliveryCommand(this.forRequest(params), params, input);
   }
 
   completeDelivery(id: string, result: unknown): void {
-    const store = this.findById(id);
-    if (!store) throw new Error(`delivery authority lost command ${id}`);
-    store.update(id, { state: "succeeded", result, finishedAt: nowIso() });
+    completeDeliveryCommand(this.findById(id), id, result);
   }
 
   failDelivery(id: string, error: unknown): void {
-    const store = this.findById(id);
-    if (!store) throw new Error(`delivery authority lost command ${id}`);
-    const value = error && typeof error === "object" ? (error as Record<string, unknown>) : {};
-    store.update(id, {
-      state: "failed",
-      error: error instanceof Error ? error.message : String(error),
-      errorCode: typeof value["code"] === "string" ? value["code"] : undefined,
-      result: {
-        status: typeof value["status"] === "number" ? value["status"] : 500,
-        code: typeof value["code"] === "string" ? value["code"] : null,
-      },
-      finishedAt: nowIso(),
-    });
+    failDeliveryCommand(this.findById(id), id, error);
   }
 
   registerProject(input: Parameters<ProjectStore["register"]>[0]): Project {
@@ -351,6 +339,13 @@ export class ProjectPartitions implements CommandAuthority {
 
   createTurn(id: string, prompt: string, input: CreateTurnInput = {}): ThreadTurn {
     return this.requireThreadStore(id).createTurn(id, prompt, input);
+  }
+
+  findTurnByIdempotency(
+    id: string,
+    input: NonNullable<CreateTurnInput["idempotency"]>,
+  ): ThreadTurn | undefined {
+    return this.requireThreadStore(id).findTurnByIdempotency(id, input);
   }
 
   updateThread(id: string, patch: UpdateThreadInput): Thread {

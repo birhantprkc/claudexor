@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import { createTailBuffer, boundedTail } from "./setup-login-runner.js";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
+import { describe, expect, it, vi } from "vitest";
+import { createTailBuffer, boundedTail, terminateAppServerChild } from "./setup-login-runner.js";
 
 describe("device-login output tail redaction (X224 ring path)", () => {
   it("a secret split by the 4096-byte ring boundary does not survive as a prefix-less fragment", () => {
@@ -22,5 +24,76 @@ describe("device-login output tail redaction (X224 ring path)", () => {
 
   it("boundedTail leaves a whole non-truncated string's leading word intact", () => {
     expect(boundedTail("firstword then rest", false)).toBe("firstword then rest");
+  });
+
+  it("redacts before selecting a direct-string tail boundary", () => {
+    const secret = ["sk", "or", "v1", "BOUNDARYSECRETVALUE1234567890"].join("-");
+    const output = boundedTail(`${"x".repeat(4090)} ${secret} trailing`);
+    expect(output).not.toContain("BOUNDARYSECRETVALUE1234567890");
+    expect(output).toContain("trailing");
+  });
+
+  it.each([4096, 4097])("clamps %i-byte multibyte input on a UTF-8 boundary", (size) => {
+    const text = `${"a".repeat(size - 3)}€`;
+    const output = boundedTail(text);
+    expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(4096);
+    expect(output).not.toContain("�");
+  });
+});
+
+describe("device-login app-server termination", () => {
+  function childThatClosesOn(signalToClose: NodeJS.Signals, delayMs: number) {
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, {
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn((signal: NodeJS.Signals) => {
+        if (signal === signalToClose) {
+          setTimeout(() => {
+            Object.assign(child, { signalCode: signal });
+            child.emit("close", null, signal);
+          }, delayMs);
+        }
+        return true;
+      }),
+    });
+    return child;
+  }
+
+  it("waits for a slow cooperative TERM before returning", async () => {
+    const child = childThatClosesOn("SIGTERM", 10);
+    const close = vi.fn();
+    await terminateAppServerChild(child, { close }, { termGraceMs: 100, killGraceMs: 10 });
+    expect(close).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledTimes(1);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("escalates a TERM-ignoring child and waits for confirmed SIGKILL close", async () => {
+    const child = childThatClosesOn("SIGKILL", 5);
+    await terminateAppServerChild(child, { close: vi.fn() }, { termGraceMs: 1, killGraceMs: 100 });
+    expect(child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+    expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+  });
+
+  it("does not mistake a kill error event for process death", async () => {
+    const child = childThatClosesOn("SIGKILL", 5);
+    child.on("error", () => undefined);
+    const kill = child.kill as ReturnType<typeof vi.fn>;
+    kill.mockImplementation((signal: NodeJS.Signals) => {
+      if (signal === "SIGTERM") child.emit("error", new Error("TERM delivery failed"));
+      if (signal === "SIGKILL") {
+        setTimeout(() => {
+          Object.assign(child, { signalCode: signal });
+          child.emit("close", null, signal);
+        }, 5);
+      }
+      return true;
+    });
+
+    await terminateAppServerChild(child, { close: vi.fn() }, { termGraceMs: 1, killGraceMs: 100 });
+
+    expect(child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+    expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
   });
 });

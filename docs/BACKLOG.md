@@ -39,6 +39,19 @@ deferred; they are recorded here now.
   them to an empty projection through `try?`. The hardened store now refuses
   unsafe files, but disk, permission, or tamper failures are rare and need a
   deliberate user-facing state/error owner rather than a release-loop patch.
+- PDR-07: harden future formal-review and full-gate output roots against
+  same-user symlinked ancestors and pre-existing output collisions. The current
+  release uses fresh, real external directories and the packet verifier binds
+  every published byte, so no candidate or secret boundary failure was
+  reproduced. A later change should give both writers one compact
+  fresh-directory/no-symlink owner instead of adding route-specific checks.
+- PDR-08: let an already completed run apply, thread apply,
+  `accept_clean_patch`, or `revert_run` delivery return its durable same-key
+  result before later mutable/idle gates. The delivery journal currently
+  exposes begin/record but no read-only replay lookup, so closing this sibling
+  correctly needs one authority API shared by all four delivery surfaces. Side
+  effects remain exactly-once today; the rare replay during newer active work
+  returns a fresh refusal rather than its old success.
 
 ## v3.2.0 wave-4 review deferrals
 
@@ -218,11 +231,6 @@ deferred; they are recorded here now.
   `packages/cli`; relocate to a daemon/core-owned module so the CLI stays a
   thin projection of `/v2/quota`. Structural, pre-existing; move only with
   tests riding along.
-- Q-c: review devtool (triad-scope-review.mjs) — run retry eligibility through
-  full checklist validation BEFORE deciding a slot "responded", and persist
-  complete per-attempt telemetry for retried slots (3.0.1-r7 sol criticals,
-  re-observed in the 3.0.2 wave when the gemini slot failed its liveness floor
-  without the promised same-SHA retry).
 
 ## v3.0.3 deferrals (owner decision R2)
 
@@ -324,34 +332,6 @@ revision/etag, already logged above), are intentionally not duplicated.
 - F4B-8: ARCHITECTURE.md garbled parenthetical — should read {type:"chatgpt"}.
 - F4B-9: device-code job.command is prose under "Advanced — terminal command";
   INV-093 intends an operator-runnable fallback.
-
-### Review harness (triad / sealer / coverage tooling)
-
-- Sealer wave-mix fence fail-open when slot records omit reviewWaveId
-  (validateSlotRecord never requires it; first undefined assignment admits the
-  next record).
-- validateSlotRecord does not require liveness_floor_ms — a hand-authored
-  record with live:true and no floor passes.
-- Scope slot promptSha256 never bound to its sub-wave coverage pack digest
-  (only triad slots are bound) — bind every named panel slot.
-- triad-scope-review.mjs: scope record's live stamped BEFORE checklist
-  validation (triad stamps after) — a partial scope response persists
-  live:true beside status partial.
-- triad-scope-review.mjs: slot records call Number(requiredArg("round")) after
-  the paid calls — omitted --round wastes the whole panel spend before
-  throwing; reuse the validated round variable.
-- Submitted prompt is raw while the persisted/digested copy is
-  redactSecrets(prompt) — promptSha256 binds bytes the reviewer did not
-  exactly consume.
-- Notation drift: CLAUDEXOR_BIBLE.md INV-125 + docs/DEVELOPMENT.md say
-  triad@<subwave>=model while the sealer emits <slot>@<sub_wave>:<model> —
-  align wording.
-- review-coverage-check.mjs argv[1] vs import.meta.url compare is
-  platform-dependent (Windows backslashes); normalize via pathToFileURL.
-- Ledger row X177 disposition text still says "interrupted/veto elevate"
-  though 78b3f330 reverted the veto half — amend X177 or cross-reference.
-- Delta-size-aware liveness floor (X34 carryover: floor misfires on
-  micro-deltas).
 
 ### macOS UX (Ф3 advisories)
 

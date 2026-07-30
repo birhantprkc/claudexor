@@ -60,6 +60,7 @@ import {
 } from "./profile-compatibility.js";
 import { remoteFilesystemServices } from "./remote-filesystem.js";
 import { projectRunApplicability } from "./run-applicability.js";
+import { threadTurnServices } from "./thread-turn-services.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 type SetupJobManager = ReturnType<typeof createSetupJobManager>;
@@ -216,37 +217,7 @@ export function controlServices(
       const { threads: rows, problems } = threads.listThreadsResilient();
       return { threads: rows as unknown[], problems: problems as unknown[] };
     },
-    threadDetail: async (id: string) => {
-      const thread = threads.getThread(id);
-      if (!thread) throw Object.assign(new Error(`no such thread: ${id}`), { status: 404 });
-      return {
-        thread: thread as unknown,
-        sessions: threads.sessionsForThread(id) as unknown[],
-        turns: threads.turnsFor(id) as unknown[],
-      };
-    },
-    createThreadTurn: async (
-      id: string,
-      prompt: string,
-      opts: {
-        kind?: unknown;
-        parentRunId?: string | null;
-        planRunId?: string | null;
-        planHash?: string | null;
-        planOverridden?: boolean;
-        attachments?: ResourceAttachmentRef[];
-        idempotency?: { key: string; client: string; request: unknown };
-      },
-    ) =>
-      threads.createTurn(id, prompt, {
-        kind: opts.kind as any,
-        parentRunId: opts.parentRunId,
-        planRunId: opts.planRunId,
-        planHash: opts.planHash,
-        planOverridden: opts.planOverridden,
-        attachments: resources.resolve(opts.attachments),
-        idempotency: opts.idempotency,
-      }),
+    ...threadTurnServices(threads, resources),
     updateThread: async (
       id: string,
       patch: {
@@ -312,16 +283,17 @@ export function controlServices(
       return purged;
     },
     applyThread: async (id: string, opts: ThreadApplyOptions) => applyThreadDiff(threads, id, opts),
-    setTurnEnqueueError: (
-      turnId: string,
-      problem: import("@claudexor/schema").TurnEnqueueProblem,
-    ) => threads.setTurnEnqueueError(turnId, problem),
     listTrust: listTrustService,
     updateTrust: updateTrustService,
     pendingInteractions: (runId: string) => interactions.pendingForRun(runId),
     answerInteraction: (runId: string, interactionId: string, answers: unknown) =>
       interactions.answer(runId, interactionId, answers),
     operatorDecision: (runId: string, params: unknown) => threads.operatorDecision(params, runId),
+    findOperatorDecisionByIdempotency: (
+      runId: string,
+      params: unknown,
+      idempotency: { key: string; client: string; request: unknown },
+    ) => threads.findOperatorDecisionByIdempotency(params, runId, idempotency),
     recordOperatorDecision: (
       runId: string,
       params: unknown,

@@ -130,7 +130,23 @@ describe("ThreadStore", () => {
       },
     };
     const first = s.createTurn(thread.id, "first", input);
+    expect(s.findTurnByIdempotency(thread.id, input.idempotency)?.id).toBe(first.id);
+    expect(
+      s.findTurnByIdempotency(thread.id, {
+        key: "turn-missing",
+        client: "test",
+        request: { threadId: thread.id, prompt: "missing" },
+      }),
+    ).toBeUndefined();
+    expect(s.turnsFor(thread.id)).toHaveLength(1);
     expect(s.createTurn(thread.id, "first", input).id).toBe(first.id);
+    expect(() =>
+      s.findTurnByIdempotency(thread.id, {
+        key: "turn-1",
+        client: "test",
+        request: { prompt: "different" },
+      }),
+    ).toThrow(/different request/);
     expect(() =>
       s.createTurn(thread.id, "different", {
         idempotency: { key: "turn-1", client: "test", request: { prompt: "different" } },
@@ -148,6 +164,7 @@ describe("ThreadStore", () => {
     ).toThrow(/different request/);
     expect(s.turnsFor(other.id)).toEqual([]);
     const reloaded = reload(root, journal);
+    expect(reloaded.findTurnByIdempotency(thread.id, input.idempotency)?.id).toBe(first.id);
     expect(reloaded.createTurn(thread.id, "first", input).id).toBe(first.id);
   });
 
@@ -201,6 +218,39 @@ describe("ThreadStore", () => {
       context: {},
     });
     expect(s.getTurn(turn.id)?.enqueue_error).toBeNull();
+  });
+
+  it("bindTurnRun is idempotent for one run and refuses to rewrite turn history", () => {
+    const { s } = store();
+    const thread = s.createThread({ repoRoot: "/tmp/proj" });
+    const turn = s.createTurn(thread.id, "one immutable turn");
+
+    s.bindTurnRun(turn.id, "run-original");
+    expect(() => s.bindTurnRun(turn.id, "run-original")).not.toThrow();
+    expect(() => s.bindTurnRun(turn.id, "run-different")).toThrowError(
+      expect.objectContaining({
+        code: "turn_run_conflict",
+        status: 409,
+        retryable: false,
+      }),
+    );
+    expect(s.getTurn(turn.id)?.run_id).toBe("run-original");
+    expect(s.getThread(thread.id)?.run_ids).toEqual(["run-original"]);
+    expect(s.getThread(thread.id)?.head_run_id).toBe("run-original");
+  });
+
+  it("binds already accepted turns in command order even when both bubbles exist", () => {
+    const { s } = store();
+    const thread = s.createThread({ repoRoot: "/tmp/proj" });
+    const first = s.createTurn(thread.id, "first accepted command");
+    const second = s.createTurn(thread.id, "second accepted command");
+
+    s.bindTurnRun(first.id, "run-first");
+    s.bindTurnRun(second.id, "run-second");
+    expect(s.getTurn(first.id)?.run_id).toBe("run-first");
+    expect(s.getTurn(second.id)?.run_id).toBe("run-second");
+    expect(s.getThread(thread.id)?.run_ids).toEqual(["run-first", "run-second"]);
+    expect(s.getThread(thread.id)?.head_run_id).toBe("run-second");
   });
 
   it("auto-titles a thread from the first prompt's first line", () => {

@@ -712,6 +712,20 @@ function markdownPlannerAdapter(id: string, planLines: string[]): HarnessAdapter
   };
 }
 
+/** Deterministically fail one attempt during async session/profile preparation,
+ * before a harness process exists. The production method stays private; this
+ * fixture only replaces its runtime slot so the public run contract is tested. */
+function rejectSessionPreparationFor(orch: Orchestrator, harnessId: string): void {
+  const target = orch as unknown as {
+    sessionSpecFields: (...args: unknown[]) => Promise<unknown>;
+  };
+  const original = target.sessionSpecFields.bind(orch);
+  target.sessionSpecFields = async (...args: unknown[]) => {
+    if (args[1] === harnessId) throw new Error(`${harnessId} profile preparation rejected`);
+    return original(...args);
+  };
+}
+
 describe("Orchestrator", () => {
   it("keeps review evidence external even when a candidate path would block the old in-tree copy", () => {
     const source = reapMk(join(tmpdir(), "claudexor-review-source-"));
@@ -1074,6 +1088,15 @@ describe("Orchestrator", () => {
     const events = readFileSync(join(res.runDir, "events.jsonl"), "utf8");
     // The one-shot continuation was launched (and then failed).
     expect(events).toContain('"type":"run.continuation"');
+    const continuationLifecycle = readRunEvents(res.runDir).filter(
+      (event) =>
+        event.payload["attempt_id"] === "a01c" &&
+        (event.type === "harness.started" || event.type === "harness.completed"),
+    );
+    expect(continuationLifecycle.map((event) => event.type)).toEqual([
+      "harness.started",
+      "harness.completed",
+    ]);
     // The retained interrupted candidate is never adopted or terminalized clean.
     expect(existsSync(join(res.runDir, "final", "work_product.yaml"))).toBe(false);
     expect(events).toContain('"type":"run.failed"');
@@ -3359,22 +3382,29 @@ describe("Orchestrator", () => {
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
         "  - profile_id: c",
         "    harness_id: limited",
         "    display_name: C",
         "    credential_kind: api_key",
         "    secret_ref: 'openai:c'",
+        "  - profile_id: d",
+        "    harness_id: limited",
+        "    display_name: D",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:d'",
         "harnesses:",
         "  limited:",
         "    profile_policy:",
         "      limit_action: rotate",
+        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
     try {
       const spawns: Array<{ profile: string | null; session: string }> = [];
+      const probedProfiles: string[] = [];
       const adapter: HarnessAdapter = {
         id: "limited",
         async discover() {
@@ -3395,6 +3425,7 @@ describe("Orchestrator", () => {
           });
         },
         async probeCredentialProfile(profile) {
+          probedProfiles.push(profile.profile_id);
           return {
             profile_id: profile.profile_id,
             harness_id: "limited",
@@ -3458,6 +3489,10 @@ describe("Orchestrator", () => {
       });
       expect(legacyOutcome(res)).not.toBe("failed");
       expect(spawns.map((s) => s.profile)).toEqual(["a", "c"]);
+      // Admission probes the explicit current identity; rotation probes only
+      // the statically-selectable same-kind candidate. Cross-kind b is never
+      // activated merely to discover that policy cannot select it.
+      expect(probedProfiles).toEqual(["a", "c"]);
       // Failover is a NEW vendor session under the new credential.
       expect(new Set(spawns.map((s) => s.session)).size).toBe(2);
       expect(events).toContain("route.profile.rotated");
@@ -3905,8 +3940,8 @@ describe("Orchestrator", () => {
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
         "  - profile_id: c",
         "    harness_id: asker",
         "    display_name: C",
@@ -3916,11 +3951,13 @@ describe("Orchestrator", () => {
         "  asker:",
         "    profile_policy:",
         "      limit_action: rotate",
+        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
     try {
       const profilesSeen: Array<string | null> = [];
+      const probedProfiles: string[] = [];
       const asker = askAdapter("asker", function* (sessionId) {
         const ts = new Date().toISOString();
         yield { type: "started", session_id: sessionId, ts };
@@ -3940,14 +3977,17 @@ describe("Orchestrator", () => {
         yield { type: "message", session_id: sessionId, ts, text: "4" };
         yield { type: "completed", session_id: sessionId, ts };
       });
-      asker.probeCredentialProfile = async (profile) => ({
-        profile_id: profile.profile_id,
-        harness_id: "asker",
-        availability: profile.profile_id === "b" ? "unavailable" : "available",
-        verification: profile.profile_id === "b" ? "failed" : "passed",
-        detail: profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
-        last_verified_at: new Date().toISOString(),
-      });
+      asker.probeCredentialProfile = async (profile) => {
+        probedProfiles.push(profile.profile_id);
+        return {
+          profile_id: profile.profile_id,
+          harness_id: "asker",
+          availability: "available",
+          verification: "passed",
+          detail: "fixture profile verified",
+          last_verified_at: new Date().toISOString(),
+        };
+      };
       const askerRun = asker.run.bind(asker);
       asker.run = (spec) => {
         profilesSeen.push(spec.credential_profile?.profile_id ?? null);
@@ -3967,6 +4007,7 @@ describe("Orchestrator", () => {
       });
       expect(legacyOutcome(res)).toBe("success");
       expect(profilesSeen).toEqual(["a", "c"]);
+      expect(probedProfiles).toEqual(["a", "c"]);
       expect(events).toContain("route.profile.rotated");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4100,29 +4141,39 @@ describe("Orchestrator", () => {
         "    display_name: C",
         "    credential_kind: api_key",
         "    secret_ref: 'openai:c'",
+        "  - profile_id: d",
+        "    harness_id: asker",
+        "    display_name: D",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:d'",
         "harnesses:",
         "  asker:",
         "    profile_policy:",
         "      limit_action: rotate",
+        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
     try {
       const seen: string[] = [];
+      const probedProfiles: string[] = [];
       const asker = askAdapter("asker", function* (sessionId) {
         const ts = new Date().toISOString();
         yield { type: "started", session_id: sessionId, ts };
         yield { type: "message", session_id: sessionId, ts, text: "4" };
         yield { type: "completed", session_id: sessionId, ts };
       });
-      asker.probeCredentialProfile = async (profile) => ({
-        profile_id: profile.profile_id,
-        harness_id: "asker",
-        availability: profile.profile_id === "b" ? "unavailable" : "available",
-        verification: profile.profile_id === "b" ? "failed" : "passed",
-        detail: profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
-        last_verified_at: new Date().toISOString(),
-      });
+      asker.probeCredentialProfile = async (profile) => {
+        probedProfiles.push(profile.profile_id);
+        return {
+          profile_id: profile.profile_id,
+          harness_id: "asker",
+          availability: profile.profile_id === "b" ? "unavailable" : "available",
+          verification: profile.profile_id === "b" ? "failed" : "passed",
+          detail: profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
+          last_verified_at: new Date().toISOString(),
+        };
+      };
       const askerRun = asker.run.bind(asker);
       asker.run = (spec) => {
         seen.push(spec.credential_profile?.profile_id ?? "(none)");
@@ -4165,6 +4216,7 @@ describe("Orchestrator", () => {
       });
       expect(legacyOutcome(res)).toBe("success");
       expect(seen).toEqual(["c"]);
+      expect(probedProfiles).toEqual(["a", "b", "c"]);
       expect(events).toContain("route.profile.headroom_exceeded");
       expect(events).toContain("route.profile.rotated");
     } finally {
@@ -5261,8 +5313,69 @@ describe("Orchestrator", () => {
     expect(report).not.toContain("Raw scout bundle");
     expect(existsSync(join(res.runDir, "final", "explore-findings.yaml"))).toBe(true);
     expect(existsSync(join(res.runDir, "final", "omissions.md"))).toBe(true);
+    expect(
+      readRunEvents(res.runDir).find(
+        (event) => event.type === "output.ready" && event.payload["path"] === "final/report.md",
+      )?.payload["kind"],
+    ).toBe("report");
     const telemetry = readFileSync(join(res.runDir, "final", "telemetry.yaml"), "utf8");
     expect(telemetry).toContain("status: succeeded");
+  });
+
+  it("deep scan records a pre-stream scout failure without disposing a slow admitted sibling's HOME", async () => {
+    const repo = await initRepo();
+    const rejected = askAdapter("scout-setup-fail", () => []);
+    const slowBase = askAdapter("scout-slow", () => []);
+    let scopedHome: string | null = null;
+    let observedHomeAlive = false;
+    const slow: HarnessAdapter = {
+      ...slowBase,
+      async *run(spec) {
+        scopedHome = spec.env["HOME"] ?? null;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        observedHomeAlive = scopedHome !== null && existsSync(scopedHome);
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts,
+          text: "Slow scout report",
+          final: true,
+        };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    const orch = new Orchestrator({
+      registry: new Map<string, HarnessAdapter>([
+        [rejected.id, rejected],
+        [slow.id, slow],
+      ]),
+      reviewers: [],
+    });
+    rejectSessionPreparationFor(orch, rejected.id);
+
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "map the repository",
+      mode: "ask",
+      deepScan: true,
+      n: 2,
+      harnesses: [rejected.id, slow.id],
+    });
+
+    expect(legacyOutcome(res)).toBe("success");
+    expect(observedHomeAlive).toBe(true);
+    expect(scopedHome).not.toBeNull();
+    expect(existsSync(scopedHome ?? "")).toBe(false);
+    expect(readFileSync(join(res.runDir, "final", "report.md"), "utf8")).toContain(
+      "Slow scout report",
+    );
+    expect(
+      readRunEvents(res.runDir).some(
+        (event) => event.type === "harness.started" && event.payload["harness_id"] === rejected.id,
+      ),
+    ).toBe(false);
   });
 
   it("QA-019: n>1 subscription deep-scan scouts admit under a finite cap via the estimate floor (both scouts run)", async () => {
@@ -7766,6 +7879,94 @@ describe("Orchestrator", () => {
     expect(legacyOutcome(res)).toBe("failed");
     expect(existsSync(join(res.runDir, "final", "plan.md"))).toBe(false);
     expect(res.candidates.every((c) => c.status !== "success")).toBe(true);
+  });
+
+  it("council contains a pre-stream member failure and keeps the shared HOME through a slow sibling", async () => {
+    const repo = await initRepo();
+    const base = councilPlannerAdapter("planner-slow", "slow");
+    const homeObservations: boolean[] = [];
+    let scopedHome: string | null = null;
+    const slow: HarnessAdapter = {
+      ...base,
+      async *run(spec) {
+        scopedHome = spec.env["HOME"] ?? null;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        homeObservations.push(scopedHome !== null && existsSync(scopedHome));
+        yield* base.run(spec);
+      },
+    };
+    const rejected = councilPlannerAdapter("planner-setup-fail", "fail");
+    const orch = new Orchestrator({
+      registry: new Map<string, HarnessAdapter>([
+        [rejected.id, rejected],
+        [slow.id, slow],
+      ]),
+      reviewers: [],
+    });
+    rejectSessionPreparationFor(orch, rejected.id);
+
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "design the feature",
+      mode: "plan",
+      council: true,
+      n: 2,
+      harnesses: [rejected.id, slow.id],
+    });
+
+    expect(legacyOutcome(res)).toBe("success");
+    expect(homeObservations.length).toBeGreaterThanOrEqual(1);
+    expect(homeObservations.every(Boolean)).toBe(true);
+    expect(scopedHome).not.toBeNull();
+    expect(existsSync(scopedHome ?? "")).toBe(false);
+    expect(
+      readRunEvents(res.runDir).some(
+        (event) => event.type === "harness.started" && event.payload["harness_id"] === rejected.id,
+      ),
+    ).toBe(false);
+    expect(readFileSync(join(res.runDir, "council", "membership.yaml"), "utf8")).toContain(
+      "degraded: true",
+    );
+  });
+
+  it("plan failure uses the dominant typed harness remediation and redacts the composed error", async () => {
+    const repo = await initRepo();
+    const token = `sk-${"a".repeat(48)}`;
+    const timeoutPlanner: HarnessAdapter = {
+      ...councilPlannerAdapter("planner-timeout", "timeout"),
+      async *run(spec) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: spec.session_id, ts };
+        yield {
+          type: "status",
+          session_id: spec.session_id,
+          ts,
+          transient: { kind: "timeout", retry_delay_ms: 0 },
+        };
+        yield {
+          type: "error",
+          session_id: spec.session_id,
+          ts,
+          error: `planner timed out with ${token}`,
+        };
+        yield { type: "completed", session_id: spec.session_id, ts };
+      },
+    };
+    const res = await new Orchestrator({
+      registry: new Map([[timeoutPlanner.id, timeoutPlanner]]),
+      reviewers: [],
+    }).run({
+      repoRoot: repo,
+      prompt: "design the feature",
+      mode: "plan",
+      harnesses: [timeoutPlanner.id],
+    });
+    expect(legacyOutcome(res)).toBe("failed");
+    const failure = readFileSync(join(res.runDir, "final", "failure.yaml"), "utf8");
+    expect(failure).toContain("went silent");
+    expect(failure).not.toMatch(/[Rr]e-authenticate/);
+    expect(failure).not.toContain(token);
+    expect(readFileSync(join(res.runDir, "final", "summary.md"), "utf8")).not.toContain(token);
   });
 
   it("keeps a blocked Council member above an interrupted peer in terminal precedence", async () => {

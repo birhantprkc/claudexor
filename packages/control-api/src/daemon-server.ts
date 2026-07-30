@@ -40,12 +40,11 @@ import {
 import { projectTurnRunCards } from "./thread-projection.js";
 import { projectSession, projectThread, projectTurn } from "./thread-projection.js";
 import {
-  chainThreadMutation,
   handleThreadTurnCreate,
   handleThreadTurnRetry,
   type ThreadTurnRouteCtx,
 } from "./thread-turn-routes.js";
-import { assertThreadIdle, threadIdOfRun } from "./thread-mutation.js";
+import { chainIdleRunMutation, chainThreadMutation } from "./thread-mutation.js";
 import {
   handleThreadLifecycleRoutes,
   type ThreadLifecycleRouteCtx,
@@ -73,6 +72,7 @@ import {
   type RunApplyRouteContext,
 } from "./run-apply-routes.js";
 import { rerunWithFeedback } from "./decision-rerun.js";
+import { acceptRiskDecision, type RiskDecisionBody } from "./decision-accept-risk.js";
 export { normalizeRunStartRequest } from "./run-start.js";
 import { candidatesFor } from "./candidates.js";
 import { handleProjectRoute, type ProjectRouteServices } from "./project-routes.js";
@@ -277,12 +277,17 @@ export interface DaemonControlApiOptions {
         answers: unknown,
       ) => { status: string; message?: string };
       operatorDecision?: (runId: string, params: unknown) => ControlOperatorDecisionRecord | null;
+      findOperatorDecisionByIdempotency?: (
+        runId: string,
+        params: unknown,
+        idempotency: { key: string; client: string; request: unknown },
+      ) => ControlOperatorDecisionRecord | null;
       recordOperatorDecision?: (
         runId: string,
         params: unknown,
         decision: ControlOperatorDecisionRecord,
         idempotency?: { key: string; client: string; request: unknown },
-      ) => ControlOperatorDecisionRecord;
+      ) => { record: ControlOperatorDecisionRecord; reused: boolean };
       createThread?: (input: unknown) => Promise<unknown>;
       listThreads?: () => Promise<{ threads: unknown[]; problems?: unknown[] }>;
       threadDetail?: (
@@ -301,6 +306,10 @@ export interface DaemonControlApiOptions {
           idempotency?: { key: string; client: string; request: unknown };
         },
       ) => Promise<unknown>;
+      findThreadTurnByIdempotency?: (
+        id: string,
+        idempotency: { key: string; client: string; request: unknown },
+      ) => Promise<{ id: string } | null>;
       updateThread?: (
         id: string,
         patch: {
@@ -805,8 +814,11 @@ export class DaemonControlApiServer {
           services: this.opts.services,
           findRun: (id) => this.findRun(id),
           waitForRunStart: (id) => this.waitForRunStart(id),
+          serializeThreadMutation: (threadId, work) =>
+            chainThreadMutation(this.threadTurnChains, threadId, work),
           json: (response, status, body) => this.json(response, status, body),
-          requestError: (response, error) => this.requestError(response, error),
+          requestError: (response, error, fallbackStatus) =>
+            this.requestError(response, error, fallbackStatus),
         },
         method,
         path,
@@ -1078,79 +1090,24 @@ export class DaemonControlApiServer {
       }
 
       if (body.action === "accept_risk" || body.action === "override_needs_human") {
-        const decisionBody = body;
-        const decisionAction: "accept_risk" | "override_needs_human" = body.action;
         try {
-          return await this.chainRunMutation(rec, async () => {
-            // D-16: a work_state veto (the model attested needs_input / incomplete)
-            // is NON-OVERRIDABLE — a risk acceptance cannot supply missing input,
-            // and the delivery gate refuses the override on that axis. Reject
-            // accept_risk with a TYPED problem here instead of recording a false
-            // "Apply is now available" ACK that the gate would then refuse.
-            const workVeto = this.runWorkStateVeto(rec);
-            if (workVeto) {
-              return this.json(res, 409, {
-                error:
-                  workVeto === "needs_input"
-                    ? "run reported it needs more input; a risk override cannot supply the missing input — re-run with the input (rerun_with_feedback)"
-                    : "run reported the work is incomplete; a risk override cannot finish it — re-run until it completes (rerun_with_feedback)",
-                code: "work_state_needs_input",
-              });
-            }
-            // The override unblocks a NEEDS-DECISION run (review blocked /
-            // checks failed, D8); recording one elsewhere would claim an apply
-            // permission that does not exist.
-            if (!this.runNeedsDecision(rec)) {
-              return this.json(res, 409, {
-                error:
-                  rec.state === "succeeded"
-                    ? "run does not need a decision; apply it directly if its review is clean (no risk override needed)"
-                    : `run is ${rec.state}; risk overrides only unblock needs-decision runs (use rerun_with_feedback instead)`,
-              });
-            }
-            const patch = readPatch(rec);
-            if (patch === null)
-              return this.json(res, 409, {
-                error: "no patch artifact; there is nothing to unblock for apply",
-              });
-            const decision = this.recordOperatorDecision(
-              rec,
-              {
-                action: decisionAction,
-                findingIds: decisionBody.findingIds,
-                acceptedRisks: decisionBody.acceptedRisks,
-                patchSha256: sha256(patch),
-                decidedAt: nowIso(),
-              },
-              {
-                key: decisionKey,
-                client: "control-api",
-                request: { runId: rec.runId ?? rec.id, body: decisionBody },
-              },
-            );
-            try {
-              writeOperatorDecisionProjection(rec, decision);
-              appendRunAuditEvent(rec, "control.applied", {
-                decision: decisionAction,
-                finding_ids: decisionBody.findingIds,
-                accepted_risks: decisionBody.acceptedRisks,
-              });
-            } catch {
-              // Journal authority remains queryable and replayable by Idempotency-Key.
-            }
-            return this.json(
-              res,
-              200,
-              ControlRunDecisionResponse.parse({
-                accepted: true,
-                status: "applied",
-                // Honest ACK (QA-032B): nothing is mutated at decision time. The
-                // risk is accepted for this exact patch; Apply is now available
-                // and a fresh final check runs just-in-time before any mutation.
-                message: `${decisionAction} recorded for this exact patch; Apply is now available and will run a fresh final check before changing the project`,
-              }),
-            );
-          });
+          return await acceptRiskDecision(
+            {
+              services: this.opts.services,
+              chainMutation: (record, work) => this.chainRunMutation(record, work),
+              workStateVeto: (record) => this.runWorkStateVeto(record),
+              needsDecision: (record) => this.runNeedsDecision(record),
+              readPatch,
+              writeProjection: writeOperatorDecisionProjection,
+              appendAudit: (record, payload) =>
+                appendRunAuditEvent(record, "control.applied", payload),
+              json: (response, status, responseBody) => this.json(response, status, responseBody),
+            },
+            rec,
+            body as RiskDecisionBody,
+            decisionKey,
+            res,
+          );
         } catch (error) {
           return this.requestError(res, error);
         }
@@ -1287,19 +1244,26 @@ export class DaemonControlApiServer {
         }
       }
 
-      return rerunWithFeedback(
-        {
-          daemon: this.opts.daemon,
-          services: this.opts.services,
-          waitForRunStart: (id) => this.waitForRunStart(id),
-          appendAudit: (record, payload) => appendRunAuditEvent(record, "control.applied", payload),
-          json: (response, status, responseBody) => this.json(response, status, responseBody),
-        },
-        rec,
-        body,
-        decisionKey,
-        res,
-      );
+      try {
+        return await rerunWithFeedback(
+          {
+            daemon: this.opts.daemon,
+            services: this.opts.services,
+            serializeThreadMutation: (threadId, work) =>
+              chainThreadMutation(this.threadTurnChains, threadId, work),
+            waitForRunStart: (id) => this.waitForRunStart(id),
+            appendAudit: (record, payload) =>
+              appendRunAuditEvent(record, "control.applied", payload),
+            json: (response, status, responseBody) => this.json(response, status, responseBody),
+          },
+          rec,
+          body,
+          decisionKey,
+          res,
+        );
+      } catch (error) {
+        return this.requestError(res, error, 500);
+      }
     }
 
     if (method === "GET" && path === "/harnesses") {
@@ -2020,26 +1984,8 @@ export class DaemonControlApiServer {
     return state === "needs_input" || state === "incomplete" ? state : null;
   }
 
-  private recordOperatorDecision(
-    rec: DaemonRunRecord,
-    decision: ControlOperatorDecisionRecord,
-    idempotency?: { key: string; client: string; request: unknown },
-  ): ControlOperatorDecisionRecord {
-    const record = this.opts.services?.recordOperatorDecision;
-    if (!record) {
-      throw Object.assign(new Error("operator decisions are not supported by this engine build"), {
-        status: 501,
-      });
-    }
-    return record(rec.runId ?? rec.id, rec.params, decision, idempotency);
-  }
   private chainRunMutation<T>(rec: DaemonRunRecord, work: () => Promise<T>): Promise<T> {
-    const threadId = threadIdOfRun(rec);
-    if (!threadId) return work();
-    return chainThreadMutation(this.threadTurnRouteCtx(), threadId, async () => {
-      await assertThreadIdle(rec, () => this.opts.daemon.list());
-      return work();
-    });
+    return chainIdleRunMutation(this.threadTurnChains, this.opts.daemon, rec, work);
   }
 
   private threadTurnRouteCtx(): ThreadTurnRouteCtx {
@@ -2056,6 +2002,7 @@ export class DaemonControlApiServer {
       daemon: this.opts.daemon,
       threadDetail: services.threadDetail as NonNullable<typeof services.threadDetail>,
       createThreadTurn: services.createThreadTurn as NonNullable<typeof services.createThreadTurn>,
+      findThreadTurnByIdempotency: services.findThreadTurnByIdempotency,
       setTurnEnqueueError: services.setTurnEnqueueError,
       threadTurnChains: this.threadTurnChains,
     };

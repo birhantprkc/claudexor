@@ -62,6 +62,35 @@ describe("daemonOutcomeSummary (P2: a reason on every non-clean daemon terminal,
       }),
     ).toBe("run failed (stuck_no_progress)");
   });
+
+  it.each([
+    ["needs_input", "input_required"],
+    ["incomplete", "work_incomplete"],
+  ] as const)("surfaces a succeeded %s work-state veto", (state, reason) => {
+    const summary = daemonOutcomeSummary({
+      runId: "r-work-state",
+      status: "succeeded",
+      outcomeFacts: makeOutcomeFacts("succeeded", {
+        reason,
+        work_state: {
+          state,
+          source: "constrained",
+          ...(state === "needs_input"
+            ? {
+                required_inputs: [
+                  {
+                    kind: "decision" as const,
+                    locator: null,
+                    description: "Choose a target",
+                  },
+                ],
+              }
+            : {}),
+        },
+      }),
+    });
+    expect(summary).toContain(`run succeeded (${reason})`);
+  });
 });
 
 describe("enqueueAndAwait typed ControlProblem transport", () => {

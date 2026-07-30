@@ -49,6 +49,7 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
     private(set) var stops = 0
     private(set) var starts = 0
     private(set) var startedScripts: [URL] = []
+    private(set) var stoppedIdentities: [RuntimeClosureIdentity] = []
 
     func isBusy() async -> Bool? {
         let delay = lock.withLock { busyProbes += 1; return busyDelayNanoseconds }
@@ -56,9 +57,10 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
         return lock.withLock { busy }
     }
 
-    func stopForRuntimeReplacement() async throws {
+    func stopForRuntimeReplacement(expectedIdentity: RuntimeClosureIdentity) async throws {
         try lock.withLock {
             stops += 1
+            stoppedIdentities.append(expectedIdentity)
             if let replacementStopRefusal { throw replacementStopRefusal }
             if stopThrows { throw ReconciliationTestError() }
         }
@@ -152,6 +154,7 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
 
         #expect(result == .replaced(target))
         #expect(daemon.stops == 1)
+        #expect(daemon.stoppedIdentities == [old])
         #expect(daemon.starts == 1)
         #expect(daemon.startedScripts == [script])
     }

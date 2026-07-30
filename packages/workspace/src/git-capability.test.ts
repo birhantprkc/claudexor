@@ -1,8 +1,13 @@
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { composeBaseEnv } from "@claudexor/core";
 import { describe, expect, it } from "vitest";
 import {
   GitCapabilityError,
   gitCapabilityProblem,
   probeGitCapability,
+  resolveGitExecutable,
   requireGitCapability,
 } from "./git-capability.js";
 
@@ -106,5 +111,47 @@ describe("Git capability", () => {
     expect(error.code).toBe(problem?.code);
     expect(error.message).toBe(`${problem?.reason} ${problem?.remediation}`);
     expect(error.message).not.toContain(capability.detail);
+  });
+
+  it("skips a directory named git and resolves the launchable file behind it", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-git-resolver-"));
+    const invalid = join(root, "invalid");
+    const valid = join(root, "valid");
+    mkdirSync(join(invalid, "git"), { recursive: true });
+    mkdirSync(valid);
+    writeFileSync(join(valid, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(join(valid, "git"), 0o700);
+    try {
+      expect(resolveGitExecutable([invalid, valid].join(delimiter))).toBe(
+        realpathSync(join(valid, "git")),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves from the same normalized mirror-native PATH used for execution", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-git-env-"));
+    const managed = join(root, "managed");
+    const inherited = join(root, "inherited");
+    mkdirSync(managed);
+    mkdirSync(inherited);
+    for (const dir of [managed, inherited]) {
+      writeFileSync(join(dir, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      chmodSync(join(dir, "git"), 0o700);
+    }
+    writeFileSync(join(managed, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(join(managed, "node"), 0o700);
+    const env = composeBaseEnv(
+      "mirror_native",
+      { PATH: inherited },
+      join(managed, "node"),
+      process.platform,
+    );
+    try {
+      expect(resolveGitExecutable(env.PATH)).toBe(realpathSync(join(managed, "git")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -70,6 +70,31 @@ describe("claudexor profiles add (INV-135)", () => {
   });
 });
 
+describe("claudexor profiles login machine output", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("refuses an interactive Claude login as one JSON object before vendor output", async () => {
+    let stdout = "";
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+      stdout += String(chunk);
+      return true;
+    }) as never);
+
+    const code = await profilesCommand(
+      parseArgs(["profiles", "login", "claude", "work", "--json"]),
+      true,
+    );
+
+    expect(code).toBe(2);
+    expect(write).toHaveBeenCalledOnce();
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: false,
+      exitCode: 2,
+      code: "invalid_argument",
+    });
+  });
+});
+
 describe("removeProfileFromRegistry (INV-135 removal owner)", () => {
   let dir: string;
   let prev: string | undefined;

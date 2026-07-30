@@ -167,12 +167,8 @@ export class AcpServer {
           )) as Record<string, unknown>;
           const summary = summarizeResult(result);
           if (summary) await this.agentMessage(client, params.sessionId, summary);
-          // Plan lifecycle (D14/D17): a plan turn that ends needs_answers renders
-          // its ENGINE-parsed open questions as TURN TEXT and ends the turn — the
-          // user's next prompt is an ordinary follow-up plan turn on this same
-          // session (POST /threads/:id/turns), the same path every surface uses.
-          // Single-choice RUN-TIME interactions keep the requestPermission bridge
-          // (requestAnswers); this is the end-of-turn typed-question batch.
+          // Plan questions end as turn text; the next prompt continues this thread.
+          // Runtime choice interactions still use the requestPermission bridge.
           const planReadiness = result.planReadiness as { state?: string } | null | undefined;
           if (planReadiness?.state === "needs_answers") {
             const questions = Array.isArray(result.planQuestions)
@@ -181,20 +177,20 @@ export class AcpServer {
             const rendered = renderPlanQuestions(questions);
             if (rendered) await this.agentMessage(client, params.sessionId, rendered);
           }
-          // `result.status` is the run LIFECYCLE (D8); the ACP stop reason is
-          // projected through the ONE owner (acpStopReason).
+          // Project lifecycle status through the canonical ACP stop-reason owner.
           const status = typeof result.status === "string" ? result.status : "unknown";
-          const outcomeFacts = RunOutcomeFacts.safeParse(result.outcomeFacts);
+          const parsedOutcomeFacts = RunOutcomeFacts.safeParse(result.outcomeFacts);
+          const outcomeFacts = parsedOutcomeFacts.success ? parsedOutcomeFacts.data : null;
           const stopReason: acp.StopReason = controller.signal.aborted
             ? "cancelled"
-            : acpStopReason(status, outcomeFacts.success ? outcomeFacts.data.reason : null);
+            : acpStopReason(status, outcomeFacts?.reason ?? null);
           return {
             stopReason,
             _meta: {
               claudexor: {
                 runId: result.runId ?? null,
                 status,
-                outcomeFacts: result.outcomeFacts ?? null,
+                outcomeFacts,
                 outcomeBanner: result.outcomeBanner ?? null,
                 failure: result.failure ?? null,
                 applyEligibility: result.applyEligibility ?? null,

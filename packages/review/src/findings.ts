@@ -1,6 +1,6 @@
 import type { ReviewFinding, RouteProofStatus, Severity } from "@claudexor/schema";
 import { ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
-import { newId, stableStringify } from "@claudexor/util";
+import { newId } from "@claudexor/util";
 import { RELEASE_NATIVE_CHECKLIST_ITEMS } from "./reviewPrompt.js";
 
 const MAX_BALANCED_JSON_CANDIDATES = 64;
@@ -149,6 +149,24 @@ export interface ReviewerInfo {
   route_proof_status?: RouteProofStatus;
 }
 
+/** Deterministic persisted transcript projection for sealed native reviews.
+ * The producer feeds the already-redacted normalized event through this owner;
+ * the sealer replays the JSONL through the same bundled candidate function. */
+export function sealedReviewTranscriptChunk(event: unknown): string | null {
+  if (!isRecord(event) || event["type"] !== "message") return null;
+  if (isRecord(event["payload"]) && event["payload"]["auth_switched"] === true) return null;
+  const text = event["text"];
+  if (typeof text !== "string" || text.length === 0) return null;
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+export function sealedReviewTranscriptFromEvents(events: readonly unknown[]): string {
+  return events
+    .map(sealedReviewTranscriptChunk)
+    .filter((text): text is string => text !== null)
+    .join("");
+}
+
 export function parseFindingsDetailed(
   text: string,
   reviewer: ReviewerInfo,
@@ -218,20 +236,22 @@ export function parseSealedReviewEnvelopeDetailed(
   text: string,
   reviewer: ReviewerInfo,
 ): SealedReviewEnvelopeParse {
-  const blocks = extractAllReviewPayloads(text);
-  if (blocks.length === 0) {
-    return { findings: [], malformed: 0, error: "no sealed review envelope", blocks };
+  const source = text.trim();
+  if (source.length === 0) {
+    return { findings: [], malformed: 0, error: "no sealed review envelope", blocks: [] };
   }
-  const unique = new Map(blocks.map((block) => [stableStringify(block), block]));
-  if (unique.size !== 1) {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(source);
+  } catch {
     return {
       findings: [],
       malformed: 0,
-      error: "reviewer emitted divergent or mixed JSON review payloads",
-      blocks,
+      error: "sealed review output must be exactly one JSON object with no surrounding prose",
+      blocks: [],
     };
   }
-  const envelope = unique.values().next().value as unknown;
+  const blocks = [envelope];
   if (!isRecord(envelope) || !hasExactKeys(envelope, ["completion", "findings"])) {
     return { findings: [], malformed: 0, error: "invalid sealed review envelope shape", blocks };
   }
@@ -304,77 +324,8 @@ export function parseSealedReviewEnvelopeDetailed(
   return { findings: parsed.findings, malformed: 0, error: null, blocks };
 }
 
-function extractAllReviewPayloads(text: string): unknown[] {
-  const out: unknown[] = [];
-  let cursor = 0;
-  let attempts = 0;
-  while (cursor < text.length) {
-    const lineEnd = text.indexOf("\n", cursor);
-    const end = lineEnd < 0 ? text.length : lineEnd;
-    let start = cursor;
-    while (start < end && (text[start] === " " || text[start] === "\t")) start += 1;
-    const opener = text[start];
-    if (opener !== "{" && opener !== "[") {
-      cursor = lineEnd < 0 ? text.length : lineEnd + 1;
-      continue;
-    }
-    attempts += 1;
-    if (attempts > MAX_BALANCED_JSON_CANDIDATES) break;
-    const jsonEnd = balancedJsonEnd(text, start);
-    if (jsonEnd === null) {
-      cursor = lineEnd < 0 ? text.length : lineEnd + 1;
-      continue;
-    }
-    try {
-      const value = JSON.parse(text.slice(start, jsonEnd));
-      if (isReviewPayload(value)) {
-        out.push(value);
-        cursor = jsonEnd;
-        continue;
-      }
-    } catch {
-      // Continue at the next line; a later complete payload may still exist.
-    }
-    cursor = lineEnd < 0 ? text.length : lineEnd + 1;
-  }
-  return out;
-}
-
-function balancedJsonEnd(source: string, start: number): number | null {
-  const first = source[start];
-  if (first !== "{" && first !== "[") return null;
-  const stack = [first];
-  let inString = false;
-  let escaped = false;
-  for (let index = start + 1; index < source.length; index += 1) {
-    const character = source[index] ?? "";
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-    if (character === '"') inString = true;
-    else if (character === "{" || character === "[") stack.push(character);
-    else if (character === "}" || character === "]") {
-      if (stack.pop() !== (character === "}" ? "{" : "[")) return null;
-      if (stack.length === 0) return index + 1;
-    }
-  }
-  return null;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function isReviewPayload(value: unknown): boolean {
-  if (Array.isArray(value)) return true;
-  if (!isRecord(value)) return false;
-  return (
-    Array.isArray(value["findings"]) ||
-    ("severity" in value && ("claim" in value || "message" in value || "evidence" in value))
-  );
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

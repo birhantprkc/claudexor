@@ -9,6 +9,11 @@ import {
   runStopIfRequested,
 } from "./runtime-replacement-stop.js";
 
+const EXPECTED_VERSION = "3.4.0";
+const EXPECTED_BUILD_SHA = "b".repeat(40);
+const STOP_ARGS = ["--stop", EXPECTED_VERSION, EXPECTED_BUILD_SHA];
+const LEASE_OWNER = { pid: 4242, token: "lease-owner" };
+
 describe("claudexord --probe (D-2 install probe)", () => {
   it("handles --probe and ignores a normal argv", () => {
     expect(runProbeIfRequested(["--probe"])).toBe(true);
@@ -44,10 +49,11 @@ describe("claudexord --stop (runtime replacement admission)", () => {
     let terminationChecks = 0;
     try {
       process.exitCode = undefined;
-      const handled = await runStopIfRequested(["--stop"], {
+      const handled = await runStopIfRequested(STOP_ARGS, {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
+        leaseOwner: () => LEASE_OWNER,
         client: () => ({
           shutdownForRuntimeReplacement: async () => {
             throw Object.assign(new Error("work became active"), {
@@ -84,10 +90,11 @@ describe("claudexord --stop (runtime replacement admission)", () => {
     let allowSigkill: boolean | undefined;
     try {
       process.exitCode = undefined;
-      await runStopIfRequested(["--stop"], {
+      await runStopIfRequested(STOP_ARGS, {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
+        leaseOwner: () => LEASE_OWNER,
         client: () => ({
           shutdownForRuntimeReplacement: async () => {
             throw new Error("daemon connection closed");
@@ -95,6 +102,8 @@ describe("claudexord --stop (runtime replacement admission)", () => {
         }),
         awaitTermination: async (_path, options) => {
           allowSigkill = options.allowSigkill;
+          expect(options.expectedOwner).toBe(LEASE_OWNER);
+          expect(options.requireNoSuccessor).toBe(true);
           return { outcome: "exited", detail: "lease released" };
         },
         write: (line) => output.push(line),
@@ -118,10 +127,11 @@ describe("claudexord --stop (runtime replacement admission)", () => {
     let allowSigkill: boolean | undefined;
     try {
       process.exitCode = undefined;
-      await runStopIfRequested(["--stop"], {
+      await runStopIfRequested(STOP_ARGS, {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
+        leaseOwner: () => LEASE_OWNER,
         client: () => ({
           shutdownForRuntimeReplacement: async () => {
             throw new Error("unknown method: claudexor.shutdownForRuntimeReplacement");
@@ -152,12 +162,20 @@ describe("claudexord --stop (runtime replacement admission)", () => {
     let allowSigkill: boolean | undefined;
     try {
       process.exitCode = undefined;
-      await runStopIfRequested(["--stop"], {
+      await runStopIfRequested(STOP_ARGS, {
         socketPath: () => "/tmp/test-daemon.sock",
         readToken: () => "test-token",
         socketAlive: async () => true,
+        leaseOwner: () => LEASE_OWNER,
         client: () => ({
-          shutdownForRuntimeReplacement: async () => ({ ok: true, fenced: true }),
+          shutdownForRuntimeReplacement: async (expected) => {
+            expect(expected).toEqual({
+              version: EXPECTED_VERSION,
+              buildSha: EXPECTED_BUILD_SHA,
+              leaseOwner: { pid: LEASE_OWNER.pid, token: LEASE_OWNER.token },
+            });
+            return { ok: true, fenced: true, targetBound: true };
+          },
         }),
         awaitTermination: async (_path, options) => {
           allowSigkill = options.allowSigkill;
@@ -174,17 +192,178 @@ describe("claudexord --stop (runtime replacement admission)", () => {
     }
   });
 
-  it("rejects a success-shaped response that does not prove the admission fence", async () => {
-    let terminationChecks = 0;
+  it("allows a legacy fenced receipt only to passively prove natural exit", async () => {
+    let allowSigkill: boolean | undefined;
     await expect(
       admitAndAwaitRuntimeReplacementStop(
-        async () => ({ ok: true }),
+        async () => ({ ok: true, fenced: true }),
+        async (options) => {
+          allowSigkill = options.allowSigkill;
+          return { outcome: "exited", detail: "legacy daemon exited naturally" };
+        },
+        LEASE_OWNER,
+      ),
+    ).resolves.toMatchObject({ outcome: "exited" });
+    expect(allowSigkill).toBe(false);
+  });
+
+  it("fails closed when a legacy fenced receipt outlives the passive deadline", async () => {
+    await expect(
+      admitAndAwaitRuntimeReplacementStop(
+        async () => ({ ok: true, fenced: true }),
+        async (options) => {
+          expect(options.allowSigkill).toBe(false);
+          return { outcome: "still_alive", detail: "legacy daemon remained alive" };
+        },
+        LEASE_OWNER,
+      ),
+    ).rejects.toMatchObject({ code: "runtime_activity_unknown", retryable: true });
+  });
+
+  it("fails closed when the pinned daemon exits but a successor is already live", async () => {
+    await expect(
+      admitAndAwaitRuntimeReplacementStop(
         async () => {
+          throw new Error("admission response lost");
+        },
+        async (options) => {
+          expect(options.expectedOwner).toBe(LEASE_OWNER);
+          expect(options.requireNoSuccessor).toBe(true);
+          return {
+            outcome: "still_alive",
+            detail: "pinned daemon exited but successor owns the lease",
+          };
+        },
+        LEASE_OWNER,
+      ),
+    ).rejects.toMatchObject({ code: "runtime_activity_unknown", retryable: true });
+  });
+
+  it("refuses a live socket with missing token without requesting shutdown or termination", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    let clients = 0;
+    let terminationChecks = 0;
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(STOP_ARGS, {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => null,
+        socketAlive: async () => true,
+        leaseOwner: () => LEASE_OWNER,
+        client: () => {
+          clients += 1;
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => {
           terminationChecks += 1;
           return { outcome: "exited", detail: "must not be consulted" };
         },
-      ),
-    ).rejects.toMatchObject({ code: "runtime_activity_unknown", retryable: true });
-    expect(terminationChecks).toBe(0);
+        write: (line) => output.push(line),
+      });
+
+      expect(clients).toBe(0);
+      expect(terminationChecks).toBe(0);
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(output.join(""))).toMatchObject({
+        stopped: false,
+        code: "runtime_activity_unknown",
+        retryable: true,
+      });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("keeps proven socket-and-lease absence as an idempotent already-stopped success", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(STOP_ARGS, {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => null,
+        socketAlive: async () => false,
+        leaseOwner: () => null,
+        client: () => {
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => ({ outcome: "still_alive", detail: "unused" }),
+        write: (line) => output.push(line),
+      });
+
+      expect(process.exitCode).toBeUndefined();
+      expect(JSON.parse(output.join(""))).toEqual({ stopped: true, alreadyStopped: true });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("refuses a booting daemon that owns the writer lease before its socket binds", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    let clients = 0;
+    let terminationChecks = 0;
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(STOP_ARGS, {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => "test-token",
+        socketAlive: async () => false,
+        leaseOwner: () => LEASE_OWNER,
+        client: () => {
+          clients += 1;
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => {
+          terminationChecks += 1;
+          return { outcome: "exited", detail: "must not be consulted" };
+        },
+        write: (line) => output.push(line),
+      });
+
+      expect(clients).toBe(0);
+      expect(terminationChecks).toBe(0);
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(output.join(""))).toMatchObject({
+        stopped: false,
+        code: "runtime_activity_unknown",
+        retryable: true,
+      });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
+  });
+
+  it("rejects a stop invocation without exact identity before probing daemon state", async () => {
+    const previousExitCode = process.exitCode;
+    const output: string[] = [];
+    let socketChecks = 0;
+    try {
+      process.exitCode = undefined;
+      await runStopIfRequested(["--stop"], {
+        socketPath: () => "/tmp/test-daemon.sock",
+        readToken: () => "unused",
+        socketAlive: async () => {
+          socketChecks += 1;
+          return false;
+        },
+        leaseOwner: () => null,
+        client: () => {
+          throw new Error("must not construct a client");
+        },
+        awaitTermination: async () => ({ outcome: "still_alive", detail: "unused" }),
+        write: (line) => output.push(line),
+      });
+
+      expect(socketChecks).toBe(0);
+      expect(process.exitCode).toBe(1);
+      expect(JSON.parse(output.join(""))).toMatchObject({
+        stopped: false,
+        code: "runtime_activity_unknown",
+      });
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 });
