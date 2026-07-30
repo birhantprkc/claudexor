@@ -395,12 +395,7 @@ function baseRunArgs(prompt, harnesses, extra = []) {
   ];
 }
 
-function assertRunStatus(
-  phase,
-  name,
-  out,
-  wanted = ["success", "succeeded", "no_op", "ungated", "review_not_run"],
-) {
+function assertRunStatus(phase, name, out, wanted = ["succeeded"]) {
   if (out.envFailure)
     return envfail(phase, name, {
       reason: "transient network/environment failure after retry",
@@ -427,7 +422,7 @@ function assertRunStatus(
 }
 
 function assertPrimaryOutput(phase, name, out, kind) {
-  const r = assertRunStatus(phase, name, out, ["success", "succeeded"]);
+  const r = assertRunStatus(phase, name, out, ["succeeded"]);
   if (r.status === "fail" || !out.json?.runId) return out.json;
   const detail = inspectRun(out.json.runId, out.cwd ?? root);
   const primary = detail?.primaryOutput;
@@ -533,9 +528,21 @@ function recordRunEvidence(phase, name, out, cwd) {
 }
 
 function gatePassed(detail) {
-  const attempts = detail?.telemetry?.attempts ?? [];
-  return attempts.some(
-    (a) => a.outcome?.gates_passed === true || (a.gates ?? []).some((g) => g.status === "passed"),
+  return detail?.runFacts?.gates?.state === "passed";
+}
+
+function runApplyable(ev) {
+  return (
+    ev?.detail?.runFacts?.apply?.eligibility?.eligible === true &&
+    ev?.decision?.apply_recommendation === "apply"
+  );
+}
+
+function runNeedsDecision(ev) {
+  const outcome = ev?.detail?.runFacts?.outcome;
+  return (
+    outcome?.lifecycle === "succeeded" &&
+    (outcome.review === "blocked" || outcome.checks === "failed")
   );
 }
 
@@ -821,14 +828,15 @@ function runWritePhase() {
     );
     const ev = recordRunEvidence(phase, `${h} run evidence`, out, repo);
     if (!ev) continue;
-    const applyable =
-      ["success", "succeeded"].includes(out.json?.status) &&
-      ev.decision?.status === "success" &&
-      ev.decision?.verification_basis === "both";
-    if (patchLooksReal(ev) && gatePassed(ev.detail) && applyable)
+    const succeededWithChecks =
+      out.json?.status === "succeeded" &&
+      ev.decision?.facts?.lifecycle === "succeeded" &&
+      ev.decision?.facts?.checks === "passed";
+    if (patchLooksReal(ev) && gatePassed(ev.detail) && succeededWithChecks)
       pass(phase, `${h} run patch+gate`, {
         runId: out.json.runId,
         status: out.json.status,
+        review: ev.decision?.facts?.review ?? "unknown",
         basis: ev.decision?.verification_basis ?? "none",
       });
     else
@@ -872,7 +880,7 @@ function runMultiWritePhase() {
     const ev = recordRunEvidence(phase, "multi race evidence", out, repo);
     if (out.envFailure) return;
     if (
-      ev?.decision?.status === "success" &&
+      runApplyable(ev) &&
       ev.decision.verification_basis === "both" &&
       patchLooksReal(ev) &&
       gatePassed(ev.detail)
@@ -882,7 +890,7 @@ function runMultiWritePhase() {
         status: out.json.status,
         winner: ev.decision.winner,
         basis: ev.decision.verification_basis,
-        outcome: ev.decision.outcome,
+        facts: ev.decision.facts,
       });
     else
       fail(phase, "multi race decision", {
@@ -920,7 +928,7 @@ function runMultiWritePhase() {
       : false;
     if (
       synth &&
-      ev?.decision?.status === "success" &&
+      runApplyable(ev) &&
       ev.decision.verification_basis === "both" &&
       patchLooksReal(ev) &&
       gatePassed(ev.detail)
@@ -960,14 +968,18 @@ function runMultiWritePhase() {
     const ev = recordRunEvidence(phase, "convergence evidence", out, repo);
     if (out.envFailure) return;
     if (
-      ev?.wp?.meta?.status === "success" &&
+      ev?.wp?.meta?.lifecycle === "succeeded" &&
+      ev.wp.meta.outcome_facts?.checks === "passed" &&
       ev.wp.meta.review_verified === true &&
-      ["success", "succeeded"].includes(out.json?.status)
+      out.json?.status === "succeeded" &&
+      runApplyable(ev) &&
+      ev.decision?.verification_basis === "both" &&
+      gatePassed(ev.detail)
     )
       pass(phase, "convergence work_product", {
         runId: out.json?.runId,
-        status: ev.wp.meta.status,
-        attempts: ev.wp.meta.attempts,
+        status: ev.wp.meta.lifecycle,
+        attempts: ev.detail?.telemetry?.attempts?.length ?? 0,
         reviewVerified: ev.wp.meta.review_verified,
       });
     else
@@ -1016,7 +1028,7 @@ function runDegradationControl(phase, onlyHarness) {
       rec(phase, "single-family verification_basis=none", {
         runId: out.json?.runId,
         status: out.json?.status,
-        outcome: ev.decision.outcome,
+        facts: ev.decision.facts,
         basis,
       });
       const apply = runCliJson(["apply", out.json.runId, "--dry-run"], {
@@ -1082,11 +1094,8 @@ function runDegradationControl(phase, onlyHarness) {
 
 function chooseVerifiedRun() {
   return (
-    state.verifiedRuns.find(
-      (r) => r.out.json?.status === "succeeded" && r.ev?.decision?.status === "success",
-    ) ??
-    (state.multiRace?.out?.json?.status === "succeeded" &&
-    state.multiRace?.ev?.decision?.status === "success"
+    state.verifiedRuns.find((r) => r.out.json?.status === "succeeded" && runApplyable(r.ev)) ??
+    (state.multiRace?.out?.json?.status === "succeeded" && runApplyable(state.multiRace?.ev)
       ? state.multiRace
       : null)
   );
@@ -1130,7 +1139,7 @@ function runLifecyclePhase() {
       { cwd: repo, name: `${phase}-${mode}-source` },
     );
     const ev = recordRunEvidence(phase, `apply ${mode} source`, out, repo);
-    if (out.json?.status === "succeeded" && ev?.decision?.status === "success") {
+    if (out.json?.status === "succeeded" && runApplyable(ev)) {
       const applied = runCliJson(["apply", out.json.runId, "--mode", mode], {
         cwd: repo,
         name: `${phase}-apply-${mode}`,
@@ -1175,11 +1184,10 @@ function runBlockedDecisionScenario(phase, multi) {
     { cwd: repo, name: `${phase}-blocked-risk` },
   );
   const ev = recordRunEvidence(phase, "blocked risk evidence", out, repo);
-  if (out.json?.status === "blocked" && ev?.patchNonEmpty) {
+  if (runNeedsDecision(ev) && ev?.patchNonEmpty) {
     pass(phase, "blocked high-risk run", {
       runId: out.json.runId,
-      outcome: ev.decision?.outcome,
-      status: ev.decision?.status,
+      facts: ev.decision?.facts,
     });
     const dec = runCliJson(["decision", out.json.runId, "--accept-risk"], {
       cwd: repo,
@@ -1218,7 +1226,8 @@ function runBlockedDecisionScenario(phase, multi) {
     ],
     { cwd: rerunRepo, name: `${phase}-blocked-rerun-source` },
   );
-  if (rerunSrc.json?.status === "blocked") {
+  const rerunEv = recordRunEvidence(phase, "blocked rerun evidence", rerunSrc, rerunRepo);
+  if (runNeedsDecision(rerunEv)) {
     const rerun = runCliJson(
       [
         "decision",
@@ -1258,7 +1267,7 @@ function runRevertScenario(phase, multi) {
     ],
     { cwd: repo, name: `${phase}-in-place-revert` },
   );
-  if (out.json?.runId && ["succeeded", "success"].includes(out.json.status)) {
+  if (out.json?.runId && out.json.status === "succeeded") {
     const rev = runCliJson(["decision", out.json.runId, "--revert"], {
       cwd: repo,
       name: `${phase}-revert`,
@@ -1290,7 +1299,7 @@ function runRevertScenario(phase, multi) {
     ],
     { cwd: repo2, name: `${phase}-in-place-diverge-source` },
   );
-  if (out2.json?.runId && ["succeeded", "success"].includes(out2.json.status)) {
+  if (out2.json?.runId && out2.json.status === "succeeded") {
     writeFileSync(join(repo2, "src", "extra.js"), "export const diverged = true;\n");
     const rev = runCliJson(["decision", out2.json.runId, "--revert"], {
       cwd: repo2,
@@ -1698,7 +1707,8 @@ async function runPlanPhase() {
       implementOutcome.status === "succeeded" &&
       ev?.patchNonEmpty &&
       gatePassed(ev.detail) &&
-      ev.decision?.status === "success"
+      runApplyable(ev) &&
+      ev.decision?.verification_basis === "both"
     ) {
       pass(phase, "implement patch+gate", {
         runId: implementOutcome.runId,
