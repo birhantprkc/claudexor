@@ -189,7 +189,7 @@
               "type": "number",
               "minimum": 0,
               "default": 0.05,
-              "description": "Per-candidate USD reservation floor held against the run cap for every race-wave slot after the first, so a parallel wave cannot blow past the cap between settlements."
+              "description": "USD reservation floor for later parallel race candidates, deep-scan scouts, and Council members; the Deep Scan reducer; the one-shot enveloped candidate continuation; and every paid attempt inside a Delegate child. The first ordinary top-level attempt remains unreserved."
             }
           },
           "additionalProperties": false,

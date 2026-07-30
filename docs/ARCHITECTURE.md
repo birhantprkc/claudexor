@@ -1717,12 +1717,15 @@ native route, and an undisclosed route remains cost-unverifiable. `finite(0)` ad
 only proven-zero or subscription-entitlement work; a positive finite cap permits
 at most one unknown-cost paid unit in flight. A later exact charge above the cap
 is retained and ends `budget_overshoot`; permanently unknown cost ends
-`cost_unverifiable` rather than fabricating `$0`. Parallel race, Council, and
-deep-scan waves reserve an estimate floor (`budget.estimate_usd_floor`, default
-$0.05) after the first top-level slot. A real Delegate child uses that same
-floor for its first and subsequent work because it overlaps the still-running
-parent. Concurrent estimated work therefore counts against shared headroom
-before usage streams, while final settlement remains authoritative.
+`cost_unverifiable` rather than fabricating `$0`. Later parallel race
+candidates, Council members, and deep-scan scouts reserve an estimate floor
+(`budget.estimate_usd_floor`, default $0.05). The Deep Scan synthesis reducer
+and the one-shot enveloped candidate continuation reserve it too because each
+is another unknown-cost paid unit. A real Delegate child uses that same floor
+for its first and subsequent paid attempts because it overlaps the still-running
+parent. The first ordinary top-level attempt remains unreserved. Estimated work
+therefore counts against shared headroom before usage streams, while final
+settlement remains authoritative.
 
 A budget refusal is projected honestly by ONE shared classifier
 (`classifyBudgetFailure`), not re-invented per mode. The ledger's typed
@@ -2438,16 +2441,19 @@ code touching one of these areas must honor it or change it explicitly here.
   typed open questions, answer turns refine it on the same persisted lane, and
   Implement freezes it as a content-hashed brief. There is no separate spec
   surface, spec-session store, or grounding-run job class.
-- `--json` mode guarantees exactly one JSON object on stdout for run/ops
-  verbs; interactive TTY question prompts (follow/agent Q&A) remain human-text
-  affordances by design. Every FAILURE class — argument/usage validation,
-  pre-daemon bootstrap (e.g. `EPERM` on `fchmod`), typed preflight/daemon
-  problems, transport errors, and unexpected exceptions — is normalized by the
-  ONE top-level projector (`packages/cli/src/cli-error.ts`) into a single
-  failure envelope `{ok:false, exitCode, code?, message, retryable?,
-  fieldErrors?, requiredActions?, details?, context?}` (with a legacy `error`
-  alias of `message`), generated from the SAME typed problem as the human
-  stderr line. A run-scoped failure (inspect/apply/decision) may add a
+- `--json` mode guarantees exactly one JSON object on stdout; interactive TTY
+  question prompts (follow/agent Q&A) remain human-text affordances by design.
+  Canonical run paths normalize argument/usage validation, pre-daemon bootstrap
+  (e.g. `EPERM` on `fchmod`), typed preflight/daemon problems, transport errors,
+  and unexpected exceptions through the ONE top-level projector
+  (`packages/cli/src/cli-error.ts`) into
+  `{ok:false, exitCode, code?, message, retryable?, fieldErrors?,
+  requiredActions?, details?, context?}` (with a legacy `error` alias of
+  `message`), generated from the SAME typed problem as the human stderr line.
+  Some subcommands and pre/post-run paths retain purpose-built one-object
+  schemas; their exact bounded residue is tracked as D-7 in `docs/BACKLOG.md`.
+  A projector-owned run-scoped failure
+  (inspect/apply/decision) may add a
   per-command identifying field such as `runId` alongside those canonical
   fields, but the projector-owned fields always win over a same-named extra, so
   the failure shape cannot be forged. Redaction runs BEFORE the bounded-context

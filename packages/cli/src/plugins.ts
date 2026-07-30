@@ -269,7 +269,7 @@ function skillText(host: PluginHost, runtime: RuntimePaths): string {
     "",
     "- NEVER paste live credentials into prompts — every ingress hard-blocks secret-like values (typed `inline_secret_rejected`). Store keys with `claudexor secrets set` and reference them.",
     "- NEVER auto-answer `claudexor decision` for a blocked run: risk acceptance (accept-risk/override) is the HUMAN operator's call. Report the blocked state and the decision options.",
-    "- Exit codes: 0 = success terminal; 1 = failed/blocked/cancelled run; 2 = usage error (unknown verb/flag/mode). `--json` errors come as `{ok:false, exitCode, error}` on stdout.",
+    "- Canonical run-command exits: 0 = success terminal; 1 = failed/blocked/cancelled run; 2 = usage error. Their `--json` failures use `{ok:false, exitCode, message, code?, ...}` on stdout (`error` is a legacy alias). Some subcommands preserve purpose-built schemas or child exits; the exact residue is tracked in `docs/BACKLOG.md` D-7.",
     "",
     // QA-029A: disclose the plugin identity AND the exact slash invocation as two
     // separate typed facts. The old single `Host namespace: claudexor@skills-dir`

@@ -172,19 +172,20 @@ export const GlobalConfig = z
       .object({
         paid_budget_per_run: PaidBudget.default({ kind: "unlimited" }),
         /**
-         * Per-candidate reservation floor (USD) held against the run cap for
-         * every race-wave slot AFTER the first, BEFORE any usage streams.
-         * Makes concurrent in-flight candidates visible to the budget breaker
-         * so a parallel wave cannot blow past the finite paid budget between
-         * settlements. The first slot never holds it: a cap smaller than the
-         * floor still runs one candidate and stops on real usage.
+         * Per-unit reservation floor (USD) held against the run cap BEFORE
+         * usage streams. It applies to later parallel race candidates,
+         * deep-scan scouts, and Council members; the Deep Scan reducer; the
+         * one-shot enveloped candidate continuation; and every paid attempt
+         * inside a server-proven Delegate child. The first ordinary top-level
+         * attempt remains unreserved: a cap smaller than the floor still runs
+         * one unit and stops on real usage.
          */
         estimate_usd_floor: z
           .number()
           .nonnegative()
           .default(0.05)
           .describe(
-            "Per-candidate USD reservation floor held against the run cap for every race-wave slot after the first, so a parallel wave cannot blow past the cap between settlements.",
+            "USD reservation floor for later parallel race candidates, deep-scan scouts, and Council members; the Deep Scan reducer; the one-shot enveloped candidate continuation; and every paid attempt inside a Delegate child. The first ordinary top-level attempt remains unreserved.",
           ),
       })
       .strict()

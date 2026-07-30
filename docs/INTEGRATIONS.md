@@ -502,10 +502,11 @@ files:
   bridging) and inside each isolated envelope worktree a candidate races in —
   because an envelope only ever contains committed files, so an untracked
   project-root bridge would not reach a candidate. The envelope copy carries no
-  run event and is excluded from the candidate's diff by its ownership marker, so
-  it never lands in a patch (and a `CLAUDE.md` a candidate writes itself, lacking
-  the marker, is captured normally). Both creates are exclusive and never follow a
-  symlink, so a hand-written `CLAUDE.md` is never overwritten. The project-root
+  run event and is excluded from the candidate's diff only when Claudexor created
+  it for that run and its bytes still exactly match the generated bridge. Any
+  candidate-authored or candidate-edited `CLAUDE.md` is captured normally, even
+  if it retains the ownership marker. Both creates are exclusive and never follow
+  a symlink, so a hand-written `CLAUDE.md` is never overwritten. The project-root
   write is skipped for read-only runs and `--in-place` stateful targets.
 
 Both behaviors are automatic. If you would rather manage the files yourself,

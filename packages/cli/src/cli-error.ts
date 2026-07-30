@@ -1,10 +1,12 @@
 /**
- * The ONE CLI result/error projector (D-7, GH #28). Every failure class —
- * argument/usage validation, pre-daemon bootstrap, typed preflight/daemon
- * problems, transport errors, and unexpected exceptions — is normalized into a
- * single typed problem and rendered as EXACTLY ONE JSON envelope on stdout
- * (`--json` mode) or one human line on stderr (text mode), both derived from
- * the SAME typed object. A central category -> exit-code table owns the codes:
+ * The canonical CLI result/error projector (D-7, GH #28). Paths routed here
+ * normalize argument/usage validation, pre-daemon bootstrap, typed
+ * preflight/daemon problems, transport errors, and unexpected exceptions into
+ * one typed problem. They render EXACTLY ONE JSON envelope on stdout (`--json`
+ * mode) or one human line on stderr (text mode), both derived from the SAME
+ * typed object. Some subcommands and pre/post-run paths retain purpose-built
+ * one-object schemas; their exact residue is tracked by D-7 rather than hidden
+ * behind this owner. A central category -> exit-code table owns the codes:
  * usage/validation = 2, operational failure = 1.
  *
  * This projector is intentionally dependency-light: it imports only the CLI IO
@@ -13,10 +15,9 @@
  * a valid last-resort serializer even when bootstrap failed.
  *
  * The run-verb SUCCESS envelope (`{runId, runDir, status, ...}`) does NOT flow
- * through here: the projector owns FAILURE paths and the non-run commands whose
- * error handling was previously ad-hoc. The failure envelope keeps a legacy
- * `error` alias of `message` so existing consumers/tests that read `error`
- * keep working.
+ * through here: the projector owns the failure paths that call it and migrated
+ * non-run commands. The failure envelope keeps a legacy `error` alias of
+ * `message` so existing consumers/tests that read `error` keep working.
  */
 import { ControlProblem } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";

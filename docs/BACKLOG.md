@@ -83,12 +83,6 @@ deferred; they are recorded here now.
   setup projection.
 - X244: add the ACP initialize capability → exact CLI suffix → durable setup
   job → non-success exit ownership chain to the architecture runtime map.
-- X245: update the integrations guide's Claude bridge paragraph: exclusion
-  requires created-this-run provenance and exact generated-byte equality, not
-  merely the ownership marker.
-- X246: correct SECURITY.md's pre-existing secret-store wording. Managed API
-  keys use the daemon-owned 0600 file store; only vendor-owned native state may
-  use a vendor Keychain.
 - X247: either forward `--json` through `acp serve auth login codex` or reject
   it explicitly; ACP clients do not send the flag, so the current experimental
   path remains functional.
@@ -416,7 +410,6 @@ revision/etag, already logged above), are intentionally not duplicated.
 - [F45] anthropic/claude-fable-5 | runtime_behavior_changes | apps/macos/ClaudexorApp/Sources/ClaudexorApp/RuntimeInstallCoordinator.swift install(): failure paths at steps 5/6 (probe mismatch, busy) clean up with removeVersionDir, but a throw from step 7 (`try await daemon.stop()`), the pointer-write catch, the relaunch-throw path, and the handshake-mismatch rollback all leave the freshly unpacked, quarantine-stripped versions/<v> directory on disk with no pointer referencing it.
 - [F45] anthropic/claude-fable-5 | implicit_contracts | GatewayClient.engineHasActiveWork (ClaudexorKit/GatewayClient.swift) hardcodes the state-filter values ["running", "queued"] for GET /v2/runs, but the daemon's `state` query is STRICT ('a typoed or malformed value is a typed 400' per the ARCHITECTURE run-list contract / packages/control-api/src/run-list.ts), and the only tests (RuntimeBusyGateTests) run against BusyStubURLProtocol, never the real enum.
 - [F45] anthropic/claude-fable-5 | implicit_contracts | The --json failure-envelope contract (ARCHITECTURE 'Design constraints': every FAILURE class is normalized by the ONE projector in packages/cli/src/cli-error.ts into {ok:false, exitCode, code?, message, ...}) is bypassed by new code: setup-login-inline.ts streamDurableCodexLogin in --json mode prints ad-hoc failure objects — {ok:false, error:'snapshot_unavailable', status, jobId} lacks both 'message' and 'exitCode', and the not_supported terminal object {ok:false, job, nextAction} likewise carries no canonical envelope fields — so a machine consumer keying on the documented projector shape gets an unrecognized failure form on the auth-login path.
-- [F45] openai/gpt-5.6-sol | security_and_secrets | packages/secrets/package.json, description: the published metadata claims "OS keychain where available, else a 0600 file", while the current architecture and DEVELOPMENT.md explicitly state that the managed secret store is file-only and has no System Keychain backend. This is misleading public security metadata in the touched 3.1.0 package release.
 - [F45] anthropic/claude-fable-5 | runtime_behavior_changes | packages/util/CHANGELOG.md: the 3.1.0 entry is completely empty ('## 3.1.0' with no bullets) even though this release adds an entire new public API surface to @claudexor/util — packages/util/src/runtime-manifest.ts (RUNTIME_UPDATE_AUTHORITY, SignedRuntimeManifest, verifyRuntimeManifest, isMonotonicRuntimeUpgrade, canonicalJson, runtimeArchiveUrl) re-exported from index.ts and consumed by the CLI's fail-closed release check.
 
 - [post-3.1.0] Re-run the full post-release program audit (codex gpt-5.6-sol, deep-scan) after the claude weekly quota resets — the 2026-07-24 attempt died at the reducer stage with 96% quota used; its scout findings are ledgered as X237-X239.

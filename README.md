@@ -762,16 +762,21 @@ GitHub account without their explicit approval.
 ## Privacy
 
 Claudexor collects **no telemetry**: no analytics, no crash reporting, no
-background auto-update pings. The only outbound network traffic is what you
-configure — the vendor harness CLIs and model APIs your runs use — plus a few
-strictly user-invoked lookups against public endpoints: `claudexor release
+background auto-update pings. Outbound traffic comes from the vendor harness
+CLIs and model APIs used by configured run routes. Generic Web/Search follows
+the run's external-context policy (default `auto`); Browser MCP/navigation
+requires explicit Browser opt-in. Remote SSH reaches only connections you
+explicitly configure and enable; the app may then connect and retry their event
+streams automatically. While the daemon runs, it may poll configured vendor
+quota/status sources in the background (including Anthropic `oauth/usage`) to
+maintain routing and readiness. Public lookups include `claudexor release
 check-name` (package registries), `claudexor release check` and the app's Check
 for Updates (the GitHub release manifest), and `claudexor release stats` (GitHub
-release download counts + the npm downloads API, owner-facing). The app's engine
-update check runs only on foreground or when you click Check for Updates — never
-on a timer. The `telemetry/` names you may see under `~/.claudexor/v3/` and in
-run artifacts are **local files only** (per-harness cost/latency averages and
-per-run evidence); nothing is transmitted.
+release download counts + the npm downloads API, owner-facing). These are
+user-invoked except the app's engine update check, which runs on foreground or
+when you click Check for Updates, never on a timer. The `telemetry/` names you
+may see under `~/.claudexor/v3/` and in run artifacts are **local files only**
+(per-harness cost/latency averages and per-run evidence); nothing is transmitted.
 
 ## Uninstall / where your data lives
 

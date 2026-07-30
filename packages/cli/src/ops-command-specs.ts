@@ -113,7 +113,7 @@ export const OPS_COMMAND_SPECS_BEFORE_REMOTE = [
       { prefix: ["rotate-token"], min: 1, max: 1 },
     ],
     usageArgs: "start|status|stop|logs|rotate-token",
-    summary: "Optional local daemon (claudexord)",
+    summary: "Managed local daemon (claudexord)",
     flags: ["json"],
     mutability: "ops",
     stability: "stable",

@@ -74,15 +74,16 @@ It is strict: skipping a step is how the 2026-07-21 incident happened.
 
 ## CLI vs MCP vs control API
 
-- **CLI** is the primary surface. `--json` gives machine output on the main
-  paths. EVERY failure — usage/validation, pre-daemon bootstrap, typed
-  preflight/daemon problems, transport, or an unexpected exception — comes back
-  as exactly one envelope `{ok:false, exitCode, code?, message, retryable?,
-  fieldErrors?, requiredActions?, details?, context?}` on stdout (with a legacy
-  `error` alias of `message`), optionally carrying a per-command identifying
-  field such as `runId`; the canonical fields above always win over an extra of
-  the same name. Exit 2 is usage/validation, exit 1 is an operational failure. Typed domain codes and structured field errors survive
-  (parse `code`/`fieldErrors`, never scrape `message`). A run that STARTED
+- **CLI** is the primary surface. `--json` gives exactly one machine object on
+  stdout. Canonical run paths normalize usage/validation, pre-daemon bootstrap,
+  typed preflight/daemon, transport, and unexpected failures into
+  `{ok:false, exitCode, code?, message, retryable?, fieldErrors?,
+  requiredActions?, details?, context?}` (with a legacy `error` alias of
+  `message`). Some subcommands and pre/post-run paths retain purpose-built
+  one-object schemas; the exact bounded residue is tracked in `docs/BACKLOG.md`
+  under D-7. For projector-owned failures, exit 2 is
+  usage/validation and exit 1 is operational; typed codes and field errors
+  survive (parse `code`/`fieldErrors`, never scrape `message`). A run that STARTED
   always reports its terminal as `{runId, runDir, status, ...}` even when the
   status is a failure — a non-success terminal is a result, not an error
   envelope. `claudexor <cmd> --help` (or `--help --json`) prints that command's

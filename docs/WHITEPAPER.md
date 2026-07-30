@@ -193,15 +193,15 @@ Run evidence lives in two labeled planes: Claudexor's internal orchestration
 record (contracts, events, attempts, reviews), and the project's produced
 outputs (user deliverables). Surfaces always say which plane they show.
 
-The machine surface obeys one contract: a run verb emits exactly one success
-envelope (`{runId, runDir, status, …}`), and every failure — a daemon that will
-not start, an attachment that will not upload, a `--resume` with nothing to
-continue, a mid-run transport error — is rendered by a single projector into one
-typed problem carrying a stable `message`/`code`/exit code, on stdout for
-`--json`, one compact line for `--json-stream`, or one stderr line for text. No
-command path emits a partial ad-hoc error, and secret-like tokens are redacted at
-that one projection point, so a script never has to parse two shapes for the same
-class of failure.
+The canonical run machine surface obeys one contract: a run verb emits exactly
+one success envelope (`{runId, runDir, status, …}`), while shared
+usage/bootstrap/preflight/transport failures are rendered by one projector into
+a typed problem carrying stable `message`/`code`/exit fields. `--json-stream`
+keeps one compact event per line and text mode keeps one stderr line. Some
+subcommands and pre/post-run paths retain purpose-built one-object schemas; the
+exact bounded residue is tracked explicitly as D-7 in the backlog rather than
+hidden behind a generic wrapper. Secret-like tokens are redacted before any
+bounded error context is emitted.
 
 ## Secrets, Auth, And Isolation
 
@@ -241,9 +241,10 @@ run.
 
 ## Workspace Semantics
 
-Chat write turns run in-place on the live tree (the way local coding agents
-work), with snapshots and a fenced revert as the safety net; candidates,
-scouts, and delegated sub-runs run in isolated envelopes outside the repo.
+Chat write turns run in-place in the thread execution tree: the live project for
+an `in_place` thread or its persistent worktree for an `isolated` thread. Both
+use snapshots and a fenced revert as the safety net; candidates, scouts, and
+delegated sub-runs run in isolated envelopes outside the execution tree.
 Git admission follows the execution shape, not read versus write alone:
 explicitly isolated workspaces and Git-backed candidate envelopes may initialize
 a non-git project loudly, while supported in-place paths remain available

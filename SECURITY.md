@@ -38,17 +38,22 @@ What Claudexor already does, so you can calibrate reports:
 - The control API binds `127.0.0.1` only, requires a bearer token
   (timing-safe comparison), and enforces a loopback host/origin guard;
   `/healthz` is the only unauthenticated route.
-- Secret values are stored in the OS keychain where available, else in a
-  `0600` file; secret material is redacted from event logs, job records,
-  thread stores, and reviewer artifacts.
+- Claudexor-managed secrets use the daemon-owned `0600` file store. Vendor-native
+  credentials remain in each vendor's own store, which may use the OS Keychain;
+  secret material is redacted from event logs, job records, thread stores, and
+  reviewer artifacts.
 - No telemetry, analytics, or crash reporting is collected (see the Privacy
-  section of the README). Outbound traffic is limited to the model and harness
-  endpoints you configure plus public GitHub/npm lookups for release-name
-  checks, updates, and download statistics — each either explicitly
-  user-invoked or, for the app's update check, triggered only on app
-  foreground (there is no background update timer). Local
-  files named `telemetry` contain only on-device run evidence and are never
-  transmitted.
+  section of the README). Outbound traffic comes from configured model/harness
+  routes. Generic Web/Search follows the run's external-context policy (default
+  `auto`); Browser MCP/navigation requires explicit Browser opt-in. Remote SSH
+  reaches only connections explicitly configured and enabled, after which the
+  app may connect and retry their event streams automatically. While the daemon
+  runs, it may poll configured vendor quota/status sources in the background
+  (including Anthropic `oauth/usage`) to maintain routing and readiness. Public
+  GitHub/npm lookups cover release-name checks, updates, and download statistics;
+  they are user-invoked except the app's update check, which runs only on app
+  foreground (there is no background update timer). Local files named
+  `telemetry` contain only on-device run evidence and are never transmitted.
 
 In scope: the CLI, daemon, control API, MCP/ACP servers, the macOS app, and
 the host-integration plugin writers. Out of scope: vulnerabilities in the
