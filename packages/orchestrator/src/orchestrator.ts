@@ -5938,7 +5938,6 @@ export class Orchestrator {
       return writePlanHarnessFailure(
         this.planRunDeps(),
         {
-          input,
           contract,
           taskId,
           runId,

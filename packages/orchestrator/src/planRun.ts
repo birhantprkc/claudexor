@@ -209,7 +209,6 @@ export async function runCouncilPlan(
     return writePlanHarnessFailure(
       deps,
       {
-        input,
         contract,
         taskId,
         runId,
@@ -308,7 +307,6 @@ export async function runCouncilPlan(
     return writePlanHarnessFailure(
       deps,
       {
-        input,
         contract,
         taskId,
         runId,
@@ -481,7 +479,6 @@ export function finalizePlanRun(
 export function writePlanHarnessFailure(
   deps: PlanRunDeps,
   ctx: {
-    input: RunInput;
     contract: TaskContract;
     taskId: string;
     runId: string;
@@ -505,7 +502,7 @@ export function writePlanHarnessFailure(
   },
   fallbackMessage: string,
 ): OrchestratorResult {
-  const { input, contract, taskId, runId, store, paths, log, ledger, planAttempts } = ctx;
+  const { contract, taskId, runId, store, paths, log, ledger, planAttempts } = ctx;
   const blocked = planAttempts.some((p) => p.status === "blocked");
   // QA-050: a budget refusal (pre-spawn denial, or a settled budget terminal)
   // is a BUDGET failure across plan + council, not a harness one.
@@ -595,7 +592,6 @@ export function writePlanHarnessFailure(
     error: message,
     failure_ref: "final/failure.yaml",
   });
-  void input;
   return {
     spendUsd: ledger.spend(),
     runId,
