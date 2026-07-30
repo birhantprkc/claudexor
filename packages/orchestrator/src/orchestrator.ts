@@ -918,6 +918,14 @@ export class Orchestrator {
     return this.config(repoRoot)?.global.budget.estimate_usd_floor ?? 0.05;
   }
 
+  /** Delegate children overlap their still-running parent, so child-side paid
+   * units use the same bounded floor as later slots in a parallel wave. */
+  private reservationEstimateUsd(input: RunInput, parallel = false): number | undefined {
+    return parallel || Boolean(input.delegatedFromRunId)
+      ? this.estimateUsdFloor(input.repoRoot)
+      : undefined;
+  }
+
   private execRootOf(input: RunInput): string {
     return input.executionRoot ?? input.repoRoot;
   }
@@ -2966,7 +2974,7 @@ export class Orchestrator {
         cost: attemptCostEvidence(
           routed.adapter.id,
           attemptId,
-          i > 0 ? this.estimateUsdFloor(input.repoRoot) : undefined,
+          this.reservationEstimateUsd(input, i > 0),
           this.routeBillingKnowledge(input, routed.adapter.id),
         ),
       });
@@ -3616,6 +3624,7 @@ export class Orchestrator {
         ledger,
         taskId,
         input.signal,
+        this.reservationEstimateUsd(input),
       );
     } catch (err) {
       // Review preflight/evidence failures end TERMINALLY with artifacts —
@@ -3664,7 +3673,7 @@ export class Orchestrator {
         cost: attemptCostEvidence(
           synthRouted.adapter.id,
           "synth",
-          undefined,
+          this.reservationEstimateUsd(input),
           this.routeBillingKnowledge(input, synthRouted.adapter.id),
         ),
       });
@@ -3762,6 +3771,7 @@ export class Orchestrator {
                 ledger,
                 taskId,
                 input.signal,
+                this.reservationEstimateUsd(input),
               );
               evidences.push(...synthEvidence);
               workingRuns.push(run);
@@ -4317,6 +4327,7 @@ export class Orchestrator {
     ledger?: BudgetLedger,
     taskId?: string,
     signal?: AbortSignal,
+    reservationEstimateUsd?: number,
   ): Promise<CandidateEvidence[]> {
     const evidences: CandidateEvidence[] = [];
     for (const run of runs) {
@@ -4340,7 +4351,7 @@ export class Orchestrator {
                 attemptId: run.attemptId,
                 intent: "review",
                 harnessId: "review-panel",
-                cost: attemptCostEvidence("review-panel", run.attemptId),
+                cost: attemptCostEvidence("review-panel", run.attemptId, reservationEstimateUsd),
               })
             : undefined;
         const result =
@@ -4814,7 +4825,7 @@ export class Orchestrator {
           cost: attemptCostEvidence(
             adapter.id,
             attemptId,
-            undefined,
+            this.reservationEstimateUsd(input),
             this.routeBillingKnowledge(input, adapter.id),
           ),
         });
@@ -5004,7 +5015,11 @@ export class Orchestrator {
                       attemptId,
                       intent: "review",
                       harnessId: "review-panel",
-                      cost: attemptCostEvidence("review-panel", attemptId),
+                      cost: attemptCostEvidence(
+                        "review-panel",
+                        attemptId,
+                        this.reservationEstimateUsd(input),
+                      ),
                     })
                   : null;
               const reviewResult =
@@ -5778,6 +5793,7 @@ export class Orchestrator {
         roHome,
         contextSection,
         laneRun,
+        estimateUsdFloor: this.estimateUsdFloor(input.repoRoot),
       });
     }
 
@@ -5817,6 +5833,7 @@ export class Orchestrator {
           fallbackHome: roHome.env,
           promptBody: planPrompt(input.prompt) + contextSection,
           intent: "plan",
+          reservationEstimateUsd: this.reservationEstimateUsd(input),
         });
         if (outcome.budgetDenied) {
           // QA-050: retain the denied planner slot before breaking so the
@@ -6360,13 +6377,13 @@ export class Orchestrator {
         intent: opts.intent,
         harnessId: adapter.id,
         // QA-019: an n>1 deep-scan scout admits under a FINITE estimate floor
-        // (mirror of the candidate loop): the first scout reserves without a
-        // floor, but later scouts pass the repo's usd floor so a subscription
-        // swarm is not refused for lacking a per-attempt cash quote under a cap.
+        // (mirror of the candidate loop): the first top-level scout reserves
+        // without a floor; later scouts and every real Delegate child pass the
+        // repo floor because they overlap an existing family unit.
         cost: attemptCostEvidence(
           adapter.id,
           attemptId,
-          opts.deepScan && idx > 0 ? this.estimateUsdFloor(input.repoRoot) : undefined,
+          this.reservationEstimateUsd(input, opts.deepScan && idx > 0),
           this.routeBillingKnowledge(input, adapter.id),
         ),
       });

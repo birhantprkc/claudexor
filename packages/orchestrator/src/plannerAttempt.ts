@@ -75,6 +75,9 @@ export interface PlannerAttemptArgs {
   fallbackHome: Record<string, string>;
   promptBody: string;
   intent: Intent;
+  /** Conservative admission floor for a parallel Council member or a real
+   * Delegate child that overlaps its still-running parent. */
+  reservationEstimateUsd?: number;
 }
 
 export interface PreparedPlannerAttempt {
@@ -113,7 +116,7 @@ export async function runPlannerAttempt(
     cost: attemptCostEvidence(
       adapter.id,
       attemptId,
-      undefined,
+      args.reservationEstimateUsd,
       deps.billingKnowledge(input, adapter.id),
     ),
   });

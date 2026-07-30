@@ -7661,6 +7661,7 @@ describe("Orchestrator", () => {
       mode: "plan",
       council: true,
       harnesses: ["planner-a", "planner-b"],
+      paidBudget: { kind: "finite", maxUsd: 1.5 },
       onEvent: (event) => eventTypes.push(event.type),
     });
     expect(legacyOutcome(res)).toBe("success");
@@ -7715,6 +7716,41 @@ describe("Orchestrator", () => {
       { attempt_id: "p03", role: "merge" },
     ]);
     expect(telemetry).toMatchObject({ run_facts: runFacts });
+  });
+
+  it("council discloses an estimate-headroom member refusal below the floor", async () => {
+    const repo = await initRepo();
+    const orch = new Orchestrator({
+      registry: new Map<string, HarnessAdapter>([
+        ["planner-a", councilPlannerAdapter("planner-a", "A")],
+        ["planner-b", councilPlannerAdapter("planner-b", "B")],
+      ]),
+      reviewers: [],
+    });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "design the feature",
+      mode: "plan",
+      council: true,
+      harnesses: ["planner-a", "planner-b"],
+      paidBudget: { kind: "finite", maxUsd: 0.04 },
+    });
+
+    expect(legacyOutcome(res)).toBe("success");
+    const membership = new ArtifactStore(repo).readYaml<{
+      requested: number;
+      drafted: number;
+      degraded: boolean;
+      members: Array<{ status: string }>;
+    }>(join(res.runDir, "council", "membership.yaml"));
+    expect(membership).toMatchObject({ requested: 2, drafted: 1, degraded: true });
+    expect(membership?.members.filter((member) => member.status === "failed")).toHaveLength(1);
+    expect(
+      readRunEvents(res.runDir).some(
+        (event) =>
+          event.type === "budget.lease.created" && event.payload["denied"] === "estimate_headroom",
+      ),
+    ).toBe(true);
   });
 
   it("council degrades honestly when a member fails but the merge still runs", async () => {
@@ -10851,10 +10887,17 @@ describe("delegation belt injection (D32)", () => {
     }
   });
 
-  it("settles a delegated child adapter's cash into its local and parent family ledgers", async () => {
+  it("admits an estimated delegated child while the parent unknown-cost unit is live", async () => {
     const repo = await initRepo();
     const authority = new DelegationBudgetAuthority();
     const root = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const parentLease = root.reserve({
+      taskId: "task-parent",
+      attemptId: "parent-a01",
+      intent: "implement",
+      harnessId: "parent",
+    });
+    expect(parentLease.granted).toBe(true);
     authority.registerParent("run-parent", root);
     authority.noteChildAccepted("run-parent", "job-child");
     const orch = new Orchestrator({
@@ -10882,6 +10925,7 @@ describe("delegation belt injection (D32)", () => {
     ).toBe("succeeded");
     expect(result.spendUsd).toBeCloseTo(0.2, 5);
     expect(root.spend()).toBeCloseTo(0.2, 5);
+    root.cancel(parentLease.lease!.lease_id);
     authority.beginParentClose("run-parent");
     await expect(authority.waitForChildren("run-parent", 20)).resolves.toBeUndefined();
   });

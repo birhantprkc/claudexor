@@ -82,6 +82,7 @@ export async function runCouncilPlan(
     roHome: { env: Record<string, string>; dispose: () => void };
     contextSection: string;
     laneRun: boolean;
+    estimateUsdFloor: number;
   },
 ): Promise<OrchestratorResult> {
   const { input, contract, taskId, runId, store, paths, log, ledger, adapters, roHome } = args;
@@ -129,6 +130,8 @@ export async function runCouncilPlan(
           fallbackHome: roHome.env,
           promptBody: deps.planPrompt(input.prompt) + args.contextSection,
           intent: "plan",
+          reservationEstimateUsd:
+            idx > 0 || input.delegatedFromRunId ? args.estimateUsdFloor : undefined,
         }),
       ),
     );
@@ -254,6 +257,7 @@ export async function runCouncilPlan(
       ),
       // D31: the merge is a synthesis iteration on the primary.
       intent: "synthesize",
+      reservationEstimateUsd: input.delegatedFromRunId ? args.estimateUsdFloor : undefined,
     });
   } finally {
     roHome.dispose();

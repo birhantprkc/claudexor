@@ -67,7 +67,12 @@ depth>0), a max sub-run count per parent (default 8), and one live parent-owned
 paid-budget authority shared by the parent and every child. Reservations and
 settlements are global to that authority, while each child reports its own spend
 and the parent reports the aggregate; exhaustion is a typed refusal, never a
-silent independent or unlimited budget. The daemon keeps that family authority
+silent independent or unlimited budget. `--delegate` is permission rather than
+a promise that a child will run, so the parent keeps ordinary first-slot cost
+evidence. Once server-owned `delegatedFromRunId` proves that a real child
+overlaps the live parent, every child-side reservation uses the configured
+estimate floor; settlement remains authoritative and insufficient shared
+headroom still refuses the child with a typed budget cause. The daemon keeps that family authority
 for the run lifetime: child admission is atomic and monotonic (pending starts
 count toward the max of 8), parent cancellation closes admission before it
 cascades, and the parent's terminal record waits for child drain. A bounded
@@ -1712,10 +1717,12 @@ native route, and an undisclosed route remains cost-unverifiable. `finite(0)` ad
 only proven-zero or subscription-entitlement work; a positive finite cap permits
 at most one unknown-cost paid unit in flight. A later exact charge above the cap
 is retained and ends `budget_overshoot`; permanently unknown cost ends
-`cost_unverifiable` rather than fabricating `$0`. Parallel race waves reserve a
-per-candidate estimate floor (`budget.estimate_usd_floor`, default $0.05) after
-the first slot, so concurrent estimated work counts against headroom before
-usage streams.
+`cost_unverifiable` rather than fabricating `$0`. Parallel race, Council, and
+deep-scan waves reserve an estimate floor (`budget.estimate_usd_floor`, default
+$0.05) after the first top-level slot. A real Delegate child uses that same
+floor for its first and subsequent work because it overlaps the still-running
+parent. Concurrent estimated work therefore counts against shared headroom
+before usage streams, while final settlement remains authoritative.
 
 A budget refusal is projected honestly by ONE shared classifier
 (`classifyBudgetFailure`), not re-invented per mode. The ledger's typed

@@ -21,6 +21,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { ControlRunDetail } from "../packages/schema/dist/index.js";
 import { redactSecrets } from "../packages/util/dist/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -224,6 +225,25 @@ function runCliText(args, opts = {}) {
 function inspectRun(runId, cwd) {
   const out = runCliJson(["inspect", runId], { cwd, name: `inspect ${runId}` });
   return out.json;
+}
+
+async function controlRunDetail(runId) {
+  try {
+    const [{ ensureDaemon }, { controlApiFetch }] = await Promise.all([
+      import("../packages/cli/dist/daemon-run.js"),
+      import("../packages/cli/dist/live.js"),
+    ]);
+    const { addr } = await ensureDaemon();
+    const response = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`);
+    const body = JSON.parse(await response.text());
+    if (!response.ok) throw new Error(`GET /runs/${runId} failed (HTTP ${response.status})`);
+    return { detail: ControlRunDetail.parse(body), error: null };
+  } catch (error) {
+    return {
+      detail: null,
+      error: redactSecrets(error instanceof Error ? error.message : String(error)),
+    };
+  }
 }
 
 function artifactExists(runDir, relPath) {
@@ -450,8 +470,7 @@ function assertPrimaryOutput(phase, name, out, kind) {
   return detail;
 }
 
-function assertCouncilArtifacts(phase, name, detail, runDir = detail?.runDir) {
-  const council = detail?.council;
+function assertCouncilArtifacts(phase, name, council, runDir) {
   const members = Array.isArray(council?.members) ? council.members : [];
   const draftedMembers = members.filter(
     (member) => member?.status === "drafted" || member?.status === "merged",
@@ -472,9 +491,12 @@ function assertCouncilArtifacts(phase, name, detail, runDir = detail?.runDir) {
     draftFiles,
   };
   const valid =
-    Number(council?.requested) >= 2 &&
-    Number(council?.drafted) >= 1 &&
-    council?.drafted === draftedMembers.length &&
+    council?.requested === 2 &&
+    council?.drafted === 2 &&
+    council?.degraded === false &&
+    members.length === 2 &&
+    new Set(members.map((member) => member?.harnessId)).size === 2 &&
+    draftedMembers.length === 2 &&
     typeof council?.mergedBy === "string" &&
     council.mergedBy.length > 0 &&
     members.some(
@@ -482,23 +504,7 @@ function assertCouncilArtifacts(phase, name, detail, runDir = detail?.runDir) {
     ) &&
     evidence.membership &&
     draftFiles.every(Boolean);
-  const failedMembers = members.filter((member) => member?.status === "failed");
-  const degradedExpected = Number(council?.drafted) < Number(council?.requested);
-  const disclosureValid =
-    council?.degraded === degradedExpected &&
-    (!degradedExpected ||
-      (failedMembers.length === Number(council?.requested) - Number(council?.drafted) &&
-        failedMembers.every(
-          (member) => typeof member?.error === "string" && member.error.trim().length > 0,
-        )));
-  const result = valid ? pass(phase, name, evidence) : fail(phase, name, evidence);
-  (disclosureValid ? pass : fail)(phase, `${name} degradation disclosure`, {
-    requested: council?.requested,
-    drafted: council?.drafted,
-    degraded: council?.degraded,
-    failed: evidence.members.filter((member) => member.status === "failed"),
-  });
-  return result;
+  return valid ? pass(phase, name, evidence) : fail(phase, name, evidence);
 }
 
 function recordRunEvidence(phase, name, out, cwd) {
@@ -535,6 +541,17 @@ function runApplyable(ev) {
   return (
     ev?.detail?.runFacts?.apply?.eligibility?.eligible === true &&
     ev?.decision?.apply_recommendation === "apply"
+  );
+}
+
+function runAdoptedAndVerified(ev) {
+  const outcome = ev?.detail?.runFacts?.outcome;
+  return (
+    outcome?.lifecycle === "succeeded" &&
+    outcome?.checks === "passed" &&
+    outcome?.review === "approved" &&
+    ev?.wp?.meta?.adopted === true &&
+    ev?.wp?.meta?.apply_state === "applied"
   );
 }
 
@@ -679,7 +696,7 @@ function needHarness(phase, h, label = h) {
   return true;
 }
 
-function runReadonlyPhase() {
+async function runReadonlyPhase() {
   const phase = "phase1";
   for (const retired of ["audit", "explore"]) {
     const out = runCliJson([retired, "retired verb probe"], {
@@ -775,7 +792,7 @@ function runReadonlyPhase() {
         "Plan adding multiply; reconcile disagreements between planners.",
         "--harness",
         multi.join(","),
-        ...councilFlags(),
+        ...councilFlags(2),
         "--effort",
         "low",
         "--max-usd",
@@ -784,8 +801,20 @@ function runReadonlyPhase() {
       { cwd: repos.readonly, name: `${phase}-multi-plan` },
     );
     const detail = assertPrimaryOutput(phase, "multi plan", plan, "plan.md");
-    if (detail?.runDir) {
-      assertCouncilArtifacts(phase, "multi plan council artifacts", detail);
+    if (detail?.runDir && plan.json?.runId) {
+      const projected = await controlRunDetail(plan.json.runId);
+      if (projected.detail)
+        assertCouncilArtifacts(
+          phase,
+          "multi plan council artifacts",
+          projected.detail.council,
+          detail.runDir,
+        );
+      else
+        fail(phase, "multi plan council artifacts", {
+          runId: plan.json.runId,
+          projectionError: projected.error,
+        });
     }
     const exp = runCliJson(
       [
@@ -1036,10 +1065,12 @@ function runDegradationControl(phase, onlyHarness) {
         name: `${phase}-single-family-apply-refusal`,
       });
       if (
+        ev.detail?.runFacts?.apply?.eligibility?.eligible === false &&
+        ev.detail?.runFacts?.apply?.eligibility?.state === "not_verified" &&
         apply.code !== 0 &&
-        /not verified|refusing apply|not applyable|decision status/.test(
-          apply.stdout + apply.stderr,
-        )
+        apply.json?.runId === out.json.runId &&
+        apply.json?.dryRun === true &&
+        apply.json?.code === "invalid_request"
       )
         pass(phase, "single-family apply refused", { runId: out.json.runId });
       else
@@ -1251,6 +1282,8 @@ function runBlockedDecisionScenario(phase, multi) {
 
 function runRevertScenario(phase, multi) {
   const repo = makeMathRepo(`${phase}-revert`, { addBug: true });
+  const mathPath = join(repo, "src", "math.js");
+  const preTurnMath = readFileSync(mathPath, "utf8");
   const out = runCliJson(
     [
       "agent",
@@ -1272,7 +1305,17 @@ function runRevertScenario(phase, multi) {
       cwd: repo,
       name: `${phase}-revert`,
     });
-    if (rev.code === 0 && rev.json?.accepted) pass(phase, "decision --revert", rev.json);
+    const detail = inspectRun(out.json.runId, repo);
+    if (
+      rev.code === 0 &&
+      rev.json?.accepted === true &&
+      readFileSync(mathPath, "utf8") === preTurnMath &&
+      detail?.summary?.result?.applyState === "reverted"
+    )
+      pass(phase, "decision --revert", {
+        runId: out.json.runId,
+        applyState: detail.summary.result.applyState,
+      });
     else fail(phase, "decision --revert", { exit: rev.code, json: rev.json, log: rel(rev.log) });
   } else
     skip(phase, "decision --revert", {
@@ -1300,14 +1343,18 @@ function runRevertScenario(phase, multi) {
     { cwd: repo2, name: `${phase}-in-place-diverge-source` },
   );
   if (out2.json?.runId && out2.json.status === "succeeded") {
-    writeFileSync(join(repo2, "src", "extra.js"), "export const diverged = true;\n");
+    const touchedPath = join(repo2, "src", "math.js");
+    const userEdit = readFileSync(touchedPath, "utf8") + "// user edit after the run\n";
+    writeFileSync(touchedPath, userEdit);
     const rev = runCliJson(["decision", out2.json.runId, "--revert"], {
       cwd: repo2,
       name: `${phase}-revert-diverged`,
     });
     if (
       rev.code !== 0 &&
-      /diverged|rejected/.test(JSON.stringify(rev.json ?? {}) + rev.stdout + rev.stderr)
+      rev.json?.code === "revert_refused" &&
+      rev.json?.context?.reason === "postimage_diverged" &&
+      readFileSync(touchedPath, "utf8") === userEdit
     )
       pass(phase, "revert divergence fence", { runId: out2.json.runId });
     else
@@ -1633,7 +1680,7 @@ async function runPlanPhase() {
         prompt,
         mode: "plan",
         council: true,
-        n: Math.min(3, multi.length),
+        n: 2,
       },
       { waitForTerminal: true },
     );
@@ -1655,8 +1702,10 @@ async function runPlanPhase() {
       runId: planOutcome.runId,
       sha256: planHash,
     });
-    const planDetail = inspectRun(planOutcome.runId, repo);
-    assertCouncilArtifacts(phase, "plan council artifacts", planDetail, planOutcome.runDir);
+    const planDetail = ControlRunDetail.parse(
+      await requestJson(`/runs/${encodeURIComponent(planOutcome.runId)}`),
+    );
+    assertCouncilArtifacts(phase, "plan council artifacts", planDetail.council, planOutcome.runDir);
 
     // This is the product's actual Implement action: a second turn in the SAME
     // thread names the exact plan run. The server freezes plan.md, mints
@@ -1707,7 +1756,7 @@ async function runPlanPhase() {
       implementOutcome.status === "succeeded" &&
       ev?.patchNonEmpty &&
       gatePassed(ev.detail) &&
-      runApplyable(ev) &&
+      runAdoptedAndVerified(ev) &&
       ev.decision?.verification_basis === "both"
     ) {
       pass(phase, "implement patch+gate", {
@@ -1782,7 +1831,7 @@ async function runPlanPhase() {
   }
 }
 
-function runDelegationPhase() {
+async function runDelegationPhase() {
   // D32: `orchestrate` is gone; `agent --delegate` injects the scoped Claudexor
   // belt into a claude/codex sandbox so the harness can spawn bounded isolated
   // sub-runs. Positive: a delegate agent run on an mcp_injection harness still
@@ -1792,35 +1841,85 @@ function runDelegationPhase() {
   const phase = "phase9";
   const candidates = available(requestedHarnesses).filter((h) => h === "claude" || h === "codex");
   for (const h of candidates) {
+    const repo = makeMathRepo(`${phase}-${h}-delegate`, { addBug: true });
+    const accessArgs = [];
+    if (h === "codex") {
+      const trust = runCliJson(["trust", "--allow-full-access"], {
+        cwd: repo,
+        name: `${phase}-${h}-delegate-trust`,
+      });
+      if (trust.code !== 0) {
+        fail(phase, `${h} Delegate disposable full-access grant`, {
+          exit: trust.code,
+          log: rel(trust.log),
+        });
+        continue;
+      }
+      accessArgs.push("--access", "full");
+    }
     const out = runCliJson(
       [
         "agent",
-        "Fix add() in this repo and verify with node --test; delegate exploratory sub-questions.",
+        "First use exactly one claudexor_ask belt tool to locate where add is defined in the original project. Do not ask the child to inspect your private candidate workspace or run tests. Then fix add locally; the configured gate will verify it.",
         "--delegate",
         "--harness",
         h,
+        ...accessArgs,
+        "--test",
+        testCmd(),
         "--effort",
         "low",
         "--max-usd",
         maxUsd,
       ],
-      { cwd: repos.write, name: `${phase}-${h}-delegate` },
+      { cwd: repo, name: `${phase}-${h}-delegate` },
     );
-    if (out.code === 0 && out.json?.runId)
-      pass(phase, `${h} agent --delegate produced a durable run`, {
-        runId: out.json?.runId,
-        status: out.json?.status,
+    const projected = out.json?.runId
+      ? await controlRunDetail(out.json.runId)
+      : { detail: null, error: "run id missing" };
+    const delegation = projected.detail?.summary?.delegation;
+    const children = projected.detail?.children ?? [];
+    const child = children.find(
+      (item) =>
+        item.delegatedFromRunId === out.json?.runId &&
+        item.mode === "ask" &&
+        item.state === "succeeded",
+    );
+    if (
+      out.code === 0 &&
+      out.json?.status === "succeeded" &&
+      delegation?.requested === true &&
+      delegation?.effective === true &&
+      delegation?.used === true &&
+      projected.detail?.runFacts?.outcome?.checks === "passed" &&
+      projected.detail?.summary?.result?.kind === "patch" &&
+      children.length === 1 &&
+      child
+    )
+      pass(phase, `${h} agent --delegate`, {
+        runId: out.json.runId,
+        childRunId: child.runId,
+        delegation,
       });
     else
       fail(phase, `${h} agent --delegate`, {
         exit: out.code,
         status: out.json?.status,
+        delegation,
+        projectionError: projected.error,
+        children: children.map((item) => ({
+          runId: item.runId,
+          state: item.state,
+          mode: item.mode,
+          delegatedFromRunId: item.delegatedFromRunId,
+        })),
         log: rel(out.log),
       });
   }
   if (candidates.length === 0)
     skip(phase, "agent --delegate", { reason: "need a doctor-ok claude/codex harness" });
   if (harnessOk("cursor")) {
+    const repo = makeMathRepo(`${phase}-cursor-delegate`, { addBug: true });
     const out = runCliJson(
       [
         "agent",
@@ -1828,17 +1927,18 @@ function runDelegationPhase() {
         "--delegate",
         "--harness",
         "cursor",
+        "--test",
+        testCmd(),
         "--effort",
         "low",
         "--max-usd",
         maxUsd,
       ],
-      { cwd: repos.write, name: `${phase}-cursor-delegate-negative` },
+      { cwd: repo, name: `${phase}-cursor-delegate-negative` },
     );
-    const detail = out.json?.runId ? inspectRun(out.json.runId, repos.write) : null;
+    const detail = out.json?.runId ? inspectRun(out.json.runId, repo) : null;
     const delegation = detail?.telemetry?.delegation;
     if (
-      out.code === 0 &&
       out.json?.runId &&
       delegation?.requested === true &&
       delegation?.effective === false &&
@@ -1853,6 +1953,22 @@ function runDelegationPhase() {
         exit: out.code,
         json: out.json,
         delegation,
+        log: rel(out.log),
+      });
+    if (
+      out.code === 0 &&
+      out.json?.status === "succeeded" &&
+      detail?.runFacts?.outcome?.checks === "passed" &&
+      detail?.summary?.result?.kind === "patch"
+    )
+      pass(phase, "cursor ordinary Agent after Delegate degradation", {
+        runId: out.json.runId,
+      });
+    else
+      fail(phase, "cursor ordinary Agent after Delegate degradation", {
+        exit: out.code,
+        status: out.json?.status,
+        failure: out.json?.failure ?? null,
         log: rel(out.log),
       });
   }
@@ -1944,7 +2060,7 @@ async function runMcpServePhase() {
           repoPath: repo,
           harness: h,
           effort: "low",
-          maxUsd: Number(maxUsd),
+          paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
         },
       },
     });
@@ -1955,16 +2071,55 @@ async function runMcpServePhase() {
     else fail(phase, "mcp ping during call", { stderr: srv.stderrText().slice(-300) });
     const startedAt = Date.now();
     const call = await srv.waitFor((m) => m.id === 2, timeoutMs);
-    const text = String(call?.result?.content?.[0]?.text ?? "");
-    if (call && !call.result?.isError && text.includes("runId: ")) {
+    const structured = call?.result?.structuredContent;
+    const durableHandle =
+      call &&
+      !call.result?.isError &&
+      typeof structured?.runId === "string" &&
+      structured.runId.length > 0 &&
+      ["queued", "running", "succeeded"].includes(structured.status);
+    let terminal = structured?.status === "succeeded" ? structured : null;
+    for (let poll = 0; durableHandle && !terminal && Date.now() - startedAt < timeoutMs; poll++) {
+      const id = 100 + poll;
+      srv.send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "claudexor_run_result", arguments: { runId: structured.runId } },
+      });
+      const result = await srv.waitFor((message) => message.id === id, 15_000);
+      const candidate = result?.result?.structuredContent;
+      if (["succeeded", "failed", "cancelled", "interrupted"].includes(candidate?.status)) {
+        terminal = candidate;
+        break;
+      }
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 500));
+    }
+    let cleanup = null;
+    if (durableHandle && !terminal) {
+      srv.send({
+        jsonrpc: "2.0",
+        id: 9_000,
+        method: "tools/call",
+        params: { name: "claudexor_run_cancel", arguments: { runId: structured.runId } },
+      });
+      cleanup = await srv.waitFor((message) => message.id === 9_000, 15_000);
+    }
+    if (durableHandle && terminal?.status === "succeeded") {
       pass(phase, "mcp ask result", {
         harness: h,
         ms: Date.now() - startedAt,
-        runId: /runId: (\S+)/.exec(text)?.[1],
+        runId: structured.runId,
+        initialStatus: structured.status,
+        terminalStatus: terminal.status,
       });
     } else {
+      const text = String(call?.result?.content?.[0]?.text ?? "");
       fail(phase, "mcp ask result", {
         isError: call?.result?.isError,
+        structured,
+        terminal,
+        cleanup: cleanup?.result?.structuredContent ?? null,
         head: text.slice(0, 200),
         stderr: srv.stderrText().slice(-300),
       });
@@ -2011,24 +2166,52 @@ async function runAcpServePhase() {
       method: "session/prompt",
       params: {
         sessionId: sess.result.sessionId,
-        prompt: "Answer exactly: 4. What is 2+2?",
-        mode: "ask",
-        harness: h,
-        effort: "low",
-        maxUsd: Number(maxUsd),
+        prompt: [{ type: "text", text: "Answer exactly: 4. What is 2+2?" }],
+        _meta: {
+          claudexor: {
+            mode: "ask",
+            harness: h,
+            effort: "low",
+            paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
+          },
+        },
       },
     });
     const done = await srv.waitFor((m) => m.id === 3, timeoutMs);
     const chunk = srv.messages.find(
       (m) =>
-        m.method === "session/update" && m.params?.update?.sessionUpdate === "agent_message_chunk",
+        m.method === "session/update" &&
+        m.params?.update?.sessionUpdate === "agent_message_chunk" &&
+        typeof m.params?.update?.content?.text === "string" &&
+        m.params.update.content.text.trim().length > 0,
     );
-    if (done?.result?.stopReason === "end_turn" && chunk)
-      pass(phase, "acp prompt round-trip", { harness: h });
+    const receipt = done?.result?._meta?.claudexor;
+    const projected =
+      typeof receipt?.runId === "string" && receipt.runId.length > 0
+        ? await controlRunDetail(receipt.runId)
+        : { detail: null, error: "run id missing" };
+    const controlsApplied =
+      projected.detail?.summary?.mode === "ask" &&
+      JSON.stringify(projected.detail?.summary?.harnesses) === JSON.stringify([h]) &&
+      JSON.stringify(projected.detail?.summary?.paidBudget) ===
+        JSON.stringify({ kind: "finite", maxUsd: Number(maxUsd) });
+    if (
+      done?.result?.stopReason === "end_turn" &&
+      chunk &&
+      typeof receipt?.runId === "string" &&
+      receipt.runId.length > 0 &&
+      receipt.status === "succeeded" &&
+      controlsApplied
+    )
+      pass(phase, "acp prompt round-trip", { harness: h, runId: receipt.runId });
     else
       fail(phase, "acp prompt round-trip", {
         stopReason: done?.result?.stopReason,
         sawChunk: Boolean(chunk),
+        receipt,
+        controlsApplied,
+        projectionError: projected.error,
+        error: done?.error ?? null,
       });
   } finally {
     await srv.close();
@@ -2156,7 +2339,7 @@ async function main() {
     });
   }
   if (ready) {
-    if (phaseEnabled("phase1")) runReadonlyPhase();
+    if (phaseEnabled("phase1")) await runReadonlyPhase();
     if (phaseEnabled("phase2")) runWritePhase();
     if (phaseEnabled("phase3")) runMultiWritePhase();
     if (phaseEnabled("phase4")) runLifecyclePhase();
@@ -2164,7 +2347,7 @@ async function main() {
     if (phaseEnabled("phase6")) runVisionPhase();
     if (phaseEnabled("phase7")) runWebPhase();
     if (phaseEnabled("phase8")) await runPlanPhase();
-    if (phaseEnabled("phase9")) runDelegationPhase();
+    if (phaseEnabled("phase9")) await runDelegationPhase();
     if (phaseEnabled("phase10")) await runMcpServePhase();
     if (phaseEnabled("phase11")) await runAcpServePhase();
   }
