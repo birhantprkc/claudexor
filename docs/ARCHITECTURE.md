@@ -993,11 +993,12 @@ Endpoint semantics beyond the inventory:
   accepted, a replay may reuse its one journaled runless turn only while that
   turn is still the conversation tail; the recovery boundary refuses a
   historical orphan before enqueue. Already accepted commands remain valid and
-  bind in daemon command order even when later turn bubbles exist. Thread
-  recovery mutations are serialized per thread, bind a turn to at most one run,
-  preserve frozen-plan hash/override provenance on Exact Retry, and emit
-  decision/rerun audit side effects only for the request that first accepted the
-  command.
+  bind in daemon command order even when later turn bubbles exist. If command
+  retention has removed that authority while its turn is already bound, replay
+  refuses instead of executing a second unbound run. Thread recovery mutations
+  are serialized per thread, bind a turn to at most one run, preserve
+  frozen-plan hash/override provenance on Exact Retry, and emit decision/rerun
+  audit side effects only for the request that first accepted the command.
 - `GET /v2/trust` + `POST /v2/trust` are the user-level trust surface: the GET
   enumerates per-repo trust files (`~/.claudexor/v3/trust/<repo-hash>.yaml`, each
   stamped with its `repo_root` provenance so the list is human-readable; legacy
