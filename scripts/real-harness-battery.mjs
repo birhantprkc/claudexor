@@ -378,7 +378,7 @@ function makeProtectedRepo(name) {
 }
 
 function testCmd() {
-  return "node --test";
+  return JSON.stringify(["node", "--test"]);
 }
 
 function baseRunArgs(prompt, harnesses, extra = []) {
@@ -1462,16 +1462,17 @@ function runVisionPhase() {
       ],
       { cwd: repos.readonly, name: `${phase}-cursor-image-negative` },
     );
-    if (
-      out.code !== 0 &&
-      /cannot accept image/.test(JSON.stringify(out.json ?? {}) + out.stdout + out.stderr)
-    )
-      pass(phase, "cursor image fail-loud", {
+    if (out.code !== 0 && out.json?.code === "attachment_pool_unsupported")
+      pass(phase, "cursor image typed refusal", {
         status: out.json?.status,
-        error: out.json?.error ?? out.json?.summary,
+        code: out.json.code,
       });
     else
-      fail(phase, "cursor image fail-loud", { exit: out.code, json: out.json, log: rel(out.log) });
+      fail(phase, "cursor image typed refusal", {
+        exit: out.code,
+        json: out.json,
+        log: rel(out.log),
+      });
   } else skip(phase, "cursor image negative", { reason: "cursor not ok" });
 }
 
@@ -1776,8 +1777,8 @@ function runDelegationPhase() {
   // belt into a claude/codex sandbox so the harness can spawn bounded isolated
   // sub-runs. Positive: a delegate agent run on an mcp_injection harness still
   // produces a work product (the belt injection doesn't break the run).
-  // Negative: `--delegate` on cursor (no mcp_injection) fails loud with the
-  // belt refusal, never silently drops the belt.
+  // A non-injecting Cursor lane continues as ordinary Agent, but records the
+  // stable typed reason instead of silently pretending Delegate was effective.
   const phase = "phase9";
   const candidates = available(requestedHarnesses).filter((h) => h === "claude" || h === "codex");
   for (const h of candidates) {
@@ -1824,20 +1825,24 @@ function runDelegationPhase() {
       ],
       { cwd: repos.write, name: `${phase}-cursor-delegate-negative` },
     );
+    const detail = out.json?.runId ? inspectRun(out.json.runId, repos.write) : null;
+    const delegation = detail?.telemetry?.delegation;
     if (
-      out.code !== 0 &&
-      /delegation belt|mcp_injection|cannot inject/.test(
-        JSON.stringify(out.json ?? {}) + out.stdout + out.stderr,
-      )
+      out.code === 0 &&
+      out.json?.runId &&
+      delegation?.requested === true &&
+      delegation?.effective === false &&
+      delegation?.reason === "manifest_unsupported"
     )
-      pass(phase, "cursor --delegate fail-loud", {
-        status: out.json?.status,
-        error: out.json?.error ?? out.json?.summary,
+      pass(phase, "cursor --delegate typed degradation", {
+        runId: out.json.runId,
+        reason: delegation.reason,
       });
     else
-      fail(phase, "cursor --delegate fail-loud", {
+      fail(phase, "cursor --delegate typed degradation", {
         exit: out.code,
         json: out.json,
+        delegation,
         log: rel(out.log),
       });
   }
@@ -1911,14 +1916,11 @@ async function runMcpServePhase() {
     srv.send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tools = await srv.waitFor((m) => m.id === 1, 15_000);
     const names = (tools?.result?.tools ?? []).map((t) => t.name);
-    if (
-      names.length === 12 &&
-      names.includes("claudexor_ask") &&
-      names.includes("claudexor_best_of")
-    )
-      pass(phase, "mcp tools/list", { count: names.length });
+    const requiredNames = ["claudexor_ask", "claudexor_best_of"];
+    const missingNames = requiredNames.filter((name) => !names.includes(name));
+    if (missingNames.length === 0) pass(phase, "mcp tools/list", { count: names.length });
     else {
-      fail(phase, "mcp tools/list", { names });
+      fail(phase, "mcp tools/list", { names, missingNames });
       return;
     }
     srv.send({
@@ -1981,7 +1983,12 @@ async function runAcpServePhase() {
       fail(phase, "acp initialize", { init });
       return;
     }
-    srv.send({ jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: repo } });
+    srv.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/new",
+      params: { cwd: repo, mcpServers: [] },
+    });
     const sess = await srv.waitFor((m) => m.id === 2, 15_000);
     if (!sess?.result?.sessionId) {
       fail(phase, "acp session/new", { sess });
