@@ -329,9 +329,10 @@ export function unwrapWorkReportEnvelope(
   if (mode.channel === "instructed_fence" && instructedPrefix?.trim()) {
     return validateWorkReport(instructedPrefix, obj["work_report"], mode.source);
   }
-  // A footer-only reply is still a valid report. Read-only modes will reject
-  // its empty deliverable honestly, while a mutating attempt may have produced
-  // a real diff. Only a PRESENT legacy output must satisfy the old string shape.
+  // A footer-only reply is still a valid report. Each consumer keeps its
+  // established product rule: Ask/report may surface honest "(no output)",
+  // Plan/reducer require prose, and a mutating attempt may have a real diff.
+  // Only a PRESENT legacy output must satisfy the old string shape.
   if (mode.channel === "instructed_fence" && obj["output"] === undefined) {
     return validateWorkReport("", obj["work_report"], mode.source);
   }
