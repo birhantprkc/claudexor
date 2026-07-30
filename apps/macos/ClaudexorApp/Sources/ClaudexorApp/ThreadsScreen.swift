@@ -470,13 +470,6 @@ struct ThreadsScreen: View {
             // Native dismissible popover — no inline glass-on-glass panel.
             .popover(isPresented: $showOptions, arrowEdge: .bottom) {
                 composerOptions
-                    // Animated popover resizes SIGSEGV on macOS 26.x: growing the
-                    // content (expanding "Advanced", strategy sections) makes
-                    // PopoverHostingView animate `setFrame:` inside windowDidLayout,
-                    // whose nested run loop hits a dead UpdateCycle observer
-                    // (crash at pc=0). Non-animated resizes never enter that path,
-                    // so every in-popover state change must run animation-free.
-                    .transaction { $0.disablesAnimations = true }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

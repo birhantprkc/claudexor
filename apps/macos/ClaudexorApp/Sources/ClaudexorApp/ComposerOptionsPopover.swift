@@ -345,6 +345,13 @@ extension ThreadsScreen {
         .scrollIndicators(.visible)
         // Root-level text selection for the options popover (batch-6 item c / §2.9).
         .textSelection(.enabled)
+        // Animated popover resizes SIGSEGV on macOS 26.x: growing the
+        // content (expanding "Advanced", strategy sections) makes
+        // PopoverHostingView animate `setFrame:` inside windowDidLayout,
+        // whose nested run loop hits a dead UpdateCycle observer
+        // (crash at pc=0). Non-animated resizes never enter that path,
+        // so every in-popover state change must run animation-free.
+        .transaction { $0.disablesAnimations = true }
     }
 
     /// QA-010: the optional Create-turn deterministic test command. ONE honest
