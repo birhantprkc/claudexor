@@ -21,7 +21,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
-import { ControlRunDetail } from "../packages/schema/dist/index.js";
+import { ArtifactStore } from "../packages/artifact-store/dist/index.js";
+import { ControlRunDetail, RunDeliveryState } from "../packages/schema/dist/index.js";
 import { redactSecrets } from "../packages/util/dist/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1305,18 +1306,28 @@ function runRevertScenario(phase, multi) {
       cwd: repo,
       name: `${phase}-revert`,
     });
-    const detail = inspectRun(out.json.runId, repo);
+    const deliveryState = RunDeliveryState.safeParse(
+      new ArtifactStore(repo).readYaml(join(out.json.runDir, "final", "delivery_state.yaml")),
+    );
     if (
       rev.code === 0 &&
       rev.json?.accepted === true &&
       readFileSync(mathPath, "utf8") === preTurnMath &&
-      detail?.summary?.result?.applyState === "reverted"
+      deliveryState.success &&
+      deliveryState.data.applyState === "reverted"
     )
       pass(phase, "decision --revert", {
         runId: out.json.runId,
-        applyState: detail.summary.result.applyState,
+        applyState: deliveryState.data.applyState,
       });
-    else fail(phase, "decision --revert", { exit: rev.code, json: rev.json, log: rel(rev.log) });
+    else
+      fail(phase, "decision --revert", {
+        exit: rev.code,
+        json: rev.json,
+        bytesRestored: readFileSync(mathPath, "utf8") === preTurnMath,
+        deliveryState: deliveryState.success ? deliveryState.data : null,
+        log: rel(rev.log),
+      });
   } else
     skip(phase, "decision --revert", {
       reason: "in-place source not succeeded",
@@ -1344,7 +1355,15 @@ function runRevertScenario(phase, multi) {
   );
   if (out2.json?.runId && out2.json.status === "succeeded") {
     const touchedPath = join(repo2, "src", "math.js");
-    const userEdit = readFileSync(touchedPath, "utf8") + "// user edit after the run\n";
+    const postimage = readFileSync(touchedPath, "utf8");
+    const userEdit = postimage.replace(
+      "return a + b;",
+      "return Number(a) + Number(b); // user edit after the run",
+    );
+    if (userEdit === postimage) {
+      fail(phase, "revert divergence fixture", { reason: "run-owned postimage was absent" });
+      return;
+    }
     writeFileSync(touchedPath, userEdit);
     const rev = runCliJson(["decision", out2.json.runId, "--revert"], {
       cwd: repo2,
@@ -1959,7 +1978,7 @@ async function runDelegationPhase() {
       out.code === 0 &&
       out.json?.status === "succeeded" &&
       detail?.runFacts?.outcome?.checks === "passed" &&
-      detail?.summary?.result?.kind === "patch"
+      detail?.work_product?.meta?.result_kind === "patch"
     )
       pass(phase, "cursor ordinary Agent after Delegate degradation", {
         runId: out.json.runId,
