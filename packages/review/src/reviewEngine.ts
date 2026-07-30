@@ -34,7 +34,8 @@ import {
   sealedReviewTranscriptChunk,
   type ReviewerInfo,
 } from "./findings.js";
-import { buildReviewPrompt } from "./reviewPrompt.js";
+import { buildReviewPrompt, SEALED_REVIEW_OUTPUT_SCHEMA } from "./reviewPrompt.js";
+import { sealedReviewTranscriptFromEvents } from "./sealedReviewEnvelope.js";
 import {
   buildReviewerCandidateInventory,
   cleanupTemporaryReviewerWorkspaceBaseDir,
@@ -354,6 +355,9 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         effort_hint: reviewer.requestedEffort ?? null,
         auth_preference: reviewer.authPreference ?? "auto",
         env_inheritance: input.envInheritance ?? "mirror_native",
+        ...(input.evidenceReadOnly && input.frozenIdentity
+          ? { output_schema: SEALED_REVIEW_OUTPUT_SCHEMA }
+          : {}),
         ...(input.env ? { env: input.env } : {}),
       });
       writeText(artifact.promptPath, spec.prompt);
@@ -396,6 +400,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
     let routeModel: string | undefined;
     let routeSource: RouteProof["observed"]["evidence_source"] = "unavailable";
     let reviewerError: string | null = null;
+    let sealedProjectionError: string | null = null;
     try {
       const out = await collectReviewerOutput(
         reviewer,
@@ -407,8 +412,10 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         artifact,
         input.onReviewerEvent,
         input.signal,
+        input.evidenceReadOnly === true,
       );
       text = out.text;
+      sealedProjectionError = out.sealedProjectionError ?? null;
       streamObservedModel = out.observedModel;
       routeModel = out.observedModel;
       routeSource = out.observedSource;
@@ -422,10 +429,14 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       const partial = err as PartialReviewerSpend & {
         partialObservedModel?: string;
         partialObservedSource?: RouteProof["observed"]["evidence_source"];
+        partialSealedProjectionError?: string;
         partialText?: string;
       };
       if (typeof partial?.partialText === "string" && partial.partialText.trim() !== "") {
         text = partial.partialText;
+      }
+      if (typeof partial?.partialSealedProjectionError === "string") {
+        sealedProjectionError = partial.partialSealedProjectionError;
       }
       reviewerSpend.recordPartial(index, partial);
       if (partial?.partialObservedModel) {
@@ -452,6 +463,21 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       : null;
     const jsonBlocks = sealedParse?.blocks ?? extractJsonBlocks(text);
     writeJson(artifact.parsedPath, redactValue(jsonBlocks));
+    if (sealedParse && (sealedProjectionError || sealedParse.error)) {
+      const detail = sealedProjectionError ?? sealedParse.error ?? "invalid sealed review output";
+      writeParseError(artifact, {
+        error: "invalid_sealed_review_envelope",
+        detail,
+        malformed: sealedParse.malformed,
+        text_sha256: sha256(text),
+        ...(reviewerError ? { reviewer_error: reviewerError } : {}),
+      });
+      findingsByReviewer[index]?.push(...sealedParse.findings);
+      findingsByReviewer[index]?.push(
+        insufficientEvidenceFinding(info, `Invalid sealed review envelope: ${detail}.`),
+      );
+      return;
+    }
     if (reviewerError && (text.trim() === "" || jsonBlocks.length === 0)) {
       findingsByReviewer[index]?.push(
         insufficientEvidenceFinding(info, `Reviewer failed: ${reviewerError}`),
@@ -473,18 +499,6 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
       findingsByReviewer[index]?.push(...parsed.findings);
       parsedFindingsRecorded = true;
     };
-    if (sealedParse?.error) {
-      Object.assign(parseError, {
-        error: "invalid_sealed_review_envelope",
-        detail: sealedParse.error,
-        malformed: sealedParse.malformed,
-        text_sha256: sha256(text),
-      });
-      recordParsedFindings();
-      findingsByReviewer[index]?.push(
-        insufficientEvidenceFinding(info, `Invalid sealed review envelope: ${sealedParse.error}.`),
-      );
-    }
     if (parsed.malformed > 0 && !sealedParse?.error) {
       Object.assign(parseError, {
         error: "malformed_findings",
@@ -590,6 +604,7 @@ async function collectReviewerOutput(
   artifact: ReviewerArtifactContext,
   onReviewerEvent: ReviewCandidateInput["onReviewerEvent"],
   signal?: AbortSignal,
+  sealed = false,
 ): Promise<ReviewerOutput> {
   const controller = new AbortController();
   spec.extra["abortSignal"] = controller.signal;
@@ -642,6 +657,7 @@ async function collectReviewerOutput(
     let lastError: string | null = null;
     let attemptObservedModel: string | undefined;
     let attemptObservedSource: RouteProof["observed"]["evidence_source"] = "unavailable";
+    const sealedMessageEvents: unknown[] = [];
     for await (const ev of iter) {
       const eventTime = nowIso();
       const persistedEvent = redactValue(ev);
@@ -712,12 +728,22 @@ async function collectReviewerOutput(
           unknown_usd: unknownUsd,
         });
       }
+      if (sealed && ev.type === "message" && ev.final === true) {
+        sealedMessageEvents.push(persistedEvent);
+      }
       if (ev.type === "message" && ev.text && ev.payload?.["auth_switched"] !== true) {
         const safeText = sealedReviewTranscriptChunk(persistedEvent);
         if (safeText !== null) {
-          text += safeText;
-          partialText += safeText;
-          appendLine(artifact.transcriptPath, safeText);
+          if (sealed) {
+            // Keep the long-running transcript visibly active for monitors. A
+            // clean completion replaces these progress bytes with the exact
+            // typed-final projection used by the sealed parser and sealer.
+            appendLine(artifact.transcriptPath, safeText);
+          } else {
+            text += safeText;
+            partialText += safeText;
+            appendLine(artifact.transcriptPath, safeText);
+          }
         }
       }
       if (ev.observed_model) {
@@ -737,6 +763,16 @@ async function collectReviewerOutput(
     }
     if (isCancelled()) {
       throw new Error("Reviewer cancelled");
+    }
+    let sealedProjectionError: string | undefined;
+    if (sealed) {
+      try {
+        text = sealedReviewTranscriptFromEvents(sealedMessageEvents);
+        partialText = text;
+        writeText(artifact.transcriptPath, text);
+      } catch (error) {
+        sealedProjectionError = error instanceof Error ? error.message : String(error);
+      }
     }
     if (
       sawTransient &&
@@ -773,7 +809,12 @@ async function collectReviewerOutput(
       return consumeOnce(nativeTry + 1);
     }
     if (sawError && !timedOut) {
-      throw new Error(`Reviewer emitted error event: ${lastError ?? "unknown error"}`);
+      throw Object.assign(
+        new Error(`Reviewer emitted error event: ${lastError ?? "unknown error"}`),
+        {
+          ...(sealedProjectionError ? { partialSealedProjectionError: sealedProjectionError } : {}),
+        },
+      );
     }
     if (!timedOut && !isCancelled()) {
       const completedTime = nowIso();
@@ -799,6 +840,7 @@ async function collectReviewerOutput(
     costKnowledge.finishAttempt();
     return {
       text,
+      ...(sealedProjectionError ? { sealedProjectionError } : {}),
       observedModel: attemptObservedModel,
       observedSource: attemptObservedSource,
       costUsd,

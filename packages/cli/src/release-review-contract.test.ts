@@ -372,7 +372,13 @@ const { pathToFileURL } = require("node:url");
           severity: "WARN",
           category: "correctness",
           claim: "Non-blocking fixture finding",
-          evidence: { files: [{ path: "file.txt", lines: "1" }] },
+          evidence: {
+            files: [{ path: "file.txt", lines: "1" }],
+            diff_hunks: [],
+            commands: [],
+            logs: [],
+          },
+          proposed_fix: "No release-blocking change required.",
         }];
         const envelope = {
           completion: {
@@ -388,11 +394,20 @@ const { pathToFileURL } = require("node:url");
           findings,
         };
         const completed = new Date().toISOString();
+        const finalText = JSON.stringify(envelope) + "\\n";
         yield {
           type: "message",
           session_id: spec.session_id,
           ts: completed,
-          text: JSON.stringify(envelope) + "\\n",
+          text: finalText,
+        };
+        yield {
+          type: "message",
+          session_id: spec.session_id,
+          ts: completed,
+          text: finalText,
+          final: true,
+          payload: { final_source: index === 0 ? "structured_output" : "last_agent_message" },
         };
         yield {
           type: "completed",
@@ -489,6 +504,26 @@ const { pathToFileURL } = require("node:url");
       });
       expect(engine.stderr).toBe("");
       expect(engine.status).toBe(0);
+      for (const [index, required] of REQUIRED_NATIVE_REVIEWERS.entries()) {
+        const reviewerDir = join(
+          artifacts,
+          `${String(index + 1).padStart(2, "0")}-${required.harnessId}`,
+        );
+        const messages = readFileSync(join(reviewerDir, "raw-normalized-stream.jsonl"), "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .filter((event) => event.type === "message");
+        expect(messages).toHaveLength(2);
+        expect(messages[0].text).toBe(messages[1].text);
+        expect(messages[1]).toMatchObject({
+          final: true,
+          payload: {
+            final_source: index === 0 ? "structured_output" : "last_agent_message",
+          },
+        });
+        expect(readFileSync(join(reviewerDir, "transcript.md"), "utf8")).toBe(messages[1].text);
+      }
 
       const keys = generateKeyPairSync("ed25519");
       write(

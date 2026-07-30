@@ -36,6 +36,7 @@ export function reviewerAuthSwitchFromEvent(ev: HarnessEvent): {
 
 export interface ReviewerOutput {
   text: string;
+  sealedProjectionError?: string;
   observedModel?: string;
   observedSource: RouteProof["observed"]["evidence_source"];
   costUsd: number;

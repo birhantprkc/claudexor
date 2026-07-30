@@ -52,10 +52,23 @@ export function sealedReviewTranscriptChunk(event: unknown): string | null {
 }
 
 export function sealedReviewTranscriptFromEvents(events: readonly unknown[]): string {
-  return events
-    .map(sealedReviewTranscriptChunk)
-    .filter((text): text is string => text !== null)
-    .join("");
+  // HarnessEvent.final is the cross-harness typed-answer contract. Adapter
+  // provenance such as payload.final_source remains preserved in raw events
+  // and pinned by adapter conformance, but is not a second finality authority.
+  const finals = events.filter(
+    (event): event is Record<string, unknown> =>
+      isRecord(event) && event["type"] === "message" && event["final"] === true,
+  );
+  if (finals.length !== 1) {
+    throw new Error(
+      `sealed review requires exactly one typed final message; observed ${finals.length}`,
+    );
+  }
+  const transcript = sealedReviewTranscriptChunk(finals[0]!);
+  if (transcript === null) {
+    throw new Error("sealed review final message has no projectable text");
+  }
+  return transcript;
 }
 
 /** Dependency-free decision parser shared by the product and receipt verifier.

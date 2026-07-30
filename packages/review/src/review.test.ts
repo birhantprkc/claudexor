@@ -18,9 +18,11 @@ import type { ProviderFamily } from "@claudexor/schema";
 import {
   ConformanceReport,
   ConvergencePredicate,
+  type HarnessEvent,
   HarnessManifest,
   ReviewFinding,
   RunEventType,
+  strictifyForStructuredOutput,
 } from "@claudexor/schema";
 import { evaluateConvergence } from "./convergence.js";
 import {
@@ -34,6 +36,7 @@ import { buildTestCommandGrant, gatesPassed, runGate } from "./gates.js";
 import { ReadinessLedger, failureSignature } from "./readiness.js";
 import { revalidateFindings } from "./revalidate.js";
 import { type ReviewerProgressEvent, type ReviewerSpec, reviewCandidate } from "./reviewEngine.js";
+import { SEALED_REVIEW_OUTPUT_SCHEMA } from "./reviewPrompt.js";
 import { buildRouteProof, classifyDiversity } from "./route.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -169,6 +172,13 @@ describe("reviewer progress event schema contract", () => {
 });
 
 describe("sealed release native reviewer contract", () => {
+  it("keeps the release transport schema provider-strict and semantic-free", () => {
+    expect(strictifyForStructuredOutput(SEALED_REVIEW_OUTPUT_SCHEMA)).toEqual(
+      SEALED_REVIEW_OUTPUT_SCHEMA,
+    );
+    expect(JSON.stringify(SEALED_REVIEW_OUTPUT_SCHEMA)).not.toMatch(/"(?:enum|const|minimum)"\s*:/);
+  });
+
   it("accepts only one exact JSON envelope and rejects surrounding reviewer prose", () => {
     const reviewer = {
       harness_id: "codex",
@@ -206,6 +216,45 @@ describe("sealed release native reviewer contract", () => {
     }
   });
 
+  it("submits the release schema only for frozen sealed reviews", async () => {
+    const { cwd, evidenceDir } = makeReviewWorkspace("claudexor-generic-review-schema-");
+    const artifactsDir = reapMk(join(tmpdir(), "claudexor-generic-review-schema-artifacts-"));
+    initGitFixture(cwd);
+    let submittedOutputSchema: unknown = "not observed";
+    let submittedPrompt = "";
+    const adapter: HarnessAdapter = {
+      id: "generic-reviewer",
+      async discover() {
+        throw new Error("not used");
+      },
+      async doctor() {
+        throw new Error("not used");
+      },
+      async *run(spec) {
+        submittedOutputSchema = spec.output_schema;
+        submittedPrompt = spec.prompt;
+        const ts = new Date().toISOString();
+        yield { type: "message", session_id: spec.session_id, ts, text: "[]" };
+      },
+    };
+
+    try {
+      await reviewCandidate({
+        candidateLabel: "Generic candidate",
+        diff: "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
+        evidenceDir,
+        artifactsDir,
+        cwd,
+        reviewers: [{ adapter, providerFamily: "openai" }],
+      });
+      expect(submittedOutputSchema).toBeUndefined();
+      expect(submittedPrompt).not.toContain("All four evidence arrays are required");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(artifactsDir, { recursive: true, force: true });
+    }
+  });
+
   it("prompts for an explicit completion envelope while preserving generic findings", async () => {
     const { cwd, evidenceDir } = makeReviewWorkspace("claudexor-release-review-");
     const artifactsDir = reapMk(join(tmpdir(), "claudexor-release-review-artifacts-"));
@@ -219,6 +268,9 @@ describe("sealed release native reviewer contract", () => {
     let submittedSessionId = "";
     let submittedExternalContextPolicy = "";
     let submittedWebPolicy = "";
+    let submittedOutputSchema: unknown;
+    let sawLiveTranscriptProgress = false;
+    let emitDuplicateTypedFinal = false;
     let reviewPayload = {
       completion: {
         verdict: "PASS",
@@ -230,7 +282,15 @@ describe("sealed release native reviewer contract", () => {
         ].map((item) => ({ item, completed: true })),
         findingCount: 1,
       },
-      findings: [{ severity: "WARN", category: "test_gap", claim: "release wrapper finding" }],
+      findings: [
+        {
+          severity: "WARN",
+          category: "test_gap",
+          claim: "release wrapper finding",
+          evidence: { files: [], diff_hunks: [], commands: [], logs: [] },
+          proposed_fix: "Add the missing release assertion.",
+        },
+      ],
     };
     const adapter: HarnessAdapter = {
       id: "release-reviewer",
@@ -255,15 +315,32 @@ describe("sealed release native reviewer contract", () => {
         submittedSessionId = spec.session_id;
         submittedExternalContextPolicy = spec.external_context_policy;
         submittedWebPolicy = spec.tool_permission_policy.web;
+        submittedOutputSchema = spec.output_schema;
         const ts = new Date().toISOString();
+        const text = JSON.stringify(reviewPayload);
         yield {
           type: "message",
           session_id: spec.session_id,
           ts,
           observed_model: "release-model",
           credential_route: "vendor_native",
-          text: JSON.stringify(reviewPayload),
+          text,
         };
+        sawLiveTranscriptProgress =
+          readFileSync(join(artifactsDir, "01-release-reviewer", "transcript.md"), "utf8") ===
+          `${text}\n`;
+        const finalEvent = {
+          type: "message",
+          session_id: spec.session_id,
+          ts,
+          observed_model: "release-model",
+          credential_route: "vendor_native",
+          text,
+          final: true,
+          payload: { final_source: "last_agent_message" },
+        } satisfies HarnessEvent;
+        yield finalEvent;
+        if (emitDuplicateTypedFinal) yield finalEvent;
       },
     };
     try {
@@ -296,8 +373,13 @@ describe("sealed release native reviewer contract", () => {
       expect(prompt).toContain("findingCount must exactly equal findings.length");
       expect(submittedExternalContextPolicy).toBe("live");
       expect(submittedWebPolicy).toBe("live");
+      expect(submittedOutputSchema).toEqual(SEALED_REVIEW_OUTPUT_SCHEMA);
+      expect(sawLiveTranscriptProgress).toBe(true);
       expect(readFileSync(join(artifactsDir, "01-release-reviewer", "prompt.md"), "utf8")).toBe(
         prompt,
+      );
+      expect(readFileSync(join(artifactsDir, "01-release-reviewer", "transcript.md"), "utf8")).toBe(
+        `${JSON.stringify(reviewPayload)}\n`,
       );
       expect(result.findings.map((finding) => finding.claim)).toContain("release wrapper finding");
       expect(
@@ -368,6 +450,56 @@ describe("sealed release native reviewer contract", () => {
         ).toMatchObject({ error: "invalid_sealed_review_envelope" });
       } finally {
         rmSync(invalidArtifactsDir, { recursive: true, force: true });
+      }
+
+      reviewPayload = {
+        completion: {
+          verdict: "PASS",
+          checklist: [
+            "sealed_evidence",
+            "intent_and_scope",
+            "runtime_and_security",
+            "tests_and_release",
+          ].map((item) => ({ item, completed: true })),
+          findingCount: 0,
+        },
+        findings: [],
+      };
+      emitDuplicateTypedFinal = true;
+      const duplicateArtifactsDir = reapMk(
+        join(tmpdir(), "claudexor-duplicate-final-review-artifacts-"),
+      );
+      try {
+        const duplicate = await reviewCandidate({
+          candidateLabel: "Release candidate",
+          diff,
+          evidenceDir,
+          evidenceReadOnly: true,
+          frozenIdentity: {
+            candidateSha: "a".repeat(40),
+            candidateTree: "b".repeat(40),
+            packetManifestSha256: "c".repeat(64),
+          },
+          env: { CLAUDEXOR_REVIEW_WAVE_ID: "55555555-5555-4555-8555-555555555555" },
+          artifactsDir: duplicateArtifactsDir,
+          cwd,
+          reviewers: [{ adapter, providerFamily: "openai", requestedModel: "release-model" }],
+        });
+        expect(duplicate.findings).toHaveLength(1);
+        expect(duplicate.findings[0]?.severity).toBe("INSUFFICIENT_EVIDENCE");
+        expect(
+          JSON.parse(
+            readFileSync(
+              join(duplicateArtifactsDir, "01-release-reviewer", "parse-error.json"),
+              "utf8",
+            ),
+          ),
+        ).toMatchObject({
+          error: "invalid_sealed_review_envelope",
+          detail: "sealed review requires exactly one typed final message; observed 2",
+        });
+      } finally {
+        rmSync(duplicateArtifactsDir, { recursive: true, force: true });
       }
     } finally {
       rmSync(cwd, { recursive: true, force: true });
@@ -443,6 +575,15 @@ describe("sealed release native reviewer contract", () => {
           readFileSync(join(artifactsDir, "01-release-no-retry", "metadata.json"), "utf8"),
         ),
       ).not.toHaveProperty("transient_retry");
+      expect(
+        JSON.parse(
+          readFileSync(join(artifactsDir, "01-release-no-retry", "parse-error.json"), "utf8"),
+        ),
+      ).toMatchObject({
+        error: "invalid_sealed_review_envelope",
+        detail: "sealed review requires exactly one typed final message; observed 0",
+        reviewer_error: "Reviewer emitted error event: stream disconnected",
+      });
       await expect(
         reviewCandidate({
           candidateLabel: "Release candidate",
@@ -762,16 +903,56 @@ describe("route proof", () => {
 });
 
 describe("findings", () => {
-  it("projects normalized message events to exact single-newline transcript bytes", () => {
+  it("projects exactly one typed final for sealed reviews", () => {
+    const codexEnvelope = '{"completion":{"verdict":"PASS"},"findings":[]}';
     expect(
       sealedReviewTranscriptFromEvents([
         { type: "started", text: "ignored" },
-        { type: "message", text: "first" },
-        { type: "message", text: "second\n" },
-        { type: "message", text: "ignored auth", payload: { auth_switched: true } },
-        { type: "message", text: "" },
+        { type: "message", text: codexEnvelope },
+        {
+          type: "message",
+          text: codexEnvelope,
+          final: true,
+          payload: { final_source: "last_agent_message" },
+        },
       ]),
-    ).toBe("first\nsecond\n");
+    ).toBe(`${codexEnvelope}\n`);
+
+    const claudeEnvelope = '{"completion":{"verdict":"FAIL"},"findings":[{}]}';
+    expect(
+      sealedReviewTranscriptFromEvents([
+        { type: "message", text: "I found one issue." },
+        {
+          type: "message",
+          text: `${claudeEnvelope}\n`,
+          final: true,
+          payload: { final_source: "structured_output" },
+        },
+      ]),
+    ).toBe(`${claudeEnvelope}\n`);
+
+    expect(() =>
+      sealedReviewTranscriptFromEvents([{ type: "message", text: codexEnvelope }]),
+    ).toThrow(/exactly one typed final message; observed 0/);
+    expect(() =>
+      sealedReviewTranscriptFromEvents([
+        {
+          type: "message",
+          text: codexEnvelope,
+          final: true,
+          payload: { final_source: "result" },
+        },
+        {
+          type: "message",
+          text: codexEnvelope,
+          final: true,
+          payload: { final_source: "last_agent_message" },
+        },
+      ]),
+    ).toThrow(/exactly one typed final message; observed 2/);
+    expect(
+      sealedReviewTranscriptFromEvents([{ type: "message", text: codexEnvelope, final: true }]),
+    ).toBe(`${codexEnvelope}\n`);
   });
 
   it("parses fenced json then dedupes keeping most severe", () => {
