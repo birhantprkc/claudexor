@@ -359,11 +359,9 @@ export function handleThreadTurnCreate(
         (!turnPool || turnPool.includes(thread.primary_harness))
           ? thread.primary_harness
           : undefined;
-      // `overridePlanReadiness` is a ControlThreadTurnRequest-only field (its
-      // effect is recorded on the turn as plan_readiness_overridden and honored
-      // by the run-start readiness gate); it is NOT a ControlRunStartRequest
-      // field, so it must be stripped before the strict run-start parse or the
-      // "Implement anyway" override would 400 on an unrecognized key.
+      // `overridePlanReadiness` belongs only to ControlThreadTurnRequest. Its
+      // effect is recorded on the turn and honored by the run-start readiness
+      // gate; strip it before strict run-start parsing or "Implement anyway" fails.
       const {
         overridePlanReadiness: _overrideConsumed,
         answersPlanRunId: _answersPlanRunIdConsumed,
