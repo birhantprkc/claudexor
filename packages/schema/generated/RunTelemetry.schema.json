@@ -582,7 +582,7 @@
                           "validated",
                           "absent"
                         ],
-                        "description": "Provenance of a WorkReport: constrained (native schema transport), validated (whole-answer JSON), or absent (no transport could carry one — a disclosed absence, not a failure)."
+                        "description": "Provenance of a WorkReport: constrained (native schema transport), validated (instructed terminal metadata), or absent (no transport could carry one — a disclosed absence, not a failure)."
                       },
                       "required_inputs": {
                         "type": "array",

@@ -17,8 +17,8 @@ import { WORK_REPORT_TRANSPORT_SCHEMA } from "./work-report.js";
  * caller's copy). `output` controls the no-vs-with-caller shape:
  *  - a strictified caller schema → `{ work_report, output: <schema> }`
  *  - "string"                    → `{ work_report, output: {type:"string"} }`
- *    (codex/cursor final_message routes with no caller schema: the markdown
- *    deliverable rides the string so the constrained final message can carry it)
+ *    (codex final_message routes with no caller schema: the markdown deliverable
+ *    rides the string so the constrained final message can carry it)
  *  - null                        → `{ work_report }` only
  *    (claude side_tool route with no caller schema: the WorkReport rides its
  *    StructuredOutput tool while the final message stays markdown = deliverable)

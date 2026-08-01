@@ -352,7 +352,7 @@
                         "unsupported"
                       ],
                       "default": "unsupported",
-                      "description": "How the harness carries the D-16 WorkReport envelope: constrained (native schema transport), validated (whole-answer JSON), or unsupported (work_state stays unverified)."
+                      "description": "How the harness carries the D-16 WorkReport envelope: constrained (native schema transport), validated (instructed terminal metadata), or unsupported (work_state stays unverified)."
                     },
                     "structured_output_channel": {
                       "type": "string",

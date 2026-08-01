@@ -148,6 +148,8 @@ describe("resolveWorkReportEnvelope (D-16 spec-build decision)", () => {
     expect(mode.source).toBe("validated");
     // No native schema constrains cursor — the envelope rides an instruction.
     expect(mode.instruction).toBeTruthy();
+    expect(mode.instruction).toContain("complete final answer as normal Markdown");
+    expect(mode.instruction).not.toContain('"output"');
     expect(outputSchema).toBeUndefined();
   });
 
@@ -193,11 +195,11 @@ describe("unwrapWorkReportEnvelope", () => {
     expect(r.workReport).toEqual(completed);
   });
 
-  // A no-caller-schema route promises `output` is the deliverable STRING. A
-  // non-string (or missing) output is a broken envelope, NOT something to coerce
-  // to "[object Object]" and finalize clean (constrained_json + instructed_fence).
+  // A constrained no-caller-schema route promises `output` is the deliverable
+  // STRING. Cursor's instructed fence uses it only as a compatibility fallback
+  // for historical fence-only replies.
   const fenceEnvelope = (envelope: unknown): string =>
-    ["prefatory prose", "```json", JSON.stringify(envelope), "```"].join("\n");
+    ["```json", JSON.stringify(envelope), "```"].join("\n");
   const nonStringOutputs: Array<[string, unknown]> = [
     ["object", {}],
     ["array", []],
@@ -211,7 +213,7 @@ describe("unwrapWorkReportEnvelope", () => {
       expect(r.workReport).toBeNull();
       expect(r.deliverable).not.toContain("[object Object]");
     });
-    it(`instructed_fence: ${label} output is a work_report contract violation`, () => {
+    it(`instructed_fence: fence-only legacy ${label} output is a work_report contract violation`, () => {
       const r = unwrapWorkReportEnvelope(
         fenceEnvelope({ work_report: completed, output: badOutput }),
         FENCE,
@@ -228,10 +230,11 @@ describe("unwrapWorkReportEnvelope", () => {
     expect(r.workReport).toBeNull();
   });
 
-  it("instructed_fence: a missing output slot is a work_report contract violation", () => {
+  it("instructed_fence: a footer-only report is valid with an empty deliverable", () => {
     const r = unwrapWorkReportEnvelope(fenceEnvelope({ work_report: completed }), FENCE);
-    expect(r.contractViolation).toMatch(/output must be a string/);
-    expect(r.workReport).toBeNull();
+    expect(r.deliverable).toBe("");
+    expect(r.workReport).toEqual(completed);
+    expect(r.contractViolation).toBeNull();
   });
 
   it("flags non-JSON on an active route as a contract violation", () => {
@@ -325,18 +328,59 @@ describe("unwrapWorkReportEnvelope", () => {
     expect(r.contractViolation).toMatch(/work_report missing or malformed/);
   });
 
-  // D-16c instructed_fence (cursor): the envelope is the LAST fenced JSON block.
-  it("instructed_fence: parses the last fenced JSON block, prose before it discarded", () => {
+  // D-16c instructed_fence (cursor): the LAST fenced JSON block is metadata;
+  // the complete Markdown before it is the canonical deliverable.
+  it("instructed_fence: preserves rich Markdown and treats the last fence as metadata", () => {
     const answer = [
-      "Here is my summary of what I did.",
+      "# Plan",
+      "",
+      "## Steps",
+      "1. Inspect the current owner.",
+      "2. Make the smallest shared change.",
+      "",
+      "```ts",
+      "const preserved = true;",
+      "```",
+      "",
+      "## Risks",
+      "- Keep legacy fence-only replies readable.",
+      "",
+      "## Open Questions",
+      "- [single] Which rollout? :: staged :: immediate",
       "```json",
-      JSON.stringify({ work_report: completed, output: "final deliverable text" }),
+      JSON.stringify({ work_report: completed }),
       "```",
     ].join("\n");
     const r = unwrapWorkReportEnvelope(answer, FENCE);
-    expect(r.deliverable).toBe("final deliverable text");
+    expect(r.deliverable).toBe(answer.slice(0, answer.lastIndexOf("```json")).trimEnd());
     expect(r.workReport).toEqual(completed);
     expect(r.source).toBe("validated");
+    expect(r.contractViolation).toBeNull();
+  });
+
+  it("instructed_fence: a rich prefix wins over a redundant legacy output", () => {
+    const answer = [
+      "# Complete answer",
+      "Full detail that must not be replaced by a short summary.",
+      "```json",
+      JSON.stringify({ work_report: completed, output: "short summary" }),
+      "```",
+    ].join("\n");
+    const r = unwrapWorkReportEnvelope(answer, FENCE);
+    expect(r.deliverable).toBe(
+      "# Complete answer\nFull detail that must not be replaced by a short summary.",
+    );
+    expect(r.workReport).toEqual(completed);
+    expect(r.contractViolation).toBeNull();
+  });
+
+  it("instructed_fence: a historical fence-only envelope falls back to output", () => {
+    const r = unwrapWorkReportEnvelope(
+      fenceEnvelope({ work_report: completed, output: "legacy answer" }),
+      FENCE,
+    );
+    expect(r.deliverable).toBe("legacy answer");
+    expect(r.workReport).toEqual(completed);
     expect(r.contractViolation).toBeNull();
   });
 
@@ -346,7 +390,7 @@ describe("unwrapWorkReportEnvelope", () => {
   });
 
   it("instructed_fence: a needs_input envelope carries required_inputs", () => {
-    const answer = "```json\n" + JSON.stringify({ work_report: needsInput, output: "" }) + "\n```";
+    const answer = "```json\n" + JSON.stringify({ work_report: needsInput }) + "\n```";
     const r = unwrapWorkReportEnvelope(answer, FENCE);
     expect(r.workReport?.state).toBe("needs_input");
     expect(r.workReport?.required_inputs).toHaveLength(1);
