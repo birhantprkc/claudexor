@@ -71,14 +71,14 @@ export type WorkReport = z.infer<typeof WorkReport>;
  * the provenance of the work_state axis:
  * - `constrained`: a native schema-constrained transport carried it (codex
  *   --output-schema, claude StructuredOutput tool).
- * - `validated`: a whole-answer validated-JSON transport carried it (cursor).
+ * - `validated`: an instructed terminal metadata block carried it (cursor).
  * - `absent`: the route could not carry one (transport unsupported or a lane
  *   gated the structured transport off) — a DISCLOSED absence, not a failure.
  */
 export const WorkReportSource = z
   .enum(["constrained", "validated", "absent"])
   .describe(
-    "Provenance of a WorkReport: constrained (native schema transport), validated (whole-answer JSON), or absent (no transport could carry one — a disclosed absence, not a failure).",
+    "Provenance of a WorkReport: constrained (native schema transport), validated (instructed terminal metadata), or absent (no transport could carry one — a disclosed absence, not a failure).",
   );
 export type WorkReportSource = z.infer<typeof WorkReportSource>;
 
