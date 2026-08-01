@@ -1,5 +1,12 @@
 # @claudexor/config
 
+## 3.2.1
+
+### Patch Changes
+
+- @claudexor/schema@3.2.1
+- @claudexor/util@3.2.1
+
 ## 3.2.0
 
 ### Patch Changes
