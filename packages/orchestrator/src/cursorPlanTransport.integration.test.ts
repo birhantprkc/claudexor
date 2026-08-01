@@ -53,8 +53,30 @@ describe("Cursor Plan validated transport composition", () => {
       smokeIsolatedApiKey: async () => ({ ok: false, detail: "not needed" }),
       runCliHarness: async function* (opts: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
         captured = opts;
-        const envelope =
-          '```json\n{"work_report":{"state":"completed","required_inputs":[]},"output":"PLAN_OK"}\n```';
+        const plan = [
+          "# Plan",
+          "",
+          "## Goal",
+          "Create the requested file without changing unrelated code.",
+          "",
+          "## Steps",
+          "1. Confirm the repository root.",
+          "2. Create the file with the exact requested content.",
+          "3. Verify its bytes and Git status.",
+          "",
+          "## Risks",
+          "- Do not commit unless the user asks.",
+          "",
+          "## Open Questions",
+          "- [single] Where should the file live? :: repository root :: tmp directory",
+          "- [text] Should the file be committed?",
+        ].join("\n");
+        const envelope = [
+          plan,
+          "```json",
+          '{"work_report":{"state":"completed","required_inputs":[]}}',
+          "```",
+        ].join("\n");
         const frames = [
           { type: "system", subtype: "init", model: "cursor-test" },
           { type: "assistant", message: { content: [{ text: envelope }] } },
@@ -95,14 +117,25 @@ describe("Cursor Plan validated transport composition", () => {
     expect(args[args.indexOf("--sandbox") + 1]).toBe("enabled");
     expect(args).toContain("--trust");
     expect(args).not.toContain("--force");
-    expect(args.at(-1)).toContain("This block is mandatory.");
+    expect(args.at(-1)).toContain("complete final answer as normal Markdown");
+    expect(args.at(-1)).not.toContain('"output"');
 
     expect(result.lifecycle).toBe("succeeded");
     expect(result.facts.work_state).toEqual({
       state: "completed",
       source: "validated",
     });
-    expect(readFileSync(join(result.runDir, "final", "plan.md"), "utf8").trim()).toBe("PLAN_OK");
+    const plan = readFileSync(join(result.runDir, "final", "plan.md"), "utf8").trim();
+    expect(plan).toContain("# Plan");
+    expect(plan).toContain("3. Verify its bytes and Git status.");
+    expect(plan).toContain("## Open Questions");
+    expect(plan).not.toContain("work_report");
+    const questions = JSON.parse(
+      readFileSync(join(result.runDir, "final", "questions.json"), "utf8"),
+    ) as { parse: string; questions: Array<{ kind: string; prompt: string }> };
+    expect(questions.parse).toBe("found");
+    expect(questions.questions).toHaveLength(2);
+    expect(questions.questions.map((question) => question.kind)).toEqual(["single", "text"]);
     const events = readFileSync(join(result.runDir, "events.jsonl"), "utf8");
     expect(events).not.toContain("route.fallback.started");
     expect(events).not.toContain("work_report contract");

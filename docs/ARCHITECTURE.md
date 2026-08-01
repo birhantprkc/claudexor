@@ -1830,12 +1830,16 @@ wraps the markdown deliverable as `output: string`; a `side_tool` route
 `{work_report}`-ONLY schema so the prose final stays the deliverable and the
 report rides the tool payload (the adapter surfaces it on the final message's
 `work_report_side_tool` payload); a `validated` route (cursor, no native
-schema) INSTRUCTS the model to end with a fenced `{work_report, output}` JSON
-block that the finalizer validates off the last fenced block. The three tiers
+schema) INSTRUCTS the model to write its complete markdown answer normally and
+end with a fenced `{work_report}` metadata block that the finalizer validates
+off the last fenced block. Historical fence-only `{work_report, output}` replies
+remain readable through a compatibility fallback; a nonempty markdown prefix
+is always canonical, and legacy `output` is consulted only when that prefix is
+empty. The three tiers
 are one resolver (`resolveWorkReportEnvelope`) and one unwrap
 (`unwrapWorkReportEnvelope`, keyed on the envelope `channel`). The unified
-attempt finalizer un-nests the envelope beside `finalizeStructuredOutput` —
-`answer.md` persists the OUTPUT, never the envelope — and validates the
+attempt finalizer removes the transport beside `finalizeStructuredOutput` —
+`answer.md` persists the deliverable, never the envelope/footer — and validates the
 model-authored `WorkReport { state, required_inputs }`. A missing/malformed
 report on a constrained OR validated route is a typed `work_report_contract`
 failure (never a prose success); a valid `needs_input`/`incomplete` report
