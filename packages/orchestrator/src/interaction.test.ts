@@ -177,6 +177,9 @@ describe("interactionChannelFor finite-or-disabled policy", () => {
   });
 
   it("does not relabel a daemon terminal release as a timeout", async () => {
+    // This is an ordering assertion, not a scheduler-speed benchmark. A real
+    // 1 ms wall-clock timer races the immediate handler under loaded Node 20 CI.
+    vi.useFakeTimers();
     const events: CapturedEvent[] = [];
     const channel = interactionChannelFor(
       {
