@@ -16,7 +16,7 @@ struct HarnessAccountChip: View {
     @Environment(AppModel.self) private var model
     let current: HarnessFamily?
     let pool: [HarnessFamily]
-    /// The thread/draft's pinned credential profile (nil = follow the default).
+    /// The thread/draft's pinned credential profile (nil = automatic routing).
     let pinnedProfileId: String?
     let onPickHarness: (HarnessFamily?) -> Void
     /// nil = automatic (clear the pin); else pin that profile id.
@@ -113,7 +113,7 @@ struct HarnessAccountChip: View {
         .fixedSize()
         .help(segment.pinned
             ? "This thread is pinned to \(segment.label). Pick Automatic to follow the harness default (auto-balance across enabled accounts) instead."
-            : "Account for this thread: following the harness default (\(segment.label)); auto-balance may rotate among enabled accounts at a quota limit. Pick a specific account to pin it to this thread.")
+            : "Account for this thread: Automatic routing may rotate among enabled accounts at a quota limit. Pick a specific account to pin it to this thread.")
     }
 }
 

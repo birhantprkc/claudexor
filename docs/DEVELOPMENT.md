@@ -91,7 +91,7 @@ macOS app checks:
 
 ```bash
 cd apps/macos/ClaudexorKit && swift test
-cd ../ClaudexorApp && swift build
+cd ../ClaudexorApp && swift test && swift build
 ```
 
 Release verification is wrapped by:

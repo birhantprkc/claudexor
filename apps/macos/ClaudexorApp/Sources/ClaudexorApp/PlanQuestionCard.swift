@@ -11,6 +11,32 @@ import SwiftUI
 /// The answer encoding + completeness live in `PlanAnswerComposer` (pure,
 /// unit-tested); this view is only collection + submit.
 enum PlanAnswerComposer {
+    static func isAnswered(
+        _ question: PlanQuestion,
+        selections: [String: Set<String>],
+        freeText: [String: String]
+    ) -> Bool {
+        let picked = !(selections[question.id]?.isEmpty ?? true)
+        let typed = !(freeText[question.id] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        switch question.kind {
+        case "text": return typed
+        // Plan options are suggestions, including for persisted 3.2.0
+        // artifacts whose old producer encoded allow_text=false.
+        default: return picked || typed
+        }
+    }
+
+    static func unansweredQuestionIDs(
+        _ questions: [PlanQuestion],
+        selections: [String: Set<String>],
+        freeText: [String: String]
+    ) -> Set<String> {
+        Set(questions.lazy.filter {
+            !isAnswered($0, selections: selections, freeText: freeText)
+        }.map(\.id))
+    }
+
     /// Every question is answered: `text` needs non-empty free text; single/multi
     /// need at least one selected option (or free text when the question allows it).
     static func isComplete(
@@ -19,14 +45,8 @@ enum PlanAnswerComposer {
         freeText: [String: String]
     ) -> Bool {
         guard !questions.isEmpty else { return false }
-        return questions.allSatisfy { q in
-            let picked = !(selections[q.id]?.isEmpty ?? true)
-            let typed = !(freeText[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            switch q.kind {
-            case "text": return typed
-            default: return picked || (q.allowText && typed)
-            }
-        }
+        return unansweredQuestionIDs(
+            questions, selections: selections, freeText: freeText).isEmpty
     }
 
     /// A follow-up plan-turn prompt encoding the operator's answers — one line
@@ -51,19 +71,55 @@ enum PlanAnswerComposer {
     }
 }
 
+/// Durable submitted-state projection for a plan answer card. A bound/queued
+/// answer turn, or a retryable refusal with its own Retry affordance, owns the
+/// submission. A non-retryable refusal leaves the original card editable so
+/// the operator can send a new turn. Prompt text is display-only after this
+/// typed relation has selected the turn; it is never used to infer identity.
+enum PlanAnswerSubmission {
+    static func acceptedTurn(
+        sourcePlanRunId: String,
+        turns: [ThreadTurnInfo]
+    ) -> ThreadTurnInfo? {
+        turns.first { turn in
+            guard turn.answersPlanRunId == sourcePlanRunId else { return false }
+            if turn.runId != nil { return true }
+            guard let refusal = turn.enqueueError else { return true }
+            return refusal.retryable != false
+        }
+    }
+}
+
 struct PlanQuestionCard: View {
     @Environment(AppModel.self) private var model
     let questions: [PlanQuestion]
+    /// Run whose open questions this card answers; persisted on the follow-up
+    /// turn so submitted state survives app reload and remote reconnect.
+    let sourcePlanRunId: String
+    /// Exact prompt of the durable answer turn, when one already exists.
+    let submittedPrompt: String?
     /// The plan turn's owning thread/location/workspace, frozen by its card.
     let target: TurnStartTarget
+    /// Current model/auth/effort choices for this card-started turn.
+    let routingOptions: TurnOptions
 
     @State private var selections: [String: Set<String>] = [:]
     @State private var freeText: [String: String] = [:]
     @State private var sending = false
     @State private var errorMessage: String?
+    /// Post-ACK bridge until the refreshed thread projection carries the
+    /// durable `answersPlanRunId` relation. Never the reload authority.
+    @State private var acceptedPrompt: String?
+
+    private var effectiveSubmittedPrompt: String? { submittedPrompt ?? acceptedPrompt }
 
     private var complete: Bool {
         PlanAnswerComposer.isComplete(questions, selections: selections, freeText: freeText)
+    }
+
+    private var unansweredQuestionIDs: Set<String> {
+        PlanAnswerComposer.unansweredQuestionIDs(
+            questions, selections: selections, freeText: freeText)
     }
 
     private var applicabilityBlocker: String? {
@@ -79,33 +135,65 @@ struct PlanQuestionCard: View {
                 Text("The plan needs your answers")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text("\(questions.count) question\(questions.count == 1 ? "" : "s")")
-                    .font(.caption2).foregroundStyle(.secondary)
+                if effectiveSubmittedPrompt != nil {
+                    Label("submitted", systemImage: "checkmark.circle.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.status(.positive))
+                } else {
+                    Text("\(questions.count) question\(questions.count == 1 ? "" : "s")")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
-            ForEach(questions) { question in
-                questionRow(question)
-            }
-            if let errorMessage {
-                Text(errorMessage).font(.caption).foregroundStyle(Theme.status(.negative)).textSelection(.enabled)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Spacer()
-                Button(sending ? "Sending…" : "Submit answers") { submit() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(
-                        !complete || sending
-                            || model.isThreadBusy(target.threadID, at: target.locationID)
-                            || applicabilityBlocker != nil)
-                    .help(applicabilityBlocker ?? (complete
-                        ? "Send your answers as a follow-up plan turn"
-                        : "Answer every question first"))
+            if let submitted = effectiveSubmittedPrompt {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                    Text("Answers submitted")
+                        .font(.callout.weight(.semibold))
+                    Text(submitted)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                ForEach(questions) { question in
+                    questionRow(question)
+                }
+                if let errorMessage {
+                    Text(errorMessage).font(.caption).foregroundStyle(Theme.status(.negative))
+                }
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+                    if !complete {
+                        Label(
+                            "\(unansweredQuestionIDs.count) of \(questions.count) questions still need an answer",
+                            systemImage: "exclamationmark.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(Theme.status(.caution))
+                    } else if let applicabilityBlocker {
+                        Label(applicabilityBlocker, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(Theme.status(.caution))
+                    } else if model.isThreadBusy(target.threadID, at: target.locationID) {
+                        Label("Wait for the running turn to finish", systemImage: "clock")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(sending ? "Sending…" : "Submit answers") { submit() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(
+                            !complete || sending
+                                || model.isThreadBusy(target.threadID, at: target.locationID)
+                                || applicabilityBlocker != nil)
+                        .help(applicabilityBlocker ?? (complete
+                            ? "Send your answers as a follow-up plan turn"
+                            : "Answer every question first"))
+                }
             }
         }
         .padding(Theme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardSurface(strokeColor: Theme.status(.attention).opacity(0.45))
+        .textSelection(.enabled)
     }
 
     @ViewBuilder
@@ -115,6 +203,12 @@ struct PlanQuestionCard: View {
                 Text(question.prompt).font(.callout.weight(.medium))
                 if question.kind == "multi" {
                     Text("pick one or more").font(.caption2).foregroundStyle(.secondary)
+                }
+                if unansweredQuestionIDs.contains(question.id) {
+                    Text("required")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.status(.caution))
+                        .accessibilityLabel("Answer required")
                 }
             }
             if !question.options.isEmpty {
@@ -132,11 +226,11 @@ struct PlanQuestionCard: View {
                     }
                 }
             }
-            // Free-text field for `text` questions and any option question that
-            // also accepts a typed answer (allow_text).
-            if question.kind == "text" || question.allowText {
+            // Free text is a complete alternative to the offered chips whenever
+            // `allow_text` is true; the parser enables it for every plan question.
+            if question.kind == "text" || !question.options.isEmpty {
                 TextField(
-                    question.kind == "text" ? "Your answer" : "Add detail (optional)",
+                    question.kind == "text" ? "Your answer" : "Or answer in your own words…",
                     text: Binding(
                         get: { freeText[question.id] ?? "" },
                         set: { freeText[question.id] = $0 }),
@@ -159,15 +253,20 @@ struct PlanQuestionCard: View {
     }
 
     private func submit() {
-        guard complete else { return }
+        guard complete, effectiveSubmittedPrompt == nil else { return }
         let prompt = PlanAnswerComposer.encode(questions, selections: selections, freeText: freeText)
         sending = true
         errorMessage = nil
         Task {
             let ok = await model.composerSend(
-                prompt: prompt, mode: .plan, target: target)
+                prompt: prompt,
+                mode: .plan,
+                answersPlanRunId: sourcePlanRunId,
+                options: routingOptions,
+                target: target)
             sending = false
-            if !ok { errorMessage = model.threadStatus ?? "The plan turn was not accepted." }
+            if ok { acceptedPrompt = prompt }
+            else { errorMessage = model.threadStatus ?? "The plan turn was not accepted." }
         }
     }
 }

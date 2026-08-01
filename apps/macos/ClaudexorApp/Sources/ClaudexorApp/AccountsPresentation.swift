@@ -167,8 +167,8 @@ enum AccountsPresentation {
 
     /// The composer Harness+Account chip's account segment (M9-UX item 2): what
     /// the segment shows for `harnessId` given the thread/draft's pinned profile.
-    /// A pin overrides; otherwise the segment follows the harness's GLOBAL Active
-    /// default (server-computed). Pure so it is unit-tested.
+    /// A pin shows one named account; otherwise the stable `Automatic` label
+    /// discloses that server routing may rotate. Pure so it is unit-tested.
     struct AccountSegment: Equatable {
         /// True when the thread pins a specific account (vs. following the default).
         let pinned: Bool
@@ -188,19 +188,10 @@ enum AccountsPresentation {
         if let pinned = pinnedProfileId {
             return AccountSegment(pinned: true, label: profileName(pinned), systemImage: "pin.fill")
         }
-        // No pin → follow the harness's next-up identity from the server
-        // projection (what routing would pick — informational).
-        guard let identity = model.authoritativeNextUp(for: harnessId) else {
-            return AccountSegment(pinned: false, label: "Default", systemImage: "person.crop.circle")
-        }
-        switch identity {
-        case .profile(let id): return AccountSegment(pinned: false, label: profileName(id), systemImage: "person.crop.circle")
-        case .native(let route):
-            let label = route == "api_key" ? "API key"
-                : route == "local_session" ? "CLI login" : "Default"
-            return AccountSegment(pinned: false, label: label, systemImage: "person.crop.circle")
-        case .none: return AccountSegment(pinned: false, label: "No account", systemImage: "exclamationmark.circle")
-        }
+        // No pin means routing may change as quota/readiness changes. Naming the
+        // transient next-up route made this one stable choice oscillate between
+        // "Default", "CLI login", and "API key" during projection refreshes.
+        return AccountSegment(pinned: false, label: "Automatic", systemImage: "wand.and.stars")
     }
 
     /// Highest used-% across every account — the trigger's quota summary.

@@ -333,6 +333,11 @@ export const ThreadTurn = z
     thread_id: Id.describe("Thread the turn belongs to."),
     run_id: Id.nullable().default(null).describe("Run backing this turn; null while unbound."),
     parent_run_id: Id.nullable().default(null).describe("Run this turn follows up on, when any."),
+    /** Set when this follow-up answers the open questions of an earlier plan
+     * run. The durable relation avoids prompt parsing and local UI-only state. */
+    answers_plan_run_id: Id.nullable()
+      .default(null)
+      .describe("Plan run whose open questions this follow-up turn answers."),
     /** Set when this turn implements an approved plan from an earlier plan run. */
     plan_run_id: Id.nullable()
       .default(null)

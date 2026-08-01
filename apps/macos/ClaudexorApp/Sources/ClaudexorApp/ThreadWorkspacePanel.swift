@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import ClaudexorKit
 
@@ -213,7 +214,19 @@ struct ThreadWorkspacePanel: View {
         // QA-003: the chip's action is to CLEAR the run filter — name it so, so
         // the trailing `xmark` glyph doesn't become the AX name.
         .accessibilityLabel("Clear run filter")
-        .help("Filtered to this run — clear to see the whole thread's workspace")
+        .help("Filtered to full run id \(id) — clear to see the whole thread's workspace")
+        .contextMenu {
+            Button("Copy Full Run ID") { copyRunReference(id) }
+            if let command = RunInspectCommand.command(
+                runID: id, locationID: model.selectedExecutionLocation) {
+                Button("Copy Inspect Command") { copyRunReference(command) }
+            }
+        }
+    }
+
+    private func copyRunReference(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
     private var tabBar: some View {

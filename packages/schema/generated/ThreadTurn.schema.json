@@ -40,6 +40,18 @@
           "description": "Run this turn follows up on, when any.",
           "default": null
         },
+        "answers_plan_run_id": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadTurn/properties/run_id/anyOf/0"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Plan run whose open questions this follow-up turn answers.",
+          "default": null
+        },
         "plan_run_id": {
           "anyOf": [
             {

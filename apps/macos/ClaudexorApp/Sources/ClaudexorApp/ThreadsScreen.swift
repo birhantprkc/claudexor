@@ -327,8 +327,6 @@ struct ThreadsScreen: View {
     @State var renameDraft = ""
     @State var renameTargetId: String?
     @State var renameTargetLocation: ExecutionLocationID?
-
-
     // MARK: Conversation pane
 
     private var conversation: some View {
@@ -347,7 +345,8 @@ struct ThreadsScreen: View {
                                     turn: turn,
                                     target: model.turnStartTarget(
                                         locationID: model.selectedExecutionLocation,
-                                        thread: detail.thread))
+                                        thread: detail.thread),
+                                    routingOptions: resolvedComposerOptions.routingOverridesOnly)
                                     .conversationMeasure()
                                     .id(turn.id)
                             }

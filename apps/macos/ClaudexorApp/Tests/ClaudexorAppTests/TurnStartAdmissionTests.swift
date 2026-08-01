@@ -5,6 +5,30 @@ import ClaudexorKit
 
 @Suite(.serialized)
 struct TurnStartAdmissionTests {
+    @Test func auxiliaryCardProjectionKeepsRoutingAndDropsHiddenControls() {
+        var options = TurnOptions()
+        options.maxUsd = 12
+        options.access = "full"
+        options.web = "live"
+        options.untilClean = true
+        options.delegate = true
+        options.council = true
+        options.models = ["codex": "gpt-5.6-terra", "claude": "claude-opus-5"]
+        options.authRoute = "subscription"
+        options.effort = "high"
+
+        let projected = options.routingOverridesOnly
+        #expect(projected.models == options.models)
+        #expect(projected.authRoute == "subscription")
+        #expect(projected.effort == "high")
+        #expect(projected.maxUsd == nil)
+        #expect(projected.access == nil)
+        #expect(projected.web == nil)
+        #expect(!projected.untilClean)
+        #expect(!projected.delegate)
+        #expect(!projected.council)
+    }
+
     @MainActor
     @Test func blockedDraftAgentPerformsNoCreateUploadOrTurnRequest() async throws {
         defer { TurnStartStubURLProtocol.handler = nil }

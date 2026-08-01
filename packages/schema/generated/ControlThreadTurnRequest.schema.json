@@ -390,6 +390,10 @@
           "exclusiveMinimum": 0,
           "description": "Per-run turn cap (beats per-harness settings)."
         },
+        "answersPlanRunId": {
+          "$ref": "#/definitions/ControlThreadTurnRequest/properties/planRunId",
+          "description": "Plan run whose open questions this follow-up turn answers."
+        },
         "overridePlanReadiness": {
           "type": "boolean",
           "description": "Implement a not-ready plan anyway; recorded on the turn."

@@ -116,6 +116,22 @@ describe("projectTurn carries the frozen-plan audit fields (QA-046, INV-081)", (
     expect(turn.planReadinessOverridden).toBe(true);
   });
 
+  it("projects the durable plan-answer source", () => {
+    const turn = projectTurn(
+      {
+        id: "tn-answer",
+        thread_id: "th-1",
+        run_id: "run-answer",
+        answers_plan_run_id: "run-plan",
+        kind: "followup",
+        prompt: "answers",
+        created_at: now,
+      },
+      cards,
+    );
+    expect(turn.answersPlanRunId).toBe("run-plan");
+  });
+
   it("defaults a legacy turn (no freeze fields) to null hash + false override", () => {
     const turn = projectTurn(
       {

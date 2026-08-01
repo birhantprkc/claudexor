@@ -23,6 +23,10 @@ import {
 import type { DaemonFacadeClient, DaemonRunRecord } from "./daemon-server.js";
 import { assertLatestThreadTurn, inspectThreadTurnCreateReplay } from "./thread-recovery.js";
 import { chainThreadMutation } from "./thread-mutation.js";
+import {
+  assertPlanAnswerQuestionsArtifact,
+  assertPlanAnswerSubmission,
+} from "./thread-plan-answer.js";
 
 export interface ThreadTurnRouteCtx {
   json(res: ServerResponse, status: number, body: unknown): void;
@@ -43,6 +47,7 @@ export interface ThreadTurnRouteCtx {
     prompt: string,
     opts: {
       parentRunId?: string | null;
+      answersPlanRunId?: string | null;
       planRunId?: string | null;
       planHash?: string | null;
       planOverridden?: boolean;
@@ -55,7 +60,6 @@ export interface ThreadTurnRouteCtx {
     idempotency: { key: string; client: string; request: unknown },
   ) => Promise<{ id: string } | null>;
   setTurnEnqueueError?: (turnId: string, problem: TurnEnqueueProblem) => void;
-  /** Per-thread promise chain (owned by the server; shared with turn creation). */
   threadTurnChains: Map<string, Promise<void>>;
 }
 
@@ -255,10 +259,26 @@ export function handleThreadTurnCreate(
         run_ids?: string[];
         workspace?: { mode?: string };
       };
+      const turns = detail.turns as Array<Record<string, unknown>>;
       let prompt = String(body["prompt"] ?? "");
       let mode = typeof body["mode"] === "string" ? (body["mode"] as string) : thread.mode;
+      const answersPlanRunId =
+        typeof body["answersPlanRunId"] === "string" ? (body["answersPlanRunId"] as string) : null;
       const planRunId =
         typeof body["planRunId"] === "string" ? (body["planRunId"] as string) : null;
+      assertPlanAnswerSubmission({
+        sourcePlanRunId: answersPlanRunId,
+        implementPlanRunId: planRunId,
+        mode,
+        headRunId: thread.head_run_id,
+        threadRunIds: thread.run_ids ?? [],
+        turns,
+      });
+      if (answersPlanRunId) {
+        assertPlanAnswerQuestionsArtifact(
+          await ctx.readRunArtifactText(answersPlanRunId, "final/questions.json"),
+        );
+      }
       // "Implement plan" (D17/D27): the plan is FROZEN at implement time
       // (sha256 of final/plan.md recorded on the turn and delivered to the
       // executor as a server-owned planRef file reference) — never
@@ -344,7 +364,11 @@ export function handleThreadTurnCreate(
       // by the run-start readiness gate); it is NOT a ControlRunStartRequest
       // field, so it must be stripped before the strict run-start parse or the
       // "Implement anyway" override would 400 on an unrecognized key.
-      const { overridePlanReadiness: _overrideConsumed, ...runStartBody } = body;
+      const {
+        overridePlanReadiness: _overrideConsumed,
+        answersPlanRunId: _answersPlanRunIdConsumed,
+        ...runStartBody
+      } = body;
       const params = ctx.normalizeStart(
         ControlRunStartRequest.parse({
           ...runStartBody,
@@ -380,6 +404,7 @@ export function handleThreadTurnCreate(
         // No explicit kind: the store auto-detects initial vs followup so the
         // FIRST turn of a thread is "initial", not "followup" (review #4).
         parentRunId: thread.head_run_id ?? null,
+        answersPlanRunId,
         planHash,
         planOverridden,
         planRunId,

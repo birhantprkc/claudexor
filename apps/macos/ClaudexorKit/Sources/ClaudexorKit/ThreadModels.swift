@@ -229,6 +229,8 @@ public struct ThreadTurnInfo: Codable, Sendable, Identifiable, Equatable {
     public let threadId: String
     public let runId: String?
     public let parentRunId: String?
+    /// Set when this follow-up turn answers the open questions of a plan run.
+    public let answersPlanRunId: String?
     /// Set when this turn implements an approved plan from an earlier run.
     public let planRunId: String?
     /// SHA-256 of the frozen plan bytes this Implement turn materialized (INV-081);
@@ -251,7 +253,8 @@ public struct ThreadTurnInfo: Codable, Sendable, Identifiable, Equatable {
     public let createdAt: String
 
     public init(id: String, threadId: String, runId: String?, parentRunId: String?,
-                planRunId: String?, kind: String?, prompt: String, run: TurnRunCard?,
+                answersPlanRunId: String? = nil, planRunId: String?, kind: String?, prompt: String,
+                run: TurnRunCard?,
                 planHash: String? = nil, planReadinessOverridden: Bool = false,
                 enqueueError: TurnEnqueueErrorInfo? = nil,
                 continuity: ThreadTurnContinuity? = nil, createdAt: String) {
@@ -259,6 +262,7 @@ public struct ThreadTurnInfo: Codable, Sendable, Identifiable, Equatable {
         self.threadId = threadId
         self.runId = runId
         self.parentRunId = parentRunId
+        self.answersPlanRunId = answersPlanRunId
         self.planRunId = planRunId
         self.planHash = planHash
         self.planReadinessOverridden = planReadinessOverridden
@@ -271,7 +275,7 @@ public struct ThreadTurnInfo: Codable, Sendable, Identifiable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, threadId, runId, parentRunId, planRunId, planHash,
+        case id, threadId, runId, parentRunId, answersPlanRunId, planRunId, planHash,
              planReadinessOverridden, kind, prompt, run, enqueueError, continuity, createdAt
     }
 
@@ -285,6 +289,7 @@ public struct ThreadTurnInfo: Codable, Sendable, Identifiable, Equatable {
         threadId = try c.decode(String.self, forKey: .threadId)
         runId = try c.decodeIfPresent(String.self, forKey: .runId) ?? nil
         parentRunId = try c.decodeIfPresent(String.self, forKey: .parentRunId) ?? nil
+        answersPlanRunId = try c.decodeIfPresent(String.self, forKey: .answersPlanRunId) ?? nil
         planRunId = try c.decodeIfPresent(String.self, forKey: .planRunId) ?? nil
         planHash = try c.decodeIfPresent(String.self, forKey: .planHash) ?? nil
         planReadinessOverridden = try c.decodeIfPresent(Bool.self, forKey: .planReadinessOverridden) ?? false
@@ -485,6 +490,8 @@ public struct ResourceAttachmentRef: Codable, Sendable, Equatable {
 public struct ThreadTurnRequest: Codable, Sendable {
     public var prompt: String
     public var mode: String?
+    /// Source plan whose open questions this follow-up answers.
+    public var answersPlanRunId: String?
     public var harnesses: [String]?
     public var n: Int?
     public var attempts: Int?
@@ -539,7 +546,8 @@ public struct ThreadTurnRequest: Codable, Sendable {
     /// Per-turn reasoning-effort request (adapter-declared ladder); nil = harness default.
     public var effort: String?
 
-    public init(prompt: String, mode: String? = nil, harnesses: [String]? = nil, n: Int? = nil,
+    public init(prompt: String, mode: String? = nil, answersPlanRunId: String? = nil,
+                harnesses: [String]? = nil, n: Int? = nil,
                 attempts: Int? = nil, untilClean: Bool? = nil, swarm: Bool? = nil, deepScan: Bool? = nil,
                 create: Bool? = nil, council: Bool? = nil, delegate: Bool? = nil,
                 paidBudget: PaidBudget? = nil, primaryHarness: String? = nil, model: String? = nil,
@@ -552,6 +560,7 @@ public struct ThreadTurnRequest: Codable, Sendable {
                 authPreference: String? = nil, effort: String? = nil) {
         self.prompt = prompt
         self.mode = mode
+        self.answersPlanRunId = answersPlanRunId
         self.harnesses = harnesses
         self.n = n
         self.attempts = attempts

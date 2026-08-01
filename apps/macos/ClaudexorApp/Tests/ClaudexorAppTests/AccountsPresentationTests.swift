@@ -228,7 +228,7 @@ import Testing
         #expect(AccountsPresentation.rows(model: model).isEmpty)
         #expect(AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "raw-api", pinnedProfileId: nil
-        ).label == "API key")
+        ).label == "Automatic")
     }
 
     @MainActor
@@ -250,7 +250,7 @@ import Testing
         #expect(cli.nextUp == false)
         #expect(AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil
-        ).label == "API key")
+        ).label == "Automatic")
     }
 
     @MainActor
@@ -330,9 +330,9 @@ import Testing
     }
 
     @MainActor
-    @Test func composerAccountSegmentFollowsPinThenNextUpDefault() throws {
-        // The composer chip's account segment shows the thread's pinned account,
-        // else the harness's server-computed next-up default.
+    @Test func composerAccountSegmentKeepsAutomaticStableAndShowsAnExplicitPin() throws {
+        // An unpinned thread is one stable Automatic choice even while the
+        // server's next-up route changes; an explicit pin shows its account.
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         let profilesJSON = """
         [{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
@@ -342,11 +342,11 @@ import Testing
         model.credentialProfiles = try JSONDecoder().decode(
             [CredentialProfileEntry].self, from: Data(profilesJSON.utf8))
 
-        // No projection yet → generic default.
+        // No projection yet.
         var seg = AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil)
         #expect(seg.pinned == false)
-        #expect(seg.label == "Default")
+        #expect(seg.label == "Automatic")
 
         // Projection: the native CLI login is next up.
         model.harnessAccounts = try JSONDecoder().decode([HarnessAccounts].self, from: Data("""
@@ -357,7 +357,7 @@ import Testing
         seg = AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil)
         #expect(seg.pinned == false)
-        #expect(seg.label == "CLI login")
+        #expect(seg.label == "Automatic")
 
         // The same unprofiled/default identity may honestly route through an
         // API key when the native source is unavailable or config requests it.
@@ -367,7 +367,7 @@ import Testing
         """.utf8))
         seg = AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil)
-        #expect(seg.label == "API key")
+        #expect(seg.label == "Automatic")
 
         // A thread pin overrides the default and resolves to the profile's name.
         seg = AccountsPresentation.composerAccountSegment(

@@ -1219,6 +1219,7 @@ final class AppModel {
     func composerSend(
         prompt: String,
         mode: RunMode,
+        answersPlanRunId: String? = nil,
         planRunId: String? = nil,
         model: String? = nil,
         attachments: [PendingAttachment] = [],
@@ -1285,6 +1286,7 @@ final class AppModel {
             threadId: tid,
             prompt: prompt,
             mode: mode,
+            answersPlanRunId: answersPlanRunId,
             planRunId: planRunId,
             model: model,
             attachments: attachments,
@@ -1308,6 +1310,7 @@ final class AppModel {
         threadId: String,
         prompt: String,
         mode: RunMode,
+        answersPlanRunId: String? = nil,
         planRunId: String? = nil,
         model: String? = nil,
         attachments: [PendingAttachment] = [],
@@ -1369,6 +1372,7 @@ final class AppModel {
             result = try await requestClient.sendTurn(threadId: threadId, body: ThreadTurnRequest(
                 prompt: prompt,
                 mode: mode.apiValue,
+                answersPlanRunId: answersPlanRunId,
                 harnesses: racePool.isEmpty ? nil : racePool,
                 n: raceN,
                 // "Until clean" and "Max attempts" are mutually exclusive repair

@@ -129,6 +129,7 @@ export function projectTurn(
     threadId: t["thread_id"],
     runId,
     parentRunId: t["parent_run_id"] ?? null,
+    answersPlanRunId: t["answers_plan_run_id"] ?? null,
     planRunId: t["plan_run_id"] ?? null,
     // INV-081 provenance (QA-046): the durable turn records the frozen plan's
     // SHA-256 and whether the operator implemented over open questions, but the

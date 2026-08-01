@@ -284,6 +284,18 @@
                 "description": "Run this turn follows up on, when any.",
                 "default": null
               },
+              "answersPlanRunId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/ControlThreadDetail/properties/thread/properties/credentialProfileId/anyOf/0"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Plan run whose open questions this follow-up turn answers.",
+                "default": null
+              },
               "planRunId": {
                 "anyOf": [
                   {

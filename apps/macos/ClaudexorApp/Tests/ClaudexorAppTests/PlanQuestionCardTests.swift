@@ -9,7 +9,7 @@ import ClaudexorKit
 @Suite struct PlanQuestionCardTests {
     private func single(_ id: String, _ prompt: String, _ opts: [(String, String)]) -> PlanQuestion {
         PlanQuestion(id: id, kind: "single", prompt: prompt,
-                     options: opts.map { PlanQuestionOption(id: $0.0, label: $0.1) }, allowText: false)
+                     options: opts.map { PlanQuestionOption(id: $0.0, label: $0.1) }, allowText: true)
     }
     private func multi(_ id: String, _ prompt: String, _ opts: [(String, String)]) -> PlanQuestion {
         PlanQuestion(id: id, kind: "multi", prompt: prompt,
@@ -35,6 +35,74 @@ import ClaudexorKit
 
     @Test func emptyQuestionSetIsNeverComplete() {
         #expect(!PlanAnswerComposer.isComplete([], selections: [:], freeText: [:]))
+    }
+
+    @Test func typedAnswerCompletesAnOptionQuestionWithoutAChip() {
+        let qs = [single("q1", "Store?", [("a", "SQLite"), ("b", "Postgres")])]
+        #expect(PlanAnswerComposer.isComplete(
+            qs, selections: [:], freeText: ["q1": "Neither, use a flat file"]))
+        #expect(PlanAnswerComposer.unansweredQuestionIDs(
+            qs, selections: [:], freeText: ["q1": "   "]) == ["q1"])
+    }
+
+    @Test func persistedLegacyOptionQuestionAlsoAcceptsProse() {
+        let legacy = PlanQuestion(
+            id: "q1",
+            kind: "single",
+            prompt: "Store?",
+            options: [PlanQuestionOption(id: "a", label: "SQLite")],
+            allowText: false)
+        #expect(PlanAnswerComposer.isComplete(
+            [legacy], selections: [:], freeText: ["q1": "Use a flat file"]))
+    }
+
+    private func answerTurn(
+        id: String,
+        source: String?,
+        runId: String? = nil,
+        retryable: Bool? = nil
+    ) -> ThreadTurnInfo {
+        ThreadTurnInfo(
+            id: id,
+            threadId: "thread-1",
+            runId: runId,
+            parentRunId: "plan-1",
+            answersPlanRunId: source,
+            planRunId: nil,
+            kind: "followup",
+            prompt: "Answers to your plan questions:\n- Store? → SQLite",
+            run: nil,
+            enqueueError: retryable.map {
+                TurnEnqueueErrorInfo(
+                    message: "refused",
+                    retryable: $0,
+                    failedAt: "2026-08-02T00:00:00Z")
+            },
+            createdAt: "2026-08-02T00:00:00Z")
+    }
+
+    @Test func submittedStateComesFromTheDurableAnswerTurnRelation() throws {
+        let unrelated = answerTurn(id: "u", source: "other", runId: "run-u")
+        let nonRetryable = answerTurn(id: "n", source: "plan-1", retryable: false)
+        let accepted = answerTurn(id: "a", source: "plan-1", runId: "run-a")
+        let selected = try #require(PlanAnswerSubmission.acceptedTurn(
+            sourcePlanRunId: "plan-1",
+            turns: [unrelated, nonRetryable, accepted]))
+        #expect(selected.id == "a")
+    }
+
+    @Test func queuedAndRetryableAnswerTurnsAlsoSuppressDuplicateSubmission() {
+        let queued = answerTurn(id: "q", source: "plan-1")
+        #expect(PlanAnswerSubmission.acceptedTurn(
+            sourcePlanRunId: "plan-1", turns: [queued])?.id == "q")
+
+        let retryable = answerTurn(id: "r", source: "plan-1", retryable: true)
+        #expect(PlanAnswerSubmission.acceptedTurn(
+            sourcePlanRunId: "plan-1", turns: [retryable])?.id == "r")
+
+        let failed = answerTurn(id: "f", source: "plan-1", retryable: false)
+        #expect(PlanAnswerSubmission.acceptedTurn(
+            sourcePlanRunId: "plan-1", turns: [failed]) == nil)
     }
 
     @Test func encodeUsesOptionLabelsAndAppendsFreeText() {

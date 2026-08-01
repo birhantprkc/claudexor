@@ -1001,9 +1001,13 @@ views in the shared design-system files; screens compose them.
   session identity. The header and action footer stay fixed while the
   potentially long question/options middle is a max-height `ScrollView` with a
   `LazyVStack`, so answering never grows beyond the window or re-lays out the
-  whole card on chip selection, and reopening the thread after restart restores
-  the open questions and prior answers from the run artifact. The macOS card
-  itself lands in M5; the Swift surface is knowingly stale until then.
+  whole card on chip selection. Every question accepts either its offered chips
+  or the operator's own words; the all-required submit gate names each missing
+  question and shows a visible remaining count. Reopening the thread after
+  restart restores open questions from the plan run artifact and restores an
+  already-submitted answer as a read-only receipt from the durable answer-turn
+  relation. Implement is a separate Agent action: its row names the effective
+  write scope before the click and the request is bound to that disclosed scope.
 - **Budget cockpit (Settings tab).** Spend, circuit breaker, portfolio weights,
   pre-exhaustion warnings — a Settings tab, not a top-level screen; the live per-run meter
   rides the receipt row.

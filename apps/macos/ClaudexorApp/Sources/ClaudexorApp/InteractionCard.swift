@@ -87,6 +87,7 @@ struct InteractionCard: View {
         }
         .padding(Theme.Spacing.lg)
         .cardSurface(stroke: true, strokeColor: Theme.status(.attention).opacity(0.5))
+        .textSelection(.enabled)
     }
 
     private var hasAnyAnswer: Bool {

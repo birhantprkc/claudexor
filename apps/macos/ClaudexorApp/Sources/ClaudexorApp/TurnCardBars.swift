@@ -25,6 +25,7 @@ struct TurnReceiptRow: View {
         TurnPresentation.statusLine(
             phase: run.phase, reason: run.outcomeFacts?.reason,
             harnesses: run.harnesses, n: run.n,
+            isRace: run.mode == .bestOfN,
             retryLabel: run.phase.isActive ? run.retryStatus?.label : nil,
             reviewNeedsDecision: run.reviewNeedsDecision,
             waitingOnUser: run.waitingOnUser)

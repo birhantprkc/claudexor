@@ -77,11 +77,10 @@ export interface CreateThreadInput {
 export interface CreateTurnInput {
   kind?: ThreadTurn["kind"];
   parentRunId?: string | null;
-  /** Set when this turn implements an approved plan from an earlier run. */
+  answersPlanRunId?: string | null;
   planRunId?: string | null;
   /** Freeze-on-implement provenance (D17): sha256 of the implemented plan. */
   planHash?: string | null;
-  /** True when the user explicitly implemented a not-ready plan. */
   planOverridden?: boolean;
   /** Files/images attached to this turn, already resolved to scoped on-disk paths. */
   attachments?: Attachment[];
@@ -411,6 +410,7 @@ export class ThreadStore {
       thread_id: threadId,
       run_id: null,
       parent_run_id: input.parentRunId !== undefined ? input.parentRunId : thread.head_run_id,
+      answers_plan_run_id: input.answersPlanRunId ?? null,
       plan_run_id: input.planRunId ?? null,
       plan_hash: input.planHash ?? null,
       plan_readiness_overridden: input.planOverridden === true,

@@ -46,7 +46,12 @@ export function createRetentionRunner(deps: RetentionRunnerDeps): RetentionRunne
         for (const id of thread.run_ids) referenced.add(id);
         if (thread.head_run_id) referenced.add(thread.head_run_id);
         for (const turn of deps.threads.turnsFor(thread.id)) {
-          for (const id of [turn.run_id, turn.parent_run_id, turn.plan_run_id]) {
+          for (const id of [
+            turn.run_id,
+            turn.parent_run_id,
+            turn.answers_plan_run_id,
+            turn.plan_run_id,
+          ]) {
             if (id) referenced.add(id);
           }
         }

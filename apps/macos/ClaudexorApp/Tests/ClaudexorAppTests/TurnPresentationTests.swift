@@ -14,12 +14,13 @@ import ClaudexorKit
         reason: String? = nil,
         harnesses: [HarnessFamily] = [.codex],
         n: Int = 1,
+        isRace: Bool = false,
         retry: String? = nil,
         needsDecision: Bool = false,
         waiting: Bool = false
     ) -> TurnPresentation.StatusLine {
         TurnPresentation.statusLine(
-            phase: phase, reason: reason, harnesses: harnesses, n: n, retryLabel: retry,
+            phase: phase, reason: reason, harnesses: harnesses, n: n, isRace: isRace, retryLabel: retry,
             reviewNeedsDecision: needsDecision, waitingOnUser: waiting)
     }
 
@@ -56,10 +57,28 @@ import ClaudexorKit
         #expect(single.identity == HarnessFamily.claude.label)
         #expect(single.family == .claude)
         // A race shows Best-of N — harnesses.first may be a LOSING candidate.
-        let race = line(.running, harnesses: [.claude, .codex], n: 3)
+        let race = line(.running, harnesses: [.claude, .codex], n: 3, isRace: true)
         #expect(race.identity == "Best-of 3")
         #expect(race.family == nil)
+        // A multi-harness pool alone does not prove a race.
+        #expect(line(.running, harnesses: [.claude, .codex], n: 1).identity == nil)
         #expect(line(.running, harnesses: []).identity == nil)
+    }
+
+    @MainActor
+    @Test func attemptsRunWithAMultiHarnessPoolDoesNotManufactureARaceCount() throws {
+        let summary = try JSONDecoder().decode(
+            RunSummary.self,
+            from: Data(#"{"runId":"run-one","state":"running","mode":"agent","strategy":"attempts","harnesses":["claude","codex"]}"#.utf8))
+        let run = AppModel.liveTask(from: summary)
+        #expect(run.mode == .maxAttempts)
+        #expect(run.n == 1)
+        #expect(line(
+            run.phase,
+            harnesses: run.harnesses,
+            n: run.n,
+            isRace: run.mode == .bestOfN
+        ).identity == nil)
     }
 
     @Test func quietTerminalsKeepAQuietStateWordAndNoChip() {

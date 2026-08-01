@@ -2518,7 +2518,7 @@
               "allow_text": {
                 "type": "boolean",
                 "default": false,
-                "description": "True when a free-text answer is accepted (text questions)."
+                "description": "True when free text is accepted as a complete answer, including as an alternative to single/multi options."
               }
             },
             "required": [

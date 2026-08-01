@@ -53,9 +53,13 @@ describe("extractPlanQuestions (QA-016 block boundary)", () => {
     const { parse, questions } = extractPlanQuestions(plan);
     expect(parse).toBe("found");
     expect(questions).toHaveLength(3);
-    expect(questions[0]).toMatchObject({ kind: "single", prompt: "Which database?" });
+    expect(questions[0]).toMatchObject({
+      kind: "single",
+      prompt: "Which database?",
+      allow_text: true,
+    });
     expect(questions[0]?.options.map((o) => o.label)).toEqual(["Postgres", "SQLite"]);
-    expect(questions[1]).toMatchObject({ kind: "multi" });
+    expect(questions[1]).toMatchObject({ kind: "multi", allow_text: true });
     expect(questions[1]?.options).toHaveLength(3);
     expect(questions[2]).toMatchObject({ kind: "text", allow_text: true });
     expect(questions[2]?.options).toHaveLength(0);
@@ -82,7 +86,11 @@ describe("extractPlanQuestions (QA-016 block boundary)", () => {
     const { parse, questions } = extractPlanQuestions(plan);
     expect(parse).toBe("found");
     expect(questions).toHaveLength(2);
-    expect(questions[0]).toMatchObject({ kind: "single", prompt: "Which runtime?" });
+    expect(questions[0]).toMatchObject({
+      kind: "single",
+      prompt: "Which runtime?",
+      allow_text: true,
+    });
     expect(questions[0]?.options.map((o) => o.label)).toEqual(["Node", "Bun"]);
     expect(questions[1]).toMatchObject({ kind: "text", allow_text: true });
   });
