@@ -8290,6 +8290,7 @@ describe("DaemonControlApiServer", () => {
       attemptId: "a01",
       safeMessage: "Auth failed",
       rawDetailRef: null,
+      resetsAt: null,
       logRefs: [],
       eventRefs: [],
       runDir: record.runDir as string,

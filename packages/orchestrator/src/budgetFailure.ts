@@ -15,7 +15,15 @@
 import type { RunFailureCode } from "@claudexor/schema";
 import type { BudgetTerminal } from "@claudexor/budget";
 
-type BudgetRunFailureCode = Exclude<RunFailureCode, "delegation_child_drain_timeout">;
+// Derived by SUBTRACTION from RunFailureCode, so every code added to that union
+// silently joins this one and breaks the exhaustive switch below. Excluded here are
+// the codes that are not budget denials at all: a drained delegation child, and a
+// spent subscription WINDOW — the latter is a quota timer, not money, and its
+// remediation is "wait for resetsAt", never "raise --max-usd".
+type BudgetRunFailureCode = Exclude<
+  RunFailureCode,
+  "delegation_child_drain_timeout" | "subscription_window_exhausted"
+>;
 
 /** The typed lease-denial the ledger produces, captured at the denial site with
  * the route/slot it refused so the terminal can name them instead of null. */

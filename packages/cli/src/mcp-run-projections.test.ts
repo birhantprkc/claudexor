@@ -15,6 +15,7 @@ const failure = {
   attemptId: "a01",
   safeMessage: "Authentication expired",
   rawDetailRef: null,
+  resetsAt: null,
   logRefs: [],
   eventRefs: [],
   runDir: "/tmp/run",

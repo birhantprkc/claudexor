@@ -254,9 +254,10 @@
                         "unknown_paid_in_flight",
                         "budget_overshoot",
                         "cost_unverifiable",
-                        "delegation_child_drain_timeout"
+                        "delegation_child_drain_timeout",
+                        "subscription_window_exhausted"
                       ],
-                      "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons and Delegate child-drain timeout)."
+                      "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, and a spent subscription quota window whose reopen time is RunFailure.resetsAt)."
                     },
                     {
                       "type": "null"
@@ -316,6 +317,19 @@
                   ],
                   "default": null,
                   "description": "Run artifact directory."
+                },
+                "resetsAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage."
                 },
                 "nextActions": {
                   "type": "array",

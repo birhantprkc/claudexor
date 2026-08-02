@@ -181,7 +181,8 @@
                   "transport_unavailable",
                   "platform_unsupported",
                   "refresh_failed",
-                  "no_source"
+                  "no_source",
+                  "auth_revoked"
                 ],
                 "description": "Why a registered subject has no quota snapshot, in the source's own vocabulary."
               },

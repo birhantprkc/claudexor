@@ -28,6 +28,11 @@
                   ],
                   "description": "Project context depth; auto is the only mode.",
                   "default": "auto"
+                },
+                "ephemeral": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Declare the root one-shot: it anchors this run only, is never entered into the durable project registry, and its commands/run events live in the global no-project partition."
                 }
               },
               "required": [
