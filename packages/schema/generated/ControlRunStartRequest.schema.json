@@ -102,10 +102,15 @@
               ],
               "default": "envelope",
               "description": "Run isolation: envelope (isolated worktree in the external per-project runtime namespace, the default) or live (the project tree itself)."
+            },
+            "delegated": {
+              "type": "boolean",
+              "default": false,
+              "description": "Marks a run driven by an EXTERNAL orchestrator that owns the workspace, not by the operator at a surface. Such a run is confined to a scoped harness HOME even under isolation='live' (an in-place delegated attempt therefore cannot resume a native vendor session stored under the real HOME). Unrelated to the `delegate` belt flag and to `delegatedFromRunId` (belt-child provenance)."
             }
           },
           "additionalProperties": false,
-          "description": "Execution isolation settings for a run.",
+          "description": "Execution isolation and delegation settings for a run.",
           "default": {
             "isolation": "envelope"
           }

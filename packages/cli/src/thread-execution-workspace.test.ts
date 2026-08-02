@@ -188,7 +188,7 @@ describe("thread workspace Git admission", () => {
     mode: "agent" as const,
     scope: { kind: "project" as const, root: "/repo", context: "auto" as const },
     untilClean: true,
-    execution: { isolation: "live" as const },
+    execution: { isolation: "live" as const, delegated: false },
   };
 
   it("uses the same worktree predicate for isolated and protected-path turns", () => {
@@ -244,7 +244,7 @@ describe("thread workspace Git admission", () => {
         prompt: "read",
         mode,
         scope: { kind: "project" as const, root: "/repo", context: "auto" as const },
-        execution: { isolation: "envelope" as const },
+        execution: { isolation: "envelope" as const, delegated: false },
       };
       expect(threadExecutionRequiresWorktree({ thread: isolated, mode, protectedPaths: [] })).toBe(
         true,

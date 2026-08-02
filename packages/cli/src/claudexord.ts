@@ -456,6 +456,7 @@ export async function main(): Promise<void> {
               ? p.protectedPathApprovals
               : undefined,
             inPlace,
+            delegated: p.execution.delegated,
             signal: runSignal,
             onRunStart,
           })

@@ -23,3 +23,13 @@ export class DelegationBeltUnavailableError extends ClaudexorError {
   readonly code = "delegation_belt_unavailable";
   readonly status = 503;
 }
+
+/**
+ * A run marked `execution.delegated` could not be confined to a scoped harness
+ * HOME. Its caller cannot audit a confinement that silently did not happen, so
+ * the attempt refuses instead of degrading onto the operator's real home (which
+ * holds the daemon control token and the caller's own provider settings).
+ */
+export class DelegatedHomeUnavailableError extends ClaudexorError {
+  readonly code = "delegated_home_unavailable";
+}

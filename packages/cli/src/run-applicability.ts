@@ -23,7 +23,10 @@ function requestFor(repoRoot: string, shape: RunShape): ControlRunStartRequest {
   const base = {
     prompt: "run applicability projection",
     scope: { kind: "project" as const, root: repoRoot, context: "auto" as const },
-    execution: { isolation: shape === "read_only" ? ("envelope" as const) : ("live" as const) },
+    execution: {
+      isolation: shape === "read_only" ? ("envelope" as const) : ("live" as const),
+      delegated: false,
+    },
   };
   if (shape === "read_only") return { ...base, mode: "ask" };
   if (shape === "agent_convergence") return { ...base, mode: "agent", untilClean: true };

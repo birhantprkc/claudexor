@@ -365,6 +365,31 @@ describe("Control API schemas", () => {
     ).toThrow();
   });
 
+  it("defaults the delegated-run marker to false and keeps execution strict", () => {
+    // Omitted by every existing caller (macOS app, CLI, MCP belt): the marker
+    // must never turn a surface-started run into a delegated one by accident.
+    expect(ControlRunStartRequest.parse({ prompt: "x" }).execution.delegated).toBe(false);
+    expect(
+      ControlRunStartRequest.parse({ prompt: "x", execution: { isolation: "live" } }).execution,
+    ).toEqual({ isolation: "live", delegated: false });
+    expect(
+      ControlRunStartRequest.parse({
+        prompt: "x",
+        mode: "agent",
+        execution: { isolation: "live", delegated: true },
+      }).execution.delegated,
+    ).toBe(true);
+    // Still strict: an unknown execution key is a loud refusal, which is also
+    // exactly how an OLDER daemon answers this new field (hence the client-side
+    // minimum-version pin).
+    expect(() =>
+      ControlRunStartRequest.parse({
+        prompt: "x",
+        execution: { isolation: "live", delgated: true },
+      }),
+    ).toThrow();
+  });
+
   it("accepts reviewer effort overrides on run start requests", () => {
     const req = ControlRunStartRequest.parse({
       prompt: "review it",

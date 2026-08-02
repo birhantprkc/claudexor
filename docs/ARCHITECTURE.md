@@ -156,7 +156,11 @@ at every wire boundary.
   authority while persistent threads use git worktrees; scoped harness homes/
   config dirs for write envelopes and read-only routes via `readOnlyHomeEnv` keep
   relocatable, route-local state outside both the worktree and the operator's
-  home. A selected native Codex route uses its Claudexor-owned file-only profile;
+  home. An in-place run normally keeps the native environment so its vendor
+  session stays resumable; a run marked `execution.delegated` (started by an
+  external orchestrator that owns the workspace) is scoped even in place, and
+  refuses rather than starting a harness in the operator's home.
+  A selected native Codex route uses its Claudexor-owned file-only profile;
   native Claude also uses a Claudexor-owned config dir and exposes only the
   narrow host Keychain bridge described in §5. The package also owns diff
   capture and path-safe disposal.

@@ -22,6 +22,7 @@ import {
   writeCandidateAttemptArtifacts,
 } from "./candidateOutputs.js";
 import { processAttemptUsage } from "./attemptUsage.js";
+import { scopedHarnessHome } from "./delegatedHome.js";
 import * as AC from "./attemptUsageCost.js";
 import {
   type CandidateRun,
@@ -478,6 +479,13 @@ export interface RunInput {
    * is the deliverable. Only honored by convergence modes.
    */
   inPlace?: boolean;
+  /**
+   * `execution.delegated`: this run is driven by an EXTERNAL orchestrator that
+   * owns the workspace. Every attempt is then confined to a scoped harness HOME
+   * even in-place, trading native-session resume for confinement (see
+   * `scopedHarnessHome`), and refusing rather than degrading when it cannot be.
+   */
+  delegated?: boolean;
   /**
    * Per-run globs no candidate may touch (create/modify/delete/rename). Unlike
    * project protected paths, these produce a deny-path violation; both require
@@ -2297,6 +2305,13 @@ export class Orchestrator {
     const knobs = this.routeSpecKnobs(routed, contract, modelHint, effortHint);
     // Isolated scoped-home sessions are never retained after disposal.
     const inPlaceEnvelope = envelope.worktree_path === envelope.repo_root;
+    // Refuses (never silently degrades) when a delegated run cannot be confined.
+    const harnessHome = scopedHarnessHome(
+      wsm,
+      envelope,
+      inPlaceEnvelope,
+      runInput?.delegated === true,
+    );
     const rawContextPacket = await rawContextForEnvelope(routed.implementationTransport, envelope);
     const sessionFields = runInput
       ? await this.sessionSpecFields(
@@ -2365,9 +2380,11 @@ export class Orchestrator {
       ...(inPlaceEnvelope && sessionFields?.resume_session_id
         ? { resume_session_id: sessionFields.resume_session_id }
         : {}),
-      // Scoped harness home only for isolated envelopes; in-place runs use the
-      // native environment so the resumed vendor session is actually reachable.
-      ...(inPlaceEnvelope ? {} : { env: wsm.envFor(envelope) }),
+      // Scoped harness home for isolated envelopes AND for every delegated run;
+      // an ordinary in-place run keeps the native environment so the resumed
+      // vendor session is reachable. See scopedHarnessHome for the cost a
+      // delegated in-place attempt pays for that confinement.
+      ...(harnessHome.env ? { env: harnessHome.env } : {}),
       raw_context_packet: rawContextPacket,
       stream_deltas: streamDeltas,
     });
@@ -2778,6 +2795,10 @@ export class Orchestrator {
             ...(secretDiffRefusal ? { secret_diff_refusal: secretDiffRefusal } : {}),
             gates: gates.map((g) => ({ id: g.id, status: g.status })),
             branch: envelope.branch_name,
+            // Applied-isolation fact, not a promise: the caller of a delegated
+            // run verifies the confinement it asked for instead of trusting it.
+            harness_home_isolated: harnessHome.isolated,
+            harness_home_dir: harnessHome.homeDir,
           },
         }),
       {
