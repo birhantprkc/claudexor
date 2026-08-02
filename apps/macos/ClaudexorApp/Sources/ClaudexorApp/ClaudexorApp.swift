@@ -93,6 +93,7 @@ enum AboutPanel {
     private var terminationPending = false
     private weak var mainWindow: NSWindow?
     private var containmentInstalled = false
+    private let containmentSettlement = WindowContainmentSettlement()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -203,12 +204,19 @@ enum AboutPanel {
 
     @objc private func mainWindowGeometryDidChange(_ note: Notification) {
         guard let window = note.object as? NSWindow else { return }
-        containMainWindow(window)
+        scheduleMainWindowContainment(window)
     }
 
     @objc private func screenParametersDidChange(_ note: Notification) {
         guard let mainWindow else { return }
-        containMainWindow(mainWindow)
+        scheduleMainWindowContainment(mainWindow)
+    }
+
+    @MainActor private func scheduleMainWindowContainment(_ window: NSWindow) {
+        containmentSettlement.request { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.containMainWindow(window)
+        }
     }
 
     @MainActor private func containMainWindow(_ window: NSWindow) {

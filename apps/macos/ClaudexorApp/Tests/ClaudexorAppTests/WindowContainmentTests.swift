@@ -4,6 +4,37 @@ import Testing
 @testable import ClaudexorApp
 
 @Suite struct WindowContainmentTests {
+    @MainActor
+    @Test func resizeBurstsSettleOnceWithoutSynchronousOrReentrantApplication() {
+        var queued: [@MainActor () -> Void] = []
+        let settlement = WindowContainmentSettlement { queued.append($0) }
+        var applications = 0
+
+        settlement.request {
+            applications += 1
+            settlement.request { applications += 100 }
+        }
+        settlement.request { applications += 10 }
+
+        #expect(applications == 0)
+        #expect(queued.count == 1)
+        queued.removeFirst()()
+        #expect(applications == 1)
+        #expect(queued.isEmpty)
+
+        settlement.request { applications += 1 }
+        #expect(queued.count == 1)
+        queued.removeFirst()()
+        #expect(applications == 2)
+    }
+
+    @Test func conversationFloorYieldsToThePresentedWorkspace() {
+        #expect(ThreadWorkspaceLayout.conversationMinimumWidth(
+            inspectorPresented: false) == 420)
+        #expect(ThreadWorkspaceLayout.conversationMinimumWidth(
+            inspectorPresented: true) == nil)
+    }
+
     @Test func ordinaryMoveIsNotClampedBeforeCrossDisplayOwnershipChanges() {
         #expect(!WindowContainment.clampWindowNotifications.contains(
             NSWindow.didMoveNotification

@@ -220,7 +220,7 @@ struct ThreadsScreen: View {
                 .padding(.vertical, sidebarInset)
                 .overlay(alignment: .trailing) { sidebarResizeHandle }
             conversation
-                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: ThreadWorkspaceLayout.conversationMinimumWidth(inspectorPresented: model.inspectorPresented), maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.leading, sidebarGap)
         }
         .task {
