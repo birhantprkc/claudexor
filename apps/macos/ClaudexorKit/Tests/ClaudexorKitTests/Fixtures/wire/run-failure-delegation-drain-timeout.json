@@ -13,6 +13,7 @@
       "events.jsonl#delegation-child-drain"
     ],
     "runDir": null,
+    "resetsAt": null,
     "nextActions": [
       "Inspect child run terminals and retry the parent after recovery."
     ]

@@ -54,6 +54,7 @@ export * from "./status-projection.js";
 export * from "./control-operation-responses.js";
 export * from "./control-thread-apply.js";
 export * from "./control-run-scope.js";
+export * from "./control-run-failure.js";
 export * from "./setup.js";
 export * from "./control-trust.js";
 export * from "./control-gc.js";

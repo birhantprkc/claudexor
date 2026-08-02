@@ -186,7 +186,7 @@ describe("thread workspace Git admission", () => {
   const liveConvergence = {
     prompt: "repair",
     mode: "agent" as const,
-    scope: { kind: "project" as const, root: "/repo", context: "auto" as const },
+    scope: { kind: "project" as const, root: "/repo", context: "auto" as const, ephemeral: false },
     untilClean: true,
     execution: { isolation: "live" as const, delegated: false },
   };
@@ -243,7 +243,12 @@ describe("thread workspace Git admission", () => {
       const request = {
         prompt: "read",
         mode,
-        scope: { kind: "project" as const, root: "/repo", context: "auto" as const },
+        scope: {
+          kind: "project" as const,
+          root: "/repo",
+          context: "auto" as const,
+          ephemeral: false,
+        },
         execution: { isolation: "envelope" as const, delegated: false },
       };
       expect(threadExecutionRequiresWorktree({ thread: isolated, mode, protectedPaths: [] })).toBe(

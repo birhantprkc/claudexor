@@ -403,7 +403,12 @@ describe("Control API schemas", () => {
       reviewerEfforts: { anthropic: "max", openai: "xhigh" },
       reviewerModels: { anthropic: "claude-opus-4-8", openai: "gpt-4o" },
     });
-    expect(req.scope).toEqual({ kind: "project", root: "/repo", context: "auto", ephemeral: false });
+    expect(req.scope).toEqual({
+      kind: "project",
+      root: "/repo",
+      context: "auto",
+      ephemeral: false,
+    });
     expect(req.reviewerPanel).toEqual([
       { harness: "claude", model: "claude-opus-4-8", effort: "max" },
       { harness: "cursor", model: "gemini-3.1-pro" },

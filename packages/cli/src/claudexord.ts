@@ -54,6 +54,7 @@ import { dispatchClaudexordEntry, runIfDirectEntry } from "./claudexord-entry.js
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 import { quotaSubjectUniverseFromConfig } from "./quota-subject-universe.js";
 import { runStopIfRequested } from "./runtime-replacement-stop.js";
+import { threadContinuityContext } from "./thread-continuity-context.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 
 /** Public daemon-composition hook retained for embedders and tests. */
@@ -294,35 +295,12 @@ export async function main(): Promise<void> {
               : threadId
                 ? (threads.getThread(threadId)?.credential_profile_id ?? null)
                 : null;
-        // Continuity context (INV-137): prior turns (for the delta packet) and
-        // every lane checkpoint of the thread. Only a bound thread turn carries
-        // it — a non-thread one-shot has no conversation to continue.
-        const continuityContext =
-          threadId && turnId
-            ? (() => {
-                const current = threads.getTurn(turnId);
-                const currentCreatedAt = current?.created_at ?? "";
-                const priorTurns = threads
-                  .turnsFor(threadId)
-                  .filter(
-                    (t) =>
-                      t.id !== turnId &&
-                      t.run_id != null &&
-                      (!currentCreatedAt || t.created_at < currentCreatedAt),
-                  )
-                  .map((t) => ({ id: t.id, prompt: t.prompt, runId: t.run_id }));
-                return {
-                  turnId,
-                  profileId: requestedProfileId,
-                  priorTurns,
-                  laneCheckpoints: threads.laneCheckpointsForThread(threadId).map((c) => ({
-                    harness: c.harness_id,
-                    profileId: c.profile_id ?? null,
-                    turnId: c.turn_id,
-                  })),
-                };
-              })()
-            : undefined;
+        const continuityContext = threadContinuityContext({
+          threads,
+          threadId,
+          turnId,
+          profileId: requestedProfileId,
+        });
         let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         let runSignal: AbortSignal | undefined = ctx.signal;
         if (maxSeconds !== null) {

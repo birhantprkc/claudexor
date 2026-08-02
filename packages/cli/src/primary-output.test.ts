@@ -88,6 +88,7 @@ describe("primaryOutputForCli", () => {
           attemptId: "a01",
           safeMessage: "Authentication expired",
           rawDetailRef: null,
+          resetsAt: null,
           logRefs: [],
           eventRefs: [],
           runDir: root,

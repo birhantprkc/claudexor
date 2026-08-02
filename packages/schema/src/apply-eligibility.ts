@@ -1,7 +1,8 @@
 import { z } from "zod/v3";
 import { RunOutcomeFacts } from "./decision.js";
 import { PlanReadiness, CouncilProjection } from "./plan.js";
-import { ControlBudgetSnapshot, RunFailure } from "./control.js";
+import { ControlBudgetSnapshot } from "./control.js";
+import { RunFailure } from "./control-run-failure.js";
 import { RunDelegationInfo } from "./delegation.js";
 
 /**

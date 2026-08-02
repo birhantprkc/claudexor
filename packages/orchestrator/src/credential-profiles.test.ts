@@ -774,10 +774,10 @@ describe("vendor credential observation (honest profile verification)", () => {
       withVendorCredentialObservation(
         wrongMethod,
         vendorCredentialObservation(
-        { snapshots: [snap("work", 0.1)], absences: [] },
-        "claude",
-        "work",
-      ),
+          { snapshots: [snap("work", 0.1)], absences: [] },
+          "claude",
+          "work",
+        ),
       ),
     ).toEqual(wrongMethod);
   });

@@ -14,8 +14,8 @@ import {
   ControlPendingInteraction,
   ControlRunSummary,
   ControlTimelineEvent,
-  RunFailure,
 } from "./control.js";
+import { RunFailure } from "./control-run-failure.js";
 
 export const ControlPrimaryOutput = z
   .object({
