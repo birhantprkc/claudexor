@@ -38,7 +38,7 @@ struct RunEvidenceView: View {
             stableID: task.id, resolvedRunID: task.resolvedRunId)
         return VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             SectionLabel("Diagnostics summary", systemImage: "stethoscope")
-            HStack(spacing: Theme.Spacing.sm) {
+            FlowLayout(spacing: Theme.Spacing.sm) {
                 Button {
                     copyToPasteboard(runID)
                 } label: {
