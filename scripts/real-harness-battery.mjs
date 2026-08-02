@@ -22,19 +22,6 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
-import { ArtifactStore } from "../packages/artifact-store/dist/index.js";
-import {
-  awaitDaemonTermination,
-  DaemonClient,
-  daemonLeaseOwner,
-  defaultSocketPath,
-  processIsAlive,
-  readToken,
-  socketAlive,
-} from "../packages/daemon/dist/index.js";
-import { ControlRunDetail, RunDeliveryState } from "../packages/schema/dist/index.js";
-import { CLAUDEXOR_VERSION, redactSecrets } from "../packages/util/dist/index.js";
-import { admitAndAwaitRuntimeReplacementStop } from "../packages/cli/dist/runtime-replacement-stop.js";
 import {
   assertNoPreexistingDaemon,
   assertRegularFileUnchanged,
@@ -51,6 +38,53 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "cli", "dist", "cli.js");
 const nodeBin = process.execPath;
 const home = homedir();
+delete process.env.CLAUDEXOR_BATTERY_BUILD_VERIFIED;
+const forcedBuildStartedAt = new Date().toISOString();
+const forcedBuildCommand = [join(root, "node_modules", ".bin", "turbo"), "run", "build", "--force"];
+const forcedBuildResult = spawnSync(forcedBuildCommand[0], forcedBuildCommand.slice(1), {
+  cwd: root,
+  env: process.env,
+  stdio: "inherit",
+});
+const forcedBuildReceipt = {
+  command: "turbo run build --force",
+  startedAt: forcedBuildStartedAt,
+  finishedAt: new Date().toISOString(),
+  exitCode: typeof forcedBuildResult.status === "number" ? forcedBuildResult.status : 1,
+  candidateSha: null,
+  candidateTree: null,
+};
+if (forcedBuildReceipt.exitCode !== 0) {
+  throw new Error(
+    `forced workspace build failed before the real-harness battery started (exit ${forcedBuildReceipt.exitCode}${forcedBuildResult.error ? `; ${forcedBuildResult.error.message}` : ""})`,
+  );
+}
+
+// Import every compiled workspace dependency only AFTER the entrypoint-owned,
+// uncached build completed. A stale dist module can therefore never enter this
+// process before the build proof it is supposed to exercise.
+const [artifactStoreModule, daemonModule, schemaModule, utilModule, runtimeStopModule] =
+  await Promise.all([
+    import("../packages/artifact-store/dist/index.js"),
+    import("../packages/daemon/dist/index.js"),
+    import("../packages/schema/dist/index.js"),
+    import("../packages/util/dist/index.js"),
+    import("../packages/cli/dist/runtime-replacement-stop.js"),
+  ]);
+const { ArtifactStore } = artifactStoreModule;
+const {
+  awaitDaemonTermination,
+  DaemonClient,
+  daemonLeaseOwner,
+  defaultSocketPath,
+  processIsAlive,
+  readToken,
+  socketAlive,
+} = daemonModule;
+const { ControlRunDetail, RunDeliveryState } = schemaModule;
+const { CLAUDEXOR_VERSION, redactSecrets } = utilModule;
+const { admitAndAwaitRuntimeReplacementStop } = runtimeStopModule;
+
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const defaultRoot = join(home, ".claudexor", "dogfood", `battery-${runId}`);
 const layout = resolveRealHarnessBatteryLayout({
@@ -72,8 +106,6 @@ const requestedHarnesses = (process.env.CLAUDEXOR_BATTERY_HARNESSES ?? "codex,cl
   .map((s) => s.trim())
   .filter(Boolean);
 const marker = process.env.CLAUDEXOR_BATTERY_IMAGE_MARKER ?? "CLAUDEXOR-7521";
-const buildVerified = process.env.CLAUDEXOR_BATTERY_BUILD_VERIFIED === "1";
-delete process.env.CLAUDEXOR_BATTERY_BUILD_VERIFIED;
 // Optional phase filter (e.g. "10,11,12"): an operator iterating on one
 // surface should not re-burn the whole battery. Default: every phase.
 const phaseFilter = (process.env.CLAUDEXOR_BATTERY_PHASES ?? "")
@@ -128,7 +160,8 @@ const evidence = {
   configBefore: protectedConfigBefore ? describeFileSnapshot(protectedConfigBefore) : null,
   configAfter: null,
   configUnchanged: layout.mode === "scratch" ? null : false,
-  forcedBuildVerified: buildVerified,
+  forcedBuildVerified: true,
+  forcedBuild: forcedBuildReceipt,
   cli,
   node: nodeBin,
   version: null,
@@ -344,6 +377,7 @@ async function startBatteryDaemon() {
   // fresh daemon must still be stopped through the identity-bound RPC.
   runtimeState.daemonIdentity = runtimeReplacementIdentityFromHandshake(handshake);
   if (
+    handshake?.engine?.version !== CLAUDEXOR_VERSION ||
     handshake?.engine?.sha !== evidence.candidate.sha ||
     resolve(handshake?.engine?.entry ?? "") !== expectedEntry
   ) {
@@ -2575,7 +2609,16 @@ function phase0(harnessPhasesRequested = true) {
   const phase = "phase0";
   const version = runCliText(["--version"], { name: "version" });
   evidence.version = version.stdout.trim();
-  pass(phase, "cli version", { version: evidence.version });
+  if (version.code === 0 && evidence.version === CLAUDEXOR_VERSION) {
+    pass(phase, "cli version", { version: evidence.version });
+  } else {
+    fail(phase, "cli version", {
+      exit: version.code,
+      expected: CLAUDEXOR_VERSION,
+      observed: evidence.version,
+      log: rel(version.log),
+    });
+  }
   const doctor = runCliJson(["doctor"], { name: "doctor" });
   if (doctor.code !== 0 || !doctor.json?.harnesses) {
     fail(phase, "doctor", {
@@ -2629,6 +2672,8 @@ const state = { verifiedRuns: [], multiRace: null };
 async function main() {
   evidence.candidate.sha = runGit(["rev-parse", "HEAD"], root);
   evidence.candidate.tree = runGit(["rev-parse", "HEAD^{tree}"], root);
+  evidence.forcedBuild.candidateSha = evidence.candidate.sha;
+  evidence.forcedBuild.candidateTree = evidence.candidate.tree;
   process.stdout.write(
     `Claudexor real-harness battery\nroot=${batteryRoot}\nconfig=${configDir}\nconfigMode=${layout.mode}\ncandidate=${evidence.candidate.sha}\nharnesses=${requestedHarnesses.join(",")}\nmaxUsd=${maxUsd}\n\n`,
   );
@@ -2639,9 +2684,6 @@ async function main() {
   try {
     if (layout.mode === "existing_default" && phaseFilter.length > 0) {
       throw new Error("an existing-default acceptance run cannot use CLAUDEXOR_BATTERY_PHASES");
-    }
-    if (layout.mode === "existing_default" && !buildVerified) {
-      throw new Error("existing-default acceptance must run through pnpm battery:real");
     }
     if (
       layout.mode === "existing_default" &&

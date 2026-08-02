@@ -344,9 +344,10 @@ Tests and local smokes must never touch real user state:
 
   This mode accepts only the canonical default config path and requires the
   battery directory outside both `~/.claudexor` and the source checkout. It
-  deliberately does not export `CLAUDEXOR_CONFIG_DIR`. The `pnpm battery:real`
-  entrypoint first forces every workspace build (no Turbo cache), then records
-  the launched daemon entry digest beside its exact SHA/entry handshake. The
+  deliberately does not export `CLAUDEXOR_CONFIG_DIR`. The battery entrypoint
+  itself first forces every workspace build (no Turbo cache), then dynamically
+  loads the resulting dist modules and records the launched daemon entry digest
+  beside its exact version/SHA/entry handshake. The
   lane refuses a pre-existing daemon, stops only the identity-bound daemon it
   started, keeps `config.yaml` byte- and mode-identical, and revokes its
   temporary disposable-repo full-access grant. Every Codex and
@@ -355,8 +356,9 @@ Tests and local smokes must never touch real user state:
   fails this VM acceptance, while Cursor retains its declared credential
   transport. The lane is strict: FAIL, ENV, or SKIP greater than zero, a phase
   filter, or omission of Codex, Claude, or Cursor makes the acceptance run fail.
-  Calling the script directly cannot satisfy the build proof. Never use the lane
-  on the credential-free pristine VM or on a config root with live work.
+  build proof has no caller-supplied sentinel: every invocation owns and awaits
+  the forced build before battery code can load. Never use the lane on the
+  credential-free pristine VM or on a config root with live work.
 - Runtime retry/review knobs are user-global config (`runtime.transient_retry`
   and `runtime.reviewer_timeout_ms`) with env overrides
   `CLAUDEXOR_TRANSIENT_RETRY_MAX`,

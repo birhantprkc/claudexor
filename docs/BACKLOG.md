@@ -52,6 +52,12 @@ deferred; they are recorded here now.
   correctly needs one authority API shared by all four delivery surfaces. Side
   effects remain exactly-once today; the rare replay during newer active work
   returns a fresh refusal rather than its old success.
+- PDR-09: clear the Plan answer card's session-local post-ACK bridge when the
+  refreshed thread projection proves that the answer turn received a
+  non-retryable pre-enqueue refusal. The durable server relation remains the
+  submission authority today, and the rare stale read-only card self-heals on
+  thread reopen or app restart; this is UI recovery polish, not a release
+  safety defect.
 
 ## v3.2.0 wave-4 review deferrals
 

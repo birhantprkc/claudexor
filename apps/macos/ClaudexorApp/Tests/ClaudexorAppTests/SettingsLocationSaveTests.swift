@@ -219,6 +219,7 @@ struct SettingsLocationSaveTests {
             at: remote,
             admittedGeneration: capturedGeneration
         )
+        _ = await model.harnessProjectionLanes[remote]?.task?.value
 
         #expect(ok)
         #expect(requestedPorts.values.first == 41002)
@@ -242,6 +243,7 @@ struct SettingsLocationSaveTests {
             at: remote,
             admittedGeneration: captured
         )
+        _ = await model.harnessProjectionLanes[remote]?.task?.value
 
         #expect(result.succeeded)
         #expect(requestedPorts.values.first == 41002)

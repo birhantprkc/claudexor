@@ -1615,8 +1615,20 @@ struct AppModelRefreshTests {
         ), requestNotificationAuthorization: false)
         let calls = AppRefreshCallCounter()
         let oldArrived = AppRefreshCallCounter()
+        let observerArrived = AppRefreshCallCounter()
         let releaseOld = DispatchSemaphore(value: 0)
+        let releaseObserver = DispatchSemaphore(value: 0)
+        defer {
+            model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
+            releaseOld.signal()
+            releaseObserver.signal()
+        }
         AppRequestStubURLProtocol.handler = { request in
+            if request.url?.path == "/v2/global/events" {
+                observerArrived.increment()
+                _ = releaseObserver.wait(timeout: .now() + 5)
+                return (appResponse(for: request), Data())
+            }
             guard request.url?.path == "/v2/credential-profiles",
                   request.url?.query == "snapshot=true"
             else { throw AppRefreshTestError.badRequest }
@@ -1638,6 +1650,7 @@ struct AppModelRefreshTests {
         }
         let newer = Task { await model.refreshAccounts() }
         #expect(await newer.value == nil)
+        try await waitForAppTest(observerArrived, message: "quota observer never started")
         releaseOld.signal()
         #expect(await older.value == nil)
 
@@ -1659,8 +1672,20 @@ struct AppModelRefreshTests {
         ), requestNotificationAuthorization: false)
         let calls = AppRefreshCallCounter()
         let oldArrived = AppRefreshCallCounter()
+        let observerArrived = AppRefreshCallCounter()
         let releaseOld = DispatchSemaphore(value: 0)
+        let releaseObserver = DispatchSemaphore(value: 0)
+        defer {
+            model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
+            releaseOld.signal()
+            releaseObserver.signal()
+        }
         AppRequestStubURLProtocol.handler = { request in
+            if request.url?.path == "/v2/global/events" {
+                observerArrived.increment()
+                _ = releaseObserver.wait(timeout: .now() + 5)
+                return (appResponse(for: request), Data())
+            }
             guard request.url?.path == "/v2/credential-profiles",
                   request.url?.query == "snapshot=true"
             else { throw AppRefreshTestError.badRequest }
@@ -1687,6 +1712,7 @@ struct AppModelRefreshTests {
         }
         let newer = Task { await model.refreshAccounts() }
         #expect(await newer.value == nil)
+        try await waitForAppTest(observerArrived, message: "quota observer never started")
         releaseOld.signal()
         #expect(await older.value == nil)
 

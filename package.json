@@ -18,7 +18,7 @@
     "schema:gen": "tsx packages/schema/scripts/gen-jsonschema.ts",
     "gen:version": "node scripts/gen-version.mjs",
     "bench:bundle": "node benchmarks/terminal_bench/scripts/bundle-cli.mjs",
-    "battery:real": "turbo run build --force && CLAUDEXOR_BATTERY_BUILD_VERIFIED=1 node scripts/real-harness-battery.mjs",
+    "battery:real": "node scripts/real-harness-battery.mjs",
     "docs:check": "pnpm --filter ...@claudexor/control-api build && pnpm --filter ...@claudexor/cli build && node scripts/docs-truth-check.mjs",
     "staged:check": "node scripts/staged-field-check.mjs",
     "retired:check": "node scripts/retired-key-check.mjs",
