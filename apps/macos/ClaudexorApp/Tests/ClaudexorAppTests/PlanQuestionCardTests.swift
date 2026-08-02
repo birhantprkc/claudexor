@@ -125,6 +125,16 @@ import ClaudexorKit
         #expect(!prompt.contains("→ b"))
     }
 
+    @Test func ownWordsOverrideAStaleChipSelection() {
+        let qs = [single("q1", "Which store?", [("a", "SQLite"), ("b", "Postgres")])]
+        let prompt = PlanAnswerComposer.encode(
+            qs,
+            selections: ["q1": ["a"]],
+            freeText: ["q1": "Use a flat file"])
+        #expect(prompt.contains("Which store? → Use a flat file"))
+        #expect(!prompt.contains("SQLite"))
+    }
+
     @Test func encodeMarksUnansweredQuestionsHonestly() {
         let qs = [single("q1", "Store?", [("a", "SQLite")])]
         let prompt = PlanAnswerComposer.encode(qs, selections: [:], freeText: [:])

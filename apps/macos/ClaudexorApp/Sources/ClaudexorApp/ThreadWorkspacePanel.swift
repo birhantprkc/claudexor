@@ -168,7 +168,8 @@ struct ThreadWorkspacePanel: View {
     private func runFilterHeader(_ run: TaskRun) -> some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             HStack(spacing: Theme.Spacing.sm) {
-                filterChip(run.id)
+                filterChip(RunInspectCommand.diagnosticRunID(
+                    stableID: run.id, resolvedRunID: run.resolvedRunId))
                 Spacer()
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { runFactsExpanded.toggle() }

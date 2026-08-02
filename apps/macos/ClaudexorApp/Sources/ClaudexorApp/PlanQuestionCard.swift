@@ -62,8 +62,9 @@ enum PlanAnswerComposer {
                 .filter { selections[q.id]?.contains($0.id) == true }
                 .map(\.label)
             let text = (freeText[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            var parts = labels
-            if !text.isEmpty { parts.append(text) }
+            // Own words are an alternative to the offered chips, never a
+            // contradictory second answer if stale UI state contains both.
+            let parts = text.isEmpty ? labels : [text]
             let answer = parts.isEmpty ? "(no answer)" : parts.joined(separator: ", ")
             lines.append("- \(q.prompt) → \(answer)")
         }
@@ -153,9 +154,17 @@ struct PlanQuestionCard: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                ForEach(questions) { question in
-                    questionRow(question)
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                        ForEach(questions) { question in
+                            questionRow(question)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxHeight: 320)
+                .scrollIndicators(.visible)
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(Theme.status(.negative))
                 }
@@ -233,7 +242,12 @@ struct PlanQuestionCard: View {
                     question.kind == "text" ? "Your answer" : "Or answer in your own words…",
                     text: Binding(
                         get: { freeText[question.id] ?? "" },
-                        set: { freeText[question.id] = $0 }),
+                        set: { value in
+                            freeText[question.id] = value
+                            if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                selections[question.id] = []
+                            }
+                        }),
                     axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...4)
@@ -250,6 +264,7 @@ struct PlanQuestionCard: View {
             set = set.contains(optionId) ? [] : [optionId]
         }
         selections[question.id] = set
+        if !set.isEmpty { freeText[question.id] = "" }
     }
 
     private func submit() {

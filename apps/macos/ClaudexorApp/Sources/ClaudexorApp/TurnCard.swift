@@ -160,12 +160,22 @@ struct TurnCard: View {
                     let submitted = PlanAnswerSubmission.acceptedTurn(
                         sourcePlanRunId: runId,
                         turns: model.selectedThreadDetail?.turns ?? [])
-                    PlanQuestionCard(
-                        questions: run.planQuestions,
-                        sourcePlanRunId: runId,
-                        submittedPrompt: submitted?.prompt,
-                        target: target,
-                        routingOptions: routingOptions)
+                    if submitted != nil || model.selectedThreadDetail?.thread.headRunId == runId {
+                        PlanQuestionCard(
+                            questions: run.planQuestions,
+                            sourcePlanRunId: runId,
+                            submittedPrompt: submitted?.prompt,
+                            target: target,
+                            routingOptions: routingOptions)
+                    } else {
+                        Label(
+                            "Questions superseded by a later turn",
+                            systemImage: "arrow.turn.down.right"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Answer the questions on the latest Plan turn instead.")
+                    }
                 }
                 // The interactive "Implement plan" affordance stays inline (owner).
                 if let result = turn.run?.result, result.kind == "plan" {

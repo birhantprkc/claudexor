@@ -543,9 +543,9 @@ frequency and volume are. The contracts:
     its "automatic account routing" option clears the pin back to automatic routing,
     and the choice persists through the thread DTO, never local-only UI state.
     An engine-default API-key fallback is a ROUTE, never a synthetic account:
-    it adds no row and does not increase "N accounts". When that route is next,
-    the existing composer/footer disclosure says "API key"; Auth remains the key
-    management surface.
+    it adds no row and does not increase "N accounts". The shared AccountsSurface
+    discloses "API key" when that route is next; an unpinned composer chip stays
+    "Automatic" because next-up may rotate. Auth remains the key management surface.
 
     Accounts open and explicit Refresh consume ONE location-scoped server
     snapshot containing profiles, readiness, Workspace Git, quota, `next_up`,
@@ -1291,9 +1291,10 @@ DesignSystemComponents.swift, DesignTokens.swift.)
 - **`HarnessAccountChip`** — a single shared view (one instance in the composer controls row):
   ONE capsule with two menu segments. The harness segment (brand mark + label + chevron `Menu`)
   switches the thread's sticky primary harness (a change applies from the next turn); the
-  account segment shows the thread's pinned profile or the harness's computed next-up selection, and
-  picking pins the thread's credential profile (the per-thread override — the accounts popover owns
-  the global Enabled set that next-up routing draws from).
+  account segment shows the thread's pinned profile or the stable label "Automatic"; the shared
+  AccountsSurface owns the computed next-up disclosure. Picking pins the thread's credential profile
+  (the per-thread override — the accounts popover owns the global Enabled set that next-up routing
+  draws from).
 
 - **Titles / H1.** Headed surfaces (Settings tabs) use the shared title recipe
   (`.title2.weight(.bold)` + optional `.callout` secondary subtitle); never

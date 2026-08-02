@@ -34,11 +34,13 @@ struct RunEvidenceView: View {
     }
 
     private func diagnosticsContent(_ task: TaskRun) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        let runID = RunInspectCommand.diagnosticRunID(
+            stableID: task.id, resolvedRunID: task.resolvedRunId)
+        return VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             SectionLabel("Diagnostics summary", systemImage: "stethoscope")
             HStack(spacing: Theme.Spacing.sm) {
                 Button {
-                    copyToPasteboard(task.id)
+                    copyToPasteboard(runID)
                 } label: {
                     Label("Copy Run ID", systemImage: "number")
                 }
@@ -46,7 +48,7 @@ struct RunEvidenceView: View {
                 .help("Copy the full run id used by inspect, follow, apply, and decision commands.")
                 Button {
                     if let command = RunInspectCommand.command(
-                        runID: task.id, locationID: locationID) {
+                        runID: runID, locationID: locationID) {
                         copyToPasteboard(command)
                     }
                 } label: {
@@ -54,9 +56,9 @@ struct RunEvidenceView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(RunInspectCommand.command(
-                    runID: task.id, locationID: locationID) == nil)
+                    runID: runID, locationID: locationID) == nil)
                 .help(RunInspectCommand.command(
-                    runID: task.id, locationID: locationID) == nil
+                    runID: runID, locationID: locationID) == nil
                     ? "The SwiftPM development build has no bundled CLI; copy the run id instead."
                     : "Copy a directly runnable command using the full run id.")
                 Button {

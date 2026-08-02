@@ -4,6 +4,10 @@ import Foundation
 /// Exact recovery command copied by the run Evidence surface. Compact run
 /// labels remain presentation-only; every command carries the full id.
 enum RunInspectCommand {
+    static func diagnosticRunID(stableID: String, resolvedRunID: String?) -> String {
+        resolvedRunID ?? stableID
+    }
+
     static func local(runID: String, node: URL, cli: URL) -> String {
         [node.path, cli.path, "inspect", runID]
             .map(SSHCommandFactory.posixQuote)

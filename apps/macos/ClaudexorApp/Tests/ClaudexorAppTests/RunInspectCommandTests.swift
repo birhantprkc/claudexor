@@ -3,6 +3,13 @@ import Testing
 @testable import ClaudexorApp
 
 @Suite struct RunInspectCommandTests {
+    @Test func resolvedRunIDReplacesTheStableQueuedJobAlias() {
+        #expect(RunInspectCommand.diagnosticRunID(
+            stableID: "job-queued", resolvedRunID: "run-real") == "run-real")
+        #expect(RunInspectCommand.diagnosticRunID(
+            stableID: "run-stable", resolvedRunID: nil) == "run-stable")
+    }
+
     @Test func localCommandQuotesBundledPathsAndTheFullRunID() {
         let command = RunInspectCommand.local(
             runID: "run-e3decb11d1e4",
