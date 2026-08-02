@@ -187,7 +187,9 @@ deliverable is never a deliverable.
 No regex governance: risk, permissions, winners, web evidence, and
 tests-passed come from typed contracts and events, never from string-matching
 model output. Unknown cost is unknown — subscription valuation, metered cash,
-and absence are three different typed facts.
+and absence are three different typed facts. A route fallback announced before
+the vendor process starts is selection evidence, not a fabricated paid attempt;
+receipt certainty is judged only across real started intervals.
 
 Run evidence lives in two labeled planes: Claudexor's internal orchestration
 record (contracts, events, attempts, reviews), and the project's produced

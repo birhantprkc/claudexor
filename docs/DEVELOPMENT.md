@@ -329,10 +329,34 @@ Tests and local smokes must never touch real user state:
   but never auto-start one (a typo'd run id reports `no such run`); only acting
   paths (`agent`/`best-of`/`create`, `decision`) auto-start it. `daemon start` blocks
   until the daemon is actually ready, so a follow-up `status`/run can't race it.
-- Real-harness dogfood lives in `scripts/real-harness-battery.mjs` and runs only
-  against disposable repos under `~/.claudexor/dogfood`. It asserts engine-owned
-  artifacts, quarantines repeated host/network transient failures as ENV, and
-  must not target the Claudexor repo for harness writes.
+- Real-harness dogfood lives in `scripts/real-harness-battery.mjs`. Its default
+  scratch mode runs disposable repos under `~/.claudexor/dogfood`, with an
+  isolated config root. It asserts engine-owned artifacts, quarantines repeated
+  host/network transient failures as ENV, and must not target the Claudexor repo
+  for harness writes.
+- A credentialed disposable VM may opt into the existing default login state:
+
+  ```bash
+  CLAUDEXOR_BATTERY_CONFIG_DIR="$HOME/.claudexor/v3" \
+  CLAUDEXOR_BATTERY_DIR="$HOME/claudexor-dogfood/repo/battery-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ)" \
+    pnpm battery:real
+  ```
+
+  This mode accepts only the canonical default config path and requires the
+  battery directory outside both `~/.claudexor` and the source checkout. It
+  deliberately does not export `CLAUDEXOR_CONFIG_DIR`. The `pnpm battery:real`
+  entrypoint first forces every workspace build (no Turbo cache), then records
+  the launched daemon entry digest beside its exact SHA/entry handshake. The
+  lane refuses a pre-existing daemon, stops only the identity-bound daemon it
+  started, keeps `config.yaml` byte- and mode-identical, and revokes its
+  temporary disposable-repo full-access grant. Every Codex and
+  Claude task attempt in the daemon's complete new-job inventory must disclose
+  `local_session` from `native_session`; an API fallback or undisclosed route
+  fails this VM acceptance, while Cursor retains its declared credential
+  transport. The lane is strict: FAIL, ENV, or SKIP greater than zero, a phase
+  filter, or omission of Codex, Claude, or Cursor makes the acceptance run fail.
+  Calling the script directly cannot satisfy the build proof. Never use the lane
+  on the credential-free pristine VM or on a config root with live work.
 - Runtime retry/review knobs are user-global config (`runtime.transient_retry`
   and `runtime.reviewer_timeout_ms`) with env overrides
   `CLAUDEXOR_TRANSIENT_RETRY_MAX`,

@@ -5156,6 +5156,48 @@ describe("Orchestrator", () => {
     expect(answer).not.toContain("[auth]");
   });
 
+  it("settles exact API cash when the readiness disclosure precedes started", async () => {
+    const repo = await initRepo();
+    const adapter = askAdapter("authy", function* (sessionId) {
+      const ts = new Date().toISOString();
+      yield {
+        type: "message",
+        session_id: sessionId,
+        ts,
+        credential_route: undefined,
+        text: "[auth] auto selected api_key route because doctor smoke-proved it",
+        payload: {
+          auth_switched: true,
+          from_auth_mode: "local_session",
+          to_auth_mode: "api_key",
+          reason: "readiness_preferred",
+        },
+      };
+      yield { type: "started", session_id: sessionId, ts };
+      yield { type: "message", session_id: sessionId, ts, text: "Answered." };
+      yield {
+        type: "usage",
+        session_id: sessionId,
+        ts,
+        usage: { cost_usd: 0.08005475 },
+      };
+      yield { type: "completed", session_id: sessionId, ts };
+    });
+    const orch = new Orchestrator({ registry: new Map([["authy", adapter]]), reviewers: [] });
+    const res = await orch.run({
+      repoRoot: repo,
+      prompt: "do it",
+      mode: "ask",
+      harnesses: ["authy"],
+      n: 1,
+      paidBudget: { kind: "finite", maxUsd: 1.5 },
+    });
+
+    expect(legacyOutcome(res)).toBe("success");
+    expect(res.facts.reason).toBeNull();
+    expectBudgetSplit(res.runDir, 0.08005475, 0);
+  });
+
   it("falls back to another ask harness when web evidence is unsatisfied", async () => {
     const repo = await initRepo();
     const bad = askAdapter("web-bad", function* (sessionId) {

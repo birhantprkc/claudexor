@@ -147,6 +147,135 @@ describe("processAttemptUsage", () => {
     });
   });
 
+  it("does not turn a pre-start API fallback disclosure into an unpaid interval", () => {
+    const telemetry = createAttemptTelemetry("auto", false);
+    const ts = new Date().toISOString();
+    observeAttemptTelemetry(telemetry, {
+      type: "message",
+      session_id: "s",
+      ts,
+      text: "switching route",
+      payload: { auth_switched: true, to_auth_mode: "api_key" },
+    });
+    observeAttemptTelemetry(telemetry, {
+      type: "started",
+      session_id: "s",
+      ts,
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, {
+      ...usageEvent(false),
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, { type: "completed", session_id: "s", ts });
+
+    expect(telemetry.usageCost.cashKnowledge).toBe("exact");
+    expect(telemetry.usageCost.cashUsd).toBe(0.37);
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1.5 });
+    const lease = ledger.reserve({
+      taskId: "pre-start-api-fallback",
+      intent: "explain",
+      harnessId: "claude",
+    }).lease!;
+    ledger.settle(
+      lease.lease_id,
+      attemptUsageCostSettlement(
+        0.37,
+        false,
+        "a01",
+        "claude",
+        telemetry.authMode,
+        telemetry.usageCost,
+      ),
+    );
+    expect(ledger.spend()).toBe(0.37);
+    expect(ledger.terminal()).toBeNull();
+  });
+
+  it("keeps a real API interval without usage unresolved across a later retry", () => {
+    const telemetry = createAttemptTelemetry("auto", false);
+    const ts = new Date().toISOString();
+    observeAttemptTelemetry(telemetry, {
+      type: "message",
+      session_id: "s",
+      ts,
+      text: "switching route",
+      payload: { auth_switched: true, to_auth_mode: "api_key" },
+    });
+    observeAttemptTelemetry(telemetry, {
+      type: "started",
+      session_id: "s",
+      ts,
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, { type: "completed", session_id: "s", ts });
+    observeAttemptTelemetry(telemetry, {
+      type: "started",
+      session_id: "s",
+      ts,
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, {
+      ...usageEvent(false),
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, { type: "completed", session_id: "s", ts });
+
+    expect(telemetry.usageCost.cashKnowledge).toBe("unknown");
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1.5 });
+    const lease = ledger.reserve({
+      taskId: "missing-first-api-receipt",
+      intent: "explain",
+      harnessId: "claude",
+    }).lease!;
+    ledger.settle(
+      lease.lease_id,
+      attemptUsageCostSettlement(
+        0.37,
+        false,
+        "a01",
+        "claude",
+        telemetry.authMode,
+        telemetry.usageCost,
+      ),
+    );
+    expect(ledger.spend()).toBe(0.37);
+    expect(ledger.terminal()).toBe("cost_unverifiable");
+  });
+
+  it("keeps native completion separate from a paid retry with a pre-start fallback", () => {
+    const telemetry = createAttemptTelemetry("auto", false);
+    const ts = new Date().toISOString();
+    observeAttemptTelemetry(telemetry, {
+      type: "started",
+      session_id: "s",
+      ts,
+      credential_route: "vendor_native",
+    });
+    observeAttemptTelemetry(telemetry, { type: "completed", session_id: "s", ts });
+    observeAttemptTelemetry(telemetry, {
+      type: "message",
+      session_id: "s",
+      ts,
+      text: "switching route",
+      payload: { auth_switched: true, to_auth_mode: "api_key" },
+    });
+    observeAttemptTelemetry(telemetry, {
+      type: "started",
+      session_id: "s",
+      ts,
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, {
+      ...usageEvent(false),
+      credential_route: "managed_api_key",
+    });
+    observeAttemptTelemetry(telemetry, { type: "completed", session_id: "s", ts });
+
+    expect(telemetry.usageCost.cashKnowledge).toBe("exact");
+    expect(telemetry.usageCost.cashUsd).toBe(0.37);
+  });
+
   it("fails cash certainty closed when a native attempt switches to API without usage", () => {
     const telemetry = createAttemptTelemetry("auto", false);
     const ts = new Date().toISOString();

@@ -257,7 +257,14 @@ pnpm test
   allowlisted, unless a justified baseline entry explains why).
 - When runtime/harness resilience changes, the fixed real-harness battery
   (`pnpm battery:real`) is rerun or explicitly waived with the ENV/network
-  evidence that made it inconclusive.
+  evidence that made it inconclusive. Release acceptance uses the credentialed
+  disposable-VM existing-default lane from `docs/DEVELOPMENT.md`, without a
+  phase filter: its forced uncached build and receipt must bind the launched
+  daemon entry digest to the exact candidate handshake, prove the default config
+  remained byte-identical, prove every durable route interval in every Codex and
+  Claude task attempt stayed on a disclosed native session, and report
+  `FAIL=0 ENV=0 SKIP=0`. A scratch or partial run is diagnostic evidence, not
+  this acceptance gate.
 - New terminal states, retry events, or telemetry fields are documented in
   architecture/development docs and have generated schema updates.
 - Swift tests/build pass.

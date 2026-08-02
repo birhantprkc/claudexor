@@ -23,6 +23,7 @@ interface RouteKnowledgeState {
   sawUnknownUsage: boolean;
   unresolvedApiRoute: boolean;
   unresolvedUndisclosedRoute: boolean;
+  activeStarted: boolean;
   activeSawEvent: boolean;
   activeSawNativeRoute: boolean;
   activeSawApiRoute: boolean;
@@ -151,7 +152,12 @@ export function newAttemptUsageCost(): AttemptUsageCost {
  * ended without a usage receipt remains unresolved even if a later retry pays. */
 function startAttemptUsageRoute(cost: AttemptUsageCost): void {
   const state = stateFor(cost);
-  finishActiveRoute(state);
+  // Adapters may disclose an auth fallback before the vendor process emits
+  // `started`. That prelude selects the carried mode but is not a billable
+  // interval of its own. Only a second real `started` may close a prior
+  // interval as missing its usage receipt.
+  if (state.activeStarted) finishActiveRoute(state);
+  state.activeStarted = true;
   state.activeSawEvent = false;
   state.activeSawNativeRoute = false;
   state.activeSawApiRoute = false;
@@ -163,6 +169,7 @@ function observeAttemptUsageRoute(
   mode: "local_session" | "api_key" | null,
 ): void {
   const state = stateFor(cost);
+  if (!state.activeStarted) return;
   state.activeSawEvent = true;
   if (mode === "local_session") {
     state.sawNativeRoute = true;
@@ -197,6 +204,11 @@ export function observeAttemptUsageEvent(
           ? "api_key"
           : mode;
     recordAttemptUsageCost(cost, receiptMode, usd, event.usage?.estimated === true);
+  }
+  if (event.type === "completed") {
+    const state = stateFor(cost);
+    finishActiveRoute(state);
+    state.activeStarted = false;
   }
   return mode;
 }
@@ -270,6 +282,7 @@ function newRouteKnowledgeState(): RouteKnowledgeState {
     sawUnknownUsage: false,
     unresolvedApiRoute: false,
     unresolvedUndisclosedRoute: false,
+    activeStarted: false,
     activeSawEvent: false,
     activeSawNativeRoute: false,
     activeSawApiRoute: false,
