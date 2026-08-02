@@ -3,6 +3,31 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.0** (2026-08-03): preconditions for an external orchestrator driving
+  Claudexor runs. `RunScope.ephemeral` declares a one-shot project root — it
+  anchors a single run, never enters the durable project registry, and its
+  commands and run events live in the global no-project partition, so a host
+  that hands Claudexor a disposable worktree per subagent stops filling the
+  registry with entries that are dead on arrival. `RunExecution.delegated`
+  marks a run driven by a machine orchestrator rather than an operator at a
+  surface: every attempt is confined to a scoped harness HOME even under
+  `isolation: "live"`, the run refuses rather than degrades when that home is
+  absent, and the applied isolation is recorded on the attempt so the caller
+  verifies confinement instead of trusting it. Credential-profile readiness
+  discloses `verification_source`, separating "this profile's material is
+  present locally" from "the vendor answered a request made with this
+  profile's credential"; a vendor 401/403 on a subject's own token becomes the
+  typed quota absence `auth_revoked` instead of an undiagnosed refresh
+  failure. A spent subscription window is refused typed end to end —
+  `subscription_window_exhausted` with a structural `RunFailure.resetsAt`,
+  carried out of a candidate attempt's catch onto the run terminal only when
+  every candidate died of the same refusal — so a scheduler reads a field
+  instead of parsing the message. `worktreePrune` no longer deregisters
+  worktrees Claudexor does not own. Internally, `RunFailure` moves to
+  `control-run-failure.ts` and the thread continuity-context builder to
+  `thread-continuity-context.ts`, keeping both tracked files under the
+  readability ratchet and putting the continuity filters under test.
+
 - **v3.2.1** (2026-08-03): a focused macOS plan-answer and diagnostics repair,
   based on reports from Walter Siamruk (#102–#108). Composer-selected models,
   effort, and auth route now reach turns started from plan cards; Implement plan

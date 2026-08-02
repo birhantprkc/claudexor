@@ -1,5 +1,15 @@
 # claudexor
 
+## 3.3.0
+
+### Minor Changes
+
+- Preconditions for an external orchestrator driving Claudexor runs. `RunScope.ephemeral` declares a one-shot project root: it anchors a single run, never enters the durable project registry, and its commands and run events live in the global no-project partition, so a host that hands Claudexor a disposable worktree per subagent stops filling the registry with entries that are dead on arrival. `RunExecution.delegated` marks a run driven by a machine orchestrator rather than an operator at a surface, and confines every attempt to a scoped harness HOME even under `isolation: "live"` — refusing rather than degrading when that home is absent, and recording the applied isolation on the attempt so the caller verifies confinement instead of trusting it. Credential-profile readiness now discloses `verification_source`, separating "this profile's material is present locally" from "the vendor answered a request made with this profile's credential", and a vendor 401/403 on a subject's own token becomes the typed quota absence `auth_revoked` instead of an undiagnosed refresh failure. A spent subscription window is refused typed end to end: `subscription_window_exhausted` with a structural `RunFailure.resetsAt`, carried out of a candidate attempt's catch and onto the run terminal only when every candidate died of the same refusal. `worktreePrune` no longer deregisters worktrees Claudexor does not own.
+
+### Patch Changes
+
+- @claudexor/cli@3.3.0
+
 ## 3.2.1
 
 ### Patch Changes
