@@ -162,8 +162,8 @@ struct PlanQuestionCard: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxHeight: 320)
+                .fixedSize(horizontal: false, vertical: true)
                 .scrollIndicators(.visible)
                 if let errorMessage {
                     Text(errorMessage).font(.caption).foregroundStyle(Theme.status(.negative))
