@@ -189,6 +189,7 @@ import {
   type FinalVerifyRecord,
   type RunOutcomeFacts,
   type WorkState,
+  isEphemeralRunScope,
   isTerminalLifecycle,
   needsDecision,
   needsOperatorAttention,
@@ -926,6 +927,10 @@ export class DaemonControlApiServer {
         const thread = await svc({
           title: parsed.title,
           repoRoot,
+          // Carried explicitly through the SAME predicate the run route and the
+          // partition router use: dropping it here would register a root the
+          // wire contract promises never to register.
+          ephemeral: isEphemeralRunScope(parsed.scope),
           mode: parsed.mode,
           workspace: parsed.workspace,
           authPreference: parsed.authPreference,

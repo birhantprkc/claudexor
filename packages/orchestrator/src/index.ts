@@ -8,6 +8,5 @@ export {
   nextUpIdentity,
   probeCredentialProfileStatus,
   profileStatusAdmits,
-  vendorCredentialObservation,
-  withVendorCredentialObservation,
+  vendorVerifiedProfileStatus,
 } from "./credential-profiles.js";

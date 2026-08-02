@@ -12,7 +12,9 @@ import {
   rotateSpecOnTypedLimit,
   selectedProfileAvailability,
   staticRotationCandidates,
+  vendorVerifiedProfileStatus,
   type ProfilePolicy,
+  type VendorQuotaObservations,
 } from "./credential-profiles.js";
 import { writeRunTelemetryArtifact } from "./runTelemetryWriter.js";
 import {
@@ -55,6 +57,7 @@ import type {
   InteractionRequest,
   ModeKind,
   PaidBudget,
+  QuotaAbsence,
   QuotaSnapshot,
   RoutingGoal,
   ProtectedPathApproval,
@@ -289,6 +292,10 @@ export interface OrchestratorDeps {
   routingGoal?: RoutingGoal;
   /** Durable global quota projection, injected by the daemon boundary. */
   quotaSnapshots?: () => readonly QuotaSnapshot[];
+  /** The same projection's typed ABSENCES — the half that carries
+   * `auth_revoked`, i.e. the vendor's own rejection of a profile's credential.
+   * Without it, admission can only read the local login store. */
+  quotaAbsences?: () => readonly QuotaAbsence[];
   /** Persist typed live quota/cooldown events into that same projection. */
   quotaEventSink?: (harnessId: string, event: HarnessEvent) => void;
   /** Ordered explicit reviewer panel. Unlike legacy per-family overrides this
@@ -1054,8 +1061,20 @@ export class Orchestrator {
     return policy ?? { limit_action: "fail", rotation_eligible: [], headroom_threshold: 0.9 };
   }
 
+  /** The quota poller's authenticated vendor evidence for THIS decision epoch,
+   * read once so every profile in the epoch is judged against one observation
+   * set. This is what makes profile readiness at admission mean the same thing
+   * it means on the Accounts card (INV-135 honesty). */
+  private vendorQuotaObservations(): VendorQuotaObservations {
+    return {
+      snapshots: this.deps.quotaSnapshots?.() ?? [],
+      absences: this.deps.quotaAbsences?.() ?? [],
+    };
+  }
+
   /** Fresh profile readiness for one rotation decision epoch. Accounts uses
-   * the same probe wrapper + admission predicate when projecting next_up. */
+   * the same probe wrapper + vendor overlay + admission predicate when
+   * projecting next_up. */
   private async readyProfileIdsForRotation(
     input: RunInput,
     harnessId: string,
@@ -1070,12 +1089,18 @@ export class Orchestrator {
       excluded,
     });
     const adapter = this.deps.registry.get(harnessId);
+    const quota = this.vendorQuotaObservations();
     const entries = await Promise.all(
       profiles.map(async (profile) => ({
         profile,
-        status: await probeCredentialProfileStatus(
-          profile,
-          adapter?.probeCredentialProfile?.bind(adapter),
+        // Rotating INTO a profile the vendor has already rejected would spend a
+        // whole attempt to rediscover the 401 the poller reported a minute ago.
+        status: vendorVerifiedProfileStatus(
+          await probeCredentialProfileStatus(
+            profile,
+            adapter?.probeCredentialProfile?.bind(adapter),
+          ),
+          quota,
         ),
       })),
     );
@@ -1284,6 +1309,9 @@ export class Orchestrator {
       dropped.push(detail);
       droppedLanes.push({ harnessId, stage, detail });
     };
+    // One observation set for the whole admission pass, so two lanes cannot be
+    // judged against different vendor epochs.
+    const vendorQuota = this.vendorQuotaObservations();
     for (const id of ids) {
       const adapter = this.deps.registry.get(id);
       if (!adapter) {
@@ -1357,6 +1385,11 @@ export class Orchestrator {
         profileId: this.effectiveProfileId(input, id),
         harnessId: id,
         probe: profileAdapter?.probeCredentialProfile?.bind(profileAdapter),
+        // `verification: passed` from the local store only means a login file
+        // is present. The poller's authenticated vendor call is the only
+        // liveness evidence we have, and admission is the surface that must
+        // act on it — otherwise the run dispatches into a revoked token.
+        quota: vendorQuota,
       });
       if (profileVerdict !== null) {
         if (profileVerdict === "available") {

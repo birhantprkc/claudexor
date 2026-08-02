@@ -409,8 +409,13 @@ export async function worktreeAddExisting(
   path: string,
   branch: string,
 ): Promise<void> {
-  // A stale registration for the lost directory would fail the add; prune first.
-  await git(repo, ["worktree", "prune"]);
+  // A stale registration for the lost directory would fail the add, so it has
+  // to go — but ONLY it. `git worktree prune` is repo-wide (see worktreePrune)
+  // and would take a co-writer's momentarily-absent tree of the same git dir
+  // with it; this recovery runs against the USER'S project root, so that is
+  // exactly the shared git dir. Deregistering the one path we are about to
+  // recreate is the whole need.
+  await worktreeRemove(repo, path);
   const r = await git(repo, ["worktree", "add", path, branch]);
   if (r.code !== 0)
     throw new WorkspaceError(`git worktree add (existing branch) failed: ${r.stderr.trim()}`);
@@ -540,9 +545,13 @@ async function worktreeList(repo: string): Promise<string[]> {
  * trees live under the Claudexor runtime root, so that is the whole test.
  *
  * Leaving OUR stale admin entry behind is cheap (it costs a directory under
- * `.git/worktrees` until a prune is safe again, and `worktreeAddExisting`
- * prunes explicitly when it must reuse the name). Deregistering a worktree we
- * do not own is not recoverable by us at all. Refusing is the honest trade.
+ * `.git/worktrees` until a prune is safe again, and a caller that must reuse
+ * one exact name deregisters that one path with `worktreeRemove`).
+ * Deregistering a worktree we do not own is not recoverable by us at all.
+ * Refusing is the honest trade.
+ *
+ * This is the ONLY place in the tree that runs the repo-wide `worktree prune`;
+ * a second ungated caller re-opens the whole harm, so keep it that way.
  */
 export async function worktreePrune(repo: string): Promise<void> {
   for (const path of await worktreeList(repo)) {

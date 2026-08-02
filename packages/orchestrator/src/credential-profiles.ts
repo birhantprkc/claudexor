@@ -53,6 +53,10 @@ export async function selectedProfileAvailability(input: {
   profileId?: string | null;
   harnessId: string;
   probe?: (profile: CredentialProfile) => Promise<CredentialProfileStatus>;
+  /** The quota poller's authenticated vendor evidence, when the caller holds
+   * it. Omitting it admits on the LOCAL store alone — which is the reading of
+   * `verification: passed` that let a run dispatch into a revoked token. */
+  quota?: VendorQuotaObservations | null;
 }): Promise<string | null> {
   if (!input.profileId) return null;
   let profile: CredentialProfile;
@@ -62,7 +66,10 @@ export async function selectedProfileAvailability(input: {
     return error instanceof Error ? error.message : String(error);
   }
   if (!input.probe) return `harness "${input.harnessId}" has no profile probe`;
-  const result = await probeCredentialProfileStatus(profile, input.probe);
+  const result = vendorVerifiedProfileStatus(
+    await probeCredentialProfileStatus(profile, input.probe),
+    input.quota,
+  );
   return profileStatusAdmits(profile, result)
     ? "available"
     : (result.detail ?? `${result.availability}/${result.verification}`);
@@ -154,6 +161,35 @@ export function withVendorCredentialObservation(
     verification_source: "vendor",
     last_verified_at: observation.observed_at,
   };
+}
+
+/** The quota poller's evidence for every subject: what an authenticated vendor
+ *  call last returned, and which subjects it could not answer for. */
+export interface VendorQuotaObservations {
+  snapshots: readonly QuotaSnapshot[];
+  absences: readonly QuotaAbsence[];
+}
+
+/**
+ * The vendor-verified reading of ONE probed profile status — the single
+ * composition behind every consumer of `profileStatusAdmits`: run admission,
+ * rotation readiness, and the accounts projection. Keeping the overlay in one
+ * place is the point: applying it on the listing branch alone is what let the
+ * Accounts card say `revoked` while the router dispatched into the same token.
+ *
+ * `probeCredentialProfileStatus` guarantees the status carries its own
+ * profile's identity, so the subject is read from the status itself. Without
+ * quota evidence the local verdict stands untouched.
+ */
+export function vendorVerifiedProfileStatus(
+  status: CredentialProfileStatus,
+  quota: VendorQuotaObservations | null | undefined,
+): CredentialProfileStatus {
+  if (!quota) return status;
+  return withVendorCredentialObservation(
+    status,
+    vendorCredentialObservation(quota, status.harness_id, status.profile_id),
+  );
 }
 
 /** One readiness predicate shared by run admission and accounts projection. */

@@ -3808,6 +3808,205 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("never rotates INTO a profile the vendor already rejected (auth_revoked)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-revoked-rotation-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:a'",
+        "  - profile_id: c",
+        "    harness_id: limited",
+        "    display_name: C",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:c'",
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "      rotation_eligible: [c]",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: string[] = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        // Both logins are present locally — c looks like a perfect failover.
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          spawns.push(spec.credential_profile?.profile_id ?? "none");
+          yield {
+            type: "started",
+            session_id: spec.session_id,
+            ts,
+            credential_profile_id: spec.credential_profile?.profile_id,
+            payload: { native_session_id: `native-${spawns.length}` },
+          };
+          yield {
+            type: "status",
+            session_id: spec.session_id,
+            ts,
+            text: "api_retry: rate limited",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          };
+          yield {
+            type: "error",
+            session_id: spec.session_id,
+            ts,
+            error: "vendor rate limit exhausted",
+          };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: string[] = [];
+      await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+        // The poller's authenticated call with c's own token was rejected.
+        quotaAbsences: () => [
+          {
+            subject: {
+              harness: "limited",
+              credential_route: "managed_api_key",
+              plan_label: null,
+              subject_id: "c",
+            },
+            reason: "auth_revoked",
+            detail: "vendor rejected this key",
+            observed_at: new Date().toISOString(),
+          },
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "a",
+        onEvent: (event) => events.push(event.type),
+      });
+      // Rotating into a known-dead credential would spend a whole attempt to
+      // rediscover the 401 the poller already reported.
+      expect(spawns).not.toContain("c");
+      expect(events).not.toContain("route.profile.rotated");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("refuses to dispatch into a profile the vendor already rejected (auth_revoked)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-revoked-profile-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: work",
+        "    harness_id: asker",
+        "    display_name: Work",
+        "    credential_kind: config_dir_login",
+        "    isolation_locator: /tmp/p/work",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const answered: string[] = [];
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        answered.push("asker");
+        yield { type: "started", session_id: sessionId, ts };
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      // The LOCAL store is perfectly happy: a login file is present.
+      asker.probeCredentialProfile = async (profile) => ({
+        profile_id: profile.profile_id,
+        harness_id: "asker",
+        availability: "available",
+        verification: "passed",
+        verification_source: "local_store",
+        detail: "login present in the profile config dir",
+        last_verified_at: null,
+      });
+      // The quota poller's last AUTHENTICATED vendor call with this profile's
+      // own token was rejected. Admission must read that, not the login file.
+      const run = () =>
+        new Orchestrator({
+          registry: new Map([["asker", asker]]),
+          reviewers: [],
+          quotaAbsences: () => [
+            {
+              subject: {
+                harness: "asker",
+                credential_route: "vendor_native",
+                plan_label: null,
+                subject_id: "work",
+              },
+              reason: "auth_revoked",
+              detail: "oauth/usage responded 401",
+              observed_at: new Date().toISOString(),
+            },
+          ],
+        }).run({
+          repoRoot: repo,
+          prompt: "2+2?",
+          mode: "ask",
+          harnesses: ["asker"],
+          credentialProfileId: "work",
+        });
+      const res = await run();
+      expect(res.lifecycle).toBe("failed");
+      expect(res.summary).toContain("credential profile is not ready");
+      expect(res.summary).toContain("oauth/usage responded 401");
+      // Nothing was spawned: the refusal happened before any spend.
+      expect(answered).toEqual([]);
+      expect(res.spendUsd).toBe(0);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("a selected api_key profile classifies the route by ITS kind — the default subscription cooldown does not apply (round-18 #2)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-profile-route-config-"));

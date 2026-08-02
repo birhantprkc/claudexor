@@ -612,6 +612,46 @@ describe("ProjectPartitions", () => {
     f.partitions.close();
     f.manager.close();
   });
+
+  it("creates a thread on an ephemeral root without registering it either", () => {
+    const f = fixture();
+    const root = join(f.root, "disposable-thread-tree");
+    mkdirSync(root, { recursive: true });
+
+    const thread = f.partitions.createThread({ repoRoot: root, ephemeral: true });
+
+    // Same promise the run route already keeps: nothing durable names the
+    // disposable tree, so it is not registry litter or a ghost candidate.
+    expect(f.projects.current().list()).toEqual([]);
+    expect(f.partitions.quarantineGhostProjects()).toEqual([]);
+    // And the thread is fully usable from the global no-project partition,
+    // whose command authority its turns share.
+    expect(f.partitions.getThread(thread.id)?.repo?.root).toBe(root);
+    expect(f.partitions.listThreads().map((t) => t.id)).toContain(thread.id);
+    expect(f.partitions.forRequest({ threadId: thread.id })).toBe(f.partitions.forRequest({}));
+
+    f.partitions.close();
+    f.manager.close();
+  });
+
+  it("still auto-registers a durable (non-ephemeral) thread root", () => {
+    const f = fixture();
+    const root = join(f.root, "durable-project");
+    mkdirSync(root, { recursive: true });
+
+    const thread = f.partitions.createThread({ repoRoot: root });
+
+    expect(
+      f.projects
+        .current()
+        .list()
+        .map((p) => p.root),
+    ).toEqual([root]);
+    expect(f.partitions.forRequest({ threadId: thread.id })).not.toBe(f.partitions.forRequest({}));
+
+    f.partitions.close();
+    f.manager.close();
+  });
 });
 
 function fixtureAt(root: string) {

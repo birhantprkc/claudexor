@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { worktreeAdd, worktreePrune } from "./git.js";
+import { worktreeAdd, worktreeAddExisting, worktreePrune } from "./git.js";
 
 const roots: string[] = [];
 let configDirOverride: string | undefined;
@@ -85,5 +85,30 @@ describe("worktreePrune", () => {
 
   it("is a no-op on a directory that is not a git repository", async () => {
     await expect(worktreePrune(tempDir("claudexor-not-a-repo-"))).resolves.toBeUndefined();
+  });
+});
+
+describe("worktreeAddExisting", () => {
+  it("reclaims only its own lost registration, never a foreign stale one", async () => {
+    const { repo, base } = initRepo();
+    // A co-writer's worktree of the SAME git dir, momentarily absent. Thread
+    // recovery runs against the USER'S project root, so this is the realistic
+    // neighbour — not a Claudexor-owned envelope.
+    const foreign = join(tempDir("claudexor-foreign-"), "tree");
+    await worktreeAdd(repo, foreign, "foreign/tree", base);
+    rmSync(foreign, { recursive: true, force: true });
+    // Our thread worktree: branch survived, directory lost (the recovery case).
+    const ours = join(process.env.CLAUDEXOR_CONFIG_DIR as string, "projects", "abc", "tree");
+    mkdirSync(join(ours, ".."), { recursive: true });
+    await worktreeAdd(repo, ours, "claudexor/thread-t1", base);
+    rmSync(ours, { recursive: true, force: true });
+
+    await worktreeAddExisting(repo, ours, "claudexor/thread-t1");
+
+    // The recovery must succeed AND leave the co-writer registered: a repo-wide
+    // `git worktree prune` here would deregister their live workspace, which we
+    // cannot undo for them.
+    expect(registeredWorktrees(repo)).toContain(ours);
+    expect(registeredWorktrees(repo)).toContain(foreign);
   });
 });

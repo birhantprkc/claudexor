@@ -3,6 +3,19 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.1** (2026-08-03): three surfaces that the 3.3.0 batch changed on one
+  branch and left untouched on its twin. Thread worktree recovery deregisters
+  only the one lost registration instead of running the repo-wide
+  `git worktree prune` against the user's project — the exact harm
+  `worktreePrune` was gated for, from the one caller that still bypassed it.
+  The vendor-verification overlay now runs at RUN ADMISSION and rotation
+  readiness, not only in the Accounts listing, so a profile the vendor already
+  rejected (`auth_revoked`) is refused before spawn instead of being dispatched
+  into while the Accounts card calls it revoked. And `scope.ephemeral` is
+  honored on `POST /threads` as it already was on `POST /runs`: a declared
+  one-shot root is no longer silently entered into the durable project
+  registry, which is what the field's own description promises.
+
 - **v3.3.0** (2026-08-03): preconditions for an external orchestrator driving
   Claudexor runs. `RunScope.ephemeral` declares a one-shot project root — it
   anchors a single run, never enters the durable project registry, and its

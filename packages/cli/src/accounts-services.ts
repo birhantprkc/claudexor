@@ -10,10 +10,7 @@ import type {
   QuotaAbsence,
   QuotaSnapshot,
 } from "@claudexor/schema";
-import {
-  vendorCredentialObservation,
-  withVendorCredentialObservation,
-} from "@claudexor/orchestrator";
+import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import {
   harnessAccountsProjection,
   profileAccountIdentity,
@@ -119,9 +116,6 @@ function withVendorVerification<
 ): T[] {
   return entries.map((entry) => ({
     ...entry,
-    status: withVendorCredentialObservation(
-      entry.status,
-      vendorCredentialObservation(quota, entry.profile.harness_id, entry.profile.profile_id),
-    ),
+    status: vendorVerifiedProfileStatus(entry.status, quota),
   }));
 }

@@ -786,3 +786,64 @@ describe("vendor credential observation (honest profile verification)", () => {
     expect(withVendorCredentialObservation(local, null)).toEqual(local);
   });
 });
+
+describe("run admission reads the vendor's verdict, not just the local store", () => {
+  const revoked = {
+    subject: {
+      harness: "claude",
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: "work",
+    },
+    reason: "auth_revoked",
+    detail: "oauth/usage responded 401",
+    observed_at: "2026-07-17T12:00:00Z",
+  } as const;
+
+  const locallyPassing = async () =>
+    ({
+      profile_id: "work",
+      harness_id: "claude",
+      availability: "available",
+      verification: "passed",
+      verification_source: "local_store",
+      detail: "claude.ai login verified in the profile config dir",
+      last_verified_at: "2026-07-17T11:00:00Z",
+    }) as const;
+
+  it("refuses a locally-passing profile the vendor already rejected", async () => {
+    // Exactly the state that made this a bug: the Accounts card renders
+    // `verification: failed` from this same quota response while the router
+    // dispatched the run into the dead token.
+    const verdict = await selectedProfileAvailability({
+      registry: [work],
+      profileId: "work",
+      harnessId: "claude",
+      probe: locallyPassing,
+      quota: { snapshots: [], absences: [revoked] },
+    });
+    expect(verdict).toBe("oauth/usage responded 401");
+  });
+
+  it("still admits when the poller has no verdict for that subject", async () => {
+    const otherSubject = { ...revoked, subject: { ...revoked.subject, subject_id: "personal" } };
+    expect(
+      await selectedProfileAvailability({
+        registry: [work],
+        profileId: "work",
+        harnessId: "claude",
+        probe: locallyPassing,
+        quota: { snapshots: [], absences: [otherSubject] },
+      }),
+    ).toBe("available");
+    expect(
+      await selectedProfileAvailability({
+        registry: [work],
+        profileId: "work",
+        harnessId: "claude",
+        probe: locallyPassing,
+        quota: { snapshots: [], absences: [] },
+      }),
+    ).toBe("available");
+  });
+});

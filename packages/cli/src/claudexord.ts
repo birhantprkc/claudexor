@@ -208,6 +208,10 @@ export async function main(): Promise<void> {
           delegationBudgetAuthority,
           routingGoal: p.routingGoal,
           quotaSnapshots: () => quotaStoreSlot.current().read().snapshots,
+          // The absence half of the SAME projection: `auth_revoked` is how the
+          // poller reports a vendor rejecting a profile's credential, and run
+          // admission is the surface that has to act on it.
+          quotaAbsences: () => quotaStoreSlot.current().read().absences,
           quotaEventSink: (harnessId, event) => quotaStoreSlot.current().ingest(harnessId, event),
           reviewerPanel: p.reviewerPanel,
           reviewerModels:

@@ -279,15 +279,15 @@ export class ProjectPartitions implements CommandAuthority {
     return this.ensure(id).manager;
   }
 
-  createThread(input: CreateThreadInput): Thread {
-    if (input.repoRoot && !this.projects.current().findByRoot(input.repoRoot)) {
-      this.registerProject({
-        root: input.repoRoot,
-        idempotencyKey: `thread-auto-register-${hashJson(input.repoRoot)}`,
-        clientId: "thread-create",
-      });
+  /** `ephemeral`: the caller declared this root ONE-SHOT (INV-035) — never registered, so the
+   * thread takes the global no-project partition, exactly as its commands and run events do. */
+  createThread(input: CreateThreadInput & { ephemeral?: boolean }): Thread {
+    const root = input.ephemeral === true ? null : (input.repoRoot ?? null);
+    if (root && !this.projects.current().findByRoot(root)) {
+      const idempotencyKey = `thread-auto-register-${hashJson(root)}`;
+      this.registerProject({ root, idempotencyKey, clientId: "thread-create" });
     }
-    return this.threadStoreForRoot(input.repoRoot).createThread(input);
+    return this.threadStoreForRoot(root).createThread(input);
   }
 
   listThreads(): Thread[] {

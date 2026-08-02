@@ -860,6 +860,60 @@ describe("DaemonControlApiServer", () => {
     });
   });
 
+  it("carries scope.ephemeral from POST /threads to the thread service (INV-035)", async () => {
+    const { daemon } = fakeDaemon();
+    const repo = reapMk(join(tmpdir(), "claudexor-thread-ephemeral-"));
+    const now = new Date().toISOString();
+    const seen: Array<Record<string, unknown>> = [];
+    const threadObj = (id: string): Record<string, unknown> => ({
+      schema_version: 2,
+      id,
+      created_at: now,
+      updated_at: now,
+      repo: { root: repo, base_ref: "HEAD" },
+      title: null,
+      mode: "agent",
+      workspace: { mode: "in_place", worktree_path: null, base_sha: null },
+      auth_preference: "auto",
+      primary_harness: null,
+      routingGoal: "auto",
+      run_ids: [],
+      head_run_id: null,
+      state: "active",
+    });
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const post = async (scope: Record<string, unknown>, key: string) =>
+          globalThis.fetch(`${base}/v2/threads`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "content-type": "application/json",
+              "X-Claudexor-Protocol-Major": "3",
+              "Idempotency-Key": key,
+            },
+            body: JSON.stringify({ scope }),
+          });
+        expect((await post({ kind: "project", root: repo, ephemeral: true }, "eph-1")).status).toBe(
+          200,
+        );
+        expect((await post({ kind: "project", root: repo }, "eph-2")).status).toBe(200);
+        // The daemon gates auto-registration on this flag. Dropping it at the
+        // route silently registers a root whose own published description
+        // promises it is "never entered into the durable project registry".
+        expect(seen.map((input) => input["ephemeral"])).toEqual([true, false]);
+      },
+      undefined,
+      {
+        createThread: async (input) => {
+          seen.push(input as Record<string, unknown>);
+          return threadObj(`th-${seen.length}`);
+        },
+      },
+    );
+  });
+
   it("projects request-validation errors as typed fieldErrors, not a Zod dump (QA-053)", async () => {
     const { daemon } = fakeDaemon();
     let createCalls = 0;

@@ -30,6 +30,7 @@ import {
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
+import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
 import {
@@ -397,7 +398,15 @@ export function controlServices(
         throw Object.assign(new Error("profile update did not persist"), { status: 500 });
       }
       invalidateDoctorCache();
-      return { profile: updated, status: await profileDoctorStatus(updated) };
+      return {
+        profile: updated,
+        // Same vendor overlay the listing applies: a single-profile response
+        // must not re-declare a revoked credential `passed` (INV-135 honesty).
+        status: vendorVerifiedProfileStatus(
+          await profileDoctorStatus(updated),
+          quotaRegistry().read(),
+        ),
+      };
     },
     // INV-135 deletion: registry first; scoped material cleanup is fenced and disclosed.
     deleteCredentialProfile: async (input: unknown) => {
@@ -488,7 +497,13 @@ export function controlServices(
         displayName: request.displayName,
       });
       invalidateDoctorCache();
-      return { profile, status: await profileDoctorStatus(profile) };
+      return {
+        profile,
+        status: vendorVerifiedProfileStatus(
+          await profileDoctorStatus(profile),
+          quotaRegistry().read(),
+        ),
+      };
     },
     updateSettings: async (patch: unknown) => {
       const p = ControlSettingsUpdateRequest.parse(patch ?? {});
