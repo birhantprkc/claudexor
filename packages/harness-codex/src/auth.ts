@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { labelStreams, providerScrubEnv, runCapture } from "@claudexor/core";
 import { resolveSecret } from "@claudexor/secrets";
-import { ensureDir, redactSecrets, userConfigDir } from "@claudexor/util";
+import { ensureDir, nativeHarnessStateRoot, redactSecrets, userConfigDir } from "@claudexor/util";
 
 const BIN = process.env.CLAUDEXOR_CODEX_BIN || "codex";
 export const CODEX_FILE_AUTH_OVERRIDE = 'cli_auth_credentials_store="file"';
@@ -81,7 +81,7 @@ export function ensureCodexApiAuth(
  */
 export function defaultNativeCodexHome(env?: Record<string, string | null | undefined>): string {
   const override = env?.["CLAUDEXOR_CODEX_NATIVE_HOME"] ?? process.env.CLAUDEXOR_CODEX_NATIVE_HOME;
-  if (!override?.trim()) return join(userConfigDir(), "native", "codex");
+  if (!override?.trim()) return join(nativeHarnessStateRoot(), "codex");
   // Containment guard (symmetry with claude's defaultNativeClaudeConfigDir): an
   // override that escapes the Claudexor config root could point the codex child
   // at (and mutate) an arbitrary directory. Keep it inside the owned root.

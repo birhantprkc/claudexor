@@ -1,12 +1,17 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { DelegatedHomeUnavailableError } from "@claudexor/core";
+import { DelegatedEvidenceIncompleteError, DelegatedHomeUnavailableError } from "@claudexor/core";
 import { WorkspaceEnvelope } from "@claudexor/schema";
 import { WorkspaceManager } from "@claudexor/workspace";
 import { ensureDir } from "@claudexor/util";
-import { scopedHarnessHome } from "./delegatedHome.js";
+import {
+  appliedAttemptFacts,
+  assertDelegatedEvidence,
+  scopedHarnessHome,
+} from "./delegatedHome.js";
 
 /** An envelope whose scoped home really exists on disk, in-place or isolated. */
 function envelopeAt(base: string, repoRoot: string, inPlace: boolean): WorkspaceEnvelope {
@@ -43,7 +48,7 @@ describe("scopedHarnessHome", () => {
     const home = scopedHarnessHome(wsm, envelopeAt(base, repoRoot, true), true, false);
     // The deliberate pre-existing design: no scoped HOME, so a native vendor
     // session stored under the real $HOME stays resumable.
-    expect(home).toEqual({ isolated: false, homeDir: null });
+    expect(home).toEqual({ isolated: false, homeDir: null, confinement: null });
     expect(home.env).toBeUndefined();
   });
 
@@ -75,5 +80,96 @@ describe("scopedHarnessHome", () => {
     );
     // A NON-delegated run is unaffected by the same missing directory.
     expect(scopedHarnessHome(wsm, envelope, true, false).isolated).toBe(false);
+  });
+});
+
+describe("delegated confinement", () => {
+  const base = mkdtempSync(join(tmpdir(), "claudexor-delegated-conf-"));
+  const operatorHome = join(base, "operator");
+  const runtimeRoot = join(operatorHome, ".claudexor");
+  const repoRoot = join(operatorHome, "project");
+  const roots = {
+    operatorHome,
+    runtimeRoot,
+    nativeStateRoot: join(runtimeRoot, "native"),
+  };
+  for (const dir of [join(runtimeRoot, "daemon"), roots.nativeStateRoot, repoRoot]) ensureDir(dir);
+  writeFileSync(join(runtimeRoot, "daemon", "token"), "bearer");
+  const wsm = new WorkspaceManager(repoRoot, { runtimeRoot: join(base, "runtime") });
+  afterAll(() => rmSync(base, { recursive: true, force: true }));
+
+  const darwin = process.platform === "darwin";
+
+  it.runIf(darwin)("gives a delegated MUTATING attempt a proven OS boundary", () => {
+    const envelope = envelopeAt(base, repoRoot, true);
+    const home = scopedHarnessHome(wsm, envelope, true, true, "workspace_write", roots);
+    expect(home.confinement?.mechanism).toBe("seatbelt");
+    // Applied, not promised: the policy was executed against a path it denies.
+    expect(home.confinement?.verified_denied_path).toContain(".claudexor");
+    expect(
+      spawnSync(
+        "/usr/bin/sandbox-exec",
+        ["-p", home.confinement!.profile, "/bin/cat", join(runtimeRoot, "daemon", "token")],
+        { encoding: "utf8" },
+      ).status,
+    ).not.toBe(0);
+  });
+
+  it("leaves a delegated READ-ONLY attempt on the harness's own enforcement", () => {
+    const envelope = envelopeAt(base, repoRoot, true);
+    expect(scopedHarnessHome(wsm, envelope, true, true, "readonly", roots).confinement).toBeNull();
+  });
+
+  it("leaves an ordinary mutating attempt unconfined", () => {
+    const envelope = envelopeAt(base, repoRoot, false);
+    expect(
+      scopedHarnessHome(wsm, envelope, false, false, "workspace_write", roots).confinement,
+    ).toBeNull();
+  });
+});
+
+describe("applied attempt evidence", () => {
+  const complete = {
+    harness_home_isolated: true,
+    harness_home_dir: "/scoped",
+    access_applied: "external_sandbox_full" as const,
+    credential_profile_applied: null,
+    confinement_mechanism: "seatbelt" as const,
+    confinement_profile_digest: "sha256:abc",
+    confinement_verified_denied_path: "/runtime",
+  };
+
+  it("writes an all-null block for an attempt that died before its home was decided", () => {
+    expect(appliedAttemptFacts(undefined, "workspace_write", null)).toEqual({
+      harness_home_isolated: false,
+      harness_home_dir: null,
+      access_applied: "workspace_write",
+      credential_profile_applied: null,
+      confinement_mechanism: null,
+      confinement_profile_digest: null,
+      confinement_verified_denied_path: null,
+    });
+  });
+
+  it("refuses a delegated mutating terminal whose attempt cannot prove its confinement", () => {
+    expect(() =>
+      assertDelegatedEvidence(true, "workspace_write", [{ attemptId: "a01" }]),
+    ).toThrowError(DelegatedEvidenceIncompleteError);
+    expect(() =>
+      assertDelegatedEvidence(true, "workspace_write", [
+        { attemptId: "a01", applied: { ...complete, confinement_mechanism: null } },
+      ]),
+    ).toThrowError(/no proof of the applied confinement/);
+  });
+
+  it("passes a complete delegated terminal, and never gates the runs it does not own", () => {
+    expect(() =>
+      assertDelegatedEvidence(true, "workspace_write", [{ attemptId: "a01", applied: complete }]),
+    ).not.toThrow();
+    // Non-delegated and read-only delegated runs are unaffected.
+    expect(() =>
+      assertDelegatedEvidence(false, "workspace_write", [{ attemptId: "a01" }]),
+    ).not.toThrow();
+    expect(() => assertDelegatedEvidence(true, "readonly", [{ attemptId: "a01" }])).not.toThrow();
   });
 });

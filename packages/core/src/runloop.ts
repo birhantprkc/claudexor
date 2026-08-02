@@ -1,4 +1,5 @@
 import type { HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
+import { confinedInvocation } from "./confinement.js";
 import { spawnProcess, type ChildStdin } from "./proc.js";
 import type { ProcessTreeTerminationOutcome, ReapProcessTreeOptions } from "./process-tree.js";
 
@@ -97,8 +98,13 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   // Box the stdin handle: it is assigned inside the onSpawn callback, which
   // TypeScript's control-flow narrowing cannot see through a plain let.
   const session: { io: ChildStdin | null } = { io: null };
+  // The OS boundary is applied HERE, at the one seam every local-CLI adapter
+  // already funnels through, rather than in each adapter's argv builder: an
+  // adapter that forgot to opt in would run a delegated child unconfined while
+  // the run record still said it asked for confinement.
+  const invocation = confinedInvocation(spec.confinement, opts.bin, opts.args);
   try {
-    for await (const ev of spawnProcess(opts.bin, opts.args, {
+    for await (const ev of spawnProcess(invocation.bin, invocation.args, {
       cwd: spec.cwd,
       env: opts.env,
       inheritEnv: spec.env_inheritance,

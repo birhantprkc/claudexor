@@ -5,6 +5,7 @@ import {
   type BudgetLedger,
   type BudgetSettlement,
 } from "@claudexor/budget";
+import type { AppliedAttemptFacts } from "./delegatedHome.js";
 
 export interface AttemptUsageCost {
   cashUsd: number;
@@ -117,6 +118,11 @@ export function attemptFailureRecord(
   cost: AttemptFailureCost,
   phase: "workspace" | "harness",
   message: string,
+  /** What the attempt ACTUALLY ran under. REQUIRED (no default): the success
+   * record carries these, and a failure record that quietly omitted them would
+   * leave a delegated caller unable to tell a confined attempt that crashed
+   * from an unconfined one that did. */
+  applied: AppliedAttemptFacts,
 ): Record<string, unknown> {
   return {
     attempt_id: attemptId,
@@ -126,6 +132,7 @@ export function attemptFailureRecord(
     errored: true,
     phase,
     errors: [message],
+    ...applied,
   };
 }
 

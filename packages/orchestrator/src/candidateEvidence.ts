@@ -4,6 +4,7 @@ import type { CandidateEvidence } from "@claudexor/arbitration";
 import type { AttemptOutcomeClass } from "./attemptFinalize.js";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
 import type { DeclaredFailure } from "./runTerminalResults.js";
+import type { AppliedAttemptFacts } from "./delegatedHome.js";
 import type { SecretDiffRefusal } from "./secretDiff.js";
 import { toolWarnings } from "./attemptTelemetry.js";
 
@@ -37,6 +38,11 @@ export interface CandidateRun {
    * reduces the error to a message string, and the run terminal would have to
    * read prose to recover what the thrower already knew. */
   declaredFailure?: DeclaredFailure;
+  /** What this attempt's harness process actually ran under (HOME, access,
+   * credential profile, applied OS boundary). Present on the success path AND
+   * on the per-slot failure path: a delegated caller audits the confinement it
+   * asked for instead of trusting that it happened. */
+  applied?: AppliedAttemptFacts;
 }
 
 /**

@@ -20,9 +20,18 @@ import type { BudgetTerminal } from "@claudexor/budget";
 // the codes that are not budget denials at all: a drained delegation child, and a
 // spent subscription WINDOW — the latter is a quota timer, not money, and its
 // remediation is "wait for resetsAt", never "raise --max-usd".
-type BudgetRunFailureCode = Exclude<
+// An ALLOWLIST, not an Exclude: every code added to the shared enum for an
+// unrelated reason (the delegated-confinement refusals were the third) would
+// otherwise join the budget set by default and inherit "raise --max-usd"
+// remediation for a failure no budget fixes.
+type BudgetRunFailureCode = Extract<
   RunFailureCode,
-  "delegation_child_drain_timeout" | "subscription_window_exhausted"
+  | "finite_zero"
+  | "hard_cap"
+  | "estimate_headroom"
+  | "unknown_paid_in_flight"
+  | "budget_overshoot"
+  | "cost_unverifiable"
 >;
 
 /** The typed lease-denial the ledger produces, captured at the denial site with

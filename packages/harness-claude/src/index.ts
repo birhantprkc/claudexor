@@ -431,11 +431,10 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           },
         },
         auth_modes: authModes,
+        // external_sandbox_full: engine-provided sandbox, maps to bypassPermissions.
         access_profiles_supported: [
           ...(readonlyProfile.supported ? ["readonly" as const] : []),
-          "workspace_write",
-          "full",
-          "inherit_native",
+          ...(["workspace_write", "full", "external_sandbox_full", "inherit_native"] as const),
         ],
       });
     },

@@ -281,6 +281,27 @@ export class SensitiveResourcePolicy {
 
     return assessRelocation(input, sourceRoot, sourcePath, excludedRoots);
   }
+
+  /**
+   * The credential-bearing entries this policy classifies, as names RELATIVE to
+   * a home directory.
+   *
+   * `classifyPath` answers "is this path sensitive"; a filesystem confinement
+   * needs the complementary question — "which paths under this home must a
+   * confined process be unable to open" — and cannot get there by classifying,
+   * because it has no candidate list to classify. Exposing the sets from their
+   * owner keeps the confinement deny list DERIVED: a store added here reaches
+   * the sandbox profile with no second edit, and no consumer may re-list them
+   * (`scripts/sensitive-resource-ownership-check.mjs` fails the build if one
+   * tries).
+   */
+  homeRelativeCredentialEntries(): readonly string[] {
+    return Object.freeze([
+      ...CREDENTIAL_STORE_PARTS,
+      ...CREDENTIAL_FILE_BASENAMES,
+      ".config/gcloud",
+    ]);
+  }
 }
 
 export const sensitiveResourcePolicy = Object.freeze(new SensitiveResourcePolicy());

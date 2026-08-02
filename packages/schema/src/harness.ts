@@ -2,6 +2,7 @@ import { z } from "zod/v3";
 import { AuthSourceKind, AuthSourceReadiness, CredentialRoute } from "./auth.js";
 import { CredentialProfile } from "./credential-profile.js";
 import { ToolRef } from "./tool-ref.js";
+import { HarnessConfinement, IsolationCapabilities } from "./harness-confinement.js";
 import {
   AccessProfile,
   AuthPreference,
@@ -321,30 +322,6 @@ export const AuthCapabilities = z
   .default({})
   .describe("Declared auth routing facts for a harness.");
 export type AuthCapabilities = z.infer<typeof AuthCapabilities>;
-
-export const ContainmentKind = z
-  .enum([
-    "env_or_file_injection",
-    "scoped_home_keychain_bridge",
-    "host_user_context",
-    "process_sandbox",
-    "container",
-  ])
-  .describe(
-    "Isolation containment level an adapter supports for run environments, from env/file injection through scoped-HOME keychain bridging to process sandboxes and containers.",
-  );
-export type ContainmentKind = z.infer<typeof ContainmentKind>;
-
-export const IsolationCapabilities = z
-  .object({
-    supported_containment: z
-      .array(ContainmentKind)
-      .default(["env_or_file_injection"])
-      .describe("Containment mechanisms the adapter can run under."),
-  })
-  .default({})
-  .describe("Declared isolation containment facts for a harness.");
-export type IsolationCapabilities = z.infer<typeof IsolationCapabilities>;
 
 export const ReadonlyMechanism = z
   .enum(["fs_sandbox", "permission_deny", "tool_allowlist", "none"])
@@ -719,6 +696,13 @@ export const HarnessRunSpec = z
     raw_context_packet: RawContextPacket.nullable()
       .optional()
       .describe("Hash-bound context packet supplied only to git-patch-envelope producers."),
+    /** The APPLIED OS boundary this process starts inside; null = none (every
+     * ordinary run). Consumed by the shared CLI run loop, never by adapters. */
+    confinement: HarnessConfinement.nullable()
+      .default(null)
+      .describe(
+        "OS-enforced filesystem boundary the harness process starts inside; null = none. Applied by the shared CLI run loop, not by adapters.",
+      ),
     extra: z
       .record(z.string(), z.unknown())
       .default({})

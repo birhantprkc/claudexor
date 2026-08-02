@@ -45,7 +45,8 @@ import {
 } from "@claudexor/core";
 import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
 import { parseCodexEvent, parseCodexStderrFailure, type CodexParseState } from "./parse.js";
-import { probeCodexCredentialProfile, resolveCodexProfileRoute } from "./profile.js";
+// prettier-ignore
+import { CODEX_ACCESS_PROFILES, probeCodexCredentialProfile, resolveCodexProfileRoute } from "./profile.js";
 import { smokeIsolatedApiKey } from "./smoke.js";
 export { canonicalCodexProfileHome, codexAccountIdentity } from "./profile.js";
 import { estimateCodexCostUsd } from "./pricing.js";
@@ -77,18 +78,25 @@ import {
   type CodexLoginProbe,
 } from "./auth.js";
 
-function sandboxArgs(access: AccessProfile): string[] {
+/** Sandbox mode per access profile; null = native. `external_sandbox_full`
+ * means CLAUDEXOR owns the sandbox, so codex's own is off, like `full`. */
+function sandboxMode(access: AccessProfile): string | null {
   switch (access) {
     case "readonly":
-      return ["--sandbox", "read-only"];
+      return "read-only";
     case "workspace_write":
-      return ["--sandbox", "workspace-write"];
+      return "workspace-write";
     case "full":
     case "external_sandbox_full":
-      return ["--sandbox", "danger-full-access"];
+      return "danger-full-access";
     case "inherit_native":
-      return [];
+      return null;
   }
+}
+
+function sandboxArgs(access: AccessProfile): string[] {
+  const mode = sandboxMode(access);
+  return mode ? ["--sandbox", mode] : [];
 }
 
 export function redactCodexDoctorDetail(text: string): string {
@@ -313,17 +321,8 @@ export function codexExecArgs(
 
 /** Sandbox as `-c sandbox_mode=...` config (the only spelling `exec resume` accepts). */
 function sandboxConfigArgs(access: AccessProfile): string[] {
-  switch (access) {
-    case "readonly":
-      return ["-c", 'sandbox_mode="read-only"'];
-    case "workspace_write":
-      return ["-c", 'sandbox_mode="workspace-write"'];
-    case "full":
-    case "external_sandbox_full":
-      return ["-c", 'sandbox_mode="danger-full-access"'];
-    case "inherit_native":
-      return [];
-  }
+  const mode = sandboxMode(access);
+  return mode ? ["-c", `sandbox_mode="${mode}"`] : [];
 }
 
 function codexWebArgs(policy: HarnessRunSpec["external_context_policy"]): string[] {
@@ -470,7 +469,7 @@ export function createCodexAdapter(deps: Partial<CodexRuntimeDeps> = {}): Harnes
           ],
         },
         auth_modes: authModes,
-        access_profiles_supported: ["readonly", "workspace_write", "full", "inherit_native"],
+        access_profiles_supported: CODEX_ACCESS_PROFILES,
       });
     },
 

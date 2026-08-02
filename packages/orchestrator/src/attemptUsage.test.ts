@@ -9,6 +9,7 @@ import {
   withAttemptFailureCost,
 } from "./attemptUsageCost.js";
 import { createAttemptTelemetry, observeAttemptTelemetry } from "./attemptTelemetry.js";
+import { appliedAttemptFacts } from "./delegatedHome.js";
 
 const usageEvent = (estimated: boolean) =>
   ({
@@ -85,6 +86,11 @@ describe("processAttemptUsage", () => {
         attemptFailureCost({ costUsd: 0.4 }, "post-stream-error"),
         "harness",
         "redacted failure",
+        appliedAttemptFacts(
+          { isolated: true, homeDir: "/scoped", confinement: null },
+          "workspace_write",
+          "prof-1",
+        ),
       ),
     ).toEqual({
       attempt_id: "a01",
@@ -94,6 +100,15 @@ describe("processAttemptUsage", () => {
       errored: true,
       phase: "harness",
       errors: ["redacted failure"],
+      // A failed attempt still states what it ran under; the success record
+      // carries the SAME block.
+      harness_home_isolated: true,
+      harness_home_dir: "/scoped",
+      access_applied: "workspace_write",
+      credential_profile_applied: "prof-1",
+      confinement_mechanism: null,
+      confinement_profile_digest: null,
+      confinement_verified_denied_path: null,
     });
   });
 

@@ -24,7 +24,12 @@ import {
   writeCandidateAttemptArtifacts,
 } from "./candidateOutputs.js";
 import { processAttemptUsage } from "./attemptUsage.js";
-import { scopedHarnessHome } from "./delegatedHome.js";
+import {
+  appliedAttemptFacts,
+  assertDelegatedEvidence,
+  scopedHarnessHome,
+  type ScopedHarnessHome,
+} from "./delegatedHome.js";
 import * as AC from "./attemptUsageCost.js";
 import {
   type CandidateRun,
@@ -1430,6 +1435,7 @@ export class Orchestrator {
         readOnlyIntent
           ? "readonly"
           : (input.access ?? this.config(input.repoRoot).trust.access_default),
+        input.delegated === true,
       );
       const accessSupported =
         !requiredAccess || manifest.access_profiles_supported.includes(requiredAccess);
@@ -2307,6 +2313,29 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * The ONE place an attempt's HOME and OS boundary are decided.
+   *
+   * Called by every caller of `runCandidateInEnvelope` INSIDE that caller's
+   * try, so a delegated refusal is caught by the same catch that writes the
+   * attempt record, and so the decided home is in scope there.
+   */
+  private harnessHomeFor(
+    wsm: WorkspaceManager,
+    envelope: WorkspaceEnvelope,
+    routed: RoutedAdapter,
+    runInput: RunInput | undefined,
+  ): ScopedHarnessHome {
+    // Refuses (never silently degrades) when a delegated run cannot be confined.
+    return scopedHarnessHome(
+      wsm,
+      envelope,
+      envelope.worktree_path === envelope.repo_root,
+      runInput?.delegated === true,
+      routed.adapterAccess,
+    );
+  }
+
   private async runCandidateInEnvelope(
     routed: RoutedAdapter,
     envelope: WorkspaceEnvelope,
@@ -2318,35 +2347,34 @@ export class Orchestrator {
     paths: ReturnType<ArtifactStore["runPaths"]>,
     wsm: WorkspaceManager,
     ledger: BudgetLedger,
-    access: AccessProfile = "workspace_write",
-    onHarnessEvent?: (event: HarnessEvent) => void,
-    signal?: AbortSignal,
-    modelHint?: string,
-    effortHint?: EffortHint,
-    intent: Intent = "implement",
-    log?: EventLog,
-    effectiveWebMode?: ExternalContextPolicy,
-    interaction?: InteractionChannel,
-    budgetGuard?: (streamedUsd: number) => boolean,
-    runInput?: RunInput,
-    streamDeltas = false,
-    fileBackedContext?: string,
+    access: AccessProfile,
+    onHarnessEvent: ((event: HarnessEvent) => void) | undefined,
+    signal: AbortSignal | undefined,
+    modelHint: string | undefined,
+    effortHint: EffortHint | undefined,
+    intent: Intent,
+    log: EventLog | undefined,
+    effectiveWebMode: ExternalContextPolicy | undefined,
+    interaction: InteractionChannel | undefined,
+    budgetGuard: ((streamedUsd: number) => boolean) | undefined,
+    runInput: RunInput | undefined,
+    streamDeltas: boolean,
+    fileBackedContext: string | undefined,
     /** D-16d: when set, the mechanical continuation checkpoint pointer for a
      * one-shot fresh-session continuation — appended to the prompt so the model
      * (and the offline fake) re-grounds in the exhausted attempt's partial work. */
-    continuationPointer?: string,
+    continuationPointer: string | undefined,
+    /** Decided by `harnessHomeFor` in the CALLER, so the per-attempt applied
+     * facts exist in the caller's catch too: an attempt that ran and then threw
+     * must record what it ran under, not just why it stopped. REQUIRED (no
+     * default): a silent fallback here would spawn a delegated child on the
+     * operator's real home while the record still claimed confinement. */
+    harnessHome: ScopedHarnessHome,
   ): Promise<CandidateRun> {
     const adapter = routed.adapter;
     const knobs = this.routeSpecKnobs(routed, contract, modelHint, effortHint);
     // Isolated scoped-home sessions are never retained after disposal.
     const inPlaceEnvelope = envelope.worktree_path === envelope.repo_root;
-    // Refuses (never silently degrades) when a delegated run cannot be confined.
-    const harnessHome = scopedHarnessHome(
-      wsm,
-      envelope,
-      inPlaceEnvelope,
-      runInput?.delegated === true,
-    );
     const rawContextPacket = await rawContextForEnvelope(routed.implementationTransport, envelope);
     const sessionFields = runInput
       ? await this.sessionSpecFields(
@@ -2420,6 +2448,9 @@ export class Orchestrator {
       // vendor session is reachable. See scopedHarnessHome for the cost a
       // delegated in-place attempt pays for that confinement.
       ...(harnessHome.env ? { env: harnessHome.env } : {}),
+      // The OS boundary itself. The shared CLI run loop wraps the argv with it;
+      // no adapter opts in, so no adapter can forget.
+      confinement: harnessHome.confinement,
       raw_context_packet: rawContextPacket,
       stream_deltas: streamDeltas,
     });
@@ -2430,6 +2461,13 @@ export class Orchestrator {
     const workReportMode: WorkReportEnvelopeMode = this.applyWorkEnvelope(spec, workEnvelope);
     const inactivityMs = harnessInactivityTimeoutMs(this.config(contract.repo.root));
 
+    // Named once: the attempt record, the CandidateRun and the terminal gate all
+    // read the SAME applied facts rather than three re-derivations.
+    const applied = appliedAttemptFacts(
+      harnessHome,
+      spec.access,
+      sessionFields?.credential_profile?.profile_id ?? runInput?.credentialProfileId ?? null,
+    );
     const attemptStartedMs = Date.now();
     const budgetSignalState = { quotaPressureDisclosed: false };
     const triedProfiles = new Set<string>(); // W5.4 failover: each profile at most once
@@ -2830,10 +2868,10 @@ export class Orchestrator {
             ...(secretDiffRefusal ? { secret_diff_refusal: secretDiffRefusal } : {}),
             gates: gates.map((g) => ({ id: g.id, status: g.status })),
             branch: envelope.branch_name,
-            // Applied-isolation fact, not a promise: the caller of a delegated
-            // run verifies the confinement it asked for instead of trusting it.
-            harness_home_isolated: harnessHome.isolated,
-            harness_home_dir: harnessHome.homeDir,
+            // Applied facts, not promises: the caller of a delegated run
+            // verifies the confinement it asked for instead of trusting it.
+            // Built by the SAME shape the failure path writes.
+            ...applied,
           },
         }),
       {
@@ -2866,6 +2904,7 @@ export class Orchestrator {
       telemetry,
       ...(secretDiffRefusal ? { secretDiffRefusal } : {}),
       outcomeClass: finalized.outcomeClass,
+      applied,
     };
   }
 
@@ -3219,6 +3258,9 @@ export class Orchestrator {
         slot.attemptId,
       );
       let envelope: WorkspaceEnvelope | undefined;
+      // Declared OUTSIDE the try so the catch below can state what the attempt
+      // actually ran under, not merely that it stopped.
+      let harnessHome: ScopedHarnessHome | undefined;
       try {
         log.emit("harness.started", {
           harness_id: adapter.id,
@@ -3239,6 +3281,7 @@ export class Orchestrator {
             requestedSingleCandidate &&
             slot.routed.implementationTransport !== "git_patch_envelope",
         });
+        harnessHome = this.harnessHomeFor(wsm, envelope, slot.routed, input);
         const run = await this.runCandidateInEnvelope(
           slot.routed,
           envelope,
@@ -3279,6 +3322,9 @@ export class Orchestrator {
           },
           input,
           requestedSingleCandidate, // W-C4 deltas: single-candidate chat lane only (racing = noise x N)
+          undefined,
+          undefined,
+          harnessHome,
         );
         ledger.settle(
           slot.leaseId,
@@ -3407,6 +3453,7 @@ export class Orchestrator {
                   requestedSingleCandidate,
                   undefined,
                   packet.pointerLine ?? undefined,
+                  harnessHome,
                 );
                 ledger.settle(
                   contLeaseId,
@@ -3474,7 +3521,18 @@ export class Orchestrator {
         });
         store.writeYaml(
           join(paths.attemptsDir, slot.attemptId, "attempt.yaml"),
-          AC.attemptFailureRecord(slot.attemptId, adapter.id, failureCost, infraPhase, message),
+          AC.attemptFailureRecord(
+            slot.attemptId,
+            adapter.id,
+            failureCost,
+            infraPhase,
+            message,
+            appliedAttemptFacts(
+              harnessHome,
+              slot.routed.adapterAccess,
+              this.effectiveProfileId(input, adapter.id),
+            ),
+          ),
         );
         runsBySlot[slotIdx] = {
           attemptId: slot.attemptId,
@@ -3502,6 +3560,11 @@ export class Orchestrator {
           // alive past this catch; `message` alone would force the terminal to
           // read prose back out.
           ...(declared.code ? { declaredFailure: declared } : {}),
+          applied: appliedAttemptFacts(
+            harnessHome,
+            slot.routed.adapterAccess,
+            this.effectiveProfileId(input, adapter.id),
+          ),
         };
       } finally {
         if (envelope) await wsm.dispose(envelope); // no worktree leak even on create/run error
@@ -3509,6 +3572,9 @@ export class Orchestrator {
     };
     await runBounded(slots, Math.min(slots.length, MAX_PARALLEL_CANDIDATES), runSlot);
     const runs: CandidateRun[] = runsBySlot.filter((r): r is CandidateRun => r !== undefined);
+    // Fail-closed terminal: a delegated mutating run whose attempts cannot state
+    // their applied confinement refuses instead of passing.
+    assertDelegatedEvidence(input.delegated === true, candidateAccess, runs);
     const cancelledCandidates = () =>
       runs.map((r) => ({
         attemptId: r.attemptId,
@@ -3866,6 +3932,7 @@ export class Orchestrator {
             dirtyPolicy: "snapshot",
             accessProfile: candidateAccess,
           });
+          const synthHome = this.harnessHomeFor(wsm, envelope, synthRouted, input);
           const run = await this.runCandidateInEnvelope(
             synthRouted,
             envelope,
@@ -3902,6 +3969,8 @@ export class Orchestrator {
             input,
             false,
             synthesisInput.content,
+            undefined,
+            synthHome,
           );
           ledger.settle(
             lease.lease?.lease_id ?? "",
@@ -5002,7 +5071,9 @@ export class Orchestrator {
         const knobs = this.routeSpecKnobs(routed, contract, undefined, input.effort);
         const effectiveWeb = this.discloseWebUpgrade(log, routed, knobs.webPolicy, attemptId);
         let run: CandidateRun;
+        let harnessHome: ScopedHarnessHome | undefined;
         try {
+          harnessHome = this.harnessHomeFor(wsm, envelope, routed, input);
           log.emit("harness.started", {
             harness_id: adapter.id,
             attempt_id: attemptId,
@@ -5047,6 +5118,9 @@ export class Orchestrator {
             },
             input,
             true, // convergence runs one candidate: live deltas on (W-C4)
+            undefined,
+            undefined,
+            harnessHome,
           );
           ledger.settle(
             lease.lease?.lease_id ?? "",
@@ -5081,9 +5155,25 @@ export class Orchestrator {
           });
           store.writeYaml(
             join(paths.attemptsDir, attemptId, "attempt.yaml"),
-            AC.attemptFailureRecord(attemptId, adapter.id, failureCost, "harness", message),
+            AC.attemptFailureRecord(
+              attemptId,
+              adapter.id,
+              failureCost,
+              "harness",
+              message,
+              appliedAttemptFacts(
+                harnessHome,
+                routed.adapterAccess,
+                this.effectiveProfileId(input, adapter.id),
+              ),
+            ),
           );
           run = {
+            applied: appliedAttemptFacts(
+              harnessHome,
+              routed.adapterAccess,
+              this.effectiveProfileId(input, adapter.id),
+            ),
             attemptId,
             harnessId: adapter.id,
             label: `Attempt ${attempt}`,
@@ -5103,6 +5193,9 @@ export class Orchestrator {
           };
         }
         lastRun = run;
+        // Fail-closed twin of the candidate lane's gate: this loop terminalizes
+        // per attempt, so the proof is spent per attempt.
+        assertDelegatedEvidence(input.delegated === true, convergenceAccess, [run]);
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry: run.telemetry });
         // Cancellation/deadline keeps priority over a belt failure finalized concurrently.
         if (input.signal?.aborted) break;

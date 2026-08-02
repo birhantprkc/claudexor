@@ -1,3 +1,16 @@
+/**
+ * `external_sandbox_full` = the ENGINE provides the sandbox and codex stands its
+ * own down. Required, not optional: codex shells out to `/usr/bin/sandbox-exec`
+ * and macOS refuses a nested profile, so the two cannot both be applied.
+ */
+export const CODEX_ACCESS_PROFILES = [
+  "readonly",
+  "workspace_write",
+  "full",
+  "external_sandbox_full",
+  "inherit_native",
+] as const;
+
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";

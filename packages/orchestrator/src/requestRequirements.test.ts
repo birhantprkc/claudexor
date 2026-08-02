@@ -207,3 +207,32 @@ describe("RequestRequirementsResolver Delegate preflight", () => {
     });
   });
 });
+
+describe("adapterAccess under external confinement", () => {
+  const resolver = new RequestRequirementsResolver();
+
+  it("hands the adapter external_sandbox_full so it stands its own sandbox down", () => {
+    // macOS refuses a nested seatbelt, so the engine's boundary and the
+    // harness's own are mutually exclusive. Stated as an ACCESS PROFILE, which
+    // every adapter already maps — never as a per-harness branch.
+    expect(resolver.adapterAccess("implement", "workspace_diff", "workspace_write", true)).toBe(
+      "external_sandbox_full",
+    );
+    expect(resolver.adapterAccess("implement", "workspace_diff", "full", true)).toBe(
+      "external_sandbox_full",
+    );
+  });
+
+  it("leaves an unconfined run and a read-only lane exactly as they were", () => {
+    expect(resolver.adapterAccess("implement", "workspace_diff", "workspace_write", false)).toBe(
+      "workspace_write",
+    );
+    expect(resolver.adapterAccess("implement", "workspace_diff", "readonly", true)).toBe(
+      "readonly",
+    );
+    // A patch-envelope producer is pinned to readonly and keeps its own enforcement.
+    expect(resolver.adapterAccess("implement", "git_patch_envelope", "workspace_write", true)).toBe(
+      "readonly",
+    );
+  });
+});

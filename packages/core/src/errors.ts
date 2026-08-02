@@ -32,4 +32,28 @@ export class DelegationBeltUnavailableError extends ClaudexorError {
  */
 export class DelegatedHomeUnavailableError extends ClaudexorError {
   readonly code = "delegated_home_unavailable";
+  readonly category = "internal" as const;
+}
+
+/**
+ * A run marked `execution.delegated` could not be given an OS-ENFORCED
+ * filesystem boundary — the host does not offer one, or the profile did not
+ * take effect when probed. The scoped HOME beside it is a convention that an
+ * absolute path defeats, so there is nothing to degrade onto: the attempt
+ * refuses. See docs/DELEGATED_CONFINEMENT.md.
+ */
+export class ConfinementUnavailableError extends ClaudexorError {
+  readonly code = "delegated_confinement_unavailable";
+  readonly category = "config_error" as const;
+}
+
+/**
+ * A terminal MUTATING delegated run whose attempts do not all carry the applied
+ * HOME/access/profile/confinement facts. Asking for confinement is not evidence
+ * that it happened, so an unauditable mutating terminal is an infrastructure
+ * refusal rather than a pass.
+ */
+export class DelegatedEvidenceIncompleteError extends ClaudexorError {
+  readonly code = "delegated_evidence_incomplete";
+  readonly category = "internal" as const;
 }

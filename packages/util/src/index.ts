@@ -253,6 +253,19 @@ export function claudexorOwnedRoot(): string {
 }
 
 /**
+ * Root of the Claudexor-owned NATIVE vendor state (`<config>/native/<vendor>/…`).
+ *
+ * Each adapter owns the layout below its own vendor directory, but the root is
+ * shared: it is where a subscription lane's credential actually lives, which
+ * makes it the one part of the runtime tree a confined harness process must
+ * still be able to open. Spelled once so the confinement carve-out and the
+ * adapters cannot drift apart.
+ */
+export function nativeHarnessStateRoot(): string {
+  return join(userConfigDir(), "native");
+}
+
+/**
  * Stable external runtime namespace for a project.
  *
  * A repository's `.claudexor/` directory is user-owned, versionable project

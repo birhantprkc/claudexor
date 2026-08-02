@@ -19,9 +19,16 @@ export const RunFailureCode = z
     "cost_unverifiable",
     "delegation_child_drain_timeout",
     "subscription_window_exhausted",
+    /* A delegated run's confinement preconditions. Each is thrown as a typed
+     * error deep in the attempt loop, so it must be listed here or
+     * `declaredFailure` drops it to `code: null` and the terminal states less
+     * than the thrower knew. See docs/DELEGATED_CONFINEMENT.md. */
+    "delegated_home_unavailable",
+    "delegated_confinement_unavailable",
+    "delegated_evidence_incomplete",
   ])
   .describe(
-    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, and a spent subscription quota window whose reopen time is RunFailure.resetsAt).",
+    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence).",
   );
 export type RunFailureCode = z.infer<typeof RunFailureCode>;
 

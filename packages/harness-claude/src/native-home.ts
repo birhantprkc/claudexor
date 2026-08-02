@@ -2,7 +2,13 @@ import { existsSync, lstatSync, readFileSync, realpathSync, symlinkSync } from "
 import { join, resolve, sep } from "node:path";
 import { normalizeThroughExistingAncestor } from "@claudexor/core";
 import type { AccountIdentity } from "@claudexor/schema";
-import { claudexorOwnedRoot, ensureDir, userConfigDir, userHomeDir } from "@claudexor/util";
+import {
+  claudexorOwnedRoot,
+  ensureDir,
+  nativeHarnessStateRoot,
+  userConfigDir,
+  userHomeDir,
+} from "@claudexor/util";
 
 export const CLAUDE_KEYCHAIN_BRIDGE_ENV = "CLAUDEXOR_CLAUDE_KEYCHAIN_BRIDGE";
 export const CLAUDE_NATIVE_DIR_ENV = "CLAUDEXOR_CLAUDE_NATIVE_DIR";
@@ -26,7 +32,7 @@ export function defaultNativeClaudeConfigDir(
   env?: Record<string, string | null | undefined>,
 ): string {
   const override = env?.[CLAUDE_NATIVE_DIR_ENV] ?? process.env.CLAUDEXOR_CLAUDE_NATIVE_DIR;
-  if (!override?.trim()) return join(userConfigDir(), "native", "claude", "default");
+  if (!override?.trim()) return join(nativeHarnessStateRoot(), "claude", "default");
   const ownedRoot = resolve(userConfigDir());
   const target = resolve(override.trim());
   if (target !== ownedRoot && !target.startsWith(ownedRoot + sep)) {

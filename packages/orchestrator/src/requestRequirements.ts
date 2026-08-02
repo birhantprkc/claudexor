@@ -70,16 +70,29 @@ export class RequestRequirementsError extends HarnessUnavailableError {
 
 /** One preflight owner for requested-vs-effective lane capability truth. */
 export class RequestRequirementsResolver {
-  /** Patch producers only read; the engine owns materialization and delivery. */
+  /**
+   * Patch producers only read; the engine owns materialization and delivery.
+   *
+   * `externallyConfined` is the delegated-run case: Claudexor puts the harness
+   * process inside its OWN OS sandbox, and macOS refuses a nested one, so the
+   * harness must stand its native sandbox down. `external_sandbox_full` is
+   * exactly that instruction and every adapter already maps it — the engine
+   * states an access profile, it does not branch on a harness name. It applies
+   * only where there was something to confine: a lane the transport already
+   * pinned to `readonly` keeps its own read-only enforcement.
+   */
   adapterAccess(
     intent: Intent,
     implementationTransport: ImplementationTransport,
     requestedAccess: AccessProfile,
+    externallyConfined = false,
   ): AccessProfile {
-    return implementationTransport === "git_patch_envelope" &&
+    const access =
+      implementationTransport === "git_patch_envelope" &&
       (intent === "implement" || intent === "synthesize")
-      ? "readonly"
-      : requestedAccess;
+        ? "readonly"
+        : requestedAccess;
+    return externallyConfined && access !== "readonly" ? "external_sandbox_full" : access;
   }
 
   assertConvergenceWorkspace(

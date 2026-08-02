@@ -3,6 +3,24 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.2** (2026-08-03): a delegated MUTATING run is now confined by an
+  OS-enforced filesystem boundary, not by a convention. The scoped harness
+  `HOME` 3.3.0 introduced redirects `~`-relative lookups and nothing else — a
+  live `workspace_write` agent run read `~/.claudexor/v3/daemon/token`, a bearer
+  for the whole control API, straight off its absolute path. Such an attempt now
+  starts inside a macOS Seatbelt profile that denies the Claudexor runtime tree
+  and the operator's credential stores (derived from the sensitive-resource
+  owner, never re-listed), applied at the ONE shared CLI spawn seam so no adapter
+  can forget it, and PROVEN against a path it denies before the harness runs.
+  Because macOS refuses a nested sandbox, the engine states the existing
+  `external_sandbox_full` access profile so the harness stands its own down — an
+  access profile, never a harness-name branch. Every attempt records what it
+  actually ran under (HOME, access, credential profile, boundary digest and
+  verified denied path) on the success AND failure paths, a delegated mutating
+  terminal without that proof refuses, and the three confinement refusals are
+  typed `RunFailureCode`s instead of being flattened to `code: null`. What the
+  boundary does not cover is written down in `docs/DELEGATED_CONFINEMENT.md`.
+
 - **v3.3.1** (2026-08-03): three surfaces that the 3.3.0 batch changed on one
   branch and left untouched on its twin. Thread worktree recovery deregisters
   only the one lost registration instead of running the repo-wide
