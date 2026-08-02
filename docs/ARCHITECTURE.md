@@ -1724,7 +1724,10 @@ native reviewers to valuation and API-key reviewers to cash independently;
 their aggregate is never blindly charged as cash. Candidate and reviewer
 retries classify EACH usage event by that event/current typed credential
 route; a native→API-key retry cannot hide later metered spend under the first
-native route, and an undisclosed route remains cost-unverifiable. `finite(0)` admits
+native route, and an undisclosed route remains cost-unverifiable. A typed auth
+fallback disclosed before the vendor process starts selects the carried route
+but does not create a billable interval; only a real `started` interval can end
+without a receipt and make cash cost permanently unknown. `finite(0)` admits
 only proven-zero or subscription-entitlement work; a positive finite cap permits
 at most one unknown-cost paid unit in flight. A later exact charge above the cap
 is retained and ends `budget_overshoot`; permanently unknown cost ends

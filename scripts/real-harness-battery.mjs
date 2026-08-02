@@ -9,7 +9,8 @@
  *
  * Safety:
  * - never targets the Claudexor repo as a mutation target;
- * - uses a temp CLAUDEXOR_CONFIG_DIR for daemon/settings state;
+ * - defaults to a temp CLAUDEXOR_CONFIG_DIR for daemon/settings state;
+ * - may use the exact default config only through an explicit, guarded VM lane;
  * - keeps HOME native so real harness sessions/Keychain remain available;
  * - never prints secret values.
  */
@@ -22,8 +23,29 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { ArtifactStore } from "../packages/artifact-store/dist/index.js";
+import {
+  awaitDaemonTermination,
+  DaemonClient,
+  daemonLeaseOwner,
+  defaultSocketPath,
+  processIsAlive,
+  readToken,
+  socketAlive,
+} from "../packages/daemon/dist/index.js";
 import { ControlRunDetail, RunDeliveryState } from "../packages/schema/dist/index.js";
-import { redactSecrets } from "../packages/util/dist/index.js";
+import { CLAUDEXOR_VERSION, redactSecrets } from "../packages/util/dist/index.js";
+import { admitAndAwaitRuntimeReplacementStop } from "../packages/cli/dist/runtime-replacement-stop.js";
+import {
+  assertNoPreexistingDaemon,
+  assertRegularFileUnchanged,
+  describeFileSnapshot,
+  durableAttemptRouteEvidence,
+  evaluateRequiredNativeRoutes,
+  resolveRealHarnessBatteryLayout,
+  runtimeReplacementIdentityFromHandshake,
+  sameDaemonLease,
+  snapshotRegularFile,
+} from "./lib/real-harness-battery-state.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "cli", "dist", "cli.js");
@@ -31,8 +53,15 @@ const nodeBin = process.execPath;
 const home = homedir();
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const defaultRoot = join(home, ".claudexor", "dogfood", `battery-${runId}`);
-const batteryRoot = resolve(process.env.CLAUDEXOR_BATTERY_DIR ?? defaultRoot);
-const configDir = join(batteryRoot, "config");
+const layout = resolveRealHarnessBatteryLayout({
+  home,
+  sourceRoot: root,
+  defaultBatteryRoot: defaultRoot,
+  batteryDir: process.env.CLAUDEXOR_BATTERY_DIR,
+  requestedConfigDir: process.env.CLAUDEXOR_BATTERY_CONFIG_DIR,
+  ambientConfigDir: process.env.CLAUDEXOR_CONFIG_DIR,
+});
+const { batteryRoot, configDir } = layout;
 const resultsDir = join(batteryRoot, "results");
 const reposDir = join(batteryRoot, "repos");
 const logsDir = join(batteryRoot, "logs");
@@ -43,6 +72,8 @@ const requestedHarnesses = (process.env.CLAUDEXOR_BATTERY_HARNESSES ?? "codex,cl
   .map((s) => s.trim())
   .filter(Boolean);
 const marker = process.env.CLAUDEXOR_BATTERY_IMAGE_MARKER ?? "CLAUDEXOR-7521";
+const buildVerified = process.env.CLAUDEXOR_BATTERY_BUILD_VERIFIED === "1";
+delete process.env.CLAUDEXOR_BATTERY_BUILD_VERIFIED;
 // Optional phase filter (e.g. "10,11,12"): an operator iterating on one
 // surface should not re-burn the whole battery. Default: every phase.
 const phaseFilter = (process.env.CLAUDEXOR_BATTERY_PHASES ?? "")
@@ -52,10 +83,14 @@ const phaseFilter = (process.env.CLAUDEXOR_BATTERY_PHASES ?? "")
   .map((s) => `phase${s.replace(/^phase/, "")}`);
 const phaseEnabled = (id) => phaseFilter.length === 0 || phaseFilter.includes(id);
 
-mkdirSync(configDir, { recursive: true });
-mkdirSync(resultsDir, { recursive: true });
-mkdirSync(reposDir, { recursive: true });
-mkdirSync(logsDir, { recursive: true });
+if (layout.mode === "scratch") mkdirSync(configDir, { recursive: true, mode: 0o700 });
+mkdirSync(resultsDir, { recursive: true, mode: 0o700 });
+mkdirSync(reposDir, { recursive: true, mode: 0o700 });
+mkdirSync(logsDir, { recursive: true, mode: 0o700 });
+
+const protectedConfigPath = join(configDir, "config.yaml");
+const protectedConfigBefore =
+  layout.mode === "existing_default" ? snapshotRegularFile(protectedConfigPath) : null;
 
 const env = {
   ...process.env,
@@ -66,9 +101,11 @@ const env = {
   ]
     .filter(Boolean)
     .join(":"),
-  CLAUDEXOR_CONFIG_DIR: configDir,
+  CLAUDEXOR_DAEMON_ENTRY: join(root, "packages", "cli", "dist", "claudexord.js"),
   CLAUDEXOR_DOCTOR_TTL_MS: "0",
 };
+if (layout.exportConfigDir) env.CLAUDEXOR_CONFIG_DIR = configDir;
+else delete env.CLAUDEXOR_CONFIG_DIR;
 if (existsSync(join(home, ".local", "bin", "cursor-agent"))) {
   env.CLAUDEXOR_CURSOR_BIN = join(home, ".local", "bin", "cursor-agent");
 }
@@ -80,18 +117,33 @@ if (existsSync(join(home, ".claudexor", "node", "bin", "claude"))) {
 }
 // The in-process Control API phase must resolve the same isolated daemon and
 // harness binaries as child CLI invocations.
+if (!layout.exportConfigDir) delete process.env.CLAUDEXOR_CONFIG_DIR;
 Object.assign(process.env, env);
 
 const results = [];
 const evidence = {
   batteryRoot,
   configDir,
+  configMode: layout.mode,
+  configBefore: protectedConfigBefore ? describeFileSnapshot(protectedConfigBefore) : null,
+  configAfter: null,
+  configUnchanged: layout.mode === "scratch" ? null : false,
+  forcedBuildVerified: buildVerified,
   cli,
   node: nodeBin,
   version: null,
+  candidate: { sha: null, tree: null },
+  daemon: { start: null, handshake: null, entrySha256: null, stop: null },
   requestedHarnesses,
   okHarnesses: [],
   harnessReports: {},
+};
+const runtimeState = {
+  daemonOwned: false,
+  daemonClient: null,
+  daemonIdentity: null,
+  daemonLease: null,
+  baselineJobIds: new Set(),
 };
 
 function rel(path) {
@@ -223,9 +275,238 @@ function runCliText(args, opts = {}) {
   return runCli(args, { ...opts, json: false });
 }
 
+async function startBatteryDaemon() {
+  const socketPath = defaultSocketPath();
+  const expectedEntry = join(root, "packages", "cli", "dist", "claudexord.js");
+  evidence.daemon.entrySha256 = createHash("sha256")
+    .update(readFileSync(expectedEntry))
+    .digest("hex");
+  const preflight = runCliJson(["daemon", "status"], {
+    name: "daemon-preflight",
+    envRetry: false,
+  });
+  const preflightLease = daemonLeaseOwner(socketPath);
+  const preflightSocketAlive = await socketAlive(socketPath);
+  assertNoPreexistingDaemon({
+    statusCode: preflight.code,
+    socketIsAlive: preflightSocketAlive,
+    leaseIsAlive: Boolean(preflightLease && processIsAlive(preflightLease.pid)),
+  });
+
+  const started = runCliJson(["daemon", "start"], {
+    name: "daemon-start",
+    envRetry: false,
+  });
+  const startedPid = started.json?.pid;
+  const lease = daemonLeaseOwner(socketPath);
+  if (Number.isSafeInteger(startedPid) && startedPid > 0 && lease?.pid === startedPid) {
+    const token = readToken();
+    if (token) {
+      // Capture cleanup authority as soon as the detached child proves writer
+      // ownership. A later readiness/handshake failure must not leak it.
+      runtimeState.daemonOwned = true;
+      runtimeState.daemonLease = lease;
+      runtimeState.daemonClient = new DaemonClient(socketPath, token);
+      evidence.daemon.start = {
+        pid: startedPid,
+        ready: started.json?.ready === true,
+        alreadyRunning: started.json?.alreadyRunning === true,
+        processIdentity: lease.identity?.status ?? null,
+      };
+    }
+  }
+  if (
+    started.code !== 0 ||
+    started.json?.ready !== true ||
+    started.json?.alreadyRunning === true ||
+    !Number.isSafeInteger(startedPid) ||
+    startedPid <= 0
+  ) {
+    throw new Error(`battery could not prove a fresh daemon start; inspect ${started.log}`);
+  }
+  if (!runtimeState.daemonOwned || !lease || lease.pid !== startedPid) {
+    throw new Error("fresh daemon pid does not own the writer lease; refusing cleanup authority");
+  }
+
+  const [{ ensureDaemon }, { controlApiFetch, CONTROL_PROTOCOL_MAJOR }] = await Promise.all([
+    import("../packages/cli/dist/daemon-run.js"),
+    import("../packages/cli/dist/live.js"),
+  ]);
+  const { addr } = await ensureDaemon();
+  const response = await controlApiFetch(addr, "/v2/handshake", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ protocolMajor: CONTROL_PROTOCOL_MAJOR, client: "battery" }),
+  });
+  if (!response.ok) throw new Error(`battery daemon handshake failed (HTTP ${response.status})`);
+  const handshake = await response.json();
+  // Capture the identity before candidate validation. A mismatching but valid
+  // fresh daemon must still be stopped through the identity-bound RPC.
+  runtimeState.daemonIdentity = runtimeReplacementIdentityFromHandshake(handshake);
+  if (
+    handshake?.engine?.sha !== evidence.candidate.sha ||
+    resolve(handshake?.engine?.entry ?? "") !== expectedEntry
+  ) {
+    throw new Error("battery daemon handshake does not match the exact source candidate");
+  }
+  evidence.daemon.handshake = {
+    version: handshake.engine.version,
+    sha: handshake.engine.sha,
+    entry: handshake.engine.entry,
+    entrySha256: evidence.daemon.entrySha256,
+  };
+  runtimeState.baselineJobIds = new Set(
+    (await runtimeState.daemonClient.list()).map((job) => job.id),
+  );
+  pass("phase0", "fresh exact-candidate daemon", evidence.daemon.handshake);
+}
+
+async function stopBatteryDaemon() {
+  if (!runtimeState.daemonOwned) return;
+  const socketPath = defaultSocketPath();
+  const expectedOwner = runtimeState.daemonLease;
+  const client = runtimeState.daemonClient;
+  const currentOwner = daemonLeaseOwner(socketPath);
+  if (!client || !sameDaemonLease(expectedOwner, currentOwner)) {
+    evidence.daemon.stop = {
+      stopped: false,
+      reason: "captured daemon owner is no longer current; successor left untouched",
+    };
+    fail("cleanup", "battery-owned daemon stopped", evidence.daemon.stop);
+    return;
+  }
+  try {
+    const target = {
+      version: runtimeState.daemonIdentity?.version ?? CLAUDEXOR_VERSION,
+      buildSha: runtimeState.daemonIdentity?.buildSha ?? evidence.candidate.sha,
+      leaseOwner: { pid: expectedOwner.pid, token: expectedOwner.token },
+    };
+    const termination = await admitAndAwaitRuntimeReplacementStop(
+      () => client.shutdownForRuntimeReplacement(target),
+      (options) => awaitDaemonTermination(socketPath, options),
+      expectedOwner,
+    );
+    const leaseReleased = daemonLeaseOwner(socketPath) === null;
+    const valid = termination.outcome !== "still_alive" && leaseReleased;
+    evidence.daemon.stop = {
+      stopped: valid,
+      outcome: termination.outcome,
+      detail: termination.detail,
+      leaseReleased,
+    };
+    (valid ? pass : fail)("cleanup", "battery-owned daemon stopped", evidence.daemon.stop);
+    if (valid) runtimeState.daemonOwned = false;
+  } catch (error) {
+    evidence.daemon.stop = {
+      stopped: false,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+    fail("cleanup", "battery-owned daemon stopped", evidence.daemon.stop);
+  }
+}
+
+function verifyProtectedConfig() {
+  if (!protectedConfigBefore) return;
+  try {
+    const after = assertRegularFileUnchanged(protectedConfigPath, protectedConfigBefore);
+    evidence.configAfter = describeFileSnapshot(after);
+    evidence.configUnchanged = true;
+    pass("cleanup", "default config remained byte-identical", evidence.configAfter);
+  } catch (error) {
+    evidence.configAfter = (() => {
+      try {
+        return describeFileSnapshot(snapshotRegularFile(protectedConfigPath));
+      } catch {
+        return null;
+      }
+    })();
+    evidence.configUnchanged = false;
+    fail("cleanup", "default config remained byte-identical", {
+      error: error instanceof Error ? error.message : String(error),
+      before: evidence.configBefore,
+      after: evidence.configAfter,
+    });
+  }
+}
+
 function inspectRun(runId, cwd) {
   const out = runCliJson(["inspect", runId], { cwd, name: `inspect ${runId}` });
   return out.json;
+}
+
+async function verifyNativeSessionRoutes() {
+  if (layout.mode !== "existing_default") return;
+  const requiredHarnesses = requestedHarnesses.filter((h) => h === "codex" || h === "claude");
+  const observed = [];
+  let jobs;
+  try {
+    jobs = await runtimeState.daemonClient.list();
+  } catch (error) {
+    fail("acceptance", "complete battery run inventory", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  const batteryJobs = jobs.filter((job) => !runtimeState.baselineJobIds.has(job.id));
+  const inventoryErrors = [];
+  const seenRunDirs = new Set();
+  for (const job of batteryJobs) {
+    if (typeof job.runDir !== "string") continue;
+    if (seenRunDirs.has(job.runDir)) continue;
+    seenRunDirs.add(job.runDir);
+    const telemetry = new ArtifactStore(root).readYaml(join(job.runDir, "final", "telemetry.yaml"));
+    if (!telemetry || !Array.isArray(telemetry.attempts)) {
+      inventoryErrors.push({
+        jobId: job.id,
+        runId: job.runId ?? null,
+        reason: "telemetry_missing",
+      });
+      continue;
+    }
+    for (const attempt of telemetry.attempts) {
+      if (!requiredHarnesses.includes(attempt.harness_id)) continue;
+      const base = {
+        jobId: job.id,
+        runId: job.runId ?? null,
+        attemptId: attempt.attempt_id,
+        harnessId: attempt.harness_id,
+      };
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(attempt.attempt_id ?? "")) {
+        observed.push({ ...base, kind: "invalid_attempt_id", authMode: null, authSource: null });
+        continue;
+      }
+      const eventsPath = join(job.runDir, "attempts", attempt.attempt_id, "events.jsonl");
+      let events;
+      try {
+        events = readFileSync(eventsPath, "utf8")
+          .split("\n")
+          .filter((line) => line.trim().length > 0)
+          .map((line) => JSON.parse(line));
+      } catch {
+        observed.push({
+          ...base,
+          kind: "events_missing_or_malformed",
+          authMode: null,
+          authSource: null,
+        });
+        continue;
+      }
+      const durable = durableAttemptRouteEvidence(events);
+      for (const route of durable.observed) observed.push({ ...base, ...route });
+      if (!durable.sawStarted) {
+        observed.push({ ...base, kind: "started_route_missing", authMode: null, authSource: null });
+      }
+    }
+  }
+  const routeResult = evaluateRequiredNativeRoutes(requiredHarnesses, observed);
+  const valid = routeResult.valid && inventoryErrors.length === 0;
+  (valid ? pass : fail)("acceptance", "Codex and Claude routes stayed vendor-native", {
+    batteryJobs: batteryJobs.length,
+    observed,
+    inventoryErrors,
+    missing: routeResult.missing,
+    nonNative: routeResult.nonNative,
+  });
 }
 
 async function controlRunDetail(runId) {
@@ -567,14 +848,6 @@ function runNeedsDecision(ev) {
 function patchLooksReal(ev) {
   const diffstat = ev?.wp?.meta?.diffstat;
   return ev?.patchNonEmpty && (diffstat?.files ?? 0) > 0;
-}
-
-function setGlobalConfig(yaml) {
-  writeFileSync(join(configDir, "config.yaml"), yaml);
-}
-
-function clearGlobalConfig() {
-  rmSync(join(configDir, "config.yaml"), { force: true });
 }
 
 // Tiny PNG encoder with a 5x7 bitmap font for the marker image.
@@ -1019,109 +1292,104 @@ function runMultiWritePhase() {
         log: rel(out.log),
       });
   }
-  runDegradationControl(phase, multi[0]);
+  const singleFamilyReviewer = multi.find((h) => harnessIntent(h, "review"));
+  if (singleFamilyReviewer) runDegradationControl(phase, singleFamilyReviewer);
+  else fail(phase, "single-family degradation control", { reason: "no doctor-ok reviewer" });
 }
 
 function runDegradationControl(phase, onlyHarness) {
-  const disabled = requestedHarnesses.filter((h) => h !== onlyHarness);
-  setGlobalConfig(
+  // An explicit same-family panel proves the degradation contract without
+  // rewriting user-global harness settings. This keeps the existing-session
+  // VM lane read-only with respect to config.yaml.
+  const reviewerPanel = ["--reviewer-panel", onlyHarness];
+  const repo = makeMathRepo(`${phase}-single-family-control`, { addBug: true });
+  const out = runCliJson(
     [
-      "version: 1",
-      "harnesses:",
-      ...disabled.flatMap((h) => [`  ${h}:`, "    enabled: false"]),
-      "",
-    ].join("\n"),
+      "best-of",
+      "Fix add(a,b) in src/math.js so tests pass. Do not change tests.",
+      "--harness",
+      onlyHarness,
+      "--n",
+      "1",
+      ...reviewerPanel,
+      "--test",
+      testCmd(),
+      "--effort",
+      "low",
+      "--max-usd",
+      maxUsd,
+    ],
+    { cwd: repo, name: `${phase}-single-family-control` },
   );
-  try {
-    const repo = makeMathRepo(`${phase}-single-family-control`, { addBug: true });
-    const out = runCliJson(
-      [
-        "best-of",
-        "Fix add(a,b) in src/math.js so tests pass. Do not change tests.",
-        "--harness",
-        onlyHarness,
-        "--n",
-        "1",
-        "--test",
-        testCmd(),
-        "--effort",
-        "low",
-        "--max-usd",
-        maxUsd,
-      ],
-      { cwd: repo, name: `${phase}-single-family-control` },
-    );
-    const ev = recordRunEvidence(phase, "single-family control", out, repo);
-    if (ev?.decision) {
-      const basis = ev.decision.verification_basis ?? "unknown";
-      const rec = basis === "none" ? pass : fail;
-      rec(phase, "single-family verification_basis=none", {
-        runId: out.json?.runId,
-        status: out.json?.status,
-        facts: ev.decision.facts,
-        basis,
-      });
-      const apply = runCliJson(["apply", out.json.runId, "--dry-run"], {
-        cwd: repo,
-        name: `${phase}-single-family-apply-refusal`,
-      });
-      if (
-        ev.detail?.runFacts?.apply?.eligibility?.eligible === false &&
-        ev.detail?.runFacts?.apply?.eligibility?.state === "not_verified" &&
-        apply.code !== 0 &&
-        apply.json?.runId === out.json.runId &&
-        apply.json?.dryRun === true &&
-        apply.json?.code === "invalid_request"
-      )
-        pass(phase, "single-family apply refused", { runId: out.json.runId });
-      else
-        fail(phase, "single-family apply refused", {
-          exit: apply.code,
-          stdout: apply.stdout,
-          stderr: apply.stderr,
-          log: rel(apply.log),
-        });
-    } else {
-      fail(phase, "single-family control decision", {
-        status: out.json?.status,
-        error: out.json?.error,
-        log: rel(out.log),
-      });
-    }
-    const convRepo = makeMathRepo(`${phase}-single-family-convergence`, { addBug: true });
-    const conv = runCliJson(
-      [
-        "agent",
-        "Fix add(a,b) in src/math.js so tests pass. Do not change tests.",
-        "--harness",
-        onlyHarness,
-        "--until-clean",
-        "--test",
-        testCmd(),
-        "--effort",
-        "low",
-        "--max-usd",
-        maxUsd,
-      ],
-      { cwd: convRepo, name: `${phase}-single-family-convergence` },
-    );
+  const ev = recordRunEvidence(phase, "single-family control", out, repo);
+  if (ev?.decision) {
+    const basis = ev.decision.verification_basis ?? "unknown";
+    const rec = basis === "none" ? pass : fail;
+    rec(phase, "single-family verification_basis=none", {
+      runId: out.json?.runId,
+      status: out.json?.status,
+      facts: ev.decision.facts,
+      basis,
+    });
+    const apply = runCliJson(["apply", out.json.runId, "--dry-run"], {
+      cwd: repo,
+      name: `${phase}-single-family-apply-refusal`,
+    });
     if (
-      conv.code !== 0 &&
-      /cross-family|review/.test(JSON.stringify(conv.json ?? {}) + conv.stdout + conv.stderr)
+      ev.detail?.runFacts?.apply?.eligibility?.eligible === false &&
+      ev.detail?.runFacts?.apply?.eligibility?.state === "not_verified" &&
+      apply.code !== 0 &&
+      apply.json?.runId === out.json.runId &&
+      apply.json?.dryRun === true &&
+      apply.json?.code === "invalid_request"
     )
-      pass(phase, "single-family convergence refused", {
-        status: conv.json?.status,
-        error: conv.json?.error ?? conv.json?.summary,
-      });
+      pass(phase, "single-family apply refused", { runId: out.json.runId });
     else
-      fail(phase, "single-family convergence refused", {
-        exit: conv.code,
-        json: conv.json,
-        log: rel(conv.log),
+      fail(phase, "single-family apply refused", {
+        exit: apply.code,
+        stdout: apply.stdout,
+        stderr: apply.stderr,
+        log: rel(apply.log),
       });
-  } finally {
-    clearGlobalConfig();
+  } else {
+    fail(phase, "single-family control decision", {
+      status: out.json?.status,
+      error: out.json?.error,
+      log: rel(out.log),
+    });
   }
+  const convRepo = makeMathRepo(`${phase}-single-family-convergence`, { addBug: true });
+  const conv = runCliJson(
+    [
+      "agent",
+      "Fix add(a,b) in src/math.js so tests pass. Do not change tests.",
+      "--harness",
+      onlyHarness,
+      "--until-clean",
+      ...reviewerPanel,
+      "--test",
+      testCmd(),
+      "--effort",
+      "low",
+      "--max-usd",
+      maxUsd,
+    ],
+    { cwd: convRepo, name: `${phase}-single-family-convergence` },
+  );
+  if (
+    conv.code !== 0 &&
+    /cross-family|review/.test(JSON.stringify(conv.json ?? {}) + conv.stdout + conv.stderr)
+  )
+    pass(phase, "single-family convergence refused", {
+      status: conv.json?.status,
+      error: conv.json?.error ?? conv.json?.summary,
+    });
+  else
+    fail(phase, "single-family convergence refused", {
+      exit: conv.code,
+      json: conv.json,
+      log: rel(conv.log),
+    });
 }
 
 function chooseVerifiedRun() {
@@ -1862,78 +2130,93 @@ async function runDelegationPhase() {
   for (const h of candidates) {
     const repo = makeMathRepo(`${phase}-${h}-delegate`, { addBug: true });
     const accessArgs = [];
-    if (h === "codex") {
-      const trust = runCliJson(["trust", "--allow-full-access"], {
-        cwd: repo,
-        name: `${phase}-${h}-delegate-trust`,
-      });
-      if (trust.code !== 0) {
-        fail(phase, `${h} Delegate disposable full-access grant`, {
-          exit: trust.code,
-          log: rel(trust.log),
+    let fullAccessGranted = false;
+    try {
+      if (h === "codex") {
+        const trust = runCliJson(["trust", "--allow-full-access"], {
+          cwd: repo,
+          name: `${phase}-${h}-delegate-trust`,
         });
-        continue;
+        if (trust.code !== 0) {
+          fail(phase, `${h} Delegate disposable full-access grant`, {
+            exit: trust.code,
+            log: rel(trust.log),
+          });
+          continue;
+        }
+        fullAccessGranted = true;
+        accessArgs.push("--access", "full");
       }
-      accessArgs.push("--access", "full");
+      const out = runCliJson(
+        [
+          "agent",
+          "First use exactly one claudexor_ask belt tool to locate where add is defined in the original project. Do not ask the child to inspect your private candidate workspace or run tests. Then fix add locally; the configured gate will verify it.",
+          "--delegate",
+          "--harness",
+          h,
+          ...accessArgs,
+          "--test",
+          testCmd(),
+          "--effort",
+          "low",
+          "--max-usd",
+          maxUsd,
+        ],
+        { cwd: repo, name: `${phase}-${h}-delegate` },
+      );
+      const projected = out.json?.runId
+        ? await controlRunDetail(out.json.runId)
+        : { detail: null, error: "run id missing" };
+      const delegation = projected.detail?.summary?.delegation;
+      const children = projected.detail?.children ?? [];
+      const child = children.find(
+        (item) =>
+          item.delegatedFromRunId === out.json?.runId &&
+          item.mode === "ask" &&
+          item.state === "succeeded",
+      );
+      if (
+        out.code === 0 &&
+        out.json?.status === "succeeded" &&
+        delegation?.requested === true &&
+        delegation?.effective === true &&
+        delegation?.used === true &&
+        projected.detail?.runFacts?.outcome?.checks === "passed" &&
+        projected.detail?.summary?.result?.kind === "patch" &&
+        children.length === 1 &&
+        child
+      )
+        pass(phase, `${h} agent --delegate`, {
+          runId: out.json.runId,
+          childRunId: child.runId,
+          delegation,
+        });
+      else
+        fail(phase, `${h} agent --delegate`, {
+          exit: out.code,
+          status: out.json?.status,
+          delegation,
+          projectionError: projected.error,
+          children: children.map((item) => ({
+            runId: item.runId,
+            state: item.state,
+            mode: item.mode,
+            delegatedFromRunId: item.delegatedFromRunId,
+          })),
+          log: rel(out.log),
+        });
+    } finally {
+      if (fullAccessGranted) {
+        const revoke = runCliJson(["trust", "--revoke-full-access"], {
+          cwd: repo,
+          name: `${phase}-${h}-delegate-trust-revoke`,
+        });
+        (revoke.code === 0 ? pass : fail)(phase, `${h} Delegate full-access grant revoked`, {
+          exit: revoke.code,
+          log: rel(revoke.log),
+        });
+      }
     }
-    const out = runCliJson(
-      [
-        "agent",
-        "First use exactly one claudexor_ask belt tool to locate where add is defined in the original project. Do not ask the child to inspect your private candidate workspace or run tests. Then fix add locally; the configured gate will verify it.",
-        "--delegate",
-        "--harness",
-        h,
-        ...accessArgs,
-        "--test",
-        testCmd(),
-        "--effort",
-        "low",
-        "--max-usd",
-        maxUsd,
-      ],
-      { cwd: repo, name: `${phase}-${h}-delegate` },
-    );
-    const projected = out.json?.runId
-      ? await controlRunDetail(out.json.runId)
-      : { detail: null, error: "run id missing" };
-    const delegation = projected.detail?.summary?.delegation;
-    const children = projected.detail?.children ?? [];
-    const child = children.find(
-      (item) =>
-        item.delegatedFromRunId === out.json?.runId &&
-        item.mode === "ask" &&
-        item.state === "succeeded",
-    );
-    if (
-      out.code === 0 &&
-      out.json?.status === "succeeded" &&
-      delegation?.requested === true &&
-      delegation?.effective === true &&
-      delegation?.used === true &&
-      projected.detail?.runFacts?.outcome?.checks === "passed" &&
-      projected.detail?.summary?.result?.kind === "patch" &&
-      children.length === 1 &&
-      child
-    )
-      pass(phase, `${h} agent --delegate`, {
-        runId: out.json.runId,
-        childRunId: child.runId,
-        delegation,
-      });
-    else
-      fail(phase, `${h} agent --delegate`, {
-        exit: out.code,
-        status: out.json?.status,
-        delegation,
-        projectionError: projected.error,
-        children: children.map((item) => ({
-          runId: item.runId,
-          state: item.state,
-          mode: item.mode,
-          delegatedFromRunId: item.delegatedFromRunId,
-        })),
-        log: rel(out.log),
-      });
   }
   if (candidates.length === 0)
     skip(phase, "agent --delegate", { reason: "need a doctor-ok claude/codex harness" });
@@ -2344,34 +2627,79 @@ const repos = {
 const state = { verifiedRuns: [], multiRace: null };
 
 async function main() {
+  evidence.candidate.sha = runGit(["rev-parse", "HEAD"], root);
+  evidence.candidate.tree = runGit(["rev-parse", "HEAD^{tree}"], root);
   process.stdout.write(
-    `Claudexor real-harness battery\nroot=${batteryRoot}\nconfig=${configDir}\nharnesses=${requestedHarnesses.join(",")}\nmaxUsd=${maxUsd}\n\n`,
+    `Claudexor real-harness battery\nroot=${batteryRoot}\nconfig=${configDir}\nconfigMode=${layout.mode}\ncandidate=${evidence.candidate.sha}\nharnesses=${requestedHarnesses.join(",")}\nmaxUsd=${maxUsd}\n\n`,
   );
   // Phase 12 (plugin lifecycle in a scratch HOME) needs NO real harness —
   // the readiness gate applies only to harness-dependent phases.
   const harnessPhasesRequested =
     phaseFilter.length === 0 || phaseFilter.some((p) => p !== "phase12");
-  const ready = phase0(harnessPhasesRequested);
-  if (!ready && harnessPhasesRequested) {
-    fail("phase0", "readiness gate", {
-      reason: "no requested harness is doctor-ok; harness-dependent phases cannot proceed",
+  try {
+    if (layout.mode === "existing_default" && phaseFilter.length > 0) {
+      throw new Error("an existing-default acceptance run cannot use CLAUDEXOR_BATTERY_PHASES");
+    }
+    if (layout.mode === "existing_default" && !buildVerified) {
+      throw new Error("existing-default acceptance must run through pnpm battery:real");
+    }
+    if (
+      layout.mode === "existing_default" &&
+      ["codex", "claude", "cursor"].some((harness) => !requestedHarnesses.includes(harness))
+    ) {
+      throw new Error(
+        "existing-default acceptance requires codex, claude, and cursor in CLAUDEXOR_BATTERY_HARNESSES",
+      );
+    }
+    if (
+      layout.mode === "existing_default" &&
+      runGit(["status", "--porcelain=v1", "--untracked-files=all"], root) !== ""
+    ) {
+      throw new Error("existing-default acceptance requires a clean exact-candidate checkout");
+    }
+    await startBatteryDaemon();
+    const ready = phase0(harnessPhasesRequested);
+    if (!ready && harnessPhasesRequested) {
+      fail("phase0", "readiness gate", {
+        reason: "no requested harness is doctor-ok; harness-dependent phases cannot proceed",
+      });
+    }
+    if (ready) {
+      if (phaseEnabled("phase1")) await runReadonlyPhase();
+      if (phaseEnabled("phase2")) runWritePhase();
+      if (phaseEnabled("phase3")) runMultiWritePhase();
+      if (phaseEnabled("phase4")) runLifecyclePhase();
+      if (phaseEnabled("phase5")) runCreatePhase();
+      if (phaseEnabled("phase6")) runVisionPhase();
+      if (phaseEnabled("phase7")) runWebPhase();
+      if (phaseEnabled("phase8")) await runPlanPhase();
+      if (phaseEnabled("phase9")) await runDelegationPhase();
+      if (phaseEnabled("phase10")) await runMcpServePhase();
+      if (phaseEnabled("phase11")) await runAcpServePhase();
+    }
+    if (phaseEnabled("phase12")) runPluginLifecyclePhase();
+  } catch (error) {
+    fail("fatal", "unhandled error", {
+      error: error instanceof Error ? (error.stack ?? error.message) : String(error),
     });
+  } finally {
+    try {
+      if (runtimeState.daemonOwned) await verifyNativeSessionRoutes();
+    } catch (error) {
+      fail("acceptance", "native-route verification completed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    try {
+      await stopBatteryDaemon();
+    } catch (error) {
+      fail("cleanup", "battery-owned daemon cleanup completed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      verifyProtectedConfig();
+    }
   }
-  if (ready) {
-    if (phaseEnabled("phase1")) await runReadonlyPhase();
-    if (phaseEnabled("phase2")) runWritePhase();
-    if (phaseEnabled("phase3")) runMultiWritePhase();
-    if (phaseEnabled("phase4")) runLifecyclePhase();
-    if (phaseEnabled("phase5")) runCreatePhase();
-    if (phaseEnabled("phase6")) runVisionPhase();
-    if (phaseEnabled("phase7")) runWebPhase();
-    if (phaseEnabled("phase8")) await runPlanPhase();
-    if (phaseEnabled("phase9")) await runDelegationPhase();
-    if (phaseEnabled("phase10")) await runMcpServePhase();
-    if (phaseEnabled("phase11")) await runAcpServePhase();
-  }
-  if (phaseEnabled("phase12")) runPluginLifecyclePhase();
-  runCliText(["daemon", "stop"], { name: "daemon-stop" });
   const summary = {
     generatedAt: new Date().toISOString(),
     evidence,
@@ -2391,6 +2719,8 @@ async function main() {
     `- root: \`${batteryRoot}\``,
     `- cli: \`${cli}\``,
     `- version: \`${evidence.version ?? "unknown"}\``,
+    `- candidate: \`${evidence.candidate.sha ?? "unknown"}\``,
+    `- config mode: \`${layout.mode}\``,
     `- requested harnesses: ${requestedHarnesses.join(", ")}`,
     `- doctor-ok harnesses: ${evidence.okHarnesses.join(", ") || "(none)"}`,
     `- counts: PASS=${summary.counts.pass} FAIL=${summary.counts.fail} ENV=${summary.counts.env} SKIP=${summary.counts.skip}`,
@@ -2408,12 +2738,15 @@ async function main() {
   process.stdout.write(
     `\nRESULT PASS=${summary.counts.pass} FAIL=${summary.counts.fail} ENV=${summary.counts.env} SKIP=${summary.counts.skip}\nreport=${jsonPath}\nsummary=${mdPath}\n`,
   );
-  process.exit(summary.counts.fail > 0 ? 1 : 0);
+  const strictFailure =
+    layout.mode === "existing_default" &&
+    (summary.counts.env > 0 || summary.counts.skip > 0 || evidence.configUnchanged !== true);
+  process.exitCode = summary.counts.fail > 0 || strictFailure ? 1 : 0;
 }
 
 main().catch((err) => {
-  fail("fatal", "unhandled error", {
-    error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-  });
-  process.exit(1);
+  process.stderr.write(
+    `${redactSecrets(err instanceof Error ? (err.stack ?? err.message) : String(err))}\n`,
+  );
+  process.exitCode = 1;
 });

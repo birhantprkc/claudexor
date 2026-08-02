@@ -15,7 +15,15 @@ Release history for Claudexor. The current version is declared in the root
   directly runnable bundled/remote inspect command. CI now executes the
   ClaudexorApp tests (#91). GitHub Actions move to checkout 7.0.1,
   pnpm/action-setup 6.0.9, and download-artifact 8.0.1; the one Node 20 timer
-  fixture exposed during refresh now uses deterministic fake time.
+  fixture exposed during refresh now uses deterministic fake time. The repaired
+  real-harness battery (#94) can use existing authenticated sessions in a
+  disposable VM without relocating or copying credentials, refuses a live
+  daemon, forces and digests the exact source build, binds cleanup to the daemon
+  it started, leaves the default config byte-identical, revokes temporary trust,
+  scans every durable route interval, and fails acceptance on any FAIL, ENV, or
+  SKIP. API fallback disclosure before process start no longer creates a
+  fictitious unpaid interval and incorrectly ends an exact paid run as
+  `cost_unverifiable`.
 
 - **v3.2.0** (2026-07-29) — an eight-pull-request batch: remote execution, a
   canonical run receipt, and the toolchain moved forward. Remote SSH
