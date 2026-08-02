@@ -31,6 +31,7 @@ import {
   isWorkingCandidate,
   partitionCandidates,
   toCandidateEvidence,
+  unanimousDeclaredFailure,
 } from "./candidateEvidence.js";
 import { capabilityIntents } from "@claudexor/gateway";
 import { policyFindings } from "./policyFindings.js";
@@ -126,6 +127,7 @@ import { buildRevisePrompt } from "./revisePrompt.js";
 import {
   type AnnouncedRunContext,
   cancelledResult,
+  declaredFailure,
   failTerminally,
   guardAnnouncedRun,
   writeFailure,
@@ -3427,6 +3429,7 @@ export class Orchestrator {
         const failureCost = AC.attemptFailureCost(err, "post-stream-error", 0);
         ledger.settle(slot.leaseId, failureCost.settlement);
         const message = safeErrorMessage(err);
+        const declared = declaredFailure(err);
         const infraPhase: "workspace" | "harness" =
           envelope === undefined ? "workspace" : "harness";
         log.emit("harness.completed", {
@@ -3462,6 +3465,10 @@ export class Orchestrator {
             knobs.model,
           ),
           infraPhase,
+          // Keep a TYPED pre-spawn refusal (spent quota window + its reset)
+          // alive past this catch; `message` alone would force the terminal to
+          // read prose back out.
+          ...(declared.code ? { declaredFailure: declared } : {}),
         };
       } finally {
         if (envelope) await wsm.dispose(envelope); // no worktree leak even on create/run error
@@ -3656,15 +3663,21 @@ export class Orchestrator {
       // harness cause (timeout, rate limit, crash, config) gets remediation that
       // fits it, instead of a doomed "Check harness authentication".
       const harnessCategory = dominantHarnessFailureCategory(first.telemetry.transientFailures);
+      // A run speaks with a candidate's TYPED refusal only when EVERY candidate
+      // died of the same one (candidateEvidence owns that rule); mixed causes
+      // keep the honest harness terminal.
+      const unanimous = unanimousDeclaredFailure(runs);
       writeFailure(store, paths, {
         phase,
-        category: phase === "workspace" ? "project" : "harness_error",
+        category: unanimous?.category ?? (phase === "workspace" ? "project" : "harness_error"),
+        code: unanimous?.code ?? null,
         harnessId: first.harnessId,
         attemptId: first.attemptId,
         safeMessage: rootCause,
         rawDetailRef: `attempts/${first.attemptId}/attempt.yaml`,
         eventRefs: existingEventRefs,
         runDir: paths.root,
+        resetsAt: unanimous?.resetsAt ?? null,
         nextActions: first.secretDiffRefusal
           ? secretDiff.secretDiffNextActions(first.secretDiffRefusal)
           : phase === "workspace"

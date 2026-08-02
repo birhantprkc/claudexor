@@ -10,8 +10,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
 import { RunFailure, type CredentialProfile, type QuotaSnapshot } from "@claudexor/schema";
+import { type CandidateRun, unanimousDeclaredFailure } from "./candidateEvidence.js";
 import { preflightCredentialProfile } from "./credential-profile-rotation.js";
-import { failTerminally } from "./runTerminalResults.js";
+import { type DeclaredFailure, failTerminally } from "./runTerminalResults.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -110,5 +111,48 @@ describe("subscription window exhaustion", () => {
       Object.assign(new Error("adapter said timeout"), { category: "timeout" }),
     );
     expect(failure.category).toBe("internal");
+  });
+});
+
+describe("unanimousDeclaredFailure (no ranking of mixed causes)", () => {
+  const window = (resetsAt: string | null): DeclaredFailure => ({
+    category: "harness_unavailable",
+    code: "subscription_window_exhausted",
+    resetsAt,
+  });
+
+  const slot = (declaredFailure?: DeclaredFailure): CandidateRun =>
+    ({ attemptId: "a", harnessId: "h", errored: true, declaredFailure }) as CandidateRun;
+
+  it("carries the LATEST reset when every candidate died of the same window", () => {
+    expect(
+      unanimousDeclaredFailure([
+        slot(window("2026-08-02T12:00:00.000Z")),
+        slot(window("2026-08-02T18:00:00.000Z")),
+        slot(window("2026-08-02T15:00:00.000Z")),
+      ]),
+    ).toEqual(window("2026-08-02T18:00:00.000Z"));
+    // Waiting out the EARLIEST would return to two windows that are still spent.
+  });
+
+  it("refuses to speak for a run whose candidates failed differently", () => {
+    expect(unanimousDeclaredFailure([slot(window(RESETS_AT)), slot(undefined)])).toBeNull();
+    expect(
+      unanimousDeclaredFailure([
+        slot(window(RESETS_AT)),
+        slot({ category: "budget", code: "hard_cap", resetsAt: null }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("reports an unknown reset rather than a partial one", () => {
+    expect(unanimousDeclaredFailure([slot(window(RESETS_AT)), slot(window(null))])).toEqual(
+      window(null),
+    );
+  });
+
+  it("has nothing to say about an empty or untyped candidate set", () => {
+    expect(unanimousDeclaredFailure([])).toBeNull();
+    expect(unanimousDeclaredFailure([slot(undefined), slot(undefined)])).toBeNull();
   });
 });

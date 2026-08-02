@@ -3,6 +3,7 @@ import type { GateResult, ReviewFinding, RunOutcomeFacts, TaskContract } from "@
 import type { CandidateEvidence } from "@claudexor/arbitration";
 import type { AttemptOutcomeClass } from "./attemptFinalize.js";
 import type { AttemptTelemetry } from "./attemptTelemetry.js";
+import type { DeclaredFailure } from "./runTerminalResults.js";
 import type { SecretDiffRefusal } from "./secretDiff.js";
 import { toolWarnings } from "./attemptTelemetry.js";
 
@@ -31,6 +32,37 @@ export interface CandidateRun {
    * never reviewed/arbitrated/adopted as clean — it terminalizes the run
    * `interrupted` unless a CLEAN continuation superseded it upstream. */
   outcomeClass?: AttemptOutcomeClass;
+  /** The TYPED refusal this attempt died on (a spent subscription window and
+   * when it reopens), when it declared one. The per-slot catch otherwise
+   * reduces the error to a message string, and the run terminal would have to
+   * read prose to recover what the thrower already knew. */
+  declaredFailure?: DeclaredFailure;
+}
+
+/**
+ * The one typed refusal a run may speak with when NO candidate produced work.
+ *
+ * UNANIMITY is the whole rule. Promoting one slot's refusal to speak for a run
+ * whose other slots died of something else would tell the caller to wait out a
+ * quota window for a failure no timer fixes — so mixed causes keep the honest
+ * mixed-cause harness terminal instead. When the causes DO agree, the run
+ * carries the LATEST reset: waiting for the earliest would leave every other
+ * exhausted window still exhausted. An unknown reset anywhere makes the run's
+ * reset unknown — a partial answer here is worse than none.
+ */
+export function unanimousDeclaredFailure(runs: readonly CandidateRun[]): DeclaredFailure | null {
+  const first = runs[0]?.declaredFailure;
+  if (!first?.code) return null;
+  const declared = runs.map((run) => run.declaredFailure);
+  const agrees = declared.every((d) => d?.code === first.code && d?.category === first.category);
+  if (!agrees) return null;
+  const resets = declared.map((d) => d?.resetsAt ?? null);
+  const known = resets.filter((at): at is string => at !== null);
+  const resetsAt =
+    known.length > 0 && known.length === resets.length
+      ? known.reduce((latest, at) => (Date.parse(at) > Date.parse(latest) ? at : latest))
+      : null;
+  return { ...first, resetsAt };
 }
 
 /** A pre-work corpse (harness error, no diff) AND an `interrupted` partial

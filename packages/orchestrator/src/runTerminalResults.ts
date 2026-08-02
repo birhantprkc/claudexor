@@ -45,6 +45,13 @@ export function writeFailure(
   });
 }
 
+/** The typed provenance an error declared about its own terminal. */
+export interface DeclaredFailure {
+  category?: RunFailure["category"];
+  code: RunFailureCode | null;
+  resetsAt: string | null;
+}
+
 /**
  * The typed provenance an ERROR carries about its own terminal.
  *
@@ -55,12 +62,12 @@ export function writeFailure(
  * `code` this way; category and reset time follow the same rule. Everything is
  * validated against the schema, so an unrelated error carrying a `category`
  * property of its own cannot smuggle in a bogus classification.
+ *
+ * A candidate attempt that dies on such an error records this on its
+ * `CandidateRun`, so the refusal survives the per-slot catch that otherwise
+ * reduces it to a message string.
  */
-function declaredFailure(err: unknown): {
-  category?: RunFailure["category"];
-  code: RunFailureCode | null;
-  resetsAt: string | null;
-} {
+export function declaredFailure(err: unknown): DeclaredFailure {
   const record = err && typeof err === "object" ? (err as Record<string, unknown>) : {};
   const code = RunFailureCode.safeParse(record["code"]);
   const category = RunFailure.shape.category.safeParse(record["category"]);

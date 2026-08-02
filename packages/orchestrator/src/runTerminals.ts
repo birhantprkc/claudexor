@@ -27,7 +27,12 @@ import { reconcileDecisionTerminal } from "./decisionTerminalReconciliation.js";
 import type { OrchestratorResult } from "./orchestrator.js";
 import { prepareRunFactsFailureReceipt, prepareRunFactsReceipt } from "./runFacts.js";
 import type { AnnouncedRunContext } from "./runTerminalContext.js";
-import { cancelledResult, failTerminally, writeFailure } from "./runTerminalResults.js";
+import {
+  cancelledResult,
+  declaredFailure,
+  failTerminally,
+  writeFailure,
+} from "./runTerminalResults.js";
 import {
   clearFailureArtifact,
   reconcileWorkProductTerminal,
@@ -35,7 +40,7 @@ import {
 } from "./terminalOutcome.js";
 
 export type { AnnouncedRunContext } from "./runTerminalContext.js";
-export { cancelledResult, failTerminally, writeFailure };
+export { cancelledResult, declaredFailure, failTerminally, writeFailure };
 
 function ownsDelegateDrain(context: AnnouncedRunContext): boolean {
   try {

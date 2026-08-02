@@ -4930,6 +4930,80 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("an agent run's spent subscription window reaches failure.yaml as a typed code + reset time", async () => {
+    // The mutating (agent) path never reaches the run terminal by throwing: the
+    // per-slot catch turns the refusal into an attempt error string, and the run
+    // ends through the no-working-candidates terminal. Without the candidate
+    // carrying its typed refusal, a host would be left parsing prose for the
+    // one thing it needs — when to come back.
+    const repo = await initRepo();
+    const resetsAt = "2026-08-02T18:00:00.000Z";
+    const configDir = reapMk(join(tmpdir(), "claudexor-agent-window-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: spent",
+        "    harness_id: impl",
+        "    display_name: Spent",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:spent'",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const res = await new Orchestrator({
+        registry: new Map<string, HarnessAdapter>([["impl", diffImplementer("impl")]]),
+        reviewers: reviewers(),
+        quotaSnapshots: () => [
+          {
+            subject: {
+              harness: "impl",
+              credential_route: "managed_api_key",
+              plan_label: null,
+              subject_id: "spent",
+            },
+            constraints: [
+              {
+                id: "weekly_scoped:Fable",
+                label: "7 day (Fable)",
+                used_ratio: 0.97,
+                window_seconds: 604800,
+                resets_at: resetsAt,
+                cooldown_until: null,
+              },
+            ],
+            source: "claude_oauth_usage",
+            observed_at: new Date().toISOString(),
+            freshness: "fresh",
+          },
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["impl"],
+        credentialProfileId: "spent",
+        n: 1,
+      });
+
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "subscription_window_exhausted",
+        resetsAt,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("an unknown explicit credential profile refuses before any adapter launches (INV-135)", async () => {
     const repo = await initRepo();
     let launches = 0;
