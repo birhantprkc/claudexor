@@ -266,7 +266,7 @@ export interface RunnerHooks {
 
 export type RunnerFn = (params: any, hooks?: RunnerHooks) => Promise<unknown>;
 
-/** Default Claudexor tool surface for MCP (v0.9: 5 canonical modes + strategy flags). */
+/** Default Claudexor MCP tool surface: three canonical modes plus strategy controls. */
 export function defaultClaudexorTools(runner: RunnerFn): McpTool[] {
   const reviewerModelProperties = Object.fromEntries(
     PROVIDER_FAMILIES.map((family) => [family, { type: "string", minLength: 1 }]),

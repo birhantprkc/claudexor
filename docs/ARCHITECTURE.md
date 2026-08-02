@@ -141,8 +141,8 @@ at every wire boundary.
   doctor runner, typed errors. Default write modes are orchestrator/envelope
   paths, not direct live-tree execution.
 - `packages/orchestrator`: the canonical mode pipelines (ask, plan, agent) with
-  strategy flags (race width, attempt caps, until-clean, deep-scan, create,
-  delegate); owns run telemetry and policy gates (trust, risk, protected paths),
+  separate schema-owned strategy controls; owns run telemetry and policy gates
+  (trust, risk, protected paths),
   typed transient retry policy, no-progress outcomes, and the one terminal
   `RunFacts` projection from canonical run artifacts.
 - `packages/gateway`: harness discovery and capability/intent gating (route
@@ -190,7 +190,7 @@ at every wire boundary.
 - `packages/mcp-server`, `packages/acp-server`: thin protocol surfaces. The
   MCP server rides the official TypeScript SDK v2 (concurrent dispatch, era
   negotiation down to 2024-10-07, schema-validated arguments, elicitation);
-  all five run modes enqueue through the daemon `/v2` control API. Until MCP
+  all three run modes enqueue through the daemon `/v2` control API. Until MCP
   Tasks stabilize, MCP returns a durable run handle and exposes explicit
   status/result/cancel/interaction tools; it does not hold a tool call open or
   advertise Tasks. ACP uses the official TypeScript SDK at stable protocol v1;

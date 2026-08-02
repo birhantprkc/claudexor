@@ -208,7 +208,7 @@ export const AgentCapabilityCatalog = z
     modes: z
       .array(ModeKind)
       .describe(
-        "Canonical run modes (strategies like --n/--until-clean/--swarm are flags, not modes).",
+        "Canonical run modes; strategy controls are separate schema-owned fields, never modes.",
       ),
     runControlKeys: z
       .array(z.string())

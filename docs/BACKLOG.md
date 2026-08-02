@@ -58,6 +58,15 @@ deferred; they are recorded here now.
   submission authority today, and the rare stale read-only card self-heals on
   thread reopen or app restart; this is UI recovery polish, not a release
   safety defect.
+- PDR-10: require an existing-default real-harness battery root to be a fresh,
+  battery-owned directory and reject roots that contain the source checkout or
+  default config. The documented unique directory is safe and the risky path
+  requires an explicit operator override, so this is opt-in destructive-path
+  hardening rather than a default-reachable release defect.
+- PDR-11: remove the retired `swarm` request member from the two Swift request
+  mirrors and keep `deepScan` as the schema-owned strategy flag. Production
+  app paths never emit `swarm`; only a programmatic Swift caller can currently
+  send it and receive the schema's typed unknown-key refusal.
 
 ## v3.2.0 wave-4 review deferrals
 
