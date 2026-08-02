@@ -44,6 +44,15 @@ import ClaudexorKit
     @Test func idleOtherwise() {
         #expect(ThreadRowStatus.of(running: false, needsHuman: false) == .idle)
     }
+
+    @Test func remoteSyncTimeUsesTheEnglishProductLocale() {
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        let expected = date.formatted(
+            Date.FormatStyle(date: .omitted, time: .shortened)
+                .locale(Locale(identifier: "en_US_POSIX")))
+
+        #expect(formattedRemoteSyncTime(date) == expected)
+    }
 }
 
 /// D42: the thread's runs are aggregated in conversation order, de-duplicated.

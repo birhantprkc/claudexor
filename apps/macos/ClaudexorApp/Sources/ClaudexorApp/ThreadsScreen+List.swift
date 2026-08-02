@@ -20,6 +20,12 @@ enum ThreadRowStatus: Equatable {
     }
 }
 
+func formattedRemoteSyncTime(_ date: Date) -> String {
+    date.formatted(
+        Date.FormatStyle(date: .omitted, time: .shortened)
+            .locale(Locale(identifier: "en_US_POSIX")))
+}
+
 extension ThreadsScreen {
     /// True when this thread's head run is actively working (per-thread, not the
     /// global submit gate) — drives the running badge.
@@ -170,6 +176,6 @@ extension ThreadsScreen {
         guard located.locationID != .local,
               let cached = model.remoteThreadCache.first(where: { $0.id == located.id })
         else { return base }
-        return "\(base) · synced \(cached.syncedAt.formatted(date: .omitted, time: .shortened))"
+        return "\(base) · synced \(formattedRemoteSyncTime(cached.syncedAt))"
     }
 }

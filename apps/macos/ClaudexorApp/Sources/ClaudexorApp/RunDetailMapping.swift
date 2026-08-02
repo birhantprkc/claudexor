@@ -38,19 +38,49 @@ enum RunDetailMapping {
         decision: JSONValue?, candidates: [CandidateInfo], findings: [Finding],
         failure: RunFailureInfo?, phase: RunPhase, outcomeFacts: RunOutcomeFacts?
     ) -> ReviewVerdict {
-        if !findings.isEmpty { return .findings }
-        if outcomeFacts?.review == "blocked" { return .findings }
-        if failure?.phase == "review" { return .error }
-        let outcome = decision?["outcome"]?.stringValue
-        let basis = decision?["verification_basis"]?.stringValue
-        if outcome == "ready" && (basis == "cross_family_review" || basis == "both") {
-            return .clean
+        let fallback: ReviewVerdict
+        if !findings.isEmpty {
+            fallback = .findings
+        } else if failure?.phase == "review" {
+            fallback = .error
+        } else {
+            let outcome = decision?["outcome"]?.stringValue
+            let basis = decision?["verification_basis"]?.stringValue
+            if outcome == "ready" && (basis == "cross_family_review" || basis == "both") {
+                fallback = .clean
+            } else if candidates.contains(where: {
+                $0.winner && $0.reviewVerified && $0.finalReviewClean == true
+            }) {
+                fallback = .clean
+            } else {
+                fallback = phase.isActive ? .running : .notRun
+            }
         }
-        if candidates.contains(where: { $0.winner && $0.reviewVerified && $0.finalReviewClean == true }) {
-            return .clean
+        // A current terminal review failure stays an error even when the detail
+        // also aggregates findings from earlier or losing attempts. Legacy runs
+        // without facts retain their historical findings-first ordering.
+        let effectiveFallback: ReviewVerdict =
+            outcomeFacts?.review == "not_run" && failure?.phase == "review"
+            ? .error : fallback
+        return effectiveReviewVerdict(outcomeFacts: outcomeFacts, fallback: effectiveFallback)
+    }
+
+    /// Terminal RunFacts own the review verdict. `reviewFindings` deliberately
+    /// keeps advisory and losing-attempt evidence, so stale progress cannot
+    /// override the terminal axis. The fallback serves active and legacy runs.
+    static func effectiveReviewVerdict(
+        outcomeFacts: RunOutcomeFacts?, fallback: ReviewVerdict
+    ) -> ReviewVerdict {
+        guard let review = outcomeFacts?.review else { return fallback }
+        switch review {
+        case "blocked": return .findings
+        case "approved": return .clean
+        case "not_run":
+            return fallback == .error || fallback == .failed ? fallback : .notRun
+        default:
+            // Preserve forward-compatible evidence if a newer engine adds an axis value.
+            return fallback
         }
-        if outcomeFacts?.review == "approved" { return .clean }
-        return phase.isActive ? .running : .notRun
     }
 
     /// Live plan checklist: nil when the run never emitted plan.progress

@@ -29,7 +29,7 @@ struct RunOutcomeSection: View {
             if let council = task.council {
                 councilSection(council)
             }
-            if task.reviewVerdict != .notRun || task.reviewNeedsDecision || !task.findings.isEmpty {
+            if task.effectiveReviewVerdict != .notRun || task.reviewNeedsDecision || !task.findings.isEmpty {
                 reviewContent
             }
         }
@@ -205,11 +205,12 @@ struct RunOutcomeSection: View {
     /// Cross-family review verdict + findings, read-only. The decision controls
     /// live on the chat receipt (needsDecision), never duplicated here (D42).
     private var reviewContent: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        let verdict = task.effectiveReviewVerdict
+        return VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             SectionLabel("Cross-family review", systemImage: "person.2.badge.gearshape")
             Panel {
-                Label(reviewVerdictText(task.reviewVerdict), systemImage: reviewVerdictGlyph(task.reviewVerdict))
-                    .foregroundStyle(reviewVerdictColor(task.reviewVerdict))
+                Label(reviewVerdictText(verdict), systemImage: reviewVerdictGlyph(verdict))
+                    .foregroundStyle(reviewVerdictColor(verdict))
             }
             if task.reviewNeedsDecision {
                 Text("This run needs a decision — decide from its card in the conversation.")

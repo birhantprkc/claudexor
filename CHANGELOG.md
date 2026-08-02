@@ -23,7 +23,11 @@ Release history for Claudexor. The current version is declared in the root
   scans every durable route interval, and fails acceptance on any FAIL, ENV, or
   SKIP. API fallback disclosure before process start no longer creates a
   fictitious unpaid interval and incorrectly ends an exact paid run as
-  `cost_unverifiable`.
+  `cost_unverifiable`. The macOS app now treats the terminal review axis as the
+  decision authority, so advisory findings cannot show `Needs you` controls
+  beside an approved, already-applied winner; failed final checks retain their
+  server-authorized risk-decision path, and remote sync times stay English under
+  non-English host locales.
 
 - **v3.2.0** (2026-07-29) — an eight-pull-request batch: remote execution, a
   canonical run receipt, and the toolchain moved forward. Remote SSH
@@ -41,8 +45,9 @@ Release history for Claudexor. The current version is declared in the root
   else before reading its content; both remote endpoints are wired only into
   the remote runtime, so a local daemon answers 501. The release pipeline
   builds, attests, SBOMs, and publishes the four remote-runtime archives, the
-  signed remote manifest, and the remote SBOM as first-class assets (a
-  12-asset publish allowlist, provenance verified before any use). Runtime
+  signed remote manifest, and the remote SBOM as first-class assets (inside the
+  12-asset candidate allowlist; publish adds the review attestation as the
+  thirteenth final asset, with provenance verified before any use). Runtime
   activation is admission-safe across local install, steady
   reconciliation, remote install, and rollback: the daemon atomically proves
   run/setup idleness and fences every ingress before stopping, while a late

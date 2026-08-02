@@ -1,11 +1,22 @@
 import Foundation
 
 extension TaskRun {
-    /// The review gate needs an operator decision: blocking findings remain and
-    /// no decision has been recorded yet. Derived from the honest outcome axes.
+    /// The effective review presentation. Terminal facts outrank mutable live
+    /// progress; active and legacy runs retain their last evidence projection.
+    var effectiveReviewVerdict: ReviewVerdict {
+        RunDetailMapping.effectiveReviewVerdict(
+            outcomeFacts: outcomeFacts, fallback: reviewVerdict)
+    }
+
+    /// A risk-overridable terminal needs an operator decision: review blocked or
+    /// checks failed after a succeeded lifecycle, with no decision recorded yet.
+    /// This mirrors the server-owned needsDecision predicate exactly.
     var reviewNeedsDecision: Bool {
         guard phase.isTerminal else { return false }
-        let blocked = outcomeFacts?.review == "blocked" || reviewVerdict == .findings
+        let blocked = outcomeFacts.map {
+            $0.lifecycle == "succeeded"
+                && ($0.review == "blocked" || $0.checks == "failed")
+        } ?? (effectiveReviewVerdict == .findings)
         return blocked && operatorDecisionAction == nil
     }
 

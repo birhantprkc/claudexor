@@ -511,14 +511,14 @@ struct TaskRun: Identifiable, Hashable {
     var prompt: String
     var mode: RunMode
     /// The run LIFECYCLE (D8). Presentation of outcome quality (review / checks /
-    /// delivery) reads `outcomeFacts` + `reviewVerdict`, never this phase.
+    /// delivery) reads `outcomeFacts` + the effective review verdict, never this phase.
     var phase: RunPhase
     var project: String
     var harnesses: [HarnessFamily]
     var n: Int
     var createdAt: Date
     var updatedAt: Date
-    /// Explicit review truth: empty findings are never `.clean` (needs the engine's verified evidence).
+    /// Mutable review progress/legacy fallback; terminal facts determine the effective verdict first.
     var reviewVerdict: ReviewVerdict = .notRun
     var retryStatus: RetryStatusNote?  // latest typed transient status (W-C2/sol #6); cleared on progress
     var spendUsd: Double

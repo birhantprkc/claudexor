@@ -661,8 +661,8 @@ Important boundaries:
 - `packages/harness-*` adapters translate native tool I/O into typed events.
 - `packages/workspace` owns worktree envelopes and scoped harness homes.
 - `packages/orchestrator` owns the canonical mode pipelines (ask, plan, agent)
-  and their strategy flags (race width, attempt caps, until-clean, deep-scan,
-  create, delegate).
+  and their separate schema-owned strategy controls; the canonical Modes
+  section above defines them.
 - `packages/review`, `arbitration`, `synthesis`, and `budget` own selection and
   validation logic.
 - CLI, daemon, control API, MCP, ACP, plugins, and macOS are thin surfaces.

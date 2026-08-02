@@ -322,9 +322,9 @@ Tests and local smokes must never touch real user state:
   never open Terminal or write `~/.claudexor`.
 - The `fake-*` harnesses are the offline, keyless, deterministic fixtures
   (`--harness fake-success`, etc.); they are only selectable by explicit id and
-  never enter auto/reviewer/orchestrate pools. `fake-implement` additionally writes a
-  real worktree file and emits a schema-valid orchestration plan, so the
-  create / write→apply / orchestrate chains are exercisable with no real harness.
+  never enter automatic or reviewer pools. `fake-implement` additionally writes
+  a real worktree file for producing intents, so the Agent write→apply and
+  Create chains are exercisable with no real harness.
 - Read-only run lookups (`inspect`, `apply`) connect to an already-running daemon
   but never auto-start one (a typo'd run id reports `no such run`); only acting
   paths (`agent`/`best-of`/`create`, `decision`) auto-start it. `daemon start` blocks
@@ -356,7 +356,7 @@ Tests and local smokes must never touch real user state:
   fails this VM acceptance, while Cursor retains its declared credential
   transport. The lane is strict: FAIL, ENV, or SKIP greater than zero, a phase
   filter, or omission of Codex, Claude, or Cursor makes the acceptance run fail.
-  build proof has no caller-supplied sentinel: every invocation owns and awaits
+  The build proof has no caller-supplied sentinel: every invocation owns and awaits
   the forced build before battery code can load. Never use the lane on the
   credential-free pristine VM or on a config root with live work.
 - Runtime retry/review knobs are user-global config (`runtime.transient_retry`

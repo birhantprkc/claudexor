@@ -341,9 +341,9 @@
               "plan",
               "agent"
             ],
-            "description": "Canonical run mode: ask and plan are read-only, agent writes. Engine strategies (race width, attempts, deep_scan, create, delegate) are flags on a mode, not modes."
+            "description": "Canonical run mode: ask and plan are read-only, agent writes. Strategy controls are separate schema-owned fields, never modes."
           },
-          "description": "Canonical run modes (strategies like --n/--until-clean/--swarm are flags, not modes)."
+          "description": "Canonical run modes; strategy controls are separate schema-owned fields, never modes."
         },
         "runControlKeys": {
           "type": "array",

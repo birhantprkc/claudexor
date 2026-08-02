@@ -16,9 +16,9 @@ export const DEFAULT_MANDATORY_CONTEXT = ["README.md", "docs/ARCHITECTURE.md"];
 
 /**
  * Uniform fail-closed preflight for EXPLICITLY-configured mandatory context.
- * Called by every run mode (ask/plan/audit/agent/orchestrate) so a versioned
+ * Called by every canonical run mode (ask/plan/agent) so a versioned
  * `mandatory_files` contract is honored identically — not just by the modes that
- * happen to build a ContextPack (the bug where `audit` failed but `run`/`ask`
+ * happen to build a ContextPack (the bug where one route failed but another
  * silently passed the same repo). A no-op when the list is empty (the default,
  * since `claudexor init` no longer seeds it), so fresh repos are never gated.
  * Read-only: only checks file readability, never mutates.

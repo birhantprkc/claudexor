@@ -70,10 +70,8 @@ export type ProviderFamily = z.infer<typeof ProviderFamily>;
  * Canonical modes (v3.0.0 collapse, BREAKING): three conversation intents —
  * ask (read-only answer; `deep_scan` widens it into the bounded multi-scout
  * research sweep that used to be `audit --swarm`/`explore`), plan
- * (read-only planning), agent (writes). Engine strategies remain FLAGS on a
- * mode, never modes: `n` (best-of race width / deep-scan width), `attempts`
- * / `until_clean` (agent convergence), `create` (agent from-scratch),
- * `deep_scan` (ask sweep). Retired ids (`audit`, `explore`,
+ * (read-only planning), agent (writes). Strategy controls are separate
+ * schema-owned fields on those modes, never modes themselves. Retired ids (`audit`, `explore`,
  * `readonly_audit`, `best_of_n`, …) hard-error at every wire boundary
  * (Bible: modes are canonical and breaking, never silent aliases). The former
  * `orchestrate` mode was deleted once its delegation replacement landed
@@ -82,7 +80,7 @@ export type ProviderFamily = z.infer<typeof ProviderFamily>;
 export const ModeKind = z
   .enum(["ask", "plan", "agent"])
   .describe(
-    "Canonical run mode: ask and plan are read-only, agent writes. Engine strategies (race width, attempts, deep_scan, create, delegate) are flags on a mode, not modes.",
+    "Canonical run mode: ask and plan are read-only, agent writes. Strategy controls are separate schema-owned fields, never modes.",
   );
 export type ModeKind = z.infer<typeof ModeKind>;
 
