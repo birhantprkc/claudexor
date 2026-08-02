@@ -51,6 +51,7 @@ vi.mock("./registry.js", async (importOriginal) => {
               harness_id: profile.harness_id,
               availability: readiness.availability,
               verification: readiness.verification,
+              verification_source: "local_store",
               detail: "live profile probe disabled in projection unit test",
               last_verified_at: null,
             };

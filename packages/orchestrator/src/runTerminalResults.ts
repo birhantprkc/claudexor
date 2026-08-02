@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { ArtifactStore } from "@claudexor/artifact-store";
 import type { EventLog } from "@claudexor/event-log";
-import { RunFailureCode, type ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
+import { RunFailure, RunFailureCode, type ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import type { OrchestratorResult } from "./orchestrator.js";
 import { terminalOutcomeFacts } from "./terminalOutcome.js";
@@ -23,6 +23,9 @@ export function writeFailure(
     logRefs?: string[];
     eventRefs?: string[];
     runDir?: string;
+    /** Structural reopen time for a windowed refusal (spent subscription
+     * quota); null/omitted when the failure has no such time. */
+    resetsAt?: string | null;
     nextActions?: string[];
   },
 ): void {
@@ -37,8 +40,38 @@ export function writeFailure(
     logRefs: failure.logRefs ?? [],
     eventRefs: failure.eventRefs ?? [],
     runDir: failure.runDir ?? paths.root,
+    resetsAt: failure.resetsAt ?? null,
     nextActions: failure.nextActions ?? [],
   });
+}
+
+/**
+ * The typed provenance an ERROR carries about its own terminal.
+ *
+ * A refusal that knows exactly what it is (a spent quota window, and when it
+ * reopens) must not be flattened into `internal` / `code: null` just because it
+ * travelled as an exception: the terminal then states less than the thrower
+ * knew, and the only remaining signal is prose. `failTerminally` already read
+ * `code` this way; category and reset time follow the same rule. Everything is
+ * validated against the schema, so an unrelated error carrying a `category`
+ * property of its own cannot smuggle in a bogus classification.
+ */
+function declaredFailure(err: unknown): {
+  category?: RunFailure["category"];
+  code: RunFailureCode | null;
+  resetsAt: string | null;
+} {
+  const record = err && typeof err === "object" ? (err as Record<string, unknown>) : {};
+  const code = RunFailureCode.safeParse(record["code"]);
+  const category = RunFailure.shape.category.safeParse(record["category"]);
+  const resetsAt = RunFailure.shape.resetsAt.safeParse(record["resetsAt"]);
+  return {
+    ...(typeof record["category"] === "string" && category.success
+      ? { category: category.data }
+      : {}),
+    code: code.success ? code.data : null,
+    resetsAt: resetsAt.success ? resetsAt.data : null,
+  };
 }
 
 /**
@@ -154,9 +187,7 @@ export function failTerminally(
   } = {},
 ): OrchestratorResult {
   const message = redactSecrets(err instanceof Error ? err.message : String(err));
-  const parsedCode = RunFailureCode.safeParse(
-    err && typeof err === "object" ? (err as { code?: unknown }).code : undefined,
-  );
+  const declared = declaredFailure(err);
   const failFacts = terminalOutcomeFacts(failureMeta.priorFacts, "failed", "harness_failed");
   store.writeText(
     join(paths.finalDir, "summary.md"),
@@ -164,13 +195,14 @@ export function failTerminally(
   );
   writeFailure(store, paths, {
     phase,
-    category: failureMeta.category ?? "internal",
-    code: parsedCode.success ? parsedCode.data : null,
+    category: declared.category ?? failureMeta.category ?? "internal",
+    code: declared.code,
     harnessId: failureMeta.harnessId,
     attemptId: failureMeta.attemptId,
     safeMessage: message,
     rawDetailRef: failureMeta.rawDetailRef,
     runDir: paths.root,
+    resetsAt: declared.resetsAt,
     nextActions: failureMeta.nextActions ?? ["Open diagnostics", "Retry the run"],
   });
   log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });

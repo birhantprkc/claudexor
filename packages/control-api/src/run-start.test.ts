@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { findAcceptedAroundPreflight, normalizeExistingProjectRoot } from "./run-start.js";
+import {
+  findAcceptedAroundPreflight,
+  normalizeExistingProjectRoot,
+  normalizeRunStartRequest,
+} from "./run-start.js";
 
 const roots: string[] = [];
 
@@ -76,5 +80,28 @@ describe("findAcceptedAroundPreflight", () => {
         },
       ),
     ).rejects.toBe(preflightError);
+  });
+});
+
+describe("ephemeral project roots", () => {
+  it("carries the one-shot declaration through normalization", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-ephemeral-root-"));
+    roots.push(root);
+
+    const declared = normalizeRunStartRequest({
+      prompt: "do the thing",
+      mode: "agent",
+      scope: { kind: "project", root, ephemeral: true },
+    });
+    // The scope is rebuilt field-by-field during normalization; dropping the
+    // flag here would silently register the disposable tree after all.
+    expect(declared.scope).toEqual({ kind: "project", root, context: "auto", ephemeral: true });
+
+    const ordinary = normalizeRunStartRequest({
+      prompt: "do the thing",
+      mode: "agent",
+      scope: { kind: "project", root },
+    });
+    expect(ordinary.scope).toEqual({ kind: "project", root, context: "auto", ephemeral: false });
   });
 });

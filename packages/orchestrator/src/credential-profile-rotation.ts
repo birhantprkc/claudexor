@@ -209,6 +209,38 @@ function emitRotationExhausted(args: {
 }
 
 /**
+ * A spent subscription window, refused MACHINE-READABLY.
+ *
+ * The verdict a caller actually needs from this refusal is "not now, come back
+ * at T" — and the only honest way to deliver T is as a field. Gluing it into
+ * the sentence and shipping the terminal as `category: internal, code: null`
+ * left every consumer (a surface, a scheduler, an automating host) to regex
+ * the prose for a timestamp, which no contract in this repo permits. The
+ * message stays human-readable; the machine reads `code` and `resetsAt`, which
+ * the run terminal lifts onto `final/failure.yaml` verbatim.
+ */
+function subscriptionWindowExhausted(
+  profileId: string,
+  harnessId: string,
+  breach: HeadroomBreach,
+): Error {
+  return Object.assign(
+    new Error(
+      `credential profile "${profileId}" (${harnessId}) is over its headroom threshold ` +
+        `(${breach.constraint_id} at ${Math.round(breach.used_ratio * 100)}% >= ${Math.round(breach.threshold * 100)}%; ` +
+        `limit_action=fail${breach.resets_at ? `; resets ${breach.resets_at}` : ""})`,
+    ),
+    {
+      code: "subscription_window_exhausted",
+      // Not `internal`: nothing malfunctioned. The account cannot serve this
+      // run until its window reopens, which is what harness_unavailable means.
+      category: "harness_unavailable",
+      resetsAt: breach.resets_at,
+    },
+  );
+}
+
+/**
  * `profile_headroom_preflight` (W5.4): BEFORE spawn, the selected profile's
  * freshest quota windows are checked against the policy threshold. A breach
  * is always a typed event; `rotate` swaps to the next eligible profile with
@@ -247,11 +279,7 @@ export function preflightCredentialProfile(args: {
     // The documented FAIL action fails (release wave tier1 #4): a FRESH breach
     // under fail refuses before spawn with the evidence, instead of silently
     // proceeding into a vendor rejection.
-    throw new Error(
-      `credential profile "${profile.profile_id}" (${harnessId}) is over its headroom threshold ` +
-        `(${breach.constraint_id} at ${Math.round(breach.used_ratio * 100)}% >= ${Math.round(breach.threshold * 100)}%; ` +
-        `limit_action=fail${breach.resets_at ? `; resets ${breach.resets_at}` : ""})`,
-    );
+    throw subscriptionWindowExhausted(profile.profile_id, harnessId, breach);
   }
   if (policy.limit_action !== "rotate") return profile;
   const next = nextEligibleProfile(

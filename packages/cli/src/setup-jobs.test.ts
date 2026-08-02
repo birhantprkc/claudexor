@@ -2239,6 +2239,7 @@ describe("setup jobs for credential profiles (INV-135)", () => {
           harness_id: harness,
           availability: "available",
           verification: "passed",
+          verification_source: "local_store",
           detail: "chatgpt login in scoped home",
           last_verified_at: new Date(ms).toISOString(),
         };
@@ -2297,6 +2298,7 @@ describe("setup jobs for credential profiles (INV-135)", () => {
         harness_id: harness,
         availability: "unavailable",
         verification: "not_run",
+        verification_source: "local_store",
         detail: "logged out",
         last_verified_at: null,
       }),

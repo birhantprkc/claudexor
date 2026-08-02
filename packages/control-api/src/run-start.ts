@@ -84,7 +84,14 @@ export function normalizeRunStart(parsed: ControlRunStartRequest): ControlRunSta
     const repoRoot = normalizeExistingProjectRoot(parsed.scope.root);
     return {
       ...parsed,
-      scope: { kind: "project", root: repoRoot, context: parsed.scope.context ?? "auto" },
+      scope: {
+        kind: "project",
+        root: repoRoot,
+        context: parsed.scope.context ?? "auto",
+        // Rebuilt field-by-field: an omitted key here would silently drop the
+        // caller's one-shot declaration and register the root after all.
+        ephemeral: parsed.scope.ephemeral,
+      },
     };
   }
   if (mode === "ask") {

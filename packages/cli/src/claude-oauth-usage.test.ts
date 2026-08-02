@@ -138,6 +138,25 @@ describe("claude oauth/usage quota source (W5.3, INV-062)", () => {
     expect(nativeAbsence?.detail).toContain("500");
   });
 
+  it("claims auth_revoked, not refresh_failed, when the vendor rejects the credential", async () => {
+    // A 401/403 from a call made with THIS subject's own token is the vendor
+    // saying the credential is dead — the one fact that separates a revoked
+    // login from an unreachable endpoint, and the one the profile status reads.
+    const result = await refreshClaudeOauthUsageQuota({
+      readCredential: async () => ({ accessToken: "tok", subscriptionType: "max" }),
+      fetchUsage: async () => {
+        throw Object.assign(new Error("oauth/usage responded 401"), {
+          quotaAbsenceReason: "auth_revoked" as const,
+        });
+      },
+      now: () => new Date("2026-07-18T00:00:00Z"),
+    });
+    expect(result.snapshots).toEqual([]);
+    const nativeAbsence = result.absences?.find((a) => a.subject.subject_id === null);
+    expect(nativeAbsence?.reason).toBe("auth_revoked");
+    expect(nativeAbsence?.detail).toContain("401");
+  });
+
   it("claims a refresh_failed absence when an HTTP-200 body carries no parseable quota windows (BACKLOG Q-a)", async () => {
     // An endpoint that answers 200 but with a body that maps to zero quota
     // windows must yield a typed absence, not silent emptiness — the registry

@@ -6,6 +6,7 @@ import type {
   Thread,
   ThreadTurn,
 } from "@claudexor/schema";
+import { isEphemeralRunScope } from "@claudexor/schema";
 import { hashJson, isClaudexorOwnedRuntimePath } from "@claudexor/util";
 import { commandProjection, type CommandStore } from "./command-store.js";
 import { JournalManager, type JournalProjectionSlot } from "./journal-manager.js";
@@ -114,6 +115,9 @@ export class ProjectPartitions implements CommandAuthority {
     }
     const scope = record(input.scope);
     if (scope.kind !== "project") return this.globalCommands.current();
+    // A declared one-shot root is never registered, so INV-035's "no-project
+    // state remains global" governs it (partitionForRoot would 404 instead).
+    if (isEphemeralRunScope(scope)) return this.globalCommands.current();
     const root = stringField(scope, "root");
     return this.partitionForRoot(root).commands.current();
   }

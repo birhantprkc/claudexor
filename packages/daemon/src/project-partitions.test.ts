@@ -583,6 +583,35 @@ describe("ProjectPartitions", () => {
     f.partitions.close();
     f.manager.close();
   });
+
+  it("serves an ephemeral project root from the global partition without registering it", () => {
+    const f = fixture();
+    const root = join(f.root, "disposable-worktree");
+    mkdirSync(root, { recursive: true });
+
+    // Today's behavior for an unregistered root: a typed 404 on the first call.
+    expect(() => f.partitions.forRequest({ scope: { kind: "project", root } })).toThrow(
+      /project is not registered/,
+    );
+
+    const ephemeral = { scope: { kind: "project", root, ephemeral: true } };
+    expect(f.partitions.forRequest(ephemeral)).toBe(f.partitions.forRequest({}));
+    f.partitions.recordRunEvent(ephemeral, {
+      seq: 1,
+      ts: "2026-01-01T00:00:00.000Z",
+      run_id: "run-ephemeral",
+      task_id: "task-ephemeral",
+      type: "run.created",
+      payload: { mode: "agent" },
+    });
+    // The whole point: nothing durable now names the disposable tree, so it is
+    // not registry litter and never becomes a ghost-quarantine candidate.
+    expect(f.projects.current().list()).toEqual([]);
+    expect(f.partitions.quarantineGhostProjects()).toEqual([]);
+
+    f.partitions.close();
+    f.manager.close();
+  });
 });
 
 function fixtureAt(root: string) {

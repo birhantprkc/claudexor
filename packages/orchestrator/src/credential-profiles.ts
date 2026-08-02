@@ -4,6 +4,7 @@ import type {
   CredentialProfile,
   CredentialProfileStatus,
   HarnessEvent,
+  QuotaAbsence,
   QuotaSnapshot,
 } from "@claudexor/schema";
 import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
@@ -67,6 +68,94 @@ export async function selectedProfileAvailability(input: {
     : (result.detail ?? `${result.availability}/${result.verification}`);
 }
 
+/**
+ * Quota sources that are an AUTHENTICATED REQUEST TO THE VENDOR made with the
+ * subject's own credential — the vendor answering is proof the credential is
+ * still honored, and its 401/403 is proof it is not. Locally-read sources
+ * (`claude_statusline`, `codex_rollout`) and mid-run stream evidence
+ * (`claude_api_retry`) are deliberately excluded: they observe usage, not
+ * credential liveness, and treating them as proof would restate the very
+ * over-promise this overlay exists to remove.
+ */
+const VENDOR_AUTHENTICATED_QUOTA_SOURCES: ReadonlySet<QuotaSnapshot["source"]> = new Set([
+  "claude_oauth_usage",
+  "codex_app_server",
+]);
+
+/** What the quota poller's last authenticated vendor contact says about ONE
+ * credential subject's liveness. Null = the poller has no verdict to offer. */
+export type VendorCredentialObservation =
+  | { outcome: "honored"; observed_at: string }
+  | { outcome: "revoked"; observed_at: string; detail: string };
+
+/**
+ * The poller's verdict for one profile, if it has one (INV-135 honesty).
+ *
+ * The quota poller ALREADY calls the vendor once a minute with each profile's
+ * own token; a fresh snapshot from such a call means the credential was
+ * honored, and a typed `auth_revoked` absence means it was rejected. Reading
+ * that existing evidence is why profile verification can be live without a
+ * probe run — a config-dir login has no cheaper liveness test than spending
+ * quota on a mini-run, so building one would cost exactly what it measures.
+ */
+export function vendorCredentialObservation(
+  quota: { snapshots: readonly QuotaSnapshot[]; absences: readonly QuotaAbsence[] },
+  harnessId: string,
+  profileId: string,
+): VendorCredentialObservation | null {
+  const owns = (subject: QuotaSnapshot["subject"]): boolean =>
+    subject.harness === harnessId && (subject.subject_id ?? null) === profileId;
+  const snapshot = quota.snapshots.find(
+    (item) => owns(item.subject) && VENDOR_AUTHENTICATED_QUOTA_SOURCES.has(item.source),
+  );
+  if (snapshot) return { outcome: "honored", observed_at: snapshot.observed_at };
+  const revoked = quota.absences.find(
+    (item) => owns(item.subject) && item.reason === "auth_revoked",
+  );
+  if (revoked) {
+    return {
+      outcome: "revoked",
+      observed_at: revoked.observed_at,
+      detail: revoked.detail ?? "the vendor rejected this profile's credential",
+    };
+  }
+  return null;
+}
+
+/**
+ * Overlay the vendor's verdict onto a locally-probed profile status, so
+ * `verification` means what a router assumes it means.
+ *
+ * The overlay may DOWNGRADE freely — a rejected credential is a fact the local
+ * store cannot see, and it is exactly the case that made a `passed` profile
+ * fail a run one minute later. It may not UPGRADE: a local probe that already
+ * said "this dir is logged in under the wrong method" knows something the usage
+ * endpoint does not, so a successful vendor call only re-stamps provenance on
+ * an already-passing verdict. Absent a verdict the status is returned
+ * untouched, still declaring `local_store`.
+ */
+export function withVendorCredentialObservation(
+  status: CredentialProfileStatus,
+  observation: VendorCredentialObservation | null,
+): CredentialProfileStatus {
+  if (!observation) return status;
+  if (observation.outcome === "revoked") {
+    return {
+      ...status,
+      verification: "failed",
+      verification_source: "vendor",
+      detail: redactSecrets(observation.detail),
+      last_verified_at: observation.observed_at,
+    };
+  }
+  if (status.verification !== "passed") return status;
+  return {
+    ...status,
+    verification_source: "vendor",
+    last_verified_at: observation.observed_at,
+  };
+}
+
 /** One readiness predicate shared by run admission and accounts projection. */
 export function profileStatusAdmits(
   profile: Pick<CredentialProfile, "credential_kind">,
@@ -90,6 +179,7 @@ export async function probeCredentialProfileStatus(
       harness_id: profile.harness_id,
       availability: "unknown",
       verification: "not_run",
+      verification_source: "local_store",
       detail: `harness "${profile.harness_id}" has no profile probe`,
       last_verified_at: null,
     };
@@ -109,6 +199,7 @@ export async function probeCredentialProfileStatus(
       harness_id: profile.harness_id,
       availability: "unknown",
       verification: "not_run",
+      verification_source: "local_store",
       detail: `profile readiness probe failed: ${redactSecrets(
         error instanceof Error ? error.message : String(error),
       )}`,

@@ -4,6 +4,16 @@ import { normalizeReadiness, type HarnessStatus } from "@claudexor/gateway";
 import { probeGitCapability } from "@claudexor/workspace";
 import { noProjectRepoRoot } from "@claudexor/util";
 import { validateModel } from "@claudexor/core";
+import type {
+  CredentialProfile,
+  CredentialProfileStatus,
+  QuotaAbsence,
+  QuotaSnapshot,
+} from "@claudexor/schema";
+import {
+  vendorCredentialObservation,
+  withVendorCredentialObservation,
+} from "@claudexor/orchestrator";
 import {
   harnessAccountsProjection,
   profileAccountIdentity,
@@ -64,13 +74,14 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
       })),
     );
     if (input?.snapshot === true) {
-      const [out, statuses, git, fencedQuota] = await Promise.all([
+      const [probed, statuses, git, fencedQuota] = await Promise.all([
         projectedProfiles,
         buildGateway({ includeFakes: false }).statusAll({ cwd: NO_PROJECT_ROOT, fresh: true }),
         probeGitCapability(),
         quotaRegistry().refreshWithCursor(),
       ]);
       const quota = fencedQuota.response;
+      const out = withVendorVerification(probed, quota);
       return {
         profiles: out,
         harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
@@ -83,14 +94,34 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
         quotaEventCursor: fencedQuota.quotaEventCursor,
       };
     }
-    const out = await projectedProfiles;
+    const quota = quotaRegistry().read();
+    const out = withVendorVerification(await projectedProfiles, quota);
     return {
       profiles: out,
-      harnessAccounts: await harnessAccountsProjection(
-        NO_PROJECT_ROOT,
-        quotaRegistry().read().snapshots,
-        { profiles: out },
-      ),
+      harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
+        profiles: out,
+      }),
     };
   };
+}
+
+/**
+ * Replace each profile's LOCAL verification verdict with the vendor's, wherever
+ * the quota poller already has one. Applied before `harnessAccounts` is built
+ * so the routing identity (`next_up`) and the listed status can never disagree:
+ * a revoked profile must not be advertised as who the next run routes to.
+ */
+function withVendorVerification<
+  T extends { profile: CredentialProfile; status: CredentialProfileStatus },
+>(
+  entries: T[],
+  quota: { snapshots: readonly QuotaSnapshot[]; absences: readonly QuotaAbsence[] },
+): T[] {
+  return entries.map((entry) => ({
+    ...entry,
+    status: withVendorCredentialObservation(
+      entry.status,
+      vendorCredentialObservation(quota, entry.profile.harness_id, entry.profile.profile_id),
+    ),
+  }));
 }

@@ -377,9 +377,10 @@ export const RunFailureCode = z
     "budget_overshoot",
     "cost_unverifiable",
     "delegation_child_drain_timeout",
+    "subscription_window_exhausted",
   ])
   .describe(
-    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons and Delegate child-drain timeout).",
+    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, and a spent subscription quota window whose reopen time is RunFailure.resetsAt).",
   );
 export type RunFailureCode = z.infer<typeof RunFailureCode>;
 
@@ -434,6 +435,17 @@ export const RunFailure = z
       .default([])
       .describe("Event references relevant to the failure."),
     runDir: z.string().nullable().default(null).describe("Run artifact directory."),
+    /** STRUCTURAL reset time. A refusal that only says "resets 2026-08-02T…"
+     * inside safeMessage forces every caller to parse prose to decide when to
+     * come back — the thing typed contracts exist to prevent. */
+    resetsAt: z
+      .string()
+      .datetime({ offset: true })
+      .nullable()
+      .default(null)
+      .describe(
+        "When the refused window reopens (a spent subscription quota window), or null when the failure has no such time. Callers schedule a retry off this field, never off safeMessage.",
+      ),
     nextActions: z.array(z.string()).default([]).describe("Suggested operator next actions."),
   })
   .describe(

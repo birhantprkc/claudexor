@@ -216,6 +216,15 @@ async function fetchUsageDefault(accessToken: string): Promise<unknown> {
     },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
+  // A 401/403 from an endpoint called with THIS subject's own access token is
+  // the vendor stating the credential is no longer honored — the one live
+  // liveness fact the daemon gets for free, without spending a run's quota.
+  // Everything else stays an undiagnosed refresh failure.
+  if (res.status === 401 || res.status === 403) {
+    throw Object.assign(new Error(`oauth/usage responded ${res.status}`), {
+      quotaAbsenceReason: "auth_revoked" as QuotaAbsence["reason"],
+    });
+  }
   if (!res.ok) throw new Error(`oauth/usage responded ${res.status}`);
   return res.json();
 }
@@ -320,10 +329,13 @@ export async function refreshClaudeOauthUsageQuota(
           ),
         );
     } catch (error) {
+      // The fetch path carries its own typed reason for a rejected credential
+      // (auth_revoked); anything untagged stays an undiagnosed refresh failure.
+      const tagged = (error as { quotaAbsenceReason?: QuotaAbsence["reason"] })?.quotaAbsenceReason;
       absences.push(
         claudeOauthAbsence(
           candidate.subjectId,
-          "refresh_failed",
+          tagged ?? "refresh_failed",
           error instanceof Error ? error.message : String(error),
           now(),
         ),

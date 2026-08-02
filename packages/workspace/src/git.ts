@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,7 +7,7 @@ import {
   runCaptureRaw,
   WorkspaceError,
 } from "@claudexor/core";
-import { containsSecretLikeToken } from "@claudexor/util";
+import { containsSecretLikeToken, isClaudexorOwnedRuntimePath } from "@claudexor/util";
 import {
   initializeGitRepository,
   type EnsureGitRepositoryDependencies,
@@ -517,7 +517,38 @@ export async function reversePatchAndIndexProtected(
   return runProtectedApply(repo, diff, { index: true, reverse: true });
 }
 
+/** Registered worktree paths of `repo` (main tree first), from porcelain output. */
+async function worktreeList(repo: string): Promise<string[]> {
+  const r = await git(repo, ["worktree", "list", "--porcelain"]);
+  if (r.code !== 0) return [];
+  return r.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter((path) => path.length > 0);
+}
+
+/**
+ * Prune stale worktree registrations — but ONLY when every stale one is ours.
+ *
+ * `git worktree prune` is REPO-WIDE: it deregisters every worktree whose
+ * directory is missing at that instant, across the whole shared git dir. When
+ * another writer drives Claudexor from its own worktrees of the same
+ * repository, a tree of theirs that is momentarily absent (being recreated, on
+ * an unmounted volume) is indistinguishable from dead debris — and pruning it
+ * silently unregisters someone else's live workspace. Claudexor's own envelope
+ * trees live under the Claudexor runtime root, so that is the whole test.
+ *
+ * Leaving OUR stale admin entry behind is cheap (it costs a directory under
+ * `.git/worktrees` until a prune is safe again, and `worktreeAddExisting`
+ * prunes explicitly when it must reuse the name). Deregistering a worktree we
+ * do not own is not recoverable by us at all. Refusing is the honest trade.
+ */
 export async function worktreePrune(repo: string): Promise<void> {
+  for (const path of await worktreeList(repo)) {
+    if (existsSync(path) || isClaudexorOwnedRuntimePath(path)) continue;
+    return;
+  }
   await git(repo, ["worktree", "prune"]);
 }
 

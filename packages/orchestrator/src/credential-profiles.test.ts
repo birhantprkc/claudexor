@@ -15,6 +15,8 @@ import {
   selectedProfileAvailability,
   staticRotationCandidates,
   profileStatusAdmits,
+  vendorCredentialObservation,
+  withVendorCredentialObservation,
 } from "./credential-profiles.js";
 import { HarnessRunSpec as HarnessRunSpecSchema } from "@claudexor/schema";
 import type { QuotaSnapshot } from "@claudexor/schema";
@@ -61,6 +63,7 @@ describe("selectedProfileAvailability", () => {
         harness_id: "claude",
         availability: "available",
         verification: "failed",
+        verification_source: "local_store",
         detail: "wrong credential route",
         last_verified_at: null,
       }),
@@ -75,6 +78,7 @@ describe("selectedProfileAvailability", () => {
         harness_id: "claude",
         availability: "available",
         verification: "not_run",
+        verification_source: "local_store",
         detail: "native session unverified",
         last_verified_at: null,
       }),
@@ -95,6 +99,7 @@ describe("selectedProfileAvailability", () => {
         harness_id: "claude",
         availability: "available",
         verification: "not_run",
+        verification_source: "local_store",
         detail: "secret present",
         last_verified_at: null,
       }),
@@ -124,6 +129,7 @@ describe("selectedProfileAvailability", () => {
         harness_id: "claude",
         availability: "unavailable",
         verification: "failed",
+        verification_source: "local_store",
         detail: `credential rejected ${token}`,
         last_verified_at: null,
       }),
@@ -680,5 +686,103 @@ describe("nextUpIdentity readiness parity", () => {
       route: "local_session",
     });
     expect(nextUpIdentity(input)).toEqual({ kind: "profile", profileId: "a" });
+  });
+});
+
+describe("vendor credential observation (honest profile verification)", () => {
+  const local = {
+    profile_id: "work",
+    harness_id: "claude",
+    availability: "available",
+    verification: "passed",
+    verification_source: "local_store",
+    detail: "claude.ai login verified in the profile config dir",
+    last_verified_at: "2026-07-17T11:00:00Z",
+  } as const;
+
+  const revoked = {
+    subject: {
+      harness: "claude",
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: "work",
+    },
+    reason: "auth_revoked",
+    detail: "oauth/usage responded 401",
+    observed_at: "2026-07-17T12:00:00Z",
+  } as const;
+
+  it("reads a successful authenticated poll as the vendor honoring the credential", () => {
+    expect(
+      vendorCredentialObservation(
+        { snapshots: [snap("work", 0.1)], absences: [] },
+        "claude",
+        "work",
+      ),
+    ).toEqual({ outcome: "honored", observed_at: "2026-07-17T12:00:00Z" });
+  });
+
+  it("ignores a snapshot from a locally-read source — usage is not credential liveness", () => {
+    const statusline = { ...snap("work", 0.1), source: "claude_statusline" as const };
+    expect(
+      vendorCredentialObservation({ snapshots: [statusline], absences: [] }, "claude", "work"),
+    ).toBeNull();
+  });
+
+  it("has no verdict for another subject's evidence", () => {
+    expect(
+      vendorCredentialObservation({ snapshots: [], absences: [revoked] }, "claude", "personal"),
+    ).toBeNull();
+    expect(
+      vendorCredentialObservation({ snapshots: [], absences: [revoked] }, "codex", "work"),
+    ).toBeNull();
+  });
+
+  it("downgrades a locally-passing profile the vendor has rejected", () => {
+    const status = withVendorCredentialObservation(
+      local,
+      vendorCredentialObservation({ snapshots: [], absences: [revoked] }, "claude", "work"),
+    );
+    expect(status).toMatchObject({
+      verification: "failed",
+      verification_source: "vendor",
+      last_verified_at: "2026-07-17T12:00:00Z",
+    });
+    // The whole point of task 4: admission must now refuse the dead account.
+    expect(profileStatusAdmits({ credential_kind: "config_dir_login" }, status)).toBe(false);
+  });
+
+  it("re-stamps provenance on a passing profile the vendor answered for", () => {
+    const status = withVendorCredentialObservation(
+      local,
+      vendorCredentialObservation(
+        { snapshots: [snap("work", 0.1)], absences: [] },
+        "claude",
+        "work",
+      ),
+    );
+    expect(status).toMatchObject({
+      verification: "passed",
+      verification_source: "vendor",
+      last_verified_at: "2026-07-17T12:00:00Z",
+    });
+  });
+
+  it("never upgrades a locally-failed verdict — the local probe knows more", () => {
+    const wrongMethod = { ...local, verification: "failed" } as const;
+    expect(
+      withVendorCredentialObservation(
+        wrongMethod,
+        vendorCredentialObservation(
+        { snapshots: [snap("work", 0.1)], absences: [] },
+        "claude",
+        "work",
+      ),
+      ),
+    ).toEqual(wrongMethod);
+  });
+
+  it("leaves the status untouched when the poller has no verdict", () => {
+    expect(withVendorCredentialObservation(local, null)).toEqual(local);
   });
 });

@@ -98,10 +98,25 @@ export const CredentialProfileStatus = z
     harness_id: Id,
     availability: AuthAvailability,
     verification: AuthVerification,
+    /** WHAT the `verification` verdict is worth. `local_store` means only that
+     * this profile's own credential material is present and well-formed where
+     * it should be — it cannot tell a live token from a revoked one.
+     * `vendor` means the vendor itself answered a request made with THIS
+     * profile's credential. A router that needs "configured AND healthy" must
+     * read this alongside `verification`; `passed` + `local_store` promises
+     * strictly less than it sounds. */
+    verification_source: z
+      .enum(["local_store", "vendor"])
+      .default("local_store")
+      .describe(
+        "How the verification verdict was reached: local_store = the profile's credential material is present locally (says nothing about the token being live); vendor = the vendor answered a request made with this profile's own credential.",
+      ),
     detail: z.string().optional().describe("Redacted human-readable probe evidence."),
     last_verified_at: IsoTimestamp.nullable()
       .default(null)
-      .describe("When a probe last verified this profile; null = never verified."),
+      .describe(
+        "When the verification verdict was established, by the method named in verification_source; null = never verified.",
+      ),
   })
   .strict()
   .describe("Doctor-owned readiness projection for one credential profile; never durable config.");

@@ -285,6 +285,7 @@ function realLikeAdapter(id: string, family: ProviderFamily = "openai"): Harness
         harness_id: id,
         availability: "available",
         verification: "passed",
+        verification_source: "local_store",
         detail: "fixture profile verified",
         last_verified_at: new Date().toISOString(),
       };
@@ -350,6 +351,7 @@ function diffImplementer(
         harness_id: id,
         availability: "available",
         verification: "passed",
+        verification_source: "local_store",
         detail: "fixture profile verified",
         last_verified_at: new Date().toISOString(),
       };
@@ -675,6 +677,7 @@ function askAdapter(
         harness_id: id,
         availability: "available",
         verification: "passed",
+        verification_source: "local_store",
         detail: "fixture profile verified",
         last_verified_at: new Date().toISOString(),
       };
@@ -3487,6 +3490,7 @@ describe("Orchestrator", () => {
             harness_id: "limited",
             availability: profile.profile_id === "b" ? "unavailable" : "available",
             verification: profile.profile_id === "b" ? "failed" : "passed",
+            verification_source: "local_store",
             detail:
               profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
             last_verified_at: new Date().toISOString(),
@@ -3775,6 +3779,7 @@ describe("Orchestrator", () => {
         harness_id: "asker",
         availability: "available",
         verification: "not_run",
+        verification_source: "local_store",
         detail: "secret stored",
         last_verified_at: null,
       });
@@ -3906,6 +3911,7 @@ describe("Orchestrator", () => {
         harness_id: "asker",
         availability: "available",
         verification: "not_run",
+        verification_source: "local_store",
         detail: "secret stored",
         last_verified_at: null,
       });
@@ -3956,6 +3962,7 @@ describe("Orchestrator", () => {
         harness_id: "asker",
         availability: "unavailable",
         verification: "failed",
+        verification_source: "local_store",
         detail: "profile login expired",
         last_verified_at: null,
       });
@@ -4040,6 +4047,7 @@ describe("Orchestrator", () => {
           harness_id: "asker",
           availability: "available",
           verification: "passed",
+          verification_source: "local_store",
           detail: "fixture profile verified",
           last_verified_at: new Date().toISOString(),
         };
@@ -4124,6 +4132,7 @@ describe("Orchestrator", () => {
             harness_id: "limited",
             availability: "available",
             verification: "passed",
+            verification_source: "local_store",
             detail: "fixture profile verified",
             last_verified_at: new Date().toISOString(),
           };
@@ -4226,6 +4235,7 @@ describe("Orchestrator", () => {
           harness_id: "asker",
           availability: profile.profile_id === "b" ? "unavailable" : "available",
           verification: profile.profile_id === "b" ? "failed" : "passed",
+          verification_source: "local_store",
           detail: profile.profile_id === "b" ? "profile login expired" : "fixture profile verified",
           last_verified_at: new Date().toISOString(),
         };
