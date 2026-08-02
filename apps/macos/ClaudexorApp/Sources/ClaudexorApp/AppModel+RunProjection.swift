@@ -17,7 +17,10 @@ extension AppModel {
             phase: RunPhase(api: summary.state),
             project: projectName,
             harnesses: families,
-            n: summary.n ?? max(1, families.count),
+            // `harnesses` is the eligible/observed pool, not proof that the
+            // run was a race. Only the typed race strategy may project a
+            // Best-of count when an older summary omitted `n`.
+            n: summary.n ?? (summary.strategy == "race" ? max(1, families.count) : 1),
             createdAt: .now, updatedAt: .now,
             spendUsd: summary.spendUsd ?? 0, capUsd: summary.paidBudget?.finiteMaxUsd ?? 0,
             spendKnown: summary.spendUsd != nil,

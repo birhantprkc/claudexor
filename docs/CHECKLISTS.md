@@ -161,8 +161,9 @@ pnpm test
 - Exercise a plan with many open questions at compact height: the plan question
   card scrolls its questions/options lazily inside a bounded middle while the
   header and Implement/answer controls stay visible and clickable. Restart the
-  app, reopen the owning thread, and verify the plan's open questions and prior
-  answers restore from the run artifact (never a blank chat).
+  app, reopen the owning thread, and verify open questions restore from the plan
+  artifact while an accepted answer restores as a read-only receipt from its
+  typed answer-turn relation (never a blank or re-submittable card).
 - Plan loop: readiness is derived server-side from `final/questions.json`
   (`ready`/`needs_answers`/`unverified`); the card renders that projection and
   never re-parses plan text. Implement freezes the plan (sha256 on the turn);

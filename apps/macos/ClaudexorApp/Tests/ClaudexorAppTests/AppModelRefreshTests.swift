@@ -1931,6 +1931,60 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func ordinaryPlanSendPreservesPerHarnessModelsEffortAndAuthRoute() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let model = AppModel(client: GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
+            session: URLSession(configuration: config)
+        ), requestNotificationAuthorization: false)
+        let bodyBox = CreateBodyBox()
+
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/threads/thread-routing/turns"):
+                bodyBox.data = appTestRequestBody(request)
+                return (
+                    appResponse(for: request, status: 202),
+                    Data(#"{"jobId":"job-routing","state":"queued","error":null}"#.utf8)
+                )
+            case ("GET", "/v2/runs"):
+                return (appResponse(for: request), Data(#"{"runs":[]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let target = TurnStartTarget.existing(
+            locationID: .local,
+            threadID: "thread-routing",
+            repoRoot: "/tmp/project",
+            workspaceMode: "in_place",
+            eligibleHarnesses: ["codex", "claude"])
+        model.runApplicabilityProjections[.local] = .ready(
+            try testRunApplicabilityResponse(root: "/tmp/project"))
+        var options = TurnOptions()
+        options.models = ["codex": "gpt-5.6-terra", "claude": "claude-opus-5"]
+        options.authRoute = "subscription"
+        options.effort = "high"
+
+        let sent = await model.composerSend(
+            prompt: "Plan this change",
+            mode: .plan,
+            options: options,
+            target: target)
+        let request = try JSONDecoder().decode(
+            ThreadTurnRequest.self, from: #require(bodyBox.data))
+
+        #expect(sent)
+        #expect(request.mode == "plan")
+        #expect(request.models == options.models)
+        #expect(request.effort == "high")
+        #expect(request.authPreference == "subscription")
+    }
+
+    @MainActor
     @Test func lifecycleRefreshTargetsOneExactSourceAndPreservesCatalogState() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

@@ -33,7 +33,9 @@ export const PlanQuestion = z
     allow_text: z
       .boolean()
       .default(false)
-      .describe("True when a free-text answer is accepted (text questions)."),
+      .describe(
+        "True when free text is accepted as a complete answer, including as an alternative to single/multi options.",
+      ),
   })
   .strict()
   .describe("One open question surfaced by a plan revision.");

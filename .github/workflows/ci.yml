@@ -192,6 +192,6 @@ jobs:
         working-directory: apps/macos/ClaudexorKit
         run: swift test
 
-      - name: Swift build (ClaudexorApp)
+      - name: Swift tests and build (ClaudexorApp)
         working-directory: apps/macos/ClaudexorApp
-        run: swift build
+        run: swift test && swift build

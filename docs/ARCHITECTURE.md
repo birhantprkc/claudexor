@@ -1094,6 +1094,8 @@ turns in the same conversation, not a separate session identity.
 The open questions themselves ride the SAME projection: `ControlRunDetail`
 carries `planQuestions` (the parsed `PlanQuestion[]`) beside `planReadiness`,
 from one artifact read — so surfaces RENDER questions without re-parsing.
+Every parsed question accepts the operator's own words as a complete answer;
+single/multi options are suggestions rather than a forced closed vocabulary.
 The interactive CLI (a TTY plan turn on a thread) offers to answer inline
 (numbered pick for `single`, comma-separated for `multi`, free line for `text`,
 blank to skip) and submits the composed answers as an ordinary follow-up plan
@@ -1109,6 +1111,15 @@ normally; the user's next prompt is an ordinary follow-up plan turn. ACP's
 `session/requestPermission` bridge stays reserved for single-choice RUN-TIME
 interactions (the SDK 1.2.x has no multi-select/free-text typed input, so the
 end-of-turn question batch is rendered as text rather than a faked typed form).
+
+An answer follow-up carries `answersPlanRunId`, a typed relation to the plan
+whose questions it answers. The Control API accepts it only for a Plan turn
+against the same thread's current head and rejects a second accepted/queued or
+retryable answer turn. The relation is persisted on `ThreadTurn` and projected
+as `answersPlanRunId`, so the macOS card restores a read-only submitted receipt
+after restart or remote reconnect without parsing prompt text. A non-retryable
+pre-enqueue refusal remains resubmittable; retryable refusals keep their own
+exact-turn Retry path.
 
 Implement is a normal agent thread turn that carries `planRunId`
 (`POST /v2/threads/:id/turns`). The server FREEZES the referenced plan: it reads

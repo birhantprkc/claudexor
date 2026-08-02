@@ -276,6 +276,23 @@ describe("EffortHint is an OPEN vocabulary, bounded by shape only", () => {
 });
 
 describe("Control API schemas", () => {
+  it("accepts typed plan-answer provenance only on the thread-turn boundary", () => {
+    expect(
+      ControlThreadTurnRequest.safeParse({
+        prompt: "answers",
+        mode: "plan",
+        answersPlanRunId: "run-plan",
+      }).success,
+    ).toBe(true);
+    expect(
+      ControlRunStartRequest.safeParse({
+        prompt: "answers",
+        mode: "plan",
+        answersPlanRunId: "run-plan",
+      }).success,
+    ).toBe(false);
+  });
+
   it("keeps the frozen plan reference server-owned on the thread-turn boundary", () => {
     expect(
       ControlThreadTurnRequest.safeParse({

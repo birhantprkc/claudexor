@@ -17,6 +17,9 @@ struct TurnCard: View {
     @Environment(AppModel.self) private var model
     let turn: ThreadTurnInfo
     let target: TurnStartTarget
+    /// Current per-turn routing choices shared with plan-card actions. Strategy,
+    /// access, and review controls are deliberately absent.
+    let routingOptions: TurnOptions
     @State private var actionError: String?
     /// Set after a successful accept-risk decision so the apply affordance appears
     /// immediately; the SERVER gate still owns whether apply succeeds.
@@ -35,9 +38,20 @@ struct TurnCard: View {
         turn.runId.flatMap { model.task($0, at: target.locationID) }
     }
 
+    private var planImplementAccess: AccessProfile {
+        model.effectiveThreadAccess.flatMap(AccessProfile.init(wire:))
+            ?? model.composerAccessDefault
+    }
+
+    private var planImplementOptions: TurnOptions {
+        var options = routingOptions
+        options.access = planImplementAccess.wire
+        return options
+    }
+
     private var planImplementBlocker: String? {
         model.turnStartAdmission(
-            target: target, mode: .agent, options: .init()).interactionBlocker
+            target: target, mode: .agent, options: planImplementOptions).interactionBlocker
     }
 
     /// A decision-flow run applies from its CHAT RECEIPT (decide → apply inline);
@@ -143,7 +157,25 @@ struct TurnCard: View {
                 // D17: a plan that came back needs_answers surfaces its open
                 // questions inline; answering submits a follow-up plan turn.
                 if run.mode == .plan, run.planReadiness?.state == "needs_answers", !run.planQuestions.isEmpty {
-                    PlanQuestionCard(questions: run.planQuestions, target: target)
+                    let submitted = PlanAnswerSubmission.acceptedTurn(
+                        sourcePlanRunId: runId,
+                        turns: model.selectedThreadDetail?.turns ?? [])
+                    if submitted != nil || model.selectedThreadDetail?.thread.headRunId == runId {
+                        PlanQuestionCard(
+                            questions: run.planQuestions,
+                            sourcePlanRunId: runId,
+                            submittedPrompt: submitted?.prompt,
+                            target: target,
+                            routingOptions: routingOptions)
+                    } else {
+                        Label(
+                            "Questions superseded by a later turn",
+                            systemImage: "arrow.turn.down.right"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Answer the questions on the latest Plan turn instead.")
+                    }
                 }
                 // The interactive "Implement plan" affordance stays inline (owner).
                 if let result = turn.run?.result, result.kind == "plan" {
@@ -274,6 +306,10 @@ struct TurnCard: View {
                 Label("\(result.blockers) blocker\(result.blockers == 1 ? "" : "s")", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
+            Label("Agent · \(planImplementAccess.label)", systemImage: planImplementAccess.glyph)
+                .font(.caption)
+                .foregroundStyle(Theme.status(.caution))
+                .help("Implement starts a write-capable Agent turn with \(planImplementAccess.label.lowercased()) access.")
             Spacer()
             // D17: Implement follows the server plan-readiness gate. Open questions
             // ⇒ the primary path is the answer card; the only way past is the
@@ -286,7 +322,7 @@ struct TurnCard: View {
                             || model.isThreadBusy(target.threadID, at: target.locationID)
                             || planImplementBlocker != nil)
                     .help(planImplementBlocker
-                        ?? "Override the plan-readiness gate and implement with questions still open")
+                        ?? "Start an Agent turn with \(planImplementAccess.label.lowercased()) access and override the plan-readiness gate although questions remain")
             } else {
                 Button(implementingPlan ? "Implementing…" : "Implement plan") { implementPlan(override: false) }
                     .buttonStyle(.borderedProminent).controlSize(.small)
@@ -294,7 +330,8 @@ struct TurnCard: View {
                         implementingPlan
                             || model.isThreadBusy(target.threadID, at: target.locationID)
                             || planImplementBlocker != nil)
-                    .help(planImplementBlocker ?? "Run an agent turn that implements this plan")
+                    .help(planImplementBlocker
+                        ?? "Start an Agent turn with \(planImplementAccess.label.lowercased()) access to implement this plan")
             }
         }
     }
@@ -443,7 +480,8 @@ struct TurnCard: View {
     private func implementPlan(override: Bool) {
         guard let runId = turn.runId else { return }
         implementingPlan = true
-        var options = TurnOptions()
+        // Bind the request to the same write scope disclosed beside the button.
+        var options = planImplementOptions
         options.overridePlanReadiness = override
         Task {
             await model.composerSend(prompt: "Implement this plan.", mode: .agent,

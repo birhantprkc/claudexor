@@ -276,10 +276,11 @@ struct SettingsLocationSaveTests {
         model.settingsStatus = "Visible location status"
         let requestArrived = SettingsLocationCallCounter()
         let releaseRequest = DispatchSemaphore(value: 0)
+        defer { releaseRequest.signal() }
         SettingsLocationURLProtocol.handler = { request in
             requestedPorts.append(request.url?.port)
             requestArrived.increment()
-            _ = releaseRequest.wait(timeout: .now() + 5)
+            releaseRequest.wait()
             return (
                 HTTPURLResponse(
                     url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",

@@ -48,17 +48,17 @@ enum TurnPresentation {
         reason: String?,
         harnesses: [HarnessFamily],
         n: Int,
+        isRace: Bool,
         retryLabel: String?,
         reviewNeedsDecision: Bool,
         waitingOnUser: Bool
     ) -> StatusLine {
-        let racing = n > 1 || harnesses.count > 1
         let identity: String?
         let family: HarnessFamily?
-        if racing {
-            identity = "Best-of \(max(n, harnesses.count))"
+        if isRace {
+            identity = "Best-of \(max(1, n))"
             family = nil
-        } else if let single = harnesses.first {
+        } else if harnesses.count == 1, let single = harnesses.first {
             identity = single.label
             family = single
         } else {

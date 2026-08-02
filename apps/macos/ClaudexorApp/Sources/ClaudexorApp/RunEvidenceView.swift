@@ -34,9 +34,33 @@ struct RunEvidenceView: View {
     }
 
     private func diagnosticsContent(_ task: TaskRun) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        let runID = RunInspectCommand.diagnosticRunID(
+            stableID: task.id, resolvedRunID: task.resolvedRunId)
+        return VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             SectionLabel("Diagnostics summary", systemImage: "stethoscope")
             HStack(spacing: Theme.Spacing.sm) {
+                Button {
+                    copyToPasteboard(runID)
+                } label: {
+                    Label("Copy Run ID", systemImage: "number")
+                }
+                .buttonStyle(.bordered)
+                .help("Copy the full run id used by inspect, follow, apply, and decision commands.")
+                Button {
+                    if let command = RunInspectCommand.command(
+                        runID: runID, locationID: locationID) {
+                        copyToPasteboard(command)
+                    }
+                } label: {
+                    Label("Copy Inspect Command", systemImage: "terminal")
+                }
+                .buttonStyle(.bordered)
+                .disabled(RunInspectCommand.command(
+                    runID: runID, locationID: locationID) == nil)
+                .help(RunInspectCommand.command(
+                    runID: runID, locationID: locationID) == nil
+                    ? "The SwiftPM development build has no bundled CLI; copy the run id instead."
+                    : "Copy a directly runnable command using the full run id.")
                 Button {
                     copyDiagnostics(task)
                 } label: {
@@ -199,6 +223,10 @@ struct RunEvidenceView: View {
         if let runDir = task.runDir { text += "\nrunDir: \(runDir)" }
         if let engineError = task.engineError { text += "\n\n# Engine Error\n\(engineError)" }
         if let diagnostics = task.diagnosticText { text += "\n\n# Diagnostics\n\(diagnostics)" }
+        copyToPasteboard(text)
+    }
+
+    private func copyToPasteboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }

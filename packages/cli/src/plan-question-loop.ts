@@ -146,6 +146,7 @@ export async function runPlanQuestionLoop(opts: {
       {
         prompt: answerPrompt,
         mode: "plan",
+        answersPlanRunId: currentRunId,
         threadId,
         scope: { kind: "project", root: process.cwd() },
         execution: { isolation: "envelope" },

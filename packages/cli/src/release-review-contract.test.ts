@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { FROZEN_REVIEW_EVIDENCE_FILES } from "../../context/src/evidence.js";
+import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import { describe, expect, it } from "vitest";
 import {
   ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS,
@@ -31,7 +32,7 @@ import { bundleReleaseReviewVerifier } from "../../../scripts/lib/release-review
 const candidateSha = "a".repeat(40);
 const candidateTree = "b".repeat(40);
 const digest = "d".repeat(64);
-const expected = { candidateSha, candidateTree, candidateVersion: "3.2.0" };
+const expected = { candidateSha, candidateTree, candidateVersion: CLAUDEXOR_VERSION };
 const repoRoot = resolve(import.meta.dirname, "../../..");
 const sealer = resolve(repoRoot, "scripts/seal-owner-review-attestation.mjs");
 const fullGateReceiptRunner = resolve(repoRoot, "scripts/run-full-gate-receipt.mjs");
@@ -63,7 +64,7 @@ function fixture() {
     authMode: "local_session",
     authSwitched: false,
     effortHonored: true,
-    reviewRuntimeVersion: "3.2.0",
+    reviewRuntimeVersion: CLAUDEXOR_VERSION,
     reviewRuntimeBuildSha: candidateSha,
     reviewRuntimeEntrySha256: digest,
     startedAt: `2026-07-30T00:00:0${index}.000Z`,
@@ -268,8 +269,8 @@ describe("native owner-review publishing contract", () => {
   it("keeps input, path and strict UTF-8 checks small and fail-closed", () => {
     expect(validateReleaseInput("candidate", candidateSha).ok).toBe(true);
     expect(validateReleaseInput("candidate", "main").ok).toBe(false);
-    expect(validateReleaseInput("publish", "v3.2.0").ok).toBe(true);
-    expect(validateReleaseInput("publish", "v3.2.0-rc.1").ok).toBe(false);
+    expect(validateReleaseInput("publish", `v${CLAUDEXOR_VERSION}`).ok).toBe(true);
+    expect(validateReleaseInput("publish", `v${CLAUDEXOR_VERSION}-rc.1`).ok).toBe(false);
     expect(pathIsWithin("/candidate", "/candidate/evidence")).toBe(true);
     expect(pathIsWithin("/candidate", "/candidate-sibling")).toBe(false);
     expect(() => decodeReviewUtf8(Buffer.from([0xc3, 0x28]))).toThrow(/not valid UTF-8/);
@@ -321,7 +322,7 @@ describe("native owner-review sealer", () => {
       git("config", "user.email", "fixture@example.invalid");
       git("config", "user.name", "fixture");
       write(join(candidate, "file.txt"), "base\n");
-      write(join(candidate, "package.json"), json({ version: "3.2.0" }));
+      write(join(candidate, "package.json"), json({ version: CLAUDEXOR_VERSION }));
       git("add", "file.txt");
       git("add", "package.json");
       git("commit", "-qm", "base");

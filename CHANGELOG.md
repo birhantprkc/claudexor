@@ -3,6 +3,20 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.2.1** (2026-08-02): a focused macOS plan-answer and diagnostics repair,
+  based on reports from Walter Siamruk (#102–#108). Composer-selected models,
+  effort, and auth route now reach turns started from plan cards; Implement plan
+  names and binds its Agent write scope; multi-harness non-race runs no longer
+  claim a Best-of result; and an unpinned account has one stable Automatic
+  identity. Plan option chips are suggestions, including on saved 3.2.0 runs;
+  every required answer has visible state, card text is selectable, and a
+  durable typed relation restores the exact submitted receipt after reload
+  while preventing duplicate turns. Diagnostics can copy the full run id or a
+  directly runnable bundled/remote inspect command. CI now executes the
+  ClaudexorApp tests (#91). GitHub Actions move to checkout 7.0.1,
+  pnpm/action-setup 6.0.9, and download-artifact 8.0.1; the one Node 20 timer
+  fixture exposed during refresh now uses deterministic fake time.
+
 - **v3.2.0** (2026-07-29) — an eight-pull-request batch: remote execution, a
   canonical run receipt, and the toolchain moved forward. Remote SSH
   execution (#82, kazzand): a thread can bind to a concrete `~/.ssh/config`

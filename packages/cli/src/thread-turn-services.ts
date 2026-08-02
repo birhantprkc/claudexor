@@ -19,6 +19,7 @@ export function threadTurnServices(threads: ProjectPartitions, resources: Resour
       options: {
         kind?: unknown;
         parentRunId?: string | null;
+        answersPlanRunId?: string | null;
         planRunId?: string | null;
         planHash?: string | null;
         planOverridden?: boolean;
@@ -29,6 +30,7 @@ export function threadTurnServices(threads: ProjectPartitions, resources: Resour
       threads.createTurn(id, prompt, {
         kind: options.kind as any,
         parentRunId: options.parentRunId,
+        answersPlanRunId: options.answersPlanRunId,
         planRunId: options.planRunId,
         planHash: options.planHash,
         planOverridden: options.planOverridden,

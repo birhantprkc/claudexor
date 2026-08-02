@@ -146,7 +146,10 @@ function toQuestion(
     kind: resolved,
     prompt: promptText,
     options: isText ? [] : options,
-    allow_text: isText,
+    // Every question accepts the operator's own words as a complete answer.
+    // This keeps the plan lifecycle aligned with the live interaction card and
+    // prevents a forced chip pick when none of the planner's options fits.
+    allow_text: true,
   };
 }
 

@@ -5,6 +5,7 @@
     "threadId": "th-1",
     "runId": "run-6",
     "parentRunId": null,
+    "answersPlanRunId": null,
     "planRunId": "run-plan-1",
     "planHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "planReadinessOverridden": true,

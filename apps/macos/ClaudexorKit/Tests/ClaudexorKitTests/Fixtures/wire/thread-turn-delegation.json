@@ -5,6 +5,7 @@
     "threadId": "th-1",
     "runId": "run-delegate-parent",
     "parentRunId": null,
+    "answersPlanRunId": null,
     "planRunId": null,
     "planHash": null,
     "planReadinessOverridden": false,

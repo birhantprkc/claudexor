@@ -1250,6 +1250,9 @@ export const ControlThreadTurn = z
     threadId: Id.describe("Thread the turn belongs to."),
     runId: Id.nullable().default(null).describe("Run backing this turn; null while unbound."),
     parentRunId: Id.nullable().default(null).describe("Run this turn follows up on, when any."),
+    answersPlanRunId: Id.nullable()
+      .default(null)
+      .describe("Plan run whose open questions this follow-up turn answers."),
     /** Set when this turn implements an approved plan from an earlier run. */
     planRunId: Id.nullable()
       .default(null)

@@ -32,6 +32,7 @@ public struct LocalRuntimeClosureSelection: Sendable, Equatable {
 enum DaemonLauncher {
     static var bundledNode: URL? { Bundle.main.resourceURL?.appendingPathComponent("node") }
     static var bundledDaemon: URL? { Bundle.main.resourceURL?.appendingPathComponent("claudexord.bundle.cjs") }
+    static var bundledCLI: URL? { Bundle.main.resourceURL?.appendingPathComponent("claudexor.bundle.cjs") }
     static var bundledVersion: String? {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }

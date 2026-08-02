@@ -76,6 +76,16 @@ describe("ThreadStore", () => {
     expect(t2.parent_run_id).toBe("run-1");
   });
 
+  it("persists the plan-answer provenance relation across a journal restart", () => {
+    const { root, journal, s } = store();
+    const thread = s.createThread({ repoRoot: "/tmp/proj" });
+    const plan = s.createTurn(thread.id, "make a plan");
+    s.bindTurnRun(plan.id, "run-plan");
+    const answer = s.createTurn(thread.id, "answers", { answersPlanRunId: "run-plan" });
+    expect(answer.answers_plan_run_id).toBe("run-plan");
+    expect(reload(root, journal).getTurn(answer.id)?.answers_plan_run_id).toBe("run-plan");
+  });
+
   it("persists the delivered lineage watermark across a journal restart", () => {
     const { root, journal, s } = store();
     const thread = s.createThread({ repoRoot: "/tmp/proj", workspace: "isolated" });

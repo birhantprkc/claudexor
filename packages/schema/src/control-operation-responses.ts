@@ -120,6 +120,11 @@ export const ControlThreadTurnRequest = ControlRunStartRequest.omit({
   planRef: true,
 })
   .extend({
+    /** Source plan whose open questions this follow-up answers. The thread
+     * route validates ownership/current-head/duplicate submission. */
+    answersPlanRunId: Id.optional().describe(
+      "Plan run whose open questions this follow-up turn answers.",
+    ),
     /** Implement-plan only: explicitly proceed although the plan still has
      * open questions (D17). Recorded on the turn for provenance. */
     overridePlanReadiness: z

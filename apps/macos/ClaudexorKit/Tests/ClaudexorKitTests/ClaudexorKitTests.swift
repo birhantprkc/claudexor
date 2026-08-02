@@ -822,6 +822,21 @@ import Testing
         #expect(plainObj?["models"] == nil)
     }
 
+    @Test func threadTurnPlanAnswerProvenanceEncodesAndLegacyDecodeDefaultsNil() throws {
+        let request = ThreadTurnRequest(
+            prompt: "answers",
+            mode: "plan",
+            answersPlanRunId: "run-plan")
+        let encoded = try JSONEncoder().encode(request)
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        #expect(object?["answersPlanRunId"] as? String == "run-plan")
+
+        let legacy = try JSONDecoder().decode(
+            ThreadTurnInfo.self,
+            from: Data(#"{"id":"tn-1","threadId":"th-1","runId":null,"parentRunId":null,"planRunId":null,"kind":"followup","prompt":"x","run":null,"createdAt":"2026-08-02T00:00:00Z"}"#.utf8))
+        #expect(legacy.answersPlanRunId == nil)
+    }
+
     @Test func startRunRequestEncodesHarnessScopedModels() throws {
         let req = StartRunRequest(prompt: "x", models: ["codex": "gpt-5.5"])
         let obj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(req)) as? [String: Any]
