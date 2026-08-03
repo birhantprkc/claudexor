@@ -3,6 +3,38 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.7** (2026-08-03): the Ouroboros-integration line, rebased onto the
+  3.2.1 release. Claudexor's control endpoint now resolves on Windows:
+  `defaultSocketPath()` gained a `win32` branch returning the named pipe
+  `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
+  where it previously always built a Unix-style `.sock` path that could not be
+  bound — the digest of the daemon dir keeps concurrent daemons with distinct
+  `CLAUDEXOR_CONFIG_DIR`s on distinct endpoints, and the `CLAUDEXOR_DAEMON_SOCK`
+  override is unchanged. Downstream platform gates that assert a per-platform
+  endpoint depend on this branch existing. Alongside it the cancel path stops
+  lying on Windows: `resolveKillTreeStrategy` names its mechanism once
+  (`posix_process_group` everywhere, `windows_taskkill` on win32), the win32 leg
+  issues one pinned `taskkill /T /F` while the root still probes alive, and
+  because no group probe can prove whole-tree death there the outcome is the
+  typed unconfirmed reason rather than a false CONFIRMED. A readonly cursor run
+  is now genuinely read-only — it dispatches onto `--mode ask`, the only mode
+  that CLI documents as withholding the write tools (under the previous argv a
+  readonly agent created a file on instruction), and the manifest stops claiming
+  `fs_sandbox` for a mechanism that is really a tool allowlist. Confinement proof
+  gained the control it was missing: `proveConfinementDenial` credited nearly
+  every nonzero exit as a proven denial, so a Seatbelt profile that failed to
+  apply or failed to compile recorded a `verified_denied_path` that proved
+  nothing; a positive control (an allow-listed own root must stay readable under
+  the sandbox) plus launch-fault discrimination on stderr now separate a real
+  deny from a launcher failure. Delegated mutating runs became routable on the
+  cursor and opencode adapters, which refused `external_sandbox_full` — the
+  profile that means the engine proved and applied its own OS boundary, so the
+  adapter's weaker sandbox stands down — while bare `full`, which claims no
+  boundary at all, is still refused. Finally, a claude/cursor terminal login
+  discloses its OAuth URL as a structural field on the login job instead of only
+  printing it into the PTY, so a surface without a terminal has something to
+  render.
+
 - **v3.3.6** (2026-08-03): a delegated MUTATING run now works on Linux and
   Windows instead of failing closed there. 3.3.2 could only complete such a run
   on macOS: `applyConfinement` threw on every other platform and the terminal
