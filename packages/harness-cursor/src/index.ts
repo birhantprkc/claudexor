@@ -64,7 +64,12 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
       { source: "api_key_env", kind: "env_var", relocatable_by: ["ENV"] },
     ],
   },
-  access_control: { readonly_mechanism: "fs_sandbox" },
+  // Ask mode is the mechanism: the CLI withholds the write/shell tools there
+  // ("--mode ask ... (read-only)" per cursor-agent --help), which is a tool
+  // allowlist, not a filesystem sandbox. `--sandbox enabled` alone was proven
+  // NOT to enforce readonly: a print-mode agent run "has access to all tools,
+  // including write and shell", and a live probe wrote a file through it.
+  access_control: { readonly_mechanism: "tool_allowlist" },
   isolation: {
     supported_containment: ["scoped_home_keychain_bridge", "env_or_file_injection"],
   },
@@ -715,7 +720,12 @@ async function* runCursor(
   const args = ["-p", "--output-format", "stream-json", ...accessArgs(spec.access)];
   // Native Plan's createPlan schema cannot carry D-16 WorkReport; native read-only
   // Ask preserves prompt-owned plan intent and the model-authored final report.
-  if (spec.intent === "plan") args.push("--mode", "ask");
+  // `readonly` access rides the SAME mode: Ask is the only mechanism this CLI
+  // has that actually withholds the write/shell tools. Without it a readonly
+  // run is a full agent run — `--sandbox enabled` gates commands, not file
+  // edits (proven by a live probe: the agent created a file under exactly the
+  // previous readonly argv).
+  if (spec.intent === "plan" || spec.access === "readonly") args.push("--mode", "ask");
   // W-C4 live deltas (engine-gated; the parser applies the documented taxonomy).
   if (spec.stream_deltas) args.push("--stream-partial-output");
   if (spec.model_hint) args.push("--model", spec.model_hint);
