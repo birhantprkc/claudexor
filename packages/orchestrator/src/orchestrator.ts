@@ -27,6 +27,8 @@ import { processAttemptUsage } from "./attemptUsage.js";
 import {
   appliedAttemptFacts,
   assertDelegatedEvidence,
+  confinementNotice,
+  externallyConfinedLane,
   scopedHarnessHome,
   type ScopedHarnessHome,
 } from "./delegatedHome.js";
@@ -1435,7 +1437,7 @@ export class Orchestrator {
         readOnlyIntent
           ? "readonly"
           : (input.access ?? this.config(input.repoRoot).trust.access_default),
-        input.delegated === true,
+        externallyConfinedLane(input.delegated === true),
       );
       const accessSupported =
         !requiredAccess || manifest.access_profiles_supported.includes(requiredAccess);
@@ -2409,7 +2411,8 @@ export class Orchestrator {
       // Engine-derived read-only prompt constraints: protected/auto-protected
       // paths PLUS the exact typed gate argv the run will execute (QA-022 FIX B).
       prompt: promptWithEngineConstraints(
-        [prompt, laneContinuity?.pointerLine, continuationPointer]
+        // A child running without an OS boundary is TOLD so (disclosure 2 of 3).
+        [prompt, confinementNotice(harnessHome), laneContinuity?.pointerLine, continuationPointer]
           .filter((s): s is string => typeof s === "string" && s.length > 0)
           .join("\n\n"),
         contract.constraints.protected_paths,

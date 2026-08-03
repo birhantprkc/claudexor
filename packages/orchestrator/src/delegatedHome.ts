@@ -1,10 +1,13 @@
 import { existsSync } from "node:fs";
+import type { ConfinementHost } from "@claudexor/core";
 import {
   applyConfinement,
+  confinementBoundaryAvailable,
   DelegatedEvidenceIncompleteError,
   DelegatedHomeUnavailableError,
 } from "@claudexor/core";
 import type { AccessProfile, HarnessConfinement, WorkspaceEnvelope } from "@claudexor/schema";
+import { confinementBoundaryProven } from "@claudexor/schema";
 import { claudexorOwnedRoot, nativeHarnessStateRoot, userHomeDir } from "@claudexor/util";
 import type { WorkspaceManager } from "@claudexor/workspace";
 
@@ -18,11 +21,31 @@ export interface ScopedHarnessHome {
   homeDir: string | null;
   /** The APPLIED OS boundary, or null when this attempt runs without one. */
   confinement: HarnessConfinement | null;
+  /**
+   * Why this attempt got NO boundary, when it asked for one and the host had
+   * none. Null both when a boundary WAS applied and when none was ever asked
+   * for — an ordinary run is not "unconfined", it is out of scope, and the
+   * terminal gate below depends on being able to tell those apart.
+   */
+  confinementUnavailableReason: string | null;
 }
 
 /** Access profiles under which the harness can modify the filesystem. */
 export function isMutatingAccess(access: AccessProfile): boolean {
   return access !== "readonly";
+}
+
+/**
+ * Whether this run's lanes should be told to stand their own sandbox down.
+ *
+ * Only a delegated run asks for an engine-provided boundary, and only a host
+ * that can actually provide one earns the trade. Telling a harness to drop its
+ * native sandbox where Claudexor will NOT replace it is a pure loss — strictly
+ * worse than never having asked — so the two conditions are one expression
+ * rather than a flag the caller passes and a check nobody makes.
+ */
+export function externallyConfinedLane(delegated: boolean, host?: ConfinementHost): boolean {
+  return delegated && confinementBoundaryAvailable(host).available;
 }
 
 /** Roots the confinement is drawn against; overridable so tests never touch the real home. */
@@ -65,6 +88,12 @@ export function defaultConfinementRoots(): ConfinementRoots {
  * nested sandboxes), which would be a net loss where there is no shell to
  * confine.
  *
+ * WHERE THE HOST HAS NO BOUNDARY the attempt still runs, and says so: the
+ * reason travels onto the attempt record, into the child's prompt and into the
+ * caller's result. A delegated run that refused on every platform Claudexor has
+ * not implemented a mechanism for would be a macOS-only feature wearing a
+ * general name.
+ *
  * THE COST of the scoped home, stated plainly: an in-place delegated attempt
  * CANNOT resume a native vendor session whose store lives under the real `$HOME`
  * — cursor (`~/.cursor`) and opencode (XDG data under `$HOME`) lose resume.
@@ -83,8 +112,16 @@ export function scopedHarnessHome(
   delegated: boolean,
   access: AccessProfile = "workspace_write",
   roots: ConfinementRoots = defaultConfinementRoots(),
+  host?: ConfinementHost,
 ): ScopedHarnessHome {
-  if (inPlaceEnvelope && !delegated) return { isolated: false, homeDir: null, confinement: null };
+  if (inPlaceEnvelope && !delegated) {
+    return {
+      isolated: false,
+      homeDir: null,
+      confinement: null,
+      confinementUnavailableReason: null,
+    };
+  }
   const env = wsm.envFor(envelope);
   const homeDir = env["HOME"];
   if (delegated && (!homeDir || !existsSync(homeDir))) {
@@ -92,17 +129,47 @@ export function scopedHarnessHome(
       `delegated run cannot be confined: the scoped harness home for attempt ${envelope.attempt_id} is missing (${homeDir || "unset"})`,
     );
   }
-  const confinement =
+  const outcome =
     delegated && isMutatingAccess(access)
-      ? applyConfinement({
-          operatorHome: roots.operatorHome,
-          runtimeRoot: roots.runtimeRoot,
-          nativeStateRoot: roots.nativeStateRoot,
-          scopedHome: homeDir as string,
-          worktree: envelope.worktree_path,
-        })
-      : null;
-  return { env, isolated: true, homeDir: homeDir ?? null, confinement };
+      ? applyConfinement(
+          {
+            operatorHome: roots.operatorHome,
+            runtimeRoot: roots.runtimeRoot,
+            nativeStateRoot: roots.nativeStateRoot,
+            scopedHome: homeDir as string,
+            worktree: envelope.worktree_path,
+          },
+          host,
+        )
+      : { confinement: null, unavailableReason: null };
+  return {
+    env,
+    isolated: true,
+    homeDir: homeDir ?? null,
+    confinement: outcome.confinement,
+    confinementUnavailableReason: outcome.unavailableReason,
+  };
+}
+
+/**
+ * What the CHILD is told, when it is running without an OS boundary.
+ *
+ * Second of the three places the absence is disclosed (the attempt record and
+ * the caller's result are the other two). A model that believes it is sandboxed
+ * when it is not is the one reader whose behaviour actually changes on this
+ * fact, so it is stated to the model in plain words rather than left in an
+ * artifact it never reads.
+ */
+export function confinementNotice(home: ScopedHarnessHome | null | undefined): string | null {
+  const reason = home?.confinementUnavailableReason;
+  if (!reason) return null;
+  return [
+    "Engine disclosure — NO OS-ENFORCED BOUNDARY: this delegated run was asked to put your",
+    `process inside a kernel-enforced filesystem boundary and could not: ${reason}.`,
+    "Nothing outside this notice stops you from reading or writing any path this user account",
+    "can reach. Confine yourself to the worktree you were given and the HOME you were given,",
+    "and do not read the operator's credential stores or Claudexor's own runtime directory.",
+  ].join("\n");
 }
 
 /**
@@ -118,9 +185,19 @@ export interface AppliedAttemptFacts {
   harness_home_dir: string | null;
   access_applied: AccessProfile;
   credential_profile_applied: string | null;
-  confinement_mechanism: "seatbelt" | null;
+  /**
+   * OPAQUE mechanism label, never a platform and never a promise: it is written
+   * only together with the path below, which is the proof it was enforced.
+   */
+  confinement_mechanism: string | null;
   confinement_profile_digest: string | null;
   confinement_verified_denied_path: string | null;
+  /**
+   * Why this attempt ran with NO boundary. This is the field that makes an
+   * honestly unconfined attempt DIFFERENT from an attempt whose evidence is
+   * simply missing — the first is auditable, the second is not.
+   */
+  confinement_unavailable_reason: string | null;
 }
 
 /**
@@ -142,25 +219,31 @@ export function appliedAttemptFacts(
     confinement_mechanism: home?.confinement?.mechanism ?? null,
     confinement_profile_digest: home?.confinement?.profile_digest ?? null,
     confinement_verified_denied_path: home?.confinement?.verified_denied_path ?? null,
+    confinement_unavailable_reason: home?.confinementUnavailableReason ?? null,
   };
 }
 
 /**
  * Whether an attempt's record is auditable for a delegated MUTATING run.
  *
- * A terminal that cannot state the HOME, the access profile and the applied
- * boundary of every attempt it ran is indistinguishable from one that ran
- * unconfined, so the run refuses instead of reporting success.
+ * The distinction this predicate exists to draw: evidence that is MISSING is
+ * still a reason to refuse — an attempt that cannot say what it ran under is
+ * indistinguishable from one that ran unconfined behind a green terminal.
+ * Evidence that honestly says "no boundary here, and here is why" is COMPLETE;
+ * the absence of a boundary is a fact about the host, not a gap in the record,
+ * and refusing on it would make a delegated mutating run impossible wherever
+ * Claudexor has not implemented a mechanism.
+ *
+ * A named mechanism is a claim, and only `verified_denied_path` discharges it —
+ * so a record carrying the name without the proof is NOT complete, and neither
+ * is one that claims a boundary and a reason for its absence at the same time.
  */
 export function appliedEvidenceComplete(facts: AppliedAttemptFacts | null | undefined): boolean {
-  return Boolean(
-    facts &&
-    facts.harness_home_isolated &&
-    facts.harness_home_dir &&
-    facts.confinement_mechanism &&
-    facts.confinement_profile_digest &&
-    facts.confinement_verified_denied_path,
-  );
+  if (!facts || !facts.harness_home_isolated || !facts.harness_home_dir) return false;
+  if (facts.confinement_mechanism) {
+    return confinementBoundaryProven(facts) && !facts.confinement_unavailable_reason;
+  }
+  return Boolean(facts.confinement_unavailable_reason);
 }
 
 /**
@@ -180,6 +263,6 @@ export function assertDelegatedEvidence(
   const unauditable = attempts.filter((attempt) => !appliedEvidenceComplete(attempt.applied));
   if (unauditable.length === 0) return;
   throw new DelegatedEvidenceIncompleteError(
-    `delegated mutating run cannot terminalize: ${unauditable.length} attempt(s) carry no proof of the applied confinement (${unauditable.map((attempt) => attempt.attemptId).join(", ")})`,
+    `delegated mutating run cannot terminalize: ${unauditable.length} attempt(s) state neither a proven confinement nor a reason there was none (${unauditable.map((attempt) => attempt.attemptId).join(", ")})`,
   );
 }

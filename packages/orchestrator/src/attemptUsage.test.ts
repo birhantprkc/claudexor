@@ -87,7 +87,12 @@ describe("processAttemptUsage", () => {
         "harness",
         "redacted failure",
         appliedAttemptFacts(
-          { isolated: true, homeDir: "/scoped", confinement: null },
+          {
+            isolated: true,
+            homeDir: "/scoped",
+            confinement: null,
+            confinementUnavailableReason: null,
+          },
           "workspace_write",
           "prof-1",
         ),
@@ -109,6 +114,7 @@ describe("processAttemptUsage", () => {
       confinement_mechanism: null,
       confinement_profile_digest: null,
       confinement_verified_denied_path: null,
+      confinement_unavailable_reason: null,
     });
   });
 

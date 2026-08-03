@@ -79,7 +79,10 @@ export class RequestRequirementsResolver {
    * exactly that instruction and every adapter already maps it — the engine
    * states an access profile, it does not branch on a harness name. It applies
    * only where there was something to confine: a lane the transport already
-   * pinned to `readonly` keeps its own read-only enforcement.
+   * pinned to `readonly` keeps its own read-only enforcement, and a HOST with
+   * no boundary of its own to offer keeps the harness's, because trading the
+   * harness's sandbox for one that will not be applied is a pure loss. The
+   * caller decides that second condition; this owner only spends it.
    */
   adapterAccess(
     intent: Intent,
