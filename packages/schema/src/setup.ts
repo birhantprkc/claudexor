@@ -430,6 +430,17 @@ export const SetupAppServerLoginFlow = z.enum(["chatgptDeviceCode", "chatgpt"]);
 export type SetupAppServerLoginFlow = z.infer<typeof SetupAppServerLoginFlow>;
 
 /**
+ * Every flow a login disclosure sidecar can carry: the two codex app-server
+ * flows, plus `oauth_url` — an OAuth/sign-in URL the runner captured from a
+ * TERMINAL-mode vendor login's own output (claude/cursor, and codex's legacy
+ * fallback). `oauth_url` disclosures are URL-only (`userCode` is empty), the
+ * same card shape as the browser-callback (`chatgpt`) flow, so any UI can
+ * render "open this link" without a terminal.
+ */
+export const SetupLoginDisclosureFlow = z.enum(["chatgptDeviceCode", "chatgpt", "oauth_url"]);
+export type SetupLoginDisclosureFlow = z.infer<typeof SetupLoginDisclosureFlow>;
+
+/**
  * TRANSIENT device-code disclosure surfaced by the D-17 app-server login flow.
  *
  * This is a READ-TIME PROJECTION ONLY: it is overlaid on a setup-job snapshot /
@@ -442,11 +453,13 @@ export type SetupAppServerLoginFlow = z.infer<typeof SetupAppServerLoginFlow>;
  */
 export const SetupDeviceCodeDisclosure = z
   .object({
-    flow: SetupAppServerLoginFlow,
+    flow: SetupLoginDisclosureFlow,
     verificationUrl: z.string().url().describe("Where the operator completes the sign-in."),
     userCode: z
       .string()
-      .describe("Transient one-time code (empty for the browser-callback flow); never journaled."),
+      .describe(
+        "Transient one-time code (empty for the browser-callback and oauth_url flows); never journaled.",
+      ),
   })
   .strict()
   .describe("Transient device-code disclosure — read-time projection only, never journaled.");
@@ -573,9 +586,11 @@ export const SetupLoginManifest = z
     /** Which app-server auth flow the device_code runner requests. Present only
      * with loginMode "device_code". */
     appServerFlow: SetupAppServerLoginFlow.optional(),
-    /** Sidecar the device_code runner writes its transient disclosure to; read
-     * by the daemon for the snapshot overlay, never journaled. Present only with
-     * loginMode "device_code" (optional so terminal manifests keep their digest). */
+    /** Sidecar the runner writes its transient disclosure to; read by the
+     * daemon for the snapshot overlay, never journaled. device_code manifests
+     * REQUIRE it; terminal manifests MAY carry it (the runner then captures the
+     * vendor login's OAuth URL into it as an `oauth_url` disclosure). Optional
+     * so pre-upgrade sealed manifests keep their digest. */
     deviceCodePath: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
     statePath: SetupLoginProtocol.SetupLoginAbsolutePath,
     resultPath: SetupLoginProtocol.SetupLoginAbsolutePath,
@@ -603,11 +618,14 @@ export const SetupLoginManifest = z
         message: "device_code manifests require appServerFlow and deviceCodePath",
       });
     }
-    if (!deviceCode && (value.appServerFlow || value.deviceCodePath)) {
+    // deviceCodePath is legal on terminal manifests too (the runner captures
+    // the vendor login's OAuth URL into it); only the app-server flow selector
+    // stays device_code-exclusive.
+    if (!deviceCode && value.appServerFlow) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["appServerFlow"],
-        message: "appServerFlow/deviceCodePath require loginMode device_code",
+        message: "appServerFlow requires loginMode device_code",
       });
     }
   });
@@ -625,7 +643,7 @@ export const SetupLoginDeviceCode = z
     version: SetupLoginProtocolVersion,
     jobId: SetupLoginProtocol.SetupLoginJobId,
     executionId: SetupLoginProtocol.SetupLoginExecutionId,
-    flow: SetupAppServerLoginFlow,
+    flow: SetupLoginDisclosureFlow,
     verificationUrl: z.string().url(),
     userCode: z.string(),
     disclosedAt: SetupTimestamp,

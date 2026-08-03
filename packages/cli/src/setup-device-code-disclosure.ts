@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { ControlSetupJob } from "@claudexor/schema";
-import { isDeviceCodeSetupJob } from "./setup-client-pty.js";
 import { ACTIVE_SETUP_STATES } from "./setup-job-store.js";
+import { readRunnerDeviceCode } from "./setup-login-protocol.js";
 
 const DISCLOSURE_POLL_MS = 300;
 
@@ -25,8 +25,12 @@ export function createDeviceCodeDisclosureWatcher(
   const schedule = (watch: () => void) => setTimeout(watch, DISCLOSURE_POLL_MS).unref();
 
   return function arm(jobId: string): void {
-    const job = dependencies.status(jobId);
-    if (!isDeviceCodeSetupJob(job) || armed.has(jobId)) return;
+    // Armed for EVERY login job now, not only the app-server device-code flow:
+    // terminal-mode logins (claude/cursor, codex fallback) disclose the
+    // captured `oauth_url` through the same sidecar. A job that never writes
+    // one just polls out to its own deadline, like a device-code job whose
+    // start never succeeds.
+    if (armed.has(jobId)) return;
     armed.add(jobId);
     const disclosurePath = dependencies.disclosurePath(jobId);
     const watch = () => {
@@ -43,8 +47,18 @@ export function createDeviceCodeDisclosureWatcher(
       }
       if (existsSync(disclosurePath)) {
         if (current.phase === "awaiting_user") {
+          // URL-only disclosures (browser-callback, captured oauth_url) have
+          // no one-time code — the message must not promise one.
+          let urlOnly = false;
+          try {
+            urlOnly = readRunnerDeviceCode(disclosurePath)?.userCode === "";
+          } catch {
+            /* unreadable sidecar: keep the generic code message */
+          }
           dependencies.update(jobId, {
-            message: `One-time code ready — enter it at the ${current.harness} verification page (shown in Claudexor).`,
+            message: urlOnly
+              ? `Sign-in link ready — open the ${current.harness} authorization URL shown in Claudexor.`
+              : `One-time code ready — enter it at the ${current.harness} verification page (shown in Claudexor).`,
           });
         }
         armed.delete(jobId);

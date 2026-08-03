@@ -1007,7 +1007,8 @@
                   "type": "string",
                   "enum": [
                     "chatgptDeviceCode",
-                    "chatgpt"
+                    "chatgpt",
+                    "oauth_url"
                   ]
                 },
                 "verificationUrl": {
@@ -1017,7 +1018,7 @@
                 },
                 "userCode": {
                   "type": "string",
-                  "description": "Transient one-time code (empty for the browser-callback flow); never journaled."
+                  "description": "Transient one-time code (empty for the browser-callback and oauth_url flows); never journaled."
                 }
               },
               "required": [

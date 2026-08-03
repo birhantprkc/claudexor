@@ -1063,15 +1063,18 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         // sealed digests valid (the field is optional, never defaulted).
         ...(profileConfigDir ? { profileConfigDir } : {}),
         // D-17 device-code (app-server) login: the runner hosts the app-server
-        // and writes the transient disclosure sidecar. Optional/undefaulted so
-        // Terminal manifests keep their sealed digest.
+        // and writes the transient disclosure sidecar. Terminal-mode logins
+        // (claude/cursor, codex fallback) carry the SAME sidecar path so the
+        // runner can capture the vendor login's OAuth URL into it as an
+        // `oauth_url` disclosure — the no-Terminal "open this link" card.
+        // Pre-upgrade sealed manifests (no deviceCodePath) stay digest-valid.
         ...(deviceCode
           ? {
               loginMode: "device_code" as const,
               appServerFlow: spec.appServerFlow,
               deviceCodePath: paths.runnerDeviceCode,
             }
-          : {}),
+          : { deviceCodePath: paths.runnerDeviceCode }),
         statePath: paths.runnerState,
         resultPath: paths.runnerResult,
         permitPath: paths.runnerPermit,

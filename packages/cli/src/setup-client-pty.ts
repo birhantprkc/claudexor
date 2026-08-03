@@ -53,7 +53,11 @@ export function projectSetupDeviceCode(
   sidecarPath: string,
 ): SetupDeviceCodeDisclosure | undefined {
   if (!ACTIVE_SETUP_STATES.has(job.state) || job.phase !== "awaiting_user") return undefined;
-  if (!isDeviceCodeSetupJob(job) || !job.authorization) return undefined;
+  // Any authorized awaiting-user login can carry a disclosure sidecar now:
+  // the app-server flows write it after account/login/start, and TERMINAL
+  // logins (claude/cursor, codex fallback) write the captured `oauth_url`
+  // shape. The sidecar's own jobId/executionId binding below is the gate.
+  if (!job.authorization) return undefined;
   let sidecar: ReturnType<typeof readRunnerDeviceCode>;
   try {
     sidecar = readRunnerDeviceCode(sidecarPath);

@@ -159,8 +159,39 @@ export async function runSetupLoginWorker(
   // one-time code in Terminal, while a bounded ANSI-stripped tail rides the
   // result so the daemon can classify failures (e.g. the ChatGPT
   // "Allow device code login" toggle being off) instead of a bare exit code.
-  const teeOutput = manifest.harness === "codex";
+  //
+  // A manifest carrying deviceCodePath tees for a second reason: the runner
+  // captures the vendor login's OAuth URL from that same output and writes it
+  // as a STRUCTURED `oauth_url` disclosure sidecar — the codex device-code
+  // card shape, URL-only — so a UI can render "open this link" without a
+  // terminal. stdin stays inherited and every byte is still forwarded, so the
+  // vendor CLI completes its flow exactly as before; the one honest residual
+  // is that the CLI sees a pipe (not a TTY) on stdout, the same tradeoff the
+  // codex tail tee already made.
+  const captureOAuthUrl = manifest.deviceCodePath !== undefined;
+  const teeOutput = manifest.harness === "codex" || captureOAuthUrl;
   const tail = createTailBuffer();
+  const urlDetector = createOAuthUrlDetector();
+  const discloseOAuthUrl = (chunk: Buffer): void => {
+    if (!captureOAuthUrl || !manifest.deviceCodePath) return;
+    const url = urlDetector.push(chunk);
+    if (!url) return;
+    try {
+      // Same transient-sidecar discipline as the device-code flow: the URL
+      // rides ONLY this read-time projection file, never the durable receipt.
+      atomicPrivateJson(manifest.deviceCodePath, {
+        version: SETUP_LOGIN_PROTOCOL_VERSION,
+        jobId: manifest.jobId,
+        executionId: manifest.executionId,
+        flow: "oauth_url",
+        verificationUrl: url,
+        userCode: "",
+        disclosedAt: now().toISOString(),
+      });
+    } catch {
+      // The disclosure is best-effort context; it must never kill the login.
+    }
+  };
   let child;
   try {
     const spawnOptions: SpawnOptions = {
@@ -176,10 +207,12 @@ export async function runSetupLoginWorker(
       child.stdout?.on("data", (chunk: Buffer) => {
         process.stdout.write(chunk);
         tail.push(chunk);
+        discloseOAuthUrl(chunk);
       });
       child.stderr?.on("data", (chunk: Buffer) => {
         process.stderr.write(chunk);
         tail.push(chunk);
+        discloseOAuthUrl(chunk);
       });
     }
   } catch {
@@ -390,6 +423,58 @@ function appServerConnection(child: ChildProcess): CodexAppServerConnection {
 }
 
 const OUTPUT_TAIL_BYTES = 4096;
+
+/**
+ * OAuth-URL capture for TERMINAL-mode logins (claude/cursor, and codex's
+ * legacy fallback): the vendor CLI prints its sign-in URL to its own output;
+ * detecting it lets the runner surface a STRUCTURED `oauth_url` disclosure on
+ * the job — the same sidecar + card shape as codex's device-code flow — so a
+ * UI can render "open this link" with no terminal. Bounded rolling window: a
+ * URL split across chunks is still caught, memory stays capped.
+ */
+const OAUTH_URL_SCAN_WINDOW = 8_192;
+
+const OAUTH_URL_SIGNATURE_RE =
+  /(oauth|authori[sz]e|login|sign[-_]?in|device|sso|verification|callback)/i;
+
+/**
+ * First OAuth/sign-in URL in a chunk of vendor CLI output, or null. Terminal
+ * escapes are stripped FIRST so a color reset cannot glue itself onto the URL;
+ * trailing prose punctuation is trimmed. Only URLs carrying a sign-in-shaped
+ * signature qualify — a docs link in a banner must not become "the" login URL.
+ */
+export function extractOAuthUrl(text: string): string | null {
+  const plain = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u001b(?:\[[0-9;?]*[ -\/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
+  for (const match of plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)) {
+    const url = match[0].replace(/[.,;:!?]+$/, "");
+    if (OAUTH_URL_SIGNATURE_RE.test(url)) return url;
+  }
+  return null;
+}
+
+/**
+ * Stateful per-login detector: feeds chunks into a bounded window and reports
+ * the first qualifying URL exactly once (a login prints its URL once; re-prints
+ * and later noise must not rewrite the disclosure).
+ */
+export function createOAuthUrlDetector(): { push(chunk: Buffer): string | null } {
+  let window = "";
+  let found = false;
+  return {
+    push(chunk) {
+      if (found) return null;
+      window = (window + chunk.toString("utf8")).slice(-OAUTH_URL_SCAN_WINDOW);
+      const url = extractOAuthUrl(window);
+      if (!url) return null;
+      found = true;
+      return url;
+    },
+  };
+}
 
 /** Ring buffer of the last OUTPUT_TAIL_BYTES of tee'd vendor output. */
 export function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
