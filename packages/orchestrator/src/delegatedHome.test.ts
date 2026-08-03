@@ -16,7 +16,7 @@ import {
   scopedHarnessHome,
 } from "./delegatedHome.js";
 
-/** A host that offers no OS boundary at all — Windows today, Linux without bwrap. */
+/** A host Claudexor applies no OS boundary on — every platform but macOS. */
 const BARE_HOST: ConfinementHost = {
   platform: "win32",
   exists: existsSync,
@@ -146,12 +146,14 @@ describe("delegated confinement", () => {
 
   it("RUNS a delegated MUTATING attempt on a host with no boundary, and states the absence", () => {
     // The owner's rule, and the thing that made a delegated mutating run
-    // impossible on Linux and Windows: this must not throw.
+    // impossible on Linux and Windows: this must not throw. The attempt keeps
+    // its scoped HOME and records no mechanism at all.
     const envelope = envelopeAt(base, repoRoot, true);
     const home = scopedHarnessHome(wsm, envelope, true, true, "workspace_write", roots, BARE_HOST);
     expect(home.isolated).toBe(true);
+    expect(home.homeDir).toBe(envelope.home_dir);
     expect(home.confinement).toBeNull();
-    expect(home.confinementUnavailableReason).toMatch(/no OS-enforced filesystem boundary/);
+    expect(home.confinementUnavailableReason).toMatch(/applies no OS-enforced filesystem boundary/);
   });
 
   it("tells the CHILD when it is running without a boundary, and stays quiet when it is not", () => {
@@ -220,12 +222,13 @@ describe("applied attempt evidence", () => {
           isolated: true,
           homeDir: "/scoped",
           confinement: null,
-          confinementUnavailableReason: "bubblewrap is not installed here",
+          confinementUnavailableReason:
+            "Claudexor applies no OS-enforced filesystem boundary on linux",
         },
         "workspace_write",
         null,
       ).confinement_unavailable_reason,
-    ).toBe("bubblewrap is not installed here");
+    ).toBe("Claudexor applies no OS-enforced filesystem boundary on linux");
   });
 
   it("refuses a delegated mutating terminal whose attempt evidence is MISSING", () => {

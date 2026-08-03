@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, realpathSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { HarnessConfinement } from "@claudexor/schema";
 import { sensitiveResourcePolicy, sha256 } from "@claudexor/util";
@@ -25,12 +24,13 @@ import { ConfinementUnavailableError } from "./errors.js";
  * stand-down is spent ONLY where a boundary was actually proven available: a
  * host with none keeps whatever enforcement the harness brings itself.
  *
- * WHERE THERE IS NO BOUNDARY. The run still runs. It does not pretend: the
- * absence and its reason are recorded on the attempt, told to the child, and
- * returned to the caller. Refusing on a platform we have not implemented would
+ * WHERE THERE IS NO BOUNDARY — every platform but macOS, by owner decision, and
+ * a macOS host missing `sandbox-exec`. The run still runs, on the scoped `HOME`
+ * alone. It does not pretend: the absence and its reason are recorded on the
+ * attempt, told to the child, and returned to the caller. Refusing instead would
  * make "delegated" a macOS-only feature; claiming a boundary we did not prove
- * would be worse than having none, so the type below cannot express a
- * mechanism name without the path it was proven to deny.
+ * would be worse than having none, so the type below cannot express a mechanism
+ * name without the path it was proven to deny.
  */
 
 const SEATBELT_BIN = "/usr/bin/sandbox-exec";
@@ -177,42 +177,16 @@ const SEATBELT: ConfinementMechanism = {
 };
 
 /**
- * Linux: bubblewrap. A mount namespace that binds the whole host filesystem and
- * then mounts an empty tmpfs OVER each denied path, so the contents are not
- * reachable by any spelling. bwrap drops every capability before exec, so the
- * child cannot unmount what the namespace's owner mounted.
+ * The registry. ONE mechanism today, by owner decision: Seatbelt on macOS, and
+ * NO kernel boundary anywhere else. Linux bubblewrap/Landlock and a Windows
+ * equivalent were considered and declined — see docs/DELEGATED_CONFINEMENT.md §6.
+ * Non-macOS is served by the scoped HOME plus a disclosed, typed absence, which
+ * is what the rest of this file and the delegated terminal are shaped around.
  *
- * The policy is the exact argv prefix, JSON-encoded — a mechanism whose policy
- * is not text still records the thing the process was actually started under,
- * which is what the digest is for.
+ * The list stays a list because the mechanism id is OPAQUE end to end: the only
+ * place a name selects behaviour is the lookup in `confinedInvocation`.
  */
-const BUBBLEWRAP: ConfinementMechanism = {
-  id: "bubblewrap",
-  platform: "linux",
-  bins: ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"],
-  buildProfile(input, bin) {
-    const denied = confinementDeniedReadPaths(input).map(resolved);
-    const argv = [bin, "--dev-bind", "/", "/"];
-    // Every denied path, whether or not it exists yet: bwrap creates the
-    // mountpoint inside the namespace, so a credential store the child creates
-    // later lands on the tmpfs rather than escaping the policy.
-    for (const path of denied) argv.push("--tmpfs", path);
-    // Re-expose ONLY what a deny above would otherwise swallow — the scoped
-    // home and the vendor credential root both live inside the runtime tree.
-    for (const root of ownRoots(input).map(resolved)) {
-      if (denied.some((path) => path !== root && contains(path, root))) {
-        argv.push("--bind", root, root);
-      }
-    }
-    return JSON.stringify(argv);
-  },
-  invocation(profile, bin, args) {
-    const argv = JSON.parse(profile) as string[];
-    return { bin: argv[0], args: [...argv.slice(1), bin, ...args] };
-  },
-};
-
-const MECHANISMS: readonly ConfinementMechanism[] = [SEATBELT, BUBBLEWRAP];
+const MECHANISMS: readonly ConfinementMechanism[] = [SEATBELT];
 
 /** Kept for the seam tests and the docs: the macOS policy text for one attempt. */
 export function buildConfinementProfile(input: ConfinementInput): string {
@@ -257,74 +231,26 @@ function proveConfinementDenial(
   return null;
 }
 
-/** A throwaway operator layout, shaped like the real one, for the self-test. */
-function selfTestScaffold(base: string): ConfinementInput {
-  const operatorHome = join(base, "home");
-  const runtimeRoot = join(operatorHome, ".claudexor");
-  const nativeStateRoot = join(runtimeRoot, "native");
-  const scopedHome = join(runtimeRoot, "projects", "probe", "home");
-  const worktree = join(operatorHome, "project");
-  for (const dir of [join(runtimeRoot, "daemon"), nativeStateRoot, scopedHome, worktree]) {
-    mkdirSync(dir, { recursive: true });
-  }
-  writeFileSync(join(runtimeRoot, "daemon", "token"), "probe");
-  writeFileSync(join(nativeStateRoot, "auth.json"), "{}");
-  return { operatorHome, runtimeRoot, nativeStateRoot, scopedHome, worktree };
-}
-
-/**
- * Does this mechanism actually work HERE — not "is its binary installed".
- *
- * The two questions differ per platform and the difference is the whole point.
- * `sandbox-exec` present is a reliable oracle for Seatbelt; `bwrap` present is
- * NOT one for bubblewrap, because a distro can disable unprivileged user
- * namespaces and leave the binary in place. So the oracle is the mechanism's
- * own shape, executed: a denied path must be denied AND the carve-out nested
- * inside it must survive. Both halves matter — a boundary that also severs the
- * vendor credential root is a capability regression, not a fix, and it must
- * count as "no boundary here" rather than ship silently.
- */
-function selfTest(
-  mechanism: ConfinementMechanism,
-  bin: string,
-  host: ConfinementHost,
-): string | null {
-  const base = mkdtempSync(join(tmpdir(), "cxi-confine-probe-"));
-  try {
-    const input = selfTestScaffold(base);
-    const profile = mechanism.buildProfile(input, bin);
-    const denial = proveConfinementDenial(
-      mechanism,
-      profile,
-      resolved(join(input.runtimeRoot, "daemon")),
-      host,
-    );
-    if (denial) return denial;
-    // A FILE inside the carve-out, never the directory: a mechanism that
-    // re-exposed an EMPTY mount over the vendor credential root would let a
-    // readable-but-empty directory pass for a working carve-out.
-    const keep = resolved(join(input.nativeStateRoot, "auth.json"));
-    if (readUnder(mechanism, profile, keep, host).status !== 0) {
-      return "the policy also cut off the carve-outs the run needs (the vendor credential root nested inside the denied runtime tree came back unreadable)";
-    }
-    return null;
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-}
-
 /** Whether an OS-enforced boundary can be applied on this host, and why not. */
 type ConfinementAvailability =
   | { mechanism: ConfinementMechanism; bin: string; reason: null }
   | { mechanism: null; bin: null; reason: string };
 
-function probeAvailability(host: ConfinementHost): ConfinementAvailability {
+/**
+ * Whether an OS-enforced boundary exists on this host, and which one.
+ *
+ * A platform with no mechanism is a DECISION, not a gap to be discovered at
+ * spawn time, so the answer is a stated reason rather than a throw. Nothing here
+ * hunts for a boundary the owner declined to build: the question is only whether
+ * THIS platform's declared mechanism is present.
+ */
+function confinementMechanism(host: ConfinementHost): ConfinementAvailability {
   const mechanism = MECHANISMS.find((candidate) => candidate.platform === host.platform);
   if (!mechanism) {
     return {
       mechanism: null,
       bin: null,
-      reason: `no OS-enforced filesystem boundary is implemented for ${host.platform}`,
+      reason: `Claudexor applies no OS-enforced filesystem boundary on ${host.platform}; only macOS has one`,
     };
   }
   const bin = mechanism.bins.find((candidate) => host.exists(candidate));
@@ -332,33 +258,10 @@ function probeAvailability(host: ConfinementHost): ConfinementAvailability {
     return {
       mechanism: null,
       bin: null,
-      reason: `${host.platform} can enforce a boundary with ${mechanism.id}, but it is not installed here (looked for ${mechanism.bins.join(", ")})`,
-    };
-  }
-  const why = selfTest(mechanism, bin, host);
-  if (why) {
-    return {
-      mechanism: null,
-      bin: null,
-      reason: `${mechanism.id} is installed on this ${host.platform} host but did not enforce: ${why}`,
+      reason: `${host.platform} enforces a boundary with ${mechanism.id}, which is not installed here (looked for ${mechanism.bins.join(", ")})`,
     };
   }
   return { mechanism, bin, reason: null };
-}
-
-let cachedAvailability: ConfinementAvailability | null = null;
-
-/**
- * Whether an OS-enforced boundary exists on this host, and which one.
- *
- * Memoized for the real host only — the probe execs, and neither the platform
- * nor the installed mechanism changes inside one daemon process. An INJECTED
- * host is always probed fresh, so a test can drive every branch.
- */
-function confinementMechanism(host: ConfinementHost): ConfinementAvailability {
-  if (host !== DEFAULT_HOST) return probeAvailability(host);
-  cachedAvailability ??= probeAvailability(host);
-  return cachedAvailability;
 }
 
 /**

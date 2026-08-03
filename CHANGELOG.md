@@ -3,27 +3,23 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
-- **v3.3.5** (2026-08-03): a delegated MUTATING run now works on Linux and
+- **v3.3.6** (2026-08-03): a delegated MUTATING run now works on Linux and
   Windows instead of failing closed there. 3.3.2 could only complete such a run
   on macOS: `applyConfinement` threw on every other platform and the terminal
   evidence gate refused any attempt that carried no proven boundary, so
-  `execution.delegated` was a macOS-only feature wearing a general name. Where a
-  kernel boundary exists it is still applied and still PROVEN before the harness
-  spawns — macOS Seatbelt unchanged, Linux now bubblewrap (the host filesystem
-  bound through, an empty tmpfs over each denied path, carve-outs re-bound only
-  where a deny would swallow the run's own roots). Whether a host can enforce is
-  MEASURED, not assumed: the mechanism is executed once per process against a
-  throwaway scaffold and must both deny what it claims and keep the carve-outs
-  reachable, because `bwrap` being installed says nothing about a distro that
-  disabled unprivileged user namespaces. Where no boundary can be applied the run
-  proceeds and the absence is disclosed in three places — the attempt record
+  `execution.delegated` was a macOS-only feature wearing a general name. macOS
+  keeps its Seatbelt boundary, applied and PROVEN against a path it denies before
+  the harness spawns. Every other platform gets, by decision, no kernel boundary
+  at all — the scoped harness `HOME` as before, no mechanism recorded, and the
+  absence disclosed in three places: the attempt record
   (`confinement_unavailable_reason`), the child's own prompt, and the caller's
   run detail (`candidates[].confinement`). A mechanism is never named without the
   path it was proven to deny: the schema makes the pair inseparable, one owner
   answers "is there really a boundary", the mechanism identifier is opaque, and
   nothing branches on the platform. The terminal gate now separates MISSING
-  evidence (still a refusal) from evidence that honestly states there was no
-  boundary (complete, terminalizes). Finally, a delegated lane is told to stand
+  evidence (still a refusal — an attempt that cannot say what it ran under is
+  unauditable) from evidence that honestly states there was no boundary
+  (complete, terminalizes normally). Finally, a delegated lane is told to stand
   its own sandbox down only where Claudexor will actually replace it — the
   `external_sandbox_full` escalation was unconditional and would have stripped a
   harness's native sandbox on hosts that got nothing in return.
