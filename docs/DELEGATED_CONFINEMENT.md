@@ -1,8 +1,10 @@
 # Delegated-run confinement — threat model
 
-Status: **enforced on macOS; refused elsewhere.** Owner: `packages/core/src/confinement.ts`
-(mechanism) and `packages/orchestrator/src/delegatedHome.ts` (per-attempt decision + applied
-facts). This document is the reason the code exists; change it in the same commit as the code.
+Status: **enforced where the kernel offers a boundary (macOS Seatbelt, Linux bubblewrap);
+disclosed, not refused, where it does not (Windows today, and any host whose mechanism does not
+work).** Owner: `packages/core/src/confinement.ts` (mechanisms) and
+`packages/orchestrator/src/delegatedHome.ts` (per-attempt decision + applied facts). This
+document is the reason the code exists; change it in the same commit as the code.
 
 ## 1. The actor
 
@@ -76,7 +78,40 @@ reported as one.
 | Run-scoped credential broker (no long-lived token handed to the child) | Nothing here. The child does not need to be HANDED the token — it READS the operator's copy. A broker changes what we give out, not what is readable at a path | Does not address this threat |
 | Separate uid | A real boundary | Needs root; the daemon runs as the operator |
 | Container | A real boundary | Rebuilds the toolchain contract; violates §2 |
-| **macOS Seatbelt (`sandbox-exec`)** | **Kernel-enforced per-path read/write denial on the process and every descendant** | **Chosen** |
+| **macOS Seatbelt (`sandbox-exec`)** | **Kernel-enforced per-path read/write denial on the process and every descendant** | **Chosen — macOS** |
+| **Linux bubblewrap (`bwrap`)** | **A mount namespace: the host filesystem is bound through, then an empty tmpfs is mounted OVER each denied path, so no spelling reaches the contents. bwrap drops every capability before exec, so the child cannot unmount what the namespace's owner mounted** | **Chosen — Linux** |
+| Linux Landlock (direct `landlock_restrict_self`) | The same class of boundary, without a helper binary | Not chosen: needs a native binding or a syscall shim, i.e. a new dependency. bubblewrap is already the packaged, widely-installed spelling of this |
+| Windows (job objects, AppContainer, restricted tokens) | Nothing that denies *per path* to an arbitrary child process without re-architecting the launch | **None today.** Stated, not faked — see §6.2 |
+
+### 6.1 Availability is measured, never assumed
+
+"Is the binary installed" is a reliable oracle for Seatbelt and a bad one for bubblewrap: a
+distro can ship `bwrap` and disable unprivileged user namespaces, and the binary is still there.
+So the engine's availability question is answered by EXECUTING the mechanism against a throwaway
+scaffold shaped like the real one, once per process, and requiring both halves:
+
+- a path the policy denies must come back unreadable, and
+- a carve-out NESTED INSIDE that denied path (the vendor credential root under the runtime tree)
+  must come back readable — a boundary that also severs §2 is a capability regression, and it
+  counts as "no boundary here" rather than shipping quietly.
+
+A mechanism that fails either half is reported unavailable WITH THE REASON, and the run proceeds
+unconfined and disclosed. This is also what keeps a wrong policy from bricking a platform: the
+worst case of a mistake in the bubblewrap argv is a Linux host that runs unconfined and says so,
+never one that cannot run a delegated mutating job at all.
+
+### 6.2 A platform with no mechanism is not a refusal
+
+Where no kernel boundary can be applied, the run WORKS and the absence is disclosed in three
+places: the attempt record (`confinement_unavailable_reason`), the child's own prompt (an engine
+notice stating there is no boundary and what that means for it), and the caller's result
+(`candidates[].confinement`, whose `proven` is false and whose `unavailableReason` carries the
+same sentence). Refusing instead would make `execution.delegated` a macOS-only feature wearing a
+general name.
+
+Two conditions still refuse, because they are Claudexor's fault rather than the platform's: an
+allowed root that would swallow a path the policy must deny, and a policy that a *working*
+mechanism failed to enforce for one attempt.
 
 ### The nesting constraint (measured, not assumed)
 
@@ -100,8 +135,11 @@ profile onto its own switch.
 
 ## 7. The policy
 
-Built by `buildConfinementProfile`. Every path is realpath-resolved first, because Seatbelt
-matches resolved paths (`/tmp` is `/private/tmp`).
+Every path is realpath-resolved first, because both mechanisms match resolved paths (`/tmp` is
+`/private/tmp`). The deny SET is one list (`confinementDeniedReadPaths`) shared by every
+mechanism; only the encoding differs.
+
+### macOS (SBPL, `buildConfinementProfile`)
 
 ```
 (allow default)                       ; nothing is restricted that §3 does not name
@@ -117,6 +155,25 @@ matches resolved paths (`/tmp` is `/private/tmp`).
 
 SBPL is last-match-wins, so the allow carve-outs deliberately follow the denies.
 
+### Linux (bubblewrap argv)
+
+```
+bwrap --dev-bind / /                       ; the toolchain lives at absolute paths (§2)
+      --tmpfs <each denied path>           ; the same deny set, whether or not it exists yet
+      --bind <own root> <own root>         ; ONLY for a root a deny above would swallow
+      <bin> <args…>
+```
+
+The policy recorded on the attempt is this exact argv prefix, JSON-encoded, and the digest is
+taken over it — a mechanism whose policy is not text still records what the process was actually
+started under. The `--bind` carve-outs are emitted only for the run's own roots that live INSIDE
+a denied path (the scoped `HOME` and the vendor credential root both sit under the runtime tree);
+the worktree is outside every deny and needs none.
+
+### Windows
+
+No mechanism. `confinement_mechanism` is null and `confinement_unavailable_reason` says so.
+
 ## 8. What this does NOT cover
 
 Stated plainly, because a boundary described as total is worse than a narrow one:
@@ -130,11 +187,16 @@ Stated plainly, because a boundary described as total is worse than a narrow one
   reach `127.0.0.1`. The boundary removes the filesystem route to the token; it is not an
   egress control.
 - **Not writes outside the operator home and outside the listed system prefixes.** A path such
-  as `/Users/Shared` remains writable.
-- **Not non-macOS.** There is no Linux/Windows implementation. On those platforms a delegated
-  MUTATING run is REFUSED (`delegated_confinement_unavailable`), never silently run
-  unconfined. If the owner wants Linux, the equivalent is bubblewrap/Landlock and it is a new
-  mechanism, not a port of this one.
+  as `/Users/Shared` remains writable. The Linux policy is narrower still: it denies READS of the
+  listed paths and takes no position on writes elsewhere.
+- **Not Windows, and not every Linux host.** Where no mechanism applies, a delegated MUTATING run
+  is UNCONFINED — it runs, and says so in the three places §6.2 lists. It is never silently
+  unconfined, and it never names a mechanism it did not prove. A caller that requires a boundary
+  reads `proven` and decides for itself; the engine does not decide for it.
+- **Not a claim about the harness's own sandbox.** Where Claudexor applies no boundary it also
+  does not ask the harness to stand its native one down, so a codex lane keeps its
+  `workspace-write` sandbox. That is a real protection and it is deliberately left in place — but
+  it is the harness's, the engine cannot prove it, and so it is not reported as a boundary.
 - **Not non-delegated runs.** An operator-driven run at a surface is unchanged. The operator
   reading their own home is not this threat.
 - **Not `readonly` delegated runs.** They get no shell that can mutate, and they keep the
@@ -149,12 +211,23 @@ spawn records what was APPLIED:
 - `access_applied` — the access profile the ADAPTER received (`external_sandbox_full` when the
   external boundary is on), not the one the caller requested;
 - `credential_profile_applied` — the resolved profile id, or `null` for the default ladder;
-- `confinement` — mechanism, profile digest, and `verified`: the profile text was executed
-  against a path it denies and the read was refused, on this host, for this attempt.
+- `confinement_mechanism` + `confinement_profile_digest` + `confinement_verified_denied_path` —
+  the policy was executed against a path it denies and the read was refused, on this host, for
+  this attempt;
+- `confinement_unavailable_reason` — why there was NO boundary, when there was none.
 
 These are written on the SUCCESS path and on the FAILURE path, by one record builder, because
 an attempt that crashed still ran a process and the caller still needs to know what that
 process could see.
 
-A terminal MUTATING delegated run whose attempts do not all carry complete applied evidence is
-an infrastructure refusal (`delegated_evidence_incomplete`), not a pass.
+**A mechanism name is a claim; only the verified path discharges it.** `confinement_mechanism`
+present WITHOUT `confinement_verified_denied_path` reads as *no boundary*, deliberately, and the
+schema makes the pair inseparable so the engine cannot emit one half. `confinementBoundaryProven`
+is the single owner of that question, spent by the terminal gate and by the caller-facing
+projection alike; neither re-derives it, and neither branches on the mechanism's name or on the
+platform.
+
+A terminal MUTATING delegated run whose attempts carry NEITHER a proven confinement NOR a stated
+reason there was none is an infrastructure refusal (`delegated_evidence_incomplete`), not a pass.
+Missing evidence is unauditable. An honest "no boundary here, and here is why" is complete
+evidence and terminalizes normally — that distinction is the whole of the gate.
