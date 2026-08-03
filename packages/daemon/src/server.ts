@@ -38,6 +38,7 @@ import {
 } from "./job-record.js";
 import { settleJobError } from "./job-settlement.js";
 import { socketAlive } from "./socket-probe.js";
+import { isWindowsPipePath } from "./token.js";
 import {
   dispatchShutdownRpc,
   replacementRefusal,
@@ -128,7 +129,14 @@ export class DaemonServer {
   }
 
   private async startOnce(): Promise<void> {
-    if (pathExists(this.opts.socketPath) && (await socketAlive(this.opts.socketPath))) {
+    // A named pipe is not a filesystem entry: existence IS liveness (it
+    // vanishes with its owning server), so the alive probe alone decides, and
+    // the stale-file unlink/chmod below has nothing to act on.
+    const pipeEndpoint = isWindowsPipePath(this.opts.socketPath);
+    if (
+      (pipeEndpoint || pathExists(this.opts.socketPath)) &&
+      (await socketAlive(this.opts.socketPath))
+    ) {
       throw new Error(
         `a claudexor daemon is already listening on ${this.opts.socketPath}; stop it first`,
       );
@@ -138,7 +146,7 @@ export class DaemonServer {
     commandStores(this.opts.commands);
     await this.opts.startupBarrier?.("after_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled after registry load");
-    if (pathExists(this.opts.socketPath)) {
+    if (!pipeEndpoint && pathExists(this.opts.socketPath)) {
       const stale = lstatSync(this.opts.socketPath);
       if (!stale.isSocket() || (process.getuid && stale.uid !== process.getuid())) {
         throw Object.assign(new Error(`refusing to replace non-owned Unix socket path`), {
@@ -152,6 +160,7 @@ export class DaemonServer {
       this.server = createServer((sock) => this.onConnection(sock));
       this.server.once("error", reject);
       this.server.listen(this.opts.socketPath, () => {
+        if (pipeEndpoint) return resolve();
         try {
           chmodSync(this.opts.socketPath, 0o600);
         } catch {

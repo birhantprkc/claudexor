@@ -124,7 +124,7 @@ export function ensureCanonicalPrivateDirectory(path: string): string {
     // Mutate permissions only through the descriptor whose inode and pathname
     // identity were proven above; never follow a replacement path with chmod.
     fchmodSync(fd, 0o700);
-    fsyncSync(fd);
+    fsyncDirectoryHandle(fd);
   } finally {
     closeSync(fd);
   }
@@ -134,9 +134,23 @@ export function ensureCanonicalPrivateDirectory(path: string): string {
 function fsyncCanonicalDirectory(path: string): void {
   const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    fsyncSync(fd);
+    fsyncDirectoryHandle(fd);
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Directory-handle flush is a POSIX durability mechanism; win32 refuses
+ * FlushFileBuffers on a read handle, which would otherwise turn every owned-
+ * root establishment into a hard failure there. File contents keep their own
+ * descriptor-level fsync everywhere.
+ */
+function fsyncDirectoryHandle(fd: number): void {
+  try {
+    fsyncSync(fd);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
   }
 }
 

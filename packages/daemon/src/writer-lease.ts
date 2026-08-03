@@ -1,11 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   defaultProcessIdentityService,
   isKnownProcessIdentity,
   type KnownProcessIdentity,
   type ProcessIdentityReader,
 } from "@claudexor/core";
+import { daemonDir, isWindowsPipePath } from "./token.js";
+
+/**
+ * Filesystem home of the single-writer lease for a control endpoint. A Unix
+ * socket FILE anchors its lease right next to itself; a named pipe is not a
+ * filesystem entry (nothing can be created in `\\.\pipe\`), so its lease lives
+ * in the daemon dir under the pipe's own final segment — which already carries
+ * the config-dir digest, keeping concurrent daemons' leases distinct.
+ */
+export function writerLeasePath(socketPath: string): string {
+  if (isWindowsPipePath(socketPath)) {
+    const pipeName = socketPath.split(/[\\/]/).pop() || "claudexord-pipe";
+    return join(daemonDir(), `${pipeName}.writer`);
+  }
+  return `${socketPath}.writer`;
+}
 
 export interface DaemonWriterLease {
   readonly path: string;
@@ -30,7 +47,7 @@ export function acquireDaemonWriterLease(
   socketPath: string,
   deps: { identity?: ProcessIdentityReader } = {},
 ): DaemonWriterLease {
-  const path = `${socketPath}.writer`;
+  const path = writerLeasePath(socketPath);
   const token = randomUUID();
   const ownerPath = `${path}/owner.json`;
   const self = (deps.identity ?? defaultProcessIdentityService).self();
@@ -78,7 +95,7 @@ export function acquireDaemonWriterLease(
 
 /** Read the current writer-lease owner for a socket path (null when free). */
 export function daemonLeaseOwner(socketPath: string): DaemonLeaseOwner | null {
-  return readLeaseOwner(`${socketPath}.writer/owner.json`);
+  return readLeaseOwner(join(writerLeasePath(socketPath), "owner.json"));
 }
 
 function writerBusy(path: string): Error {

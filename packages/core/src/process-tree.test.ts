@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   descendantProcessGroupIds,
+  killWindowsProcessTree,
   readProcessTable,
   reapProcessTree,
+  resolveKillTreeStrategy,
+  WINDOWS_TREE_DEATH_PROOF_UNAVAILABLE,
   type ProcessTreeNode,
   type ProcessTreeReader,
 } from "./process-tree.js";
@@ -404,5 +407,164 @@ describe("reapProcessTree", () => {
       probeIntervalMs: 50,
     });
     expect(world.signals.some((s) => s.pgid === 500)).toBe(true);
+  });
+});
+
+describe("resolveKillTreeStrategy", () => {
+  it("dispatches win32 to taskkill and every POSIX platform to process groups", () => {
+    expect(resolveKillTreeStrategy("win32")).toBe("windows_taskkill");
+    expect(resolveKillTreeStrategy("linux")).toBe("posix_process_group");
+    expect(resolveKillTreeStrategy("darwin")).toBe("posix_process_group");
+    // An unknown platform keeps the POSIX default (no outcome special-casing).
+    expect(resolveKillTreeStrategy("freebsd")).toBe("posix_process_group");
+  });
+});
+
+describe("killWindowsProcessTree", () => {
+  const run =
+    (status: number | null, stderr = "") =>
+    (cmd: string, args: string[]) => {
+      calls.push({ cmd, args });
+      return { status, stdout: "", stderr };
+    };
+  let calls: Array<{ cmd: string; args: string[] }> = [];
+
+  it("invokes taskkill /PID <pid> /T /F from System32 and reports killed on exit 0", () => {
+    calls = [];
+    const result = killWindowsProcessTree(4242, run(0));
+    expect(result).toEqual({ status: "killed", pid: 4242 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.cmd.toLowerCase()).toContain("system32");
+    expect(calls[0]?.cmd.toLowerCase()).toContain("taskkill.exe");
+    expect(calls[0]?.args).toEqual(["/PID", "4242", "/T", "/F"]);
+  });
+
+  it("maps exit 128 to not_found (the process was already gone)", () => {
+    calls = [];
+    expect(killWindowsProcessTree(4242, run(128))).toEqual({ status: "not_found", pid: 4242 });
+  });
+
+  it("reports failed with detail on any other exit and on a thrown spawn", () => {
+    calls = [];
+    const failed = killWindowsProcessTree(4242, run(1, "Access is denied."));
+    expect(failed.status).toBe("failed");
+    expect(failed.status === "failed" && failed.detail).toContain("Access is denied.");
+    const thrown = killWindowsProcessTree(4242, () => {
+      throw new Error("spawn blew up");
+    });
+    expect(thrown.status).toBe("failed");
+  });
+
+  it("refuses an invalid pid without ever spawning", () => {
+    calls = [];
+    expect(killWindowsProcessTree(0, run(0)).status).toBe("failed");
+    expect(killWindowsProcessTree(-5, run(0)).status).toBe("failed");
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("reapProcessTree on win32 (taskkill leg)", () => {
+  /** Poisoned POSIX machinery: the win32 leg must never touch ps or pgids. */
+  const poisonedTree: ProcessTreeReader = {
+    snapshot: () => {
+      throw new Error("the win32 reap must not read the POSIX process table");
+    },
+  };
+
+  function windowsWorld(opts: { probesUntilDead: number | "never"; killStatus?: number }) {
+    let t = 0;
+    let probes = 0;
+    const kills: number[] = [];
+    return {
+      kills,
+      now: () => t,
+      sleep: (ms: number) => {
+        t += ms;
+        return Promise.resolve();
+      },
+      probePidAlive: (_pid: number) => {
+        probes += 1;
+        if (opts.probesUntilDead === "never") return true;
+        return probes <= opts.probesUntilDead;
+      },
+      windowsKillTree: (pid: number) => {
+        kills.push(pid);
+        const status = opts.killStatus ?? 0;
+        if (status === 0) return { status: "killed" as const, pid };
+        return { status: "failed" as const, pid, detail: `taskkill exited ${status}` };
+      },
+    };
+  }
+
+  it("kills the tree once and settles as the typed no-death-proof disclosure, never confirmed", async () => {
+    const world = windowsWorld({ probesUntilDead: 2 });
+    const outcome = await reapProcessTree({
+      rootPid: 4242,
+      platform: "win32",
+      tree: poisonedTree,
+      ...world,
+    });
+    expect(world.kills).toEqual([4242]);
+    // D21: the absent mechanism (no group ESRCH probe on Windows) is a typed
+    // disclosure on the outcome — the reap must NOT overclaim `confirmed`.
+    expect(outcome).toEqual({
+      state: "unconfirmed",
+      survivors: [],
+      unresolved: [{ pgid: 4242, reason: WINDOWS_TREE_DEATH_PROOF_UNAVAILABLE }],
+    });
+  });
+
+  it("reports the root as a SURVIVOR when it outlives the bounded deadline", async () => {
+    const world = windowsWorld({ probesUntilDead: "never" });
+    const outcome = await reapProcessTree({
+      rootPid: 4242,
+      platform: "win32",
+      tree: poisonedTree,
+      graceMs: 100,
+      deadlineMs: 500,
+      probeIntervalMs: 50,
+      ...world,
+    });
+    expect(outcome).toEqual({ state: "unconfirmed", survivors: [4242], unresolved: [] });
+  });
+
+  it("reports the root as a survivor immediately when taskkill itself failed", async () => {
+    const world = windowsWorld({ probesUntilDead: "never", killStatus: 1 });
+    const outcome = await reapProcessTree({
+      rootPid: 4242,
+      platform: "win32",
+      tree: poisonedTree,
+      ...world,
+    });
+    expect(outcome).toEqual({ state: "unconfirmed", survivors: [4242], unresolved: [] });
+  });
+
+  it("never issues a kill for a root that already probes dead (PID-reuse guard)", async () => {
+    const world = windowsWorld({ probesUntilDead: 0 });
+    const outcome = await reapProcessTree({
+      rootPid: 4242,
+      platform: "win32",
+      tree: poisonedTree,
+      ...world,
+    });
+    expect(world.kills).toEqual([]);
+    expect(outcome.state).toBe("unconfirmed");
+  });
+
+  it("POSIX platforms never dispatch to the taskkill leg", async () => {
+    let windowsKills = 0;
+    const emptyTree: ProcessTreeReader = { snapshot: () => [] };
+    const outcome = await reapProcessTree({
+      rootPid: 4242,
+      platform: "linux",
+      tree: emptyTree,
+      windowsKillTree: (pid: number) => {
+        windowsKills += 1;
+        return { status: "killed", pid };
+      },
+      probeGroupAlive: () => false,
+    });
+    expect(windowsKills).toBe(0);
+    expect(outcome.state).toBe("confirmed");
   });
 });

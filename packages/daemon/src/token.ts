@@ -15,7 +15,12 @@ import {
   writeSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { ensureCanonicalPrivateDirectory, userConfigDir, userHomeDir } from "@claudexor/util";
+import {
+  ensureCanonicalPrivateDirectory,
+  sha256,
+  userConfigDir,
+  userHomeDir,
+} from "@claudexor/util";
 
 export function daemonDir(): string {
   return join(userConfigDir(), "daemon");
@@ -38,8 +43,25 @@ export function ensureDaemonRuntimeRoot(): string {
   return root;
 }
 
-export function defaultSocketPath(): string {
-  return process.env.CLAUDEXOR_DAEMON_SOCK || join(daemonDir(), "claudexord.sock");
+/**
+ * Windows has no Unix-domain-socket path in the filesystem: Node IPC there
+ * rides named pipes (`\\.\pipe\...`). The pipe name carries a digest of the
+ * daemon dir so concurrent daemons with distinct `CLAUDEXOR_CONFIG_DIR`s (the
+ * D30 shape) get distinct endpoints, exactly like distinct socket files do.
+ */
+export function defaultSocketPath(platform: NodeJS.Platform = process.platform): string {
+  const override = process.env.CLAUDEXOR_DAEMON_SOCK;
+  if (override) return override;
+  if (platform === "win32") {
+    const digest = sha256(resolve(daemonDir())).replace(/^sha256:/, "").slice(0, 16);
+    return `\\\\.\\pipe\\claudexord-${digest}`;
+  }
+  return join(daemonDir(), "claudexord.sock");
+}
+
+/** Whether a control endpoint is a Windows named pipe rather than a socket FILE. */
+export function isWindowsPipePath(path: string): boolean {
+  return /^\\\\[.?]\\pipe\\/i.test(path);
 }
 
 export function logPath(): string {
@@ -93,12 +115,17 @@ export function readToken(): string | null {
 function validateDaemonRuntimeRootReadOnly(): string {
   const root = resolve(daemonDir());
   const stat = lstatSync(root);
+  // POSIX permission bits are a mechanism only where the OS enforces them —
+  // keyed on the same probe the uid check already uses (`process.getuid`
+  // exists exactly on POSIX). On win32 libuv synthesizes group/other bits, so
+  // this check would reject EVERY root; privacy there rides the profile-dir
+  // ACL, which mode bits can neither prove nor repair.
   if (
     stat.isSymbolicLink() ||
     !stat.isDirectory() ||
     realpathSync.native(root) !== root ||
-    (stat.mode & 0o077) !== 0 ||
-    (typeof process.getuid === "function" && stat.uid !== process.getuid())
+    (typeof process.getuid === "function" &&
+      ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid()))
   ) {
     throw new Error(`daemon runtime root is not canonical and private: ${root}`);
   }
@@ -156,7 +183,10 @@ function readValidatedToken(path: string, repairMode: boolean): string {
       (typeof process.getuid === "function" && opened.uid !== process.getuid())
     )
       throw new Error("daemon token is not an owner-controlled singly-linked regular file");
-    if ((opened.mode & 0o077) !== 0) {
+    // Same POSIX-only gate as the root validation above: mode bits are not the
+    // privacy mechanism on win32, so neither the check nor the chmod repair
+    // applies there.
+    if (typeof process.getuid === "function" && (opened.mode & 0o077) !== 0) {
       if (!repairMode) throw new Error("daemon token permissions are not private");
       // The inode/path identity was fully proven above; only now may startup
       // repair permissions inherited from an older Claudexor version.
@@ -177,6 +207,11 @@ function fsyncDirectory(path: string): void {
   const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
     fsyncSync(fd);
+  } catch (error) {
+    // Directory-handle flush is a POSIX durability mechanism; win32 refuses it
+    // on a read handle (FlushFileBuffers wants write access). The token bytes
+    // themselves were already fsync'd through their own descriptor.
+    if (process.platform !== "win32") throw error;
   } finally {
     closeSync(fd);
   }

@@ -34,6 +34,78 @@ export interface ProcessTreeNode {
   pgid: number;
 }
 
+/**
+ * Which whole-tree termination mechanism this host offers. POSIX hosts get the
+ * identity-proven process-group ladder above; win32 has no process groups, no
+ * `ps`, and no ESRCH group probe — its honest minimal tree kill is
+ * `taskkill /PID <pid> /T /F` (Job Objects would need a native addon, declined
+ * by owner proportionality). The strategy is decided ONCE here so callers
+ * dispatch on a named mechanism, not on a platform string.
+ */
+export type KillTreeStrategy = "posix_process_group" | "windows_taskkill";
+
+export function resolveKillTreeStrategy(platform: string = process.platform): KillTreeStrategy {
+  return platform === "win32" ? "windows_taskkill" : "posix_process_group";
+}
+
+/**
+ * Typed D21 disclosure reason: Windows offers no process-group emptiness probe,
+ * so a tree kill there can never PROVE whole-tree death (taskkill enumerates
+ * the parent-child snapshot at kill time; a descendant whose intermediate
+ * parent already exited is unreachable). The reap reports `unconfirmed` with
+ * this reason instead of overclaiming `confirmed`.
+ */
+export const WINDOWS_TREE_DEATH_PROOF_UNAVAILABLE = "windows_no_process_group_death_proof";
+
+export type WindowsKillTreeResult =
+  | { status: "killed"; pid: number }
+  | { status: "not_found"; pid: number }
+  | { status: "failed"; pid: number; detail: string };
+
+/**
+ * `taskkill /PID <pid> /T /F` via an absolute System32 path (mirrors the pinned
+ * `PATH` used for `ps` above — a poisoned PATH must not pick the killer).
+ * Exit 0 = the enumerated tree was terminated; exit 128 = no such process.
+ */
+export function killWindowsProcessTree(
+  pid: number,
+  run: (
+    cmd: string,
+    args: string[],
+  ) => { status: number | null; stdout: string; stderr: string } = (cmd, args) => {
+    const r = spawnSync(cmd, args, {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
+    return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  },
+): WindowsKillTreeResult {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { status: "failed", pid, detail: "invalid pid" };
+  }
+  const systemRoot = process.env["SystemRoot"] || "C:\\Windows";
+  const taskkill = `${systemRoot}\\System32\\taskkill.exe`;
+  let out: { status: number | null; stdout: string; stderr: string };
+  try {
+    out = run(taskkill, ["/PID", String(pid), "/T", "/F"]);
+  } catch (error) {
+    return {
+      status: "failed",
+      pid,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (out.status === 0) return { status: "killed", pid };
+  if (out.status === 128) return { status: "not_found", pid };
+  return {
+    status: "failed",
+    pid,
+    detail: `taskkill exited ${out.status}: ${(out.stderr || out.stdout).trim().slice(0, 200)}`,
+  };
+}
+
 export interface ProcessTreeReader {
   /** All live processes as {pid,ppid,pgid}; [] when unreadable (fail-closed). */
   snapshot(): ProcessTreeNode[];
@@ -216,6 +288,12 @@ export interface ReapProcessTreeOptions {
    * signal still clear once it actually dies, instead of pinning the deadline.
    */
   probeGroupAlive?: (pgid: number) => boolean;
+  /** Platform whose kill-tree strategy applies (default the live host). */
+  platform?: string;
+  /** Injection seam for the win32 tree killer (deterministic tests). */
+  windowsKillTree?: (pid: number) => WindowsKillTreeResult;
+  /** Raw single-PID liveness probe for the win32 path (signal 0 only). */
+  probePidAlive?: (pid: number) => boolean;
 }
 
 function defaultProbeGroupAlive(pgid: number): boolean {
@@ -225,6 +303,60 @@ function defaultProbeGroupAlive(pgid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException)?.code !== "ESRCH";
   }
+}
+
+function defaultProbePidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ESRCH";
+  }
+}
+
+/**
+ * The win32 leg of {@link reapProcessTree}: one forced tree kill, then a
+ * bounded liveness poll on the ROOT pid (the only identity Windows lets us
+ * probe without a native addon).
+ *
+ * Fail-closed honesty (QA-027/D21): even a fully successful taskkill cannot
+ * prove the WHOLE tree dead — Windows has no process-group ESRCH probe and no
+ * rescan path to orphaned grandchildren — so the best possible outcome is
+ * `unconfirmed` carrying the typed {@link WINDOWS_TREE_DEATH_PROOF_UNAVAILABLE}
+ * reason. That surfaces as a disclosure on the run, never a refusal (the kill
+ * itself is real), and never a silent `confirmed` the platform cannot back.
+ *
+ * PID-reuse: the kill is issued only while the root still PROBES alive; the
+ * probe→kill window is the residual risk Windows leaves without Job Objects
+ * (declined: native addon). The root pid is not re-killed once it probes dead.
+ */
+async function reapProcessTreeWindows(
+  opts: ReapProcessTreeOptions,
+): Promise<ProcessTreeTerminationOutcome> {
+  const kill = opts.windowsKillTree ?? killWindowsProcessTree;
+  const probeAlive = opts.probePidAlive ?? defaultProbePidAlive;
+  const sleep = opts.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = opts.now ?? Date.now;
+  const graceMs = opts.graceMs ?? 1_000;
+  const deadlineMs = opts.deadlineMs ?? graceMs + 4_000;
+  const probeIntervalMs = Math.max(1, opts.probeIntervalMs ?? 100);
+  const disclosure: ProcessTreeTerminationOutcome = {
+    state: "unconfirmed",
+    survivors: [],
+    unresolved: [{ pgid: opts.rootPid, reason: WINDOWS_TREE_DEATH_PROOF_UNAVAILABLE }],
+  };
+  if (!probeAlive(opts.rootPid)) return disclosure;
+  const killed = kill(opts.rootPid);
+  const start = now();
+  while (probeAlive(opts.rootPid)) {
+    if (killed.status === "failed" || now() - start >= deadlineMs) {
+      // The root itself is proven alive: report it as a survivor, not merely
+      // an unprovable tree.
+      return { state: "unconfirmed", survivors: [opts.rootPid], unresolved: [] };
+    }
+    await sleep(probeIntervalMs);
+  }
+  return disclosure;
 }
 
 /**
@@ -239,6 +371,12 @@ function defaultProbeGroupAlive(pgid: number): boolean {
 export async function reapProcessTree(
   opts: ReapProcessTreeOptions,
 ): Promise<ProcessTreeTerminationOutcome> {
+  if (resolveKillTreeStrategy(opts.platform ?? process.platform) === "windows_taskkill") {
+    // No `ps`, no pgids, no group ESRCH probe on win32 — the POSIX ladder
+    // below would capture nothing and falsely report `confirmed`. The kill is
+    // issued synchronously before the first await, like the POSIX capture.
+    return reapProcessTreeWindows(opts);
+  }
   const groups = opts.groups ?? defaultProcessGroupService;
   const tree = opts.tree ?? defaultProcessTreeReader;
   const identity = opts.identity ?? defaultProcessIdentityService;

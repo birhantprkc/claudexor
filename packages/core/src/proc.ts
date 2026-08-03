@@ -3,7 +3,9 @@ import { registerChildProcess, unregisterChildProcess } from "./process-registry
 import { createInterface } from "node:readline";
 import { composeBaseEnv } from "./env-scope.js";
 import {
+  killWindowsProcessTree,
   reapProcessTree,
+  resolveKillTreeStrategy,
   type ProcessTreeTerminationOutcome,
   type ReapProcessTreeOptions,
 } from "./process-tree.js";
@@ -159,6 +161,9 @@ export async function* spawnProcess(
   // recycled, or unreadable. When capture never succeeded (no proven handle) we
   // do not signal at all — the whole-tree reap remains the fail-closed disclosure
   // channel (it reports `unconfirmed` for a group it cannot identity-prove).
+  // On win32 there is never a proven handle (no POSIX identity source); the
+  // whole tree kill lives in the reap `requestCancel` always kicks first
+  // (taskkill /T /F inside reapProcessTree's windows leg).
   const killTree = (signal: NodeJS.Signals): void => {
     if (!directGroupHandle) return;
     groupService.signal(directGroupHandle, signal);
@@ -451,12 +456,22 @@ export async function runCaptureRaw(
     detached: true,
   });
   if (typeof child.pid === "number") registerChildProcess(child.pid, cmd);
+  let captureChildClosed = false;
+  child.once("close", () => {
+    captureChildClosed = true;
+  });
+  child.once("error", () => {
+    captureChildClosed = true;
+  });
   // Identity-proven-only group signalling for capture children too (round-4 #1
   // residue): a raw `process.kill(-pid)` after the short-lived capture child
   // exited could hit an unrelated recycled group. Group signals go only through
   // the identity-verified handle captured at spawn; without a proven handle we
   // fall back to `child.kill` — the ChildProcess OBJECT is pinned to this exact
   // process by Node, so a direct-child signal can never target a recycled PID.
+  // On win32 no handle ever captures; the viable tree kill is taskkill, gated
+  // on the child not yet having closed (Node holds the process handle until
+  // then, so the PID cannot have been recycled).
   const captureGroupService = opts.processGroups ?? defaultProcessGroupService;
   let captureGroupHandle: ProcessGroupHandle | undefined;
   if (typeof child.pid === "number") {
@@ -466,6 +481,14 @@ export async function runCaptureRaw(
   const killTree = (signal: NodeJS.Signals): void => {
     if (captureGroupHandle) {
       captureGroupService.signal(captureGroupHandle, signal);
+      return;
+    }
+    if (
+      resolveKillTreeStrategy() === "windows_taskkill" &&
+      typeof child.pid === "number" &&
+      !captureChildClosed
+    ) {
+      killWindowsProcessTree(child.pid);
       return;
     }
     try {
