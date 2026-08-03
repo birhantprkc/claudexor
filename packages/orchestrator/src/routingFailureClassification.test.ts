@@ -44,4 +44,35 @@ describe("routingFailureClassification", () => {
     expect(routingFailureClassification("boom").category).toBe("harness_unavailable");
     expect(routingFailureClassification(undefined).category).toBe("harness_unavailable");
   });
+
+  /**
+   * Quota admission moved INTO routing (the account that will actually spawn is
+   * the one whose windows are checked), so a spent subscription window is now
+   * thrown here rather than inside a candidate attempt. The per-slot catch that
+   * records `CandidateRun.declaredFailure` never sees it, which makes this
+   * classifier the last place that can carry the typed refusal. If it drops the
+   * code, `final/failure.yaml` says `code: null` and a scheduler is back to
+   * parsing prose for the reopen time.
+   */
+  it("carries a typed refusal's code and reset time through the routing terminal", () => {
+    const resetsAt = "2026-08-02T18:00:00.000Z";
+    const err = Object.assign(new Error("credential profile is over its headroom threshold"), {
+      code: "subscription_window_exhausted",
+      category: "harness_unavailable",
+      resetsAt,
+    });
+    const result = routingFailureClassification(err);
+    expect(result.category).toBe("harness_unavailable");
+    expect(result.code).toBe("subscription_window_exhausted");
+    expect(result.resetsAt).toBe(resetsAt);
+  });
+
+  it("never lets an unrecognized code reach the terminal as a sub-code", () => {
+    // `routing_preflight_refused` is a classification marker, not a RunFailureCode;
+    // an arbitrary string must not be smuggled into failure.yaml's `code` either.
+    expect(routingFailureClassification(new RoutingPreflightError("refused")).code).toBeNull();
+    expect(
+      routingFailureClassification(Object.assign(new Error("x"), { code: "not_a_real_code" })).code,
+    ).toBeNull();
+  });
 });

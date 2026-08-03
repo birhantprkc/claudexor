@@ -3087,6 +3087,8 @@ export class Orchestrator {
       writeFailure(store, paths, {
         phase: "routing",
         category: routingFailure.category,
+        code: routingFailure.code,
+        resetsAt: routingFailure.resetsAt,
         safeMessage: message,
         runDir: paths.root,
         ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
@@ -4878,6 +4880,8 @@ export class Orchestrator {
       writeFailure(store, paths, {
         phase: "routing",
         category: routingFailure.category,
+        code: routingFailure.code,
+        resetsAt: routingFailure.resetsAt,
         safeMessage: message,
         runDir: paths.root,
         ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
@@ -5966,6 +5970,8 @@ export class Orchestrator {
       writeFailure(store, paths, {
         phase: "routing",
         category: routingFailure.category,
+        code: routingFailure.code,
+        resetsAt: routingFailure.resetsAt,
         safeMessage: message,
         runDir: paths.root,
         ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
@@ -6511,6 +6517,8 @@ export class Orchestrator {
       writeFailure(store, paths, {
         phase: "routing",
         category: routingFailure.category,
+        code: routingFailure.code,
+        resetsAt: routingFailure.resetsAt,
         safeMessage: message,
         runDir: paths.root,
         ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
