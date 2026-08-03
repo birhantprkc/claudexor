@@ -203,6 +203,105 @@ describe("a host with no boundary works and says so", () => {
   });
 });
 
+describe("proveConfinementDenial rejects a sandbox that did not actually deny (audit claim E)", () => {
+  const fixture = scaffold();
+  afterAll(() => rmSync(fixture.base, { recursive: true, force: true }));
+
+  const SEATBELT = "/usr/bin/sandbox-exec";
+  // The denied probe applyConfinement selects is the daemon dir (first existing
+  // denied path); an own-root is the positive-control surface.
+  const isDeniedTarget = (path: string): boolean => path.includes("/daemon");
+
+  /**
+   * A darwin host whose sandbox-exec behavior is scripted, so the three failure
+   * shapes are exercised on ANY platform (this box cannot boot the others, and a
+   * real failed sandbox_apply cannot be provoked on demand). Unconfined `/bin/ls`
+   * always succeeds (the paths are real); the wrapped sandbox-exec run is faked.
+   */
+  function scriptedHost(sandbox: (path: string) => { status: number | null; stderr?: string }) {
+    return {
+      platform: "darwin" as const,
+      // sandbox-exec is present even on non-darwin dev/CI so the mechanism resolves.
+      exists: (path: string) => path === SEATBELT || existsSync(path),
+      run: (bin: string, args: string[]) => {
+        if (bin === "/bin/ls") return { status: 0 }; // unconfined controls
+        // mechanism.invocation => ["-p", profile, "/bin/ls", <path>]
+        return sandbox(args[args.length - 1] ?? "");
+      },
+    } satisfies ConfinementHost;
+  }
+
+  it("records a proven boundary when the sandbox APPLIED and the denied path was denied", () => {
+    const host = scriptedHost((path) =>
+      isDeniedTarget(path)
+        ? { status: 1, stderr: `ls: ${path}: Operation not permitted` } // program-level deny
+        : { status: 0 },
+    );
+    const applied = applyConfinement(fixture.input, host);
+    expect(applied.unavailableReason).toBeNull();
+    expect(applied.confinement?.mechanism).toBe("seatbelt");
+    expect(applied.confinement?.verified_denied_path).toContain("daemon");
+  });
+
+  it("does NOT record proof when the profile FAILED TO APPLY (sandbox_apply refused)", () => {
+    // Every wrapped run fails identically: the positive control catches it.
+    const host = scriptedHost(() => ({
+      status: 1,
+      stderr: "sandbox-exec: sandbox_apply: Operation not permitted",
+    }));
+    expect(() => applyConfinement(fixture.input, host)).toThrowError(ConfinementUnavailableError);
+    try {
+      applyConfinement(fixture.input, host);
+    } catch (err) {
+      expect((err as Error).message).toMatch(/sandbox did not apply/);
+    }
+  });
+
+  it("does NOT record proof when the profile is MALFORMED (parse/compile error)", () => {
+    const host = scriptedHost(() => ({
+      status: 1,
+      stderr: "/usr/bin/sandbox-exec: failed to parse the profile: unexpected token",
+    }));
+    expect(() => applyConfinement(fixture.input, host)).toThrowError(ConfinementUnavailableError);
+  });
+
+  it("does NOT credit an application fault that surfaces on the denied probe after the control passed", () => {
+    // Belt-and-suspenders: the positive control passes (own-root readable), but
+    // the denied probe's nonzero carries a sandbox_apply signature -> not a deny.
+    const host = scriptedHost((path) =>
+      isDeniedTarget(path)
+        ? { status: 1, stderr: "sandbox-exec: sandbox_apply: Operation not permitted" }
+        : { status: 0 },
+    );
+    expect(() => applyConfinement(fixture.input, host)).toThrowError(ConfinementUnavailableError);
+    try {
+      applyConfinement(fixture.input, host);
+    } catch (err) {
+      expect((err as Error).message).toMatch(/application fault, not a policy deny/);
+    }
+  });
+
+  it("does NOT credit an unexplained non-completion (status null) as a deny", () => {
+    const host = scriptedHost((path) =>
+      isDeniedTarget(path) ? { status: null, stderr: "" } : { status: 0 },
+    );
+    expect(() => applyConfinement(fixture.input, host)).toThrowError(ConfinementUnavailableError);
+  });
+
+  it("does NOT record proof when an allowed path is denied under the sandbox (control failed)", () => {
+    // The sandbox is over-broad: it denies EVERYTHING, so the denied path would
+    // exit nonzero, but the positive control proves the sandbox is not honoring
+    // its allow carve-outs and the denial is meaningless.
+    const host = scriptedHost(() => ({ status: 1, stderr: "ls: Operation not permitted" }));
+    expect(() => applyConfinement(fixture.input, host)).toThrowError(ConfinementUnavailableError);
+    try {
+      applyConfinement(fixture.input, host);
+    } catch (err) {
+      expect((err as Error).message).toMatch(/sandbox did not apply/);
+    }
+  });
+});
+
 describe("confined invocation", () => {
   it("wraps the argv when a boundary is applied and passes through when it is not", () => {
     const confinement = {

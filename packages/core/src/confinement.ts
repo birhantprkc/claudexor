@@ -204,29 +204,81 @@ function readUnder(
   return host.run(invocation.bin, invocation.args);
 }
 
+/** A trimmed, bounded stderr tail for a probe's failure reason. */
+function describeProbeFault(stderr: string | undefined): string {
+  return stderr && stderr.trim() ? ` (${stderr.trim().slice(0, 200)})` : "";
+}
+
+/**
+ * stderr signatures of the SANDBOX ITSELF failing to launch or apply the
+ * profile — a refused `sandbox_apply`, a profile that would not compile/parse —
+ * as opposed to the wrapped program running and hitting a real policy deny.
+ * `sandbox-exec` prefixes its OWN failures with `sandbox-exec:` and never runs
+ * the wrapped tool; a denied read instead surfaces from the tool itself
+ * (`ls: <path>: Operation not permitted`). A nonzero exit carrying one of these
+ * is infrastructure, not proof.
+ */
+const SANDBOX_APPLICATION_FAULT_RE =
+  /sandbox-exec:|sandbox_apply|sandbox_compile|failed to (parse|compile|apply|initialize)|could not (parse|compile)|error parsing/i;
+
+function isSandboxApplicationFault(stderr: string | undefined): boolean {
+  return typeof stderr === "string" && SANDBOX_APPLICATION_FAULT_RE.test(stderr);
+}
+
 /**
  * Prove the policy denies, on THIS host, before anything runs under it.
  *
  * Returns the reason it could NOT be proven, or null when it was. A policy that
- * fails to compile, or that a future OS quietly stops enforcing, would
- * otherwise produce a run that reports `confined` and is not.
+ * fails to compile, that a launcher refuses to apply, or that a future OS
+ * quietly stops enforcing, would otherwise produce a run that records a false
+ * `verified_denied_path` and reports `confined` when it is not.
+ *
+ * Three guards, because a nonzero exit alone means nothing:
+ *   NEGATIVE control — the denied path must be readable UNCONFINED, or an
+ *     ENOENT there would masquerade as a policy deny.
+ *   POSITIVE control — an ALLOWED path must stay readable UNDER the sandbox. If
+ *     it does not, the sandbox never applied (failed `sandbox_apply`, a profile
+ *     that would not compile), so any subsequent "deny" is the launcher
+ *     failing, not the policy denying. This is the guard the audit was missing.
+ *   FAULT discrimination — even with the sandbox applied, a nonzero exit whose
+ *     stderr is a launch/application fault, or that never completed, is never
+ *     recorded as proof. Only an explained nonzero (positive control passed, no
+ *     fault signature, path proven readable unconfined) is a real deny.
  */
 function proveConfinementDenial(
   mechanism: ConfinementMechanism,
   profile: string,
   probePath: string,
+  allowedControlPaths: readonly string[],
   host: ConfinementHost,
 ): string | null {
-  // CONTROL first. A probe path that is simply absent fails the confined read
-  // for the wrong reason, and the policy would be "proven" by an ENOENT.
+  // NEGATIVE CONTROL.
   if (host.run("/bin/ls", [probePath]).status !== 0) {
     return `the probe path ${probePath} is not readable even unconfined, so a denial there proves nothing`;
   }
+
+  // POSITIVE CONTROL. Pick an allowed path that is readable unconfined, then
+  // require it to STAY readable under the sandbox. A failure here is the sandbox
+  // not applying, not the policy working.
+  const control = allowedControlPaths
+    .map((path) => resolved(path))
+    .find((path) => host.run("/bin/ls", [path]).status === 0);
+  if (!control) {
+    return `no allowed control path was readable unconfined, so the ${mechanism.id} sandbox application could not be confirmed`;
+  }
+  const positive = readUnder(mechanism, profile, control, host);
+  if (positive.status !== 0) {
+    return `the ${mechanism.id} sandbox did not apply: the allowed control path ${control} was not readable under it${describeProbeFault(positive.stderr)}`;
+  }
+
+  // THE TEST: the denied path must now be denied under the proven-applied sandbox.
   const probe = readUnder(mechanism, profile, probePath, host);
   if (probe.status === 0) return `${probePath} stayed readable under the ${mechanism.id} policy`;
+  if (isSandboxApplicationFault(probe.stderr)) {
+    return `the ${mechanism.id} probe hit a sandbox application fault, not a policy deny${describeProbeFault(probe.stderr)}`;
+  }
   if (probe.status === null) {
-    const detail = probe.stderr ? ` (${probe.stderr.trim().slice(0, 200)})` : "";
-    return `the ${mechanism.id} probe did not complete${detail}`;
+    return `the ${mechanism.id} probe did not complete${describeProbeFault(probe.stderr)}`;
   }
   return null;
 }
@@ -326,7 +378,16 @@ export function applyConfinement(
     );
   }
   const probePath = resolved(probeCandidate);
-  const why = proveConfinementDenial(available.mechanism, profile, probePath, host);
+  // The run's own allow-listed roots double as the positive-control surface:
+  // one of them staying readable under the sandbox is what proves the profile
+  // actually applied before any denial is credited.
+  const why = proveConfinementDenial(
+    available.mechanism,
+    profile,
+    probePath,
+    ownRoots(input),
+    host,
+  );
   if (why) throw new ConfinementUnavailableError(`filesystem confinement failed: ${why}`);
   return {
     confinement: {
