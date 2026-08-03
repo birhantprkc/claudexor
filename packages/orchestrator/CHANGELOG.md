@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Respect model-scoped quota windows during credential-profile headroom and rotation, including fallback and budget-downgrade models.
+- Resolve the effective model and opt-in rotated account before quota filters the route, while preserving model-scoped headroom for fallback, downgrade, and convergence attempts.
 - @claudexor/arbitration@3.2.1
 - @claudexor/artifact-store@3.2.1
 - @claudexor/budget@3.2.1

@@ -573,6 +573,14 @@ export interface RoutedAdapter {
   /** Pre-spawn credential-route estimate (INV-061 projection of preference x
    * doctor source readiness); null = undecidable, model gates stay fail-closed. */
   authRouteEstimate: "local_session" | "api_key" | null;
+  /** Quota identity resolved before pool ranking. The model is frozen for the
+   * initial route; a fallback/downgrade model forces a fresh profile preflight
+   * before spawn instead of reusing this admission. */
+  quotaAdmission: {
+    model: string | null;
+    profile: CredentialProfile | null;
+    route: "vendor_native" | "managed_api_key" | null;
+  };
   /** Manifest `synthesize` capability (#27 / D-6): only such routes are eligible
    * to run the deep-scan bounded synthesis reducer over the scout reports. */
   supportsSynthesize: boolean;
@@ -936,9 +944,13 @@ export class Orchestrator {
     model: string | null,
     log?: EventLog,
     defaultRoute: "local_session" | "api_key" | null = null,
+    quotaAdmission?: RoutedAdapter["quotaAdmission"],
   ): Promise<Pick<HarnessRunSpec, "auth_preference" | "resume_session_id" | "credential_profile">> {
     const cfg = this.config(input.repoRoot)?.global;
-    const profile = await this.preflightProfile(input, harnessId, model, log, defaultRoute);
+    const profile =
+      quotaAdmission?.model === model
+        ? quotaAdmission.profile
+        : await this.preflightProfile(input, harnessId, model, log, defaultRoute);
     return {
       // "auto" at ANY level falls through (thread turns send the thread default
       // "auto" as a per-run value; it must not shadow a configured preference).
@@ -1082,7 +1094,7 @@ export class Orchestrator {
       harnessId,
       profile?.profile_id ?? null,
       policy.headroom_threshold,
-      model ?? undefined,
+      model,
     );
     const readyProfileIds =
       policy.limit_action === "rotate" &&
@@ -1101,7 +1113,7 @@ export class Orchestrator {
         snapshots,
         readyProfileIds,
         defaultRoute,
-        model: model ?? undefined,
+        model,
         emit,
       });
     }
@@ -1112,7 +1124,7 @@ export class Orchestrator {
       registry,
       snapshots,
       readyProfileIds,
-      model: model ?? undefined,
+      model,
       emit,
     });
   }
@@ -1447,6 +1459,7 @@ export class Orchestrator {
               this.authPreferenceForHarness(input.repoRoot, id, input.authPreference),
               status.authSources,
             ),
+          quotaAdmission: { model: null, profile: null, route: null },
           supportsSynthesize: manifest.capabilities.synthesize,
           supportsInteractive: manifest.capabilities.interactive,
           supportsJsonSchemaOutput: manifest.capabilities.json_schema_output,
@@ -1487,13 +1500,39 @@ export class Orchestrator {
         `no harness can perform '${intent}' for this mode${dropped.length ? ` (skipped: ${dropped.join(", ")})` : ""}`,
       );
     }
-    const ordered = this.orderPool(pool, input, intent, statusById, ledger, runId);
+    // Quota admission must use the account that will actually spawn. In
+    // particular, an opt-in default-subject rotation has to select its ready
+    // profile before the budget router filters the exhausted default away.
+    // The same resolved profile is reused by the first spec build below.
+    const quotaPreparedPool = await Promise.all(
+      pool.map(async (routed) => {
+        const model = input.models?.[routed.adapter.id] ?? routed.settings?.defaultModel ?? null;
+        const profile = await this.preflightProfile(
+          input,
+          routed.adapter.id,
+          model,
+          log,
+          routed.authRouteEstimate,
+        );
+        const route = profile
+          ? profile.credential_kind === "api_key"
+            ? ("managed_api_key" as const)
+            : ("vendor_native" as const)
+          : routed.authRouteEstimate === "api_key"
+            ? ("managed_api_key" as const)
+            : routed.authRouteEstimate === "local_session"
+              ? ("vendor_native" as const)
+              : null;
+        return { ...routed, quotaAdmission: { model, profile, route } };
+      }),
+    );
+    const ordered = this.orderPool(quotaPreparedPool, input, intent, statusById, ledger, runId);
     if (ordered.length === 0) {
       throw new HarnessUnavailableError(
         `no harness remains eligible for '${intent}' after budget and quota routing`,
       );
     }
-    emitPrimaryDivergence(log, input.primaryHarness, ordered, pool, dropped);
+    emitPrimaryDivergence(log, input.primaryHarness, ordered, quotaPreparedPool, dropped);
     const n = input.n ?? ordered.length;
     const selectionOrder = ordered;
     const out: RoutedAdapter[] = [];
@@ -1617,28 +1656,26 @@ export class Orchestrator {
           : authModes.includes("api_key")
             ? ("api_key" as const)
             : ("unknown" as const);
-        // A selected profile's credential_kind decides the route outright
-        // (round-18 #2): an api_key profile must never inherit a
+        // The quota-preflight profile's credential_kind decides the route
+        // outright (round-18 #2). This includes an unpinned default subject
+        // that rotated before ranking; an api_key profile must never inherit a
         // subscription classification from the default store's metric.
+        const admittedProfileRoute = r.quotaAdmission.profile
+          ? r.quotaAdmission.profile.credential_kind === "api_key"
+            ? ("api_key" as const)
+            : ("local_session" as const)
+          : null;
         const authMode =
-          this.profileAuthRoute(input, r.adapter.id) ??
+          admittedProfileRoute ??
           (input.authPreference === "api_key"
             ? ("api_key" as const)
             : input.authPreference === "subscription"
               ? ("local_session" as const)
               : (metric?.last_auth_mode ?? guessedAuthMode));
-        // The quota subject this candidate would actually run as (release
-        // wave round-16 #2): the resolved profile id, or null for the engine
-        // default — so profile A's cooldown never excludes profile B or the
-        // default. A profile that does not resolve for this harness routes
-        // as unknown (undefined) and stays conservatively any-subject.
-        let credentialSubjectId: string | null | undefined;
-        try {
-          credentialSubjectId =
-            this.resolveCredentialProfile(input, r.adapter.id)?.profile_id ?? null;
-        } catch {
-          credentialSubjectId = undefined;
-        }
+        // The exact quota subject selected before ranking: profile id or the
+        // engine default. Profile A's cooldown never excludes profile B or the
+        // default on the same harness and route.
+        const credentialSubjectId = r.quotaAdmission.profile?.profile_id ?? null;
         // QA-034: the typed auth-route evidence (doctor source verification x the
         // resolved route) is AUTHORITATIVE for billing knowledge in the router —
         // a VERIFIED native route proves subscription_entitlement, so it survives
@@ -1649,10 +1686,7 @@ export class Orchestrator {
         return {
           harnessId: r.adapter.id,
           available: true,
-          model:
-            input.models?.[r.adapter.id] ??
-            config.harnesses[r.adapter.id]?.default_model ??
-            undefined,
+          model: r.quotaAdmission.model,
           effort:
             input.efforts?.[r.adapter.id] ??
             input.effort ??
@@ -1661,11 +1695,12 @@ export class Orchestrator {
           billingKnowledge: authMode === "api_key" ? "metered" : "unknown",
           incrementalCostUsd: authMode === "api_key" ? (metric?.avg_cost_usd ?? null) : null,
           credentialRoute:
-            authMode === "api_key"
+            r.quotaAdmission.route ??
+            (authMode === "api_key"
               ? "managed_api_key"
               : authMode === "local_session"
                 ? "vendor_native"
-                : undefined,
+                : undefined),
           ...(authRoute ? { authRoute } : {}),
           credentialSubjectId,
         };
@@ -1712,6 +1747,55 @@ export class Orchestrator {
       });
     }
     return ordered;
+  }
+
+  /** Harness-only convergence helpers still need the exact quota identity
+   * selected before ranking. This facade keeps their small interface while
+   * preventing a scoped limit on one model/account from cooling another. */
+  private quotaLedgerView(
+    ledger: BudgetLedger,
+    routes: readonly RoutedAdapter[],
+  ): {
+    bindingPaceSlack(id: string): number | null;
+    cooldownActive(id: string): boolean;
+  } {
+    const byId = new Map(routes.map((route) => [route.adapter.id, route]));
+    const identity = (id: string) => {
+      const route = byId.get(id);
+      return route
+        ? {
+            credentialRoute: route.quotaAdmission.route ?? undefined,
+            credentialSubjectId: route.quotaAdmission.profile?.profile_id ?? null,
+            model: route.quotaAdmission.model,
+          }
+        : null;
+    };
+    return {
+      bindingPaceSlack: (id) => {
+        const selected = identity(id);
+        return selected
+          ? ledger.bindingPaceSlack(
+              id,
+              selected.credentialRoute,
+              selected.credentialSubjectId,
+              Date.now(),
+              selected.model,
+            )
+          : ledger.bindingPaceSlack(id);
+      },
+      cooldownActive: (id) => {
+        const selected = identity(id);
+        return selected
+          ? ledger.cooldownActive(
+              id,
+              selected.credentialRoute,
+              selected.credentialSubjectId,
+              Date.now(),
+              selected.model,
+            )
+          : ledger.cooldownActive(id);
+      },
+    };
   }
 
   /**
@@ -2221,6 +2305,7 @@ export class Orchestrator {
           knobs.model,
           log,
           routed.authRouteEstimate,
+          routed.quotaAdmission,
         )
       : undefined;
     // Continuity (INV-137): once the lane (harness + resolved profile) is known,
@@ -4769,7 +4854,9 @@ export class Orchestrator {
     // observed quota cooldown across all harnesses, or genuine no-progress (a stall on the same
     // failure signature after every available harness has tried it).
     const stallThreshold = input.untilClean === true ? 4 : 2;
-    const allCooledDown = () => adapterPool.every((a) => ledger.cooldownActive(a.adapter.id));
+    const convergenceQuotaLedger = this.quotaLedgerView(ledger, adapterPool);
+    const allCooledDown = () =>
+      adapterPool.every((a) => convergenceQuotaLedger.cooldownActive(a.adapter.id));
     const attemptTelemetries: {
       attemptId: string;
       harnessId: string;
@@ -5253,7 +5340,7 @@ export class Orchestrator {
             adapterIdx = rotateOnStall(
               adapterPool.map((a) => a.adapter.id),
               adapterIdx,
-              ledger,
+              convergenceQuotaLedger,
               triedSinceProgress,
               log,
               lastRun?.harnessId ?? null,
@@ -5592,6 +5679,7 @@ export class Orchestrator {
           knobs.model,
           log,
           routed.authRouteEstimate,
+          routed.quotaAdmission,
         );
         const laneContinuity = args.laneRun
           ? await this.resolveContinuity(
@@ -6122,6 +6210,7 @@ export class Orchestrator {
           knobs.model,
           log,
           routed.authRouteEstimate,
+          routed.quotaAdmission,
         );
         const spec = HarnessRunSpec.parse({
           session_id: newId("ses"),
@@ -6444,6 +6533,7 @@ export class Orchestrator {
           knobs.model,
           log,
           routed.authRouteEstimate,
+          routed.quotaAdmission,
         );
         const grantResume =
           sessionFields.resume_session_id !== null && !resumeGranted.has(adapter.id);

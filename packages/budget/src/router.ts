@@ -44,7 +44,9 @@ export function billingKnowledgeForAuthRoute(evidence: RouteAuthEvidence): Billi
 export interface RouterCandidate {
   harnessId: string;
   available: boolean;
-  model?: string;
+  /** Known model id, null for an intentional vendor-native default, or omitted
+   * only when the caller has no model context at all. */
+  model?: string | null;
   effort?: EffortHint;
   billingKnowledge?: BillingKnowledge;
   /** Typed auth-route evidence. When present it is AUTHORITATIVE for billing

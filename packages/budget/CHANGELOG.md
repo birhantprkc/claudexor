@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Apply model-scoped quota windows and live rejections only to matching routing and pacing candidates.
+- Apply model-scoped quota windows and live rejections only to matching routing and pacing candidates; an intentional vendor-native default remains eligible until the vendor discloses its actual model.
 - @claudexor/schema@3.2.1
 - @claudexor/util@3.2.1
 

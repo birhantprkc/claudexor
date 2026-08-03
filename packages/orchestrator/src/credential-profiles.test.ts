@@ -282,6 +282,10 @@ describe("profileHeadroomBreach (W5.4 preflight)", () => {
       applies_to_models: ["fable", "claude-fable-5"],
     };
     expect(profileHeadroomBreach([scoped], "claude", "work", 0.9, "claude-opus-5")).toBeNull();
+    expect(profileHeadroomBreach([scoped], "claude", "work", 0.9, null)).toBeNull();
+    expect(profileHeadroomBreach([scoped], "claude", "work", 0.9)).toMatchObject({
+      constraint_id: "weekly_scoped:Fable",
+    });
     expect(profileHeadroomBreach([scoped], "claude", "work", 0.9, "claude-fable-5")).toMatchObject({
       constraint_id: "weekly_scoped:Fable",
     });
@@ -652,5 +656,29 @@ describe("nextUpIdentity readiness parity", () => {
         readyProfileIds: new Set(),
       }),
     ).toEqual({ kind: "native", route: "api_key" });
+  });
+
+  it("does not rotate a native-default route solely because another model family is exhausted", () => {
+    const scoped = snap(null, 1);
+    scoped.constraints[0] = {
+      ...scoped.constraints[0]!,
+      id: "weekly_scoped:Fable",
+      applies_to_models: ["fable", "claude-fable-5", "best"],
+    };
+    const input = {
+      registry: [a],
+      harnessId: "claude",
+      policy,
+      snapshots: [scoped],
+      defaultEnabled: true,
+      defaultReady: true,
+      defaultRoute: "local_session" as const,
+      readyProfileIds: new Set(["a"]),
+    };
+    expect(nextUpIdentity({ ...input, model: null })).toEqual({
+      kind: "native",
+      route: "local_session",
+    });
+    expect(nextUpIdentity(input)).toEqual({ kind: "profile", profileId: "a" });
   });
 });

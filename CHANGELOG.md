@@ -29,10 +29,12 @@ Release history for Claudexor. The current version is declared in the root
   server-authorized risk-decision path, and remote sync times stay English under
   non-English host locales. Claude advisory quota warnings no longer cool a
   healthy account, model-scoped Fable limits no longer block explicit Opus
-  routes, typed Opus/Sonnet rejections retain their model scope, fallback and
-  budget-downgrade attempts preflight the model they actually run, and the
-  real-harness battery now proves its expected convergence refusal from the
-  canonical failure instead of incidental review fields.
+  routes or a viable vendor-native default, typed Opus/Sonnet rejections retain
+  their model scope, fallback and budget-downgrade attempts preflight the model
+  they actually run, and opt-in account rotation selects a ready profile before
+  the exhausted default can be filtered out. The real-harness battery now proves
+  its expected convergence refusal from the canonical failure instead of
+  incidental review fields.
 
 - **v3.2.0** (2026-07-29) — an eight-pull-request batch: remote execution, a
   canonical run receipt, and the toolchain moved forward. Remote SSH

@@ -38,8 +38,9 @@ export function claudeQuotaModelAliases(displayName: string): string[] {
     (model) => model === family || model.startsWith(`claude-${family}-`),
   );
   // Preserve an honest model-scoped constraint even before a newly surfaced
-  // family joins the verified manifest. It will not exclude any different,
-  // explicit known model; an omitted/unknown run model remains conservative.
+  // family joins the verified manifest. It will not exclude a different known
+  // model or refuse an intentional native-default route before the vendor has
+  // disclosed which model it actually selected.
   return [...new Set([...(aliases.length > 0 ? aliases : [family]), "best"])];
 }
 

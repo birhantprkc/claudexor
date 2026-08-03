@@ -62,7 +62,7 @@ export function profileHeadroomBreach(
   harnessId: string,
   profileId: string | null,
   threshold: number,
-  model?: string,
+  model?: string | null,
 ): HeadroomBreach | null {
   for (const snapshot of snapshots) {
     // FRESH evidence only (release wave tier1 #3): a stale or unknown reading
@@ -105,7 +105,7 @@ export function nextEligibleProfile(
   snapshots: readonly QuotaSnapshot[],
   readyProfileIds: ReadonlySet<string>,
   excluded: ReadonlySet<string> = new Set(),
-  model?: string,
+  model?: string | null,
 ): CredentialProfile | null {
   for (const candidate of staticRotationCandidates({
     registry,
@@ -159,7 +159,7 @@ function emitRotationExhausted(args: {
   readyProfileIds: ReadonlySet<string>;
   excluded?: ReadonlySet<string>;
   attemptId?: string;
-  model?: string;
+  model?: string | null;
   reason: "profile_headroom_preflight" | "vendor_limit_rejected";
   emit: EmitFn;
 }): void {
@@ -222,7 +222,7 @@ export function preflightCredentialProfile(args: {
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
   readyProfileIds: ReadonlySet<string>;
-  model?: string;
+  model?: string | null;
   emit: EmitFn;
 }): CredentialProfile {
   const { profile, harnessId, policy, registry, snapshots, readyProfileIds, model, emit } = args;
@@ -307,7 +307,7 @@ export function preflightDefaultSubject(args: {
   snapshots: readonly QuotaSnapshot[];
   readyProfileIds: ReadonlySet<string>;
   defaultRoute: "local_session" | "api_key" | null;
-  model?: string;
+  model?: string | null;
   emit: EmitFn;
 }): CredentialProfile | null {
   const { harnessId, policy, registry, snapshots, readyProfileIds, defaultRoute, model, emit } =
@@ -388,7 +388,7 @@ export function planReactiveRotation(args: {
   sawTypedLimit: boolean;
   deliverableEmpty: boolean;
   lastLimit: { retryDelayMs: number | null; resetsAt: string | null } | null;
-  model?: string;
+  model?: string | null;
   emit: EmitFn;
 }): CredentialProfile | null {
   if (!rotationRetryEligible(args)) return null;
@@ -469,7 +469,7 @@ export function rotateSpecOnTypedLimit(args: {
     sawTypedLimit: args.sawTypedLimit,
     deliverableEmpty: args.deliverableEmpty,
     lastLimit: args.lastLimit,
-    model: args.spec.model_hint ?? undefined,
+    model: args.spec.model_hint,
     emit: args.emit,
   });
   if (!rotation) return null;

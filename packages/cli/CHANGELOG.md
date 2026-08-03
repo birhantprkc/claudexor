@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Preserve known Claude OAuth model scope in quota snapshots and keep unknown scope account-wide.
+- Preserve known Claude OAuth model scope in quota snapshots, keep unknown scope account-wide, and project native-default account routing without treating one scoped model limit as global.
 - @claudexor/acp-server@3.2.1
 - @claudexor/artifact-store@3.2.1
 - @claudexor/config@3.2.1

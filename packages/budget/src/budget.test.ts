@@ -768,8 +768,11 @@ describe("router", () => {
     expect(led.cooldownActive("claude", "vendor_native", null, now, "claude-fable-5")).toBe(true);
     expect(led.cooldownActive("claude", "vendor_native", null, now, "best")).toBe(true);
     expect(led.cooldownActive("claude", "vendor_native", null, now, "claude-opus-5")).toBe(false);
-    // An omitted effective model stays conservative because the harness default
-    // could be Fable.
+    // null is an intentional vendor-native default: the concrete model is not
+    // knowable before spawn, so scoped evidence alone cannot refuse it.
+    expect(led.cooldownActive("claude", "vendor_native", null, now, null)).toBe(false);
+    expect(led.bindingPaceSlack("claude", "vendor_native", null, now, null)).toBeNull();
+    // Omitted means the caller supplied no model context and stays conservative.
     expect(led.cooldownActive("claude", "vendor_native", null, now)).toBe(true);
     expect(led.bindingPaceSlack("claude", "vendor_native", null, now, "claude-opus-5")).toBeNull();
     expect(
@@ -878,7 +881,8 @@ describe("router", () => {
     expect(led.cooldownActive("claude", "vendor_native", "r", Date.now(), "claude-fable-5")).toBe(
       false,
     );
-    // Unknown effective model remains conservative.
+    expect(led.cooldownActive("claude", "vendor_native", "r", Date.now(), null)).toBe(false);
+    // Missing caller context remains conservative.
     expect(led.cooldownActive("claude", "vendor_native", "r")).toBe(true);
   });
 

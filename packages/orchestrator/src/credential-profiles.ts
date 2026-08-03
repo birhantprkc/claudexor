@@ -171,8 +171,9 @@ export function nextUpIdentity(args: {
   defaultRoute: "local_session" | "api_key" | null;
   /** Profiles admitted by their fresh profile doctor probe in this snapshot. */
   readyProfileIds: ReadonlySet<string>;
-  /** Effective configured model when known; omitted stays conservative. */
-  model?: string;
+  /** Known configured model, null for the native default, or omitted only when
+   * this projection has no model context and must stay conservative. */
+  model?: string | null;
 }): NextUpIdentity {
   const {
     registry,

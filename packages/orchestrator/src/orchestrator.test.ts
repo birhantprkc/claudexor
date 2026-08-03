@@ -28,7 +28,12 @@ const shellGate = (command: string) => ({
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import { runCapture, spawnProcess } from "@claudexor/core";
 import { createFakeHarness } from "@claudexor/harness-fake";
-import type { AccessProfile, ControlReviewerPanelEntry, ProviderFamily } from "@claudexor/schema";
+import type {
+  AccessProfile,
+  ControlReviewerPanelEntry,
+  HarnessRunSpec,
+  ProviderFamily,
+} from "@claudexor/schema";
 import { ConformanceReport, HarnessManifest, RunFacts, makeOutcomeFacts } from "@claudexor/schema";
 import { hashJson, noProjectRepoRoot, projectRuntimeDir, sha256 } from "@claudexor/util";
 import { writeEvidencePacket } from "@claudexor/context";
@@ -678,6 +683,57 @@ function askAdapter(
       for await (const event of events(spec.session_id) as AsyncIterable<Record<string, unknown>>) {
         yield { credential_route: "managed_api_key", ...event } as never;
       }
+    },
+  };
+}
+
+function nativeAskAdapter(id: string, observe: (spec: HarnessRunSpec) => void): HarnessAdapter {
+  return {
+    id,
+    async discover() {
+      return HarnessManifest.parse({
+        id,
+        display_name: id,
+        kind: "local_cli",
+        provider_family: "anthropic",
+        capabilities: { plan: true, review: true, read_files: true, web_policy: "tools" },
+        auth_modes: ["local_session"],
+        access_profiles_supported: ["readonly"],
+      });
+    },
+    async doctor() {
+      return ConformanceReport.parse({
+        harness_id: id,
+        status: "ok",
+        enabled_intents: ["explain", "audit", "plan", "review"],
+        auth_sources: [
+          { source: "native_session", availability: "available", verification: "passed" },
+        ],
+      });
+    },
+    async probeCredentialProfile(profile) {
+      return {
+        profile_id: profile.profile_id,
+        harness_id: id,
+        availability: "available",
+        verification: "passed",
+        detail: "fixture profile verified",
+        last_verified_at: new Date().toISOString(),
+      };
+    },
+    async *run(spec) {
+      observe(spec);
+      const ts = new Date().toISOString();
+      yield {
+        type: "started",
+        session_id: spec.session_id,
+        ts,
+        credential_route: "vendor_native",
+        credential_profile_id: spec.credential_profile?.profile_id,
+        observed_model: "claude-opus-5",
+      };
+      yield { type: "message", session_id: spec.session_id, ts, text: "4" };
+      yield { type: "completed", session_id: spec.session_id, ts };
     },
   };
 }
@@ -4306,6 +4362,328 @@ describe("Orchestrator", () => {
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
     }
   });
+
+  it("admits a native-default Claude route when only Fable's scoped quota is exhausted", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-native-default-model-quota-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), "version: 1\n");
+    try {
+      const seenModels: Array<string | null> = [];
+      const asker = nativeAskAdapter("asker", (spec) => seenModels.push(spec.model_hint ?? null));
+      const result = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+        quotaSnapshots: () => [
+          {
+            subject: {
+              harness: "asker",
+              credential_route: "vendor_native",
+              plan_label: "max",
+              subject_id: null,
+            },
+            constraints: [
+              {
+                id: "weekly_scoped:Fable",
+                label: "7 day (Fable)",
+                applies_to_models: ["fable", "claude-fable-5", "best"],
+                used_ratio: 1,
+                window_seconds: 7 * 24 * 60 * 60,
+                resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                cooldown_until: null,
+              },
+            ],
+            source: "claude_oauth_usage",
+            observed_at: new Date().toISOString(),
+            freshness: "fresh",
+          },
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+      });
+      expect(legacyOutcome(result)).toBe("success");
+      expect(seenModels).toEqual([null]);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it.each([
+    { action: "rotate" as const, expectedProfile: "release-sol", expectedStarts: 1 },
+    { action: "fail" as const, expectedProfile: null, expectedStarts: 0 },
+  ])(
+    "resolves a saturated default account before pool filtering when policy is $action",
+    async ({ action, expectedProfile, expectedStarts }) => {
+      const repo = await initRepo();
+      const configDir = reapMk(join(tmpdir(), `claudexor-default-${action}-quota-`));
+      const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+      process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+      writeFileSync(
+        join(configDir, "config.yaml"),
+        [
+          "credential_profiles:",
+          "  - profile_id: release-sol",
+          "    harness_id: asker",
+          "    display_name: Release Sol",
+          "    credential_kind: config_dir_login",
+          `    isolation_locator: '${join(configDir, "release-sol")}'`,
+          "harnesses:",
+          "  asker:",
+          "    profile_policy:",
+          `      limit_action: ${action}`,
+          "",
+        ].join("\n"),
+      );
+      try {
+        const profilesSeen: Array<string | null> = [];
+        const events: string[] = [];
+        const asker = nativeAskAdapter("asker", (spec) =>
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null),
+        );
+        const result = await new Orchestrator({
+          registry: new Map([["asker", asker]]),
+          reviewers: [],
+          quotaSnapshots: () => [
+            {
+              subject: {
+                harness: "asker",
+                credential_route: "vendor_native",
+                plan_label: "plus",
+                subject_id: null,
+              },
+              constraints: [
+                {
+                  id: "five_hour",
+                  label: "5 hour",
+                  used_ratio: 1,
+                  window_seconds: 18_000,
+                  resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                  cooldown_until: null,
+                },
+              ],
+              source: "codex_rollout",
+              observed_at: new Date().toISOString(),
+              freshness: "fresh",
+            },
+          ],
+        }).run({
+          repoRoot: repo,
+          prompt: "2+2?",
+          mode: "ask",
+          harnesses: ["asker"],
+          onEvent: (event) => events.push(event.type),
+        });
+        expect(profilesSeen).toHaveLength(expectedStarts);
+        if (expectedStarts > 0) {
+          expect(legacyOutcome(result)).toBe("success");
+          expect(profilesSeen).toEqual([expectedProfile]);
+          expect(events.filter((type) => type === "route.profile.headroom_exceeded")).toHaveLength(
+            1,
+          );
+          expect(events.filter((type) => type === "route.profile.rotated")).toHaveLength(1);
+        } else {
+          expect(legacyOutcome(result)).toBe("failed");
+          expect(events).not.toContain("route.profile.rotated");
+        }
+      } finally {
+        if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+        else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+      }
+    },
+  );
+
+  it("keeps convergence cooldown checks bound to the admitted model and profile", async () => {
+    const cases: Array<{
+      name: string;
+      model: string | null;
+      profile: boolean;
+      initialDefaultConstraint: boolean;
+      liveScopedConstraint: boolean;
+      expectedStarts: number;
+    }> = [
+      {
+        name: "native default",
+        model: null,
+        profile: false,
+        initialDefaultConstraint: false,
+        liveScopedConstraint: true,
+        expectedStarts: 2,
+      },
+      {
+        name: "explicit Opus",
+        model: "claude-opus-5",
+        profile: false,
+        initialDefaultConstraint: false,
+        liveScopedConstraint: true,
+        expectedStarts: 2,
+      },
+      {
+        name: "explicit Fable",
+        model: "claude-fable-5",
+        profile: false,
+        initialDefaultConstraint: false,
+        liveScopedConstraint: true,
+        expectedStarts: 1,
+      },
+      {
+        name: "different profile subject",
+        model: "claude-fable-5",
+        profile: true,
+        initialDefaultConstraint: true,
+        liveScopedConstraint: false,
+        expectedStarts: 2,
+      },
+    ];
+    for (const testCase of cases) {
+      const repo = await initRepo();
+      const configDir = reapMk(join(tmpdir(), "claudexor-convergence-quota-"));
+      const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+      process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+      writeFileSync(
+        join(configDir, "config.yaml"),
+        testCase.profile
+          ? [
+              "credential_profiles:",
+              "  - profile_id: alt",
+              "    harness_id: worker",
+              "    display_name: Alt",
+              "    credential_kind: config_dir_login",
+              `    isolation_locator: '${join(configDir, "alt")}'`,
+              "",
+            ].join("\n")
+          : "version: 1\n",
+      );
+      try {
+        let starts = 0;
+        const worker: HarnessAdapter = {
+          id: "worker",
+          async discover() {
+            return HarnessManifest.parse({
+              id: "worker",
+              display_name: "worker",
+              kind: "local_cli",
+              provider_family: "anthropic",
+              capabilities: {
+                implement: true,
+                known_models: ["claude-opus-5", "claude-fable-5"],
+              },
+              auth_modes: ["local_session"],
+              access_profiles_supported: ["workspace_write"],
+            });
+          },
+          async doctor() {
+            return ConformanceReport.parse({
+              harness_id: "worker",
+              status: "ok",
+              enabled_intents: ["implement"],
+              auth_sources: [
+                {
+                  source: "native_session",
+                  availability: "available",
+                  verification: "passed",
+                },
+              ],
+            });
+          },
+          async probeCredentialProfile(profile) {
+            return {
+              profile_id: profile.profile_id,
+              harness_id: "worker",
+              availability: "available",
+              verification: "passed",
+              detail: "fixture profile verified",
+              last_verified_at: new Date().toISOString(),
+            };
+          },
+          async *run(spec) {
+            starts += 1;
+            const ts = new Date().toISOString();
+            yield {
+              type: "started",
+              session_id: spec.session_id,
+              ts,
+              credential_route: "vendor_native",
+              credential_profile_id: spec.credential_profile?.profile_id,
+            };
+            if (testCase.liveScopedConstraint) {
+              yield {
+                type: "status",
+                session_id: spec.session_id,
+                ts,
+                credential_route: "vendor_native",
+                quota: {
+                  source: "claude_oauth_usage",
+                  plan_label: "max",
+                  subject_id: null,
+                  constraints: [
+                    {
+                      id: "weekly_scoped:Fable",
+                      label: "7 day (Fable)",
+                      applies_to_models: ["fable", "claude-fable-5", "best"],
+                      used_ratio: 1,
+                      window_seconds: 7 * 24 * 60 * 60,
+                      resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                      cooldown_until: new Date(Date.now() + 3_600_000).toISOString(),
+                    },
+                  ],
+                },
+              };
+            }
+            yield { type: "error", session_id: spec.session_id, ts, error: "fixture failure" };
+            yield { type: "completed", session_id: spec.session_id, ts };
+          },
+        };
+        const initialSnapshots = testCase.initialDefaultConstraint
+          ? [
+              {
+                subject: {
+                  harness: "worker",
+                  credential_route: "vendor_native" as const,
+                  plan_label: "max",
+                  subject_id: null,
+                },
+                constraints: [
+                  {
+                    id: "weekly_scoped:Fable",
+                    label: "7 day (Fable)",
+                    applies_to_models: ["fable", "claude-fable-5", "best"],
+                    used_ratio: 1,
+                    window_seconds: 7 * 24 * 60 * 60,
+                    resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                    cooldown_until: null,
+                  },
+                ],
+                source: "claude_oauth_usage" as const,
+                observed_at: new Date().toISOString(),
+                freshness: "fresh" as const,
+              },
+            ]
+          : [];
+        const result = await new Orchestrator({
+          registry: new Map([["worker", worker]]),
+          reviewers: reviewers(),
+          quotaSnapshots: () => initialSnapshots,
+        }).run({
+          repoRoot: repo,
+          prompt: `repair ${testCase.name}`,
+          mode: "agent",
+          harnesses: ["worker"],
+          attempts: 2,
+          ...(testCase.model ? { models: { worker: testCase.model } } : {}),
+          ...(testCase.profile ? { credentialProfileId: "alt" } : {}),
+        });
+        expect(starts, `${testCase.name}: ${result.summary}`).toBe(testCase.expectedStarts);
+      } finally {
+        if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+        else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+      }
+    }
+  }, 30000);
 
   it("checks a read-only fallback model against that model's scoped quota before spawn", async () => {
     const repo = await initRepo();

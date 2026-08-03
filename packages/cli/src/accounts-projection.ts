@@ -131,7 +131,7 @@ export async function harnessAccountsProjection(
         defaultReady: defaultRoute !== null,
         defaultRoute,
         readyProfileIds: readyProfiles.get(harnessId) ?? new Set(),
-        model: h?.default_model ?? undefined,
+        model: h?.default_model ?? null,
       }),
     };
   });

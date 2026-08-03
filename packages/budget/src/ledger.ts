@@ -30,14 +30,18 @@ export type CircuitTier = "ok" | "soft" | "downgrade" | "hard";
 export type BudgetTerminal = "budget_exhausted" | "budget_overshoot" | "cost_unverifiable" | null;
 
 /** One model-applicability predicate for every quota consumer.
- * Omitted/null scope is a vendor-wide window. An unknown effective model stays
- * conservative because the harness default may be one of the scoped models. */
+ * Omitted/null scope is a vendor-wide window. A null model is the deliberate
+ * vendor-native default: its concrete model is unknowable before spawn, so a
+ * model-scoped window alone cannot refuse the route. Undefined means the
+ * caller supplied no model context and preserves conservative matching. */
 export function quotaConstraintAppliesToModel(
   constraint: { applies_to_models?: string[] | null },
-  model?: string,
+  model?: string | null,
 ): boolean {
   const scopedModels = constraint.applies_to_models;
-  return scopedModels == null || model === undefined || scopedModels.includes(model);
+  return (
+    scopedModels == null || model === undefined || (model !== null && scopedModels.includes(model))
+  );
 }
 
 export interface CircuitThresholds {
@@ -386,7 +390,7 @@ export class BudgetLedger {
     credentialRoute?: CredentialRoute,
     credentialSubjectId?: string | null,
     now: number = Date.now(),
-    model?: string,
+    model?: string | null,
   ): boolean {
     // Live observations are subject- AND route-scoped like snapshots
     // (rounds 17-18): a profiled or API-key rate-limit must never cool the
@@ -437,7 +441,7 @@ export class BudgetLedger {
     credentialRoute?: CredentialRoute,
     credentialSubjectId?: string | null,
     now: number = Date.now(),
-    model?: string,
+    model?: string | null,
   ): number | null {
     const latest = new Map<string, BudgetObservation>();
     for (const observation of this.observationsFor(harnessId)) {
