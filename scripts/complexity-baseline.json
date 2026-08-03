@@ -18,7 +18,7 @@
   "packages/control-api/src/operation-catalog.ts": 545,
   "packages/daemon/src/journal-manager.ts": 650,
   "packages/daemon/src/project-partitions.ts": 631,
-  "packages/daemon/src/server.ts": 621,
+  "packages/daemon/src/server.ts": 628,
   "packages/daemon/src/threads.ts": 593,
   "packages/harness-claude/src/index.ts": 982,
   "packages/harness-codex/src/index.ts": 896,

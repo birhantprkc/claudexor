@@ -117,37 +117,22 @@ export const SetupNativeCommandReceipt = z
   .object(SetupNativeCommandReceiptShape)
   .strict()
   .superRefine((value, context) => {
-    if (value.commandStarted && value.permitIssuedAt === null) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["permitIssuedAt"],
-        message: "a started native command requires the exact durable permit timestamp",
-      });
-    }
+    const deny = (path: string[], message: string) =>
+      context.addIssue({ code: z.ZodIssueCode.custom, path, message });
+    if (value.commandStarted && value.permitIssuedAt === null)
+      deny(
+        ["permitIssuedAt"],
+        "a started native command requires the exact durable permit timestamp",
+      );
     if (
       value.errorCode === "permit_timeout" &&
       (value.commandStarted || value.permitIssuedAt !== null)
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["errorCode"],
-        message: "permit_timeout must prove that no command and no permit existed",
-      });
-    }
-    if (value.errorCode === "spawn_failed" && value.commandStarted) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["errorCode"],
-        message: "spawn_failed cannot claim that the command started",
-      });
-    }
-    if (value.errorCode === "device_auth_unsupported" && value.commandStarted) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["errorCode"],
-        message: "device_auth_unsupported means the vendor command was never started",
-      });
-    }
+    )
+      deny(["errorCode"], "permit_timeout must prove that no command and no permit existed");
+    if (value.errorCode === "spawn_failed" && value.commandStarted)
+      deny(["errorCode"], "spawn_failed cannot claim that the command started");
+    if (value.errorCode === "device_auth_unsupported" && value.commandStarted)
+      deny(["errorCode"], "device_auth_unsupported means the vendor command was never started");
   })
   .describe("Durable, hash-bound result of the allowlisted native setup command.");
 export type SetupNativeCommandReceipt = z.infer<typeof SetupNativeCommandReceipt>;
@@ -603,31 +588,18 @@ export const SetupLoginManifest = z
   })
   .strict()
   .superRefine((value, context) => {
+    const deny = (path: string[], message: string) =>
+      context.addIssue({ code: z.ZodIssueCode.custom, path, message });
     const deviceCode = value.loginMode === "device_code";
-    if (deviceCode && value.harness !== "codex") {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["loginMode"],
-        message: "device_code login mode exists only for the codex app-server",
-      });
-    }
-    if (deviceCode && (!value.appServerFlow || !value.deviceCodePath)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["appServerFlow"],
-        message: "device_code manifests require appServerFlow and deviceCodePath",
-      });
-    }
+    if (deviceCode && value.harness !== "codex")
+      deny(["loginMode"], "device_code login mode exists only for the codex app-server");
+    if (deviceCode && (!value.appServerFlow || !value.deviceCodePath))
+      deny(["appServerFlow"], "device_code manifests require appServerFlow and deviceCodePath");
     // deviceCodePath is legal on terminal manifests too (the runner captures
     // the vendor login's OAuth URL into it); only the app-server flow selector
     // stays device_code-exclusive.
-    if (!deviceCode && value.appServerFlow) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["appServerFlow"],
-        message: "appServerFlow requires loginMode device_code",
-      });
-    }
+    if (!deviceCode && value.appServerFlow)
+      deny(["appServerFlow"], "appServerFlow requires loginMode device_code");
   });
 export type SetupLoginManifest = z.infer<typeof SetupLoginManifest>;
 

@@ -18,7 +18,7 @@ import {
   type RunFacts,
   type RunOutcomeFacts,
 } from "@claudexor/schema";
-import { nowIso } from "@claudexor/util";
+import { fsyncDirectory, nowIso } from "@claudexor/util";
 import type { AnnouncedRunContext } from "./runTerminals.js";
 import { buildRunFacts } from "./runFactsBuilder.js";
 import { terminalFactsFailurePresentation } from "./runFactsPresentation.js";
@@ -58,22 +58,10 @@ function restoreSnapshot(path: string, prior: TextSnapshot): void {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (removed) fsyncParentDirectory(dirname(path));
+    if (removed) fsyncDirectory(dirname(path));
     return;
   }
   replaceTextAtomically(path, prior.text);
-}
-
-function fsyncParentDirectory(parent: string): void {
-  const parentFd = openSync(
-    parent,
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-  );
-  try {
-    fsyncSync(parentFd);
-  } finally {
-    closeSync(parentFd);
-  }
 }
 
 function replaceTextAtomically(path: string, text: string): void {
@@ -91,7 +79,7 @@ function replaceTextAtomically(path: string, text: string): void {
     closeSync(fileFd);
     fileFd = null;
     renameSync(tmp, path);
-    fsyncParentDirectory(parent);
+    fsyncDirectory(parent);
   } finally {
     if (fileFd !== null) closeSync(fileFd);
     try {
@@ -114,7 +102,7 @@ function writeYamlAtomically(ctx: AnnouncedRunContext, path: string, value: unkn
       closeSync(fileFd);
     }
     renameSync(tmp, path);
-    fsyncParentDirectory(parent);
+    fsyncDirectory(parent);
   } finally {
     try {
       unlinkSync(tmp);

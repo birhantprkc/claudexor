@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { withExecutableInspection, isBoundedRegularExecutable } from "@claudexor/core";
+import { fsyncDirectory } from "@claudexor/util";
 import {
   SetupLoginDeviceCode as SetupLoginDeviceCodeSchema,
   SetupLoginManifest as SetupLoginManifestSchema,
@@ -241,15 +242,6 @@ function readPrivateJson(path: string): unknown {
       throw new Error("setup-login sidecar changed during safe open");
     }
     return JSON.parse(readFileSync(fd, "utf8"));
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function fsyncDirectory(path: string): void {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }

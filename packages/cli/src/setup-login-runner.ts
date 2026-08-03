@@ -4,11 +4,7 @@ import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  ProcessGroupService,
-  defaultProcessGroupService,
-  type ProcessGroupCapture,
-} from "@claudexor/core";
+import { ProcessGroupService, defaultProcessGroupService } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
 import {
   startCodexDeviceLogin,
@@ -73,7 +69,11 @@ export async function runSetupLoginWorker(
   const processGroups = options.processGroupService ?? defaultProcessGroupService;
   const captured = processGroups.captureLeader(options.selfPid ?? process.pid);
   if (captured.status !== "known") {
-    throw new Error(describeCaptureFailure(captured));
+    throw new Error(
+      captured.status === "missing"
+        ? "setup-login worker disappeared before its process group could be captured"
+        : `setup-login worker process-group identity is unprovable: ${captured.reason}`,
+    );
   }
 
   const observedAt = now().toISOString();
@@ -91,26 +91,12 @@ export async function runSetupLoginWorker(
 
   const permit = await waitForSetupLoginPermit(manifest, now, sleep, observedAt);
   if (!permit) {
-    persistResult(manifest, {
-      permitIssuedAt: null,
-      commandStarted: false,
-      errorCode: "permit_timeout",
-      exitCode: null,
-      signal: null,
-      finishedAt: now().toISOString(),
-    });
+    persistFailure(manifest, now, null, "permit_timeout");
     return 1;
   }
 
   if (!verifyExecutableEvidence(manifest.executable)) {
-    persistResult(manifest, {
-      permitIssuedAt: permit.issuedAt,
-      commandStarted: false,
-      errorCode: "spawn_failed",
-      exitCode: null,
-      signal: null,
-      finishedAt: now().toISOString(),
-    });
+    persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
   }
 
@@ -136,15 +122,13 @@ export async function runSetupLoginWorker(
       nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
     );
     if (probe.completed && !probe.output.includes("--device-auth")) {
-      persistResult(manifest, {
-        permitIssuedAt: permit.issuedAt,
-        commandStarted: false,
-        errorCode: "device_auth_unsupported",
-        exitCode: null,
-        signal: null,
-        finishedAt: now().toISOString(),
-        outputTail: boundedTail(probe.output),
-      });
+      persistFailure(
+        manifest,
+        now,
+        permit.issuedAt,
+        "device_auth_unsupported",
+        boundedTail(probe.output),
+      );
       return 1;
     }
   }
@@ -168,12 +152,11 @@ export async function runSetupLoginWorker(
   // vendor CLI completes its flow exactly as before; the one honest residual
   // is that the CLI sees a pipe (not a TTY) on stdout, the same tradeoff the
   // codex tail tee already made.
-  const captureOAuthUrl = manifest.deviceCodePath !== undefined;
-  const teeOutput = manifest.harness === "codex" || captureOAuthUrl;
+  const teeOutput = manifest.harness === "codex" || manifest.deviceCodePath !== undefined;
   const tail = createTailBuffer();
   const urlDetector = createOAuthUrlDetector();
   const discloseOAuthUrl = (chunk: Buffer): void => {
-    if (!captureOAuthUrl || !manifest.deviceCodePath) return;
+    if (!manifest.deviceCodePath) return;
     const url = urlDetector.push(chunk);
     if (!url) return;
     try {
@@ -192,7 +175,10 @@ export async function runSetupLoginWorker(
       // The disclosure is best-effort context; it must never kill the login.
     }
   };
-  let child;
+  // A spawn throw and a wait rejection already wrote the SAME receipt, so they
+  // share one catch; de-registering the hold handlers is the one thing all
+  // three exits do (both failures and success), so it is the finally.
+  let result: { code: number | null; signal: NodeJS.Signals | null };
   try {
     const spawnOptions: SpawnOptions = {
       cwd: manifest.cwd,
@@ -202,51 +188,24 @@ export async function runSetupLoginWorker(
       detached: false,
       stdio: teeOutput ? ["inherit", "pipe", "pipe"] : "inherit",
     };
-    child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
+    const child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
     if (teeOutput) {
-      child.stdout?.on("data", (chunk: Buffer) => {
-        process.stdout.write(chunk);
+      const tee = (sink: NodeJS.WriteStream) => (chunk: Buffer) => {
+        sink.write(chunk);
         tail.push(chunk);
         discloseOAuthUrl(chunk);
-      });
-      child.stderr?.on("data", (chunk: Buffer) => {
-        process.stderr.write(chunk);
-        tail.push(chunk);
-        discloseOAuthUrl(chunk);
-      });
+      };
+      child.stdout?.on("data", tee(process.stdout));
+      child.stderr?.on("data", tee(process.stderr));
     }
-  } catch {
-    persistResult(manifest, {
-      permitIssuedAt: permit.issuedAt,
-      commandStarted: false,
-      errorCode: "spawn_failed",
-      exitCode: null,
-      signal: null,
-      finishedAt: now().toISOString(),
-    });
-    process.off("SIGTERM", holdLeaderForEscalation);
-    process.off("SIGINT", holdLeaderForEscalation);
-    return 1;
-  }
-
-  let result: { code: number | null; signal: NodeJS.Signals | null };
-  try {
     result = await waitForExit(child);
   } catch {
-    persistResult(manifest, {
-      permitIssuedAt: permit.issuedAt,
-      commandStarted: false,
-      errorCode: "spawn_failed",
-      exitCode: null,
-      signal: null,
-      finishedAt: now().toISOString(),
-    });
+    persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
+    return 1;
+  } finally {
     process.off("SIGTERM", holdLeaderForEscalation);
     process.off("SIGINT", holdLeaderForEscalation);
-    return 1;
   }
-  process.off("SIGTERM", holdLeaderForEscalation);
-  process.off("SIGINT", holdLeaderForEscalation);
   const capturedTail = tail.text();
   persistResult(manifest, {
     permitIssuedAt: permit.issuedAt,
@@ -276,14 +235,7 @@ async function runDeviceCodeLogin(
 ): Promise<number> {
   const { now, spawnProcess } = deps;
   if (!manifest.deviceCodePath || !manifest.appServerFlow) {
-    persistResult(manifest, {
-      permitIssuedAt: permit.issuedAt,
-      commandStarted: false,
-      errorCode: "spawn_failed",
-      exitCode: null,
-      signal: null,
-      finishedAt: now().toISOString(),
-    });
+    persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
   }
   let child: ChildProcess;
@@ -295,14 +247,7 @@ async function runDeviceCodeLogin(
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch {
-    persistResult(manifest, {
-      permitIssuedAt: permit.issuedAt,
-      commandStarted: false,
-      errorCode: "spawn_failed",
-      exitCode: null,
-      signal: null,
-      finishedAt: now().toISOString(),
-    });
+    persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
   }
   child.stderr?.resume();
@@ -320,14 +265,7 @@ async function runDeviceCodeLogin(
       await terminateAppServerChild(child, connection);
       // Typed capability-probe miss: reuse the existing not_supported outcome
       // so the daemon offers the legacy Terminal fallback (no stdout regex).
-      persistResult(manifest, {
-        permitIssuedAt: permit.issuedAt,
-        commandStarted: false,
-        errorCode: "device_auth_unsupported",
-        exitCode: null,
-        signal: null,
-        finishedAt: now().toISOString(),
-      });
+      persistFailure(manifest, now, permit.issuedAt, "device_auth_unsupported");
       return 1;
     }
     // Transient disclosure sidecar. The userCode rides ONLY this file (read-time
@@ -343,25 +281,16 @@ async function runDeviceCodeLogin(
     });
     const outcome = await start.awaitCompletion();
     await terminateAppServerChild(child, connection);
-    if (outcome.kind === "completed") {
-      persistResult(manifest, {
-        permitIssuedAt: permit.issuedAt,
-        commandStarted: true,
-        exitCode: 0,
-        signal: null,
-        finishedAt: now().toISOString(),
-      });
-      return 0;
-    }
+    const exitCode = outcome.kind === "completed" ? 0 : 1;
     persistResult(manifest, {
       permitIssuedAt: permit.issuedAt,
       commandStarted: true,
-      exitCode: 1,
+      exitCode,
       signal: null,
       finishedAt: now().toISOString(),
       ...(outcome.kind === "failed" ? { outputTail: boundedTail(outcome.detail) } : {}),
     });
-    return 1;
+    return exitCode;
   } catch (error) {
     await terminateAppServerChild(child, connection);
     persistResult(manifest, {
@@ -434,6 +363,11 @@ const OUTPUT_TAIL_BYTES = 4096;
  */
 const OAUTH_URL_SCAN_WINDOW = 8_192;
 
+// eslint-disable-next-line no-control-regex
+const TERM_ESCAPE_RE = /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g;
+// eslint-disable-next-line no-control-regex
+const C0_CONTROL_RE = /[\u0000-\u0009\u000b-\u001f\u007f]/g;
+
 const OAUTH_URL_SIGNATURE_RE =
   /(oauth|authori[sz]e|login|sign[-_]?in|device|sso|verification|callback)/i;
 
@@ -444,11 +378,7 @@ const OAUTH_URL_SIGNATURE_RE =
  * signature qualify — a docs link in a banner must not become "the" login URL.
  */
 export function extractOAuthUrl(text: string): string | null {
-  const plain = text
-    // eslint-disable-next-line no-control-regex
-    .replace(/\u001b(?:\[[0-9;?]*[ -\/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
+  const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
   for (const match of plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)) {
     const url = match[0].replace(/[.,;:!?]+$/, "");
     if (OAUTH_URL_SIGNATURE_RE.test(url)) return url;
@@ -506,11 +436,7 @@ export function createTailBuffer(): { push(chunk: Buffer): void; text(): string 
  * redact secret-like tokens, and clamp - diagnostic evidence entering a
  * durable journal/API surface, never a raw vendor log copy (INV-062). */
 export function boundedTail(text: string, truncated = false): string {
-  const plain = text
-    // eslint-disable-next-line no-control-regex
-    .replace(/\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "");
+  const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
   // Redact the complete sanitized input before any boundary is selected. A
   // tail-first clamp can retain only the suffix of a token and thereby remove
   // the prefix the detector needs to recognize it.
@@ -545,10 +471,9 @@ function probeLoginHelp(
     let retainedBytes = 0;
     let settled = false;
     const settle = (completed: boolean) => {
-      if (!settled) {
-        settled = true;
-        resolveProbe({ completed, output: Buffer.concat(chunks).toString("utf8") });
-      }
+      if (settled) return;
+      settled = true;
+      resolveProbe({ completed, output: Buffer.concat(chunks).toString("utf8") });
     };
     let probe: ReturnType<typeof spawn>;
     try {
@@ -617,6 +542,26 @@ function persistResult(
   } satisfies SetupLoginRunnerResult);
 }
 
+/** Every not-started outcome writes the same receipt: no exit code, no signal.
+ * Eight call sites spelled it out; one shape means the next field lands once. */
+function persistFailure(
+  manifest: SetupLoginManifest,
+  now: () => Date,
+  permitIssuedAt: string | null,
+  errorCode: NonNullable<SetupLoginRunnerResult["errorCode"]>,
+  outputTail?: string,
+): void {
+  persistResult(manifest, {
+    permitIssuedAt,
+    commandStarted: false,
+    errorCode,
+    exitCode: null,
+    signal: null,
+    finishedAt: now().toISOString(),
+    ...(outputTail === undefined ? {} : { outputTail }),
+  });
+}
+
 function waitForExit(
   child: ReturnType<typeof spawn>,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
@@ -627,14 +572,6 @@ function waitForExit(
     child.once("error", reject);
     child.once("close", (code, signal) => resolveExit({ code, signal }));
   });
-}
-
-function describeCaptureFailure(
-  captured: Exclude<ProcessGroupCapture, { status: "known" }>,
-): string {
-  return captured.status === "missing"
-    ? "setup-login worker disappeared before its process group could be captured"
-    : `setup-login worker process-group identity is unprovable: ${captured.reason}`;
 }
 
 /** The bootstrap itself never needs model/provider credentials. */
@@ -672,10 +609,8 @@ function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
 function isDirectEntrypoint(): boolean {
   if (!process.argv[1]) return false;
   try {
-    return (
-      realpathSync(resolve(process.argv[1])) ===
-      realpathSync(resolve(fileURLToPath(import.meta.url)))
-    );
+    const self = realpathSync(resolve(fileURLToPath(import.meta.url)));
+    return realpathSync(resolve(process.argv[1])) === self;
   } catch {
     return false;
   }
@@ -693,9 +628,8 @@ if (isDirectEntrypoint()) {
         process.exitCode = code;
       },
       (error) => {
-        process.stderr.write(
-          `setup-login-runner: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
+        const detail = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`setup-login-runner: ${detail}\n`);
         process.exitCode = 1;
       },
     );

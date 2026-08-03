@@ -1,6 +1,5 @@
 import {
   closeSync,
-  constants,
   existsSync,
   fsyncSync,
   openSync,
@@ -10,7 +9,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { ensureDir, projectRuntimeDir, sha256 } from "@claudexor/util";
+import { ensureDir, fsyncDirectory, projectRuntimeDir, sha256 } from "@claudexor/util";
 import { WorkspaceError } from "@claudexor/core";
 import { diffTrees } from "./git.js";
 
@@ -77,15 +76,6 @@ function persistRevertAnchor(repo: string, patch: string): string {
     throw error;
   }
   return id;
-}
-
-function fsyncDirectory(path: string): void {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
 }
 
 export function readRevertAnchor(repo: string, id: string): string {

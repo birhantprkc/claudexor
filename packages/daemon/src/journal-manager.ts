@@ -15,11 +15,10 @@ import {
   type ControlJournalQuarantineRequest,
   type ControlJournalValidation,
 } from "@claudexor/schema";
-import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 import {
   exportPartitionEntries,
   fingerprintPartition,
-  fsyncDirectory,
   cloneRecovery,
   readOwnedFile,
   recoveryAt,

@@ -17,6 +17,7 @@ import {
 import { join, resolve } from "node:path";
 import {
   ensureCanonicalPrivateDirectory,
+  fsyncDirectory,
   sha256,
   userConfigDir,
   userHomeDir,
@@ -53,7 +54,9 @@ export function defaultSocketPath(platform: NodeJS.Platform = process.platform):
   const override = process.env.CLAUDEXOR_DAEMON_SOCK;
   if (override) return override;
   if (platform === "win32") {
-    const digest = sha256(resolve(daemonDir())).replace(/^sha256:/, "").slice(0, 16);
+    const digest = sha256(resolve(daemonDir()))
+      .replace(/^sha256:/, "")
+      .slice(0, 16);
     return `\\\\.\\pipe\\claudexord-${digest}`;
   }
   return join(daemonDir(), "claudexord.sock");
@@ -200,19 +203,5 @@ function readValidatedToken(path: string, repairMode: boolean): string {
     return token;
   } finally {
     if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function fsyncDirectory(path: string): void {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    fsyncSync(fd);
-  } catch (error) {
-    // Directory-handle flush is a POSIX durability mechanism; win32 refuses it
-    // on a read handle (FlushFileBuffers wants write access). The token bytes
-    // themselves were already fsync'd through their own descriptor.
-    if (process.platform !== "win32") throw error;
-  } finally {
-    closeSync(fd);
   }
 }

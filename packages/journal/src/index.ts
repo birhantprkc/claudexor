@@ -16,7 +16,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 import { encodeJournalPayload, prepareAppendBatch } from "./append-batch.js";
 import {
   COMPACTED_SNAPSHOT,
@@ -500,15 +500,6 @@ function removeFile(path: string): void {
   if (!existsSync(path)) return;
   rmSync(path);
   fsyncDirectory(dirname(path));
-}
-
-function fsyncDirectory(path: string): void {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
 }
 
 function encodeCursor(partition: string, epoch: string, seq: number): string {

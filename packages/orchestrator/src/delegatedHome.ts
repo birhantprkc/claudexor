@@ -181,7 +181,14 @@ export function confinementNotice(home: ScopedHarnessHome | null | undefined): s
  * is not an answer to "was it confined".
  */
 export interface AppliedAttemptFacts {
-  harness_home_isolated: boolean;
+  /**
+   * ABSENT when the attempt died before its home was decided (`wsm.create` or
+   * `applyConfinement` threw). A literal `false` is a POSITIVE claim — this
+   * child ran in the operator's own HOME — and an attempt that never reached
+   * the decision made no such claim. Absence keeps it a gap in the record,
+   * which is what `appliedEvidenceComplete` already refuses on.
+   */
+  harness_home_isolated?: boolean;
   harness_home_dir: string | null;
   access_applied: AccessProfile;
   credential_profile_applied: string | null;
@@ -202,9 +209,10 @@ export interface AppliedAttemptFacts {
 
 /**
  * `home` is nullable on purpose: an attempt that died BEFORE its home was
- * decided still writes the block, with every field null. A record that omits
- * the fields entirely is indistinguishable from one written by an engine that
- * never had them, which is the ambiguity the terminal check exists to close.
+ * decided still writes the block, with every field it cannot answer null. A
+ * record that omits the block entirely is indistinguishable from one written by
+ * an engine that never had it, which is the ambiguity the terminal check exists
+ * to close. `harness_home_isolated` is the one exception — see the field.
  */
 export function appliedAttemptFacts(
   home: ScopedHarnessHome | null | undefined,
@@ -212,7 +220,7 @@ export function appliedAttemptFacts(
   credentialProfileId: string | null,
 ): AppliedAttemptFacts {
   return {
-    harness_home_isolated: home?.isolated ?? false,
+    ...(home ? { harness_home_isolated: home.isolated } : {}),
     harness_home_dir: home?.homeDir ?? null,
     access_applied: access,
     credential_profile_applied: credentialProfileId,

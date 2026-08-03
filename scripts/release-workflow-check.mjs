@@ -461,6 +461,9 @@ for (const [label, pattern] of [
   ["published provenance is bound to source identity", /validatePublishedProvenance/],
   ["published latest dist-tag is verified", /dist-tags.*latest/s],
   ["published package signatures are audited", /audit[",\s]+signatures/],
+  // `latest` rides the publish; `next` has to be moved deliberately, and the
+  // downstream consumer pins it. Dropping the move strands the channel.
+  ["next dist-tag is moved to the published version", /dist-tag[",\s]+add[",\s]+.*next/s],
 ]) {
   if (!pattern.test(npmPublisher)) errors.push(`publish-npm-release.mjs: ${label}`);
 }

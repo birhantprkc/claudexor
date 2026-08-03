@@ -76,22 +76,16 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
   attachment_inputs: [],
 });
 
-function accessArgs(access: AccessProfile): string[] {
-  switch (access) {
-    case "readonly":
-      return ["--sandbox", "enabled", "--trust"];
-    case "workspace_write":
-      // `--force` alone force-allows commands with NO sandbox — materially
-      // broader than claude acceptEdits / codex --sandbox workspace-write for
-      // the same profile. Keep the sandbox on for workspace_write parity.
-      return ["--force", "--sandbox", "enabled", "--trust"];
-    case "full":
-    case "external_sandbox_full":
-      return ["--force", "--sandbox", "disabled", "--trust"];
-    case "inherit_native":
-      return ["--trust"];
-  }
-}
+// `--force` alone force-allows commands with NO sandbox — materially broader
+// than claude acceptEdits / codex --sandbox workspace-write for the same
+// profile. Keep the sandbox on for workspace_write parity.
+const accessArgs: Record<AccessProfile, string[]> = {
+  readonly: ["--sandbox", "enabled", "--trust"],
+  workspace_write: ["--force", "--sandbox", "enabled", "--trust"],
+  full: ["--force", "--sandbox", "disabled", "--trust"],
+  external_sandbox_full: ["--force", "--sandbox", "disabled", "--trust"],
+  inherit_native: ["--trust"],
+};
 
 async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
   try {
@@ -120,7 +114,13 @@ function cursorApiKey(env?: Record<string, string | null | undefined>): string |
   );
 }
 
+type EnvMap = Record<string, string | null | undefined>;
 type CursorApiSmokeResult = { ok: boolean; detail: string };
+/** The route did not need (or could not run) the isolated key smoke. */
+const unsmokedApiSmoke = (key: string | null): CursorApiSmokeResult => ({
+  ok: false,
+  detail: key ? "Cursor API-key smoke not required for selected route" : "no Cursor API key",
+});
 type CursorApiSmokeCacheEntry = { result: CursorApiSmokeResult; expiresAtMs: number };
 type CursorApiSmokeOptions = {
   makeBaseDir?: () => string;
@@ -297,9 +297,7 @@ async function smokeCursorApiKey(
   return result;
 }
 
-async function listCursorModels(
-  env: Record<string, string | null | undefined> = { ...providerScrubEnv() },
-): Promise<HarnessModel[]> {
+async function listCursorModels(env: EnvMap = { ...providerScrubEnv() }): Promise<HarnessModel[]> {
   try {
     const r = await runCapture(BIN, ["--list-models"], { env, timeoutMs: 30_000 });
     if (r.code !== 0) return [];
@@ -309,25 +307,15 @@ async function listCursorModels(
   }
 }
 
-function cursorBaseEnv(
-  env?: Record<string, string | null | undefined>,
-): Record<string, string | null | undefined> {
-  return {
-    ...(env ?? {}),
-    ...providerScrubEnv(),
-  };
+function cursorBaseEnv(env?: EnvMap): EnvMap {
+  return { ...(env ?? {}), ...providerScrubEnv() };
 }
 
-function cursorNativeEnv(
-  env?: Record<string, string | null | undefined>,
-): Record<string, string | null | undefined> {
-  return {
-    ...cursorBaseEnv(env),
-    CURSOR_API_KEY: null,
-  };
+function cursorNativeEnv(env?: EnvMap): EnvMap {
+  return { ...cursorBaseEnv(env), CURSOR_API_KEY: null };
 }
 
-function maybeBridgeScopedHome(env: Record<string, string | null | undefined>): void {
+function maybeBridgeScopedHome(env: EnvMap): void {
   const home = env["HOME"];
   if (home && needsScopedHomeKeychainBridge(CURSOR_CAPABILITY_PROFILE))
     bridgeMacLoginKeychain(home);
@@ -343,11 +331,9 @@ async function resolveCursorAuthRoute(
   },
 ): Promise<{
   route: CursorAuthRoute;
-  env: Record<string, string | null | undefined>;
+  env: EnvMap;
   key: string | null;
   nativeAuthed: boolean;
-  nativeProbeError: string | null;
-  apiSmoke: CursorApiSmokeResult;
   scopedHome: boolean;
 }> {
   const env = cursorBaseEnv(input.env);
@@ -369,12 +355,7 @@ async function resolveCursorAuthRoute(
   const apiSmoke =
     shouldSmokeApiKey && key
       ? await smokeCursorApiKey(deps, key, input.fresh === true)
-      : {
-          ok: false,
-          detail: key
-            ? "Cursor API-key smoke not required for selected route"
-            : "no Cursor API key",
-        };
+      : unsmokedApiSmoke(key);
   const route = selectCursorAuthRoute({
     authPreference,
     hasKey: Boolean(key),
@@ -382,15 +363,7 @@ async function resolveCursorAuthRoute(
     nativeAuthed,
     scopedHome,
   });
-  return {
-    route,
-    env,
-    key,
-    nativeAuthed,
-    nativeProbeError: nativeProbe.probeError,
-    apiSmoke,
-    scopedHome,
-  };
+  return { route, env, key, nativeAuthed, scopedHome };
 }
 
 async function listCursorModelsFromReadyRoute(
@@ -559,12 +532,7 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
       const apiSmoke =
         key && shouldSmokeApiKey
           ? await smokeCursorApiKey(runtime, key, _spec.fresh === true)
-          : {
-              ok: false,
-              detail: key
-                ? "Cursor API-key smoke not required for selected route"
-                : "no Cursor API key",
-            };
+          : unsmokedApiSmoke(key);
       // Readiness doctrine: a key string alone is source availability, not
       // proven readiness. A bridged native status probe proves the exact scoped
       // environment; API fallback still requires its isolated smoke.
@@ -732,7 +700,7 @@ async function* runCursor(
     yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
     return;
   }
-  const args = ["-p", "--output-format", "stream-json", ...accessArgs(spec.access)];
+  const args = ["-p", "--output-format", "stream-json", ...accessArgs[spec.access]];
   // Native Plan's createPlan schema cannot carry D-16 WorkReport; native read-only
   // Ask preserves prompt-owned plan intent and the model-authored final report.
   // `readonly` access rides the SAME mode: Ask is the only mechanism this CLI

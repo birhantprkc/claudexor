@@ -1,6 +1,9 @@
-import type { RunFailureCode } from "@claudexor/schema";
+import { join } from "node:path";
+import type { ArtifactStore } from "@claudexor/artifact-store";
+import type { EventLog } from "@claudexor/event-log";
+import { makeOutcomeFacts, type RunFailureCode } from "@claudexor/schema";
 import { harnessFailureNextActions } from "./harnessFailure.js";
-import { declaredFailure } from "./runTerminalResults.js";
+import { declaredFailure, writeFailure } from "./runTerminalResults.js";
 
 /**
  * Classify typed routing refusal separately from provider availability.
@@ -45,4 +48,52 @@ export function routingFailureClassification(err: unknown): {
     code: declared.code,
     resetsAt: declared.resetsAt,
   };
+}
+
+/**
+ * The whole routing-catch terminal, written once instead of per strategy.
+ *
+ * Every strategy's routing catch wrote the identical twenty-nine lines — the
+ * context_error note, the classified failure record, the diagnostic summary and
+ * the two lifecycle events — differing only in the mode label printed into the
+ * summary. Four copies is four places for the next routing field to be added to
+ * three of them, which is exactly how `code`/`resetsAt` reached the terminal
+ * late. The caller keeps its own `return`, because the result shape is the one
+ * thing that genuinely differs between strategies.
+ */
+export function writeRoutingFailureTerminal(
+  store: ArtifactStore,
+  paths: ReturnType<ArtifactStore["runPaths"]>,
+  log: EventLog,
+  run: { runId: string; modeLabel: string; message: string; err: unknown },
+): void {
+  store.writeText(
+    join(paths.contextDir, "context_error.md"),
+    `# Routing Error\n\n${run.message}\n`,
+  );
+  // A routing preflight refusal is a config_error, not harness_unavailable
+  // (A-1/#22): classify identically across every strategy's routing catch.
+  const routingFailure = routingFailureClassification(run.err);
+  writeFailure(store, paths, {
+    phase: "routing",
+    category: routingFailure.category,
+    code: routingFailure.code,
+    resetsAt: routingFailure.resetsAt,
+    safeMessage: run.message,
+    runDir: paths.root,
+    ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
+  });
+  store.writeText(
+    join(paths.finalDir, "summary.md"),
+    `# Run ${run.runId} (${run.modeLabel})\n\n- Lifecycle: failed\n- Phase: routing\n\n${run.message}\n`,
+  );
+  log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
+  log.emit("run.failed", {
+    lifecycle: "failed",
+    facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
+    reason: "harness_failed",
+    phase: "routing",
+    error: run.message,
+    failure_ref: "final/failure.yaml",
+  });
 }

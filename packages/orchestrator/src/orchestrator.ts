@@ -125,7 +125,7 @@ import { governRouteEffort } from "./effortGovernance.js";
 import { isFullAccess, RequestRequirementsResolver } from "./requestRequirements.js";
 import { DelegationBudgetAuthority } from "./delegationBudgetAuthority.js";
 import { activateDelegationParent } from "./delegation-parent-activation.js";
-import { routingFailureClassification } from "./routing-failure.js";
+import { writeRoutingFailureTerminal } from "./routing-failure.js";
 export { routingFailureClassification } from "./routing-failure.js";
 import { runBounded } from "./run-bounded.js";
 import { planPrompt } from "./plan-prompt.js";
@@ -3077,34 +3077,11 @@ export class Orchestrator {
       );
     } catch (err) {
       const message = safeErrorMessage(err);
-      store.writeText(
-        join(paths.contextDir, "context_error.md"),
-        `# Routing Error\n\n${message}\n`,
-      );
-      // A routing preflight refusal is a config_error, not harness_unavailable
-      // (A-1/#22): classify identically across every strategy's routing catch.
-      const routingFailure = routingFailureClassification(err);
-      writeFailure(store, paths, {
-        phase: "routing",
-        category: routingFailure.category,
-        code: routingFailure.code,
-        resetsAt: routingFailure.resetsAt,
-        safeMessage: message,
-        runDir: paths.root,
-        ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
-      });
-      store.writeText(
-        join(paths.finalDir, "summary.md"),
-        `# Run ${runId} (${mode})\n\n- Lifecycle: failed\n- Phase: routing\n\n${message}\n`,
-      );
-      log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
-      log.emit("run.failed", {
-        lifecycle: "failed",
-        facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
-        reason: "harness_failed",
-        phase: "routing",
-        error: message,
-        failure_ref: "final/failure.yaml",
+      writeRoutingFailureTerminal(store, paths, log, {
+        runId,
+        modeLabel: mode,
+        message,
+        err,
       });
       return {
         runId,
@@ -3586,25 +3563,11 @@ export class Orchestrator {
         harnessId: r.harnessId,
         status: gatesPassed(r.gates) && !r.errored ? "green" : "red",
       }));
-
-    // Revert divergence fence for the single-candidate in-place path: the
-    // candidate mutated the LIVE tree during execution above, so the post-turn
-    // snapshot must be taken NOW — before review/synthesis/arbitration, which can
-    // run for a long time during which the user may edit files. Snapshotting after
-    // arbitration (as the race-adoption path does) would fold those user edits
-    // into the revert target and let a later revert clobber them.
-    let earlyPostTurnSha: string | null = null;
-    if (input.inPlace && requestedSingleCandidate && runs.every((run) => !run.secretDiffRefusal)) {
-      try {
-        earlyPostTurnSha = await snapshotTree(execRoot);
-      } catch {
-        earlyPostTurnSha = null;
-      }
-    }
-
-    if (input.signal?.aborted) {
-      await disposeReviewEnvelopes();
-      return cancelledResult(
+    /** The one cancellation terminal this race can reach, from any of its three
+     * abort checks. Every argument is re-read at call time, exactly as it was
+     * when each check spelled the whole call out for itself. */
+    const cancelledRaceResult = () =>
+      cancelledResult(
         log,
         runId,
         taskId,
@@ -3626,6 +3589,25 @@ export class Orchestrator {
         input.signal,
         store,
       );
+
+    // Revert divergence fence for the single-candidate in-place path: the
+    // candidate mutated the LIVE tree during execution above, so the post-turn
+    // snapshot must be taken NOW — before review/synthesis/arbitration, which can
+    // run for a long time during which the user may edit files. Snapshotting after
+    // arbitration (as the race-adoption path does) would fold those user edits
+    // into the revert target and let a later revert clobber them.
+    let earlyPostTurnSha: string | null = null;
+    if (input.inPlace && requestedSingleCandidate && runs.every((run) => !run.secretDiffRefusal)) {
+      try {
+        earlyPostTurnSha = await snapshotTree(execRoot);
+      } catch {
+        earlyPostTurnSha = null;
+      }
+    }
+
+    if (input.signal?.aborted) {
+      await disposeReviewEnvelopes();
+      return cancelledRaceResult();
     }
 
     const failedDelegation = delegateFailure.dominantRaceCandidateFailure(runs);
@@ -3869,28 +3851,7 @@ export class Orchestrator {
       await disposeReviewEnvelopes();
     }
     if (input.signal?.aborted) {
-      return cancelledResult(
-        log,
-        runId,
-        taskId,
-        mode,
-        paths.root,
-        cancelledCandidates(),
-        () =>
-          this.writeRunTelemetry(
-            store,
-            paths,
-            contract,
-            runId,
-            taskId,
-            mode,
-            candidateRoster(runs),
-            null,
-          ),
-        ledger.spend(),
-        input.signal,
-        store,
-      );
+      return cancelledRaceResult();
     }
 
     // Synthesis: if worthwhile, run a synthesizer as a NEW, re-checked candidate.
@@ -4056,28 +4017,7 @@ export class Orchestrator {
       }
     }
     if (input.signal?.aborted) {
-      return cancelledResult(
-        log,
-        runId,
-        taskId,
-        mode,
-        paths.root,
-        cancelledCandidates(),
-        () =>
-          this.writeRunTelemetry(
-            store,
-            paths,
-            contract,
-            runId,
-            taskId,
-            mode,
-            candidateRoster(runs),
-            null,
-          ),
-        ledger.spend(),
-        input.signal,
-        store,
-      );
+      return cancelledRaceResult();
     }
 
     let result: ReturnType<typeof arbitrate>;
@@ -4870,34 +4810,11 @@ export class Orchestrator {
       this.requestRequirements.assertConvergenceWorkspace(input.inPlace === true, adapterPool);
     } catch (err) {
       const message = safeErrorMessage(err);
-      store.writeText(
-        join(paths.contextDir, "context_error.md"),
-        `# Routing Error\n\n${message}\n`,
-      );
-      // A routing preflight refusal is a config_error, not harness_unavailable
-      // (A-1/#22): classify identically across every strategy's routing catch.
-      const routingFailure = routingFailureClassification(err);
-      writeFailure(store, paths, {
-        phase: "routing",
-        category: routingFailure.category,
-        code: routingFailure.code,
-        resetsAt: routingFailure.resetsAt,
-        safeMessage: message,
-        runDir: paths.root,
-        ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
-      });
-      store.writeText(
-        join(paths.finalDir, "summary.md"),
-        `# Run ${runId} (${mode})\n\n- Lifecycle: failed\n- Phase: routing\n\n${message}\n`,
-      );
-      log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
-      log.emit("run.failed", {
-        lifecycle: "failed",
-        facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
-        reason: "harness_failed",
-        phase: "routing",
-        error: message,
-        failure_ref: "final/failure.yaml",
+      writeRoutingFailureTerminal(store, paths, log, {
+        runId,
+        modeLabel: mode,
+        message,
+        err,
       });
       return {
         spendUsd: ledger.spend(),
@@ -5960,34 +5877,11 @@ export class Orchestrator {
     } catch (err) {
       roHome.dispose();
       const message = safeErrorMessage(err);
-      store.writeText(
-        join(paths.contextDir, "context_error.md"),
-        `# Routing Error\n\n${message}\n`,
-      );
-      // A routing preflight refusal is a config_error, not harness_unavailable
-      // (A-1/#22): classify identically across every strategy's routing catch.
-      const routingFailure = routingFailureClassification(err);
-      writeFailure(store, paths, {
-        phase: "routing",
-        category: routingFailure.category,
-        code: routingFailure.code,
-        resetsAt: routingFailure.resetsAt,
-        safeMessage: message,
-        runDir: paths.root,
-        ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
-      });
-      store.writeText(
-        join(paths.finalDir, "summary.md"),
-        `# Run ${runId} (plan)\n\n- Lifecycle: failed\n- Phase: routing\n\n${message}\n`,
-      );
-      log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
-      log.emit("run.failed", {
-        lifecycle: "failed",
-        facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
-        reason: "harness_failed",
-        phase: "routing",
-        error: message,
-        failure_ref: "final/failure.yaml",
+      writeRoutingFailureTerminal(store, paths, log, {
+        runId,
+        modeLabel: "plan",
+        message,
+        err,
       });
       return {
         spendUsd: ledger.spend(),
@@ -6507,34 +6401,11 @@ export class Orchestrator {
     } catch (err) {
       roHome.dispose();
       const message = safeErrorMessage(err);
-      store.writeText(
-        join(paths.contextDir, "context_error.md"),
-        `# Routing Error\n\n${message}\n`,
-      );
-      // A routing preflight refusal is a config_error, not harness_unavailable
-      // (A-1/#22): classify identically across every strategy's routing catch.
-      const routingFailure = routingFailureClassification(err);
-      writeFailure(store, paths, {
-        phase: "routing",
-        category: routingFailure.category,
-        code: routingFailure.code,
-        resetsAt: routingFailure.resetsAt,
-        safeMessage: message,
-        runDir: paths.root,
-        ...(routingFailure.nextActions ? { nextActions: routingFailure.nextActions } : {}),
-      });
-      store.writeText(
-        join(paths.finalDir, "summary.md"),
-        `# Run ${runId} (${opts.mode})\n\n- Lifecycle: failed\n- Phase: routing\n\n${message}\n`,
-      );
-      log.emit("output.ready", { kind: "summary", path: "final/summary.md", state: "diagnostic" });
-      log.emit("run.failed", {
-        lifecycle: "failed",
-        facts: makeOutcomeFacts("failed", { reason: "harness_failed" }),
-        reason: "harness_failed",
-        phase: "routing",
-        error: message,
-        failure_ref: "final/failure.yaml",
+      writeRoutingFailureTerminal(store, paths, log, {
+        runId,
+        modeLabel: opts.mode,
+        message,
+        err,
       });
       return {
         runId,

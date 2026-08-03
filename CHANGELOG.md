@@ -20,7 +20,14 @@ Release history for Claudexor. The current version is declared in the root
   is now genuinely read-only — it dispatches onto `--mode ask`, the only mode
   that CLI documents as withholding the write tools (under the previous argv a
   readonly agent created a file on instruction), and the manifest stops claiming
-  `fs_sandbox` for a mechanism that is really a tool allowlist. Confinement proof
+  `fs_sandbox` for a mechanism that is really a tool allowlist. Disclosed with
+  it, because it is a real narrowing and not only a fix: ask mode withholds
+  COMMAND EXECUTION as well as edits. The vendor's own mode roster in the pinned
+  CLI build calls it "Q&A mode - no edits or command execution", so a readonly
+  cursor run can no longer run a shell command it could run before — it now
+  matches the claude adapter, whose readonly allowlist has always excluded
+  `Bash`, while a readonly codex run still gets commands under a read-only
+  filesystem. Confinement proof
   gained the control it was missing: `proveConfinementDenial` credited nearly
   every nonzero exit as a proven denial, so a Seatbelt profile that failed to
   apply or failed to compile recorded a `verified_denied_path` that proved
@@ -30,7 +37,15 @@ Release history for Claudexor. The current version is declared in the root
   cursor and opencode adapters, which refused `external_sandbox_full` — the
   profile that means the engine proved and applied its own OS boundary, so the
   adapter's weaker sandbox stands down — while bare `full`, which claims no
-  boundary at all, is still refused. Finally, a claude/cursor terminal login
+  boundary at all, is still refused. The release itself now reaches the channel
+  it is consumed on: publishing moved only `latest`, and nothing in the repo had
+  ever moved `next`, so `claudexor@next` stayed stranded on 3.3.7-rc.0 while
+  stable releases came and went; the publisher now moves `next` to the published
+  version after the signature audit, and the workflow gate fails if that move is
+  ever dropped. An attempt that died before its harness HOME was decided no
+  longer reports `harness_home_isolated: false` — a positive claim that the
+  engine ran the child in the operator's own home — and instead omits the field,
+  so a gap in the record reads as a gap. Finally, a claude/cursor terminal login
   discloses its OAuth URL as a structural field on the login job instead of only
   printing it into the PTY, so a surface without a terminal has something to
   render.

@@ -96,6 +96,28 @@ async function main() {
     console.log(`npm published with provenance: ${spec}`);
   }
   verifyRegistrySignatures(packed);
+  moveNextChannel(packed);
+}
+
+/**
+ * `latest` moves by itself — `npm publish` with no `--tag` moves it, and the
+ * provenance check above REQUIRES it to have moved. `next` does not, and until
+ * 3.3.7 nothing in this repository had ever moved it: it was set out of band and
+ * then stranded, so `claudexor@next` still resolved to 3.3.7-rc.0 while stable
+ * releases came and went. The downstream Ouroboros CI gate installs
+ * `claudexor@next`, so leaving the tag behind ships every fix to a consumer that
+ * never resolves it.
+ *
+ * Runs LAST, after every package is published, provenance-verified and
+ * signature-audited, so a half-finished release never advertises itself on the
+ * channel. `npm dist-tag add` is idempotent, which keeps the retry path (an
+ * already-published version is skipped above) landing here just the same.
+ */
+function moveNextChannel(packed) {
+  for (const { pkg } of packed) {
+    run("npm", ["dist-tag", "add", `${pkg.name}@${pkg.version}`, "next"], root);
+    console.log(`npm next channel now resolves to ${pkg.name}@${pkg.version}`);
+  }
 }
 
 /** Install the complete exact tarball set and prove the public daemon wrapper

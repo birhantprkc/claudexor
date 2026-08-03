@@ -130,9 +130,7 @@ describe("extractOAuthUrl", () => {
     const text =
       "\u001b[1mBrowser did not open?\u001b[0m Visit:\n" +
       "\u001b[4mhttps://claude.ai/oauth/authorize?client=cli&state=abc123\u001b[0m.\n";
-    expect(extractOAuthUrl(text)).toBe(
-      "https://claude.ai/oauth/authorize?client=cli&state=abc123",
-    );
+    expect(extractOAuthUrl(text)).toBe("https://claude.ai/oauth/authorize?client=cli&state=abc123");
   });
 
   it("ignores URLs with no sign-in signature (a docs banner is not the login link)", () => {
@@ -201,9 +199,13 @@ describe("terminal-mode login worker OAuth URL disclosure", () => {
     const jobDir = join(root, "job-legacy");
     mkdirSync(jobDir, { mode: 0o700 });
     const binary = join(jobDir, "claude");
-    writeFileSync(binary, "#!/bin/sh\nprintf 'https://claude.ai/oauth/authorize?s=1\\n'\nexit 0\n", {
-      mode: 0o700,
-    });
+    writeFileSync(
+      binary,
+      "#!/bin/sh\nprintf 'https://claude.ai/oauth/authorize?s=1\\n'\nexit 0\n",
+      {
+        mode: 0o700,
+      },
+    );
     chmodSync(binary, 0o700);
     const executable = captureExecutableEvidence(binary);
     const args = ["auth", "login"];

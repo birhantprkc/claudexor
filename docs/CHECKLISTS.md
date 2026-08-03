@@ -319,6 +319,13 @@ pnpm test
 - npm packages publish with provenance in dependency order. Existing versions
   are retryable only when local tarball integrity and published provenance
   match; any mismatch blocks as a version collision.
+- Two dist-tags move, and only one of them moves by itself. `npm publish` runs
+  with no `--tag`, so npm moves `latest` — which the provenance check then
+  REQUIRES to have moved, so do not add `--tag` to that publish. `next` is moved
+  separately, by `moveNextChannel` after the signature audit, because the
+  downstream Ouroboros CI gate installs `claudexor@next` and a release that left
+  the tag behind would ship a fix its only consumer never resolves. After a
+  release, confirm both: `npm view claudexor dist-tags`.
 - Release assets are uploaded without `--clobber`; a same-name differing asset
   blocks. Publish the draft last and never edit its tag/assets afterward. This
   is workflow-enforced immutability, not a claim about GitHub repository settings.

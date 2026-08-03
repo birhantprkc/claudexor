@@ -720,6 +720,7 @@ function nativeAskAdapter(id: string, observe: (spec: HarnessRunSpec) => void): 
         harness_id: id,
         availability: "available",
         verification: "passed",
+        verification_source: "local_store",
         detail: "fixture profile verified",
         last_verified_at: new Date().toISOString(),
       };
@@ -4805,6 +4806,7 @@ describe("Orchestrator", () => {
               harness_id: "worker",
               availability: "available",
               verification: "passed",
+              verification_source: "local_store",
               detail: "fixture profile verified",
               last_verified_at: new Date().toISOString(),
             };
@@ -5065,6 +5067,7 @@ describe("Orchestrator", () => {
             harness_id: "worker",
             availability: "available",
             verification: "passed",
+            verification_source: "local_store",
             detail: "fixture profile verified",
             last_verified_at: new Date().toISOString(),
           };

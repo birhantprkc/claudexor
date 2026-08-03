@@ -95,7 +95,7 @@ export function ensureCanonicalPrivateDirectory(path: string): string {
       throw new Error(`owned directory parent is not canonical: ${parent}`);
     }
     mkdirSync(absolute, { recursive: false, mode: 0o700 });
-    fsyncCanonicalDirectory(parent);
+    fsyncDirectory(parent);
   }
   const preliminary = lstatSync(absolute);
   if (preliminary.isSymbolicLink() || !preliminary.isDirectory()) {
@@ -131,10 +131,15 @@ export function ensureCanonicalPrivateDirectory(path: string): string {
   return absolute;
 }
 
-function fsyncCanonicalDirectory(path: string): void {
+/**
+ * Flush the directory entry so a create/rename/unlink inside it survives a
+ * crash. Every atomic-replace writer in the monorepo lands here: the win32
+ * tolerance below is the whole reason this is one function and not seven.
+ */
+export function fsyncDirectory(path: string, platform: NodeJS.Platform = process.platform): void {
   const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    fsyncDirectoryHandle(fd);
+    fsyncDirectoryHandle(fd, platform);
   } finally {
     closeSync(fd);
   }
@@ -143,14 +148,15 @@ function fsyncCanonicalDirectory(path: string): void {
 /**
  * Directory-handle flush is a POSIX durability mechanism; win32 refuses
  * FlushFileBuffers on a read handle, which would otherwise turn every owned-
- * root establishment into a hard failure there. File contents keep their own
- * descriptor-level fsync everywhere.
+ * root establishment and every atomic replace into a hard failure there. File
+ * contents keep their own descriptor-level fsync everywhere. `platform` is
+ * injectable so the tolerance is provable without a Windows host.
  */
-function fsyncDirectoryHandle(fd: number): void {
+function fsyncDirectoryHandle(fd: number, platform: NodeJS.Platform = process.platform): void {
   try {
     fsyncSync(fd);
   } catch (error) {
-    if (process.platform !== "win32") throw error;
+    if (platform !== "win32") throw error;
   }
 }
 

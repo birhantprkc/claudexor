@@ -19,7 +19,7 @@ import {
   type RunEvent,
   type RunFacts,
 } from "@claudexor/schema";
-import { hashJson } from "@claudexor/util";
+import { fsyncDirectory, hashJson } from "@claudexor/util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { JOB_STATES, type JobRecord } from "./server.js";
 import {
@@ -504,15 +504,7 @@ function replaceFileDurably(path: string, text: string): void {
     closeSync(fd);
     fd = null;
     renameSync(tmp, path);
-    const parentFd = openSync(
-      parent,
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    );
-    try {
-      fsyncSync(parentFd);
-    } finally {
-      closeSync(parentFd);
-    }
+    fsyncDirectory(parent);
   } finally {
     if (fd !== null) closeSync(fd);
     try {

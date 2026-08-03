@@ -91,9 +91,10 @@ notice stating there is no boundary and what that means for it), and the caller'
 same sentence). Refusing instead would make `execution.delegated` a macOS-only feature wearing a
 general name.
 
-Two conditions still refuse, because they are Claudexor's fault rather than the platform's: an
-allowed root that would swallow a path the policy must deny, and a policy that the macOS
-mechanism failed to enforce when probed for one attempt.
+Three conditions still refuse, because they are Claudexor's own layout or this host's rather
+than the platform's: an allowed root that would swallow a path the policy must deny; a host on
+which NONE of the denied paths exists, so the policy cannot be proven to deny anything; and a
+policy that the macOS mechanism failed to enforce when probed for one attempt.
 
 What a non-macOS delegated mutating run therefore gets, in full: the scoped harness `HOME`
 (unchanged), NO confinement mechanism recorded — no mechanism name, no denied path, no digest —
@@ -126,18 +127,28 @@ Built by `buildConfinementProfile`. Every path is realpath-resolved first, becau
 matches resolved paths (`/tmp` is `/private/tmp`).
 
 ```
+(version 1)
 (allow default)                       ; nothing is restricted that §3 does not name
-(deny file-read*  <claudexor runtime root>)
-(deny file-read*  <operator credential stores, from the sensitive-resource owner>)
-(deny file-write* <operator real home>)
+(deny file-read*  <claudexor runtime root + operator credential stores, from the
+                   sensitive-resource owner — one directive, every subpath>)
 (deny file-write* <system prefixes: /usr /opt /Library /Applications /System /bin /sbin /etc /var>)
-(allow file-read* file-write* <this run's scoped home>)
-(allow file-read* file-write* <this run's worktree>)
-(allow file-read* file-write* <native vendor state root>)   ; see §8
-(allow file-read* file-write* <TMPDIR>, /private/tmp)
+(allow file-write* <TMPDIR>, /private/tmp)
+(deny file-write* <operator real home>)
+(allow file-read* file-write* <this run's scoped home>, <this run's worktree>,
+                              <native vendor state root>)   ; see §8, one directive
 ```
 
-SBPL is last-match-wins, so the allow carve-outs deliberately follow the denies.
+SBPL is last-match-wins, so this ORDER IS THE POLICY, not presentation. Two placements carry
+weight. The run's own roots come last because they must outrank every deny above them —
+including the case where the worktree lives inside the operator's home (`isolation: live`,
+which is exactly the delegated shape). And the scratch allow deliberately sits ABOVE the
+operator-home deny, not below it: a `TMPDIR` configured inside `$HOME` would otherwise re-open
+the whole home for writing.
+
+Stated plainly, because it is the consequence operators actually hit: **a `TMPDIR` inside
+`$HOME` is NOT writable under this policy** — the later home deny wins — unless that path also
+falls inside one of the run's own roots. The macOS default (`/private/var/folders/…`) is
+outside `$HOME` and is unaffected.
 
 There is no second policy. On every other platform `confinement_mechanism` is null,
 `confinement_verified_denied_path` is null, and `confinement_unavailable_reason` says why.

@@ -348,9 +348,11 @@ export interface ConfinementOutcome {
  * into the child's prompt and into its own result. It never degrades SILENTLY,
  * and it never names a mechanism it did not just prove on this host.
  *
- * Still refuses for the two conditions that are Claudexor's own fault rather
- * than the platform's: an allowed root that swallows a denied one, and a policy
- * that a working mechanism failed to enforce for this attempt.
+ * Still refuses for the three conditions that are Claudexor's own layout or
+ * this host's rather than the platform's: an allowed root that swallows a
+ * denied one, a host where no denied path exists so nothing can be proven
+ * denied, and a policy that a working mechanism failed to enforce for this
+ * attempt.
  */
 export function applyConfinement(
   input: ConfinementInput,

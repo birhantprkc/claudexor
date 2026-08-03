@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { JournalRecoveryRequiredError, type JournalRecoveryState } from "@claudexor/journal";
-import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 
 export function recoveryFrom(
   error: unknown,
@@ -159,15 +159,6 @@ export function writeAtomicPrivateJson(path: string, value: unknown, exclusive: 
     } catch {
       /* renamed or absent */
     }
-  }
-}
-
-export function fsyncDirectory(path: string): void {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
   }
 }
 

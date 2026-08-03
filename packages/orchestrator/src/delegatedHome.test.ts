@@ -10,6 +10,7 @@ import { WorkspaceManager } from "@claudexor/workspace";
 import { ensureDir } from "@claudexor/util";
 import {
   appliedAttemptFacts,
+  appliedEvidenceComplete,
   assertDelegatedEvidence,
   confinementNotice,
   externallyConfinedLane,
@@ -203,8 +204,8 @@ describe("applied attempt evidence", () => {
   };
 
   it("writes an all-null block for an attempt that died before its home was decided", () => {
-    expect(appliedAttemptFacts(undefined, "workspace_write", null)).toEqual({
-      harness_home_isolated: false,
+    const facts = appliedAttemptFacts(undefined, "workspace_write", null);
+    expect(facts).toEqual({
       harness_home_dir: null,
       access_applied: "workspace_write",
       credential_profile_applied: null,
@@ -213,6 +214,33 @@ describe("applied attempt evidence", () => {
       confinement_verified_denied_path: null,
       confinement_unavailable_reason: null,
     });
+    // ABSENT, never `false`: a literal false claims this child ran in the
+    // operator's own HOME, which is a containment breach an attempt that never
+    // reached `wsm.create` did not commit.
+    expect("harness_home_isolated" in facts).toBe(false);
+    // The gap still refuses at the terminal — absence is not a free pass.
+    expect(appliedEvidenceComplete(facts)).toBe(false);
+  });
+
+  it("states isolation positively once the home WAS decided", () => {
+    const isolated = appliedAttemptFacts(
+      { isolated: true, homeDir: "/scoped", confinement: null, confinementUnavailableReason: null },
+      "workspace_write",
+      null,
+    );
+    expect(isolated.harness_home_isolated).toBe(true);
+    // A decided-but-unisolated home is the real breach, and it stays reportable.
+    const shared = appliedAttemptFacts(
+      {
+        isolated: false,
+        homeDir: "/home/op",
+        confinement: null,
+        confinementUnavailableReason: null,
+      },
+      "workspace_write",
+      null,
+    );
+    expect(shared.harness_home_isolated).toBe(false);
   });
 
   it("carries the stated absence onto the record an attempt writes", () => {

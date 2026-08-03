@@ -1,7 +1,48 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * A directory handle whose path carries REFUSAL_MARKER answers a flush the way
+ * win32 does: FlushFileBuffers rejects a read handle. Scoped to the marker so
+ * every other fsync in this file stays real.
+ */
+const flush = vi.hoisted(() => ({
+  marker: "claudexor-flush-refusal-",
+  refusing: new Set<number>(),
+  closed: [] as number[],
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    openSync: ((path: string, flags: number, mode?: number) => {
+      const fd = actual.openSync(path, flags, mode);
+      if (String(path).includes(flush.marker)) flush.refusing.add(fd);
+      return fd;
+    }) as typeof actual.openSync,
+    fsyncSync: (fd: number) => {
+      if (flush.refusing.has(fd)) {
+        throw Object.assign(new Error("EACCES: FlushFileBuffers refused a read handle"), {
+          code: "EACCES",
+        });
+      }
+      actual.fsyncSync(fd);
+    },
+    closeSync: (fd: number) => {
+      if (flush.refusing.delete(fd)) flush.closed.push(fd);
+      actual.closeSync(fd);
+    },
+  };
+});
+
 import {
   assertNoInlineSecretValues,
   containsSecretLikeToken,
+  fsyncDirectory,
   hashJson,
   newId,
   redactSecrets,
@@ -132,5 +173,66 @@ describe("util", () => {
       if (config === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = config;
     }
+  });
+});
+
+describe("fsyncDirectory win32 tolerance", () => {
+  const roots: string[] = [];
+  function refusingDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), flush.marker));
+    roots.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    flush.closed.length = 0;
+  });
+
+  it("tolerates the refused flush on win32 and still closes the handle", () => {
+    const dir = refusingDir();
+    expect(() => fsyncDirectory(dir, "win32")).not.toThrow();
+    // The tolerance must not leak the descriptor it swallowed the error on.
+    expect(flush.closed).toHaveLength(1);
+  });
+
+  it("propagates the refused flush on every platform that has the mechanism", () => {
+    for (const platform of ["darwin", "linux", "freebsd"] as const) {
+      const dir = refusingDir();
+      expect(() => fsyncDirectory(dir, platform)).toThrow(/EACCES/);
+    }
+    expect(flush.closed).toHaveLength(3);
+  });
+
+  it("flushes for real when the platform does not refuse", () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-flush-ok-"));
+    roots.push(dir);
+    expect(() => fsyncDirectory(dir, "win32")).not.toThrow();
+    expect(() => fsyncDirectory(dir, "linux")).not.toThrow();
+    expect(flush.closed).toHaveLength(0);
+  });
+
+  it("is the only owner of the directory-flush mechanism in the monorepo", () => {
+    // The 3.3.7 defect was one-place-only tolerance: token.ts got the win32
+    // carve-out while six sibling copies kept the unguarded form, so the
+    // daemon still died on Windows. Duplicating the open+fsync pair anywhere
+    // else reintroduces exactly that split.
+    const packages = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const owners: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        if (entry === "node_modules" || entry === "dist") continue;
+        const path = join(dir, entry);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (
+          entry.endsWith(".ts") &&
+          !entry.endsWith(".test.ts") &&
+          readFileSync(path, "utf8").includes("O_DIRECTORY")
+        ) {
+          owners.push(path.slice(packages.length + 1));
+        }
+      }
+    };
+    walk(packages);
+    expect(owners).toEqual(["util/src/index.ts"]);
   });
 });
