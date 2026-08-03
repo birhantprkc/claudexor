@@ -224,7 +224,12 @@ export function createOpenCodeAdapter(): HarnessAdapter {
           attachment_inputs: [],
         },
         auth_modes: authReady ? ["api_key"] : [],
-        access_profiles_supported: ["full", "inherit_native"],
+        // external_sandbox_full: engine-provided sandbox; opencode's own
+        // permissions gate stands down (--dangerously-skip-permissions), the
+        // exact mapping accessArgs already implements — only the manifest
+        // declaration was missing, so a delegated mutating opencode run on
+        // macOS was unroutable.
+        access_profiles_supported: ["full", "external_sandbox_full", "inherit_native"],
       });
     },
 

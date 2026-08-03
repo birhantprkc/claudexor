@@ -510,7 +510,15 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
           ...(nativeAuthed ? ["local_session" as const] : []),
           ...(apiKey ? ["api_key" as const] : []),
         ],
-        access_profiles_supported: ["readonly", "workspace_write", "inherit_native"],
+        // external_sandbox_full: engine-provided sandbox; cursor's own stands
+        // down (--force --sandbox disabled), mirroring codex/claude. Bare
+        // `full` stays undeclared/refused (no boundary, not proven).
+        access_profiles_supported: [
+          "readonly",
+          "workspace_write",
+          "external_sandbox_full",
+          "inherit_native",
+        ],
       });
     },
 
@@ -707,12 +715,19 @@ async function* runCursor(
   spec: HarnessRunSpec,
   deps: CursorRuntimeDeps,
 ): AsyncIterable<HarnessEvent> {
-  if (spec.access === "full" || spec.access === "external_sandbox_full") {
+  // Bare `full` claims NO boundary at all and stays refused (unproven).
+  // `external_sandbox_full` is different by definition: the ENGINE proved and
+  // applied its own OS boundary around this child, so cursor's weaker sandbox
+  // stands down (`--force --sandbox disabled` via accessArgs) and the external
+  // boundary is THE boundary — the same mapping codex (danger-full-access) and
+  // claude (bypassPermissions) already implement for this profile.
+  if (spec.access === "full") {
     yield {
       type: "error",
       session_id: spec.session_id,
       ts: nowIso(),
-      error: "cursor full access is not conformance-proven; use workspace_write or another harness",
+      error:
+        "cursor full access is not conformance-proven; use workspace_write, or external_sandbox_full when Claudexor provides the boundary",
     };
     yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
     return;

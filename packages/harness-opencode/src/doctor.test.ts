@@ -129,3 +129,27 @@ describe("opencode doctor exact auth-source readiness", () => {
     expect(report.checks.find((check) => check.id === "installed")?.detail).toContain("[redacted]");
   });
 });
+
+describe("opencode manifest access profiles", () => {
+  beforeEach(() => {
+    mocks.resolveSecret.mockReset().mockReturnValue(null);
+    mocks.runCapture
+      .mockReset()
+      .mockResolvedValue({ stdout: "opencode 1.2.3\n", stderr: "", code: 0 });
+  });
+
+  it("declares external_sandbox_full: the engine's sandbox is the boundary, opencode's gate stands down", async () => {
+    const manifest = await createOpenCodeAdapter().discover();
+    // `full` was already declared (the adapter's only own mechanism is
+    // --dangerously-skip-permissions); external_sandbox_full rides the SAME
+    // accessArgs mapping under an engine-provided OS boundary, so a delegated
+    // mutating opencode run on macOS (Seatbelt rewrite workspace_write ->
+    // external_sandbox_full) is routable. Scoped profiles stay undeclared —
+    // opencode has no conformance-proven readonly/workspace_write mechanism.
+    expect(manifest.access_profiles_supported).toEqual([
+      "full",
+      "external_sandbox_full",
+      "inherit_native",
+    ]);
+  });
+});
