@@ -1509,13 +1509,49 @@ import Testing
         #expect(try decoder.decode(SetupJobSnapshot.self, from: encoder.encode(bare)).deviceCode == nil)
     }
 
-    @Test func snapshotAndEventRejectDeviceCodeOutsideAwaitingCodexLogin() throws {
+    /// A terminal-mode claude/cursor login captures its vendor sign-in URL and
+    /// discloses it through the SAME overlay, so the whole card must survive
+    /// the trip. While the DTO admitted codex alone, the wire payload the
+    /// daemon really sends decoded to nothing and the login card stayed blank.
+    @Test func terminalLoginOauthUrlDisclosureSurvivesEveryManagedHarness() throws {
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .oauthUrl,
+            verificationUrl: "https://claude.ai/oauth/authorize?state=abc", userCode: "")
+        let encoder = JSONEncoder(); let decoder = JSONDecoder()
+        // `oauth_url` is the wire spelling; a Swift-only case name would decode
+        // to nothing regardless of what the envelope admits.
+        #expect(SetupLoginDisclosureFlow.oauthUrl.rawValue == "oauth_url")
+        for harness in [SetupHarness.claude, .cursor, .codex] {
+            let awaiting = makeSetupJob(
+                id: "oauth", state: "waiting_for_input", phase: .awaitingUser, harness: harness)
+            #expect(awaiting.admitsDeviceCodeDisclosure)
+            let snapshot = SetupJobSnapshot(
+                job: awaiting, cursor: "c", sequence: 1, deviceCode: disclosure)
+            let event = SetupJobEvent(
+                jobId: "oauth", cursor: "c2", previousCursor: "c1", sequence: 2, time: "t",
+                state: .waitingForInput, message: awaiting.message, job: awaiting,
+                deviceCode: disclosure)
+            #expect(
+                try decoder.decode(SetupJobSnapshot.self, from: encoder.encode(snapshot))
+                    .deviceCode == disclosure)
+            #expect(
+                try decoder.decode(SetupJobEvent.self, from: encoder.encode(event))
+                    .deviceCode == disclosure)
+            // URL-only, exactly like the browser-callback flow: the card must
+            // not promise a one-time code it does not have.
+            #expect(!disclosure.hasUserCode)
+        }
+    }
+
+    @Test func snapshotAndEventRejectDeviceCodeOutsideAnAwaitingLogin() throws {
         let disclosure = SetupDeviceCodeDisclosure(
             flow: .chatgptDeviceCode,
             verificationUrl: "https://chatgpt.com/device", userCode: "ABCD-1234")
         let encoder = JSONEncoder()
+        // Lifecycle, not vendor: the phase and the terminal state are what make
+        // a disclosure invalid, and they do so for every harness.
         let invalidJobs = [
-            makeSetupJob(id: "claude", state: "waiting_for_input", phase: .awaitingUser),
+            makeSetupJob(id: "launching-claude", state: "waiting_for_input", phase: .launching),
             makeSetupJob(
                 id: "launching", state: "waiting_for_input", phase: .launching,
                 harness: .codex),
@@ -2723,6 +2759,70 @@ extension ClaudexorKitTests {
             DeleteCredentialProfileReceipt.self, from: Data(warned.utf8))
         #expect(disclosed.credentialCleanup == "none")
         #expect(disclosed.cleanupWarning?.contains("cleanup failed") == true)
+    }
+
+    /// `verification_source` is what the `verification` verdict is WORTH:
+    /// `local_store` says only that credential material is present locally,
+    /// which cannot tell a live token from a revoked one. Dropping it on decode
+    /// made every `passed` read as vendor-confirmed on this client.
+    @Test func credentialProfileStatusCarriesItsVerificationSource() throws {
+        let vendor = """
+        {"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
+         "credential_kind":"config_dir_login","isolation_locator":"/tmp/x","secret_ref":null,
+         "enabled":true,"created_at":"2026-07-18T00:00:00Z"},
+         "status":{"availability":"available","verification":"passed",
+          "verification_source":"vendor","last_verified_at":"2026-07-18T01:00:00Z"}}
+        """
+        let confirmed = try JSONDecoder().decode(
+            CredentialProfileEntry.self, from: Data(vendor.utf8))
+        #expect(confirmed.status.verificationSource == "vendor")
+
+        let local = """
+        {"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
+         "credential_kind":"config_dir_login","isolation_locator":"/tmp/x","secret_ref":null,
+         "enabled":true,"created_at":"2026-07-18T00:00:00Z"},
+         "status":{"availability":"available","verification":"passed",
+          "verification_source":"local_store"}}
+        """
+        #expect(
+            try JSONDecoder().decode(CredentialProfileEntry.self, from: Data(local.utf8))
+                .status.verificationSource == "local_store")
+
+        // A daemon that predates the distinction gets the WEAKER claim, never
+        // an invented "vendor" — same default the wire schema applies.
+        let legacy = """
+        {"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
+         "credential_kind":"config_dir_login","isolation_locator":"/tmp/x","secret_ref":null,
+         "enabled":true,"created_at":"2026-07-18T00:00:00Z"},
+         "status":{"availability":"available","verification":"passed"}}
+        """
+        #expect(
+            try JSONDecoder().decode(CredentialProfileEntry.self, from: Data(legacy.utf8))
+                .status.verificationSource == "local_store")
+    }
+
+    /// A spent subscription window states its reopen time STRUCTURALLY. While
+    /// the DTO dropped it, every surface was pushed back to reading "resets …"
+    /// out of safeMessage — the prose-parsing the typed field exists to end.
+    @Test func runFailureCarriesTheWindowReopenTime() throws {
+        let exhausted = """
+        {"phase":"routing","category":"budget","code":"subscription_window_exhausted",
+         "harnessId":"claude","attemptId":null,
+         "safeMessage":"Every candidate's subscription window is spent.",
+         "rawDetailRef":null,"logRefs":[],"eventRefs":[],"runDir":null,
+         "resetsAt":"2026-07-19T17:00:00.000Z","nextActions":[]}
+        """
+        let failure = try JSONDecoder().decode(RunFailureInfo.self, from: Data(exhausted.utf8))
+        #expect(failure.resetsAt == "2026-07-19T17:00:00.000Z")
+        #expect(failure.code == "subscription_window_exhausted")
+
+        // A refusal with no such time says so, and still decodes.
+        let drain = """
+        {"phase":"terminalization","category":"internal",
+         "code":"delegation_child_drain_timeout","safeMessage":"drained","resetsAt":null}
+        """
+        #expect(try JSONDecoder().decode(RunFailureInfo.self, from: Data(drain.utf8))
+            .resetsAt == nil)
     }
 
     /// W4.7: the daemon-normalized readiness list decodes typed — and a

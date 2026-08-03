@@ -102,7 +102,12 @@ export class QuotaRegistry {
       pendingScoped = null;
       if (record.type === REMOVED) {
         const payload = record.payload as { harness?: unknown; subject_id?: unknown };
-        if (typeof payload.harness === "string" && typeof payload.subject_id === "string") {
+        // subject_id is null for a harness's default/native subject, which is
+        // exactly the one a revocation retirement can name.
+        if (
+          typeof payload.harness === "string" &&
+          (typeof payload.subject_id === "string" || payload.subject_id === null)
+        ) {
           this.remove(payload.harness, payload.subject_id);
         }
         rawMutationAfterMarker = true;
@@ -236,6 +241,18 @@ export class QuotaRegistry {
    * Identity is (harness, subject_id) — credential_route/source never split a
    * subject for absence purposes. */
   private recomputeAbsences(claims: readonly QuotaAbsence[], now: number): void {
+    // Every other reason answers "why is there no snapshot", so a snapshot
+    // rightly silences it. `auth_revoked` answers something else — the vendor
+    // REJECTED the credential that snapshot was read with — so the window is
+    // no longer spendable and coverage below must stop being computed from it.
+    // Leaving it suppressed the claim with the very observation the vendor had
+    // just disproved, for up to 24h of reporting a dead profile as verified.
+    for (const claim of claims) {
+      if (claim.reason !== "auth_revoked") continue;
+      const { harness, subject_id } = claim.subject;
+      if (this.remove(harness, subject_id) > 0)
+        this.journal.append(REMOVED, { harness, subject_id });
+    }
     const covered = new Set(
       this.activeSnapshots(now).map((snapshot) => subjectIdentity(snapshot.subject)),
     );
@@ -480,7 +497,7 @@ export class QuotaRegistry {
     this.snapshots.set(snapshotKey(snapshot), snapshot);
   }
 
-  private remove(harness: string, subjectId: string): number {
+  private remove(harness: string, subjectId: string | null): number {
     let removed = 0;
     for (const [key, snapshot] of this.snapshots) {
       if (snapshot.subject.harness === harness && snapshot.subject.subject_id === subjectId) {

@@ -967,10 +967,6 @@
                 {
                   "type": "object",
                   "properties": {
-                    "harness": {
-                      "type": "string",
-                      "const": "codex"
-                    },
                     "action": {
                       "type": "string",
                       "const": "login"
@@ -990,7 +986,6 @@
                     }
                   },
                   "required": [
-                    "harness",
                     "action",
                     "state",
                     "phase"

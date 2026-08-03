@@ -661,6 +661,8 @@ describe("Control API schemas", () => {
         deviceCode: disclosure,
       }).deviceCode,
     ).toEqual(disclosure);
+    // `job` above is a cursor login still LAUNCHING — the phase, not the
+    // vendor, is why this one is refused.
     expect(() =>
       ControlSetupJobSnapshot.parse({
         job,
@@ -669,6 +671,53 @@ describe("Control API schemas", () => {
         deviceCode: disclosure,
       }),
     ).toThrow();
+    // A terminal-mode claude/cursor login captures its vendor sign-in URL into
+    // the SAME sidecar and discloses it as `oauth_url`. The envelope admits
+    // what the producer emits: naming one vendor here 500'd the snapshot route
+    // and killed the SSE stream on exactly the login this release ships.
+    const oauthUrl = {
+      flow: "oauth_url" as const,
+      verificationUrl: "https://claude.ai/oauth/authorize?state=abc",
+      userCode: "",
+    };
+    for (const harness of ["claude", "cursor"] as const) {
+      const awaiting = ControlSetupJob.parse({
+        ...job,
+        harness,
+        phase: "awaiting_user",
+        authCapability: {
+          ...job.authCapability,
+          disclosure: { ...job.authCapability?.disclosure, harness },
+        },
+      });
+      expect(
+        ControlSetupJobSnapshot.parse({
+          job: awaiting,
+          cursor: "journal-cursor-2",
+          sequence: 2,
+          deviceCode: oauthUrl,
+        }).deviceCode,
+      ).toEqual(oauthUrl);
+      expect(
+        ControlSetupJobEvent.parse({
+          ...eventBase,
+          job: awaiting,
+          state: awaiting.state,
+          message: awaiting.message,
+          previousCursor: null,
+          deviceCode: oauthUrl,
+        }).deviceCode,
+      ).toEqual(oauthUrl);
+      // Lifecycle eligibility still holds for every vendor.
+      expect(() =>
+        ControlSetupJobSnapshot.parse({
+          job: { ...awaiting, phase: "verifying" },
+          cursor: "journal-cursor-2",
+          sequence: 2,
+          deviceCode: oauthUrl,
+        }),
+      ).toThrow();
+    }
     expect(() =>
       ControlSetupJobEvent.parse({
         ...eventBase,

@@ -1060,6 +1060,68 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("retires the snapshot an auth_revoked claim contradicts, for a profile and the default subject", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-revoked-")));
+    const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    let nowIso = "2026-07-16T12:00:00.000Z";
+    const now = () => new Date(nowIso);
+    const subject = (subjectId: string | null) => ({
+      harness: "claude",
+      credential_route: "vendor_native" as const,
+      plan_label: null,
+      subject_id: subjectId,
+    });
+    // Cycle 1 observes both subjects; cycle 2 is the vendor rejecting them.
+    let revoked = false;
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () =>
+          revoked
+            ? {
+                snapshots: [],
+                absences: [null, "abstractdl"].map((id) => ({
+                  subject: subject(id as string | null),
+                  reason: "auth_revoked" as const,
+                  detail: "oauth/usage responded 401",
+                  observed_at: now().toISOString(),
+                })),
+              }
+            : {
+                snapshots: [
+                  quotaSnapshot("claude", null, 0.3),
+                  quotaSnapshot("claude", "abstractdl", 0.3),
+                ],
+                absences: [],
+              },
+      ],
+      now,
+      () => [subject(null), subject("abstractdl")],
+    );
+
+    expect((await registry.refresh()).snapshots).toHaveLength(2);
+
+    // The revocation lands while the cached snapshots are still well inside the
+    // 24h retention window — the exact case in which the coverage rule used to
+    // suppress it, leaving a dead credential reported as vendor-verified.
+    revoked = true;
+    nowIso = "2026-07-16T12:06:00.000Z";
+    const after = await registry.refresh();
+    expect(after.snapshots).toEqual([]);
+    expect(after.absences.map((a) => a.subject.subject_id ?? "default").sort()).toEqual([
+      "abstractdl",
+      "default",
+    ]);
+    expect(after.absences.every((a) => a.reason === "auth_revoked")).toBe(true);
+
+    // Durable: a restart replaying this journal must not resurrect the window.
+    const replayed = new QuotaRegistry(journal, [], now, () => []);
+    expect(replayed.read().snapshots).toEqual([]);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("keeps an old observation whose constraint still extends into the future (live weekly cooldown)", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-live-")));
     const journal = new DurableJournal({ rootDir: root, partition: "global" });

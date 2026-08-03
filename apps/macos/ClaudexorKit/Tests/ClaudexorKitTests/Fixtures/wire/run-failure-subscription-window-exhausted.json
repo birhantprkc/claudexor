@@ -1,0 +1,19 @@
+{
+  "schema": "RunFailure",
+  "value": {
+    "phase": "routing",
+    "category": "budget",
+    "code": "subscription_window_exhausted",
+    "harnessId": "claude",
+    "attemptId": null,
+    "safeMessage": "Every candidate's subscription window is spent.",
+    "rawDetailRef": null,
+    "logRefs": [],
+    "eventRefs": [],
+    "runDir": null,
+    "resetsAt": "2026-07-19T17:00:00.000Z",
+    "nextActions": [
+      "Wait for the window to reopen, or route to another credential."
+    ]
+  }
+}

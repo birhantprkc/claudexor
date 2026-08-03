@@ -112,10 +112,11 @@ export function vendorCredentialObservation(
 ): VendorCredentialObservation | null {
   const owns = (subject: QuotaSnapshot["subject"]): boolean =>
     subject.harness === harnessId && (subject.subject_id ?? null) === profileId;
-  const snapshot = quota.snapshots.find(
-    (item) => owns(item.subject) && VENDOR_AUTHENTICATED_QUOTA_SOURCES.has(item.source),
-  );
-  if (snapshot) return { outcome: "honored", observed_at: snapshot.observed_at };
+  // A rejection outranks a cached success. The registry retires a snapshot the
+  // vendor has contradicted, but snapshots and absences are read through two
+  // separate calls, so a cycle landing between them can still hand this one
+  // subject both. Reading the older success first is what made a revoked
+  // credential report as honored; the fail-closed order is the honest one.
   const revoked = quota.absences.find(
     (item) => owns(item.subject) && item.reason === "auth_revoked",
   );
@@ -126,7 +127,10 @@ export function vendorCredentialObservation(
       detail: revoked.detail ?? "the vendor rejected this profile's credential",
     };
   }
-  return null;
+  const snapshot = quota.snapshots.find(
+    (item) => owns(item.subject) && VENDOR_AUTHENTICATED_QUOTA_SOURCES.has(item.source),
+  );
+  return snapshot ? { outcome: "honored", observed_at: snapshot.observed_at } : null;
 }
 
 /**

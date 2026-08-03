@@ -785,6 +785,25 @@ describe("vendor credential observation (honest profile verification)", () => {
   it("leaves the status untouched when the poller has no verdict", () => {
     expect(withVendorCredentialObservation(local, null)).toEqual(local);
   });
+
+  it("lets a rejection outrank a cached success, and refuses the profile", () => {
+    // Snapshots and absences are read through two separate calls, so a refresh
+    // cycle landing between them can hand one subject both. Reading the older
+    // success first is what reported a revoked credential as vendor-verified
+    // and then dispatched a run onto it.
+    const evidence = { snapshots: [snap("work", 0.1)], absences: [revoked] };
+    expect(vendorCredentialObservation(evidence, "claude", "work")).toEqual({
+      outcome: "revoked",
+      observed_at: "2026-07-17T12:00:00Z",
+      detail: "oauth/usage responded 401",
+    });
+    const status = withVendorCredentialObservation(
+      local,
+      vendorCredentialObservation(evidence, "claude", "work"),
+    );
+    expect(status).toMatchObject({ verification: "failed", verification_source: "vendor" });
+    expect(profileStatusAdmits({ credential_kind: "config_dir_login" }, status)).toBe(false);
+  });
 });
 
 describe("run admission reads the vendor's verdict, not just the local store", () => {

@@ -223,6 +223,19 @@ export function buildWireFixtures() {
     eventRefs: ["events.jsonl#delegation-child-drain"],
     nextActions: ["Inspect child run terminals and retry the parent after recovery."],
   });
+  // A refusal carrying a NON-NULL resetsAt. The fixture above leaves it null,
+  // and the canonicalizer drops null keys — so the whole reopen-time contract
+  // rode the gate invisibly while the Swift DTO silently discarded it, forcing
+  // clients back to parsing "resets …" out of safeMessage.
+  add("run-failure-subscription-window-exhausted", "RunFailure", {
+    phase: "routing",
+    category: "budget",
+    code: "subscription_window_exhausted",
+    harnessId: "claude",
+    safeMessage: "Every candidate's subscription window is spent.",
+    resetsAt: "2026-07-19T17:00:00.000Z",
+    nextActions: ["Wait for the window to reopen, or route to another credential."],
+  });
 
   add("budget-snapshot-unlimited", "ControlBudgetSnapshot", {
     paidBudget: { kind: "unlimited" },

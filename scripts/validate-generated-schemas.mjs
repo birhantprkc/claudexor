@@ -114,11 +114,18 @@ function assertSetupProjection(file, kind) {
       false,
     );
   }
+  // Eligibility is the job's lifecycle, not its vendor: a terminal-mode
+  // claude/cursor login discloses its captured `oauth_url` through the same
+  // overlay, so the generated draft-07 must admit it exactly as codex.
   for (const harness of ["claude", "cursor"]) {
     expectVerdict(
       `harness-${harness}`,
-      setupEnvelope(kind, { ...baseJob, harness }, disclosure),
-      false,
+      setupEnvelope(
+        kind,
+        { ...baseJob, harness },
+        { flow: "oauth_url", verificationUrl: "https://claude.ai/oauth/authorize", userCode: "" },
+      ),
+      true,
     );
   }
   expectVerdict(

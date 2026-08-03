@@ -211,9 +211,14 @@ public struct RunFailureInfo: Codable, Sendable, Equatable {
     public let eventRefs: [String]
     public let runDir: String?
     public let nextActions: [String]
+    /// STRUCTURAL reopen time of the window this run was refused against (e.g.
+    /// `subscription_window_exhausted`); nil when the refusal has none. The
+    /// wire always carries the key, so dropping it forced every surface to
+    /// parse "resets …" out of `safeMessage` — which is what it exists to end.
+    public let resetsAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case phase, category, code, harnessId, attemptId, safeMessage, rawDetailRef, logRefs, eventRefs, runDir, nextActions
+        case phase, category, code, harnessId, attemptId, safeMessage, rawDetailRef, logRefs, eventRefs, runDir, nextActions, resetsAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -229,6 +234,7 @@ public struct RunFailureInfo: Codable, Sendable, Equatable {
         eventRefs = try c.decodeIfPresent([String].self, forKey: .eventRefs) ?? []
         runDir = try c.decodeIfPresent(String.self, forKey: .runDir)
         nextActions = try c.decodeIfPresent([String].self, forKey: .nextActions) ?? []
+        resetsAt = try c.decodeIfPresent(String.self, forKey: .resetsAt)
     }
 }
 
@@ -563,33 +569,8 @@ public struct SecretSetRequest: Codable, Sendable, Equatable {
     }
 }
 
-// MARK: - User-level trust (per-repo full-access grants)
-
-/// One per-repo trust file (user-level, outside versioned repo config).
-/// `repoRoot` is nil for legacy files written before provenance stamping —
-/// those are disclosed as revocable only via `claudexor trust` in the repo.
-public struct TrustEntry: Codable, Sendable, Identifiable, Equatable {
-    public let repoRoot: String?
-    public let path: String
-    public let allowFullAccess: Bool
-    public let accessDefault: String
-    public var id: String { path }
-}
-
-public struct TrustListResponse: Codable, Sendable, Equatable {
-    public let entries: [TrustEntry]
-}
-
-/// NARROW by design: exactly {repoRoot, allowFullAccess} — the only trust
-/// field the control surface may write; everything else stays CLI-only.
-public struct TrustUpdateRequest: Codable, Sendable, Equatable {
-    public let repoRoot: String
-    public let allowFullAccess: Bool
-    public init(repoRoot: String, allowFullAccess: Bool) {
-        self.repoRoot = repoRoot
-        self.allowFullAccess = allowFullAccess
-    }
-}
+// User-level trust wire models (TrustEntry / list / update) live in
+// TrustModels.swift.
 
 public enum GatewayError: Error, Sendable, Equatable {
     case http(status: Int, body: String)

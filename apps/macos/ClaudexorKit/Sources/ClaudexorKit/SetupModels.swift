@@ -67,21 +67,24 @@ public enum SetupCodexLoginFlow: String, Codable, Sendable, CaseIterable {
     case browserRedirect = "browser_redirect"
 }
 
-/// The two app-server device-code flows surfaced on a disclosure.
-public enum SetupAppServerLoginFlow: String, Codable, Sendable, CaseIterable {
+/// Every flow a login disclosure can carry (wire `SetupLoginDisclosureFlow`):
+/// the two codex app-server flows, plus `oauth_url` — the URL a TERMINAL-mode
+/// login (claude/cursor, codex fallback) printed and the runner captured.
+public enum SetupLoginDisclosureFlow: String, Codable, Sendable, CaseIterable {
     case chatgptDeviceCode
     case chatgpt
+    case oauthUrl = "oauth_url"
 }
 
 /// TRANSIENT device-code disclosure overlaid on a setup-job snapshot / SSE frame
 /// at read time (D-17). Never part of the journaled `SetupJob`; the one-time
-/// `userCode` is empty for the browser-callback flow.
+/// `userCode` is empty for the browser-callback and `oauth_url` flows.
 public struct SetupDeviceCodeDisclosure: Codable, Sendable, Equatable {
-    public let flow: SetupAppServerLoginFlow
+    public let flow: SetupLoginDisclosureFlow
     public let verificationUrl: String
     public let userCode: String
 
-    public init(flow: SetupAppServerLoginFlow, verificationUrl: String, userCode: String) {
+    public init(flow: SetupLoginDisclosureFlow, verificationUrl: String, userCode: String) {
         self.flow = flow
         self.verificationUrl = verificationUrl
         self.userCode = userCode
@@ -357,11 +360,13 @@ public struct SetupJob: Codable, Sendable, Equatable {
 
     public var isActive: Bool { !isTerminal }
 
-    /// A transient device-code overlay is valid only while the exact Codex
-    /// login job is actively waiting for the operator. This mirrors the wire
-    /// schema so every Swift consumer shares one fail-closed boundary.
+    /// A transient login disclosure is valid only while the login job is
+    /// actively waiting for the operator — of ANY managed harness, since a
+    /// terminal-mode claude/cursor login discloses its captured `oauth_url`
+    /// through the same overlay. This mirrors the wire schema so every Swift
+    /// consumer shares one fail-closed boundary.
     public var admitsDeviceCodeDisclosure: Bool {
-        harness == .codex && action == .login && isActive && phase == .awaitingUser
+        action == .login && isActive && phase == .awaitingUser
     }
 
     public var canCancel: Bool { isActive && phase != .cancelling }

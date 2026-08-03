@@ -54,12 +54,31 @@ public struct CredentialProfileEntry: Codable, Sendable, Identifiable, Equatable
     public struct Status: Codable, Sendable, Equatable {
         public let availability: String
         public let verification: String
+        /// WHAT the `verification` verdict is worth: `local_store` = only that
+        /// this profile's credential material is present and well-formed, which
+        /// cannot tell a live token from a revoked one; `vendor` = the vendor
+        /// itself answered a request made with THIS profile's credential.
+        /// Dropping it made `passed` read as vendor-confirmed on every client.
+        public let verificationSource: String
         public let detail: String?
         public let lastVerifiedAt: String?
 
         enum CodingKeys: String, CodingKey {
             case availability, verification, detail
+            case verificationSource = "verification_source"
             case lastVerifiedAt = "last_verified_at"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            availability = try c.decode(String.self, forKey: .availability)
+            verification = try c.decode(String.self, forKey: .verification)
+            // Absent = an older daemon that predates the distinction; the weaker
+            // claim is the honest default, never "vendor".
+            verificationSource =
+                try c.decodeIfPresent(String.self, forKey: .verificationSource) ?? "local_store"
+            detail = try c.decodeIfPresent(String.self, forKey: .detail)
+            lastVerifiedAt = try c.decodeIfPresent(String.self, forKey: .lastVerifiedAt)
         }
     }
 

@@ -2465,12 +2465,17 @@ export class Orchestrator {
     const inactivityMs = harnessInactivityTimeoutMs(this.config(contract.repo.root));
 
     // Named once: the attempt record, the CandidateRun and the terminal gate all
-    // read the SAME applied facts rather than three re-derivations.
-    const applied = appliedAttemptFacts(
-      harnessHome,
-      spec.access,
-      sessionFields?.credential_profile?.profile_id ?? runInput?.credentialProfileId ?? null,
-    );
+    // read the SAME applied facts rather than three re-derivations. Derived
+    // from the LIVE spec, so a W5.4 failover that rotates the credential
+    // mid-attempt is re-recorded at the point it becomes true — the receipt
+    // must name the profile that ran, never the one the request asked for.
+    const appliedNow = () =>
+      appliedAttemptFacts(
+        harnessHome,
+        spec.access,
+        spec.credential_profile?.profile_id ?? runInput?.credentialProfileId ?? null,
+      );
+    let applied = appliedNow();
     const attemptStartedMs = Date.now();
     const budgetSignalState = { quotaPressureDisclosed: false };
     const triedProfiles = new Set<string>(); // W5.4 failover: each profile at most once
@@ -2709,6 +2714,7 @@ export class Orchestrator {
           });
           if (rotated) {
             spec = rotated;
+            applied = appliedNow();
             errors.length = 0;
             harnessErrored = false;
             continue;

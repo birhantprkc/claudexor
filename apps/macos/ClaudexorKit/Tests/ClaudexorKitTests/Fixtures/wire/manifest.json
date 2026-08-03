@@ -16,6 +16,7 @@
   "delegation-capability-ready": "DelegationCapability",
   "run-delegation-degraded": "RunDelegationInfo",
   "run-failure-delegation-drain-timeout": "RunFailure",
+  "run-failure-subscription-window-exhausted": "RunFailure",
   "budget-snapshot-unlimited": "ControlBudgetSnapshot",
   "budget-snapshot-capped": "ControlBudgetSnapshot",
   "budget-snapshot-valued": "ControlBudgetSnapshot",

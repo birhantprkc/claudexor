@@ -3564,6 +3564,13 @@ describe("Orchestrator", () => {
         auth_route?: { profile_id?: string | null };
       }>(join(res.runDir, "final", "telemetry.yaml"));
       expect(telemetry?.auth_route?.profile_id).toBe("c");
+      // The APPLIED facts must agree with the route receipt. This block is
+      // derived once before spawn, so a rotation left it naming the requested
+      // "a" — a run's own record claiming a credential that never ran it.
+      const attempt = new ArtifactStore(repo).readYaml<{
+        credential_profile_applied?: string | null;
+      }>(join(res.runDir, "attempts", "a01", "attempt.yaml"));
+      expect(attempt?.credential_profile_applied).toBe("c");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
