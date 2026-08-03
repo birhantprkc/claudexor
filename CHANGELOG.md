@@ -3,7 +3,7 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
-- **v3.2.1** (2026-08-02): a focused macOS plan-answer and diagnostics repair,
+- **v3.2.1** (2026-08-03): a focused macOS plan-answer and diagnostics repair,
   based on reports from Walter Siamruk (#102–#108). Composer-selected models,
   effort, and auth route now reach turns started from plan cards; Implement plan
   names and binds its Agent write scope; multi-harness non-race runs no longer
@@ -32,9 +32,12 @@ Release history for Claudexor. The current version is declared in the root
   routes or a viable vendor-native default, typed Opus/Sonnet rejections retain
   their model scope, fallback and budget-downgrade attempts preflight the model
   they actually run, and opt-in account rotation selects a ready profile before
-  the exhausted default can be filtered out. The real-harness battery now proves
-  its expected convergence refusal from the canonical failure instead of
-  incidental review fields.
+  the exhausted default can be filtered out. Model-scoped quota stays durable
+  across current-engine restarts without breaking the supported updater
+  rollback: 3.2.0 can replay the compatible base record while current engines
+  restore the exact typed scope from its atomically journaled prepare/base pair.
+  The real-harness battery now proves its expected convergence refusal from the
+  canonical failure instead of incidental review fields.
 
 - **v3.2.0** (2026-07-29) — an eight-pull-request batch: remote execution, a
   canonical run receipt, and the toolchain moved forward. Remote SSH

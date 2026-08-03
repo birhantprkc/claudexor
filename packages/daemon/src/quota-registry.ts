@@ -1,4 +1,5 @@
 import type { DurableJournal } from "@claudexor/journal";
+import { hashJson } from "@claudexor/util";
 import {
   ControlQuotaResponse,
   HarnessEvent,
@@ -11,6 +12,7 @@ import {
 } from "@claudexor/schema";
 
 const UPSERTED = "quota.snapshot.upserted";
+const SCOPED_PREPARED = "quota.snapshot.scoped_prepared";
 const REMOVED = "quota.subject.removed";
 const PROJECTION_UPDATED = "quota.projection.updated";
 const POLL_BACKOFF_MS = 60_000;
@@ -57,11 +59,47 @@ export class QuotaRegistry {
     private readonly subjects: QuotaSubjectUniverse = () => [],
   ) {
     let rawMutationAfterMarker = false;
+    let pendingScoped: { baseHash: string; snapshot: QuotaSnapshot } | null = null;
     for (const record of journal.records()) {
-      if (record.type === UPSERTED) {
-        this.apply(QuotaSnapshotSchema.parse(record.payload));
-        rawMutationAfterMarker = true;
+      if (record.type === SCOPED_PREPARED) {
+        const payload =
+          typeof record.payload === "object" &&
+          record.payload !== null &&
+          !Array.isArray(record.payload)
+            ? (record.payload as {
+                version?: unknown;
+                base_hash?: unknown;
+                snapshot?: unknown;
+              })
+            : {};
+        const snapshot = QuotaSnapshotSchema.safeParse(payload.snapshot);
+        pendingScoped =
+          payload.version === 1 && typeof payload.base_hash === "string" && snapshot.success
+            ? {
+                baseHash: payload.base_hash,
+                snapshot: snapshot.data,
+              }
+            : null;
+        continue;
       }
+      if (record.type === UPSERTED) {
+        const base = QuotaSnapshotSchema.parse(record.payload);
+        const baseHash = hashJson(base);
+        const committedScoped =
+          pendingScoped !== null &&
+          pendingScoped.baseHash === baseHash &&
+          hashJson(legacyV320Snapshot(pendingScoped.snapshot)) === baseHash
+            ? pendingScoped.snapshot
+            : null;
+        this.apply(committedScoped ?? base);
+        pendingScoped = null;
+        rawMutationAfterMarker = true;
+        continue;
+      }
+      // A scoped prepare commits only through the immediately following
+      // matching legacy upsert. If the writer stopped or another record
+      // intervened, ignore the incomplete prepare on replay.
+      pendingScoped = null;
       if (record.type === REMOVED) {
         const payload = record.payload as { harness?: unknown; subject_id?: unknown };
         if (typeof payload.harness === "string" && typeof payload.subject_id === "string") {
@@ -311,7 +349,30 @@ export class QuotaRegistry {
 
   private recordUpsert(value: QuotaSnapshot): void {
     const snapshot = QuotaSnapshotSchema.parse(value);
-    this.journal.append(UPSERTED, snapshot);
+    // Runtime updates share this journal with the prior installed engine during
+    // rollback. v3.2.0's strict QuotaConstraint schema predates
+    // applies_to_models. Prepare the exact current snapshot under a new record
+    // type that an older runtime safely ignores, then commit it with the
+    // established, explicitly v3.2.0-shaped upsert. Current replay applies a
+    // prepare only when its matching base follows, so a stop between the two
+    // records loses neither the prior projection nor model scope: the journal
+    // appends the pair under one recovery intent and one fsync.
+    const legacy = legacyV320Snapshot(snapshot);
+    if (snapshot.constraints.some((constraint) => constraint.applies_to_models !== undefined)) {
+      this.journal.appendBatch([
+        {
+          type: SCOPED_PREPARED,
+          payload: {
+            version: 1,
+            base_hash: hashJson(legacy),
+            snapshot,
+          },
+        },
+        { type: UPSERTED, payload: legacy },
+      ]);
+    } else {
+      this.journal.append(UPSERTED, legacy);
+    }
     this.apply(snapshot);
   }
 
@@ -451,6 +512,31 @@ function snapshotKey(snapshot: QuotaSnapshot): string {
     subject.subject_id ?? "",
     snapshot.source,
   ].join("\0");
+}
+
+/** Exact durable payload accepted by the strict v3.2.0 quota schemas. Keep an
+ * explicit allowlist at every nested level so a future additive field cannot
+ * silently make updater rollback boot-incompatible again. */
+function legacyV320Snapshot(snapshot: QuotaSnapshot): QuotaSnapshot {
+  return {
+    subject: {
+      harness: snapshot.subject.harness,
+      credential_route: snapshot.subject.credential_route,
+      plan_label: snapshot.subject.plan_label,
+      subject_id: snapshot.subject.subject_id,
+    },
+    constraints: snapshot.constraints.map((constraint): QuotaConstraint => ({
+      id: constraint.id,
+      label: constraint.label,
+      used_ratio: constraint.used_ratio,
+      window_seconds: constraint.window_seconds,
+      resets_at: constraint.resets_at,
+      cooldown_until: constraint.cooldown_until,
+    })),
+    source: snapshot.source,
+    observed_at: snapshot.observed_at,
+    freshness: snapshot.freshness,
+  };
 }
 
 /** Absence-matching identity: (harness, subject_id) only — one credential

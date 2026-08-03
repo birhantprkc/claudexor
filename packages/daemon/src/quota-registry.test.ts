@@ -1,8 +1,9 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { fsyncSync, mkdtempSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
+import { hashJson } from "@claudexor/util";
 import { JournalManager } from "./journal-manager.js";
 import { QuotaRegistry, quotaProjection } from "./quota-registry.js";
 
@@ -353,6 +354,223 @@ describe("QuotaRegistry", () => {
       ]),
     );
     manager.close();
+    const restarted = new JournalManager(root);
+    const restartedSlot = restarted.registerProjection(quotaProjection());
+    restarted.start();
+    expect(restartedSlot.current().read().snapshots[0]?.constraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "cooldown:seven_day_opus",
+          applies_to_models: ["opus", "claude-opus-5", "best"],
+        }),
+        expect.objectContaining({
+          id: "cooldown:seven_day_sonnet",
+          applies_to_models: ["sonnet", "claude-sonnet-5", "best"],
+        }),
+      ]),
+    );
+    restarted.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps the durable base upsert readable by v3.2.0 while replaying model scopes", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-rollback-compat-")));
+    const now = () => new Date("2026-07-28T00:00:01.000Z");
+    const first = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(first, [], now);
+    registry.upsert({
+      ...quotaSnapshot("claude", null, 1),
+      constraints: [
+        {
+          id: "weekly_scoped:Fable 5",
+          label: "7 day (Fable 5)",
+          applies_to_models: ["fable", "claude-fable-5", "best"],
+          used_ratio: 1,
+          window_seconds: 604_800,
+          resets_at: null,
+          cooldown_until: null,
+        },
+      ],
+    });
+
+    const records = first.records();
+    expect(records.map((record) => record.type)).toEqual([
+      "quota.snapshot.scoped_prepared",
+      "quota.snapshot.upserted",
+      "quota.projection.updated",
+    ]);
+    const prepared = records[0]?.payload as {
+      version?: unknown;
+      base_hash?: unknown;
+      snapshot?: { constraints?: Array<Record<string, unknown>> };
+    };
+    expect(prepared.version).toBe(1);
+    expect(prepared.base_hash).toEqual(expect.any(String));
+    expect(prepared.snapshot?.constraints?.[0]).toMatchObject({
+      applies_to_models: ["fable", "claude-fable-5", "best"],
+    });
+    const legacy = records[1]?.payload as {
+      subject?: Record<string, unknown>;
+      constraints?: Array<Record<string, unknown>>;
+    };
+    expect(legacy.constraints?.[0]).not.toHaveProperty("applies_to_models");
+    expect(Object.keys(legacy).sort()).toEqual([
+      "constraints",
+      "freshness",
+      "observed_at",
+      "source",
+      "subject",
+    ]);
+    expect(Object.keys(legacy.subject ?? {}).sort()).toEqual([
+      "credential_route",
+      "harness",
+      "plan_label",
+      "subject_id",
+    ]);
+    expect(Object.keys(legacy.constraints?.[0] ?? {}).sort()).toEqual([
+      "cooldown_until",
+      "id",
+      "label",
+      "resets_at",
+      "used_ratio",
+      "window_seconds",
+    ]);
+    first.close();
+
+    const replay = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(replay, [], now);
+    expect(recovered.read().snapshots[0]?.constraints[0]).toMatchObject({
+      id: "weekly_scoped:Fable 5",
+      applies_to_models: ["fable", "claude-fable-5", "best"],
+    });
+    replay.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("discards a scoped prepare when its atomic batch stops before the base commit", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-batch-stop-")));
+    const interrupted = new DurableJournal({
+      rootDir: root,
+      partition: "global",
+      appendAndSync: (fd, batch) => {
+        const secondFrameOffset = batch.indexOf(batch.subarray(0, 8), 8);
+        expect(secondFrameOffset).toBeGreaterThan(0);
+        writeSync(fd, batch, 0, secondFrameOffset);
+        fsyncSync(fd);
+        throw new Error("simulated stop between scoped prepare and base commit");
+      },
+    });
+    const registry = new QuotaRegistry(interrupted, [], () => new Date("2026-07-28T00:00:01.000Z"));
+    expect(() =>
+      registry.upsert({
+        ...quotaSnapshot("claude", null, 1),
+        constraints: [
+          {
+            id: "weekly_scoped:Fable 5",
+            label: "7 day (Fable 5)",
+            applies_to_models: ["fable"],
+            used_ratio: 1,
+            window_seconds: 604_800,
+            resets_at: null,
+            cooldown_until: null,
+          },
+        ],
+      }),
+    ).toThrow(/append\/fsync completion is uncertain/);
+    interrupted.close();
+
+    const replay = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(replay, [], () => new Date("2026-07-28T00:00:01.000Z"));
+    expect(recovered.read().snapshots).toEqual([]);
+    expect(replay.records().map((record) => record.type)).toEqual([
+      "journal.recovery_tail_discarded",
+    ]);
+    // A rolled-back 3.2.0 writer may later append the identical conservative
+    // base. Because the interrupted batch was fully truncated, current replay
+    // must not resurrect its stale scope by pairing that later old-engine row.
+    replay.append("quota.snapshot.upserted", quotaSnapshot("claude", null, 1));
+    replay.close();
+
+    const afterOldWrite = new DurableJournal({ rootDir: root, partition: "global" });
+    const afterOldWriteRegistry = new QuotaRegistry(
+      afterOldWrite,
+      [],
+      () => new Date("2026-07-28T00:00:01.000Z"),
+    );
+    expect(afterOldWriteRegistry.read().snapshots[0]?.constraints[0]).not.toHaveProperty(
+      "applies_to_models",
+    );
+    afterOldWrite.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("falls back to the compatible base for malformed or future scoped prepares", () => {
+    const base = quotaSnapshot("claude", null, 0.2);
+    const scoped = {
+      ...base,
+      constraints: base.constraints.map((constraint) => ({
+        ...constraint,
+        applies_to_models: ["fable"],
+      })),
+    };
+    const prepares: unknown[] = [
+      null,
+      { version: 1, base_hash: hashJson(base), snapshot: { malformed: true } },
+      { version: 2, base_hash: hashJson(base), snapshot: scoped },
+    ];
+    for (const [index, prepare] of prepares.entries()) {
+      const root = realpathSync(
+        mkdtempSync(join(tmpdir(), `claudexor-quota-future-prepare-${index}-`)),
+      );
+      const first = new DurableJournal({ rootDir: root, partition: "global" });
+      first.appendBatch([
+        { type: "quota.snapshot.scoped_prepared", payload: prepare },
+        { type: "quota.snapshot.upserted", payload: base },
+      ]);
+      first.close();
+
+      const replay = new DurableJournal({ rootDir: root, partition: "global" });
+      const recovered = new QuotaRegistry(replay, [], () => new Date("2026-07-28T00:00:01.000Z"));
+      expect(recovered.read().snapshots[0]?.constraints[0]).toMatchObject({
+        id: "five_hour",
+        used_ratio: 0.2,
+      });
+      expect(recovered.read().snapshots[0]?.constraints[0]).not.toHaveProperty("applies_to_models");
+      replay.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a later unscoped commit replace a previously scoped snapshot on replay", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-unscoped-replace-")));
+    const now = () => new Date("2026-07-28T00:00:01.000Z");
+    const first = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(first, [], now);
+    registry.upsert({
+      ...quotaSnapshot("claude", null, 1),
+      constraints: [
+        {
+          id: "five_hour",
+          label: "5 hour",
+          applies_to_models: ["fable"],
+          used_ratio: 1,
+          window_seconds: 18_000,
+          resets_at: null,
+          cooldown_until: null,
+        },
+      ],
+    });
+    registry.upsert(quotaSnapshot("claude", null, 0.2));
+    first.close();
+
+    const replay = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(replay, [], now);
+    expect(recovered.read().snapshots[0]?.constraints[0]).toMatchObject({
+      id: "five_hour",
+      used_ratio: 0.2,
+    });
+    expect(recovered.read().snapshots[0]?.constraints[0]).not.toHaveProperty("applies_to_models");
+    replay.close();
     rmSync(root, { recursive: true, force: true });
   });
 

@@ -1763,6 +1763,12 @@ so a saturated Fable-only window cannot cool an explicit Opus run. Codex rollout
 constraint with usage, duration, reset, provenance, and freshness. The global
 journal is authority; an elapsed reset marks a snapshot stale and requests a
 refresh, never locally invents zero usage. Unknown usage remains `null`.
+Runtime-update rollback remains backward-readable: a scoped snapshot is first
+prepared under a typed record that an older engine ignores, then committed by
+the established upsert using an explicit v3.2.0 field allowlist. The journal
+appends that pair under one recovery intent and one fsync, so replay retains
+both records or neither. Current engines apply the exact scope only when the
+matching base follows; v3.2.0 replays that base conservatively as account-wide.
 `auto` ranks by the binding `min(elapsed_fraction - used_ratio)` pacing slack,
 `quality` uses only exact user-declared `{harness,model,effort}` tiers, and
 `economy` minimizes known incremental cash spend with quality tiers only as a

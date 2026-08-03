@@ -89,6 +89,48 @@ describe("DurableJournal", () => {
     other.close();
   });
 
+  it("appends a batch as one hash-chained durable group", () => {
+    const journal = openJournal();
+    const records = journal.appendBatch([
+      { type: "quota.snapshot.scoped_prepared", payload: { id: "scope" } },
+      { type: "quota.snapshot.upserted", payload: { id: "base" } },
+    ]);
+    expect(records).toHaveLength(2);
+    expect(records[1]?.previousFrameHash).toBe(records[0]?.frameHash);
+    journal.close();
+
+    const reopened = openJournal();
+    expect(reopened.records().map((record) => [record.type, record.payload])).toEqual([
+      ["quota.snapshot.scoped_prepared", { id: "scope" }],
+      ["quota.snapshot.upserted", { id: "base" }],
+    ]);
+    reopened.close();
+  });
+
+  it("discards a complete first frame when a batch stops before its second frame", () => {
+    const crashed = openJournal((fd, batch) => {
+      const secondFrameOffset = batch.indexOf(batch.subarray(0, 8), 8);
+      expect(secondFrameOffset).toBeGreaterThan(0);
+      writeSync(fd, batch, 0, secondFrameOffset);
+      fsyncSync(fd);
+      throw new Error("simulated stop between batch frames");
+    });
+    expect(() =>
+      crashed.appendBatch([
+        { type: "quota.snapshot.scoped_prepared", payload: { id: "scope" } },
+        { type: "quota.snapshot.upserted", payload: { id: "base" } },
+      ]),
+    ).toThrow(JournalAppendUncertainError);
+    crashed.close();
+
+    const recovered = openJournal();
+    expect(recovered.state()).toMatchObject({ status: "ready" });
+    expect(recovered.records().map((record) => record.type)).toEqual([
+      "journal.recovery_tail_discarded",
+    ]);
+    recovered.close();
+  });
+
   it("discards an incomplete EOF frame, fsyncs an audit record, and stays replayable", () => {
     const crashed = openJournal((fd, frame) => {
       writeSync(fd, frame, 0, 3);

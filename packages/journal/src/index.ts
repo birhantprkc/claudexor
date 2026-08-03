@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { encodeJournalPayload, prepareAppendBatch } from "./append-batch.js";
 import {
   COMPACTED_SNAPSHOT,
   HASH_BYTES,
@@ -208,7 +209,7 @@ export class DurableJournal {
       encoding: "gzip-base64",
       data: compressed.toString("base64"),
     };
-    const payloadBytes = encodeJson(payload);
+    const payloadBytes = encodeJournalPayload(payload);
     // Oversized history stays readable in its existing frames; compaction is
     // an optimization, not a corruption or recovery boundary.
     if (payloadBytes.length > MAX_PAYLOAD_BYTES) return null;
@@ -292,31 +293,39 @@ export class DurableJournal {
   }
 
   append<T>(type: string, payload: T): JournalRecord<T> {
+    return this.appendBatch([{ type, payload }])[0] as JournalRecord<T>;
+  }
+
+  /** Append one logical record group with one intent and one fsync. Recovery
+   * either retains the whole acknowledged group or truncates every group byte;
+   * no prefix can become durable on its own. */
+  appendBatch(records: readonly { type: string; payload: unknown }[]): JournalRecord[] {
     this.assertReadable();
-    if (!type.trim()) throw new Error("journal record type must not be empty");
+    if (records.length === 0) throw new Error("journal append batch must not be empty");
+    for (const record of records) {
+      if (!record.type.trim()) throw new Error("journal record type must not be empty");
+    }
     const actualBytes = Number(fstatSync(this.fd, { bigint: true }).size);
     if (actualBytes !== this.knownFileBytes) {
       throw new JournalRecoveryRequiredError(
         this.requireRecovery(this.knownFileBytes, "journal changed outside its single writer"),
       );
     }
-    const payloadBytes = encodeJson(payload);
-    if (payloadBytes.length > MAX_PAYLOAD_BYTES) throw new Error("journal payload is too large");
-    const header: FrameHeader = {
+    const batch = prepareAppendBatch({
       partition: this.options.partition,
       epoch: this.epoch,
-      seq: this.nextSeq,
+      nextSeq: this.nextSeq,
       previousFrameHash: this.previousFrameHash,
-      time: this.now().toISOString(),
-      type,
-    };
-    const frame = encodeFrame(header, payloadBytes);
+      byteOffset: this.knownFileBytes,
+      now: this.now,
+      records,
+    });
     const byteOffset = this.knownFileBytes;
-    writeIntent(this.intentPath(), { v: 1, offset: byteOffset, length: frame.length });
+    writeIntent(this.intentPath(), { v: 1, offset: byteOffset, length: batch.bytes.length });
     try {
-      this.appendFrame(this.fd, frame);
-      if (Number(fstatSync(this.fd, { bigint: true }).size) !== byteOffset + frame.length) {
-        throw new Error("journal append did not write exactly one frame");
+      this.appendFrame(this.fd, batch.bytes);
+      if (Number(fstatSync(this.fd, { bigint: true }).size) !== byteOffset + batch.bytes.length) {
+        throw new Error("journal append did not write the complete batch");
       }
       removeFile(this.intentPath());
     } catch (error) {
@@ -326,23 +335,11 @@ export class DurableJournal {
       );
       throw new JournalAppendUncertainError(recovery, { cause: error });
     }
-    const frameHash = frame.subarray(frame.length - HASH_BYTES).toString("hex");
-    const record: JournalRecord<T> = {
-      partition: header.partition,
-      epoch: header.epoch,
-      seq: header.seq,
-      previousFrameHash: header.previousFrameHash,
-      frameHash,
-      time: header.time,
-      type: header.type,
-      payload: JSON.parse(payloadBytes.toString("utf8")) as T,
-      byteOffset,
-    };
-    this.entries.push(record as JournalRecord);
-    this.nextSeq += 1;
-    this.previousFrameHash = frameHash;
-    this.knownFileBytes += frame.length;
-    return { ...record, payload: cloneJson(record.payload) };
+    this.entries.push(...batch.records);
+    this.nextSeq = batch.nextSeq;
+    this.previousFrameHash = batch.previousFrameHash;
+    this.knownFileBytes += batch.bytes.length;
+    return batch.records.map((record) => ({ ...record, payload: cloneJson(record.payload) }));
   }
 
   private recover(): void {
@@ -522,12 +519,6 @@ function encodeCursor(partition: string, epoch: string, seq: number): string {
 
 function cursorError(detail: string): JournalCursorError {
   return new JournalCursorError(`journal cursor is ${detail}; resnapshot is required`);
-}
-
-function encodeJson(value: unknown): Buffer {
-  const encoded = JSON.stringify(value);
-  if (encoded === undefined) throw new Error("journal value is not JSON serializable");
-  return Buffer.from(encoded);
 }
 
 function sha256(bytes: Buffer): string {
