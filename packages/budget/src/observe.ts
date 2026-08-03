@@ -48,6 +48,9 @@ export function observationsFromEvent(harnessId: string, ev: HarnessEvent): Budg
         quality: "native",
         kind: "quota_constraint",
         constraint_id: constraint.id,
+        ...(constraint.applies_to_models !== undefined
+          ? { applies_to_models: constraint.applies_to_models }
+          : {}),
         used_ratio: constraint.used_ratio,
         window_seconds: constraint.window_seconds,
         resets_at: constraint.resets_at,
@@ -74,6 +77,10 @@ function singleObservationFromEvent(harnessId: string, ev: HarnessEvent): Budget
       ts: nowIso(),
       quality: "observed",
       kind: "rate_limited",
+      ...(ev.rate_limit.constraint_id ? { constraint_id: ev.rate_limit.constraint_id } : {}),
+      ...(ev.rate_limit.applies_to_models !== undefined
+        ? { applies_to_models: ev.rate_limit.applies_to_models }
+        : {}),
       resets_at: resets,
       cooldown_until: cooldownUntil,
       detail: ev.error ?? undefined,

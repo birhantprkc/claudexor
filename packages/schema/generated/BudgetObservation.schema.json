@@ -57,6 +57,22 @@
         "constraint_id": {
           "type": "string"
         },
+        "applies_to_models": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Canonical model ids/aliases this quota observation applies to; omitted/null means every model."
+        },
         "used_ratio": {
           "anyOf": [
             {

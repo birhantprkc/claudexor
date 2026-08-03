@@ -738,6 +738,58 @@ describe("router", () => {
     );
   });
 
+  it("applies a saturated model-scoped window only to that model", () => {
+    const led = new BudgetLedger();
+    const now = Date.now();
+    const reset = new Date(now + 60_000).toISOString();
+    led.observeQuotaSnapshot({
+      subject: {
+        harness: "claude",
+        credential_route: "vendor_native",
+        plan_label: "max",
+        subject_id: null,
+      },
+      constraints: [
+        {
+          id: "weekly_scoped:Fable",
+          label: "7 day (Fable)",
+          applies_to_models: ["fable", "claude-fable-5", "best"],
+          used_ratio: 1,
+          window_seconds: 7 * 24 * 60 * 60,
+          resets_at: reset,
+          cooldown_until: null,
+        },
+      ],
+      source: "claude_oauth_usage",
+      observed_at: new Date(now).toISOString(),
+      freshness: "fresh",
+    });
+
+    expect(led.cooldownActive("claude", "vendor_native", null, now, "claude-fable-5")).toBe(true);
+    expect(led.cooldownActive("claude", "vendor_native", null, now, "best")).toBe(true);
+    expect(led.cooldownActive("claude", "vendor_native", null, now, "claude-opus-5")).toBe(false);
+    // An omitted effective model stays conservative because the harness default
+    // could be Fable.
+    expect(led.cooldownActive("claude", "vendor_native", null, now)).toBe(true);
+    expect(led.bindingPaceSlack("claude", "vendor_native", null, now, "claude-opus-5")).toBeNull();
+    expect(
+      led.bindingPaceSlack("claude", "vendor_native", null, now, "claude-fable-5"),
+    ).not.toBeNull();
+
+    const opus = cand("claude", {
+      model: "claude-opus-5",
+      credentialRoute: "vendor_native",
+      credentialSubjectId: null,
+    });
+    const fable = cand("claude", {
+      model: "claude-fable-5",
+      credentialRoute: "vendor_native",
+      credentialSubjectId: null,
+    });
+    expect(selectHarness([opus], routeContext(led, "auto"))).toBe(opus);
+    expect(selectHarness([fable], routeContext(led, "auto"))).toBeNull();
+  });
+
   it("a cooldown is SUBJECT-scoped (round-16 #2): profile A's exhaustion never excludes profile B or the engine default", () => {
     const led = new BudgetLedger();
     const reset = new Date(Date.now() + 60_000).toISOString();
@@ -798,6 +850,36 @@ describe("router", () => {
     expect(led.cooldownActive("claude", "vendor_native", "r")).toBe(false);
     // Unknown caller route stays conservatively any-route.
     expect(led.cooldownActive("claude", undefined, "r")).toBe(true);
+  });
+
+  it("applies a live model-scoped rejection only to matching models", () => {
+    const led = new BudgetLedger();
+    const [obs] = observationsFromEvent("claude", {
+      type: "status",
+      session_id: "s",
+      ts: new Date().toISOString(),
+      credential_route: "vendor_native",
+      credential_profile_id: "r",
+      rate_limit: {
+        constraint_id: "seven_day_opus",
+        applies_to_models: ["opus", "claude-opus-5", "best"],
+        resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+        retry_delay_ms: null,
+      },
+    });
+    expect(obs).toMatchObject({
+      constraint_id: "seven_day_opus",
+      applies_to_models: ["opus", "claude-opus-5", "best"],
+    });
+    led.observe(obs as NonNullable<typeof obs>);
+    expect(led.cooldownActive("claude", "vendor_native", "r", Date.now(), "claude-opus-5")).toBe(
+      true,
+    );
+    expect(led.cooldownActive("claude", "vendor_native", "r", Date.now(), "claude-fable-5")).toBe(
+      false,
+    );
+    // Unknown effective model remains conservative.
+    expect(led.cooldownActive("claude", "vendor_native", "r")).toBe(true);
   });
 
   it("excludes a rate-limited harness via the typed rate_limit signal", () => {

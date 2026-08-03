@@ -78,7 +78,9 @@ profile appear in one list with the same controls; the only asymmetry is
 ownership (Claudexor never mutates or deletes the vendor's own store).
 Selecting an account never narrows the harness pool; choosing a strategy
 never pins an account. Quota is read per account from the vendor's own
-surfaces, absence is typed and explained, and unknown never renders as zero.
+surfaces, model-scoped windows and typed model-family rejections apply only to
+their declared aliases, advisory warnings do not become cooldowns, absence is
+typed and explained, and unknown never renders as zero.
 
 A routing goal answers to the same line. Quality routing compares declared,
 comparable options — a named harness, model, and effort for the intent at

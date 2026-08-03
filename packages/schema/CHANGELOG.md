@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Carry optional model applicability on vendor quota constraints, live rate-limit signals, and budget observations.
 - @claudexor/util@3.2.1
 
 ## 3.2.0

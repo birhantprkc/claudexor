@@ -933,11 +933,12 @@ export class Orchestrator {
   private async sessionSpecFields(
     input: RunInput,
     harnessId: string,
+    model: string | null,
     log?: EventLog,
     defaultRoute: "local_session" | "api_key" | null = null,
   ): Promise<Pick<HarnessRunSpec, "auth_preference" | "resume_session_id" | "credential_profile">> {
     const cfg = this.config(input.repoRoot)?.global;
-    const profile = await this.preflightProfile(input, harnessId, log, defaultRoute);
+    const profile = await this.preflightProfile(input, harnessId, model, log, defaultRoute);
     return {
       // "auto" at ANY level falls through (thread turns send the thread default
       // "auto" as a per-run value; it must not shadow a configured preference).
@@ -1066,6 +1067,7 @@ export class Orchestrator {
   private async preflightProfile(
     input: RunInput,
     harnessId: string,
+    model: string | null,
     log: EventLog | undefined,
     defaultRoute: "local_session" | "api_key" | null,
   ): Promise<CredentialProfile | null> {
@@ -1080,6 +1082,7 @@ export class Orchestrator {
       harnessId,
       profile?.profile_id ?? null,
       policy.headroom_threshold,
+      model ?? undefined,
     );
     const readyProfileIds =
       policy.limit_action === "rotate" &&
@@ -1098,6 +1101,7 @@ export class Orchestrator {
         snapshots,
         readyProfileIds,
         defaultRoute,
+        model: model ?? undefined,
         emit,
       });
     }
@@ -1108,6 +1112,7 @@ export class Orchestrator {
       registry,
       snapshots,
       readyProfileIds,
+      model: model ?? undefined,
       emit,
     });
   }
@@ -2210,7 +2215,13 @@ export class Orchestrator {
     const inPlaceEnvelope = envelope.worktree_path === envelope.repo_root;
     const rawContextPacket = await rawContextForEnvelope(routed.implementationTransport, envelope);
     const sessionFields = runInput
-      ? await this.sessionSpecFields(runInput, adapter.id, log, routed.authRouteEstimate)
+      ? await this.sessionSpecFields(
+          runInput,
+          adapter.id,
+          knobs.model,
+          log,
+          routed.authRouteEstimate,
+        )
       : undefined;
     // Continuity (INV-137): once the lane (harness + resolved profile) is known,
     // build the continuation packet, materialize context/THREAD.md, and point
@@ -5578,6 +5589,7 @@ export class Orchestrator {
         const sessionFields = await this.sessionSpecFields(
           input,
           adapter.id,
+          knobs.model,
           log,
           routed.authRouteEstimate,
         );
@@ -6107,6 +6119,7 @@ export class Orchestrator {
         const sessionFields = await this.sessionSpecFields(
           input,
           routed.adapter.id,
+          knobs.model,
           log,
           routed.authRouteEstimate,
         );
@@ -6428,6 +6441,7 @@ export class Orchestrator {
         const sessionFields = await this.sessionSpecFields(
           input,
           adapter.id,
+          knobs.model,
           log,
           routed.authRouteEstimate,
         );

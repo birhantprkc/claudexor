@@ -118,6 +118,15 @@ fixtures:
     cli_version: "2.1.165"
     recorded_at: "2026-07-23"
     sanitized: "ids, environment fingerprint"
+  # LIVE. The credentialed v3.2.1 VM Opus run completed successfully after
+  # emitting status:"allowed_warning". The frame is sanitized to the same
+  # identifier placeholders while retaining the signal fields that prove an
+  # advisory heartbeat must not arm account cooldown or profile rotation.
+  signals/allowed-warning-rate-limit-event.jsonl:
+    source: recorded
+    cli_version: "2.1.165"
+    recorded_at: "2026-08-02"
+    sanitized: "ids"
   # LIVE. A Delegate-enabled interactive native-session run with the exact injected
   # `claudexor` stdio server. Claude Code emits init before the asynchronous MCP
   # handshake finishes, so the server is truthfully `pending`; it connected

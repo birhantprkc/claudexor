@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Apply model-scoped quota windows and live rejections only to matching routing and pacing candidates.
 - @claudexor/schema@3.2.1
 - @claudexor/util@3.2.1
 

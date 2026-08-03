@@ -59,6 +59,19 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "applies_to_models": {
+                      "anyOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/ControlQuotaResponse/properties/snapshots/items/properties/subject/properties/harness"
+                          }
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "used_ratio": {
                       "anyOf": [
                         {
@@ -114,7 +127,7 @@
                     "resets_at"
                   ],
                   "additionalProperties": false,
-                  "description": "One independent vendor quota window; null usage stays unknown."
+                  "description": "One independent vendor quota window; omitted/null applies_to_models means every model, and null usage stays unknown."
                 }
               },
               "source": {

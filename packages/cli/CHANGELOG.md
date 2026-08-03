@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Preserve known Claude OAuth model scope in quota snapshots and keep unknown scope account-wide.
 - @claudexor/acp-server@3.2.1
 - @claudexor/artifact-store@3.2.1
 - @claudexor/config@3.2.1

@@ -5,6 +5,7 @@ import {
   QuotaSnapshot as QuotaSnapshotSchema,
   type CredentialRoute,
   type QuotaAbsence,
+  type QuotaConstraint,
   type QuotaSnapshot,
   type QuotaSubject,
 } from "@claudexor/schema";
@@ -100,6 +101,8 @@ export class QuotaRegistry {
    * would hide a live cap from both the footer and the router's ledger. */
   private activeSnapshots(now: number): QuotaSnapshot[] {
     return [...this.snapshots.values()]
+      .map((snapshot) => withoutExpiredScopedCooldowns(snapshot, now))
+      .filter((snapshot): snapshot is QuotaSnapshot => snapshot !== null)
       .filter((snapshot) => {
         const observed = Date.parse(snapshot.observed_at);
         if (!Number.isFinite(observed)) return false;
@@ -362,16 +365,18 @@ export class QuotaRegistry {
   ): void {
     const reset = event.rate_limit?.resets_at ?? null;
     const delay = event.rate_limit?.retry_delay_ms ?? null;
+    const now = this.now();
     const cooldownUntil =
       reset ??
-      new Date(
-        this.now().getTime() + (typeof delay === "number" ? delay : 5 * 60_000),
-      ).toISOString();
+      new Date(now.getTime() + (typeof delay === "number" ? delay : 5 * 60_000)).toISOString();
     const source = harness === "claude" ? "claude_api_retry" : "codex_rollout";
     // The event's profile stamp scopes the cooldown to ITS subject (release
     // wave round-11): a profiled limit must never cool the default subject
     // down (or vice versa), and two profiles never share one quota key.
     const profileId = event.credential_profile_id ?? null;
+    const constraintId = event.rate_limit?.constraint_id
+      ? `cooldown:${event.rate_limit.constraint_id}`
+      : "cooldown";
     const existing = [...this.snapshots.values()].find(
       (snapshot) =>
         snapshot.subject.harness === harness &&
@@ -390,10 +395,17 @@ export class QuotaRegistry {
       observed_at: event.ts,
       freshness: "fresh",
       constraints: [
-        ...(existing?.constraints.filter((constraint) => constraint.id !== "cooldown") ?? []),
+        ...(existing?.constraints.filter(
+          (constraint) =>
+            constraint.id !== constraintId &&
+            !isExpiredScopedCooldown(source, constraint, now.getTime()),
+        ) ?? []),
         {
-          id: "cooldown",
+          id: constraintId,
           label: "Cooldown",
+          ...(event.rate_limit?.applies_to_models !== undefined
+            ? { applies_to_models: event.rate_limit.applies_to_models }
+            : {}),
           used_ratio: null,
           window_seconds: null,
           resets_at: reset,
@@ -450,10 +462,32 @@ function subjectIdentity(subject: QuotaSubject): string {
 function staleAt(snapshot: QuotaSnapshot, now: number): QuotaSnapshot {
   if (snapshot.freshness !== "fresh") return snapshot;
   const observed = Date.parse(snapshot.observed_at);
-  const resetExpired = snapshot.constraints.some((constraint) => {
-    const reset = constraint.resets_at ? Date.parse(constraint.resets_at) : Number.NaN;
-    return Number.isFinite(reset) && reset <= now;
-  });
+  const resetExpired = snapshot.constraints.some((constraint) => resetExpiredAt(constraint, now));
   const tooOld = !Number.isFinite(observed) || now - observed > 5 * 60_000;
   return resetExpired || tooOld ? { ...snapshot, freshness: "stale" } : snapshot;
+}
+
+function resetExpiredAt(constraint: Pick<QuotaConstraint, "resets_at">, now: number): boolean {
+  const reset = constraint.resets_at ? Date.parse(constraint.resets_at) : Number.NaN;
+  return Number.isFinite(reset) && reset <= now;
+}
+
+function isExpiredScopedCooldown(
+  source: QuotaSnapshot["source"],
+  constraint: QuotaConstraint,
+  now: number,
+): boolean {
+  return (
+    source === "claude_api_retry" &&
+    constraint.id.startsWith("cooldown:") &&
+    resetExpiredAt(constraint, now)
+  );
+}
+
+function withoutExpiredScopedCooldowns(snapshot: QuotaSnapshot, now: number): QuotaSnapshot | null {
+  const constraints = snapshot.constraints.filter(
+    (constraint) => !isExpiredScopedCooldown(snapshot.source, constraint, now),
+  );
+  if (constraints.length === snapshot.constraints.length) return snapshot;
+  return constraints.length === 0 ? null : { ...snapshot, constraints };
 }

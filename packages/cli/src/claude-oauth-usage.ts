@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { loadConfig } from "@claudexor/config";
 import type { QuotaRefreshResult } from "@claudexor/daemon";
-import { canonicalProfileConfigDir, defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
+import {
+  canonicalProfileConfigDir,
+  claudeQuotaModelAliases,
+  defaultNativeClaudeConfigDir,
+} from "@claudexor/harness-claude";
 import {
   QuotaSnapshot as QuotaSnapshotSchema,
   type QuotaAbsence,
@@ -179,10 +183,14 @@ function scopedConstraints(value: unknown): Array<Record<string, unknown> | null
     if (typeof percent !== "number") return null;
     const scope = limit["scope"] as Record<string, unknown> | undefined;
     const model = scope?.["model"] as Record<string, unknown> | undefined;
-    const name = typeof model?.["display_name"] === "string" ? model["display_name"] : "scoped";
+    const displayName =
+      typeof model?.["display_name"] === "string" ? model["display_name"].trim() : "";
+    const name = displayName || "scoped";
+    const appliesToModels = displayName ? claudeQuotaModelAliases(displayName) : null;
     return {
       id: `weekly_scoped:${name}`,
       label: `7 day (${name})`,
+      ...(appliesToModels ? { applies_to_models: appliesToModels } : {}),
       used_ratio: Math.min(Math.max(percent / 100, 0), 1),
       window_seconds: 7 * 24 * 60 * 60,
       resets_at: typeof limit["resets_at"] === "string" ? limit["resets_at"] : null,

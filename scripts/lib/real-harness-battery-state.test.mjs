@@ -16,6 +16,7 @@ import {
   describeFileSnapshot,
   durableAttemptRouteEvidence,
   evaluateRequiredNativeRoutes,
+  isCrossFamilyConvergenceRefusal,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
   sameDaemonLease,
@@ -192,6 +193,38 @@ test("native-session acceptance rejects missing and API-fallback routes", () => 
       { ...claude, authMode: null, authSource: null },
     ]),
   ).toMatchObject({ valid: false, nonNative: [{ harnessId: "claude" }] });
+});
+
+test("cross-family convergence assertion reads the canonical failure, not nested review fields", () => {
+  expect(
+    isCrossFamilyConvergenceRefusal({
+      code: 1,
+      json: {
+        status: "failed",
+        error:
+          "convergence requires a cross-family clean review (>=2 healthy reviewer provider families); found 1.",
+      },
+    }),
+  ).toBe(true);
+  expect(
+    isCrossFamilyConvergenceRefusal({
+      code: 1,
+      json: {
+        status: "failed",
+        error: "no harness remains eligible after budget and quota routing",
+        runFacts: { outcome: { review: "not_run" }, review: { state: "not_run" } },
+      },
+    }),
+  ).toBe(false);
+  expect(
+    isCrossFamilyConvergenceRefusal({
+      code: 0,
+      json: {
+        status: "succeeded",
+        summary: "convergence requires a cross-family clean review (fixture prose only)",
+      },
+    }),
+  ).toBe(false);
 });
 
 test("durable route evidence catches native to API retries after the first start", () => {

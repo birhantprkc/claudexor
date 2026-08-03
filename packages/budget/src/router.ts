@@ -125,6 +125,7 @@ function eligible(candidates: RouterCandidate[], ctx: RouteContext): RouterCandi
         candidate.credentialRoute,
         candidate.credentialSubjectId,
         ctx.now,
+        candidate.model,
       ),
   );
   const free = ready.filter((candidate) => !isIncrementalPaid(candidate));
@@ -148,6 +149,7 @@ function autoSlack(candidate: RouterCandidate, ctx: RouteContext): number | null
     candidate.credentialRoute,
     candidate.credentialSubjectId,
     ctx.now,
+    candidate.model,
   );
 }
 

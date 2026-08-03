@@ -40,13 +40,19 @@ export const QuotaConstraint = z
   .object({
     id: Id,
     label: z.string().min(1),
+    /** omitted/null = this vendor window applies to every model. A non-null
+     * list is the producer's canonical model-id/alias scope, so a
+     * model-specific cap never cools a different model on the same subject. */
+    applies_to_models: z.array(Id).nullable().optional(),
     used_ratio: z.number().min(0).max(1).nullable(),
     window_seconds: z.number().positive().nullable(),
     resets_at: z.string().datetime({ offset: true }).nullable(),
     cooldown_until: z.string().datetime({ offset: true }).nullable().default(null),
   })
   .strict()
-  .describe("One independent vendor quota window; null usage stays unknown.");
+  .describe(
+    "One independent vendor quota window; omitted/null applies_to_models means every model, and null usage stays unknown.",
+  );
 export type QuotaConstraint = z.infer<typeof QuotaConstraint>;
 
 export const QuotaSnapshot = z

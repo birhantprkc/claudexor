@@ -377,6 +377,19 @@
                     "type": "string",
                     "minLength": 1
                   },
+                  "applies_to_models": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/definitions/HarnessEvent/properties/credential_profile_id"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "used_ratio": {
                     "anyOf": [
                       {
@@ -432,7 +445,7 @@
                   "resets_at"
                 ],
                 "additionalProperties": false,
-                "description": "One independent vendor quota window; null usage stays unknown."
+                "description": "One independent vendor quota window; omitted/null applies_to_models means every model, and null usage stays unknown."
               }
             }
           },
@@ -486,6 +499,24 @@
         "rate_limit": {
           "type": "object",
           "properties": {
+            "constraint_id": {
+              "$ref": "#/definitions/HarnessEvent/properties/credential_profile_id",
+              "description": "Vendor-owned rate-window identity, when the adapter can map it from a typed field."
+            },
+            "applies_to_models": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/HarnessEvent/properties/credential_profile_id"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Canonical model ids/aliases this rejection applies to; omitted/null means every model."
+            },
             "resets_at": {
               "type": [
                 "string",

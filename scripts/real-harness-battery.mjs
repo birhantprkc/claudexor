@@ -28,6 +28,7 @@ import {
   describeFileSnapshot,
   durableAttemptRouteEvidence,
   evaluateRequiredNativeRoutes,
+  isCrossFamilyConvergenceRefusal,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
   sameDaemonLease,
@@ -1410,10 +1411,7 @@ function runDegradationControl(phase, onlyHarness) {
     ],
     { cwd: convRepo, name: `${phase}-single-family-convergence` },
   );
-  if (
-    conv.code !== 0 &&
-    /cross-family|review/.test(JSON.stringify(conv.json ?? {}) + conv.stdout + conv.stderr)
-  )
+  if (isCrossFamilyConvergenceRefusal(conv))
     pass(phase, "single-family convergence refused", {
       status: conv.json?.status,
       error: conv.json?.error ?? conv.json?.summary,

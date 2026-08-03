@@ -1,5 +1,6 @@
 import type { CredentialProfile, HarnessRunSpec, QuotaSnapshot } from "@claudexor/schema";
 import { HarnessRunSpec as HarnessRunSpecSchema } from "@claudexor/schema";
+import { quotaConstraintAppliesToModel } from "@claudexor/budget";
 
 export interface ProfilePolicy {
   limit_action: "fail" | "ask" | "rotate";
@@ -61,6 +62,7 @@ export function profileHeadroomBreach(
   harnessId: string,
   profileId: string | null,
   threshold: number,
+  model?: string,
 ): HeadroomBreach | null {
   for (const snapshot of snapshots) {
     // FRESH evidence only (release wave tier1 #3): a stale or unknown reading
@@ -69,6 +71,7 @@ export function profileHeadroomBreach(
     if (snapshot.subject.harness !== harnessId) continue;
     if ((snapshot.subject.subject_id ?? null) !== profileId) continue;
     for (const constraint of snapshot.constraints) {
+      if (!quotaConstraintAppliesToModel(constraint, model)) continue;
       if (constraint.used_ratio !== null && constraint.used_ratio >= threshold) {
         return {
           constraint_id: constraint.id,
@@ -102,6 +105,7 @@ export function nextEligibleProfile(
   snapshots: readonly QuotaSnapshot[],
   readyProfileIds: ReadonlySet<string>,
   excluded: ReadonlySet<string> = new Set(),
+  model?: string,
 ): CredentialProfile | null {
   for (const candidate of staticRotationCandidates({
     registry,
@@ -112,7 +116,13 @@ export function nextEligibleProfile(
   })) {
     if (!readyProfileIds.has(candidate.profile_id)) continue;
     if (
-      profileHeadroomBreach(snapshots, harnessId, candidate.profile_id, policy.headroom_threshold)
+      profileHeadroomBreach(
+        snapshots,
+        harnessId,
+        candidate.profile_id,
+        policy.headroom_threshold,
+        model,
+      )
     )
       continue;
     return candidate;
@@ -149,6 +159,7 @@ function emitRotationExhausted(args: {
   readyProfileIds: ReadonlySet<string>;
   excluded?: ReadonlySet<string>;
   attemptId?: string;
+  model?: string;
   reason: "profile_headroom_preflight" | "vendor_limit_rejected";
   emit: EmitFn;
 }): void {
@@ -161,6 +172,7 @@ function emitRotationExhausted(args: {
         args.harnessId,
         profile.profile_id,
         args.policy.headroom_threshold,
+        args.model,
       );
       const rejected =
         profile.profile_id === args.current?.profile_id
@@ -210,14 +222,16 @@ export function preflightCredentialProfile(args: {
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
   readyProfileIds: ReadonlySet<string>;
+  model?: string;
   emit: EmitFn;
 }): CredentialProfile {
-  const { profile, harnessId, policy, registry, snapshots, readyProfileIds, emit } = args;
+  const { profile, harnessId, policy, registry, snapshots, readyProfileIds, model, emit } = args;
   const breach = profileHeadroomBreach(
     snapshots,
     harnessId,
     profile.profile_id,
     policy.headroom_threshold,
+    model,
   );
   if (!breach) return profile;
   emit("route.profile.headroom_exceeded", {
@@ -247,6 +261,8 @@ export function preflightCredentialProfile(args: {
     profile,
     snapshots,
     readyProfileIds,
+    new Set(),
+    model,
   );
   if (!next) {
     emitRotationExhausted({
@@ -256,6 +272,7 @@ export function preflightCredentialProfile(args: {
       registry,
       snapshots,
       readyProfileIds,
+      model,
       reason: "profile_headroom_preflight",
       emit,
     });
@@ -290,11 +307,19 @@ export function preflightDefaultSubject(args: {
   snapshots: readonly QuotaSnapshot[];
   readyProfileIds: ReadonlySet<string>;
   defaultRoute: "local_session" | "api_key" | null;
+  model?: string;
   emit: EmitFn;
 }): CredentialProfile | null {
-  const { harnessId, policy, registry, snapshots, readyProfileIds, defaultRoute, emit } = args;
+  const { harnessId, policy, registry, snapshots, readyProfileIds, defaultRoute, model, emit } =
+    args;
   if (policy.limit_action !== "rotate" || defaultRoute !== "local_session") return null;
-  const breach = profileHeadroomBreach(snapshots, harnessId, null, policy.headroom_threshold);
+  const breach = profileHeadroomBreach(
+    snapshots,
+    harnessId,
+    null,
+    policy.headroom_threshold,
+    model,
+  );
   if (!breach) return null;
   emit("route.profile.headroom_exceeded", {
     harness_id: harnessId,
@@ -305,7 +330,16 @@ export function preflightDefaultSubject(args: {
     threshold: breach.threshold,
     resets_at: breach.resets_at,
   });
-  const next = nextEligibleProfile(registry, harnessId, policy, null, snapshots, readyProfileIds);
+  const next = nextEligibleProfile(
+    registry,
+    harnessId,
+    policy,
+    null,
+    snapshots,
+    readyProfileIds,
+    new Set(),
+    model,
+  );
   if (!next) {
     emitRotationExhausted({
       current: null,
@@ -314,6 +348,7 @@ export function preflightDefaultSubject(args: {
       registry,
       snapshots,
       readyProfileIds,
+      model,
       reason: "profile_headroom_preflight",
       emit,
     });
@@ -353,6 +388,7 @@ export function planReactiveRotation(args: {
   sawTypedLimit: boolean;
   deliverableEmpty: boolean;
   lastLimit: { retryDelayMs: number | null; resetsAt: string | null } | null;
+  model?: string;
   emit: EmitFn;
 }): CredentialProfile | null {
   if (!rotationRetryEligible(args)) return null;
@@ -367,6 +403,7 @@ export function planReactiveRotation(args: {
     args.snapshots,
     args.readyProfileIds,
     args.triedProfiles,
+    args.model,
   );
   if (!next) {
     emitRotationExhausted({
@@ -378,6 +415,7 @@ export function planReactiveRotation(args: {
       readyProfileIds: args.readyProfileIds,
       excluded: args.triedProfiles,
       attemptId: args.attemptId,
+      model: args.model,
       reason: "vendor_limit_rejected",
       emit: args.emit,
     });
@@ -431,6 +469,7 @@ export function rotateSpecOnTypedLimit(args: {
     sawTypedLimit: args.sawTypedLimit,
     deliverableEmpty: args.deliverableEmpty,
     lastLimit: args.lastLimit,
+    model: args.spec.model_hint ?? undefined,
     emit: args.emit,
   });
   if (!rotation) return null;

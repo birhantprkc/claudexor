@@ -171,6 +171,8 @@ export function nextUpIdentity(args: {
   defaultRoute: "local_session" | "api_key" | null;
   /** Profiles admitted by their fresh profile doctor probe in this snapshot. */
   readyProfileIds: ReadonlySet<string>;
+  /** Effective configured model when known; omitted stays conservative. */
+  model?: string;
 }): NextUpIdentity {
   const {
     registry,
@@ -181,6 +183,7 @@ export function nextUpIdentity(args: {
     defaultReady,
     defaultRoute,
     readyProfileIds,
+    model,
   } = args;
   if (!defaultEnabled) {
     return {
@@ -198,7 +201,13 @@ export function nextUpIdentity(args: {
   // fails over to the next eligible enabled profile BEFORE spawn — that is who
   // an unpinned run routes to next. `ask`/`fail` proceed on the native default.
   if (policy.limit_action === "rotate" && defaultRoute === "local_session") {
-    const breach = profileHeadroomBreach(snapshots, harnessId, null, policy.headroom_threshold);
+    const breach = profileHeadroomBreach(
+      snapshots,
+      harnessId,
+      null,
+      policy.headroom_threshold,
+      model,
+    );
     if (breach) {
       const next = nextEligibleProfile(
         registry,
@@ -207,6 +216,8 @@ export function nextUpIdentity(args: {
         null,
         snapshots,
         readyProfileIds,
+        new Set(),
+        model,
       );
       if (next) return { kind: "profile", profileId: next.profile_id };
     }

@@ -273,6 +273,19 @@ describe("profileHeadroomBreach (W5.4 preflight)", () => {
     expect(profileHeadroomBreach([snap(null, 0.99)], "claude", "work", 0.9)).toBeNull();
     expect(profileHeadroomBreach([snap("work", 0.5)], "claude", "work", 0.9)).toBeNull();
   });
+
+  it("does not rotate an Opus run away from a Fable-scoped limit", () => {
+    const scoped = snap("work", 1);
+    scoped.constraints[0] = {
+      ...scoped.constraints[0]!,
+      id: "weekly_scoped:Fable",
+      applies_to_models: ["fable", "claude-fable-5"],
+    };
+    expect(profileHeadroomBreach([scoped], "claude", "work", 0.9, "claude-opus-5")).toBeNull();
+    expect(profileHeadroomBreach([scoped], "claude", "work", 0.9, "claude-fable-5")).toMatchObject({
+      constraint_id: "weekly_scoped:Fable",
+    });
+  });
 });
 
 describe("nextEligibleProfile (W5.4 rotation order)", () => {

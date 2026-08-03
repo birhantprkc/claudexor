@@ -1,4 +1,5 @@
 import type { HarnessEvent } from "@claudexor/schema";
+import { claudeQuotaModelAliases } from "./capability-profile.js";
 
 /**
  * D-16c: claude 2.1.165 typed context / rate-limit signal mapping, extracted
@@ -44,25 +45,43 @@ export function claudeCompactBoundaryEvents(
 
 /**
  * QA-015: the top-level typed `rate_limit_event` heartbeat. Always RECOGNIZED
- * (never a dropped event). The routine `allowed` heartbeat surfaces NOTHING
- * (arming a rate_limit signal on it would falsely trip the rotation predicate);
- * only a limiting status arms the TYPED `rate_limit` signal the budget layer
- * reads. Returns `[]` for the benign heartbeat.
+ * (never a dropped event). The routine `allowed` and advisory
+ * `allowed_warning` heartbeats surface NOTHING (arming a rate_limit signal on
+ * either would falsely cool the account after a successful run); only a
+ * rejecting status arms the TYPED `rate_limit` signal the budget layer reads.
+ * Returns `[]` for a benign/advisory heartbeat.
  */
 export function claudeRateLimitEvents(obj: Json, sessionId: string, ts: string): HarnessEvent[] {
   const info =
     obj.rate_limit_info && typeof obj.rate_limit_info === "object" ? obj.rate_limit_info : null;
   const status = info ? (info as Json).status : undefined;
-  if (status !== "allowed_warning" && status !== "rejected" && status !== "blocked") return [];
+  if (status !== "rejected" && status !== "blocked") return [];
   const resetsRaw = info ? (info as Json).resetsAt : undefined;
   const resetsAt = typeof resetsRaw === "number" ? new Date(resetsRaw * 1000).toISOString() : null;
+  const rateLimitType = info ? (info as Json).rateLimitType : undefined;
+  const modelFamily =
+    rateLimitType === "seven_day_opus"
+      ? "Opus"
+      : rateLimitType === "seven_day_sonnet"
+        ? "Sonnet"
+        : null;
+  const appliesToModels = modelFamily ? claudeQuotaModelAliases(modelFamily) : null;
   return [
     {
       type: "status",
       session_id: sessionId,
       ts,
       text: `rate_limit_event: ${String(status)}`,
-      rate_limit: { resets_at: resetsAt, retry_delay_ms: null },
+      rate_limit: {
+        resets_at: resetsAt,
+        retry_delay_ms: null,
+        ...(modelFamily
+          ? {
+              constraint_id: String(rateLimitType),
+              applies_to_models: appliesToModels,
+            }
+          : {}),
+      },
       payload: { rate_limit_event: true },
     },
   ];

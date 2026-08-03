@@ -356,6 +356,9 @@ Tests and local smokes must never touch real user state:
   fails this VM acceptance, while Cursor retains its declared credential
   transport. The lane is strict: FAIL, ENV, or SKIP greater than zero, a phase
   filter, or omission of Codex, Claude, or Cursor makes the acceptance run fail.
+  The single-family convergence refusal probe matches its canonical top-level
+  failed status/message; nested RunFacts fields or incidental prose cannot
+  satisfy that assertion.
   The build proof has no caller-supplied sentinel: every invocation owns and awaits
   the forced build before battery code can load. Never use the lane on the
   credential-free pristine VM or on a config root with live work.

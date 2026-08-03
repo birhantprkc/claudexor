@@ -29,6 +29,17 @@ export type CircuitTier = "ok" | "soft" | "downgrade" | "hard";
  * reasons — the old status words exhausted/exhausted_overshoot are gone. */
 export type BudgetTerminal = "budget_exhausted" | "budget_overshoot" | "cost_unverifiable" | null;
 
+/** One model-applicability predicate for every quota consumer.
+ * Omitted/null scope is a vendor-wide window. An unknown effective model stays
+ * conservative because the harness default may be one of the scoped models. */
+export function quotaConstraintAppliesToModel(
+  constraint: { applies_to_models?: string[] | null },
+  model?: string,
+): boolean {
+  const scopedModels = constraint.applies_to_models;
+  return scopedModels == null || model === undefined || scopedModels.includes(model);
+}
+
 export interface CircuitThresholds {
   soft: number;
   downgrade: number;
@@ -375,6 +386,7 @@ export class BudgetLedger {
     credentialRoute?: CredentialRoute,
     credentialSubjectId?: string | null,
     now: number = Date.now(),
+    model?: string,
   ): boolean {
     // Live observations are subject- AND route-scoped like snapshots
     // (rounds 17-18): a profiled or API-key rate-limit must never cool the
@@ -393,6 +405,7 @@ export class BudgetLedger {
         observation.credential_route !== credentialRoute
       )
         return false;
+      if (!quotaConstraintAppliesToModel(observation, model)) return false;
 
       if (!observation.cooldown_until) return false;
       const time = Date.parse(observation.cooldown_until);
@@ -402,6 +415,7 @@ export class BudgetLedger {
     if (!credentialRoute) return false;
     return this.snapshotsFor(harnessId, credentialRoute, credentialSubjectId).some((snapshot) =>
       snapshot.constraints.some((constraint) => {
+        if (!quotaConstraintAppliesToModel(constraint, model)) return false;
         const cooldown = constraint.cooldown_until
           ? Date.parse(constraint.cooldown_until)
           : Number.NaN;
@@ -423,6 +437,7 @@ export class BudgetLedger {
     credentialRoute?: CredentialRoute,
     credentialSubjectId?: string | null,
     now: number = Date.now(),
+    model?: string,
   ): number | null {
     const latest = new Map<string, BudgetObservation>();
     for (const observation of this.observationsFor(harnessId)) {
@@ -441,6 +456,7 @@ export class BudgetLedger {
         observation.credential_route !== credentialRoute
       )
         continue;
+      if (!quotaConstraintAppliesToModel(observation, model)) continue;
       latest.set(
         `${observation.credential_route ?? ""}\0${observation.subject_id ?? ""}\0${observation.constraint_id}`,
         observation,
@@ -466,6 +482,7 @@ export class BudgetLedger {
     if (credentialRoute) {
       for (const snapshot of this.snapshotsFor(harnessId, credentialRoute, credentialSubjectId)) {
         for (const constraint of snapshot.constraints) {
+          if (!quotaConstraintAppliesToModel(constraint, model)) continue;
           if (
             typeof constraint.used_ratio !== "number" ||
             typeof constraint.window_seconds !== "number" ||

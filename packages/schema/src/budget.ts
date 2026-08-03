@@ -175,6 +175,13 @@ export const BudgetObservation = z
       ),
     usd: z.number().optional().describe("Observed spend in USD, for spend observations."),
     constraint_id: z.string().optional(),
+    applies_to_models: z
+      .array(Id)
+      .nullable()
+      .optional()
+      .describe(
+        "Canonical model ids/aliases this quota observation applies to; omitted/null means every model.",
+      ),
     used_ratio: z.number().min(0).max(1).nullable().optional(),
     window_seconds: z.number().positive().nullable().optional(),
     resets_at: z

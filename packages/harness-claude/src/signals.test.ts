@@ -82,12 +82,21 @@ describe("claude D-16 signal fixtures", () => {
     expect(events.some((e) => e.type === "message" && e.final === true)).toBe(true);
   });
 
+  it("treats the VM-observed allowed_warning heartbeat as advisory, not a cooldown", () => {
+    const events = parseFixture("allowed-warning-rate-limit-event.jsonl");
+    expect(events).toEqual([]);
+  });
+
   it("maps a limiting rate_limit_event to a typed rate_limit signal with resets_at", () => {
     const parser = createClaudeParser();
     const out = parser(
       {
         type: "rate_limit_event",
-        rate_limit_info: { status: "rejected", resetsAt: 1784774400 },
+        rate_limit_info: {
+          status: "rejected",
+          resetsAt: 1784774400,
+          rateLimitType: "seven_day_opus",
+        },
         session_id: "sig",
       },
       "sig",
@@ -95,7 +104,33 @@ describe("claude D-16 signal fixtures", () => {
     expect(out).toHaveLength(1);
     expect(out?.[0]?.type).toBe("status");
     expect(out?.[0]?.rate_limit?.resets_at).toBe(new Date(1784774400 * 1000).toISOString());
+    expect(out?.[0]?.rate_limit).toMatchObject({
+      constraint_id: "seven_day_opus",
+      applies_to_models: [
+        "opus",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "best",
+      ],
+    });
     expect(() => HarnessEvent.parse(out?.[0])).not.toThrow();
+  });
+
+  it("keeps generic rejecting windows account-wide", () => {
+    const out = createClaudeParser()(
+      {
+        type: "rate_limit_event",
+        rate_limit_info: { status: "blocked", rateLimitType: "seven_day" },
+        session_id: "sig",
+      },
+      "sig",
+    );
+    expect(out?.[0]?.rate_limit).toMatchObject({ resets_at: null, retry_delay_ms: null });
+    expect(out?.[0]?.rate_limit).not.toHaveProperty("constraint_id");
+    expect(out?.[0]?.rate_limit).not.toHaveProperty("applies_to_models");
   });
 
   it("maps rapid_refill_breaker terminal_reason to the continuation-eligible repeated_refill cause", () => {

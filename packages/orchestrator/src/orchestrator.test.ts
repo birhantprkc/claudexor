@@ -4307,6 +4307,241 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("checks a read-only fallback model against that model's scoped quota before spawn", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-fallback-model-quota-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: work",
+        "    harness_id: asker",
+        "    display_name: Work",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:work'",
+        "harnesses:",
+        "  asker:",
+        "    default_model: claude-opus-5",
+        "    fallback_model: claude-fable-5",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const seenModels: Array<string | null> = [];
+      const asker = askAdapter("asker", function* () {});
+      asker.discover = async () =>
+        HarnessManifest.parse({
+          id: "asker",
+          display_name: "asker",
+          kind: "local_cli",
+          provider_family: "anthropic",
+          capabilities: {
+            plan: true,
+            review: true,
+            read_files: true,
+            web_policy: "tools",
+            known_models: ["claude-opus-5", "claude-fable-5"],
+          },
+          access_profiles_supported: ["readonly"],
+        });
+      asker.run = (spec) => {
+        seenModels.push(spec.model_hint ?? null);
+        return (async function* () {
+          const ts = new Date().toISOString();
+          yield {
+            type: "started" as const,
+            session_id: spec.session_id,
+            ts,
+            credential_route: "managed_api_key" as const,
+          };
+          if (spec.model_hint === "claude-opus-5") {
+            yield {
+              type: "error" as const,
+              session_id: spec.session_id,
+              ts,
+              error: "primary model failed",
+            };
+          } else {
+            yield {
+              type: "message" as const,
+              session_id: spec.session_id,
+              ts,
+              text: "fallback should not run",
+            };
+          }
+          yield { type: "completed" as const, session_id: spec.session_id, ts };
+        })();
+      };
+      const eventTypes: string[] = [];
+      const result = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+        quotaSnapshots: () => [
+          {
+            subject: {
+              harness: "asker",
+              credential_route: "managed_api_key",
+              plan_label: null,
+              subject_id: "work",
+            },
+            constraints: [
+              {
+                id: "weekly_scoped:Fable",
+                label: "7 day (Fable)",
+                applies_to_models: ["fable", "claude-fable-5", "best"],
+                used_ratio: 1,
+                window_seconds: 7 * 24 * 60 * 60,
+                resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                cooldown_until: null,
+              },
+            ],
+            source: "claude_oauth_usage",
+            observed_at: new Date().toISOString(),
+            freshness: "fresh",
+          },
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        credentialProfileId: "work",
+        onEvent: (event) => eventTypes.push(event.type),
+      });
+      expect(result.lifecycle).toBe("failed");
+      expect(seenModels, JSON.stringify({ summary: result.summary, facts: result.facts })).toEqual([
+        "claude-opus-5",
+      ]);
+      expect(eventTypes).toContain("route.profile.headroom_exceeded");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("checks a budget downgrade model against that model's scoped quota before spawn", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-downgrade-model-quota-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: work",
+        "    harness_id: worker",
+        "    display_name: Work",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:work'",
+        "harnesses:",
+        "  worker:",
+        "    default_model: claude-opus-5",
+        "    fallback_model: claude-fable-5",
+        "",
+      ].join("\n"),
+    );
+    const authority = new DelegationBudgetAuthority();
+    const parentRunId = "run-parent-model-downgrade";
+    const admissionId = "job-child-model-downgrade";
+    const parentLedger = new BudgetLedger({ kind: "finite", maxUsd: 0.0555 });
+    authority.registerParent(parentRunId, parentLedger);
+    authority.noteChildAccepted(parentRunId, admissionId);
+    try {
+      const seenModels: Array<string | null> = [];
+      const worker: HarnessAdapter = {
+        id: "worker",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "worker",
+            display_name: "worker",
+            kind: "local_cli",
+            provider_family: "anthropic",
+            capabilities: {
+              implement: true,
+              known_models: ["claude-opus-5", "claude-fable-5"],
+            },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "worker",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "worker",
+            availability: "available",
+            verification: "passed",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          seenModels.push(spec.model_hint ?? null);
+          const ts = new Date().toISOString();
+          yield { type: "started", session_id: spec.session_id, ts };
+          writeFileSync(join(spec.cwd, "UNEXPECTED.txt"), "fallback should not run\n");
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const eventTypes: string[] = [];
+      const result = await new Orchestrator({
+        registry: new Map([["worker", worker]]),
+        reviewers: [],
+        delegationBudgetAuthority: authority,
+        quotaSnapshots: () => [
+          {
+            subject: {
+              harness: "worker",
+              credential_route: "managed_api_key",
+              plan_label: null,
+              subject_id: "work",
+            },
+            constraints: [
+              {
+                id: "weekly_scoped:Fable",
+                label: "7 day (Fable)",
+                applies_to_models: ["fable", "claude-fable-5", "best"],
+                used_ratio: 1,
+                window_seconds: 7 * 24 * 60 * 60,
+                resets_at: new Date(Date.now() + 3_600_000).toISOString(),
+                cooldown_until: null,
+              },
+            ],
+            source: "claude_oauth_usage",
+            observed_at: new Date().toISOString(),
+            freshness: "fresh",
+          },
+        ],
+      }).run({
+        repoRoot: repo,
+        prompt: "make one change",
+        mode: "agent",
+        harnesses: ["worker"],
+        models: { worker: "claude-opus-5" },
+        credentialProfileId: "work",
+        runId: "run-child-model-downgrade",
+        delegatedFromRunId: parentRunId,
+        delegationAdmissionId: admissionId,
+        onEvent: (event) => eventTypes.push(event.type),
+      });
+      expect(result.lifecycle).toBe("failed");
+      expect(seenModels).toEqual([]);
+      expect(eventTypes).toContain("route.profile.headroom_exceeded");
+    } finally {
+      authority.beginParentClose(parentRunId);
+      await authority.waitForChildren(parentRunId, 100);
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("an unknown explicit credential profile refuses before any adapter launches (INV-135)", async () => {
     const repo = await initRepo();
     let launches = 0;

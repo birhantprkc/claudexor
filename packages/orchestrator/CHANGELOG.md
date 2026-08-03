@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Respect model-scoped quota windows during credential-profile headroom and rotation, including fallback and budget-downgrade models.
 - @claudexor/arbitration@3.2.1
 - @claudexor/artifact-store@3.2.1
 - @claudexor/budget@3.2.1

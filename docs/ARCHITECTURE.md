@@ -607,7 +607,8 @@ may declare ONE typed `profile_policy`
 (`limit_action: fail|ask|rotate`, priority-ordered `rotation_eligible`,
 `headroom_threshold`). Two separated signals drive it (never prose, never
 plain network errors): `profile_headroom_preflight` — before spawn, the
-selected profile's freshest quota window at/over the threshold emits typed
+selected profile's freshest quota window applicable to the effective model
+at/over the threshold emits typed
 `route.profile.headroom_exceeded` evidence, and `rotate` swaps to the next
 eligible profile with `route.profile.rotated` provenance; and
 `vendor_limit_rejected` — a TYPED vendor rate-limit that terminated a
@@ -1754,7 +1755,10 @@ proven-zero route. It NEVER recommends authentication/setup for a budget cause,
 and it warns that an unchanged Exact Retry replays the immutable cap. Surfaces
 choose remediation from the typed `code`, never by parsing the message.
 
-Quota is typed and vendor-owned, never scraped from prose. Codex rollout
+Quota is typed and vendor-owned, never scraped from prose. Each constraint may
+carry canonical `applies_to_models`; omitted/null means a vendor-wide window.
+Routing, pacing, and profile headroom consume that same applicability predicate,
+so a saturated Fable-only window cannot cool an explicit Opus run. Codex rollout
 `token_count.rate_limits` preserves every reported window as an independent
 constraint with usage, duration, reset, provenance, and freshness. The global
 journal is authority; an elapsed reset marks a snapshot stale and requests a
@@ -1763,8 +1767,12 @@ refresh, never locally invents zero usage. Unknown usage remains `null`.
 `quality` uses only exact user-declared `{harness,model,effort}` tiers, and
 `economy` minimizes known incremental cash spend with quality tiers only as a
 tie-breaker. Credential transport alone never proves a route free. Typed rate
-limits create cooldowns; unknown quota remains eligible and is never rendered
-as full headroom.
+limits that reject or block a run create cooldowns. A Claude rejection whose
+typed `rateLimitType` proves an Opus or Sonnet family carries that same model
+scope into both the live ledger and durable journal; generic or unknown
+rejections remain account-wide. Advisory Claude `allowed_warning` heartbeats do
+not create cooldowns. Unknown quota remains eligible and is never rendered as
+full headroom.
 
 Quality routing needs at least one comparable user-declared tier for the run's
 intent, or the ranker refuses at preflight (`RoutingPreflightError`). This is a
@@ -2495,8 +2503,8 @@ code touching one of these areas must honor it or change it explicitly here.
   terminal object `--json` prints as the LAST line. It never changes the
   `--json` exactly-one-object contract, and the retired `run` verb stays
   retired.
-- Vendor-owned quota snapshots and typed rate-limit cooldowns persist in the
-  checksummed global journal through `QuotaRegistry`; routing reads that
+- Vendor-owned quota snapshots and typed rejecting rate-limit cooldowns persist
+  in the checksummed global journal through `QuotaRegistry`; routing reads that
   cross-run authority rather than rediscovering pressure independently in each
   run. Codex uses its app-server. Claude subscription windows arrive from the
   `oauth/usage` endpoint as the PRIMARY source (since 2.1): the daemon's

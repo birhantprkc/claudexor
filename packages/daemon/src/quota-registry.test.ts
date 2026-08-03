@@ -318,6 +318,96 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("persists independent model-scoped Claude cooldown windows", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-claude-model-cooldown-")));
+    const manager = new JournalManager(root);
+    const slot = manager.registerProjection(quotaProjection());
+    manager.start();
+    for (const [constraintId, aliases] of [
+      ["seven_day_opus", ["opus", "claude-opus-5", "best"]],
+      ["seven_day_sonnet", ["sonnet", "claude-sonnet-5", "best"]],
+    ] as const) {
+      slot.current().ingest("claude", {
+        type: "status",
+        session_id: `session-${constraintId}`,
+        ts: new Date().toISOString(),
+        credential_route: "vendor_native",
+        rate_limit: {
+          constraint_id: constraintId,
+          applies_to_models: aliases,
+          resets_at: null,
+          retry_delay_ms: 30_000,
+        },
+      });
+    }
+    expect(slot.current().read().snapshots[0]?.constraints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "cooldown:seven_day_opus",
+          applies_to_models: ["opus", "claude-opus-5", "best"],
+        }),
+        expect.objectContaining({
+          id: "cooldown:seven_day_sonnet",
+          applies_to_models: ["sonnet", "claude-sonnet-5", "best"],
+        }),
+      ]),
+    );
+    manager.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps a new scoped cooldown fresh after an older sibling reset expires", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-claude-cooldown-expiry-")));
+    let now = new Date("2026-08-03T00:00:00.000Z");
+    const manager = new JournalManager(root);
+    const slot = manager.registerProjection(
+      quotaProjection(
+        [],
+        () => [],
+        () => now,
+      ),
+    );
+    manager.start();
+    slot.current().ingest("claude", {
+      type: "status",
+      session_id: "session-opus",
+      ts: now.toISOString(),
+      credential_route: "vendor_native",
+      rate_limit: {
+        constraint_id: "seven_day_opus",
+        applies_to_models: ["opus", "claude-opus-5", "best"],
+        resets_at: "2026-08-03T00:00:01.000Z",
+        retry_delay_ms: null,
+      },
+    });
+    now = new Date("2026-08-03T00:00:02.000Z");
+    slot.current().ingest("claude", {
+      type: "status",
+      session_id: "session-sonnet",
+      ts: now.toISOString(),
+      credential_route: "vendor_native",
+      rate_limit: {
+        constraint_id: "seven_day_sonnet",
+        applies_to_models: ["sonnet", "claude-sonnet-5", "best"],
+        resets_at: "2026-08-03T00:01:02.000Z",
+        retry_delay_ms: null,
+      },
+    });
+    expect(slot.current().read().snapshots).toEqual([
+      expect.objectContaining({
+        freshness: "fresh",
+        constraints: [
+          expect.objectContaining({
+            id: "cooldown:seven_day_sonnet",
+            applies_to_models: ["sonnet", "claude-sonnet-5", "best"],
+          }),
+        ],
+      }),
+    ]);
+    manager.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("persists all windows and marks expired data stale without fabricating zero usage", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-")));
     const first = new JournalManager(root);
@@ -406,6 +496,9 @@ describe("QuotaRegistry", () => {
     nowMs += 60_000;
     await expect(registry.pollStale()).resolves.toBe(true);
     expect(calls).toBe(2);
+    expect(registry.read().snapshots).toEqual([
+      expect.objectContaining({ source: "codex_app_server", freshness: "fresh", constraints: [] }),
+    ]);
     await expect(registry.pollStale()).resolves.toBe(false);
     expect(calls).toBe(2);
 

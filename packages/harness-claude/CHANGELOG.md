@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Keep `allowed_warning` advisory and project proven quota/rejection family names onto verified model aliases.
 - @claudexor/core@3.2.1
 - @claudexor/schema@3.2.1
 - @claudexor/secrets@3.2.1

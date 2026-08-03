@@ -66,6 +66,19 @@ export function evaluateRequiredNativeRoutes(requiredHarnesses, observed) {
   return { valid: missing.length === 0 && nonNative.length === 0, missing, nonNative };
 }
 
+/** Accept only the canonical top-level convergence preflight refusal. Searching
+ * the whole JSON for `review` is invalid because every RunFacts receipt carries
+ * a `review` field, including unrelated routing failures. */
+export function isCrossFamilyConvergenceRefusal(result) {
+  const message = result?.json?.error ?? result?.json?.summary;
+  return Boolean(
+    result?.code !== 0 &&
+    result?.json?.status === "failed" &&
+    typeof message === "string" &&
+    message.startsWith("convergence requires a cross-family clean review ("),
+  );
+}
+
 /** Normalize every durable route interval/switch without trusting first-route telemetry. */
 export function durableAttemptRouteEvidence(events) {
   const observed = [];

@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Persist independent model-scoped Claude cooldown windows, pruning expired scoped siblings without staling an active family.
 - @claudexor/core@3.2.1
 - @claudexor/journal@3.2.1
 - @claudexor/schema@3.2.1

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { validateModel } from "@claudexor/core";
 import { knownModelIdsForRoute } from "@claudexor/schema";
-import { CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST } from "./capability-profile.js";
+import {
+  CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST,
+  claudeQuotaModelAliases,
+} from "./capability-profile.js";
 import { createClaudeAdapter } from "./index.js";
 
 /**
@@ -61,5 +64,26 @@ describe("the claude manifest model truth source", () => {
     const rejected = validateModel("claude-opus-9-9", known, "manifest");
     expect(rejected.status).toBe("rejected");
     expect(rejected.message).toContain("manifest known-model list");
+  });
+
+  it("projects vendor quota family names onto the manifest aliases", () => {
+    expect(claudeQuotaModelAliases(" Opus ")).toEqual([
+      "opus",
+      "claude-opus-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "best",
+    ]);
+    expect(claudeQuotaModelAliases("Sonnet")).toEqual([
+      "sonnet",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "best",
+    ]);
+    expect(claudeQuotaModelAliases("Future")).toEqual(["future", "best"]);
+    expect(claudeQuotaModelAliases("   ")).toEqual([]);
   });
 });

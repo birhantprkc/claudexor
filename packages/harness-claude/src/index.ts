@@ -39,6 +39,7 @@ import {
   CLAUDE_KNOWN_MODELS,
   CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST,
 } from "./capability-profile.js";
+export { claudeQuotaModelAliases } from "./capability-profile.js";
 import { claudeNativeLoginRemedy } from "./doctor-remedy.js";
 import { claudeNativeHomeEnv, defaultNativeClaudeConfigDir } from "./native-home.js";
 export { claudeAccountIdentity, defaultNativeClaudeConfigDir } from "./native-home.js";
@@ -409,8 +410,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           effort_levels_verified_against: efforts.live
             ? version
             : CLAUDE_EFFORT_SNAPSHOT_VERIFIED_AGAINST,
-          // Manifest model truth source + the installed CLI it was verified
-          // against; the catalog itself lives in capability-profile.ts.
+          // Manifest model truth and its verified CLI live in capability-profile.ts.
           known_models: [...CLAUDE_KNOWN_MODELS],
           known_models_verified_against: CLAUDE_KNOWN_MODELS_VERIFIED_AGAINST,
         },

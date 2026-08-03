@@ -18,6 +18,7 @@ import {
   RawPatchRefusalCode,
 } from "./raw.js";
 import { QuotaConstraint, QuotaSource } from "./quota.js";
+import { RateLimitSignal } from "./rate-limit.js";
 import { EffortHint, ModelEffortCapability } from "./effort.js";
 // Re-exported so sibling contract modules keep one import path for the type.
 export { EffortHint } from "./effort.js";
@@ -934,25 +935,9 @@ export const HarnessEvent = z
      * the budget layer projects it WITHOUT regex over model/CLI prose. Replaces the
      * old string-matching governance in budget/observe.ts.
      */
-    rate_limit: z
-      .object({
-        resets_at: z
-          .string()
-          .nullable()
-          .default(null)
-          .describe("When the rate window resets, when reported."),
-        retry_delay_ms: z
-          .number()
-          .int()
-          .nonnegative()
-          .nullable()
-          .default(null)
-          .describe("Suggested retry delay in milliseconds, when reported."),
-      })
-      .optional()
-      .describe(
-        "Typed rate-limit/quota signal set by the adapter when the native CLI reports a 429/quota/overload.",
-      ),
+    rate_limit: RateLimitSignal.optional().describe(
+      "Typed rate-limit/quota signal set by the adapter when the native CLI reports a 429/quota/overload.",
+    ),
     /**
      * Typed transient-status detail; set on `status` events. Today's only kind
      * is claude's native `api_retry` (the CLI is retrying an API call by

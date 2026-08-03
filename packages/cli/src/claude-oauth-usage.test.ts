@@ -58,8 +58,33 @@ describe("claude oauth/usage quota source (W5.3, INV-062)", () => {
     expect(byId.get("weekly_scoped:Fable")).toMatchObject({
       used_ratio: 0.17,
       label: "7 day (Fable)",
+      applies_to_models: ["fable", "claude-fable-5", "best"],
     });
   });
+
+  it.each([undefined, "", "   "])(
+    "keeps an unknown weekly model scope account-wide (display_name=%j)",
+    (displayName) => {
+      const snapshot = parseClaudeOauthUsage(
+        {
+          limits: [
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              scope: {
+                model: { ...(displayName === undefined ? {} : { display_name: displayName }) },
+              },
+            },
+          ],
+        },
+        null,
+        "max",
+      );
+      const constraint = snapshot?.constraints.find((item) => item.id === "weekly_scoped:scoped");
+      expect(constraint?.used_ratio).toBe(1);
+      expect(constraint).not.toHaveProperty("applies_to_models");
+    },
+  );
 
   it("fails to unknown on junk — no fabricated constraints", () => {
     expect(parseClaudeOauthUsage(null, null, null)).toBeNull();

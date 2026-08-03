@@ -67,6 +67,11 @@ deferred; they are recorded here now.
   mirrors and keep `deepScan` as the schema-owned strategy flag. Production
   app paths never emit `swarm`; only a programmatic Swift caller can currently
   send it and receive the schema's typed unknown-key refusal.
+- PDR-12: bind Codex app-server quota buckets to model ids only when the vendor
+  exposes a machine-readable bucket-to-model relation. The current response
+  names a separate GPT-5.3-Codex-Spark bucket but does not carry model ids; do
+  not infer routing authority from the display label. The generic `codex`
+  bucket correctly blocks the current gpt-5.6-sol release lane.
 
 ## v3.2.0 wave-4 review deferrals
 
