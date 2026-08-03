@@ -8,13 +8,16 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { redactSecrets } from "@claudexor/util";
 import {
+  type AppliedConfinementRecord,
   ControlCandidate,
+  type ControlCandidateConfinement,
+  confinementBoundaryProven,
   ReviewFinding,
   isBlocking,
   type DecisionRecord,
 } from "@claudexor/schema";
 
-interface RawAttempt {
+interface RawAttempt extends AppliedConfinementRecord {
   attempt_id?: unknown;
   harness_id?: unknown;
   label?: unknown;
@@ -89,6 +92,7 @@ export function candidatesFor(runDir: string, decision: DecisionRecord | null): 
             }
           : null,
       rankingAxes: scorecardRow ? scorecardRow.axes : null,
+      confinement: confinementCard(raw),
     });
     if (parsed.success) out.push(parsed.data);
   }
@@ -98,6 +102,31 @@ export function candidatesFor(runDir: string, decision: DecisionRecord | null): 
 
 function numberOr(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
+function stringOrNull(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * The applied-boundary card, third and last place the absence of a boundary is
+ * disclosed (the attempt record and the child's prompt are the other two).
+ *
+ * `proven` comes from the shared owner rather than from a second reading of the
+ * same two fields, so this projection cannot drift into calling an unproven
+ * mechanism name a boundary. Null only for an attempt whose record carries
+ * neither half — a run that never asked for a boundary at all.
+ */
+function confinementCard(raw: RawAttempt): ControlCandidateConfinement | null {
+  const mechanism = stringOrNull(raw.confinement_mechanism);
+  const unavailableReason = stringOrNull(raw.confinement_unavailable_reason);
+  if (!mechanism && !unavailableReason) return null;
+  return {
+    proven: confinementBoundaryProven(raw),
+    mechanism,
+    verifiedDeniedPath: stringOrNull(raw.confinement_verified_denied_path),
+    unavailableReason,
+  };
 }
 
 function readYamlMaybe<T>(path: string): T | null {

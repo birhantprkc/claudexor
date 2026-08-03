@@ -55,4 +55,54 @@ describe("candidatesFor ranking scorecard projection (QA-028)", () => {
     const cards = candidatesFor(runDir, null);
     expect(cards[0]?.rankingAxes).toBeNull();
   });
+
+  describe("applied confinement, as the CALLER of a delegated run sees it", () => {
+    it("reports a proven boundary, and the stated absence of one, without reading the OS", () => {
+      const runDir = runDirWith({
+        a01: [
+          "attempt_id: a01",
+          "harness_id: codex",
+          "confinement_mechanism: seatbelt",
+          "confinement_profile_digest: sha256:abc",
+          "confinement_verified_denied_path: /Users/x/.claudexor/v3/daemon",
+          "",
+        ].join("\n"),
+        a02: [
+          "attempt_id: a02",
+          "harness_id: claude",
+          "confinement_unavailable_reason: no OS-enforced filesystem boundary is implemented for win32",
+          "",
+        ].join("\n"),
+      });
+      const cards = candidatesFor(runDir, null);
+      const proven = cards.find((c) => c.attemptId === "a01")?.confinement;
+      expect(proven).toEqual({
+        proven: true,
+        mechanism: "seatbelt",
+        verifiedDeniedPath: "/Users/x/.claudexor/v3/daemon",
+        unavailableReason: null,
+      });
+      const absent = cards.find((c) => c.attemptId === "a02")?.confinement;
+      expect(absent?.proven).toBe(false);
+      expect(absent?.mechanism).toBeNull();
+      expect(absent?.unavailableReason).toMatch(/win32/);
+    });
+
+    it("calls a mechanism NAME with no proof exactly what it is: no boundary", () => {
+      // The whole reason the applied-fact block exists. A record that names a
+      // mechanism and cannot say what it denied is a promise, and this
+      // projection must never launder it into `proven: true`.
+      const runDir = runDirWith({
+        a01: "attempt_id: a01\nharness_id: codex\nconfinement_mechanism: seatbelt\n",
+      });
+      const card = candidatesFor(runDir, null)[0]?.confinement;
+      expect(card?.mechanism).toBe("seatbelt");
+      expect(card?.proven).toBe(false);
+    });
+
+    it("stays null for a run that never asked for a boundary", () => {
+      const runDir = runDirWith({ a01: "attempt_id: a01\nharness_id: codex\n" });
+      expect(candidatesFor(runDir, null)[0]?.confinement).toBeNull();
+    });
+  });
 });

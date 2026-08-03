@@ -3129,6 +3129,53 @@
                 ],
                 "default": null,
                 "description": "This candidate's ranking-scorecard axis values (from decision.ranking_scorecard); null when no arbitration ran."
+              },
+              "confinement": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "proven": {
+                        "type": "boolean",
+                        "description": "Whether a boundary was actually enforced for this attempt: a named mechanism AND the path it was proven to deny. The only field a consumer should branch on."
+                      },
+                      "mechanism": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Opaque label of the enforcing mechanism; null when no boundary was applied."
+                      },
+                      "verifiedDeniedPath": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Path proven unreadable under the applied policy before the harness was spawned."
+                      },
+                      "unavailableReason": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Why this attempt ran with NO boundary; null when one was applied. Present exactly when proven is false for a run that asked for a boundary."
+                      }
+                    },
+                    "required": [
+                      "proven",
+                      "mechanism",
+                      "verifiedDeniedPath",
+                      "unavailableReason"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Applied OS filesystem boundary for one attempt, or the stated reason there was none."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Applied OS boundary for this attempt; null when the run never asked for one (every non-delegated run).",
+                "default": null
               }
             },
             "required": [

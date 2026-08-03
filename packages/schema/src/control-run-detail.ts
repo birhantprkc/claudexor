@@ -35,6 +35,40 @@ export const ControlPrimaryOutput = z
   .describe("The run's primary user-facing output artifact.");
 export type ControlPrimaryOutput = z.infer<typeof ControlPrimaryOutput>;
 
+/**
+ * The applied filesystem boundary of one attempt, as its CALLER sees it.
+ *
+ * `proven` is the only question a consumer should ask, and it is answered by
+ * the one shared owner (`confinementBoundaryProven`): a mechanism NAME without
+ * the path it was shown to deny is a promise, and a promise is exactly what
+ * this block replaces. `mechanism` is opaque — never branch on its value, and
+ * never infer it from the platform.
+ */
+export const ControlCandidateConfinement = z
+  .object({
+    proven: z
+      .boolean()
+      .describe(
+        "Whether a boundary was actually enforced for this attempt: a named mechanism AND the path it was proven to deny. The only field a consumer should branch on.",
+      ),
+    mechanism: z
+      .string()
+      .nullable()
+      .describe("Opaque label of the enforcing mechanism; null when no boundary was applied."),
+    verifiedDeniedPath: z
+      .string()
+      .nullable()
+      .describe("Path proven unreadable under the applied policy before the harness was spawned."),
+    unavailableReason: z
+      .string()
+      .nullable()
+      .describe(
+        "Why this attempt ran with NO boundary; null when one was applied. Present exactly when proven is false for a run that asked for a boundary.",
+      ),
+  })
+  .describe("Applied OS filesystem boundary for one attempt, or the stated reason there was none.");
+export type ControlCandidateConfinement = z.infer<typeof ControlCandidateConfinement>;
+
 /** Per-candidate evidence card for a race run (projected from
  * attempts/<id>/attempt.yaml + reviews/<id>.yaml + the decision winner).
  * The macOS Candidates tab renders these; SSE freshness rides the client's
@@ -112,6 +146,17 @@ export const ControlCandidate = z
       .default(null)
       .describe(
         "This candidate's ranking-scorecard axis values (from decision.ranking_scorecard); null when no arbitration ran.",
+      ),
+    /**
+     * What this attempt's harness process ACTUALLY ran inside — the caller's
+     * copy of the applied fact, so an external orchestrator that asked for a
+     * confined run reads a field instead of digging through run artifacts.
+     * Null for a run that never asked for a boundary.
+     */
+    confinement: ControlCandidateConfinement.nullable()
+      .default(null)
+      .describe(
+        "Applied OS boundary for this attempt; null when the run never asked for one (every non-delegated run).",
       ),
   })
   .describe(
