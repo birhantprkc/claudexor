@@ -224,6 +224,27 @@ import ClaudexorKit
             blocksReplacement: blocksReplacement)
     }
 
+    /// The card renders for every managed harness now that a terminal-mode
+    /// claude/cursor login discloses its `oauth_url` through the same overlay.
+    /// While it named OpenAI unconditionally it told a user signing in to
+    /// Anthropic to sign in to OpenAI, and offered a codex-only escape hatch
+    /// that could not run — a card that renders nothing is a missing feature,
+    /// a card that states the wrong vendor is a false statement on screen.
+    @Test func loginDisclosureCardNamesItsOwnHarnessAndHidesTheCodexOnlyAction() {
+        let codex = AuthSheetPresentation.loginDisclosureCard(harness: .codex)
+        #expect(codex.vendor == "Codex")
+        #expect(codex.offersBrowserCallback)
+
+        for (harness, vendor) in [(SetupHarness.claude, "Claude"), (.cursor, "Cursor")] {
+            let card = AuthSheetPresentation.loginDisclosureCard(harness: harness)
+            #expect(card.vendor == vendor)
+            #expect(card.vendor != "OpenAI")
+            // The browser-callback flow is a codex app-server selector; there
+            // is nothing for a terminal login to switch to.
+            #expect(!card.offersBrowserCallback)
+        }
+    }
+
     @Test func namedProfileNeverExposesTheGlobalFallbackKeyPanel() {
         #expect(AuthSheetPresentation.showsGlobalApiKeyPanel(
             profileId: nil, secretName: "anthropic"))

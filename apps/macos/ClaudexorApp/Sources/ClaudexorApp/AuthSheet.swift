@@ -131,13 +131,15 @@ struct AuthSheet: View {
                             recheck: { Task { await recheck() } }
                         )
                     }
-                    if let disclosure = lifecycle.deviceCode, job?.phase == .awaitingUser {
+                    if let disclosure = lifecycle.deviceCode, let job, job.phase == .awaitingUser {
+                        // Keyed on the JOB's harness, never the sheet's target.
+                        let card = AuthSheetPresentation.loginDisclosureCard(harness: job.harness)
                         AuthSheetDeviceCodeCard(
-                            disclosure: disclosure,
-                            waiting: true,
+                            disclosure: disclosure, vendor: card.vendor, waiting: true,
                             actionInFlight: actionInFlight,
                             cancel: { Task { await cancelJob() } },
-                            useBrowserCallback: { Task { await switchToBrowserCallback() } }
+                            useBrowserCallback: card.offersBrowserCallback
+                                ? { Task { await switchToBrowserCallback() } } : nil
                         )
                     }
                     if let job { setupJobPanel(job) }

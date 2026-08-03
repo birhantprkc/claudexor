@@ -39,6 +39,27 @@ enum AuthSheetPresentation {
         profileId == nil && secretName != nil
     }
 
+    /// What the login-disclosure card may SAY and OFFER. The card is not
+    /// codex-only — a terminal-mode claude/cursor login discloses its captured
+    /// `oauth_url` through the same overlay — so both answers come from the
+    /// harness the JOB is for, never from a hardcoded vendor.
+    struct LoginDisclosureCard: Equatable {
+        /// Shared `HarnessFamily` vocabulary; falls back to the harness id
+        /// rather than inventing prose for a family with no label.
+        let vendor: String
+        /// The browser-callback opt-in is a codex app-server flow selector
+        /// (`SetupCodexLoginFlow`). Elsewhere there is nothing to switch to,
+        /// and the card hides it — an action that cannot work is not a thing
+        /// to explain.
+        let offersBrowserCallback: Bool
+    }
+
+    static func loginDisclosureCard(harness: SetupHarness) -> LoginDisclosureCard {
+        LoginDisclosureCard(
+            vendor: HarnessFamily(rawValue: harness.rawValue).label,
+            offersBrowserCallback: harness == .codex)
+    }
+
     /// D-17 audit point 8: the codex device-code `not_supported` terminal state
     /// is NOT a dead-end message. It offers a first-class native action.
     enum DeviceAuthFallback: Equatable {

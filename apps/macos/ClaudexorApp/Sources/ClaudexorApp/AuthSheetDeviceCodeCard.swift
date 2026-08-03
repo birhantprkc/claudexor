@@ -3,22 +3,32 @@ import AppKit
 import AuthenticationServices
 import ClaudexorKit
 
-// MARK: - D-17 device-code AuthSheet card
+// MARK: - D-17 login disclosure AuthSheet card
 //
-// The no-Terminal codex login surface: a large one-time code with an explicit
-// Copy button (never auto-copied), an "Open private sign-in" button that starts
-// an ephemeral ASWebAuthenticationSession, a Waiting state, Cancel, and an
-// explicit browser-callback opt-in for orgs that disable device-code login
-// (no silent fallback). Pure rendering — every mutation is a caller closure.
+// The no-Terminal login surface: a large one-time code with an explicit Copy
+// button (never auto-copied), an "Open private sign-in" button that starts an
+// ephemeral ASWebAuthenticationSession, a Waiting state, and Cancel. Codex's
+// app-server flows also carry an explicit browser-callback opt-in for orgs that
+// disable device-code login (no silent fallback). Pure rendering — every
+// mutation is a caller closure.
+//
+// This card is NOT codex-only: a terminal-mode claude/cursor login discloses
+// its captured `oauth_url` through the same overlay, so every line naming a
+// vendor reads it from the job instead of asserting OpenAI.
 
 struct AuthSheetDeviceCodeCard: View {
     let disclosure: SetupDeviceCodeDisclosure
+    /// Display name of the harness THIS login is for, from the shared
+    /// `HarnessFamily.label` vocabulary (harness id when there is no label).
+    let vendor: String
     let waiting: Bool
     let actionInFlight: Bool
     let cancel: () -> Void
     /// Explicit opt-in for a device-auth-disabled org — switches to the
-    /// app-server browser-callback flow. Never invoked silently.
-    let useBrowserCallback: () -> Void
+    /// app-server browser-callback flow. Never invoked silently. nil where the
+    /// action does not exist (it is codex-only), and then it is not offered at
+    /// all: an action that cannot work is not a thing to explain.
+    let useBrowserCallback: (() -> Void)?
 
     @State private var session = EphemeralSignInSession()
     @State private var copied = false
@@ -26,10 +36,10 @@ struct AuthSheetDeviceCodeCard: View {
     var body: some View {
         Panel {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                SectionLabel("Sign in to OpenAI", systemImage: "person.badge.key")
+                SectionLabel("Sign in to \(vendor)", systemImage: "person.badge.key")
 
                 if disclosure.hasUserCode {
-                    Text("Enter this one-time code on the OpenAI sign-in page:")
+                    Text("Enter this one-time code on the \(vendor) sign-in page:")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack(spacing: Theme.Spacing.md) {
                         Text(disclosure.userCode)
@@ -62,7 +72,7 @@ struct AuthSheetDeviceCodeCard: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accentSolid)
-                    .help("Open the OpenAI sign-in page in a private browser session.")
+                    .help("Open the \(vendor) sign-in page in a private browser session.")
 
                     if disclosure.hasUserCode {
                         // A plain fallback to the default browser for anyone who
@@ -81,13 +91,13 @@ struct AuthSheetDeviceCodeCard: View {
 
                 // Honest, NON-GUARANTEED wording (D-17): Safari honors the
                 // request; another default browser may not.
-                Text("Claudexor requested a private browser session. Completing the sign-in in a window that is not signed into another OpenAI account reduces the risk of signing out other OpenAI apps on this Mac — OpenAI may still invalidate sibling sessions on its side.")
+                Text("Claudexor requested a private browser session. Completing the sign-in in a window that is not signed into another \(vendor) account reduces the risk of signing out other \(vendor) apps on this Mac — \(vendor) may still invalidate sibling sessions on its side.")
                     .font(.caption2).foregroundStyle(.secondary)
 
                 if waiting {
                     HStack(spacing: Theme.Spacing.sm) {
                         ProgressView().controlSize(.small)
-                        Text("Waiting for OpenAI…").font(.caption).foregroundStyle(.secondary)
+                        Text("Waiting for \(vendor)…").font(.caption).foregroundStyle(.secondary)
                     }
                 }
 
@@ -103,16 +113,19 @@ struct AuthSheetDeviceCodeCard: View {
                     Spacer(minLength: 0)
 
                     // Explicit opt-in, never a silent fallback: for orgs that
-                    // disable device-code login (ChatGPT → Security).
-                    Button {
-                        session.cancel()
-                        useBrowserCallback()
-                    } label: {
-                        Label("Use browser sign-in instead", systemImage: "arrow.triangle.2.circlepath")
+                    // disable device-code login (ChatGPT → Security). Absent
+                    // entirely on a login that has no such flow to switch to.
+                    if let useBrowserCallback {
+                        Button {
+                            session.cancel()
+                            useBrowserCallback()
+                        } label: {
+                            Label("Use browser sign-in instead", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .buttonStyle(.link)
+                        .disabled(actionInFlight)
+                        .help("If your organization disabled device-code login, switch to the browser-callback sign-in.")
                     }
-                    .buttonStyle(.link)
-                    .disabled(actionInFlight)
-                    .help("If your organization disabled device-code login, switch to the browser-callback sign-in.")
                 }
             }
         }
@@ -122,11 +135,12 @@ struct AuthSheetDeviceCodeCard: View {
     }
 }
 
-/// Wraps a single ephemeral ASWebAuthenticationSession pointed at the OpenAI
-/// verification URL. There is no app callback for the device-code flow — the
-/// app-server reports completion — so the session is opened for isolation and
-/// cancelled when the login ends. prefersEphemeralWebBrowserSession requests a
-/// private session (honored by Safari; not guaranteed for every default browser).
+/// Wraps a single ephemeral ASWebAuthenticationSession pointed at the vendor's
+/// verification URL. There is no app callback for these flows — the app-server
+/// (or the terminal login itself) reports completion — so the session is opened
+/// for isolation and cancelled when the login ends.
+/// prefersEphemeralWebBrowserSession requests a private session (honored by
+/// Safari; not guaranteed for every default browser).
 @MainActor
 final class EphemeralSignInSession: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
     private var session: ASWebAuthenticationSession?
