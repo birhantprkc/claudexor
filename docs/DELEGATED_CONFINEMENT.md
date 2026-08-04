@@ -3,8 +3,7 @@
 Status: **enforced on macOS (Seatbelt). Everywhere else there is NO kernel boundary — by
 decision, not by omission — and the run proceeds on the scoped `HOME` with the absence
 disclosed.** Owner: `packages/core/src/confinement.ts` (mechanism) and
-`packages/orchestrator/src/delegatedHome.ts` (per-attempt decision + applied facts). This
-document is the reason the code exists; change it in the same commit as the code.
+`packages/orchestrator/src/delegatedHome.ts` (per-attempt decision + applied facts).
 
 ## 1. The actor
 
@@ -49,8 +48,8 @@ A run with `mode: agent`, `execution.isolation: live`, `access: workspace_write`
 registered project, on the operator's own daemon, reported:
 
 ```
-HOME=/Users/anton
-CODEX_HOME=/Users/anton/.claudexor/v3/native/codex
+HOME=<operator-home>
+CODEX_HOME=<operator-home>/.claudexor/v3/native/codex
 TOKEN_READABLE=yes
 TOKEN_BYTES=37
 CANARY=CXI-CANARY-…                      (a file planted in ~/.claudexor/v3/daemon/)
@@ -64,7 +63,7 @@ where the control API listens.
 ## 5. Why a scoped `HOME` is not the fix
 
 `HOME=<scoped>` is a CONVENTION. It redirects `~`-relative lookups; it says nothing about
-`/Users/anton/.claudexor/v3/daemon/token`. Every line of the reproduction above used an
+`<operator-home>/.claudexor/v3/daemon/token`. Every line of the reproduction above used an
 absolute path. The scoped home remains valuable — it keeps vendor state out of the operator's
 home and gives the confinement a place to allow — but it is not a boundary and must never be
 reported as one.
@@ -117,9 +116,12 @@ sandbox, so an outer boundary and the harness's own sandbox are mutually exclusi
 
 Therefore, when Claudexor applies the boundary it must also tell the adapter to stand its own
 sandbox down. That instruction already exists as a first-class access profile:
-`external_sandbox_full` — "full access inside an external sandbox". The engine does not branch
+`external_sandbox_full` — the harness stands its own sandbox down. The engine does not branch
 on a harness name to say this; it states the access profile, and each adapter already maps that
-profile onto its own switch.
+profile onto its own switch. The profile itself carries NO boundary: requested directly on a
+non-delegated run it is honestly unrestricted — the engine applies its own OS boundary only on
+the delegated path described here — and, unlike `full`, it is not behind the per-repo trust
+allow.
 
 ## 7. The policy
 

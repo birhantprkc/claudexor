@@ -28,7 +28,7 @@ opt-in policy that rotates a spent account out of the way on typed vendor
 limits only. Everything runs on your machine, files are the source of truth,
 and there is no telemetry.
 
-Current status: **v3.2**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.3**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 

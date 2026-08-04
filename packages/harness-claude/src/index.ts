@@ -431,7 +431,7 @@ export function createClaudeAdapter(deps: Partial<ClaudeRuntimeDeps> = {}): Harn
           },
         },
         auth_modes: authModes,
-        // external_sandbox_full: engine-provided sandbox, maps to bypassPermissions.
+        // external_sandbox_full: bypassPermissions; engine boundary exists only on delegated runs — direct requests are unrestricted.
         access_profiles_supported: [
           ...(readonlyProfile.supported ? ["readonly" as const] : []),
           ...(["workspace_write", "full", "external_sandbox_full", "inherit_native"] as const),

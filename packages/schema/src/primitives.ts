@@ -38,7 +38,7 @@ export type RiskLevel = z.infer<typeof RiskLevel>;
 export const AccessProfile = z
   .enum(["readonly", "workspace_write", "full", "external_sandbox_full", "inherit_native"])
   .describe(
-    "Filesystem/command access profile for a run: readonly (no writes), workspace_write (writes inside the workspace only), full (unrestricted; requires the per-repo trust allow), external_sandbox_full (full access inside an external sandbox), inherit_native (defer to the harness's own native sandbox settings).",
+    "Filesystem/command access profile for a run: readonly (no writes), workspace_write (writes inside the workspace only), full (unrestricted; requires the per-repo trust allow), external_sandbox_full (the harness stands its native sandbox down; the engine applies its own OS boundary only on delegated runs — requested directly this is unrestricted, and not behind the trust allow), inherit_native (defer to the harness's own native sandbox settings).",
   );
 export type AccessProfile = z.infer<typeof AccessProfile>;
 

@@ -79,7 +79,8 @@ import {
 } from "./auth.js";
 
 /** Sandbox mode per access profile; null = native. `external_sandbox_full`
- * means CLAUDEXOR owns the sandbox, so codex's own is off, like `full`. */
+ * stands codex's own sandbox down like `full`; the engine applies its own OS
+ * boundary only on delegated runs — requested directly it is unrestricted. */
 function sandboxMode(access: AccessProfile): string | null {
   switch (access) {
     case "readonly":

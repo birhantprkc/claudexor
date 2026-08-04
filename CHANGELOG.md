@@ -35,9 +35,10 @@ Release history for Claudexor. The current version is declared in the root
   the sandbox) plus launch-fault discrimination on stderr now separate a real
   deny from a launcher failure. Delegated mutating runs became routable on the
   cursor and opencode adapters, which refused `external_sandbox_full` — the
-  profile that means the engine proved and applied its own OS boundary, so the
-  adapter's weaker sandbox stands down — while bare `full`, which claims no
-  boundary at all, is still refused. The release itself now reaches the channel
+  profile that tells the adapter to stand its weaker sandbox down; the engine
+  applies and proves its own OS boundary on the delegated path (requested
+  directly the profile carries no engine boundary and runs unrestricted) —
+  while bare `full`, which claims no boundary at all, is still refused. The release itself now reaches the channel
   it is consumed on: publishing moved only `latest`, and nothing in the repo had
   ever moved `next`, so `claudexor@next` stayed stranded on 3.3.7-rc.0 while
   stable releases came and went; the publisher now moves `next` to the published

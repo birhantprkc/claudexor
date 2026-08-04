@@ -483,9 +483,10 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
           ...(nativeAuthed ? ["local_session" as const] : []),
           ...(apiKey ? ["api_key" as const] : []),
         ],
-        // external_sandbox_full: engine-provided sandbox; cursor's own stands
-        // down (--force --sandbox disabled), mirroring codex/claude. Bare
-        // `full` stays undeclared/refused (no boundary, not proven).
+        // external_sandbox_full: cursor's own sandbox stands down (--force
+        // --sandbox disabled), mirroring codex/claude; the engine applies its
+        // own OS boundary only on delegated runs. Bare `full` stays
+        // undeclared/refused (no boundary, not proven).
         access_profiles_supported: [
           "readonly",
           "workspace_write",
@@ -684,18 +685,18 @@ async function* runCursor(
   deps: CursorRuntimeDeps,
 ): AsyncIterable<HarnessEvent> {
   // Bare `full` claims NO boundary at all and stays refused (unproven).
-  // `external_sandbox_full` is different by definition: the ENGINE proved and
-  // applied its own OS boundary around this child, so cursor's weaker sandbox
-  // stands down (`--force --sandbox disabled` via accessArgs) and the external
-  // boundary is THE boundary — the same mapping codex (danger-full-access) and
-  // claude (bypassPermissions) already implement for this profile.
+  // `external_sandbox_full` stands cursor's weaker sandbox down (`--force
+  // --sandbox disabled` via accessArgs) — the same mapping codex
+  // (danger-full-access) and claude (bypassPermissions) implement. The engine
+  // applies its OWN OS boundary only on delegated runs; requested directly,
+  // this profile runs unrestricted (and is not behind the trust allow).
   if (spec.access === "full") {
     yield {
       type: "error",
       session_id: spec.session_id,
       ts: nowIso(),
       error:
-        "cursor full access is not conformance-proven; use workspace_write, or external_sandbox_full when Claudexor provides the boundary",
+        "cursor full access is not conformance-proven; use workspace_write, or external_sandbox_full (cursor's sandbox stands down; the engine applies its own boundary only on delegated runs — otherwise unrestricted)",
     };
     yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
     return;

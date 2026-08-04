@@ -181,7 +181,11 @@ at every wire boundary.
 - `packages/control-api`: loopback HTTP/SSE facade over daemon and run artifacts.
 - `packages/journal`: the checksummed append-only journal primitive
   (frame codec, fsync ACK discipline) that the daemon's durable state rides on.
-- `packages/daemon`: durable local Unix-socket queue and journal projections for commands, projects, and threads.
+  The fsync-before-ACK discipline is kernel-proven on POSIX only: win32
+  directory-entry flushes are tolerated to fail (`fsyncDirectory`), so a Windows
+  crash can resurrect a completed append's intent file and recovery will then
+  discard that acknowledged frame (disclosed, loud in the journal record).
+- `packages/daemon`: durable local queue (Unix socket on POSIX, named pipe on win32) and journal projections for commands, projects, and threads.
 - `packages/cli`: thin command surface plus local host-integration lifecycle
   (`claudexor plugin`) for generated Claude Code/Codex/Cursor/OpenCode
   skill/MCP artifacts and command artifacts where hosts support them. Plugin
@@ -1354,7 +1358,9 @@ seeded-credential home forever. A second daemon refuses to start while a live da
 holds the socket — checked BEFORE crash GC so a racing start can never reap
 the live daemon's children. `claudexor daemon rotate-token` rotates the local
 auth token (refused while the daemon is live; takes effect on next start),
-and the daemon socket is `chmod 0600`.
+and on POSIX the daemon socket is `chmod 0600` (the win32 named pipe is not a
+filesystem entry, so no chmod applies there; the bearer token remains the auth
+gate on every platform).
 
 ### Interactive runs (waiting_on_user)
 
@@ -1620,8 +1626,12 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    exact postimage, delivery returns `applied` with no mutation instead of a
    `patch does not apply` failure; a diverged target still refuses as a
    conflict, never a false success.
-2. **In-place thread turns** — a write turn executes directly in the thread's
-   execution tree. Fences: a pre-turn snapshot is taken at turn start and a
+2. **In-place turns (thread turns and thread-less one-shot runs)** — a write
+   turn executes directly in the thread's execution tree, and the thread-less
+   one-shot surface (`POST /v2/runs` with `execution.isolation: "live"`,
+   agent-mode only; `execution.delegated` external-orchestrator runs ride this
+   same shape) executes directly in the live project tree. Fences (the same
+   machinery for both): a pre-turn snapshot is taken at turn/run start and a
    post-turn snapshot at turn end (the per-turn diff base, so prior dirty state
    is never attributed to the turn), and the server-owned `revert_run` decision
    uses an external content-addressed pre/post anchor (overlapping later user
