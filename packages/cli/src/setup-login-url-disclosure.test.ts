@@ -145,6 +145,23 @@ describe("extractOAuthUrl", () => {
     expect(extractOAuthUrl(text)).toBe("https://cursor.com/loginDeepControl?token=t1");
   });
 
+  it("a buffer-end URL is provisional: published, then superseded by the full capture (FF-2)", () => {
+    const detector = createOAuthUrlDetector();
+    // The chunk boundary cuts the URL right after a signature-bearing prefix.
+    expect(detector.push(Buffer.from("Visit https://claude.ai/oauth"))).toBe(
+      "https://claude.ai/oauth",
+    );
+    // The rest of the URL arrives: the longer capture supersedes the prefix.
+    expect(detector.push(Buffer.from("/authorize?client=cli&state=s1"))).toBe(
+      "https://claude.ai/oauth/authorize?client=cli&state=s1",
+    );
+    // Output continuing past the URL finalizes it without re-publishing.
+    expect(detector.push(Buffer.from(" — press enter\n"))).toBeNull();
+    expect(
+      detector.push(Buffer.from("again https://claude.ai/oauth/authorize?state=s2")),
+    ).toBeNull();
+  });
+
   it("detector catches a URL split across chunks and reports exactly once", () => {
     const detector = createOAuthUrlDetector();
     expect(detector.push(Buffer.from("Visit https://auth.openai.com/oa"))).toBeNull();

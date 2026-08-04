@@ -50,7 +50,7 @@ export interface StatusProjectionCacheOptions {
 
 export class StatusProjectionCache<T> {
   private value: { at: number; version: string; data: T } | null = null;
-  private inFlight: { generation: number; promise: Promise<T> } | null = null;
+  private inFlight: { generation: number; version: string; promise: Promise<T> } | null = null;
   private generation = 0;
   private readonly ttlMs: number;
   private readonly now: () => number;
@@ -79,16 +79,28 @@ export class StatusProjectionCache<T> {
     ) {
       return this.value.data;
     }
-    if (this.inFlight && this.inFlight.generation === this.generation) {
+    if (
+      this.inFlight &&
+      this.inFlight.generation === this.generation &&
+      this.inFlight.version === version
+    ) {
       return this.inFlight.promise;
     }
     const generation = this.generation;
     const entry = {
       generation,
+      version,
       promise: compute().then(
         (data) => {
-          if (this.generation === generation) {
-            this.value = { at: this.now(), version: this.versionOf(), data };
+          // Stamp with the version CAPTURED at read() entry, never re-read at
+          // completion: a config change DURING the computation must not label
+          // pre-change data as post-change (wave finding, both reviewers). A
+          // stale-versioned late completion also never clobbers a value that
+          // is current; it may still prime an empty or equally-stale slot.
+          const primeable =
+            !this.value || this.value.version === version || version === this.versionOf();
+          if (this.generation === generation && primeable) {
+            this.value = { at: this.now(), version, data };
           }
           if (this.inFlight === entry) this.inFlight = null;
           return data;

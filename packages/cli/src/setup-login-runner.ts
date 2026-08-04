@@ -110,11 +110,9 @@ export async function runSetupLoginWorker(
     return runDeviceCodeLogin(manifest, permit, { now, spawnProcess });
   }
 
-  // Device-auth capability gate (v3.0.3 S6): `--device-auth` exists only
-  // since codex 0.46.0. Probe the vendor's own `login --help` BEFORE spawning
-  // so an old CLI yields a typed unsupported outcome instead of an opaque
-  // argv error. The probe fails OPEN — a broken probe falls through to the
-  // real spawn, whose own failure carries the diagnostics.
+  // `--device-auth` exists only since codex 0.46.0: probe `login --help`
+  // first so an old CLI yields a typed unsupported outcome. Fails OPEN — a
+  // broken probe falls through to the real spawn and its own diagnostics.
   if (manifest.args.includes("--device-auth")) {
     const probe = await probeLoginHelp(
       manifest.binary,
@@ -139,19 +137,10 @@ export async function runSetupLoginWorker(
   const holdLeaderForEscalation = () => undefined;
   process.on("SIGTERM", holdLeaderForEscalation);
   process.on("SIGINT", holdLeaderForEscalation);
-  // Tee the codex login's output (v3.0.3 S6): the user still sees the URL +
-  // one-time code in Terminal, while a bounded ANSI-stripped tail rides the
-  // result so the daemon can classify failures (e.g. the ChatGPT
-  // "Allow device code login" toggle being off) instead of a bare exit code.
-  //
-  // A manifest carrying deviceCodePath tees for a second reason: the runner
-  // captures the vendor login's OAuth URL from that same output and writes it
-  // as a STRUCTURED `oauth_url` disclosure sidecar — the codex device-code
-  // card shape, URL-only — so a UI can render "open this link" without a
-  // terminal. stdin stays inherited and every byte is still forwarded, so the
-  // vendor CLI completes its flow exactly as before; the one honest residual
-  // is that the CLI sees a pipe (not a TTY) on stdout, the same tradeoff the
-  // codex tail tee already made.
+  // Tee the login output: a bounded ANSI-stripped tail rides the result for
+  // failure classification, and (with deviceCodePath) the runner captures the
+  // vendor's OAuth URL into a structured `oauth_url` disclosure sidecar — a
+  // UI renders "open this link"; the CLI sees a pipe (codex tail-tee tradeoff).
   const teeOutput = manifest.harness === "codex" || manifest.deviceCodePath !== undefined;
   const tail = createTailBuffer();
   const urlDetector = createOAuthUrlDetector();
@@ -372,10 +361,9 @@ const OAUTH_URL_SIGNATURE_RE =
   /(oauth|authori[sz]e|login|sign[-_]?in|device|sso|verification|callback)/i;
 
 /**
- * First OAuth/sign-in URL in a chunk of vendor CLI output, or null. Terminal
- * escapes are stripped FIRST so a color reset cannot glue itself onto the URL;
- * trailing prose punctuation is trimmed. Only URLs carrying a sign-in-shaped
- * signature qualify — a docs link in a banner must not become "the" login URL.
+ * First sign-in-shaped URL in vendor CLI output, or null. Terminal escapes are
+ * stripped first; trailing prose punctuation is trimmed; a docs link in a
+ * banner never qualifies.
  */
 export function extractOAuthUrl(text: string): string | null {
   const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
@@ -387,20 +375,30 @@ export function extractOAuthUrl(text: string): string | null {
 }
 
 /**
- * Stateful per-login detector: feeds chunks into a bounded window and reports
- * the first qualifying URL exactly once (a login prints its URL once; re-prints
- * and later noise must not rewrite the disclosure).
+ * Per-login detector. A match ending at the window's very end may be cut by a
+ * chunk boundary (wave finding): it is published PROVISIONALLY, superseded by
+ * a longer capture, and FINAL only once output continues past its end.
  */
 export function createOAuthUrlDetector(): { push(chunk: Buffer): string | null } {
   let window = "";
-  let found = false;
+  let published: string | null = null;
+  let finalized = false;
   return {
     push(chunk) {
-      if (found) return null;
+      if (finalized) return null;
       window = (window + chunk.toString("utf8")).slice(-OAUTH_URL_SCAN_WINDOW);
-      const url = extractOAuthUrl(window);
-      if (!url) return null;
-      found = true;
+      const plain = window.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
+      const match = [...plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)].find((m) =>
+        OAUTH_URL_SIGNATURE_RE.test(m[0]),
+      );
+      if (!match) return null;
+      const url = match[0].replace(/[.,;:!?]+$/, "");
+      if ((match.index ?? 0) + match[0].length < plain.length) {
+        finalized = true;
+        return url === published ? null : url;
+      }
+      if (published !== null && url.length <= published.length) return null;
+      published = url;
       return url;
     },
   };

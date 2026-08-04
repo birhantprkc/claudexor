@@ -73,6 +73,29 @@ describe("status projection cache (daemon poll-surface load fix, 2026-08-04)", (
     expect(await cache.read(compute)).toBe(2);
   });
 
+  it("a version change during an in-flight compute never labels pre-change data as current (FF-1)", async () => {
+    let version = "v1";
+    let computes = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const cache = new StatusProjectionCache<string>({ versionOf: () => version });
+    const slow = async () => {
+      computes += 1;
+      await gate;
+      return `slow-${computes}`;
+    };
+    const first = cache.read(slow);
+    version = "v2"; // the config write lands mid-computation
+    // A reader arriving after the change must not join the v1 in-flight.
+    const second = cache.read(async () => "fresh-v2");
+    release();
+    expect(await first).toBe("slow-1");
+    expect(await second).toBe("fresh-v2");
+    // The v1 result was stamped with its CAPTURED version, so a v2 read never
+    // serves it as current.
+    expect(await cache.read(async () => "recomputed-v2")).toBe("fresh-v2");
+  });
+
   it("an invalidation during an in-flight compute keeps that result out of the cache", async () => {
     let computes = 0;
     let release!: () => void;
