@@ -56,6 +56,7 @@ export const CODEX_EFFORT_SNAPSHOT: CodexEffortCatalog = {
       levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
       default: "medium",
     },
+    "codex-auto-review": { levels: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
     "gpt-5.6-luna": { levels: ["low", "medium", "high", "xhigh", "max"], default: "medium" },
     "gpt-5.5": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },
     "gpt-5.4": { levels: ["low", "medium", "high", "xhigh"], default: "medium" },

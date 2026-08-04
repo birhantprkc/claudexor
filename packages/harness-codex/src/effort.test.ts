@@ -229,6 +229,7 @@ describe("codex effort probe degrades gracefully", () => {
     // `isDefault: true` rode gpt-5.6-sol in that capture (live-verified 0.144.1).
     expect(CODEX_EFFORT_SNAPSHOT.defaultModel).toBe("gpt-5.6-sol");
     expect(Object.keys(CODEX_EFFORT_SNAPSHOT.models).sort()).toEqual([
+      "codex-auto-review",
       "gpt-5.3-codex-spark",
       "gpt-5.4",
       "gpt-5.4-mini",
