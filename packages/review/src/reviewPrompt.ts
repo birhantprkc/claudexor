@@ -110,7 +110,7 @@ export function buildReviewPrompt(
       ]
     : ["Output ONLY a JSON array of findings."];
   const findingContract = sealed
-    ? `Each finding: {"severity":"BLOCK|FIX_FIRST|WARN|NIT|OUT_OF_SCOPE|INSUFFICIENT_EVIDENCE|NEEDS_HUMAN","category":"correctness|regression|security|performance|maintainability|test_gap|spec_gap|deploy|architecture|ux","claim":"...","evidence":{"files":[{"path":"...","lines":"..."}],"diff_hunks":[],"commands":[],"logs":[]},"proposed_fix":"..."}. All four evidence arrays are required and may be empty.`
+    ? `Each finding: {"severity":"BLOCK|FIX_FIRST|WARN|NIT|OUT_OF_SCOPE|INSUFFICIENT_EVIDENCE|NEEDS_HUMAN","category":"correctness|regression|security|performance|maintainability|test_gap|spec_gap|deploy|architecture|ux","claim":"...","evidence":{"files":[{"path":"...","lines":"..."}],"diff_hunks":["..."],"commands":[{"command":"..."}],"logs":[{"path":"..."}]},"proposed_fix":"..."}. All four evidence arrays are required and may be empty. Item shapes are exact: files entries and logs entries are objects with a "path", commands entries are objects with a "command", diff_hunks entries are strings — a bare string where an object is shown makes the finding malformed and voids the whole envelope.`
     : `Each finding: {"severity":"BLOCK|FIX_FIRST|WARN|NIT|OUT_OF_SCOPE|INSUFFICIENT_EVIDENCE|NEEDS_HUMAN","category":"correctness|regression|security|performance|maintainability|test_gap|spec_gap|deploy|architecture|ux","claim":"...","evidence":{"files":[{"path":"...","lines":"..."}]},"proposed_fix":"..."}.`;
   return [
     "You are an adversarial code reviewer.",
