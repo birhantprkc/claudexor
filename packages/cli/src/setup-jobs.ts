@@ -63,6 +63,10 @@ import {
 } from "./setup-client-pty.js";
 import { persistSetupLoginPermit, setupLoginDeadlines } from "./setup-login-permit.js";
 
+const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
+  codex: defaultNativeCodexHome,
+  claude: defaultNativeClaudeConfigDir,
+};
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
 type NativeLoginSpec = NativeLogin.NativeLoginSpec;
@@ -757,13 +761,13 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   ): Promise<ControlSetupJob> {
     const job = store.status(jobId);
     if (TERMINAL_SETUP_STATES.has(job.state)) return job;
+    const stateName = reason === "timed_out" ? "timed_out" : "cancelled";
     const result = matchingResult(jobId);
     if (result) persistNativeCommandOutcome(jobId, result);
     else
       update(jobId, { phase: "cancelling", message: `Stopping ${job.harness} login (${reason}).` });
     verificationControllers.get(jobId)?.abort(new Error(`native login ${reason}`));
     if (result) {
-      const stateName = reason === "timed_out" ? "timed_out" : "cancelled";
       return finish(jobId, stateName, reason, `${job.harness} login ${reason}.`, {
         exitCode: result.exitCode,
         signal: result.signal,
@@ -771,7 +775,6 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     }
     const group = processGroupFromJob(job);
     if (!group) {
-      const stateName = reason === "timed_out" ? "timed_out" : "cancelled";
       return finish(
         jobId,
         stateName,
@@ -779,38 +782,20 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         `${job.harness} login ${reason} before execution authorization.`,
       );
     }
+    const unconfirmed = (detail: string) =>
+      finish(jobId, "failed", "termination_unconfirmed", `${job.harness} login ${detail}`);
     const alreadyEmpty = processGroups.probeEmpty(group);
     if (alreadyEmpty.status !== "empty") {
       const term = processGroups.signal(group, "SIGTERM");
-      if (term.status === "unknown") {
-        return finish(
-          jobId,
-          "failed",
-          "termination_unconfirmed",
-          `${job.harness} login TERM was refused: ${term.reason}.`,
-        );
-      }
+      if (term.status === "unknown") return unconfirmed(`TERM was refused: ${term.reason}.`);
       if (!(await waitForGroupEmpty(group, terminationGraceMs))) {
         const kill = processGroups.signal(group, "SIGKILL");
-        if (kill.status === "unknown") {
-          return finish(
-            jobId,
-            "failed",
-            "termination_unconfirmed",
-            `${job.harness} login KILL was refused: ${kill.reason}.`,
-          );
-        }
+        if (kill.status === "unknown") return unconfirmed(`KILL was refused: ${kill.reason}.`);
       }
       if (!(await waitForGroupEmpty(group, terminationGraceMs))) {
-        return finish(
-          jobId,
-          "failed",
-          "termination_unconfirmed",
-          `${job.harness} login process group remained nonempty after SIGKILL.`,
-        );
+        return unconfirmed("process group remained nonempty after SIGKILL.");
       }
     }
-    const stateName = reason === "timed_out" ? "timed_out" : "cancelled";
     return finish(jobId, stateName, reason, `${job.harness} login ${reason}.`);
   }
 
@@ -1052,31 +1037,17 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         launcherTimeoutMs,
         job.transport,
       );
-      // The vendor-owned store this login must land in, resolved by the DAEMON
-      // (whose CLAUDEXOR_CONFIG_DIR is authoritative) and sealed into the
-      // manifest: the registered profile store on profile jobs, the daemon's
-      // own default native store otherwise. Hit live 2026-08-04: a DEFAULT
-      // job left this absent and the detached worker re-derived the home from
-      // its own bootstrap env, which drops CLAUDEXOR_CONFIG_DIR — credentials
-      // landed in the GLOBAL default store while verification polled the
-      // daemon's, so a successful login reported "not ready before the
-      // verification deadline". The field stays optional in the schema, so
-      // pre-upgrade sealed manifests keep their digests valid.
+      // The store this login must land in, resolved by the DAEMON (whose
+      // CLAUDEXOR_CONFIG_DIR is authoritative) and sealed into the manifest
+      // for DEFAULT jobs too — the detached worker's env drops the config
+      // root, so re-deriving there split login and verification stores (hit
+      // live 2026-08-04). Schema-optional: pre-upgrade digests stay valid.
       let targetConfigDir = profileConfigDir;
-      if (!targetConfigDir) {
-        try {
-          targetConfigDir =
-            job.harness === "codex"
-              ? defaultNativeCodexHome()
-              : job.harness === "claude"
-                ? defaultNativeClaudeConfigDir()
-                : undefined;
-        } catch {
-          // A misconfigured CLAUDEXOR_*_NATIVE_* override (outside the owned
-          // root) fails the containment guard. Seal nothing — the runner's own
-          // guard reports the same misconfiguration loudly at spawn, exactly
-          // as before this field covered the default lane.
-        }
+      try {
+        targetConfigDir ??= DEFAULT_STORE_OF[job.harness]?.();
+      } catch {
+        // Misconfigured native-dir override: seal nothing — the runner's own
+        // containment guard reports it loudly at spawn, exactly as before.
       }
       const manifest = sealLoginManifest({
         version: SETUP_LOGIN_PROTOCOL_VERSION,
@@ -1290,14 +1261,11 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       supervisor.assertCreateAllowed();
       const jobs = store.list({ harness });
       let active = jobs.findLast((job) => ACTIVE_SETUP_STATES.has(job.state));
-      // A client_pty job that no client ever attached (no runner state on
-      // disk) is an ORPHAN: there is no living login to protect, only a stale
-      // reservation that would otherwise conflict-refuse every retry until
-      // the 15-minute login deadline. Hit live 2026-08-04: the UI lost the
-      // attach command to a daemon ReadTimeout, and the orphan then 409ed
-      // each new attempt. A new create SUPERSEDES the orphan — cancel it and
-      // proceed. A job with observed runner state keeps the full conflict
-      // discipline below: its client is (or was) real.
+      // A client_pty job no client ever attached (no runner state on disk) is
+      // an ORPHAN — no living login to protect, only a stale reservation that
+      // conflict-refused retries for the whole login window when the UI lost
+      // the attach command (hit live 2026-08-04). A new create supersedes it;
+      // a job with observed runner state keeps the full conflict discipline.
       if (
         active &&
         active.transport === "client_pty" &&
@@ -1307,7 +1275,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           active.jobId,
           "cancelled",
           "cancelled_by_user",
-          `${active.harness} login superseded by a new login request before any client attached.`,
+          `${active.harness} login superseded before any client attached.`,
         );
         active = undefined;
       }
