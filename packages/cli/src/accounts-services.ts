@@ -102,8 +102,9 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
       ]);
       const quota = fencedQuota.response;
       const out = withVendorVerification(probed, quota);
-      // The explicit refresh proved the live state — re-prime the poll cache
-      // with a projection derived from the same probes' moment.
+      // The explicit refresh proved the live state — drop the stale poll
+      // cache so the next ordinary poll recomputes from it (re-priming with a
+      // snapshot-derived projection was explicitly declined, wave-3 decision).
       pollCache.invalidate();
       return {
         profiles: out,

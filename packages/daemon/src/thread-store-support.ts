@@ -6,6 +6,7 @@ import {
   ThreadTurn as ThreadTurnSchema,
 } from "@claudexor/schema";
 import { hashJson } from "@claudexor/util";
+import { idempotencyWireProjection } from "./idempotency-wire-projection.js";
 import type { CreateThreadInput, CreateTurnInput } from "./threads.js";
 
 /**
@@ -87,7 +88,7 @@ export function threadCreationIdempotency(
       operation: "thread.create",
       key: input.key,
     }),
-    requestDigest: hashJson(input.request),
+    requestDigest: hashJson(idempotencyWireProjection(input.request)),
     threadId: "",
   };
 }
@@ -106,7 +107,7 @@ export function turnIdempotency(
       operation: "thread.turn.create",
       key: input.key,
     }),
-    requestDigest: hashJson(input.request),
+    requestDigest: hashJson(idempotencyWireProjection(input.request)),
     turnId: "",
   };
 }

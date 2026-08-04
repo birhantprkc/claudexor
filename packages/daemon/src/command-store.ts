@@ -21,6 +21,7 @@ import {
 } from "@claudexor/schema";
 import { fsyncDirectory, hashJson } from "@claudexor/util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { idempotencyWireProjection } from "./idempotency-wire-projection.js";
 import { JOB_STATES, type JobRecord } from "./server.js";
 import {
   lstatOrNull,
@@ -556,7 +557,7 @@ function digests(
   },
 ): { requestDigest: string; keyDigest: string } {
   return {
-    requestDigest: hashJson(input.idempotencyParams ?? input.params),
+    requestDigest: hashJson(idempotencyWireProjection(input.idempotencyParams ?? input.params)),
     keyDigest: hashJson({
       client: input.clientId,
       partition,

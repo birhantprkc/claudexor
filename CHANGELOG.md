@@ -8,7 +8,12 @@ Release history for Claudexor. The current version is declared in the root
   override guards now confine to the Claudexor-owned root (`~/.claudexor`)
   instead of the narrower config root, so pointing a run at a registered
   credential-profile store under `~/.claudexor/profiles/…` works instead of
-  hard-erroring. Claudexor's control endpoint now resolves on Windows:
+  hard-erroring. Durable idempotency digests are now computed over a
+  wire-stable projection: the parse-injected `execution.delegated: false` /
+  project `scope.ephemeral: false` defaults (both new in this line) are elided
+  before hashing, so replaying an accepted request's Idempotency-Key across an
+  upgrade from 3.2.1 or 3.3.7-rc.0 returns the original handle instead of a
+  spurious `idempotency_conflict`. Claudexor's control endpoint now resolves on Windows:
   `defaultSocketPath()` gained a `win32` branch returning the named pipe
   `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
   where it previously always built a Unix-style `.sock` path that could not be
