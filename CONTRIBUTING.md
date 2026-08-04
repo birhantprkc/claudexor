@@ -51,9 +51,9 @@ packaging checks. CI remains authoritative for signed/notarized artifacts.
 
 Review authority is the cumulative diff on an exact, clean, committed and
 frozen candidate SHA, reviewed under the Owner-review release protocol in
-[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (the exact native Fable and Codex
-full-context pair, one wave plus one confirmation wave under the owner's
-decision, sealed schema-v5 attestation — Bible INV-125); any tracked
+[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (the exact native full-context
+reviewer pair that protocol defines, one wave plus one confirmation wave under
+the owner's decision, sealed schema-v5 attestation — Bible INV-125); any tracked
 mutation invalidates the evidence
 and requires a new freeze. Claudexor intentionally has no per-commit review
 hook or staged-diff review authority.

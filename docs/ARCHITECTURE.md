@@ -1921,7 +1921,8 @@ exact clean committed candidate against the checklists and docs; any tracked
 mutation invalidates every result and starts a new freeze, and the signed
 schemaVersion-5 attestation binds the candidate SHA/tree, exact full-gate
 receipt, sealed evidence manifest/diff/wave, and exactly two native full-context
-reviewer artifact sets: Claude Code Fable/max and Codex sol/xhigh (INV-125).
+reviewer artifact sets — exactly the reviewer pair the release review
+protocol (docs/CHECKLISTS.md) defines (INV-125).
 Each set binds requested and observed route/model/effort, native auth,
 live external-context/web policy, distinct session identity, overlapping
 plausible timing, candidate-built review runtime identity,

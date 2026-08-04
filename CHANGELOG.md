@@ -4,7 +4,11 @@ Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
 - **v3.3.7** (2026-08-03): the Ouroboros-integration line, rebased onto the
-  3.2.1 release. Claudexor's control endpoint now resolves on Windows:
+  3.2.1 release. The `CLAUDEXOR_CLAUDE_NATIVE_DIR`/`CLAUDEXOR_CODEX_NATIVE_HOME`
+  override guards now confine to the Claudexor-owned root (`~/.claudexor`)
+  instead of the narrower config root, so pointing a run at a registered
+  credential-profile store under `~/.claudexor/profiles/…` works instead of
+  hard-erroring. Claudexor's control endpoint now resolves on Windows:
   `defaultSocketPath()` gained a `win32` branch returning the named pipe
   `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
   where it previously always built a Unix-style `.sock` path that could not be

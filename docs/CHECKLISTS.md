@@ -542,8 +542,9 @@ repository context that small review packets lost.
   signs schema v5 only for the final confirmation pair; the initial review and
   adjudication remain in the ledger and sealed evidence, not a second signed
   graph. It refuses anything
-  except exactly one completed Fable slot and one completed Codex slot with
-  observed=requested model, honored effort, verified native route, no auth
+  except exactly the completed reviewer pair the Release review protocol
+  section defines, each slot with the observed model matching its slot-pinned
+  expected form, honored effort, verified native route, no auth
   switch or ignored setting, live external context/web policy, plausible
   overlapping timing, distinct sessions, the same receipt-bound packaged CLI
   bytes, a strict parsed completion envelope, and `pass` or `warn`.
