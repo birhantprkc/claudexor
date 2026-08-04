@@ -157,9 +157,12 @@ describe("frozen diff review", () => {
     expect(existsSync(join(f.artifacts, "evidence-metadata.json"))).toBe(true);
     expect(packetFiles(f.packet)).toEqual(before);
     expect(packetFiles(join(f.artifacts, "evidence"))).toEqual(before);
-    expect(readFileSync(join(f.artifacts, "01-sealed-reviewer", "prompt.md"), "utf8")).toContain(
-      "read every file it seals",
-    );
+    const sealedPrompt = readFileSync(join(f.artifacts, "01-sealed-reviewer", "prompt.md"), "utf8");
+    expect(sealedPrompt).toContain("every file it seals");
+    // The runtime verifies the packet digest before any reviewer launches, so
+    // the prompt must keep reviewer-side re-hashing OPTIONAL — a lane whose
+    // environment denies checksum tools must not fail the wave for it.
+    expect(sealedPrompt).toContain("re-hashing the entries yourself is OPTIONAL");
   });
 
   it("rejects wrong candidate SHA, tree, dirty state, and a tampered packet", async () => {

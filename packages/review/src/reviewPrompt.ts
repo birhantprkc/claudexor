@@ -116,7 +116,7 @@ export function buildReviewPrompt(
     "You are an adversarial code reviewer.",
     `Candidate root: ${candidateRoot}.`,
     sealed
-      ? `First verify MANIFEST.sha256 and read every file it seals in ${evidenceDir}, including FREEZE.json and DECIDED_TRADEOFFS.md. If the manifest or a sealed file is missing, return INSUFFICIENT_EVIDENCE.`
+      ? `First read MANIFEST.sha256 and every file it seals in ${evidenceDir}, including FREEZE.json and DECIDED_TRADEOFFS.md, and confirm every sealed file is present. The packet's manifest digest was already cryptographically verified by the review runtime before this session launched (verifySealedEvidencePacket, digest-bound to the frozen identity below); re-hashing the entries yourself is OPTIONAL — do it when your environment permits, but the inability to run a checksum tool is NOT grounds for INSUFFICIENT_EVIDENCE. If the manifest or a sealed file is missing or unreadable, return INSUFFICIENT_EVIDENCE.`
       : `First read the evidence packet in ${evidenceDir} (USER_INTENT.md, FORBIDDEN_FINDINGS.md, PLAN_ACCEPTED.md, DECIDED_TRADEOFFS.md, TESTS.txt, DIFF.patch, DIFF_SUMMARY.md). If a mandatory file is missing, return INSUFFICIENT_EVIDENCE.`,
     `Review ${label}'s change from the file-backed patch artifact, not from this prompt. Full patch: ${patch.diffPath}. Summary: ${patch.summaryPath}. Patch digest: ${patch.diffSha256}.`,
     ...(options.candidateInventoryMode === "diff_only"
