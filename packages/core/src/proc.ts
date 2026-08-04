@@ -6,6 +6,8 @@ import {
   killWindowsProcessTree,
   reapProcessTree,
   resolveKillTreeStrategy,
+  type KillTreeStrategy,
+  type WindowsKillTreeResult,
   type ProcessTreeTerminationOutcome,
   type ReapProcessTreeOptions,
 } from "./process-tree.js";
@@ -28,6 +30,10 @@ export interface SpawnOptions {
   timeoutMs?: number;
   /** Signal sent when the consumer closes the stream before process exit. */
   cancelSignal?: NodeJS.Signals;
+  /** Test seams: prove the win32 kill-fallback without a Windows host (the
+   * fsyncDirectoryHandle precedent). Production always uses the defaults. */
+  killTreeStrategy?: KillTreeStrategy;
+  windowsKillTree?: (pid: number) => WindowsKillTreeResult;
   /** Hard-kill delay after cancelSignal when the child ignores cooperative stop. */
   cancelKillDelayMs?: number;
   /**
@@ -484,12 +490,15 @@ export async function runCaptureRaw(
       return;
     }
     if (
-      resolveKillTreeStrategy() === "windows_taskkill" &&
+      (opts.killTreeStrategy ?? resolveKillTreeStrategy()) === "windows_taskkill" &&
       typeof child.pid === "number" &&
       !captureChildClosed
     ) {
-      killWindowsProcessTree(child.pid);
-      return;
+      // A FAILED taskkill (typed result) must not strand the capture awaiting
+      // `close` forever (wave finding): fall through to the pinned
+      // ChildProcess kill so the direct child still dies and close fires.
+      const killed = (opts.windowsKillTree ?? killWindowsProcessTree)(child.pid);
+      if (killed.status !== "failed") return;
     }
     try {
       child.kill(signal);

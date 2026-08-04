@@ -229,7 +229,9 @@ export function buildWireFixtures() {
   // clients back to parsing "resets …" out of safeMessage.
   add("run-failure-subscription-window-exhausted", "RunFailure", {
     phase: "routing",
-    category: "budget",
+    // 8bd240b3: a spent subscription window is NOT a budget denial — the
+    // engine's only emitter of this code sets harness_unavailable (wave NIT).
+    category: "harness_unavailable",
     code: "subscription_window_exhausted",
     harnessId: "claude",
     safeMessage: "Every candidate's subscription window is spent.",

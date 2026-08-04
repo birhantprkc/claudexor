@@ -428,3 +428,57 @@ describe("armOrphanExit", () => {
     expect(exits).toEqual([]);
   });
 });
+
+describe("windows kill fallback (wave FIX_FIRST: failed taskkill must not strand the capture)", () => {
+  // Windows has no capturable POSIX group: suppress group capture so the
+  // strategy branch is reached, exactly the win32 shape.
+  const noGroupIdentity: ProcessIdentityReader = {
+    read: (pid) => ({ status: "unknown", pid, platform: "linux", reason: "io_error" }),
+    self: () => ({ status: "missing", pid: 1, platform: "linux" }),
+  };
+  const noGroupService = () =>
+    new ProcessGroupService({
+      platform: "linux",
+      identity: noGroupIdentity,
+      probeProcessGroup: () => {},
+      signalProcessGroup: () => {},
+    });
+
+  it("falls through to the pinned child kill when the tree kill reports failure", async () => {
+    const attempts: number[] = [];
+    const result = await runCaptureRaw(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      timeoutMs: 80,
+      processGroups: noGroupService(),
+      killTreeStrategy: "windows_taskkill",
+      windowsKillTree: (pid) => {
+        attempts.push(pid);
+        return { status: "failed", pid, detail: "injected taskkill failure" };
+      },
+    });
+    // The injected failure was consulted, the fallback child.kill fired, and
+    // the capture RESOLVED instead of awaiting close forever.
+    expect(attempts.length).toBeGreaterThan(0);
+    expect(result.signal).toBe("SIGKILL");
+  });
+
+  it("still skips the fallback when the tree kill succeeds", async () => {
+    let calls = 0;
+    const result = await runCaptureRaw(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], {
+      timeoutMs: 60,
+      processGroups: noGroupService(),
+      killTreeStrategy: "windows_taskkill",
+      windowsKillTree: (pid) => {
+        calls += 1;
+        // Simulate a successful taskkill by killing the real child ourselves.
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        return { status: "killed", pid };
+      },
+    });
+    expect(calls).toBeGreaterThan(0);
+    expect(result.signal).toBe("SIGKILL");
+  });
+});

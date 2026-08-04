@@ -18,6 +18,7 @@ import {
   extractOAuthUrl,
   runSetupLoginWorker,
 } from "./setup-login-runner.js";
+import { createDeviceCodeDisclosureWatcher } from "./setup-device-code-disclosure.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
   atomicPrivateJson,
@@ -339,5 +340,53 @@ describe("projectSetupDeviceCode surfaces terminal-login oauth_url sidecars", ()
       disclosedAt: new Date().toISOString(),
     });
     expect(projectSetupDeviceCode(terminalClaudeJob(), sidecarPath)).toBeUndefined();
+  });
+});
+
+describe("disclosure watcher supersession (wave FIX_FIRST: SSE clients must see the corrected URL)", () => {
+  it("journals a fresh update when a provisional sidecar URL is superseded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-disclosure-"));
+    const sidecar = join(dir, "device-code.json");
+    const updates: string[] = [];
+    const job = {
+      jobId: "setup-x",
+      harness: "claude",
+      state: "waiting_for_input",
+      phase: "awaiting_user",
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    } as unknown as ControlSetupJob;
+    const arm = createDeviceCodeDisclosureWatcher({
+      status: () => job,
+      update: (_id, patch) => updates.push(String(patch.message)),
+      disclosurePath: () => sidecar,
+      now: () => new Date(),
+    });
+    const write = (verificationUrl: string) =>
+      writeFileSync(
+        sidecar,
+        JSON.stringify({
+          version: 2,
+          jobId: "setup-x",
+          executionId: "e-1",
+          flow: "oauth_url",
+          verificationUrl,
+          userCode: "",
+          disclosedAt: new Date().toISOString(),
+        }),
+      );
+    arm("setup-x");
+    // Provisional prefix lands first (chunk-boundary truncation).
+    write("https://claude.ai/oauth");
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(updates.length).toBe(1);
+    // The full capture supersedes the sidecar: the watcher must journal AGAIN
+    // so an event-stream client re-reads the corrected overlay.
+    write("https://claude.ai/oauth/authorize?client=cli&state=s1");
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(updates.length).toBe(2);
+    // Identical content never re-journals per tick.
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(updates.length).toBe(2);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

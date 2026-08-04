@@ -2,7 +2,7 @@
   "schema": "RunFailure",
   "value": {
     "phase": "routing",
-    "category": "budget",
+    "category": "harness_unavailable",
     "code": "subscription_window_exhausted",
     "harnessId": "claude",
     "attemptId": null,
