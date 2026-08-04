@@ -245,7 +245,7 @@ node scripts/seal-owner-review-attestation.mjs \
   --full-gate-receipt <external-gate-dir>/full-gate-receipt.json \
   --evidence-dir <sealed-evidence-dir> \
   --review-artifacts <native-review-artifacts-dir> \
-  --private-key ~/.claudexor/keys/review-attestation-ed25519.pem \
+  --private-key ~/.claudexor/release-authority/v2.0.0/review-attestation-private.pem \
   --authority release/review-attestation-authority.json \
   --out <attestation.json> \
   --base64-out <attestation.b64>
