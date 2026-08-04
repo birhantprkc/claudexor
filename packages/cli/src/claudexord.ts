@@ -39,6 +39,7 @@ import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, buildRegistry } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
+import { invalidateStatusProjections } from "./status-projection-cache.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
@@ -458,6 +459,9 @@ export async function main(): Promise<void> {
         store,
         onCredentialStateMayHaveChanged: (harness) => {
           authReadiness.invalidate(harness);
+          // The poll-surface projections embed harness/profile status; a
+          // login/logout makes them stale NOW, not a TTL from now.
+          invalidateStatusProjections();
           // Drop the quota absence backoff too (wave-1): a fresh login must
           // not wait out up to 15 minutes of logged-out pacing.
           quotaStoreSlot.current().noteCredentialChange();

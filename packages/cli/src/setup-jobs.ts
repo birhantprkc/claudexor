@@ -1289,7 +1289,28 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       if (prior) return prior;
       supervisor.assertCreateAllowed();
       const jobs = store.list({ harness });
-      const active = jobs.findLast((job) => ACTIVE_SETUP_STATES.has(job.state));
+      let active = jobs.findLast((job) => ACTIVE_SETUP_STATES.has(job.state));
+      // A client_pty job that no client ever attached (no runner state on
+      // disk) is an ORPHAN: there is no living login to protect, only a stale
+      // reservation that would otherwise conflict-refuse every retry until
+      // the 15-minute login deadline. Hit live 2026-08-04: the UI lost the
+      // attach command to a daemon ReadTimeout, and the orphan then 409ed
+      // each new attempt. A new create SUPERSEDES the orphan — cancel it and
+      // proceed. A job with observed runner state keeps the full conflict
+      // discipline below: its client is (or was) real.
+      if (
+        active &&
+        active.transport === "client_pty" &&
+        readRunnerState(store.paths(active.jobId).runnerState) === null
+      ) {
+        finish(
+          active.jobId,
+          "cancelled",
+          "cancelled_by_user",
+          `${active.harness} login superseded by a new login request before any client attached.`,
+        );
+        active = undefined;
+      }
       if (active) {
         // Same target store → idempotent reuse. A DIFFERENT target (default vs
         // profile, or two profiles) must refuse loudly: returning the other job

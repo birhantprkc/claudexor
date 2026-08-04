@@ -438,6 +438,33 @@ describe("setup jobs", () => {
     expect(job.command).toContain("codex");
   });
 
+  it("a new create supersedes a client_pty orphan no client ever attached", async () => {
+    // Hit live 2026-08-04: the UI lost the attach command to a daemon
+    // ReadTimeout and the orphaned client_pty job then conflict-refused every
+    // retry until the 15-minute login deadline. An unattached orphan (no
+    // runner state on disk) has no living login to protect: a new create
+    // cancels it and proceeds instead of refusing.
+    const manager = createSetupJobManager({
+      rootDir: join(root, "client-pty-supersede"),
+      platform: "linux",
+      runnerPath: resolveSetupLoginRunnerPath(),
+      launcherTimeoutMs: 10_000,
+      loginTimeoutMs: 15 * 60_000,
+      monitorPollMs: 2,
+    });
+    await manager.start();
+    const orphan = manager.create({ ...LOGIN_REQUEST, transport: "client_pty" });
+    expect(orphan.state).toBe("waiting_for_input");
+    const successor = manager.create({ ...LOGIN_REQUEST, transport: "client_pty" });
+    expect(successor.jobId).not.toBe(orphan.jobId);
+    expect(manager.status({ jobId: orphan.jobId })).toMatchObject({
+      state: "cancelled",
+      outcome: { reason: "cancelled_by_user" },
+    });
+    expect(manager.status({ jobId: successor.jobId }).state).toBe("waiting_for_input");
+    await manager.shutdown();
+  });
+
   it("keeps an unattached client_pty job alive past the runner launcher timeout", async () => {
     let nowMs = Date.parse("2026-07-25T00:00:00.000Z");
     const manager = createSetupJobManager({

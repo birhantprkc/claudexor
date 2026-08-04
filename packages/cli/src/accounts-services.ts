@@ -1,5 +1,6 @@
 import { loadConfig } from "@claudexor/config";
 import type { QuotaRegistry } from "@claudexor/daemon";
+import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
 import { normalizeReadiness, type HarnessStatus } from "@claudexor/gateway";
 import { probeGitCapability } from "@claudexor/workspace";
 import { noProjectRepoRoot } from "@claudexor/util";
@@ -61,24 +62,49 @@ export async function projectHarnessStatuses(statuses: readonly HarnessStatus[])
  * first and then derives next_up from that exact returned response; no client
  * can accidentally pair a newer quota card with an older routing identity. */
 export function createCredentialProfilesService(quotaRegistry: () => QuotaRegistry) {
-  return async (input?: { snapshot?: boolean }) => {
+  const projectProfiles = () => {
     const profiles = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
-    const projectedProfiles = Promise.all(
+    return Promise.all(
       profiles.map(async (profile) => ({
         profile,
         status: await profileDoctorStatus(profile),
         identity: profileAccountIdentity(profile),
       })),
     );
+  };
+  // The plain (non-snapshot) form is the UI's poll target: without a cache it
+  // ran a doctor probe per registered profile plus a full harness sweep
+  // inside harnessAccountsProjection on EVERY tick — the daemon-starving load
+  // behind the 2026-08-04 "Daemon unreachable: ReadTimeout" login failure.
+  // The snapshot form stays fully fresh: it is the explicit refresh action,
+  // not the poll path. A login/logout invalidates this cache immediately
+  // (invalidateStatusProjections), so freshness lags at most the short TTL.
+  const buildPollResponse = async () => {
+    const quota = quotaRegistry().read();
+    const out = withVendorVerification(await projectProfiles(), quota);
+    return {
+      profiles: out,
+      harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
+        profiles: out,
+      }),
+    };
+  };
+  const pollCache = new StatusProjectionCache<Awaited<ReturnType<typeof buildPollResponse>>>({
+    versionOf: globalConfigVersion,
+  });
+  return async (input?: { snapshot?: boolean }) => {
     if (input?.snapshot === true) {
       const [probed, statuses, git, fencedQuota] = await Promise.all([
-        projectedProfiles,
+        projectProfiles(),
         buildGateway({ includeFakes: false }).statusAll({ cwd: NO_PROJECT_ROOT, fresh: true }),
         probeGitCapability(),
         quotaRegistry().refreshWithCursor(),
       ]);
       const quota = fencedQuota.response;
       const out = withVendorVerification(probed, quota);
+      // The explicit refresh proved the live state — re-prime the poll cache
+      // with a projection derived from the same probes' moment.
+      pollCache.invalidate();
       return {
         profiles: out,
         harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
@@ -91,14 +117,7 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
         quotaEventCursor: fencedQuota.quotaEventCursor,
       };
     }
-    const quota = quotaRegistry().read();
-    const out = withVendorVerification(await projectedProfiles, quota);
-    return {
-      profiles: out,
-      harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
-        profiles: out,
-      }),
-    };
+    return pollCache.read(buildPollResponse);
   };
 }
 

@@ -30,6 +30,11 @@ import {
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
+import {
+  StatusProjectionCache,
+  globalConfigVersion,
+  invalidateStatusProjections,
+} from "./status-projection-cache.js";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
@@ -101,6 +106,11 @@ export function controlServices(
   >,
 ) {
   const secretStore = new SecretStore();
+  // Poll-heavy /harnesses default-shape projection (see status-projection-cache.ts).
+  const harnessesPollCache = new StatusProjectionCache<{
+    git: Awaited<ReturnType<typeof probeGitCapability>>;
+    harnesses: Awaited<ReturnType<typeof projectHarnessStatuses>>;
+  }>({ versionOf: globalConfigVersion });
   const journalPartition = (partition: string): JournalManager =>
     partition === "global" ? journalManager : threads.journal(partition);
   const setupJobs = (): SetupJobManager => {
@@ -308,19 +318,32 @@ export function controlServices(
     completeDelivery: async (id: string, result: unknown) => threads.completeDelivery(id, result),
     failDelivery: async (id: string, error: unknown) => threads.failDelivery(id, error),
     harnesses: async (input?: HarnessListInput) => {
-      const [statuses, git] = await Promise.all([
-        buildGateway({ includeFakes: input?.includeFakes ?? false }).statusAll(
-          { cwd: NO_PROJECT_ROOT, fresh: input?.fresh ?? false },
-          input?.harnessIds,
-        ),
-        probeGitCapability(),
-      ]);
-      return {
-        // Additive/optional on the wire so older clients can ignore it while
-        // Doctor reads system readiness without a second capability request.
-        git,
-        harnesses: await projectHarnessStatuses(statuses),
+      const compute = async () => {
+        const [statuses, git] = await Promise.all([
+          buildGateway({ includeFakes: input?.includeFakes ?? false }).statusAll(
+            { cwd: NO_PROJECT_ROOT, fresh: input?.fresh ?? false },
+            input?.harnessIds,
+          ),
+          probeGitCapability(),
+        ]);
+        return {
+          // Additive/optional on the wire so older clients can ignore it while
+          // Doctor reads system readiness without a second capability request.
+          git,
+          harnesses: await projectHarnessStatuses(statuses),
+        };
       };
+      // Only the DEFAULT poll shape rides the TTL cache (the UI's 5s tick):
+      // every sweep spawns discover + doctor across all adapters, and a poll
+      // that pays that price each tick starves the daemon (hit live
+      // 2026-08-04, "Daemon unreachable: ReadTimeout" during a login POST).
+      // Any explicit variant — fresh, a harness subset, fakes — computes
+      // directly, exactly as before.
+      const defaultShape =
+        (input?.includeFakes ?? false) === false &&
+        (input?.fresh ?? false) === false &&
+        (input?.harnessIds === undefined || input.harnessIds.length === 0);
+      return defaultShape ? harnessesPollCache.read(compute) : compute();
     },
     harnessModels: async (input: { harnessId: string; route?: "local_session" | "api_key" }) =>
       harnessModels(input.harnessId, NO_PROJECT_ROOT, true, input.route),
@@ -398,6 +421,7 @@ export function controlServices(
         throw Object.assign(new Error("profile update did not persist"), { status: 500 });
       }
       invalidateDoctorCache();
+      invalidateStatusProjections();
       return {
         profile: updated,
         // Same vendor overlay the listing applies: a single-profile response
@@ -478,6 +502,7 @@ export function controlServices(
         );
       }
       invalidateDoctorCache();
+      invalidateStatusProjections();
       return {
         profile: entry,
         removed: true,
@@ -497,6 +522,7 @@ export function controlServices(
         displayName: request.displayName,
       });
       invalidateDoctorCache();
+      invalidateStatusProjections();
       return {
         profile,
         status: vendorVerifiedProfileStatus(
@@ -515,6 +541,7 @@ export function controlServices(
       // invalid final combination (quality goal with zero tiers).
       await commitSettingsUpdate(NO_PROJECT_ROOT, p);
       invalidateDoctorCache();
+      invalidateStatusProjections();
       return settingsSnapshot(NO_PROJECT_ROOT);
     },
     listSecrets: async () => ({
@@ -537,6 +564,7 @@ export function controlServices(
       }
       const backend = secretStore.set(name, value);
       invalidateDoctorCache();
+      invalidateStatusProjections();
       return {
         name,
         backend,
@@ -547,6 +575,7 @@ export function controlServices(
     deleteSecret: async (name: string) => {
       secretStore.delete(name);
       invalidateDoctorCache();
+      invalidateStatusProjections();
       return { name, deleted: true };
     },
   };
