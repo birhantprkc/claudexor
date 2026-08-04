@@ -319,6 +319,44 @@ function validateReviewerArtifact(artifact, required, expected) {
   ]) {
     if (metadata[field] !== value) throw new Error(`${required.slot} metadata ${field} mismatch`);
   }
+  // INV-125 second amendment integrity (wave-6 finding): the sealer refuses
+  // to sign unless the fable lane reviewed the FULL context and the sol lane
+  // reviewed either the full context or the sealed EXACT delta.
+  if (!required.allowedScopes.includes(metadata.review_scope)) {
+    throw new Error(
+      `${required.slot} review scope ${JSON.stringify(metadata.review_scope ?? null)} is not allowed (allowed: ${required.allowedScopes.join(", ")})`,
+    );
+  }
+  if (metadata.review_scope === "delta") {
+    const fingerprints = parseJson(
+      readStable(join(expected.evidenceDir, "FINGERPRINTS.json"), "sealed FINGERPRINTS.json"),
+      "sealed FINGERPRINTS.json",
+    );
+    if (
+      typeof metadata.delta_base_sha !== "string" ||
+      typeof metadata.delta_sha256 !== "string" ||
+      metadata.delta_base_sha !== fingerprints.deltaBaseSha ||
+      metadata.delta_sha256 !== fingerprints.deltaSha256
+    ) {
+      throw new Error(
+        `${required.slot} delta scope does not match the sealed FINGERPRINTS delta binding`,
+      );
+    }
+    const deltaBytes = readStable(join(expected.evidenceDir, "DELTA.patch"), "sealed DELTA.patch");
+    if (sha256(deltaBytes) !== metadata.delta_sha256) {
+      throw new Error(`${required.slot} sealed DELTA.patch does not match its recorded digest`);
+    }
+    const actualDelta = execFileSync(
+      "git",
+      ["diff", "--binary", `${metadata.delta_base_sha}..${expected.candidateSha}`],
+      { maxBuffer: 512 * 1024 * 1024 },
+    );
+    if (!deltaBytes.equals(actualDelta)) {
+      throw new Error(
+        `${required.slot} sealed DELTA.patch is not the exact deltaBaseSha..candidateSha diff`,
+      );
+    }
+  }
   if (
     typeof metadata.review_runtime_version !== "string" ||
     !metadata.review_runtime_version ||
@@ -416,8 +454,12 @@ function validateReviewerArtifact(artifact, required, expected) {
   if (parsed.findings.some((finding) => blocking.has(finding.severity))) {
     throw new Error(`${required.slot} report contains a blocking or inconclusive finding`);
   }
+  const { allowedScopes: _allowedScopes, ...requiredRoute } = required;
   return {
-    ...required,
+    ...requiredRoute,
+    reviewScope: metadata.review_scope,
+    deltaBaseSha: metadata.review_scope === "delta" ? metadata.delta_base_sha : null,
+    deltaSha256: metadata.review_scope === "delta" ? metadata.delta_sha256 : null,
     sessionId: metadata.session_id,
     externalContextPolicy: metadata.external_context_policy,
     toolWebPolicy: metadata.tool_web_policy,

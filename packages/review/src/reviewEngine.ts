@@ -9,6 +9,7 @@ import type {
   RouteProof,
 } from "@claudexor/schema";
 import { HarnessRunSpec, ReviewFinding as ReviewFindingSchema } from "@claudexor/schema";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -78,11 +79,14 @@ export interface ReviewCandidateInput {
     candidateTree: string;
     packetManifestSha256: string;
   };
-  /** Owner-amended per-harness delta scope (INV-125 second amendment,
-   * 2026-08-04): the named reviewer's review SUBJECT becomes the sealed
-   * DELTA.patch (base SHA recorded here) while the full packet stays its
-   * context. Sealed-packet mode only; at least one lane stays full-context. */
-  deltaScopes?: Readonly<Record<string, string>>;
+  /** Owner-amended delta scope (INV-125 second amendment, 2026-08-04).
+   * SUBTRACTIVE by design (wave-6 integrity finding): there is NO harness
+   * parameter — the delta applies ONLY to the contract's sol slot (the
+   * cursor lane), the base SHA must match the sealed packet's FINGERPRINTS
+   * delta entries, and DELTA.patch must verify as the exact
+   * deltaBaseSha..candidateSha diff. Sealed-packet mode only; every other
+   * lane always reviews the full context. */
+  deltaScope?: { baseSha: string };
   cwd: string;
   reviewers: ReviewerSpec[];
   reviewerTimeoutMs?: number;
@@ -130,6 +134,72 @@ function readSealedDeltaEvidence(dir: string): DiffEvidence {
     throw new Error("delta-scope review requires sealed DELTA.patch and DELTA_SUMMARY.md");
   }
   return { diffPath, summaryPath, diffSha256: sha256(diffText), summary };
+}
+
+/** The contract's sol slot rides the cursor harness (INV-125, owner decisions
+ * 2026-08-04). The delta scope is PINNED to it — no other lane may take a
+ * delta subject, so a mislabeled attestation cannot be produced upstream. */
+const SOL_DELTA_HARNESS_ID = "cursor";
+
+/** Fail-closed launch-time verification of an owner-amended delta scope
+ * (wave-6 integrity finding f-…: the flag's former free parameters could
+ * mislabel a signed attestation). The base SHA and delta digest must match
+ * the sealed FINGERPRINTS entries, and DELTA.patch must be the exact
+ * deltaBaseSha..candidateSha diff of the candidate repository. */
+function assertSealedDeltaScope(
+  input: ReviewCandidateInput,
+  baseSha: string,
+): { deltaSha256: string } {
+  if (input.evidenceReadOnly !== true || !input.frozenIdentity) {
+    throw new Error("delta-scope review is only valid against a sealed packet");
+  }
+  const solLanes = input.reviewers.filter(
+    (reviewer) => reviewer.adapter.id === SOL_DELTA_HARNESS_ID,
+  );
+  if (solLanes.length !== 1) {
+    throw new Error(
+      `delta scope requires exactly one ${SOL_DELTA_HARNESS_ID} reviewer lane (the contract's sol slot), got ${solLanes.length}`,
+    );
+  }
+  const rawFingerprints = readTextSafe(join(input.evidenceDir, "FINGERPRINTS.json"));
+  if (rawFingerprints === null) {
+    throw new Error("delta-scope review requires sealed FINGERPRINTS.json");
+  }
+  let fingerprints: Record<string, unknown>;
+  try {
+    fingerprints = JSON.parse(rawFingerprints) as Record<string, unknown>;
+  } catch {
+    throw new Error("sealed FINGERPRINTS.json is not valid JSON");
+  }
+  const sealedBase = fingerprints["deltaBaseSha"];
+  const sealedDigest = fingerprints["deltaSha256"];
+  if (sealedBase !== baseSha) {
+    throw new Error(
+      `delta base ${baseSha} does not match the sealed FINGERPRINTS deltaBaseSha ${String(sealedBase)}`,
+    );
+  }
+  if (typeof sealedDigest !== "string" || !/^[0-9a-f]{64}$/.test(sealedDigest)) {
+    throw new Error("sealed FINGERPRINTS.json carries no valid deltaSha256");
+  }
+  const deltaText = readTextSafe(join(input.evidenceDir, "DELTA.patch"));
+  if (deltaText === null) throw new Error("delta-scope review requires sealed DELTA.patch");
+  // FINGERPRINTS digests are bare hex (shasum form), unlike util's prefixed
+  // sha256() used for DiffEvidence display digests.
+  const bareDigest = createHash("sha256").update(deltaText).digest("hex");
+  if (bareDigest !== sealedDigest) {
+    throw new Error("sealed DELTA.patch does not match the FINGERPRINTS deltaSha256");
+  }
+  const actual = execFileSync(
+    "git",
+    ["-C", input.cwd, "diff", "--binary", `${baseSha}..${input.frozenIdentity.candidateSha}`],
+    { maxBuffer: 512 * 1024 * 1024 },
+  );
+  if (!actual.equals(Buffer.from(deltaText, "utf8"))) {
+    throw new Error(
+      "sealed DELTA.patch is not the exact deltaBaseSha..candidateSha diff of the candidate",
+    );
+  }
+  return { deltaSha256: sealedDigest };
 }
 
 function reviewerRouteProof(
@@ -257,6 +327,9 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
   } else {
     writeDiffEvidence(input.evidenceDir, input.diff);
   }
+  const verifiedDeltaScope = input.deltaScope
+    ? assertSealedDeltaScope(input, input.deltaScope.baseSha)
+    : null;
   const preflight = preflightEvidence(input.evidenceDir);
   if (!preflight.ok) {
     const parts = [
@@ -330,10 +403,13 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         candidateCopyPaths: candidateInventory.copyPaths,
         preserveEvidenceBytes: input.evidenceReadOnly === true,
       });
-      const deltaBase = input.deltaScopes?.[reviewer.adapter.id];
-      if (deltaBase && input.evidenceReadOnly !== true) {
-        throw new Error("delta-scope review is only valid against a sealed packet");
-      }
+      // The delta subject is PINNED to the contract's sol slot; every other
+      // lane reviews the full context (INV-125 second amendment, integrity
+      // shape from the wave-6 finding — the harness is not a parameter).
+      const deltaBase =
+        verifiedDeltaScope && reviewer.adapter.id === SOL_DELTA_HARNESS_ID
+          ? input.deltaScope!.baseSha
+          : undefined;
       const reviewerPatch = deltaBase
         ? readSealedDeltaEvidence(reviewerWorkspace.evidenceDir)
         : input.evidenceReadOnly
@@ -351,6 +427,13 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         diff_sha256: persistentPatch.diffSha256,
         candidate_inventory_mode: candidateInventory.mode,
         candidate_inventory_reason: candidateInventory.reason,
+        review_scope: deltaBase ? "delta" : "full",
+        ...(deltaBase
+          ? {
+              delta_base_sha: deltaBase,
+              delta_sha256: verifiedDeltaScope!.deltaSha256,
+            }
+          : {}),
         ...frozenMetadata,
       });
       const runtimePrompt = buildReviewPrompt(

@@ -9,6 +9,7 @@ import { TextDecoder } from "node:util";
 
 const SHA1 = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const GIT_SHA = /^[0-9a-f]{40}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const SEMVER_TAG = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const REVIEW_WAVE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -43,6 +44,9 @@ export const REQUIRED_NATIVE_REVIEWERS = Object.freeze([
     providerFamily: "anthropic",
     requestedModel: "claude-fable-5",
     requestedEffort: "max",
+    // INV-125 second amendment integrity pin: the fable lane ALWAYS reviews
+    // the full context — a delta-scoped fable artifact cannot seal.
+    allowedScopes: Object.freeze(["full"]),
   }),
   // Owner decision 2026-08-04 («зачем тебе кодекс? Ревьюй курсором и клод
   // кодом» — the owner's typed reply, answering the explanation that this
@@ -58,6 +62,9 @@ export const REQUIRED_NATIVE_REVIEWERS = Object.freeze([
     providerFamily: "cursor",
     requestedModel: "gpt-5.6-sol-xhigh",
     requestedEffort: null,
+    // INV-125 second amendment: the sol lane may review either the full
+    // context or the sealed exact delta — nothing else.
+    allowedScopes: Object.freeze(["full", "delta"]),
   }),
 ]);
 
@@ -380,10 +387,27 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
         "eventsSha256",
         "parsedSha256",
         "verdict",
+        "reviewScope",
+        "deltaBaseSha",
+        "deltaSha256",
       ])
     ) {
       reasons.push(`owner review ${required.slot} entry shape is invalid`);
       continue;
+    }
+    if (!required.allowedScopes.includes(review.reviewScope)) {
+      reasons.push(
+        `owner review ${required.slot} scope ${JSON.stringify(review.reviewScope ?? null)} is not allowed (INV-125 second amendment: fable is always full-context; sol is full or the sealed exact delta)`,
+      );
+    }
+    if (review.reviewScope === "delta") {
+      if (!GIT_SHA.test(review.deltaBaseSha ?? "") || !SHA256.test(review.deltaSha256 ?? "")) {
+        reasons.push(
+          `owner review ${required.slot} delta scope is missing its base/digest binding`,
+        );
+      }
+    } else if (review.deltaBaseSha !== null || review.deltaSha256 !== null) {
+      reasons.push(`owner review ${required.slot} full scope must not carry delta bindings`);
     }
     for (const key of [
       "slot",

@@ -26,7 +26,13 @@ Release history for Claudexor. The current version is declared in the root
   review the sealed delta since that review (`claudexor review
   --delta-scope <harness>=<baseSha>`, sealed-packet mode only) with the whole
   packet as context, while the fable lane always reviews the full context —
-  attestation protocol id `native-fable-full-sol-delta-v2`. Claudexor's control endpoint now resolves on Windows:
+  attestation protocol id `native-fable-full-sol-delta-v2`. The amendment is
+  integrity-pinned (wave-6 finding): `--delta-scope` takes only a base SHA —
+  the lane is pinned to the contract's sol slot, base and digest must match
+  the sealed FINGERPRINTS delta entries, `DELTA.patch` must verify as the
+  exact base..candidate diff, each reviewer's subject scope rides its
+  artifact metadata, and the sealer refuses to sign unless fable=full and
+  sol is full or that exact sealed delta. Claudexor's control endpoint now resolves on Windows:
   `defaultSocketPath()` gained a `win32` branch returning the named pipe
   `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
   where it previously always built a Unix-style `.sock` path that could not be

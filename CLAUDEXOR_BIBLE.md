@@ -691,7 +691,14 @@ invariant or owner decision before proceeding.
   that reviewer's last completed full-context review as their review subject
   (the sealed `DELTA.patch`, with the complete packet and ledgers as context);
   the fable slot always reviews the full context, keeping one full-context
-  vendor lane under every attestation.
+  vendor lane under every attestation. The amendment is mechanically
+  enforced end-to-end: the delta lane is pinned to the sol slot's harness
+  (no harness parameter exists), the requested base and digest must match
+  the sealed packet's FINGERPRINTS delta entries, `DELTA.patch` must verify
+  as the exact base..candidate diff, each reviewer's subject scope is
+  persisted in its artifact metadata, and the sealer refuses to sign unless
+  fable reviewed the full context and sol reviewed the full context or that
+  exact sealed delta.
   Each reviewer receives the same complete Git-visible candidate,
   complete diff, sealed evidence, user dialogue and owner decisions, test and
   gate receipts, and internet access (the sol slot's review SUBJECT may be the

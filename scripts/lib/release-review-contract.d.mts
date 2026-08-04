@@ -16,6 +16,8 @@ export const REQUIRED_NATIVE_REVIEWERS: readonly Readonly<{
   providerFamily: "anthropic" | "cursor";
   requestedModel: "claude-fable-5" | "gpt-5.6-sol-xhigh";
   requestedEffort: "max" | null;
+  /** INV-125 second amendment: fable is always full; sol may take the sealed delta. */
+  allowedScopes: readonly ("full" | "delta")[];
 }>[];
 export const EXPECTED_OBSERVED_MODELS: Readonly<Record<"fable" | "sol", string>>;
 export function expectedObservedModel(required: { slot: string; requestedModel: string }): string;

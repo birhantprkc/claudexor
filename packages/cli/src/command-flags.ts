@@ -100,8 +100,8 @@ const FROZEN_REVIEW_FLAGS: readonly CliFlagSpec[] = [
   ),
   valueFlag(
     "delta-scope",
-    "<harness>=<baseSha>",
-    "Owner-amended lane scope (INV-125 second amendment): the named lane reviews the packet's sealed DELTA.patch since baseSha",
+    "<baseSha>",
+    "Owner-amended sol-lane scope (INV-125 second amendment): the contract's sol lane reviews the packet's sealed DELTA.patch since this base SHA (verified against the sealed FINGERPRINTS)",
   ),
 ];
 

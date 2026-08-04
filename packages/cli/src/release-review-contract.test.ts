@@ -54,30 +54,35 @@ function fixture() {
     algorithm: "Ed25519",
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
   };
-  const reviews = REQUIRED_NATIVE_REVIEWERS.map((required, index) => ({
-    ...required,
-    sessionId: `session-${index + 1}`,
-    externalContextPolicy: "live",
-    toolWebPolicy: "live",
-    observedModel: expectedObservedModel(required),
-    observedSource: index === 0 ? "stream_event" : "transcript",
-    routeProofStatus: "verified",
-    authMode: "local_session",
-    authSwitched: false,
-    effortHonored: true,
-    reviewRuntimeVersion: CLAUDEXOR_VERSION,
-    reviewRuntimeBuildSha: candidateSha,
-    reviewRuntimeEntrySha256: digest,
-    startedAt: `2026-07-30T00:00:0${index}.000Z`,
-    completedAt: `2026-07-30T00:00:0${index + 5}.000Z`,
-    durationMs: 5_000,
-    promptSha256: digest,
-    reportSha256: digest,
-    metadataSha256: digest,
-    eventsSha256: digest,
-    parsedSha256: digest,
-    verdict: index === 0 ? "pass" : "warn",
-  }));
+  const reviews = REQUIRED_NATIVE_REVIEWERS.map(
+    ({ allowedScopes: _scopes, ...required }, index) => ({
+      ...required,
+      reviewScope: "full",
+      deltaBaseSha: null,
+      deltaSha256: null,
+      sessionId: `session-${index + 1}`,
+      externalContextPolicy: "live",
+      toolWebPolicy: "live",
+      observedModel: expectedObservedModel(required),
+      observedSource: index === 0 ? "stream_event" : "transcript",
+      routeProofStatus: "verified",
+      authMode: "local_session",
+      authSwitched: false,
+      effortHonored: true,
+      reviewRuntimeVersion: CLAUDEXOR_VERSION,
+      reviewRuntimeBuildSha: candidateSha,
+      reviewRuntimeEntrySha256: digest,
+      startedAt: `2026-07-30T00:00:0${index}.000Z`,
+      completedAt: `2026-07-30T00:00:0${index + 5}.000Z`,
+      durationMs: 5_000,
+      promptSha256: digest,
+      reportSha256: digest,
+      metadataSha256: digest,
+      eventsSha256: digest,
+      parsedSha256: digest,
+      verdict: index === 0 ? "pass" : "warn",
+    }),
+  );
   const payload = {
     contract: "owner-review-v5",
     reviewProtocol: OWNER_REVIEW_PROTOCOL,
@@ -165,6 +170,8 @@ describe("native owner-review publishing contract", () => {
         providerFamily: "anthropic",
         requestedModel: "claude-fable-5",
         requestedEffort: "max",
+        // INV-125 second amendment: fable is ALWAYS full-context.
+        allowedScopes: ["full"],
       },
       // Owner decision 2026-08-04: the sol slot rides the cursor harness;
       // effort is carried inside cursor's native model id.
@@ -174,6 +181,8 @@ describe("native owner-review publishing contract", () => {
         providerFamily: "cursor",
         requestedModel: "gpt-5.6-sol-xhigh",
         requestedEffort: null,
+        // INV-125 second amendment: sol is full or the sealed exact delta.
+        allowedScopes: ["full", "delta"],
       },
     ]);
     expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[0]!)).toBe("claude-fable-5");
