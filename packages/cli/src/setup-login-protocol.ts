@@ -18,11 +18,13 @@ import { withExecutableInspection, isBoundedRegularExecutable } from "@claudexor
 import { fsyncDirectory } from "@claudexor/util";
 import {
   SetupLoginDeviceCode as SetupLoginDeviceCodeSchema,
+  SetupLoginInput as SetupLoginInputSchema,
   SetupLoginManifest as SetupLoginManifestSchema,
   SetupLoginPermit as SetupLoginPermitSchema,
   SetupLoginRunnerResult as SetupLoginRunnerResultSchema,
   SetupLoginRunnerState as SetupLoginRunnerStateSchema,
   type SetupLoginDeviceCode,
+  type SetupLoginInput,
   type SetupLoginManifest,
   type SetupLoginPermit,
   type SetupLoginRunnerResult,
@@ -79,6 +81,14 @@ export function readLoginManifest(path: string): SetupLoginManifest {
     ) {
       throw new Error(
         "setup-login device-code sidecar escapes or relocates its daemon-owned job directory",
+      );
+    }
+  }
+  if (manifest.inputPath !== undefined) {
+    const inputParent = realpathSync(dirname(resolve(manifest.inputPath)));
+    if (inputParent !== jobDir || basename(manifest.inputPath) !== "runner-input.json") {
+      throw new Error(
+        "setup-login input sidecar escapes or relocates its daemon-owned job directory",
       );
     }
   }
@@ -186,6 +196,22 @@ export function readRunnerPermit(path: string): SetupLoginPermit | null {
 export function readRunnerDeviceCode(path: string): SetupLoginDeviceCode | null {
   try {
     return SetupLoginDeviceCodeSchema.parse(readPrivateJson(path));
+  } catch {
+    return null;
+  }
+}
+
+/** One-shot input sidecar read, bound to the exact job execution: a stale or
+ * foreign file (wrong jobId/executionId) reads as absent, never as input. */
+export function readRunnerLoginInput(
+  path: string,
+  jobId: string,
+  executionId: string,
+): SetupLoginInput | null {
+  try {
+    const parsed = SetupLoginInputSchema.parse(readPrivateJson(path));
+    if (parsed.jobId !== jobId || parsed.executionId !== executionId) return null;
+    return parsed;
   } catch {
     return null;
   }

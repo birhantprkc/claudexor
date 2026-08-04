@@ -88,14 +88,10 @@ export async function resolveControlProtocol(input: {
       body: OPERATION_CATALOG,
     };
   }
-  // QA-066: a malformed percent triplet (`%ZZ`) or percent-encoded invalid
-  // UTF-8 (`%C0%AF`) in the path is a CLIENT syntax error. Validate the whole
-  // encoded pathname decodes once, centrally, BEFORE route dispatch — so it is
-  // a typed HTTP 400 here instead of a `URIError` thrown from one of ~35
-  // per-route `decodeURIComponent` calls into the generic 500 handler. Routes
-  // still match on and decode the ENCODED path (no re-routing on decoded text,
-  // so `%2F`/`%2e%2e` semantics are unchanged); once the whole path decodes,
-  // each `/`-delimited segment decode is guaranteed not to throw.
+  // QA-066: malformed percent-encoding in the path is a CLIENT syntax error —
+  // validate the whole encoded pathname decodes ONCE, centrally, before route
+  // dispatch (typed 400, not a per-route URIError into the 500 handler).
+  // Routes still match on the ENCODED path; `%2F`/`%2e%2e` semantics unchanged.
   if (!pathnameDecodes(input.requestPath)) {
     return {
       kind: "response",
@@ -516,6 +512,18 @@ const operations: ControlOperationDescriptor[] = [
   j("POST", "/v2/setup/jobs/:id/cancel", "mutating", null, "ControlSetupJob", {
     idempotency: "natural",
   }),
+  // One-shot sign-in input: first submission lands the transient sidecar, a
+  // repeat 409s (naturally idempotent); the value is never journaled.
+  j(
+    "POST",
+    "/v2/setup/jobs/:id/input",
+    "mutating",
+    "ControlSetupJobInputRequest",
+    "ControlSetupJob",
+    {
+      idempotency: "natural",
+    },
+  ),
   j("POST", "/v2/setup/jobs/:id/reconcile", "mutating", null, "ControlSetupJob", {
     idempotency: "natural",
   }),

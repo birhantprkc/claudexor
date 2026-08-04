@@ -5,7 +5,6 @@ import { createInterface } from "node:readline";
 import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProcessGroupService, defaultProcessGroupService } from "@claudexor/core";
-import { redactSecrets } from "@claudexor/util";
 import {
   startCodexDeviceLogin,
   type CodexAppServerConnection,
@@ -14,6 +13,13 @@ import {
 import { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 export { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 import { nativeLoginEnv } from "./native-login.js";
+import {
+  C0_CONTROL_RE,
+  TERM_ESCAPE_RE,
+  boundedTail,
+  createTailBuffer,
+  watchLoginInput,
+} from "./setup-login-io.js";
 import { waitForSetupLoginPermit } from "./setup-login-permit.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
@@ -137,10 +143,17 @@ export async function runSetupLoginWorker(
   const holdLeaderForEscalation = () => undefined;
   process.on("SIGTERM", holdLeaderForEscalation);
   process.on("SIGINT", holdLeaderForEscalation);
+  // Daemon-hosted no-Terminal modes (owner directive 2026-08-04): the runner
+  // is detached, so nothing may inherit a TTY. with_input additionally pipes
+  // stdin so the daemon-delivered one-shot input can reach the vendor CLI.
+  const urlDisclosure =
+    manifest.loginMode === "url_disclosure" || manifest.loginMode === "url_disclosure_with_input";
+  const withInput = manifest.loginMode === "url_disclosure_with_input";
   // Tee the login output: a bounded ANSI-stripped tail rides the result for
   // failure classification, and (with deviceCodePath) the vendor's OAuth URL
-  // is captured into the `oauth_url` sidecar (codex tail-tee tradeoff).
-  const teeOutput = manifest.harness === "codex" || manifest.deviceCodePath !== undefined;
+  // is captured into the sidecar (codex tail-tee tradeoff).
+  const teeOutput =
+    manifest.harness === "codex" || manifest.deviceCodePath !== undefined || urlDisclosure;
   const tail = createTailBuffer();
   const urlDetector = createOAuthUrlDetector();
   const discloseOAuthUrl = (chunk: Buffer): void => {
@@ -150,11 +163,13 @@ export async function runSetupLoginWorker(
     try {
       // Same transient-sidecar discipline as the device-code flow: the URL
       // rides ONLY this read-time projection file, never the durable receipt.
+      // The with-input flow discloses as oauth_url_input so the card knows to
+      // render the one-shot paste field alongside the link.
       atomicPrivateJson(manifest.deviceCodePath, {
         version: SETUP_LOGIN_PROTOCOL_VERSION,
         jobId: manifest.jobId,
         executionId: manifest.executionId,
-        flow: "oauth_url",
+        flow: withInput ? "oauth_url_input" : "oauth_url",
         verificationUrl: url,
         userCode: "",
         disclosedAt: now().toISOString(),
@@ -166,6 +181,7 @@ export async function runSetupLoginWorker(
   // A spawn throw and a wait rejection wrote the SAME receipt, so they share
   // one catch; de-registering the hold handlers is every exit's finally.
   let result: { code: number | null; signal: NodeJS.Signals | null };
+  let stopInputWatch: (() => void) | undefined;
   try {
     const spawnOptions: SpawnOptions = {
       cwd: manifest.cwd,
@@ -173,7 +189,11 @@ export async function runSetupLoginWorker(
       // profile's own store; absent = the default vendor store as before.
       env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
       detached: false,
-      stdio: teeOutput ? ["inherit", "pipe", "pipe"] : "inherit",
+      stdio: urlDisclosure
+        ? [withInput ? "pipe" : "ignore", "pipe", "pipe"]
+        : teeOutput
+          ? ["inherit", "pipe", "pipe"]
+          : "inherit",
     };
     const child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
     if (teeOutput) {
@@ -185,11 +205,15 @@ export async function runSetupLoginWorker(
       child.stdout?.on("data", tee(process.stdout));
       child.stderr?.on("data", tee(process.stderr));
     }
+    if (withInput && manifest.inputPath) {
+      stopInputWatch = watchLoginInput(manifest, child, now);
+    }
     result = await waitForExit(child);
   } catch {
     persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
   } finally {
+    stopInputWatch?.();
     process.off("SIGTERM", holdLeaderForEscalation);
     process.off("SIGINT", holdLeaderForEscalation);
   }
@@ -338,23 +362,6 @@ function appServerConnection(child: ChildProcess): CodexAppServerConnection {
   };
 }
 
-const OUTPUT_TAIL_BYTES = 4096;
-
-/**
- * OAuth-URL capture for TERMINAL-mode logins (claude/cursor, and codex's
- * legacy fallback): the vendor CLI prints its sign-in URL to its own output;
- * detecting it lets the runner surface a STRUCTURED `oauth_url` disclosure on
- * the job — the same sidecar + card shape as codex's device-code flow — so a
- * UI can render "open this link" with no terminal. Bounded rolling window: a
- * URL split across chunks is still caught, memory stays capped.
- */
-const OAUTH_URL_SCAN_WINDOW = 8_192;
-
-// eslint-disable-next-line no-control-regex
-const TERM_ESCAPE_RE = /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?)/g;
-// eslint-disable-next-line no-control-regex
-const C0_CONTROL_RE = /[\u0000-\u0009\u000b-\u001f\u007f]/g;
-
 const OAUTH_URL_SIGNATURE_RE =
   /(oauth|authori[sz]e|login|sign[-_]?in|device|sso|verification|callback)/i;
 
@@ -363,6 +370,8 @@ const OAUTH_URL_SIGNATURE_RE =
  * stripped first; trailing prose punctuation is trimmed; a docs link in a
  * banner never qualifies.
  */
+const OAUTH_URL_SCAN_WINDOW = 8_192;
+
 export function extractOAuthUrl(text: string): string | null {
   const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
   for (const match of plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)) {
@@ -400,62 +409,6 @@ export function createOAuthUrlDetector(): { push(chunk: Buffer): string | null }
       return url;
     },
   };
-}
-
-/** Ring buffer of the last OUTPUT_TAIL_BYTES of tee'd vendor output. */
-export function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
-  // Byte-accurate ring: keep the final OUTPUT_TAIL_BYTES RAW bytes, decode
-  // ONCE in text() (per-chunk String() splits multibyte UTF-8; UTF-16 .slice
-  // miscounts the byte bound).
-  let tail = Buffer.alloc(0);
-  // Ring overflow is tracked HERE and handed to boundedTail — the decoded
-  // string's length (already <= the cap) cannot recover it (X224).
-  let overflowed = false;
-  return {
-    push(chunk) {
-      const combined = Buffer.concat([tail, chunk]);
-      if (combined.length > OUTPUT_TAIL_BYTES) overflowed = true;
-      tail = combined.subarray(-OUTPUT_TAIL_BYTES);
-    },
-    text() {
-      // The ring can start mid-codepoint: drop leading continuation bytes
-      // (0b10xxxxxx) so the decode never opens with a replacement char.
-      let start = 0;
-      while (start < tail.length && (tail[start]! & 0b1100_0000) === 0b1000_0000) start += 1;
-      return boundedTail(tail.subarray(start).toString("utf8"), overflowed || start > 0);
-    },
-  };
-}
-
-// Live sign-in material rides a URL's QUERY (state/code_challenge/user_code):
-// transient-sidecar-only, never durable (f-78414434ad00). Host+path stay.
-const URL_QUERY_RE = /(https?:\/\/[^\s"'<>?#]+)\?[^\s"'<>]*/g;
-
-/** Strip terminal escapes (CSI, OSC, bare ESC, C0 controls except newline),
- * redact secret-like tokens and URL queries, and clamp - diagnostic evidence
- * entering a durable journal/API surface, never a raw vendor log copy
- * (INV-062). */
-export function boundedTail(text: string, truncated = false): string {
-  const plain = text
-    .replace(TERM_ESCAPE_RE, "")
-    .replace(C0_CONTROL_RE, "")
-    .replace(URL_QUERY_RE, "$1?[redacted]");
-  // Redact the complete sanitized input before any boundary is selected: a
-  // tail-first clamp can strip the prefix a token detector needs to anchor.
-  const redacted = redactSecrets(plain);
-  // When the source was truncated at the front (ring overflow, or a
-  // direct-string caller over the byte budget), a secret split by that
-  // boundary could leave a prefix-less fragment redactSecrets cannot anchor —
-  // drop the leading partial token. The caller's flag is authoritative (a
-  // ring string is already <= the cap, so length cannot see the cut).
-  const bytes = Buffer.from(redacted, "utf8");
-  const cut = truncated || bytes.length > OUTPUT_TAIL_BYTES;
-  const tail = bytes.subarray(Math.max(0, bytes.length - OUTPUT_TAIL_BYTES));
-  let start = 0;
-  while (start < tail.length && (tail[start]! & 0b1100_0000) === 0b1000_0000) start += 1;
-  let bounded = tail.subarray(start).toString("utf8");
-  if (cut) bounded = bounded.replace(/^\S+/, "");
-  return bounded.trim();
 }
 
 /** Run `<binary> login --help` captured, bounded to 10s. Fails OPEN: only a

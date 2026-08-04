@@ -883,6 +883,18 @@
     },
     {
       "method": "POST",
+      "path": "/v2/setup/jobs/:id/input",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Deliver the user's one-time sign-in input (e.g. a pasted OAuth code) to a waiting login job; the value is transient and never journaled.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlSetupJobInputRequest",
+      "parameters": [],
+      "response_schema": "ControlSetupJob",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
       "path": "/v2/setup/jobs/:id/reconcile",
       "mutating": true,
       "applicability": "global",

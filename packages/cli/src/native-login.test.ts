@@ -60,17 +60,20 @@ describe("native login specs", () => {
         "auth",
         "login",
       ]);
+      // Owner directive 2026-08-04: claude and cursor never open Terminal —
+      // claude's manual OAuth completion takes the one-shot input sidecar,
+      // cursor's login self-completes by server-side polling.
       expect(nativeLoginSpec("claude", resolver)).toEqual({
         binary: "/normalized/bin/claude",
         args: ["auth", "login"],
         displayCommand: "claude auth login",
-        loginMode: "terminal",
+        loginMode: "url_disclosure_with_input",
       });
       expect(nativeLoginSpec("cursor", resolver)).toEqual({
         binary: "/normalized/bin/cursor-agent",
         args: ["login"],
         displayCommand: "cursor-agent login",
-        loginMode: "terminal",
+        loginMode: "url_disclosure",
       });
       for (const harness of ["codex", "claude", "cursor"]) {
         expect(isAbsolute(nativeLoginSpec(harness, resolver)?.binary ?? "")).toBe(true);

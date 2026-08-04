@@ -118,7 +118,7 @@ struct AccountRowView: View {
             .fixedSize()
             .help(row.verified
                 ? "Manage this account's native login"
-                : "Start the official CLI login for this account — a Terminal window opens automatically")
+                : "Start the official CLI login for this account — the sign-in link appears right here, no Terminal window")
     }
 
     /// The delete control, or a clear spacer that still holds the column (so the

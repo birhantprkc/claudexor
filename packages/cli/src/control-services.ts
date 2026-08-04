@@ -189,9 +189,8 @@ export function controlServices(
       resources.resolve(refs);
     },
     runRetention: createRetentionRunner({ projects, threads, daemonJobs }),
-    // F3 nested-project disclosure: each project carries its (recomputed)
-    // nesting relations with other registered projects — surfaces disclose
-    // "nested inside <root>"; never a refusal.
+    // F3 nested-project disclosure: each project carries its recomputed
+    // nesting relations — surfaces disclose "nested inside <root>", never refuse.
     listProjects: async () => {
       const store = projects();
       return {
@@ -355,6 +354,7 @@ export function controlServices(
     setupJobSnapshot: async (input: unknown) => setupJobs().snapshot(input),
     setupJobEvents: async (input: unknown) => setupJobs().events(input),
     cancelSetupJob: async (input: unknown) => setupJobs().cancel(input),
+    setupJobInput: async (input: unknown) => setupJobs().input(input),
     reconcileSetupJob: async (input: unknown) => setupJobs().reconcile(input),
     extendSetupJob: async (input: unknown) => setupJobs().extend(input),
     journalEvents: async (partition: string, afterCursor?: string) =>

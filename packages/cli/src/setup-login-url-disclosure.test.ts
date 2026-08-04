@@ -66,7 +66,11 @@ function processGroups(pid = 4242): ProcessGroupService {
   });
 }
 
-function prepareTerminalLogin(script: string, harness: "claude" | "cursor" = "claude") {
+function prepareTerminalLogin(
+  script: string,
+  harness: "claude" | "cursor" = "claude",
+  loginMode?: "url_disclosure" | "url_disclosure_with_input",
+) {
   const jobDir = join(root, "job");
   mkdirSync(jobDir, { mode: 0o700 });
   const binary = join(jobDir, harness);
@@ -83,6 +87,10 @@ function prepareTerminalLogin(script: string, harness: "claude" | "cursor" = "cl
     binary,
     args,
     cwd: jobDir,
+    ...(loginMode ? { loginMode } : {}),
+    ...(loginMode === "url_disclosure_with_input"
+      ? { inputPath: join(jobDir, "runner-input.json") }
+      : {}),
     // Terminal-mode manifests now carry the disclosure sidecar path too.
     deviceCodePath: join(jobDir, "runner-devicecode.json"),
     statePath: join(jobDir, "runner-state.json"),
@@ -388,5 +396,93 @@ describe("disclosure watcher supersession (wave FIX_FIRST: SSE clients must see 
     await new Promise((resolve) => setTimeout(resolve, 450));
     expect(updates.length).toBe(2);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("daemon-hosted no-Terminal login modes (owner directive 2026-08-04)", () => {
+  it("cursor url_disclosure: NO_OPEN_BROWSER reaches the vendor and the URL is disclosed", async () => {
+    const script = [
+      "#!/bin/bash",
+      'printf "%s" "${NO_OPEN_BROWSER:-}" > "$(dirname "$0")/no-open-browser.txt"',
+      'echo "Sign in: https://cursor.com/loginDeepControl?challenge=c1&uuid=u1&mode=login"',
+      "exit 0",
+      "",
+    ].join("\n");
+    const { jobDir, manifestPath } = prepareTerminalLogin(script, "cursor", "url_disclosure");
+    const code = await runWorker(manifestPath, join(root, "native"));
+    expect(code).toBe(0);
+    expect(readFileSync(join(jobDir, "no-open-browser.txt"), "utf8")).toBe("1");
+    const disclosure = readRunnerDeviceCode(join(jobDir, "runner-devicecode.json"));
+    expect(disclosure).toMatchObject({
+      flow: "oauth_url",
+      verificationUrl: "https://cursor.com/loginDeepControl?challenge=c1&uuid=u1&mode=login",
+      userCode: "",
+    });
+  });
+
+  it("claude url_disclosure_with_input: the input sidecar reaches the vendor's stdin exactly once", async () => {
+    const script = [
+      "#!/bin/bash",
+      'echo "Visit https://platform.claude.com/oauth/authorize?state=s1 then paste the code"',
+      "IFS= read -r -t 8 line || exit 3",
+      'printf "%s" "$line" > "$(dirname "$0")/received.txt"',
+      "exit 0",
+      "",
+    ].join("\n");
+    const { jobDir, manifestPath, spec } = prepareTerminalLogin(
+      script,
+      "claude",
+      "url_disclosure_with_input",
+    );
+    const workerDone = runWorker(manifestPath, join(root, "native"));
+    // Wait for the URL disclosure (the card is now showing the link + field),
+    // then deliver the one-shot input the way the daemon route does.
+    const deadline = Date.now() + 6_000;
+    for (;;) {
+      const disclosure = readRunnerDeviceCode(join(jobDir, "runner-devicecode.json"));
+      if (disclosure) {
+        expect(disclosure.flow).toBe("oauth_url_input");
+        break;
+      }
+      if (Date.now() > deadline) throw new Error("disclosure sidecar never appeared");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    atomicPrivateJson(join(jobDir, "runner-input.json"), {
+      version: SETUP_LOGIN_PROTOCOL_VERSION,
+      jobId: spec.jobId,
+      executionId: spec.executionId,
+      value: "pasted-oauth-code-42",
+      submittedAt: new Date().toISOString(),
+    });
+    expect(await workerDone).toBe(0);
+    expect(readFileSync(join(jobDir, "received.txt"), "utf8")).toBe("pasted-oauth-code-42");
+    // The transient value never lands in the durable result receipt.
+    const result = readFileSync(join(jobDir, "runner-result.json"), "utf8");
+    expect(result).not.toContain("pasted-oauth-code-42");
+  });
+
+  it("an input sidecar bound to a different execution is never delivered", async () => {
+    const script = [
+      "#!/bin/bash",
+      'echo "Visit https://platform.claude.com/oauth/authorize?state=s2 then paste the code"',
+      "IFS= read -r -t 2 line && exit 9",
+      "exit 3",
+      "",
+    ].join("\n");
+    const { jobDir, manifestPath, spec } = prepareTerminalLogin(
+      script,
+      "claude",
+      "url_disclosure_with_input",
+    );
+    atomicPrivateJson(join(jobDir, "runner-input.json"), {
+      version: SETUP_LOGIN_PROTOCOL_VERSION,
+      jobId: spec.jobId,
+      executionId: "execution-FOREIGN",
+      value: "stolen-code",
+      submittedAt: new Date().toISOString(),
+    });
+    // The vendor's bounded read must time out (exit 3): a foreign-execution
+    // sidecar reads as absent, never as input.
+    expect(await runWorker(manifestPath, join(root, "native"))).toBe(1);
   });
 });

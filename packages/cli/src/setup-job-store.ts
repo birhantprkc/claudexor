@@ -33,6 +33,7 @@ export interface SetupJobPaths {
   runnerPermit: string;
   /** D-17 transient device-code disclosure sidecar (device_code logins only). */
   runnerDeviceCode: string;
+  runnerInput: string;
   command: string;
 }
 
@@ -118,6 +119,7 @@ export class SetupJobStore {
       runnerResult: join(dir, "runner-result.json"),
       runnerPermit: join(dir, "runner-permit.json"),
       runnerDeviceCode: join(dir, "runner-devicecode.json"),
+      runnerInput: join(dir, "runner-input.json"),
       command: join(dir, "login.command"),
     };
   }

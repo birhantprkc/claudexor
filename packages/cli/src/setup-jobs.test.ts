@@ -1259,7 +1259,10 @@ describe("setup jobs", () => {
     );
     expect(await waitForTerminal(manager, job.jobId)).toBe("failed");
     expect(ms - created).toBe(30_000);
-    expect(calls).toBe(15);
+    // 15 in-window polls + the one bounded post-deadline grace re-probe
+    // (owner live E2E 2026-08-04: a vendor credential flush can land moments
+    // after the deadline while the login itself succeeded).
+    expect(calls).toBe(16);
     expect(capability.runs).toEqual([]);
     await manager.shutdown();
   });
@@ -1300,13 +1303,15 @@ describe("setup jobs", () => {
     );
     expect(await waitForTerminal(manager, job.jobId)).toBe("failed");
     expect(manager.status({ jobId: job.jobId }).outcome?.reason).toBe("auth_not_ready");
-    expect(ms - started).toBe(10_000);
-    expect(calls).toBe(3);
+    // The in-window ceiling holds at 10s; the single bounded grace re-probe
+    // adds at most one probe duration beyond it, never an open-ended wait.
+    expect(ms - started).toBe(11_900);
+    expect(calls).toBe(4);
     expect(capability.runs).toEqual([]);
     await manager.shutdown();
   });
 
-  it("rejects readiness that arrives after the verification deadline", async () => {
+  it("accepts readiness that lands moments after the deadline via the grace re-probe", async () => {
     let ms = Date.now();
     const group = processGroupFixture();
     const capability = capabilityVerifier(() => new Date(ms));
@@ -1333,12 +1338,12 @@ describe("setup jobs", () => {
       group.leader,
       new Date(ms).toISOString(),
     );
-    expect(await waitForTerminal(manager, job.jobId)).toBe("failed");
-    expect(manager.status({ jobId: job.jobId })).toMatchObject({
-      state: "failed",
-      outcome: { reason: "auth_not_ready", exitCode: 0, signal: null },
-    });
-    expect(capability.runs).toEqual([]);
+    // Owner live E2E 2026-08-04: the codex auth.json flush landed after the
+    // 30s deadline while `codex login status` already said Logged in — the
+    // job read "Login failed" against a succeeded login. The bounded grace
+    // re-probe turns exactly this race into the pass it really is.
+    expect(await waitForTerminal(manager, job.jobId)).toBe("succeeded");
+    expect(capability.runs).toHaveLength(1);
     await manager.shutdown();
   });
 
@@ -2535,6 +2540,71 @@ describe("D-17 codex device-code login", () => {
     // read it), while the coarse outcome stays not_supported.
     expect(done.nativeCommand?.errorCode).toBe("device_auth_unsupported");
     expect(done.nativeCommand?.commandStarted).toBe(false);
+    await manager.shutdown();
+  });
+});
+
+describe("one-shot sign-in input (url_disclosure_with_input, owner directive 2026-08-04)", () => {
+  const CLAUDE_LOGIN = { harness: "claude", action: "login", authRequest: "subscription" } as const;
+  const CURSOR_LOGIN = { harness: "cursor", action: "login", authRequest: "subscription" } as const;
+
+  it("writes the transient input sidecar exactly once and never journals the value", async () => {
+    const manager = createSetupJobManager({
+      rootDir: join(root, "input-happy"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+    });
+    await manager.start();
+    const job = manager.create(CLAUDE_LOGIN);
+    const updated = manager.input({ jobId: job.jobId, value: "pasted-code-7" });
+    expect(updated.message).toContain("sign-in input received");
+    const sidecar = readFileSync(manager._store.paths(job.jobId).runnerInput, "utf8");
+    expect(JSON.parse(sidecar)).toMatchObject({
+      jobId: job.jobId,
+      value: "pasted-code-7",
+    });
+    // One-shot: the second submission conflicts instead of replacing.
+    expect(() => manager.input({ jobId: job.jobId, value: "other" })).toThrowError(
+      /already submitted/,
+    );
+    // The value exists ONLY in the 0600 sidecar: never in the journaled job.
+    const journalled = JSON.stringify(manager.status({ jobId: job.jobId }));
+    expect(journalled).not.toContain("pasted-code-7");
+    await manager.shutdown();
+  });
+
+  it("rejects input for flows that do not take it (cursor url_disclosure, codex device-code)", async () => {
+    const manager = createSetupJobManager({
+      rootDir: join(root, "input-wrong-mode"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+    });
+    await manager.start();
+    const cursorJob = manager.create(CURSOR_LOGIN);
+    expect(() => manager.input({ jobId: cursorJob.jobId, value: "x" })).toThrowError(
+      /does not accept sign-in input/,
+    );
+    const codexJob = manager.create(DEVICE_CODE_REQUEST);
+    expect(() => manager.input({ jobId: codexJob.jobId, value: "x" })).toThrowError(
+      /does not accept sign-in input/,
+    );
+    await manager.shutdown();
+  });
+
+  it("rejects malformed values before touching the job", async () => {
+    const manager = createSetupJobManager({
+      rootDir: join(root, "input-malformed"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+    });
+    await manager.start();
+    const job = manager.create(CLAUDE_LOGIN);
+    expect(() => manager.input({ jobId: job.jobId, value: "" })).toThrow();
+    expect(() => manager.input({ jobId: job.jobId, value: "y".repeat(2000) })).toThrow();
+    expect(existsSync(manager._store.paths(job.jobId).runnerInput)).toBe(false);
     await manager.shutdown();
   });
 });

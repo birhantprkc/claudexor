@@ -62,6 +62,11 @@ import {
   setupTransportConflict,
 } from "./setup-client-pty.js";
 import { persistSetupLoginPermit, setupLoginDeadlines } from "./setup-login-permit.js";
+import {
+  graceVerifyAfterDeadline,
+  isUrlDisclosureLoginMode,
+  submitSetupLoginInput,
+} from "./setup-login-completion.js";
 
 const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
   codex: defaultNativeCodexHome,
@@ -529,13 +534,30 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     }
     const latest = store.status(jobId);
     if (!ACTIVE_SETUP_STATES.has(latest.state) || latest.phase === "cancelling") return;
+    // Grace re-probe (owner live E2E 2026-08-04): a vendor credential flush
+    // landing moments after the deadline is a success, not a failure.
+    const grace = await graceVerifyAfterDeadline({
+      profileId: job.profileId ?? null,
+      probeProfile: () =>
+        probeProfileStatus(job.harness, job.profileId!, verificationController, verifyPollMs),
+      probeNative: () => probeNativeSession(job.harness, verificationController, verifyPollMs),
+    });
+    if (grace === "profile_verified") {
+      const message = `${latest.harness} profile "${job.profileId}" login verified by its doctor probe (post-deadline grace probe); the default-route capability smoke does not apply to scoped profiles.`;
+      finish(jobId, "succeeded", "completed", message, loginEvidence);
+      return;
+    }
+    if (grace === "native_verified") {
+      await runCapabilitySmoke(jobId, verificationController, loginEvidence);
+      return;
+    }
     finish(
       jobId,
       "failed",
       "auth_not_ready",
       `${latest.harness} ${
         job.profileId ? `profile "${job.profileId}"` : "native session"
-      } was not ready before the verification deadline${lastDetail ? `: ${lastDetail}` : "."}`,
+      } could not be verified within ${Math.round(verifyTimeoutMs / 1000)}s of the login command completing. The sign-in itself may still have succeeded — recheck Harness Doctor before retrying${lastDetail ? ` (last probe: ${lastDetail})` : "."}`,
       loginEvidence,
     );
   }
@@ -1013,10 +1035,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     profileConfigDir?: string,
   ): ControlSetupJob {
     const deviceCode = spec.loginMode === "device_code";
-    // The device-code flow is driven by the daemon-hosted app-server runner and
-    // needs no Terminal, so it is not macOS-gated. The legacy Terminal handoff
-    // stays macOS-only.
-    if (!deviceCode && job.transport !== "client_pty" && platform !== "darwin") {
+    // Daemon-hosted modes never touch Terminal and run on any posix platform;
+    // only the legacy Terminal handoff (codex browser_redirect) is macOS-only.
+    const daemonHosted = deviceCode || isUrlDisclosureLoginMode(spec.loginMode);
+    if (!daemonHosted && job.transport !== "client_pty" && platform !== "darwin") {
       return finish(
         job.jobId,
         "failed",
@@ -1065,13 +1087,17 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         // runner can capture the vendor login's OAuth URL into it as an
         // `oauth_url` disclosure — the no-Terminal "open this link" card.
         // Pre-upgrade sealed manifests (no deviceCodePath) stay digest-valid.
+        deviceCodePath: paths.runnerDeviceCode,
         ...(deviceCode
-          ? {
-              loginMode: "device_code" as const,
-              appServerFlow: spec.appServerFlow,
-              deviceCodePath: paths.runnerDeviceCode,
-            }
-          : { deviceCodePath: paths.runnerDeviceCode }),
+          ? { loginMode: "device_code" as const, appServerFlow: spec.appServerFlow }
+          : isUrlDisclosureLoginMode(spec.loginMode)
+            ? {
+                loginMode: spec.loginMode,
+                ...(spec.loginMode === "url_disclosure_with_input"
+                  ? { inputPath: paths.runnerInput }
+                  : {}),
+              }
+            : {}),
         statePath: paths.runnerState,
         resultPath: paths.runnerResult,
         permitPath: paths.runnerPermit,
@@ -1081,7 +1107,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         commandDigest: authorizedCommandDigest,
       });
       atomicPrivateJson(paths.manifest, manifest);
-      if (deviceCode) {
+      if (daemonHosted) {
         // D-17 primary flow: launch the app-server runner DETACHED (no Terminal,
         // no login.command script). The runner survives daemon restart exactly
         // like the Terminal runner (same detached process group + sidecars);
@@ -1099,9 +1125,11 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
             commandDigest: authorizedCommandDigest,
             manifestDigest: manifest.manifestDigest,
           },
-          message: `Starting ${job.harness} device-code sign-in over the app-server (no Terminal).`,
+          message: deviceCode
+            ? `Starting ${job.harness} device-code sign-in over the app-server (no Terminal).`
+            : `Starting ${job.harness} sign-in — the link appears here as soon as the vendor prints it (no Terminal).`,
         });
-        log(job.jobId, `device-code runner: ${nodePath} ${runnerPath} ${paths.manifest}`);
+        log(job.jobId, `daemon-hosted login runner: ${nodePath} ${runnerPath} ${paths.manifest}`);
         const runner = spawnProcess(nodePath, [runnerPath, paths.manifest], {
           detached: true,
           stdio: "ignore",
@@ -1114,7 +1142,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
             job.jobId,
             "failed",
             "launch_failed",
-            `Could not start the ${job.harness} device-code runner: ${detail}.`,
+            `Could not start the ${job.harness} sign-in runner: ${detail}.`,
             {},
             spec.displayCommand,
           );
@@ -1438,6 +1466,12 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         terminationReconciliation: { status: "empty", observedAt: iso() },
         message: `${job.harness} login process group is confirmed empty; replacement is allowed.`,
       });
+    },
+    input(input: unknown): ControlSetupJob {
+      return submitSetupLoginInput(
+        { status: (id) => store.status(id), manifestFor, update, iso },
+        input,
+      );
     },
     extend(input: unknown): ControlSetupJob {
       supervisor.assertCreateAllowed();

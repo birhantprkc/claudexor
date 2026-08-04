@@ -68,12 +68,15 @@ public enum SetupCodexLoginFlow: String, Codable, Sendable, CaseIterable {
 }
 
 /// Every flow a login disclosure can carry (wire `SetupLoginDisclosureFlow`):
-/// the two codex app-server flows, plus `oauth_url` — the URL a TERMINAL-mode
-/// login (claude/cursor, codex fallback) printed and the runner captured.
+/// the two codex app-server flows, `oauth_url` — the sign-in URL a
+/// daemon-hosted login (cursor; codex fallback) printed and the runner
+/// captured — and `oauth_url_input`, the claude variant whose card also
+/// renders a one-shot paste field delivered via POST /v2/setup/jobs/:id/input.
 public enum SetupLoginDisclosureFlow: String, Codable, Sendable, CaseIterable {
     case chatgptDeviceCode
     case chatgpt
     case oauthUrl = "oauth_url"
+    case oauthUrlInput = "oauth_url_input"
 }
 
 /// TRANSIENT device-code disclosure overlaid on a setup-job snapshot / SSE frame

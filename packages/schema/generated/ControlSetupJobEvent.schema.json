@@ -1003,7 +1003,8 @@
                   "enum": [
                     "chatgptDeviceCode",
                     "chatgpt",
-                    "oauth_url"
+                    "oauth_url",
+                    "oauth_url_input"
                   ]
                 },
                 "verificationUrl": {

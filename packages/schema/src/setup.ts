@@ -422,7 +422,14 @@ export type SetupAppServerLoginFlow = z.infer<typeof SetupAppServerLoginFlow>;
  * same card shape as the browser-callback (`chatgpt`) flow, so any UI can
  * render "open this link" without a terminal.
  */
-export const SetupLoginDisclosureFlow = z.enum(["chatgptDeviceCode", "chatgpt", "oauth_url"]);
+// oauth_url_input: the with-input variant — URL plus a one-shot paste field
+// delivered via POST /v2/setup/jobs/:id/input.
+export const SetupLoginDisclosureFlow = z.enum([
+  "chatgptDeviceCode",
+  "chatgpt",
+  "oauth_url",
+  "oauth_url_input",
+]);
 export type SetupLoginDisclosureFlow = z.infer<typeof SetupLoginDisclosureFlow>;
 
 /**
@@ -562,12 +569,14 @@ export const SetupLoginManifest = z
      * codex CODEX_HOME). OPTIONAL, not defaulted: absent on default-store jobs so
      * pre-existing manifests keep their sealed digest across a daemon upgrade. */
     profileConfigDir: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
-    /** D-17: how the runner performs the login. Absent (or "terminal") = the
-     * legacy Terminal-hosted vendor `codex login`. "device_code" = the primary
-     * flow: the runner hosts `codex app-server --stdio` and drives typed
-     * device-code auth (no Terminal). OPTIONAL/undefaulted so pre-existing
-     * sealed manifests keep their digest across a daemon upgrade. */
-    loginMode: z.enum(["terminal", "device_code"]).optional(),
+    /** How the runner performs the login: "terminal" (codex browser_redirect
+     * fallback only), "device_code" (codex app-server), "url_disclosure"
+     * (daemon-hosted, URL captured into the sidecar — cursor), or
+     * "url_disclosure_with_input" (same + one-shot stdin input — claude).
+     * OPTIONAL/undefaulted so pre-upgrade manifests keep their digest. */
+    loginMode: z
+      .enum(["terminal", "device_code", "url_disclosure", "url_disclosure_with_input"])
+      .optional(),
     /** Which app-server auth flow the device_code runner requests. Present only
      * with loginMode "device_code". */
     appServerFlow: SetupAppServerLoginFlow.optional(),
@@ -577,6 +586,9 @@ export const SetupLoginManifest = z
      * vendor login's OAuth URL into it as an `oauth_url` disclosure). Optional
      * so pre-upgrade sealed manifests keep their digest. */
     deviceCodePath: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
+    /** One-shot input sidecar (url_disclosure_with_input only): transient,
+     * never journaled, delivered to the vendor CLI's stdin by the runner. */
+    inputPath: SetupLoginProtocol.SetupLoginAbsolutePath.optional(),
     statePath: SetupLoginProtocol.SetupLoginAbsolutePath,
     resultPath: SetupLoginProtocol.SetupLoginAbsolutePath,
     permitPath: SetupLoginProtocol.SetupLoginAbsolutePath,
@@ -591,6 +603,8 @@ export const SetupLoginManifest = z
     const deny = (path: string[], message: string) =>
       context.addIssue({ code: z.ZodIssueCode.custom, path, message });
     const deviceCode = value.loginMode === "device_code";
+    const urlDisclosure =
+      value.loginMode === "url_disclosure" || value.loginMode === "url_disclosure_with_input";
     if (deviceCode && value.harness !== "codex")
       deny(["loginMode"], "device_code login mode exists only for the codex app-server");
     if (deviceCode && (!value.appServerFlow || !value.deviceCodePath))
@@ -600,6 +614,10 @@ export const SetupLoginManifest = z
     // stays device_code-exclusive.
     if (!deviceCode && value.appServerFlow)
       deny(["appServerFlow"], "appServerFlow requires loginMode device_code");
+    if (urlDisclosure && !value.deviceCodePath)
+      deny(["deviceCodePath"], "url_disclosure manifests require the disclosure sidecar path");
+    if ((value.loginMode === "url_disclosure_with_input") !== (value.inputPath !== undefined))
+      deny(["inputPath"], "inputPath rides url_disclosure_with_input manifests, exactly");
   });
 export type SetupLoginManifest = z.infer<typeof SetupLoginManifest>;
 

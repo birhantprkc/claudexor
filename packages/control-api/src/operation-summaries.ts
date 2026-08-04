@@ -74,6 +74,8 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
   "GET /v2/setup/jobs/:id/snapshot": "Read a setup job's terminal snapshot.",
   "GET /v2/setup/jobs/:id/events": "Tail a setup job's event stream (SSE).",
   "POST /v2/setup/jobs/:id/cancel": "Cancel a setup job.",
+  "POST /v2/setup/jobs/:id/input":
+    "Deliver the user's one-time sign-in input (e.g. a pasted OAuth code) to a waiting login job; the value is transient and never journaled.",
   "POST /v2/setup/jobs/:id/reconcile": "Reconcile a setup job's state.",
   "POST /v2/setup/jobs/:id/extend": "Extend a setup job's deadline.",
   "GET /v2/recovery/partitions/:id": "Inspect a journal partition for recovery.",

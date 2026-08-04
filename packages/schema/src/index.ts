@@ -57,6 +57,7 @@ export * from "./control-thread-apply.js";
 export * from "./control-run-scope.js";
 export * from "./control-run-failure.js";
 export * from "./setup.js";
+export * from "./setup-login-input.js";
 export * from "./control-trust.js";
 export * from "./control-gc.js";
 export * from "./control-secret.js";

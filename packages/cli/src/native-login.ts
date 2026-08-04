@@ -8,10 +8,12 @@ export interface NativeLoginSpec {
   binary: string;
   args: string[];
   displayCommand: string;
-  /** D-17: "device_code" = the primary flow hosted by the runner over
-   * `codex app-server --stdio` (no Terminal). Absent/"terminal" = the legacy
-   * Terminal-hosted vendor login. */
-  loginMode?: "terminal" | "device_code";
+  /** D-17: "device_code" = the codex app-server flow (no Terminal).
+   * "url_disclosure" = daemon-hosted vendor login whose sign-in URL is
+   * captured into the disclosure sidecar (cursor). "url_disclosure_with_input"
+   * = the same plus the one-shot stdin input sidecar (claude paste-code).
+   * "terminal" = the legacy Terminal handoff (codex browser_redirect only). */
+  loginMode?: "terminal" | "device_code" | "url_disclosure" | "url_disclosure_with_input";
   /** Which app-server auth flow the device_code runner requests (device_code only). */
   appServerFlow?: "chatgptDeviceCode" | "chatgpt";
 }
@@ -94,11 +96,16 @@ export function nativeLoginSpec(
       appServerFlow,
     };
   }
+  // Owner directive 2026-08-04: the terminal-based login UX for claude and
+  // cursor is an anti-pattern — a fresh user signs in from the card, no
+  // Terminal window. Claude's manual OAuth completion needs one line of user
+  // input written back (the pasted code); cursor's login self-completes by
+  // server-side polling once the URL is followed anywhere.
   return {
     binary: resolved,
     args: [...definition.args],
     displayCommand: definition.displayCommand,
-    loginMode: "terminal",
+    loginMode: harness === "claude" ? "url_disclosure_with_input" : "url_disclosure",
   };
 }
 
@@ -178,6 +185,16 @@ export function nativeLoginEnv(
     // Default and profile Claude stores are both Claudexor-owned (INV-067 /
     // INV-135); ordinary ~/.claude is never created, read, or mutated here.
     ensureDir(env.CLAUDE_CONFIG_DIR);
+  } else if (harness === "cursor") {
+    // url_disclosure: the CLI must print its sign-in URL instead of opening a
+    // browser on the daemon host (the user may be on another device). The
+    // vendor gates this on NO_OPEN_BROWSER (verified in the shipped bundle).
+    // NOTE cursor store isolation stays absent BY MEASUREMENT: the binary's
+    // darwin credential file is homedir-fixed (~/.cursor/auth.json) and the
+    // default store is the global-service Keychain — CURSOR_CONFIG_DIR
+    // relocates config, not credentials, so wiring it would only split the
+    // account's own state. One cursor account per machine user.
+    env.NO_OPEN_BROWSER = "1";
   }
   return env;
 }

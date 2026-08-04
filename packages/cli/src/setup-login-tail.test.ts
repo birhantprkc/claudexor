@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
-import { createTailBuffer, boundedTail, terminateAppServerChild } from "./setup-login-runner.js";
+import { terminateAppServerChild } from "./setup-login-runner.js";
+import { boundedTail, createTailBuffer } from "./setup-login-io.js";
 
 describe("device-login output tail redaction (X224 ring path)", () => {
   it("a secret split by the 4096-byte ring boundary does not survive as a prefix-less fragment", () => {

@@ -921,6 +921,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/setup/jobs/:id/cancel`
 - `GET /v2/setup/jobs/:id/events`
 - `POST /v2/setup/jobs/:id/extend`
+- `POST /v2/setup/jobs/:id/input`
 - `POST /v2/setup/jobs/:id/reconcile`
 - `GET /v2/setup/jobs/:id/snapshot`
 - `GET /v2/threads`
@@ -1436,15 +1437,23 @@ tees output so the operator sees the URL/one-time code, and persists a bounded
 ANSI-stripped tail so the daemon can disclose the real failure cause (e.g. the
 ChatGPT "Allow device code login" toggle being off).
 
-**Transient device-code disclosure (journal-is-authority, INV-062):** the
-one-time `userCode` rides ONLY a transient `runner-devicecode.json` sidecar the
-runner writes and a read-time overlay on `ControlSetupJobSnapshot` /
-`ControlSetupJobEvent`; it is NEVER a field of the journaled `ControlSetupJob`,
-never logged, and never written to the durable result receipt (the journal
-records only THAT a code was disclosed, via the `awaiting_user` transition). The
-sidecar is removed on terminalization so the code stops projecting.
-Snapshot/event schemas accept that overlay only for an active Codex login in
-`awaiting_user`. Stateful UI clients replace it from each authoritative frame,
+**Transient login disclosure (journal-is-authority, INV-062):** the one-time
+`userCode` and every captured sign-in URL ride ONLY a transient
+`runner-devicecode.json` sidecar the runner writes and a read-time overlay on
+`ControlSetupJobSnapshot` / `ControlSetupJobEvent`; they are NEVER fields of
+the journaled `ControlSetupJob`, never logged, and never written to the durable
+result receipt (the journal records only THAT something was disclosed, via the
+`awaiting_user` transition). The sidecar is removed on terminalization so the
+disclosure stops projecting. Snapshot/event schemas accept the overlay for any
+active login job in `awaiting_user` — codex app-server flows carry a
+`userCode`; the daemon-hosted `url_disclosure` (cursor) and
+`url_disclosure_with_input` (claude) modes carry the captured `oauth_url` /
+`oauth_url_input` sign-in link with an empty code. For
+`url_disclosure_with_input`, the user's pasted completion value arrives via
+`POST /v2/setup/jobs/:id/input`, rides a one-shot transient
+`runner-input.json` sidecar to the vendor CLI's stdin under the same
+never-journaled rule, and a second submission conflicts instead of replacing
+the first. Stateful UI clients replace the overlay from each authoritative frame,
 retain it only across a bounded same-job Extend/reconnect transition, and clear
 it on Cancel, detach, terminal/non-awaiting state, final stream loss, or poll
 failure. Every point response and SSE event must identify the setup job named

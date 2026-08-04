@@ -137,6 +137,7 @@ import {
   ControlHarnessModelsResponse,
   ControlSetupJob,
   ControlSetupJobCreateRequest,
+  ControlSetupJobInputRequest,
   ControlSetupJobEvent,
   ControlSetupJobSnapshot,
   isTerminalControlSetupJobState,
@@ -252,6 +253,7 @@ export interface DaemonControlApiOptions {
       setupJobSnapshot?: (input: unknown) => Promise<unknown>;
       setupJobEvents?: (input: unknown) => Promise<unknown>;
       cancelSetupJob?: (input: unknown) => Promise<unknown>;
+      setupJobInput?: (input: unknown) => Promise<unknown>;
       reconcileSetupJob?: (input: unknown) => Promise<unknown>;
       extendSetupJob?: (input: unknown) => Promise<unknown>;
       recoveryInspectPartition?: (partition: string) => Promise<unknown>;
@@ -1401,6 +1403,24 @@ export class DaemonControlApiServer {
         { jobId: decodeURIComponent(setupJobCancelMatch[1] as string) },
         ControlSetupJob,
       );
+    }
+    const setupJobInputMatch = /^\/setup\/jobs\/([^/]+)\/input$/.exec(path);
+    if (method === "POST" && setupJobInputMatch) {
+      try {
+        const raw = await this.readBody(req);
+        // The one-time sign-in value IS the payload here — it rides the
+        // transient sidecar to the vendor CLI and is never journaled; the
+        // inline-secret fence does not apply to this single sanctioned field.
+        const body = ControlSetupJobInputRequest.parse(raw);
+        return this.service(
+          res,
+          "setupJobInput",
+          { jobId: decodeURIComponent(setupJobInputMatch[1] as string), value: body.value },
+          ControlSetupJob,
+        );
+      } catch (err) {
+        return this.requestError(res, err);
+      }
     }
     const setupJobReconcileMatch = /^\/setup\/jobs\/([^/]+)\/reconcile$/.exec(path);
     if (method === "POST" && setupJobReconcileMatch) {

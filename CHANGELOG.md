@@ -32,7 +32,20 @@ Release history for Claudexor. The current version is declared in the root
   the sealed FINGERPRINTS delta entries, `DELTA.patch` must verify as the
   exact base..candidate diff, each reviewer's subject scope rides its
   artifact metadata, and the sealer refuses to sign unless fable=full and
-  sol is full or that exact sealed delta. Claudexor's control endpoint now resolves on Windows:
+  sol is full or that exact sealed delta. Claude and cursor logins no longer
+  open a Terminal window: both run as daemon-hosted detached runners
+  (`url_disclosure` for cursor with `NO_OPEN_BROWSER=1` — its login
+  self-completes by server-side polling from any browser; `url_disclosure_with_input`
+  for claude — the card shows the captured sign-in link plus a one-shot paste
+  field delivered to the vendor CLI's stdin via the new
+  `POST /v2/setup/jobs/:id/input` route and a transient never-journaled
+  `runner-input.json` sidecar), which also makes claude/cursor login work on
+  Linux for the first time; the legacy Terminal handoff remains only for the
+  codex `browser_redirect` fallback. Login verification gained a bounded
+  post-deadline grace re-probe: a vendor credential flush landing moments
+  after the 30s deadline now verifies as the success it is instead of
+  reporting "Login failed" against a completed sign-in, and the timeout
+  message now says the sign-in itself may have succeeded. Claudexor's control endpoint now resolves on Windows:
   `defaultSocketPath()` gained a `win32` branch returning the named pipe
   `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
   where it previously always built a Unix-style `.sock` path that could not be

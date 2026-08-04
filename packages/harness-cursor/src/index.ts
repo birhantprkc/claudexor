@@ -60,6 +60,11 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
     supported_sources: ["native_session", "api_key_env"],
     preferred_source: null,
     credential_transports: [
+      // Measured against the shipped bundle (2026-08-04): CURSOR_CONFIG_DIR
+      // exists but relocates only config — the darwin credential file is
+      // homedir-fixed (~/.cursor/auth.json) and the default store is the
+      // global-service login Keychain, so HOME remains the only credential
+      // relocation lever and per-profile cursor isolation stays unavailable.
       { source: "native_session", kind: "os_keychain", relocatable_by: ["HOME"] },
       { source: "api_key_env", kind: "env_var", relocatable_by: ["ENV"] },
     ],
