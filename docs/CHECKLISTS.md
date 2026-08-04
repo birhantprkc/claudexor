@@ -470,8 +470,10 @@ itself). This protocol bounds the loop mechanically while preserving the full
 repository context that small review packets lost.
 
 - **One wave, in parallel, on a frozen candidate SHA**: exactly two formal
-  native reviewers, Claude Code `claude-fable-5` at effort `max` and Codex
-  `gpt-5.6-sol` at effort `xhigh`, both through vendor-native local sessions.
+  native reviewers, Claude Code `claude-fable-5` at effort `max` and
+  `gpt-5.6-sol` at `xhigh` through the cursor harness (cursor model id
+  `gpt-5.6-sol-xhigh`; owner decision 2026-08-04: «зачем тебе кодекс? Ревьюй
+  курсором и клод кодом»), both through vendor-native local sessions.
   They receive the complete Git-visible repository, complete diff, same sealed
   evidence, owner dialogue/decisions, tests, and live internet access. Frozen
   review specs must record `external_context_policy=live` and web tool policy

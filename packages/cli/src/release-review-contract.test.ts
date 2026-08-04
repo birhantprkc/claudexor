@@ -20,6 +20,7 @@ import {
   OWNER_REVIEW_PROTOCOL,
   REQUIRED_NATIVE_REVIEWERS,
   decodeReviewUtf8,
+  expectedObservedModel,
   pathIsWithin,
   releaseAttestationSigningBytes,
   validateFullGateReceipt,
@@ -58,7 +59,7 @@ function fixture() {
     sessionId: `session-${index + 1}`,
     externalContextPolicy: "live",
     toolWebPolicy: "live",
-    observedModel: required.requestedModel,
+    observedModel: expectedObservedModel(required),
     observedSource: index === 0 ? "stream_event" : "transcript",
     routeProofStatus: "verified",
     authMode: "local_session",
@@ -165,14 +166,20 @@ describe("native owner-review publishing contract", () => {
         requestedModel: "claude-fable-5",
         requestedEffort: "max",
       },
+      // Owner decision 2026-08-04: the sol slot rides the cursor harness;
+      // effort is carried inside cursor's native model id.
       {
-        slot: "codex",
-        harnessId: "codex",
-        providerFamily: "openai",
-        requestedModel: "gpt-5.6-sol",
-        requestedEffort: "xhigh",
+        slot: "sol",
+        harnessId: "cursor",
+        providerFamily: "cursor",
+        requestedModel: "gpt-5.6-sol-xhigh",
+        requestedEffort: null,
       },
     ]);
+    expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[0]!)).toBe("claude-fable-5");
+    expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[1]!)).toBe(
+      "GPT-5.6 Sol 272K Extra High",
+    );
     const { attestation, authority } = fixture();
     expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
       ok: true,
@@ -230,7 +237,7 @@ describe("native owner-review publishing contract", () => {
     expect(validateReleaseAttestation(resign(forged), authority, expected).ok).toBe(false);
   });
 
-  it("requires exactly the ordered Fable and Codex pair", () => {
+  it("requires exactly the ordered Fable and Sol pair", () => {
     const { attestation, authority, resign } = fixture();
     for (const reviews of [
       attestation.payload.reviews.slice(0, 1),
@@ -359,13 +366,17 @@ const { pathToFileURL } = require("node:url");
       async *run(spec) {
         const started = new Date().toISOString();
         const observedSource = index === 0 ? "stream_event" : "transcript";
+        // The cursor slot mirrors measured cursor reality (2026-08-04):
+        // observed_model is a display name and credential_source is ABSENT
+        // from routed events — this fixture exercises the sealer's
+        // cursor-slot tolerance.
         yield {
           type: "started",
           session_id: spec.session_id,
           ts: started,
-          observed_model: required.requestedModel,
+          observed_model: config.expectedObserved[index],
           credential_route: "vendor_native",
-          credential_source: "native_session",
+          ...(required.harnessId === "cursor" ? {} : { credential_source: "native_session" }),
           payload: observedSource === "transcript" ? { observed_model_source: "transcript" } : {},
         };
         await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -496,6 +507,7 @@ const { pathToFileURL } = require("node:url");
             packetManifestSha256: manifestSha256,
           },
           reviewers: REQUIRED_NATIVE_REVIEWERS,
+          expectedObserved: REQUIRED_NATIVE_REVIEWERS.map((r) => expectedObservedModel(r)),
         }),
       );
       const engine = spawnSync(process.execPath, ["--import", "tsx", cliPath, reviewConfigPath], {
@@ -621,7 +633,7 @@ const { pathToFileURL } = require("node:url");
       expect(sameOutputRefused.status).toBe(1);
       expect(sameOutputRefused.stderr).toContain("must be different paths");
 
-      const codexMetadataPath = join(artifacts, "02-codex", "metadata.json");
+      const codexMetadataPath = join(artifacts, "02-cursor", "metadata.json");
       const codexMetadata = JSON.parse(readFileSync(codexMetadataPath, "utf8"));
       write(codexMetadataPath, json({ ...codexMetadata, ignored_settings: ["effort=xhigh"] }));
       const refused = runSealer(join(root, "refused.json"));
@@ -629,7 +641,7 @@ const { pathToFileURL } = require("node:url");
       expect(refused.stderr).toContain("ignored requested settings");
 
       write(codexMetadataPath, json(codexMetadata));
-      const codexTranscriptPath = join(artifacts, "02-codex", "transcript.md");
+      const codexTranscriptPath = join(artifacts, "02-cursor", "transcript.md");
       const codexTranscript = readFileSync(codexTranscriptPath);
       write(codexTranscriptPath, Buffer.concat([codexTranscript, Buffer.from("drift\n")]));
       const transcriptRefused = runSealer(join(root, "transcript-refused.json"));

@@ -22,6 +22,7 @@ import {
   OWNER_REVIEW_PROTOCOL,
   RELEASE_REVIEW_ATTESTATION_ALGORITHM,
   REQUIRED_NATIVE_REVIEWERS,
+  expectedObservedModel,
   canonicalJson,
   decodeReviewUtf8,
   pathIsWithin,
@@ -305,7 +306,9 @@ function validateReviewerArtifact(artifact, required, expected) {
     ["provider_family", required.providerFamily],
     ["requested_model", required.requestedModel],
     ["requested_effort", required.requestedEffort],
-    ["observed_model", required.requestedModel],
+    // Cursor reports a display name, not the id — the expected observed form
+    // is pinned per slot in the contract (owner decision 2026-08-04).
+    ["observed_model", expectedObservedModel(required)],
     ["route_proof_status", "verified"],
     ["auth_mode", "local_session"],
     ["status", "completed"],
@@ -373,11 +376,13 @@ function validateReviewerArtifact(artifact, required, expected) {
     proof.requested?.provider_family !== required.providerFamily ||
     proof.requested?.model_hint !== required.requestedModel ||
     proof.observed?.provider !== required.providerFamily ||
-    proof.observed?.model_id !== required.requestedModel ||
+    proof.observed?.model_id !== expectedObservedModel(required) ||
     proof.observed?.evidence_source !== metadata.observed_source ||
     !["stream_event", "transcript"].includes(metadata.observed_source)
   ) {
-    throw new Error(`${required.slot} route proof is incomplete or inconsistent`);
+    throw new Error(
+      `${required.slot} route proof is incomplete or inconsistent: expected {harness_id: ${JSON.stringify(required.harnessId)}, provider_family: ${JSON.stringify(required.providerFamily)}, model_hint: ${JSON.stringify(required.requestedModel)}, observed model_id: ${JSON.stringify(expectedObservedModel(required))}}, got ${JSON.stringify(proof ?? null)}`,
+    );
   }
 
   const events = validateEvents(
@@ -465,14 +470,26 @@ function validateEvents(bytes, required, observedSource, sessionId) {
     throw new Error(`${required.slot} events contain a failure, auth switch or ignored setting`);
   }
   const routed = events.filter((event) => event.credential_route != null);
+  // Cursor's routed events carry credential_route but omit credential_source
+  // (measured 2026-08-04, run-d2bffab59d74) — the native-session fact for that
+  // slot lives in telemetry auth_mode/auth_source, both still checked. When the
+  // key IS present it must still say native_session; only its absence is
+  // tolerated, and only for the cursor slot (owner decision 2026-08-04).
+  const nativeCredentialSource = (event) =>
+    event.credential_source === "native_session" ||
+    (required.harnessId === "cursor" && event.credential_source == null);
   if (
     routed.length === 0 ||
     routed.some(
-      (event) =>
-        event.credential_route !== "vendor_native" || event.credential_source !== "native_session",
+      (event) => event.credential_route !== "vendor_native" || !nativeCredentialSource(event),
     )
   ) {
-    throw new Error(`${required.slot} events do not prove a native local session`);
+    const offender = routed.find(
+      (event) => event.credential_route !== "vendor_native" || !nativeCredentialSource(event),
+    );
+    throw new Error(
+      `${required.slot} events do not prove a native local session (routed events: ${routed.length}, offending event: ${JSON.stringify(offender ? { credential_route: offender.credential_route ?? null, credential_source: offender.credential_source ?? null } : null)})`,
+    );
   }
   const observed = events.filter((event) => event.observed_model != null);
   const sources = new Set(
@@ -482,10 +499,15 @@ function validateEvents(bytes, required, observedSource, sessionId) {
   );
   if (
     observed.length === 0 ||
-    observed.some((event) => event.observed_model !== required.requestedModel) ||
+    observed.some((event) => event.observed_model !== expectedObservedModel(required)) ||
     !sources.has(observedSource)
   ) {
-    throw new Error(`${required.slot} events do not prove the exact observed model`);
+    const mismatch = observed.find(
+      (event) => event.observed_model !== expectedObservedModel(required),
+    );
+    throw new Error(
+      `${required.slot} events do not prove the exact observed model (expected ${JSON.stringify(expectedObservedModel(required))}, observed events: ${observed.length}, first mismatch: ${JSON.stringify(mismatch?.observed_model ?? null)})`,
+    );
   }
   if (events.every((event) => event.type !== "message" || typeof event.text !== "string")) {
     throw new Error(`${required.slot} events contain no reviewer transcript messages`);

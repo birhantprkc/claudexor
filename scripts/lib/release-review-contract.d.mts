@@ -11,12 +11,14 @@ export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS: readonly [
 ];
 export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS: 1000;
 export const REQUIRED_NATIVE_REVIEWERS: readonly Readonly<{
-  slot: "fable" | "codex";
-  harnessId: "claude" | "codex";
-  providerFamily: "anthropic" | "openai";
-  requestedModel: "claude-fable-5" | "gpt-5.6-sol";
-  requestedEffort: "max" | "xhigh";
+  slot: "fable" | "sol";
+  harnessId: "claude" | "cursor";
+  providerFamily: "anthropic" | "cursor";
+  requestedModel: "claude-fable-5" | "gpt-5.6-sol-xhigh";
+  requestedEffort: "max" | null;
 }>[];
+export const EXPECTED_OBSERVED_MODELS: Readonly<Record<"fable" | "sol", string>>;
+export function expectedObservedModel(required: { slot: string; requestedModel: string }): string;
 
 export function decodeReviewUtf8(value: string | Buffer, label?: string): string;
 export function validateReleaseInput(

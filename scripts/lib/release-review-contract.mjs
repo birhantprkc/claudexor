@@ -35,14 +35,38 @@ export const REQUIRED_NATIVE_REVIEWERS = Object.freeze([
     requestedModel: "claude-fable-5",
     requestedEffort: "max",
   }),
+  // Owner decision 2026-08-04 («зачем тебе кодекс? Ревьюй курсором и клод
+  // кодом» — session transcript ~/.claude/projects/-Users-anton-Ouroboros/
+  // 5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl line 394, answering the
+  // explanation that this slot required a codex-native session): the sol slot
+  // rides the cursor harness. The MODEL is unchanged — cursor has no effort
+  // flag, so `xhigh` is carried inside cursor's native model id and
+  // requestedEffort is honestly null. providerFamily is cursor's manifest
+  // family; the two slots remain distinct families and must still overlap.
   Object.freeze({
-    slot: "codex",
-    harnessId: "codex",
-    providerFamily: "openai",
-    requestedModel: "gpt-5.6-sol",
-    requestedEffort: "xhigh",
+    slot: "sol",
+    harnessId: "cursor",
+    providerFamily: "cursor",
+    requestedModel: "gpt-5.6-sol-xhigh",
+    requestedEffort: null,
   }),
 ]);
+
+/**
+ * Slot-expected STREAM-OBSERVED model string. Cursor reports a display name,
+ * never the requested id (measured 2026-08-04, advisory run run-d2bffab59d74:
+ * `observed_model: GPT-5.6 Sol 272K Extra High`), so the observed-model checks
+ * pin the exact measured string for that slot instead of the id — equality
+ * stays as strong as before, against the form the harness genuinely emits.
+ */
+export const EXPECTED_OBSERVED_MODELS = Object.freeze({
+  fable: "claude-fable-5",
+  sol: "GPT-5.6 Sol 272K Extra High",
+});
+
+export function expectedObservedModel(required) {
+  return EXPECTED_OBSERVED_MODELS[required.slot] ?? required.requestedModel;
+}
 
 export function decodeReviewUtf8(value, label = "review evidence") {
   if (typeof value === "string") return value;
@@ -365,8 +389,10 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
         );
       }
     }
-    if (review.observedModel !== required.requestedModel) {
-      reasons.push(`owner review ${required.slot} observed model does not match its request`);
+    if (review.observedModel !== expectedObservedModel(required)) {
+      reasons.push(
+        `owner review ${required.slot} observed model ${JSON.stringify(review.observedModel)} does not match expected ${JSON.stringify(expectedObservedModel(required))}`,
+      );
     }
     if (typeof review.sessionId !== "string" || review.sessionId.length === 0) {
       reasons.push(`owner review ${required.slot} session identity is missing`);

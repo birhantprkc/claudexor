@@ -675,9 +675,14 @@ invariant or owner decision before proceeding.
   `scripts/complexity-ratchet.mjs` in CI.
 - **INV-125** Release tags additionally pass the owner-review gate: ONE
   parallel native full-context wave on the frozen candidate SHA with EXACTLY
-  two required reviewers — Claude Code `claude-fable-5` at effort `max` and
-  Codex `gpt-5.6-sol` at effort `xhigh`, both on their vendor-native local
-  sessions. Each reviewer receives the same complete Git-visible candidate,
+  two required reviewers — Claude Code `claude-fable-5` at effort `max` on its
+  vendor-native local session, and `gpt-5.6-sol` at `xhigh` through the cursor
+  harness's native local session (cursor carries the effort inside its model
+  id `gpt-5.6-sol-xhigh`). Owner decision 2026-08-04, verbatim: «зачем тебе
+  кодекс? Ревьюй курсором и клод кодом» — the sol slot moved from the codex
+  harness to cursor; models, efforts, cross-family independence, and the
+  overlapping-execution requirement are unchanged.
+  Each reviewer receives the same complete Git-visible candidate,
   complete diff, sealed evidence, user dialogue and owner decisions, test and
   gate receipts, and internet access; packet splitting and substitute models
   cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched

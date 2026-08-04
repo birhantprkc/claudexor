@@ -116,9 +116,12 @@ before reading any review claims, then recomputes the commit tree and
 validates the current schemaVersion 5 payload. It binds the candidate SHA/tree,
 exact `pnpm release:verify` receipt, sealed evidence manifest/diff/wave, and
 exactly two native full-context reviewer artifact sets: Claude Code
-`claude-fable-5` at `max` and Codex `gpt-5.6-sol` at `xhigh`, both on verified
+`claude-fable-5` at `max` and `gpt-5.6-sol` at `xhigh` through the cursor
+harness (cursor model id `gpt-5.6-sol-xhigh`; owner decision 2026-08-04:
+«зачем тебе кодекс? Ревьюй курсором и клод кодом»), both on verified
 vendor-native local sessions. The sealer recomputes every evidence and reviewer
-digest, verifies requested equals observed model/effort, refuses auth switches
+digest, verifies the observed model against the slot's pinned expected form
+(cursor reports a display name), refuses auth switches
 or ignored settings, requires live external context and web policy, distinct
 overlapping sessions of at least one second, and requires each strict completion
 envelope to derive a non-blocking `pass` or `warn` verdict. The v5 attestation
@@ -239,7 +242,7 @@ CLAUDEXOR_REVIEW_WAVE_ID=<uuid-v4> \
   --candidate-tree <candidate-tree> \
   --packet-manifest-digest <manifest-sha256> \
   --reviewer-panel claude=claude-fable-5:max \
-  --reviewer-panel codex=gpt-5.6-sol:xhigh
+  --reviewer-panel cursor=gpt-5.6-sol-xhigh
 
 node scripts/seal-owner-review-attestation.mjs \
   --full-gate-receipt <external-gate-dir>/full-gate-receipt.json \
