@@ -1358,7 +1358,8 @@ seeded-credential home forever. A second daemon refuses to start while a live da
 holds the socket — checked BEFORE crash GC so a racing start can never reap
 the live daemon's children. `claudexor daemon rotate-token` rotates the local
 auth token (refused while the daemon is live; takes effect on next start),
-and on POSIX the daemon socket is `chmod 0600` (the win32 named pipe is not a
+and on POSIX the daemon best-effort chmods the socket 0600 — a chmod failure
+on exotic filesystems is tolerated at startup (the win32 named pipe is not a
 filesystem entry, so no chmod applies there; the bearer token remains the auth
 gate on every platform).
 

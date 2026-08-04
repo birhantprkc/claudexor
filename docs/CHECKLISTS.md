@@ -284,8 +284,9 @@ pnpm test
   macOS VM with real HID clicks and screenshot evidence, not UI automation alone.
 - Review gate: the Release review protocol (see the section below) — optional
   pre-freeze internal critics, then one parallel native full-context wave with
-  the exact Fable and Codex reviewers, one adjudication, one batched correction
-  commit, and one full-context confirmation focused on that delta.
+  the exact reviewer pair the Release review protocol section defines, one
+  adjudication, one batched correction commit, and one full-context
+  confirmation focused on that delta.
 - Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
   come from GitHub Actions `candidate` then `publish` mode; missing signing or
   notarization credentials block publication. Publish promotes the exact

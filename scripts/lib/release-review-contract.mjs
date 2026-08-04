@@ -36,9 +36,9 @@ export const REQUIRED_NATIVE_REVIEWERS = Object.freeze([
     requestedEffort: "max",
   }),
   // Owner decision 2026-08-04 («зачем тебе кодекс? Ревьюй курсором и клод
-  // кодом» — session transcript ~/.claude/projects/-Users-anton-Ouroboros/
-  // 5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl line 394, answering the
-  // explanation that this slot required a codex-native session): the sol slot
+  // кодом» — the owner's typed reply, answering the explanation that this
+  // slot required a codex-native session; full provenance is recorded in the
+  // release evidence packet): the sol slot
   // rides the cursor harness. The MODEL is unchanged — cursor has no effort
   // flag, so `xhigh` is carried inside cursor's native model id and
   // requestedEffort is honestly null. providerFamily is cursor's manifest

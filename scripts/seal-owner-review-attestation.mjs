@@ -471,10 +471,11 @@ function validateEvents(bytes, required, observedSource, sessionId) {
   }
   const routed = events.filter((event) => event.credential_route != null);
   // Cursor's routed events carry credential_route but omit credential_source
-  // (measured 2026-08-04, run-d2bffab59d74) — the native-session fact for that
-  // slot lives in telemetry auth_mode/auth_source, both still checked. When the
-  // key IS present it must still say native_session; only its absence is
-  // tolerated, and only for the cursor slot (owner decision 2026-08-04).
+  // (measured 2026-08-04, run-d2bffab59d74), so for the cursor slot the routed
+  // events prove the ROUTE only (vendor_native); auth_mode=local_session stays
+  // checked in metadata above. A present-or-null credential_source is
+  // tolerated for cursor alone; when it is a string it must still say
+  // native_session (owner decision 2026-08-04).
   const nativeCredentialSource = (event) =>
     event.credential_source === "native_session" ||
     (required.harnessId === "cursor" && event.credential_source == null);

@@ -94,7 +94,7 @@ async function runCollecting(
   return { events, args: captured };
 }
 
-describe("cursor external_sandbox_full stands its own sandbox down (engine boundary is THE boundary)", () => {
+describe("cursor external_sandbox_full stands its own sandbox down (the engine boundary exists only on delegated runs)", () => {
   it("maps external_sandbox_full to --force --sandbox disabled --trust, like codex/claude", async () => {
     const { events, args } = await runCollecting(spec({ access: "external_sandbox_full" }));
     expect(events.some((e) => e.type === "error")).toBe(false);
@@ -105,7 +105,8 @@ describe("cursor external_sandbox_full stands its own sandbox down (engine bound
     const sandboxIdx = argv.indexOf("--sandbox");
     expect(sandboxIdx).toBeGreaterThanOrEqual(0);
     expect(argv[sandboxIdx + 1]).toBe("disabled");
-    // Full access inside the external boundary: never Ask mode.
+    // Full access with cursor's sandbox down (engine boundary only on
+    // delegated runs): never Ask mode.
     expect(modesOf(argv)).toEqual([]);
   });
 

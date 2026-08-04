@@ -1,7 +1,9 @@
 /**
- * `external_sandbox_full` = the ENGINE provides the sandbox and codex stands its
- * own down. Required, not optional: codex shells out to `/usr/bin/sandbox-exec`
- * and macOS refuses a nested profile, so the two cannot both be applied.
+ * `external_sandbox_full` = codex stands its own sandbox down; the engine
+ * provides its own boundary only on delegated runs (a direct request runs
+ * unrestricted). Required, not optional: codex shells out to
+ * `/usr/bin/sandbox-exec` and macOS refuses a nested profile, so the two
+ * cannot both be applied.
  */
 export const CODEX_ACCESS_PROFILES = [
   "readonly",
