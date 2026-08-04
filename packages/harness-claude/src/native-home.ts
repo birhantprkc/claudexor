@@ -6,7 +6,6 @@ import {
   claudexorOwnedRoot,
   ensureDir,
   nativeHarnessStateRoot,
-  userConfigDir,
   userHomeDir,
 } from "@claudexor/util";
 
@@ -33,11 +32,18 @@ export function defaultNativeClaudeConfigDir(
 ): string {
   const override = env?.[CLAUDE_NATIVE_DIR_ENV] ?? process.env.CLAUDEXOR_CLAUDE_NATIVE_DIR;
   if (!override?.trim()) return join(nativeHarnessStateRoot(), "claude", "default");
-  const ownedRoot = resolve(userConfigDir());
+  // Containment root is claudexorOwnedRoot(), NOT userConfigDir(): registered
+  // credential-profile stores live at <ownedRoot>/profiles (that root's own
+  // doc: "credential-profile locators ... derive from here"), and Claude Code
+  // keys its Keychain item by the EXACT config-dir path, so no symlink or copy
+  // inside the narrower root can substitute. The narrower guard made the
+  // product refuse its own registered profile stores (hit live 2026-08-04
+  // wiring the release-wave fable lane to a registered profile).
+  const ownedRoot = resolve(claudexorOwnedRoot());
   const target = resolve(override.trim());
   if (target !== ownedRoot && !target.startsWith(ownedRoot + sep)) {
     throw new Error(
-      `CLAUDEXOR_CLAUDE_NATIVE_DIR must stay inside the Claudexor config root ${ownedRoot}`,
+      `CLAUDEXOR_CLAUDE_NATIVE_DIR must stay inside the Claudexor-owned root ${ownedRoot}`,
     );
   }
   return target;

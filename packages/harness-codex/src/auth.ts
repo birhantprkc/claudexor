@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { labelStreams, providerScrubEnv, runCapture } from "@claudexor/core";
 import { resolveSecret } from "@claudexor/secrets";
-import { ensureDir, nativeHarnessStateRoot, redactSecrets, userConfigDir } from "@claudexor/util";
+import {
+  claudexorOwnedRoot,
+  ensureDir,
+  nativeHarnessStateRoot,
+  redactSecrets,
+} from "@claudexor/util";
 
 const BIN = process.env.CLAUDEXOR_CODEX_BIN || "codex";
 export const CODEX_FILE_AUTH_OVERRIDE = 'cli_auth_credentials_store="file"';
@@ -83,13 +88,16 @@ export function defaultNativeCodexHome(env?: Record<string, string | null | unde
   const override = env?.["CLAUDEXOR_CODEX_NATIVE_HOME"] ?? process.env.CLAUDEXOR_CODEX_NATIVE_HOME;
   if (!override?.trim()) return join(nativeHarnessStateRoot(), "codex");
   // Containment guard (symmetry with claude's defaultNativeClaudeConfigDir): an
-  // override that escapes the Claudexor config root could point the codex child
-  // at (and mutate) an arbitrary directory. Keep it inside the owned root.
-  const ownedRoot = resolve(userConfigDir());
+  // override that escapes the Claudexor-owned root could point the codex child
+  // at (and mutate) an arbitrary directory. The root is claudexorOwnedRoot()
+  // because registered credential-profile stores live at <ownedRoot>/profiles;
+  // the narrower userConfigDir() guard refused the product's own registered
+  // stores (hit live 2026-08-04 on the claude twin).
+  const ownedRoot = resolve(claudexorOwnedRoot());
   const target = resolve(override.trim());
   if (target !== ownedRoot && !target.startsWith(ownedRoot + sep)) {
     throw new Error(
-      `CLAUDEXOR_CODEX_NATIVE_HOME must stay inside the Claudexor config root ${ownedRoot}`,
+      `CLAUDEXOR_CODEX_NATIVE_HOME must stay inside the Claudexor-owned root ${ownedRoot}`,
     );
   }
   return target;
