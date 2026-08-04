@@ -131,16 +131,15 @@ export async function runSetupLoginWorker(
     }
   }
 
-  // Keep the group leader alive through TERM so the daemon can still prove
-  // identity and escalate a stubborn descendant with KILL after the grace
-  // period. The vendor child receives the same group signal directly.
+  // Keep the group leader alive through TERM so the daemon can prove identity
+  // and escalate stubborn descendants with KILL; the vendor child receives
+  // the same group signal directly.
   const holdLeaderForEscalation = () => undefined;
   process.on("SIGTERM", holdLeaderForEscalation);
   process.on("SIGINT", holdLeaderForEscalation);
   // Tee the login output: a bounded ANSI-stripped tail rides the result for
-  // failure classification, and (with deviceCodePath) the runner captures the
-  // vendor's OAuth URL into a structured `oauth_url` disclosure sidecar — a
-  // UI renders "open this link"; the CLI sees a pipe (codex tail-tee tradeoff).
+  // failure classification, and (with deviceCodePath) the vendor's OAuth URL
+  // is captured into the `oauth_url` sidecar (codex tail-tee tradeoff).
   const teeOutput = manifest.harness === "codex" || manifest.deviceCodePath !== undefined;
   const tail = createTailBuffer();
   const urlDetector = createOAuthUrlDetector();
@@ -164,9 +163,8 @@ export async function runSetupLoginWorker(
       // The disclosure is best-effort context; it must never kill the login.
     }
   };
-  // A spawn throw and a wait rejection already wrote the SAME receipt, so they
-  // share one catch; de-registering the hold handlers is the one thing all
-  // three exits do (both failures and success), so it is the finally.
+  // A spawn throw and a wait rejection wrote the SAME receipt, so they share
+  // one catch; de-registering the hold handlers is every exit's finally.
   let result: { code: number | null; signal: NodeJS.Signals | null };
   try {
     const spawnOptions: SpawnOptions = {
@@ -406,13 +404,12 @@ export function createOAuthUrlDetector(): { push(chunk: Buffer): string | null }
 
 /** Ring buffer of the last OUTPUT_TAIL_BYTES of tee'd vendor output. */
 export function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
-  // Byte-accurate ring: keep the final OUTPUT_TAIL_BYTES RAW bytes and decode
-  // ONCE in text() — a per-chunk String() decode splits multibyte UTF-8 into
-  // replacement chars and a UTF-16 .slice miscounts the byte bound.
+  // Byte-accurate ring: keep the final OUTPUT_TAIL_BYTES RAW bytes, decode
+  // ONCE in text() (per-chunk String() splits multibyte UTF-8; UTF-16 .slice
+  // miscounts the byte bound).
   let tail = Buffer.alloc(0);
-  // Whether the stream ever exceeded the ring — the truncation signal cannot
-  // be recovered from the decoded string's length (already <= the byte cap),
-  // so track it HERE and hand it to boundedTail (X224 ring-path fix).
+  // Ring overflow is tracked HERE and handed to boundedTail — the decoded
+  // string's length (already <= the cap) cannot recover it (X224).
   let overflowed = false;
   return {
     push(chunk) {
@@ -430,22 +427,27 @@ export function createTailBuffer(): { push(chunk: Buffer): void; text(): string 
   };
 }
 
+// Live sign-in material rides a URL's QUERY (state/code_challenge/user_code):
+// transient-sidecar-only, never durable (f-78414434ad00). Host+path stay.
+const URL_QUERY_RE = /(https?:\/\/[^\s"'<>?#]+)\?[^\s"'<>]*/g;
+
 /** Strip terminal escapes (CSI, OSC, bare ESC, C0 controls except newline),
- * redact secret-like tokens, and clamp - diagnostic evidence entering a
- * durable journal/API surface, never a raw vendor log copy (INV-062). */
+ * redact secret-like tokens and URL queries, and clamp - diagnostic evidence
+ * entering a durable journal/API surface, never a raw vendor log copy
+ * (INV-062). */
 export function boundedTail(text: string, truncated = false): string {
-  const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
-  // Redact the complete sanitized input before any boundary is selected. A
-  // tail-first clamp can retain only the suffix of a token and thereby remove
-  // the prefix the detector needs to recognize it.
+  const plain = text
+    .replace(TERM_ESCAPE_RE, "")
+    .replace(C0_CONTROL_RE, "")
+    .replace(URL_QUERY_RE, "$1?[redacted]");
+  // Redact the complete sanitized input before any boundary is selected: a
+  // tail-first clamp can strip the prefix a token detector needs to anchor.
   const redacted = redactSecrets(plain);
   // When the source was truncated at the front (ring overflow, or a
   // direct-string caller over the byte budget), a secret split by that
-  // boundary could leave a prefix-less fragment redactSecrets cannot anchor.
-  // Drop the leading partial token in that case; untruncated output is whole.
-  // The caller's flag is authoritative (a ring string is already <= the cap,
-  // so a length check here cannot see the cut); direct callers OR in their
-  // own over-budget check.
+  // boundary could leave a prefix-less fragment redactSecrets cannot anchor —
+  // drop the leading partial token. The caller's flag is authoritative (a
+  // ring string is already <= the cap, so length cannot see the cut).
   const bytes = Buffer.from(redacted, "utf8");
   const cut = truncated || bytes.length > OUTPUT_TAIL_BYTES;
   const tail = bytes.subarray(Math.max(0, bytes.length - OUTPUT_TAIL_BYTES));

@@ -1,7 +1,7 @@
 import { fsyncSync, mkdtempSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
 import { hashJson } from "@claudexor/util";
 import { JournalManager } from "./journal-manager.js";
@@ -1115,6 +1115,68 @@ describe("QuotaRegistry", () => {
     expect(after.absences.every((a) => a.reason === "auth_revoked")).toBe(true);
 
     // Durable: a restart replaying this journal must not resurrect the window.
+    const replayed = new QuotaRegistry(journal, [], now, () => []);
+    expect(replayed.read().snapshots).toEqual([]);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("a REMOVED append failure leaves state and journal agreeing (no silent live-only retirement)", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-revoke-crash-")));
+    const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    let nowIso = "2026-07-16T12:00:00.000Z";
+    const now = () => new Date(nowIso);
+    const subject = (subjectId: string | null) => ({
+      harness: "claude",
+      credential_route: "vendor_native" as const,
+      plan_label: null,
+      subject_id: subjectId,
+    });
+    let revoked = false;
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () =>
+          revoked
+            ? {
+                snapshots: [],
+                absences: [
+                  {
+                    subject: subject(null),
+                    reason: "auth_revoked" as const,
+                    detail: "oauth/usage responded 401",
+                    observed_at: now().toISOString(),
+                  },
+                ],
+              }
+            : { snapshots: [quotaSnapshot("claude", null, 0.3)], absences: [] },
+      ],
+      now,
+      () => [subject(null)],
+    );
+    expect((await registry.refresh()).snapshots).toHaveLength(1);
+
+    // The retirement's durable authority write fails (disk error). The live
+    // projection must NOT have been mutated first: journal and state still
+    // agree that the snapshot exists, so a restart cannot diverge from the
+    // running daemon (wave-5 f-dace28127b7a ordering inversion).
+    revoked = true;
+    nowIso = "2026-07-16T12:06:00.000Z";
+    const realAppend = journal.append.bind(journal);
+    const spy = vi.spyOn(journal, "append").mockImplementation((type, payload) => {
+      if (type === "quota.subject.removed") throw new Error("append failed: no space left");
+      return realAppend(type, payload);
+    });
+    await expect(registry.refresh()).rejects.toThrow("no space left");
+    expect(registry.read().snapshots).toHaveLength(1);
+    spy.mockRestore();
+    const replayedMid = new QuotaRegistry(journal, [], now, () => []);
+    expect(replayedMid.read().snapshots).toHaveLength(1);
+
+    // A later healthy cycle completes the retirement durably.
+    const after = await registry.refresh();
+    expect(after.snapshots).toEqual([]);
     const replayed = new QuotaRegistry(journal, [], now, () => []);
     expect(replayed.read().snapshots).toEqual([]);
 

@@ -18,8 +18,7 @@ const PROJECTION_UPDATED = "quota.projection.updated";
 const POLL_BACKOFF_MS = 60_000;
 const MAX_POLL_BACKOFF_MS = 15 * 60_000;
 /** Snapshots older than this are pruned from every projection read (W17):
- * a day-old observation is no longer quota truth — surfacing it as a "stale"
- * row forever just clutters the footer with dead subjects. */
+ * a day-old observation is not quota truth, just footer clutter. */
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60_000;
 
 /** One refresh cycle's fruit: the snapshots a source observed, plus the typed
@@ -235,23 +234,27 @@ export class QuotaRegistry {
   }
 
   /** Aggregate one cycle's snapshots + absence claims against the subject
-   * universe (release cut V11a): a subject with a fresh-or-stale snapshot from
-   * ANY source has no absence; otherwise the first refresher-claimed absence
-   * for that subject wins; a universe subject with neither gets "no_source".
-   * Identity is (harness, subject_id) — credential_route/source never split a
-   * subject for absence purposes. */
+   * universe (V11a): a fresh-or-stale snapshot from ANY source means no
+   * absence; else the first refresher-claimed absence wins; neither =>
+   * "no_source". Identity is (harness, subject_id); route/source never split
+   * a subject. */
   private recomputeAbsences(claims: readonly QuotaAbsence[], now: number): void {
     // Every other reason answers "why is there no snapshot", so a snapshot
-    // rightly silences it. `auth_revoked` answers something else — the vendor
-    // REJECTED the credential that snapshot was read with — so the window is
-    // no longer spendable and coverage below must stop being computed from it.
-    // Leaving it suppressed the claim with the very observation the vendor had
-    // just disproved, for up to 24h of reporting a dead profile as verified.
+    // silences it. `auth_revoked` says the vendor REJECTED the credential the
+    // snapshot was read with: the window is no longer spendable, and leaving
+    // it would report a dead profile as verified for up to 24h.
     for (const claim of claims) {
       if (claim.reason !== "auth_revoked") continue;
       const { harness, subject_id } = claim.subject;
-      if (this.remove(harness, subject_id) > 0)
-        this.journal.append(REMOVED, { harness, subject_id });
+      const present = [...this.snapshots.values()].some(
+        (s) => s.subject.harness === harness && s.subject.subject_id === subject_id,
+      );
+      if (!present) continue;
+      // Durable authority BEFORE the live projection (upsert/removeSubject
+      // parity): a failed append after an in-memory delete would let replay
+      // resurrect the revoked window on restart (f-dace28127b7a).
+      this.journal.append(REMOVED, { harness, subject_id });
+      this.remove(harness, subject_id);
     }
     const covered = new Set(
       this.activeSnapshots(now).map((snapshot) => subjectIdentity(snapshot.subject)),

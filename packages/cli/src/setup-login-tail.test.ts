@@ -39,6 +39,30 @@ describe("device-login output tail redaction (X224 ring path)", () => {
     expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(4096);
     expect(output).not.toContain("�");
   });
+
+  it("an OAuth authorization URL's query never enters a durable tail (transient-only contract)", () => {
+    const out = boundedTail(
+      "Visit https://auth.openai.com/oauth/authorize?client_id=app_x&state=Zx9kQ2mP41Ns&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM and approve.",
+    );
+    expect(out).not.toContain("state=");
+    expect(out).not.toContain("code_challenge");
+    expect(out).toContain("https://auth.openai.com/oauth/authorize?[redacted]");
+    expect(out).toContain("and approve.");
+  });
+
+  it("a device verification URL keeps host+path for diagnosis but drops its query", () => {
+    const out = boundedTail(
+      "First, visit https://github.com/login/device?user_code=ABCD-EFGH to continue.",
+    );
+    expect(out).toContain("https://github.com/login/device?[redacted]");
+    expect(out).not.toContain("ABCD-EFGH");
+  });
+
+  it("a query-less URL survives whole", () => {
+    expect(boundedTail("see https://example.com/docs/errors for details")).toBe(
+      "see https://example.com/docs/errors for details",
+    );
+  });
 });
 
 describe("device-login app-server termination", () => {

@@ -13,7 +13,14 @@ Release history for Claudexor. The current version is declared in the root
   project `scope.ephemeral: false` defaults (both new in this line) are elided
   before hashing, so replaying an accepted request's Idempotency-Key across an
   upgrade from 3.2.1 or 3.3.7-rc.0 returns the original handle instead of a
-  spurious `idempotency_conflict`. Claudexor's control endpoint now resolves on Windows:
+  spurious `idempotency_conflict`. A failed terminal login's durable failure
+  tail now also drops every URL query string before persisting (host+path
+  stay): an OAuth authorization URL's `state`/`code_challenge`/`user_code`
+  values ride only the transient disclosure sidecar, never runner-result.json
+  or the journaled job message. The `auth_revoked` snapshot retirement
+  appends its durable REMOVED record before mutating the live projection
+  (matching the upsert and explicit-removal paths), so an append failure can
+  no longer leave a restart resurrecting a vendor-revoked window. Claudexor's control endpoint now resolves on Windows:
   `defaultSocketPath()` gained a `win32` branch returning the named pipe
   `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
   where it previously always built a Unix-style `.sock` path that could not be
