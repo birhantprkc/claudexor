@@ -27,6 +27,7 @@ import type {
   HarnessRunSpec,
 } from "@claudexor/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import {
   atomicPrivateJson,
   readLoginManifest,
@@ -1922,6 +1923,34 @@ describe("setup jobs", () => {
     await manager.shutdown();
   });
 
+  it("seals the daemon-resolved default native store into a default-lane login manifest", async () => {
+    // Hit live 2026-08-04: the detached login worker re-derived the codex home
+    // from its own bootstrap env, which drops CLAUDEXOR_CONFIG_DIR — so
+    // credentials landed in the GLOBAL default store while verification polled
+    // the daemon's, and a successful login reported "not ready". The manifest
+    // is now the single carrier of the target store for DEFAULT jobs too,
+    // resolved by the daemon whose config root is authoritative.
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "daemon-owned-config");
+    const group = processGroupFixture();
+    const capability = capabilityVerifier();
+    const manager = createSetupJobManager({
+      rootDir: join(root, "default-store-manifest"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      spawn: (() => fakeOpener()) as unknown as typeof import("node:child_process").spawn,
+      monitorPollMs: 1,
+      processGroups: group.service,
+      authCapabilityVerifier: capability.verifier,
+      probeAuthSource: async () => nativeReadiness(true),
+    });
+    await manager.start();
+    const job = manager.create(DEVICE_CODE_REQUEST);
+    const manifest = readLoginManifest(manager._store.paths(job.jobId).manifest);
+    expect(manifest.profileConfigDir).toBe(join(root, "daemon-owned-config", "native", "codex"));
+    await manager.shutdown();
+  });
+
   it("a failed device-auth login message carries the toggle remedy", async () => {
     // The default codex login authorizes the --device-auth flow. A started
     // command that exits nonzero (e.g. the sign-in page rejected the one-time
@@ -2193,7 +2222,12 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     expect(() => manager.create(LOGIN_REQUEST)).toThrow(/another codex login job is active/);
   });
 
-  it("default-store jobs seal NO profileConfigDir (pre-upgrade digest compatibility)", () => {
+  it("default-store jobs seal the daemon-resolved default store (field stays optional for pre-upgrade digests)", () => {
+    // Hit live 2026-08-04: leaving the default lane's target store implicit
+    // let the detached worker re-derive it from an env without the daemon's
+    // CLAUDEXOR_CONFIG_DIR, splitting the login and verification stores. The
+    // schema field remains OPTIONAL, so pre-upgrade sealed manifests (absent
+    // field) keep their digests valid — only newly sealed manifests carry it.
     const manager = createSetupJobManager({
       rootDir: join(root, "store"),
       platform: "darwin",
@@ -2203,7 +2237,7 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     const job = manager.create(LOGIN_REQUEST);
     expect(job.profileId).toBeNull();
     const manifest = readLoginManifest(manager._store.paths(job.jobId).manifest);
-    expect(manifest.profileConfigDir).toBeUndefined();
+    expect(manifest.profileConfigDir).toBe(defaultNativeCodexHome());
   });
 
   it("verifies a profile job via ITS doctor probe and honestly skips the default-route capability smoke", async () => {

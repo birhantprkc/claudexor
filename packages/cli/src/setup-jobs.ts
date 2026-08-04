@@ -21,6 +21,8 @@ import {
   type ControlSetupJobListFilter,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
+import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
+import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import * as NativeLogin from "./native-login.js";
 import {
   SETUP_PROFILES,
@@ -1050,6 +1052,32 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         launcherTimeoutMs,
         job.transport,
       );
+      // The vendor-owned store this login must land in, resolved by the DAEMON
+      // (whose CLAUDEXOR_CONFIG_DIR is authoritative) and sealed into the
+      // manifest: the registered profile store on profile jobs, the daemon's
+      // own default native store otherwise. Hit live 2026-08-04: a DEFAULT
+      // job left this absent and the detached worker re-derived the home from
+      // its own bootstrap env, which drops CLAUDEXOR_CONFIG_DIR — credentials
+      // landed in the GLOBAL default store while verification polled the
+      // daemon's, so a successful login reported "not ready before the
+      // verification deadline". The field stays optional in the schema, so
+      // pre-upgrade sealed manifests keep their digests valid.
+      let targetConfigDir = profileConfigDir;
+      if (!targetConfigDir) {
+        try {
+          targetConfigDir =
+            job.harness === "codex"
+              ? defaultNativeCodexHome()
+              : job.harness === "claude"
+                ? defaultNativeClaudeConfigDir()
+                : undefined;
+        } catch {
+          // A misconfigured CLAUDEXOR_*_NATIVE_* override (outside the owned
+          // root) fails the containment guard. Seal nothing — the runner's own
+          // guard reports the same misconfiguration loudly at spawn, exactly
+          // as before this field covered the default lane.
+        }
+      }
       const manifest = sealLoginManifest({
         version: SETUP_LOGIN_PROTOCOL_VERSION,
         jobId: job.jobId,
@@ -1059,9 +1087,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         binary: executable.realpath,
         args: [...spec.args],
         cwd: paths.dir,
-        // Present ONLY on profile jobs: absent keeps pre-upgrade manifests'
-        // sealed digests valid (the field is optional, never defaulted).
-        ...(profileConfigDir ? { profileConfigDir } : {}),
+        ...(targetConfigDir ? { profileConfigDir: targetConfigDir } : {}),
         // D-17 device-code (app-server) login: the runner hosts the app-server
         // and writes the transient disclosure sidecar. Terminal-mode logins
         // (claude/cursor, codex fallback) carry the SAME sidecar path so the

@@ -585,6 +585,13 @@ function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     "LC_ALL",
     "USER",
     "LOGNAME",
+    // The daemon's config root MUST survive into the detached worker: without
+    // it, any userConfigDir()-derived path in the worker (the default native
+    // stores above all) silently re-roots onto the GLOBAL ~/.claudexor/v3 —
+    // the exact store split behind the 2026-08-04 codex-login failure. The
+    // sealed manifest now carries the resolved store explicitly; this
+    // pass-through keeps every other owned-root derivation consistent too.
+    "CLAUDEXOR_CONFIG_DIR",
     "CLAUDEXOR_CODEX_NATIVE_HOME",
     "CLAUDEXOR_CLAUDE_NATIVE_DIR",
     // Network reachability for the DETACHED worker: without the proxy/CA
