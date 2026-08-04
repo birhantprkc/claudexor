@@ -285,8 +285,11 @@ pnpm test
 - Review gate: the Release review protocol (see the section below) — optional
   pre-freeze internal critics, then one parallel native full-context wave with
   the exact reviewer pair the Release review protocol section defines, one
-  adjudication, one batched correction commit, and one full-context
-  confirmation focused on that delta.
+  adjudication, one batched correction commit, and one confirmation wave
+  focused on that delta (per the INV-125 second amendment, the sol lane's
+  confirmation subject may be the sealed `DELTA.patch` since its last
+  completed full-context review, with the whole packet as context; the fable
+  lane always confirms in full context).
 - Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
   come from GitHub Actions `candidate` then `publish` mode; missing signing or
   notarization credentials block publication. Publish promotes the exact
@@ -497,9 +500,10 @@ repository context that small review packets lost.
   "while I'm here" fixes inside the batch. EVERY finding gets exactly one
   row in `docs/reference/review-ledger.md` (the findings ledger); its
   declined rows are the next wave's `DECLINED_FINDINGS.md`.
-- **One confirmation wave with the same full context**, focused on the fix diff
-  and every file it touched. A confirmation blocker on unchanged code without
-  new evidence is invalid.
+- **One confirmation wave**, focused on the fix diff and every file it
+  touched — the fable lane in the same full context; the sol lane may take
+  the sealed delta as its subject per the INV-125 second amendment. A
+  confirmation blocker on unchanged code without new evidence is invalid.
 - **Stop.** New proven blockers after confirmation get a fix + targeted
   re-check of exactly those findings. Anything beyond that requires an
   explicit owner decision — the protocol never self-extends.

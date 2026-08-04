@@ -17,6 +17,26 @@ function panelFlags(args: ParsedArgs): ControlReviewerPanelEntry[] | undefined {
   return parseReviewerPanelFlags(flagValues(args, "reviewer-panel"));
 }
 
+/** `--delta-scope <harness>=<baseSha>` (repeatable): the named lane's review
+ * subject becomes the packet's sealed DELTA.patch since baseSha (INV-125
+ * second amendment, owner decision 2026-08-04). Sealed-packet mode only. */
+function deltaScopeFlags(args: ParsedArgs): Record<string, string> | undefined {
+  const raw = flagValues(args, "delta-scope");
+  if (raw.length === 0) return undefined;
+  const scopes: Record<string, string> = {};
+  for (const entry of raw) {
+    const text = typeof entry === "string" ? entry : "";
+    const eq = text.indexOf("=");
+    const harness = eq > 0 ? text.slice(0, eq).trim() : "";
+    const baseSha = eq > 0 ? text.slice(eq + 1).trim() : "";
+    if (!harness || !/^[0-9a-f]{40}$/i.test(baseSha)) {
+      throw new Error(`--delta-scope expects <harness>=<40-hex-base-sha>, got '${String(entry)}'`);
+    }
+    scopes[harness] = baseSha.toLowerCase();
+  }
+  return scopes;
+}
+
 export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<number> {
   const diffPath = flagStr(args, "diff");
   const evidenceDir = flagStr(args, "evidence-dir");
@@ -34,7 +54,7 @@ export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<nu
   const frozenRequested = frozenValues.some((value) => value !== undefined);
   const usage =
     'usage: claudexor review --diff <file> [--intent "<text>"] [--tests "<evidence>"] [--reviewer-panel <list>] [--json]\n' +
-    "   or: claudexor review --evidence-dir <path> --artifacts-dir <external-path> --candidate-sha <sha> --candidate-tree <tree> --packet-manifest-digest <sha256> [--reviewer-panel <list>] [--json]";
+    "   or: claudexor review --evidence-dir <path> --artifacts-dir <external-path> --candidate-sha <sha> --candidate-tree <tree> --packet-manifest-digest <sha256> [--reviewer-panel <list>] [--delta-scope <harness>=<baseSha>] [--json]";
   if ((!diffPath && !frozenRequested) || (frozenRequested && frozenValues.some((v) => !v))) {
     return printUsageError(json, usage);
   }
@@ -47,6 +67,21 @@ export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<nu
     return printUsageError(
       json,
       "claudexor review: sealed packet mode cannot be combined with --diff, --intent, or --tests",
+    );
+  }
+  let deltaScopes: Record<string, string> | undefined;
+  try {
+    deltaScopes = deltaScopeFlags(args);
+  } catch (err) {
+    return printUsageError(
+      json,
+      `claudexor review: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (deltaScopes && !frozenRequested) {
+    return printUsageError(
+      json,
+      "claudexor review: --delta-scope is only valid in sealed packet mode",
     );
   }
   let diffText: string | undefined;
@@ -75,6 +110,7 @@ export async function reviewCommand(args: ParsedArgs, json: boolean): Promise<nu
               candidateSha: candidateSha!,
               candidateTree: candidateTree!,
               packetManifestSha256: packetManifestSha256!,
+              ...(deltaScopes ? { deltaScopes } : {}),
             },
           }
         : {

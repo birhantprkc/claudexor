@@ -17,7 +17,16 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 export const RELEASE_REVIEW_ATTESTATION_ALGORITHM = "Ed25519";
 export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION = 5;
-export const OWNER_REVIEW_PROTOCOL = "native-full-context-v1";
+// v2 (owner decision 2026-08-04, session transcript
+// 5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl line 1824, verbatim: «C (моя
+// текущая рекомендация): cursor-полоса ревьюит только дельту с прошлого
+// прогона — три маленьких фикс-коммита; сходимость почти гарантирована за
+// круг, два вердикта сохраняются. и одного агента на fable собсвенного
+// прогони тоже»): after a completed full-context sol review of the candidate
+// line, subsequent sol executions may take the delta since that review as
+// their subject (sealed DELTA.patch, full packet as context); the fable slot
+// always reviews the full context.
+export const OWNER_REVIEW_PROTOCOL = "native-fable-full-sol-delta-v2";
 export const OWNER_REVIEW_VERDICTS = Object.freeze(["pass", "warn"]);
 export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS = Object.freeze([2, 3, 4]);
 export const RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH = "release-review-verifier.mjs";

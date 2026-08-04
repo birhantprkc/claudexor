@@ -98,6 +98,11 @@ const FROZEN_REVIEW_FLAGS: readonly CliFlagSpec[] = [
     "<sha256>",
     "Expected SHA-256 identity of the sealed packet manifest",
   ),
+  valueFlag(
+    "delta-scope",
+    "<harness>=<baseSha>",
+    "Owner-amended lane scope (INV-125 second amendment): the named lane reviews the packet's sealed DELTA.patch since baseSha",
+  ),
 ];
 
 export const FROZEN_REVIEW_FLAG_NAMES = FROZEN_REVIEW_FLAGS.map((flag) => flag.name);

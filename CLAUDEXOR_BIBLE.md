@@ -681,11 +681,22 @@ invariant or owner decision before proceeding.
   id `gpt-5.6-sol-xhigh`). Owner decision 2026-08-04, verbatim: «зачем тебе
   кодекс? Ревьюй курсором и клод кодом» — the sol slot moved from the codex
   harness to cursor; models, efforts, cross-family independence, and the
-  overlapping-execution requirement are unchanged.
+  overlapping-execution requirement are unchanged. Second owner decision
+  2026-08-04 (session transcript 5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl
+  line 1824), verbatim: «C (моя текущая рекомендация): cursor-полоса ревьюит
+  только дельту с прошлого прогона — три маленьких фикс-коммита; сходимость
+  почти гарантирована за круг, два вердикта сохраняются. и одного агента на
+  fable собсвенного прогони тоже» — after a completed full-context sol review
+  of the candidate line, subsequent sol executions may take the DELTA since
+  that reviewer's last completed full-context review as their review subject
+  (the sealed `DELTA.patch`, with the complete packet and ledgers as context);
+  the fable slot always reviews the full context, keeping one full-context
+  vendor lane under every attestation.
   Each reviewer receives the same complete Git-visible candidate,
   complete diff, sealed evidence, user dialogue and owner decisions, test and
-  gate receipts, and internet access; packet splitting and substitute models
-  cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched
+  gate receipts, and internet access (the sol slot's review SUBJECT may be the
+  owner-amended delta scope above; what each reviewer receives is unchanged);
+  packet splitting and substitute models cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched
   correction commit; ONE parallel confirmation wave in the same full context,
   focused on the correction delta. Any tracked mutation re-freezes the
   candidate. A blocking, missing, malformed, route-unproven, or incomplete

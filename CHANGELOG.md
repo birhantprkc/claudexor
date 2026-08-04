@@ -20,7 +20,13 @@ Release history for Claudexor. The current version is declared in the root
   or the journaled job message. The `auth_revoked` snapshot retirement
   appends its durable REMOVED record before mutating the live projection
   (matching the upsert and explicit-removal paths), so an append failure can
-  no longer leave a restart resurrecting a vendor-revoked window. Claudexor's control endpoint now resolves on Windows:
+  no longer leave a restart resurrecting a vendor-revoked window. The release
+  review gate carries the owner's second INV-125 amendment: after a completed
+  full-context sol review of a candidate line, subsequent sol executions may
+  review the sealed delta since that review (`claudexor review
+  --delta-scope <harness>=<baseSha>`, sealed-packet mode only) with the whole
+  packet as context, while the fable lane always reviews the full context —
+  attestation protocol id `native-fable-full-sol-delta-v2`. Claudexor's control endpoint now resolves on Windows:
   `defaultSocketPath()` gained a `win32` branch returning the named pipe
   `\\.\pipe\claudexord-<digest16>` that Node IPC actually requires there,
   where it previously always built a Unix-style `.sock` path that could not be

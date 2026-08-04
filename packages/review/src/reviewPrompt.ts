@@ -93,7 +93,15 @@ export function buildReviewPrompt(
   evidenceDir: string,
   patch: DiffEvidence,
   sealedOrOptions:
-    boolean | { sealed?: boolean; candidateInventoryMode?: "git_visible" | "diff_only" } = false,
+    | boolean
+    | {
+        sealed?: boolean;
+        candidateInventoryMode?: "git_visible" | "diff_only";
+        /** Owner-amended delta scope (INV-125 second amendment, 2026-08-04):
+         * this lane's review subject is the sealed DELTA.patch since the
+         * recorded base SHA; the full packet stays its context. */
+        deltaScopeBaseSha?: string;
+      } = false,
 ): string {
   const options =
     typeof sealedOrOptions === "boolean" ? { sealed: sealedOrOptions } : sealedOrOptions;
@@ -118,7 +126,9 @@ export function buildReviewPrompt(
     sealed
       ? `First read MANIFEST.sha256 and every file it seals in ${evidenceDir}, including FREEZE.json and DECIDED_TRADEOFFS.md, and confirm every sealed file is present. The packet's manifest digest was already cryptographically verified by the review runtime before this session launched (verifySealedEvidencePacket, digest-bound to the frozen identity below); re-hashing the entries yourself is OPTIONAL — do it when your environment permits, but the inability to run a checksum tool is NOT grounds for INSUFFICIENT_EVIDENCE. If the manifest or a sealed file is missing or unreadable, return INSUFFICIENT_EVIDENCE.`
       : `First read the evidence packet in ${evidenceDir} (USER_INTENT.md, FORBIDDEN_FINDINGS.md, PLAN_ACCEPTED.md, DECIDED_TRADEOFFS.md, TESTS.txt, DIFF.patch, DIFF_SUMMARY.md). If a mandatory file is missing, return INSUFFICIENT_EVIDENCE.`,
-    `Review ${label}'s change from the file-backed patch artifact, not from this prompt. Full patch: ${patch.diffPath}. Summary: ${patch.summaryPath}. Patch digest: ${patch.diffSha256}.`,
+    options.deltaScopeBaseSha
+      ? `OWNER-AMENDED DELTA SCOPE (INV-125 second amendment, 2026-08-04): your review subject is the delta this candidate line added since your last completed full-context review — base ${options.deltaScopeBaseSha}. Review that delta from the file-backed patch artifact, not from this prompt. Delta patch: ${patch.diffPath}. Summary: ${patch.summaryPath}. Delta digest: ${patch.diffSha256}. The complete candidate diff (DIFF.patch) and the whole sealed packet remain your CONTEXT — read the ledgers before judging. Findings must be grounded in this delta or in a regression it introduces; a defect wholly outside the delta that the ledgers already carry is out of scope for this lane.`
+      : `Review ${label}'s change from the file-backed patch artifact, not from this prompt. Full patch: ${patch.diffPath}. Summary: ${patch.summaryPath}. Patch digest: ${patch.diffSha256}.`,
     ...(options.candidateInventoryMode === "diff_only"
       ? [
           "Candidate root is a disclosed diff-only projection because no Git inventory was available. It contains changed postimages, not unchanged sibling context. If a concrete claim requires an unavailable sibling, return INSUFFICIENT_EVIDENCE instead of guessing.",

@@ -157,7 +157,7 @@ describe("native owner-review publishing contract", () => {
 
   it("freezes the exact two native routes and accepts their signed v5 evidence", () => {
     expect(OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION).toBe(5);
-    expect(OWNER_REVIEW_PROTOCOL).toBe("native-full-context-v1");
+    expect(OWNER_REVIEW_PROTOCOL).toBe("native-fable-full-sol-delta-v2");
     expect(REQUIRED_NATIVE_REVIEWERS).toEqual([
       {
         slot: "fable",

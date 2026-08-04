@@ -78,6 +78,11 @@ export interface ReviewCandidateInput {
     candidateTree: string;
     packetManifestSha256: string;
   };
+  /** Owner-amended per-harness delta scope (INV-125 second amendment,
+   * 2026-08-04): the named reviewer's review SUBJECT becomes the sealed
+   * DELTA.patch (base SHA recorded here) while the full packet stays its
+   * context. Sealed-packet mode only; at least one lane stays full-context. */
+  deltaScopes?: Readonly<Record<string, string>>;
   cwd: string;
   reviewers: ReviewerSpec[];
   reviewerTimeoutMs?: number;
@@ -112,6 +117,19 @@ function readExistingDiffEvidence(dir: string, diff: string): DiffEvidence {
     diffSha256: sha256(diffText),
     summary,
   };
+}
+
+/** Sealed delta evidence for an owner-amended delta-scope lane: DELTA.patch +
+ * DELTA_SUMMARY.md ride the manifest-verified packet like every sealed file. */
+function readSealedDeltaEvidence(dir: string): DiffEvidence {
+  const diffPath = join(dir, "DELTA.patch");
+  const summaryPath = join(dir, "DELTA_SUMMARY.md");
+  const diffText = readTextSafe(diffPath);
+  const summary = readTextSafe(summaryPath);
+  if (diffText === null || summary === null) {
+    throw new Error("delta-scope review requires sealed DELTA.patch and DELTA_SUMMARY.md");
+  }
+  return { diffPath, summaryPath, diffSha256: sha256(diffText), summary };
 }
 
 function reviewerRouteProof(
@@ -312,9 +330,15 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         candidateCopyPaths: candidateInventory.copyPaths,
         preserveEvidenceBytes: input.evidenceReadOnly === true,
       });
-      const reviewerPatch = input.evidenceReadOnly
-        ? readExistingDiffEvidence(reviewerWorkspace.evidenceDir, input.diff)
-        : writeDiffEvidence(reviewerWorkspace.evidenceDir, input.diff);
+      const deltaBase = input.deltaScopes?.[reviewer.adapter.id];
+      if (deltaBase && input.evidenceReadOnly !== true) {
+        throw new Error("delta-scope review is only valid against a sealed packet");
+      }
+      const reviewerPatch = deltaBase
+        ? readSealedDeltaEvidence(reviewerWorkspace.evidenceDir)
+        : input.evidenceReadOnly
+          ? readExistingDiffEvidence(reviewerWorkspace.evidenceDir, input.diff)
+          : writeDiffEvidence(reviewerWorkspace.evidenceDir, input.diff);
       updateReviewerMetadata(artifact, {
         candidate_evidence_dir: reviewerWorkspace.evidenceDir,
         candidate_root: reviewerWorkspace.root,
@@ -337,6 +361,7 @@ export async function reviewCandidate(input: ReviewCandidateInput): Promise<Revi
         {
           sealed: input.evidenceReadOnly === true,
           candidateInventoryMode: candidateInventory.mode,
+          ...(deltaBase ? { deltaScopeBaseSha: deltaBase } : {}),
         },
       );
       spec = HarnessRunSpec.parse({
