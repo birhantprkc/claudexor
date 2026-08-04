@@ -91,7 +91,12 @@ struct AuthSheetDeviceCodeCard: View {
 
                 // Honest, NON-GUARANTEED wording (D-17): Safari honors the
                 // request; another default browser may not.
-                Text("Claudexor requested a private browser session. Completing the sign-in in a window that is not signed into another \(vendor) account reduces the risk of signing out other \(vendor) apps on this Mac — \(vendor) may still invalidate sibling sessions on its side.")
+                //
+                // NO vendor noun in this paragraph. `HarnessFamily.label` names the
+                // HARNESS, and for codex that is "Codex" — a CLI, not the issuer of the
+                // account. The revocation risk here belongs to the account provider
+                // (OpenAI), so naming the harness made the sentence plainly false.
+                Text("Claudexor requested a private browser session. Completing the sign-in in a window that is not signed into another account for this vendor reduces the risk of signing out other apps on this Mac — the vendor may still invalidate sibling sessions on its side.")
                     .font(.caption2).foregroundStyle(.secondary)
 
                 if waiting {

@@ -167,8 +167,8 @@ Stated plainly, because a boundary described as total is worse than a narrow one
   egress control.
 - **Not writes outside the operator home and outside the listed system prefixes.** A path such
   as `/Users/Shared` remains writable.
-- **Not any platform but macOS.** There, a delegated MUTATING run is UNCONFINED — it runs on the
-  scoped `HOME` alone, and says so in the three places §6.1 lists. It is never silently
+- **Not any platform but macOS.** Off macOS, a delegated MUTATING run is UNCONFINED — it runs on
+  the scoped `HOME` alone, and says so in the three places §6.1 lists. It is never silently
   unconfined, and it never names a mechanism it did not prove. A caller that requires a boundary
   reads `proven` and decides for itself; the engine does not decide for it.
 - **Not a claim about the harness's own sandbox.** Where Claudexor applies no boundary it also
