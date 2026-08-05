@@ -1,9 +1,18 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { assertLinkFreeExtractedTree } from "../../../scripts/lib/remote-runtime-archive.mjs";
 
 const script = resolve(import.meta.dirname, "../../../scripts/build-runtime-closure.mjs");
 const version = readFileSync(
@@ -20,7 +29,14 @@ const FAKE_BUILD_SHA = "0123456789abcdef0123456789abcdef01234567";
 /** Build a minimal fake signed app bundle with exactly the closure entries. */
 function fakeAppBundle(
   root: string,
-  opts: { withNode?: boolean; omit?: string; buildSha?: string; nativeAddon?: boolean } = {},
+  opts: {
+    withNode?: boolean;
+    omit?: string;
+    buildSha?: string;
+    nativeAddon?: boolean;
+    internalLink?: boolean;
+    escapingLink?: boolean;
+  } = {},
 ): string {
   const resources = join(root, "Claudexor.app", "Contents", "Resources");
   mkdirSync(join(resources, "browser-mcp-runtime", "dist"), { recursive: true });
@@ -39,6 +55,22 @@ function fakeAppBundle(
   // A forbidden native addon lands under a closure dir when requested.
   if (opts.nativeAddon)
     writeFileSync(join(resources, "browser-mcp-runtime", "fsevents.node"), "native");
+  if (opts.internalLink || opts.escapingLink) {
+    const modules = join(resources, "browser-mcp-runtime", "node_modules");
+    mkdirSync(modules, { recursive: true });
+    if (opts.internalLink) {
+      const stored = join(modules, ".store", "fixture");
+      mkdirSync(stored, { recursive: true });
+      writeFileSync(join(stored, "index.js"), "materialized fixture\n");
+      symlinkSync(".store/fixture", join(modules, "fixture"), "dir");
+    }
+    if (opts.escapingLink) {
+      const outside = join(resources, "outside-browser-runtime");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "secret.txt"), "must not be packed\n");
+      symlinkSync("../../outside-browser-runtime", join(modules, "escape"), "dir");
+    }
+  }
   // Node and the SwiftPM UI bundle are app-owned; they may be present in the
   // real bundle but must NOT land in the closure.
   if (opts.withNode) writeFileSync(join(resources, "node"), "node-binary");
@@ -106,9 +138,32 @@ describe("build-runtime-closure", () => {
     expect(listing).toContain("claudexord.bundle.cjs");
     expect(listing).toContain("browser-mcp-runtime/dist/browser-mcp-launcher.js");
     expect(listing).toContain("native/claudexor-process-identity");
-    // Node and AppIcon stay app-owned — never in the update closure.
-    expect(listing.split("\n")).not.toContain("node");
+    // Node, the CLI, and AppIcon stay host/app-owned — never in the closure.
+    const entries = listing.split("\n");
+    expect(entries).not.toContain("node");
+    expect(entries).not.toContain("claudexor.bundle.cjs");
     expect(listing).not.toContain("AppIcon.icns");
+  });
+
+  it("materializes internal package links into a link-free regular tree", () => {
+    const app = fakeAppBundle(work, { internalLink: true });
+    const out = join(work, "out");
+    run(app, out);
+    const archive = join(out, `claudexor-runtime-${version}.tar.gz`);
+    const extracted = join(work, "extracted");
+    mkdirSync(extracted);
+    execFileSync("tar", ["-xzf", archive, "-C", extracted]);
+    assertLinkFreeExtractedTree(extracted);
+    const materializedDirectory = join(extracted, "browser-mcp-runtime", "node_modules", "fixture");
+    const materialized = join(materializedDirectory, "index.js");
+    expect(lstatSync(materialized).isFile()).toBe(true);
+    expect(lstatSync(materializedDirectory).isSymbolicLink()).toBe(false);
+    expect(readFileSync(materialized, "utf8")).toBe("materialized fixture\n");
+  });
+
+  it("refuses a package link whose target escapes the closure entry", () => {
+    const app = fakeAppBundle(work, { escapingLink: true });
+    expect(() => run(app, join(work, "out"))).toThrow(/escapes its package root/);
   });
 
   it("captures the WHOLE multiline changelog entry as notes, not one physical line (QA-033b)", () => {

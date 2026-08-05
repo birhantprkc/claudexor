@@ -5,9 +5,10 @@
  * The update unit shipped by the macOS app's auto-updater is the RUNTIME
  * CLOSURE — everything apps/macos/scripts/build-app.sh stages into the signed
  * app's Contents/Resources EXCEPT Node (Node stays app-owned; a Node bump ships
- * a new DMG). We build the tarball straight from the already-signed, already-
- * verified app bundle so the update closure is byte-identical to the closure
- * the release gates smoke-tested — never a re-staged, unverified copy.
+ * a new DMG). We build the tarball from the already-signed, already-verified app
+ * bundle. Internal package links are materialized as regular files/directories
+ * and links escaping their closure entry are refused. The resulting single
+ * archive can be unpacked by hosts without POSIX symlink semantics.
  *
  *   node scripts/build-runtime-closure.mjs \
  *     --app-bundle apps/macos/dist/Claudexor.app \
@@ -27,15 +28,22 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertLinkFreeExtractedTree,
+  copyTreeMaterialized,
+} from "./lib/remote-runtime-archive.mjs";
 import { runtimeArchiveName, runtimeArchiveUrl } from "./lib/runtime-manifest-contract.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -190,7 +198,7 @@ function assertNoNativeAddons(resources, entries) {
     else if (entry.endsWith(".node")) offenders.push(entry);
   }
   if (offenders.length > 0) {
-    fail(
+    throw new Error(
       `runtime closure contains native addon(s) forbidden by D-2: ${offenders.join(", ")} ` +
         "(the bundled Node's disable-library-validation would load them unsigned)",
     );
@@ -225,14 +233,15 @@ function main() {
     const path = join(resources, entry);
     if (!existsSync(path))
       fail(`closure entry missing from the app bundle: Contents/Resources/${entry}`);
+    const info = lstatSync(path);
+    if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+      fail(`closure entry must be a regular file or directory: Contents/Resources/${entry}`);
+    }
   }
   // Node MUST stay app-owned: refuse to ship it inside the update closure even
   // if a future build-app.sh change accidentally routed it here.
   if (CLOSURE_ENTRIES.includes("node"))
     fail("node must never be part of the runtime update closure");
-
-  // Native-addon guard runs on the STAGED bundle, before we tar anything.
-  assertNoNativeAddons(resources, CLOSURE_ENTRIES);
 
   const minAppVersion = readMinAppVersion(version);
   const notes = readNotes(version);
@@ -244,26 +253,40 @@ function main() {
   const tarballPath = join(out, tarballName);
   rmSync(tarballPath, { force: true });
 
-  // Tar the closure entries at the ROOT of the archive (no leading ./ dir), so
-  // unpacking into versions/<v>/ yields versions/<v>/claudexord.bundle.cjs etc.
-  // — exactly the layout DaemonLauncher and browser-mcp adjacency expect.
-  execFileSync("tar", ["-czf", tarballPath, "-C", resources, ...CLOSURE_ENTRIES], {
-    stdio: ["ignore", "ignore", "inherit"],
-  });
-  if (!existsSync(tarballPath) || statSync(tarballPath).size === 0) {
-    fail(`tar produced no runtime closure at ${tarballPath}`);
-  }
+  const work = mkdtempSync(join(tmpdir(), "claudexor-runtime-closure-"));
+  try {
+    const staged = join(work, "closure");
+    mkdirSync(staged);
+    for (const entry of CLOSURE_ENTRIES) {
+      copyTreeMaterialized(join(resources, entry), join(staged, entry));
+    }
+    assertLinkFreeExtractedTree(staged);
+    // Run the addon guard AFTER link materialization so a linked directory
+    // cannot hide a forbidden `.node` payload from the recursive walk.
+    assertNoNativeAddons(staged, CLOSURE_ENTRIES);
 
-  // The stamped bundle inside the closure MUST carry this exact build sha, so
-  // the manifest's buildSha and the running engine's handshake sha agree. A
-  // "unknown"/unstamped bundle here means the esbuild define did not run —
-  // refuse rather than ship a manifest that lies about the engine identity.
-  const bundleText = readFileSync(join(resources, "claudexord.bundle.cjs"), "utf8");
-  if (!bundleText.includes(buildSha)) {
-    fail(
-      `claudexord.bundle.cjs is not stamped with build sha ${buildSha}: run build-app.sh with the ` +
-        "esbuild CLAUDEXOR_BUILD_SHA define (bundled + downloaded closures must be stamped identically)",
-    );
+    // Tar the closure entries at the ROOT of the archive (no leading ./ dir),
+    // so unpacking into versions/<v>/ yields
+    // versions/<v>/claudexord.bundle.cjs etc. COPYFILE_DISABLE prevents macOS
+    // AppleDouble sidecars from becoming an accidental platform dependency.
+    execFileSync("tar", ["-czf", tarballPath, "-C", staged, ...CLOSURE_ENTRIES], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    if (!existsSync(tarballPath) || statSync(tarballPath).size === 0) {
+      throw new Error(`tar produced no runtime closure at ${tarballPath}`);
+    }
+    // The stamped bundle inside the PACKED closure MUST carry this exact build
+    // sha, so manifest and `--probe` identity agree byte-for-byte.
+    const bundleText = readFileSync(join(staged, "claudexord.bundle.cjs"), "utf8");
+    if (!bundleText.includes(buildSha)) {
+      throw new Error(
+        `claudexord.bundle.cjs is not stamped with build sha ${buildSha}: run build-app.sh with the ` +
+          "esbuild CLAUDEXOR_BUILD_SHA define (bundled + downloaded closures must be stamped identically)",
+      );
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
   }
 
   // Self-verify: the manifest digest MUST be the digest of the file we ship.
@@ -292,4 +315,8 @@ function main() {
   );
 }
 
-main();
+try {
+  main();
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}

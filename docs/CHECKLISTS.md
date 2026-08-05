@@ -305,6 +305,16 @@ pnpm test
   assembled in the publish run. The remote SBOM is regenerated
   from the promoted unsigned manifest and must `cmp` byte-identical to the
   candidate SBOM before the candidate bytes ship.
+- The shared engine closure remains one artifact and one signed authority for
+  app updates and host embedding. Its archive entries are only regular files
+  or directories; internal dependency links are materialized with their
+  expected bytes, escaping links/special files/`.node` addons are refused, Node
+  and CLI are absent, and the daemon's `--probe` identity still matches the
+  publication manifest or its derived reviewed host pin. Portable extraction
+  is not evidence of feature parity for every harness/login path on that OS.
+  Embedded start/handshake/stop use one exact config root/socket and one tested
+  Node version; a Windows support claim has a native
+  extract/probe/handshake/graceful-stop smoke receipt.
 - The publish input is an annotated stable tag on exact `origin/main` plus a
   signed schema-v5 attestation. It binds the candidate SHA/tree, exact full-gate
   receipt, sealed evidence manifest/diff/wave, and the two required native
@@ -326,10 +336,11 @@ pnpm test
 - Two dist-tags move, and only one of them moves by itself. `npm publish` runs
   with no `--tag`, so npm moves `latest` — which the provenance check then
   REQUIRES to have moved, so do not add `--tag` to that publish. `next` is moved
-  separately, by `moveNextChannel` after the signature audit, because the
-  downstream Ouroboros CI gate installs `claudexor@next` and a release that left
-  the tag behind would ship a fix its only consumer never resolves. After a
-  release, confirm both: `npm view claudexor dist-tags`.
+  separately, by `moveNextChannel` after the signature audit, because preview
+  consumers resolve that channel deliberately and must not stay on stale bytes
+  after a stable promotion. Ouroboros runtime delivery is exact-archive pinned;
+  it does not resolve either npm tag. After a release, confirm both:
+  `npm view claudexor dist-tags`.
 - Release assets are uploaded without `--clobber`; a same-name differing asset
   blocks. Publish the draft last and never edit its tag/assets afterward. This
   is workflow-enforced immutability, not a claim about GitHub repository settings.

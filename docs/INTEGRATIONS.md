@@ -15,6 +15,25 @@ changing Claudexor.
 | MCP server | Exposes Claudexor tools to MCP clients. | Stable contract: the tool set with input/output schemas. Tool list follows the implementation, not old docs. |
 | ACP server | Lets compatible editors or agents talk to Claudexor as a local agent surface. | Experimental (may change in minors, disclosed in the CHANGELOG). |
 | Host plugins | User-global Claude Code, Codex, Cursor, and OpenCode integrations managed by `claudexor plugin`. | Experimental file layout (regenerate with `claudexor plugin repair all`). Installs owned local files/config only; host enablement can still require reload/manual action. |
+| Engine runtime closure | Node-free release artifact for a host that owns its daemon lifecycle, such as Ouroboros. | Exact-pin contract: one link-free archive and the existing signed runtime manifest; the host supplies the tested Node version and verifies archive plus `--probe` identity. |
+
+## Embedded Engine Runtime
+
+An embedding host reuses `claudexor-runtime-<version>.tar.gz`, the same closure
+the macOS updater consumes. The archive contains regular files/directories only
+and deliberately excludes Node and the CLI. A host pins its exact URL, build
+SHA, SHA-256, size, protocol major, entrypoint, and tested Node version; after
+extraction it requires `node claudexord.bundle.cjs --probe` to report the same
+version/build identity. The existing signed runtime manifest remains the
+publication authority, so an embedder does not create a second artifact or
+trust root.
+
+The host owns install location, daemon config root, process lifecycle, and
+rollback. Start, handshake, and stop must address the same config root/socket.
+Portable extraction alone is not a platform-support claim: Windows support
+also requires a native extract, exact-Node probe, isolated daemon handshake,
+and graceful-stop smoke; individual harness and login capabilities keep their
+own platform evidence.
 
 ## CLI
 

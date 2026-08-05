@@ -186,9 +186,7 @@ describe("native owner-review publishing contract", () => {
       },
     ]);
     expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[0]!)).toBe("claude-fable-5");
-    expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[1]!)).toBe(
-      "GPT-5.6 Sol 272K Extra High",
-    );
+    expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[1]!)).toBe("GPT-5.6 Sol 1M Extra High");
     const { attestation, authority } = fixture();
     expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
       ok: true,

@@ -184,6 +184,21 @@ Candidate runs publish nothing signed; only publish ships the signed manifest.
 Rotate the key by minting a new keypair, bumping its `keyId`, and shipping the
 new public half in a signed DMG.
 
+The engine closure is also the supported host-embedding payload. Do not add a
+second embed archive or trust root: `scripts/build-runtime-closure.mjs`
+materializes contained package links from the already-gated app resources and
+emits a regular-file/directory-only tarball for extractors without POSIX
+symlink semantics. It rejects escaping links, special files, and `.node`
+addons. Embedders keep one exact tested Node version plus
+protocol/entrypoint/size in their reviewed pin; the npm `engines` range is not
+closure-smoke evidence. The existing signed manifest is the publication
+authority used to form that pin; runtime consumers may verify it directly or
+rely on a review-bound exact URL/`buildSha`/SHA-256/size pin, without a second
+manifest or verifier. The focused builder test must cover an internal link's
+expected materialized bytes and an escaping-link refusal. A Windows claim also
+requires a native extract/exact-Node probe/isolated handshake/graceful-stop
+smoke; feature support must not be inferred from portable extraction alone.
+
 The `publish` mode carries a THIRD signed input, `remote_runtime_manifest_b64`:
 the OWNER-SIGNED four-target SSH runtime manifest, transported the same way.
 The candidate run builds the four remote runtime archives

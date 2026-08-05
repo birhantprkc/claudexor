@@ -152,6 +152,26 @@ explicit-port preview tunnel.
   only when you open the app or click Check for Updates. The manifest's
   `minAppVersion` floor means an app that is too old is told to update the app
   itself rather than offered an incompatible engine.
+- **embedded hosts** — the same signed manifest and the same Node-free closure
+  may be exact-pinned by a host that owns its Claudexor daemon lifecycle. The
+  archive contains only ordinary directories/files (internal package links are
+  materialized), so its format needs no POSIX symlink support. The host supplies
+  the exact Node version proven by its reviewed pin, launches
+  `claudexord.bundle.cjs`, verifies `--probe` against the pinned
+  `{version,buildSha}`, and uses
+  `--stop <observed-version> <observed-buildSha>` before replacing a live
+  closure. This is an extraction/daemon-bootstrap contract, not a claim that
+  every harness or interactive login path has feature parity on Windows. The
+  signed manifest is the upstream publication authority used to form that pin;
+  a host may verify it live or rely on its reviewed exact
+  URL/`buildSha`/SHA-256/size pin.
+  `minAppVersion` remains the macOS app's compatibility field; embedders keep
+  protocol, one tested Node version, and entrypoint bounds in their pin instead
+  of creating a second Claudexor manifest or trust root. Start and stop must use
+  the same `CLAUDEXOR_CONFIG_DIR` and, when overridden,
+  `CLAUDEXOR_DAEMON_SOCK`, or the lifecycle command may address another daemon.
+  A Windows consumer still owns a native
+  extract/`--probe`/handshake/`--stop` smoke before claiming Windows support.
 - **npm** — CLI/daemon installs update the ordinary way:
   `npm install -g claudexor@latest`. `claudexor release check` reports whether a
   newer engine runtime is published, verifying the same signed manifest

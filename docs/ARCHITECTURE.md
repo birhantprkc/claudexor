@@ -2336,11 +2336,54 @@ into `Contents/Resources` EXCEPT Node (the bundled daemon, the setup-login
 runner, the Browser MCP deployment, and the native process-identity helper).
 Node stays app-owned, so a Node bump ships a new signed DMG. Each release also
 publishes a **signed** `runtime-manifest.json` built straight from the signed
-app bundle by `scripts/build-runtime-closure.mjs`, so the shipped closure is
-byte-identical to the one the release gates smoke-tested.
+app bundle by `scripts/build-runtime-closure.mjs`. The builder materializes
+internal package links into regular files/directories, rejects links escaping
+their closure entry, special files, and `.node` addons, and suppresses macOS
+AppleDouble sidecars. The shipped file bytes therefore come from the exact app
+resources the release gates smoke-tested while the archive itself needs no
+POSIX symlink semantics.
 `release/runtime-min-app-version.json` is the tracked `minAppVersion` floor
 (validated `<=` the release version by `scripts/verify-version-parity.mjs`), the
 app-vs-engine skew guard.
+
+**Host-owned embedding.** A non-app host reuses this SAME release archive; the
+existing signed manifest remains its upstream publication authority. There is
+no embed-only payload, manifest, updater authority, or runtime npm install. The
+portable archive root is fixed:
+`claudexord.bundle.cjs`, `setup-login-runner.cjs`,
+`browser-mcp-runtime/`, and `native/claudexor-process-identity`. It deliberately
+contains neither Node nor the CLI. A host owns the install directory, config
+root, process, rollback, and exact reviewed pin. Its Node binary is the exact
+version proven by that pin's closure smoke; the root package's
+`engines.node >=20.19.0` promise covers the npm distribution and does not by
+itself prove a release-built `--target=node22` closure on Node 20. The pin also
+carries protocol major 3, daemon entrypoint, expected archive size, and the
+accepted `{version,buildSha,sha256}`. The signed `runtime-manifest.json` is the
+upstream publication authority used to form that pin. A host MAY verify it
+directly against the runtime-update authority, or a review-bound consumer may
+ship only the exact URL/build SHA/SHA-256/size pin and verify the downloaded
+archive against it; it need not add a second Ed25519 verification path. Neither
+mode reinterprets the app-only `minAppVersion` as a host compatibility promise
+or follows `latest` without review.
+
+The lifecycle handshake is intentionally tiny. Before activation, run
+`node claudexord.bundle.cjs --probe` and require the single JSON line's exact
+`version` and 40-character `buildSha` to match the publication identity in the
+manifest or its derived host pin.
+Before replacing a live closure, run the SERVING closure as
+`node claudexord.bundle.cjs --stop <observed-version> <observed-buildSha>` and
+require its typed stopped receipt; busy or unknown refuses the swap. The daemon
+start, handshake, and stop subprocess MUST receive the same
+`CLAUDEXOR_CONFIG_DIR` and, when set, `CLAUDEXOR_DAEMON_SOCK`; otherwise a stop
+can truthfully report `alreadyStopped` for the wrong root while the embedded
+daemon remains live. The Darwin process-identity helper remains a regular inert
+extra off Darwin: `ProcessIdentityService` executes it only on Darwin. The
+link-free archive removes a POSIX-symlink requirement, but Windows support is
+claimed only after the consumer's native extract/exact-Node `--probe`/isolated
+handshake/graceful-`--stop` smoke. Setup/login and harness capabilities retain
+their separately documented platform gates. An embedder needing isolation from
+the operator's global daemon uses its own `CLAUDEXOR_CONFIG_DIR` rather than
+replacing another owner's process.
 
 **Signed-manifest authority (D-2).** The manifest is signed by a DEDICATED
 offline Ed25519 runtime-update key, SEPARATE from the review-attestation key and

@@ -70,14 +70,14 @@ export const REQUIRED_NATIVE_REVIEWERS = Object.freeze([
 
 /**
  * Slot-expected STREAM-OBSERVED model string. Cursor reports a display name,
- * never the requested id (measured 2026-08-04, advisory run run-d2bffab59d74:
- * `observed_model: GPT-5.6 Sol 272K Extra High`), so the observed-model checks
+ * never the requested id (re-measured 2026-08-06 from the live native catalog:
+ * `gpt-5.6-sol-xhigh - GPT-5.6 Sol 1M Extra High`), so the observed-model checks
  * pin the exact measured string for that slot instead of the id — equality
  * stays as strong as before, against the form the harness genuinely emits.
  */
 export const EXPECTED_OBSERVED_MODELS = Object.freeze({
   fable: "claude-fable-5",
-  sol: "GPT-5.6 Sol 272K Extra High",
+  sol: "GPT-5.6 Sol 1M Extra High",
 });
 
 export function expectedObservedModel(required) {
