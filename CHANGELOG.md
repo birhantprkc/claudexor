@@ -3,6 +3,21 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.8** (2026-08-06): Windows daemon boot fix. Establishing a
+  daemon-owned private directory (`ensureCanonicalPrivateDirectory`) applied
+  `fchmod(fd, 0o700)` unconditionally, and win32 has no POSIX mode bits on
+  directories (directory access there is governed by ACLs; the READONLY
+  attribute that fchmod maps onto is not honored on directories), so the
+  descriptor-level chmod failed with `EPERM: operation not permitted, fchmod`
+  and `claudexord` could not boot on Windows — found by the downstream 3-OS
+  platform gate against the published 3.3.7 bytes. The directory chmod now
+  carries the same attempt-first win32 tolerance as the directory-handle
+  flush in the same module (injectable `platform`, refusal forgiven only on
+  win32); the inode/pathname identity proofs before the mutation are
+  unchanged on every platform, and the file-level `fchmod(fd, 0o600)` writers
+  (daemon token, journal, recovery files, login sidecars) are untouched —
+  on win32 those map to clearing the READONLY attribute on a file handle,
+  which succeeds.
 - **v3.3.7** (2026-08-06): the Ouroboros-integration line, rebased onto the
   3.2.1 release. The `CLAUDEXOR_CLAUDE_NATIVE_DIR`/`CLAUDEXOR_CODEX_NATIVE_HOME`
   override guards now confine to the Claudexor-owned root (`~/.claudexor`)

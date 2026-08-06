@@ -82,7 +82,10 @@ export function ensureDir(path: string): void {
  * callers create nested owned roots one level at a time. No chmod occurs until
  * pathname identity has been proven.
  */
-export function ensureCanonicalPrivateDirectory(path: string): string {
+export function ensureCanonicalPrivateDirectory(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const absolute = resolve(path);
   if (!existsSync(absolute)) {
     const parent = dirname(absolute);
@@ -95,7 +98,7 @@ export function ensureCanonicalPrivateDirectory(path: string): string {
       throw new Error(`owned directory parent is not canonical: ${parent}`);
     }
     mkdirSync(absolute, { recursive: false, mode: 0o700 });
-    fsyncDirectory(parent);
+    fsyncDirectory(parent, platform);
   }
   const preliminary = lstatSync(absolute);
   if (preliminary.isSymbolicLink() || !preliminary.isDirectory()) {
@@ -123,8 +126,8 @@ export function ensureCanonicalPrivateDirectory(path: string): string {
     }
     // Mutate permissions only through the descriptor whose inode and pathname
     // identity were proven above; never follow a replacement path with chmod.
-    fchmodSync(fd, 0o700);
-    fsyncDirectoryHandle(fd);
+    fchmodPrivateDirectoryHandle(fd, platform);
+    fsyncDirectoryHandle(fd, platform);
   } finally {
     closeSync(fd);
   }
@@ -155,6 +158,28 @@ export function fsyncDirectory(path: string, platform: NodeJS.Platform = process
 function fsyncDirectoryHandle(fd: number, platform: NodeJS.Platform = process.platform): void {
   try {
     fsyncSync(fd);
+  } catch (error) {
+    if (platform !== "win32") throw error;
+  }
+}
+
+/**
+ * Tightening a directory to 0o700 is a POSIX permission mechanism; win32 has
+ * no POSIX mode bits on directories (access there is governed by ACLs, and
+ * the READONLY attribute that fchmod maps onto is not honored on
+ * directories), so the kernel refuses the descriptor-level chmod with EPERM —
+ * which would otherwise turn every owned-root establishment into a hard
+ * daemon-boot failure there. The inode and pathname identity proofs in the
+ * caller stay in force on every platform; only the mode mutation is
+ * platform-scoped. `platform` is injectable so the tolerance is provable
+ * without a Windows host.
+ */
+function fchmodPrivateDirectoryHandle(
+  fd: number,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  try {
+    fchmodSync(fd, 0o700);
   } catch (error) {
     if (platform !== "win32") throw error;
   }

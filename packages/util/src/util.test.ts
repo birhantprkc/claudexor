@@ -1,4 +1,12 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +40,14 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       actual.fsyncSync(fd);
     },
+    fchmodSync: (fd: number, mode: number) => {
+      if (flush.refusing.has(fd)) {
+        throw Object.assign(new Error("EPERM: operation not permitted, fchmod"), {
+          code: "EPERM",
+        });
+      }
+      actual.fchmodSync(fd, mode);
+    },
     closeSync: (fd: number) => {
       if (flush.refusing.delete(fd)) flush.closed.push(fd);
       actual.closeSync(fd);
@@ -42,6 +58,7 @@ vi.mock("node:fs", async (importOriginal) => {
 import {
   assertNoInlineSecretValues,
   containsSecretLikeToken,
+  ensureCanonicalPrivateDirectory,
   fsyncDirectory,
   hashJson,
   newId,
@@ -212,27 +229,77 @@ describe("fsyncDirectory win32 tolerance", () => {
   });
 
   it("is the only owner of the directory-flush mechanism in the monorepo", () => {
-    // The 3.3.7 defect was one-place-only tolerance: token.ts got the win32
-    // carve-out while six sibling copies kept the unguarded form, so the
-    // daemon still died on Windows. Duplicating the open+fsync pair anywhere
-    // else reintroduces exactly that split.
-    const packages = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-    const owners: string[] = [];
-    const walk = (dir: string): void => {
-      for (const entry of readdirSync(dir)) {
-        if (entry === "node_modules" || entry === "dist") continue;
-        const path = join(dir, entry);
-        if (statSync(path).isDirectory()) walk(path);
-        else if (
-          entry.endsWith(".ts") &&
-          !entry.endsWith(".test.ts") &&
-          readFileSync(path, "utf8").includes("O_DIRECTORY")
-        ) {
-          owners.push(path.slice(packages.length + 1));
-        }
-      }
-    };
-    walk(packages);
-    expect(owners).toEqual(["util/src/index.ts"]);
+    runDirectoryFlushOwnershipCheck();
   });
 });
+
+describe("ensureCanonicalPrivateDirectory win32 chmod tolerance", () => {
+  // The refusal-marker tmpdir mock above makes BOTH descriptor mutations
+  // refuse the way win32 does: fchmod with EPERM (no POSIX mode bits on
+  // directory handles) and fsync with EACCES. tmpdir() itself is a symlink
+  // spelling on macOS, so the canonical realpath is the only parent this
+  // helper accepts.
+  const canonicalTmp = realpathSync.native(tmpdir());
+  const roots: string[] = [];
+  function ownedDir(prefix: string): string {
+    const dir = mkdtempSync(join(canonicalTmp, prefix));
+    roots.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    flush.closed.length = 0;
+  });
+
+  it("tolerates the refused directory chmod on win32 and still closes the handle", () => {
+    const dir = ownedDir(flush.marker);
+    expect(ensureCanonicalPrivateDirectory(dir, "win32")).toBe(dir);
+    // The tolerance must not leak the descriptor it swallowed the errors on.
+    expect(flush.closed).toHaveLength(1);
+  });
+
+  it("propagates the refused chmod on every platform that has POSIX directory modes", () => {
+    for (const platform of ["darwin", "linux", "freebsd"] as const) {
+      const dir = ownedDir(flush.marker);
+      expect(() => ensureCanonicalPrivateDirectory(dir, platform)).toThrow(/EPERM/);
+    }
+    expect(flush.closed).toHaveLength(3);
+  });
+
+  it("still tightens the mode to 0o700 when the platform does not refuse", () => {
+    const dir = ownedDir("claudexor-owned-chmod-");
+    chmodSync(dir, 0o755);
+    expect(ensureCanonicalPrivateDirectory(dir)).toBe(dir);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    // Attempt-first tolerance, same shape as the flush: the win32 parameter
+    // only forgives a refusal, it never skips the attempt.
+    chmodSync(dir, 0o755);
+    expect(ensureCanonicalPrivateDirectory(dir, "win32")).toBe(dir);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+});
+
+function runDirectoryFlushOwnershipCheck(): void {
+  // The 3.3.7 defect was one-place-only tolerance: token.ts got the win32
+  // carve-out while six sibling copies kept the unguarded form, so the
+  // daemon still died on Windows. Duplicating the open+fsync pair anywhere
+  // else reintroduces exactly that split.
+  const packages = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const owners: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir)) {
+      if (entry === "node_modules" || entry === "dist") continue;
+      const path = join(dir, entry);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (
+        entry.endsWith(".ts") &&
+        !entry.endsWith(".test.ts") &&
+        readFileSync(path, "utf8").includes("O_DIRECTORY")
+      ) {
+        owners.push(path.slice(packages.length + 1));
+      }
+    }
+  };
+  walk(packages);
+  expect(owners).toEqual(["util/src/index.ts"]);
+}
