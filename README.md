@@ -22,11 +22,12 @@ Compared to driving a bare Codex or Claude Code session, Claudexor adds the
 layer the vendors do not ship: best-of-N races with independent reviewers and
 arbitration; honest budget/quota accounting (unknown cost is never `$0`);
 deterministic gates and protected paths; and — since 2.1 — **credential
-profiles**: several Claude/Codex subscriptions registered side by side, each
-with its own isolated login and live subscription-quota tracking, with an
-opt-in policy that rotates a spent account out of the way on typed vendor
-limits only. Everything runs on your machine, files are the source of truth,
-and there is no telemetry.
+profiles**: several Claude/Codex/Cursor subscriptions registered side by side,
+each with its own isolated named login. Live subscription-quota tracking —
+and the opt-in policy that rotates a spent account out of the way on typed
+vendor limits — covers the harnesses with a vendor usage source (Claude and
+Codex); Cursor has none yet. Everything runs on your machine, files are the
+source of truth, and there is no telemetry.
 
 Current status: **v3.3.7**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
@@ -136,7 +137,7 @@ explicit-port preview tunnel.
 
 - **macOS app** — each release publishes a `claudexor-runtime-<version>.tar.gz`
   closure (the bundled daemon, setup-login runner, Browser MCP, and native
-  process-identity helper — everything except Node) plus a **signed**
+  process-identity helper; Node, the CLI, UI, and icons stay outside it) plus a **signed**
   `runtime-manifest.json` describing it. On foreground and from the bottom-left
   update chip / **Check for Updates**, the app reads that manifest and, if a
   newer runtime is offered, surfaces "Update available → vX.Y.Z". One click
@@ -560,9 +561,13 @@ Terminal tab on remote threads) directly from these
 artifacts/events, so successful answers and failed runs are inspectable instead
 of disappearing into logs.
 
-Project runs execute in isolated envelopes under the same external project
+Standalone Agent runs use isolated envelopes by default, and Best-of candidates
+always use isolated envelopes. They live under the same external project
 namespace at `~/.claudexor/v3/projects/<project-sha256>/workspaces/.../tree`;
-harness `cwd` is that envelope worktree.
+an isolated run's harness `cwd` is that envelope worktree. Chat thread turns
+follow the workspace mode described above: `in_place` uses the live project,
+while `isolated` uses its persistent thread worktree.
+
 Proven work product means a git diff in the envelope, a declared run artifact,
 or an explicitly verified host side-effect. Absolute `/tmp/...` writes are host
 side effects and do not count as project success. A project prompt asking for a

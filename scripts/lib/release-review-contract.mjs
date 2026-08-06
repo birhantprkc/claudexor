@@ -1,7 +1,8 @@
 /**
- * Fail-closed publishing contract for the two native, full-context owner
- * reviews. Historical schemas remain verifiable as signed archive bytes, but
- * only schema v5 can authorize publication.
+ * Fail-closed publishing contract for the two full-context owner reviews,
+ * executed as Cursor operator subagents (owner decision 2026-08-06).
+ * Historical schemas remain verifiable as signed archive bytes, but only
+ * schema v6 can authorize publication.
  */
 import { createPublicKey, verify } from "node:crypto";
 import { relative, resolve, sep } from "node:path";
@@ -9,27 +10,30 @@ import { TextDecoder } from "node:util";
 
 const SHA1 = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const GIT_SHA = /^[0-9a-f]{40}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const SEMVER_TAG = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const REVIEW_WAVE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const OBSERVED_SOURCES = new Set(["stream_event", "transcript"]);
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 export const RELEASE_REVIEW_ATTESTATION_ALGORITHM = "Ed25519";
-export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION = 5;
-// v2 (owner decision 2026-08-04, session transcript
-// 5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl line 1824, verbatim: «C (моя
-// текущая рекомендация): cursor-полоса ревьюит только дельту с прошлого
-// прогона — три маленьких фикс-коммита; сходимость почти гарантирована за
-// круг, два вердикта сохраняются. и одного агента на fable собсвенного
-// прогони тоже»): after a completed full-context sol review of the candidate
-// line, subsequent sol executions may take the delta since that review as
-// their subject (sealed DELTA.patch, full packet as context); the fable slot
-// always reviews the full context.
-export const OWNER_REVIEW_PROTOCOL = "native-fable-full-sol-delta-v2";
+export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION = 6;
+// v6 transport (owner decision 2026-08-06, program
+// claudexor-runtime-delivery-337, verbatim: «не надо вообще codex
+// использовать… Используй своих субагентов, ты же можешь у себя разные модели
+// вызывать так как ты cursor»): the formal release review pair executes as
+// Cursor OPERATOR SUBAGENTS, not as native Claude Code/Cursor CLI runs
+// through Claudexor. Each slot produces a markdown report plus metadata
+// (model slug, exact ISO-8601 start/finish, pass|warn verdict, review scope,
+// report digest); the two executions must genuinely overlap in wall time. The
+// native-harness protocol `native-fable-full-sol-delta-v2` (schema v5) is
+// retired to the archive list below alongside v2-v4.
+export const OWNER_REVIEW_PROTOCOL = "cursor-operator-fable-sol-v1";
 export const OWNER_REVIEW_VERDICTS = Object.freeze(["pass", "warn"]);
-export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS = Object.freeze([2, 3, 4]);
+// Owner-locked: BOTH slots review the full context under this protocol. A
+// delta, packet-split, or any other partial scope can never satisfy either
+// slot, so "full" is the only value a review entry may carry.
+export const OWNER_REVIEW_SCOPES = Object.freeze(["full"]);
+export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS = Object.freeze([2, 3, 4, 5]);
 export const RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH = "release-review-verifier.mjs";
 export const RELEASE_REVIEW_CLI_ARTIFACT_PATH = "claudexor.bundle.cjs";
 export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS = Object.freeze([
@@ -37,52 +41,26 @@ export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS = Object.freeze([
   RELEASE_REVIEW_CLI_ARTIFACT_PATH,
 ]);
 export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS = 1_000;
-export const REQUIRED_NATIVE_REVIEWERS = Object.freeze([
+// Exactly two slots; both receive the full context. No substitute model,
+// packet split, or extra critic can satisfy either slot. Each slot accepts
+// exactly one slug from its owner-approved tier set (operator decision
+// 2026-08-06 ~08:29 MSK under the owner authorization of 08:04 MSK «меня
+// удовлетворяют модели fable-5 и gpt-5.6-sol»: two subagent-model catalog
+// flaps within one hour; a hard single-tier pin would have blocked the
+// formal pair on the frozen SHA). The actually used slug is recorded in the
+// reviewer metadata and the signed review entry; a slug outside the set
+// refuses fail-closed. This constant is the single source for BOTH
+// comparison points: the semantic validator below and the sealer.
+export const OWNER_REVIEW_PANEL = Object.freeze([
   Object.freeze({
     slot: "fable",
-    harnessId: "claude",
-    providerFamily: "anthropic",
-    requestedModel: "claude-fable-5",
-    requestedEffort: "max",
-    // INV-125 second amendment integrity pin: the fable lane ALWAYS reviews
-    // the full context — a delta-scoped fable artifact cannot seal.
-    allowedScopes: Object.freeze(["full"]),
+    allowedModels: Object.freeze(["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"]),
   }),
-  // Owner decision 2026-08-04 («зачем тебе кодекс? Ревьюй курсором и клод
-  // кодом» — the owner's typed reply, answering the explanation that this
-  // slot required a codex-native session; full provenance is recorded in the
-  // release evidence packet): the sol slot
-  // rides the cursor harness. The MODEL is unchanged — cursor has no effort
-  // flag, so `xhigh` is carried inside cursor's native model id and
-  // requestedEffort is honestly null. providerFamily is cursor's manifest
-  // family; the two slots remain distinct families and must still overlap.
   Object.freeze({
     slot: "sol",
-    harnessId: "cursor",
-    providerFamily: "cursor",
-    requestedModel: "gpt-5.6-sol-xhigh",
-    requestedEffort: null,
-    // INV-125 second amendment: the sol lane may review either the full
-    // context or the sealed exact delta — nothing else.
-    allowedScopes: Object.freeze(["full", "delta"]),
+    allowedModels: Object.freeze(["gpt-5.6-sol-max", "gpt-5.6-sol-medium"]),
   }),
 ]);
-
-/**
- * Slot-expected STREAM-OBSERVED model string. Cursor reports a display name,
- * never the requested id (re-measured 2026-08-06 from the live native catalog:
- * `gpt-5.6-sol-xhigh - GPT-5.6 Sol 1M Extra High`), so the observed-model checks
- * pin the exact measured string for that slot instead of the id — equality
- * stays as strong as before, against the form the harness genuinely emits.
- */
-export const EXPECTED_OBSERVED_MODELS = Object.freeze({
-  fable: "claude-fable-5",
-  sol: "GPT-5.6 Sol 1M Extra High",
-});
-
-export function expectedObservedModel(required) {
-  return EXPECTED_OBSERVED_MODELS[required.slot] ?? required.requestedModel;
-}
 
 export function decodeReviewUtf8(value, label = "review evidence") {
   if (typeof value === "string") return value;
@@ -167,7 +145,7 @@ export function verifyReleaseAttestationSignature(
   return { ok: true, reasons: [] };
 }
 
-/** Schemas 2-4 are historical signed records, never publishing authority. */
+/** Schemas 2-5 are historical signed records, never publishing authority. */
 export function verifyArchivedReleaseAttestationSignature(attestation, authority) {
   if (!ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS.includes(attestation?.schemaVersion)) {
     return {
@@ -317,6 +295,7 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
       "reviewProtocol",
       "candidateSha",
       "candidateTree",
+      "candidateVersion",
       "evidence",
       "fullGate",
       "reviews",
@@ -325,7 +304,7 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
   ) {
     reasons.push("review attestation payload shape is invalid");
   }
-  if (payload.contract !== "owner-review-v5") reasons.push("owner review contract must be v5");
+  if (payload.contract !== "owner-review-v6") reasons.push("owner review contract must be v6");
   if (payload.reviewProtocol !== OWNER_REVIEW_PROTOCOL) {
     reasons.push(`owner review protocol must be ${OWNER_REVIEW_PROTOCOL}`);
   }
@@ -336,125 +315,49 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
     reasons.push("review attestation candidate tree mismatch");
   }
   if (
+    typeof payload.candidateVersion !== "string" ||
+    payload.candidateVersion.length === 0 ||
+    payload.candidateVersion !== expected.candidateVersion
+  ) {
+    reasons.push("review attestation candidate version mismatch");
+  }
+  if (
     !isRecord(payload.evidence) ||
-    !hasExactKeys(payload.evidence, [
-      "manifestSha256",
-      "diffSha256",
-      "reviewWaveId",
-      "metadataSha256",
-    ]) ||
+    !hasExactKeys(payload.evidence, ["manifestSha256", "diffSha256", "reviewWaveId"]) ||
     !SHA256.test(payload.evidence.manifestSha256 ?? "") ||
     !SHA256.test(payload.evidence.diffSha256 ?? "") ||
-    !REVIEW_WAVE_ID.test(payload.evidence.reviewWaveId ?? "") ||
-    !SHA256.test(payload.evidence.metadataSha256 ?? "")
+    !REVIEW_WAVE_ID.test(payload.evidence.reviewWaveId ?? "")
   ) {
     reasons.push("review attestation evidence binding is invalid");
   }
   reasons.push(...validateFullGateEvidence(payload.fullGate, expected));
 
   const reviews = Array.isArray(payload.reviews) ? payload.reviews : [];
-  if (reviews.length !== REQUIRED_NATIVE_REVIEWERS.length) {
-    reasons.push("owner review attestation requires exactly two native reviewer reports");
+  if (reviews.length !== OWNER_REVIEW_PANEL.length) {
+    reasons.push("owner review attestation requires exactly two operator reviewer reports");
   }
-  for (const [index, required] of REQUIRED_NATIVE_REVIEWERS.entries()) {
+  for (const [index, required] of OWNER_REVIEW_PANEL.entries()) {
     const review = reviews[index];
     if (
       !isRecord(review) ||
       !hasExactKeys(review, [
         "slot",
-        "harnessId",
-        "providerFamily",
-        "requestedModel",
-        "requestedEffort",
-        "sessionId",
-        "externalContextPolicy",
-        "toolWebPolicy",
-        "observedModel",
-        "observedSource",
-        "routeProofStatus",
-        "authMode",
-        "authSwitched",
-        "effortHonored",
-        "reviewRuntimeVersion",
-        "reviewRuntimeBuildSha",
-        "reviewRuntimeEntrySha256",
+        "model",
         "startedAt",
         "completedAt",
-        "durationMs",
-        "promptSha256",
-        "reportSha256",
-        "metadataSha256",
-        "eventsSha256",
-        "parsedSha256",
         "verdict",
         "reviewScope",
-        "deltaBaseSha",
-        "deltaSha256",
+        "reportSha256",
+        "metadataSha256",
       ])
     ) {
       reasons.push(`owner review ${required.slot} entry shape is invalid`);
       continue;
     }
-    if (!required.allowedScopes.includes(review.reviewScope)) {
+    if (review.slot !== required.slot || !required.allowedModels.includes(review.model)) {
       reasons.push(
-        `owner review ${required.slot} scope ${JSON.stringify(review.reviewScope ?? null)} is not allowed (INV-125 second amendment: fable is always full-context; sol is full or the sealed exact delta)`,
+        `owner review ${required.slot} slot/model is outside the owner-approved panel (${required.slot}: ${required.allowedModels.join(" | ")})`,
       );
-    }
-    if (review.reviewScope === "delta") {
-      if (!GIT_SHA.test(review.deltaBaseSha ?? "") || !SHA256.test(review.deltaSha256 ?? "")) {
-        reasons.push(
-          `owner review ${required.slot} delta scope is missing its base/digest binding`,
-        );
-      }
-    } else if (review.deltaBaseSha !== null || review.deltaSha256 !== null) {
-      reasons.push(`owner review ${required.slot} full scope must not carry delta bindings`);
-    }
-    for (const key of [
-      "slot",
-      "harnessId",
-      "providerFamily",
-      "requestedModel",
-      "requestedEffort",
-    ]) {
-      if (review[key] !== required[key]) {
-        reasons.push(
-          `owner review ${required.slot} ${key} does not match the required native route`,
-        );
-      }
-    }
-    if (review.observedModel !== expectedObservedModel(required)) {
-      reasons.push(
-        `owner review ${required.slot} observed model ${JSON.stringify(review.observedModel)} does not match expected ${JSON.stringify(expectedObservedModel(required))}`,
-      );
-    }
-    if (typeof review.sessionId !== "string" || review.sessionId.length === 0) {
-      reasons.push(`owner review ${required.slot} session identity is missing`);
-    }
-    if (review.externalContextPolicy !== "live" || review.toolWebPolicy !== "live") {
-      reasons.push(`owner review ${required.slot} did not run with live web policy`);
-    }
-    if (!OBSERVED_SOURCES.has(review.observedSource)) {
-      reasons.push(`owner review ${required.slot} has no execution-observed model source`);
-    }
-    if (review.routeProofStatus !== "verified") {
-      reasons.push(`owner review ${required.slot} route proof is not verified`);
-    }
-    if (
-      review.authMode !== "local_session" ||
-      review.authSwitched !== false ||
-      review.effortHonored !== true
-    ) {
-      reasons.push(`owner review ${required.slot} changed auth or ignored requested effort`);
-    }
-    if (
-      typeof review.reviewRuntimeVersion !== "string" ||
-      review.reviewRuntimeVersion !== expected.candidateVersion ||
-      review.reviewRuntimeBuildSha !== expected.candidateSha
-    ) {
-      reasons.push(`owner review ${required.slot} runtime is not the exact candidate build`);
-    }
-    if (!SHA256.test(review.reviewRuntimeEntrySha256 ?? "")) {
-      reasons.push(`owner review ${required.slot} runtime entry digest is invalid`);
     }
     const startedMs = parseExactIso(review.startedAt);
     const completedMs = parseExactIso(review.completedAt);
@@ -462,20 +365,11 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
       startedMs === null ||
       completedMs === null ||
       completedMs < startedMs ||
-      completedMs - startedMs < RELEASE_REVIEW_MIN_PLAUSIBLE_MS ||
-      !Number.isSafeInteger(review.durationMs) ||
-      review.durationMs < RELEASE_REVIEW_MIN_PLAUSIBLE_MS ||
-      Math.abs(completedMs - startedMs - review.durationMs) > 1_000
+      completedMs - startedMs < RELEASE_REVIEW_MIN_PLAUSIBLE_MS
     ) {
       reasons.push(`owner review ${required.slot} liveness evidence is invalid`);
     }
-    for (const key of [
-      "promptSha256",
-      "reportSha256",
-      "metadataSha256",
-      "eventsSha256",
-      "parsedSha256",
-    ]) {
+    for (const key of ["reportSha256", "metadataSha256"]) {
       if (!SHA256.test(review[key] ?? "")) {
         reasons.push(`owner review ${required.slot} ${key} is missing or malformed`);
       }
@@ -483,11 +377,11 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
     if (!OWNER_REVIEW_VERDICTS.includes(review.verdict)) {
       reasons.push(`owner review ${required.slot} verdict must be pass or warn`);
     }
+    if (!OWNER_REVIEW_SCOPES.includes(review.reviewScope)) {
+      reasons.push(`owner review ${required.slot} review scope must be full`);
+    }
   }
-  if (
-    reviews.length === REQUIRED_NATIVE_REVIEWERS.length &&
-    reviews.every((review) => isRecord(review))
-  ) {
+  if (reviews.length === OWNER_REVIEW_PANEL.length && reviews.every((review) => isRecord(review))) {
     const starts = reviews.map((review) => Date.parse(review.startedAt));
     const completions = reviews.map((review) => Date.parse(review.completedAt));
     if (
@@ -495,13 +389,10 @@ export function validateOwnerReviewAttestationPayload(payload, expected) {
       completions.some((value) => !Number.isFinite(value)) ||
       Math.max(...starts) >= Math.min(...completions)
     ) {
-      reasons.push("owner review native reviewer executions did not overlap");
+      reasons.push("owner review operator reviewer executions did not overlap");
     }
-    if (new Set(reviews.map((review) => review.sessionId)).size !== reviews.length) {
-      reasons.push("owner review native reviewer session identities must be distinct");
-    }
-    if (new Set(reviews.map((review) => review.reviewRuntimeEntrySha256)).size !== 1) {
-      reasons.push("owner review native reviewers did not use the same packaged CLI bytes");
+    if (new Set(reviews.map((review) => review.reportSha256)).size !== reviews.length) {
+      reasons.push("owner review operator reviewer reports must be distinct");
     }
   }
   if (
@@ -519,7 +410,7 @@ export function validateReleaseAttestation(attestation, authority, expected) {
     return {
       ok: false,
       reasons: [
-        `review attestation schemaVersion ${attestation?.schemaVersion ?? "(missing)"} is not accepted for publish; schemas 2-4 are archive-signature-only`,
+        `review attestation schemaVersion ${attestation?.schemaVersion ?? "(missing)"} is not accepted for publish; schemas 2-5 are archive-signature-only`,
       ],
     };
   }
@@ -540,7 +431,8 @@ function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasExactKeys(value, keys) {
+/** Exact-shape check shared with the sealer's on-disk metadata validation. */
+export function hasExactKeys(value, keys) {
   if (!isRecord(value) || Object.keys(value).length !== keys.length) return false;
   const allowed = new Set(keys);
   return Object.keys(value).every((key) => allowed.has(key));

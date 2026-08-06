@@ -33,8 +33,6 @@ import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
 import { createCursorParser, parseCursorModelList } from "./parse.js";
 export { parseCursorModelList } from "./parse.js";
 import {
-  cursorProfileKeyOrRefusal,
-  probeCursorCredentialProfile,
   probeCursorNativeAuth,
   selectCursorAuthRoute,
   shouldDiscloseCursorAutoApiRoute,
@@ -42,6 +40,12 @@ import {
   type CursorAuthRoute,
   type CursorNativeAuthProbe,
 } from "./auth.js";
+import {
+  probeCursorCredentialProfile,
+  resolveCursorRunRoute,
+  stampCursorProfileEvents,
+} from "./profile.js";
+export { canonicalCursorProfileHome, cursorProfilePathEnv } from "./profile.js";
 export {
   cursorStatusAuthenticated,
   cursorStatusLoggedOut,
@@ -60,12 +64,11 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
     supported_sources: ["native_session", "api_key_env"],
     preferred_source: null,
     credential_transports: [
-      // Measured against the shipped bundle (2026-08-04): CURSOR_CONFIG_DIR
-      // exists but relocates only config — the darwin credential file is
-      // homedir-fixed (~/.cursor/auth.json) and the default store is the
-      // global-service login Keychain, so HOME remains the only credential
-      // relocation lever and per-profile cursor isolation stays unavailable.
+      // Default native auth uses the OS Keychain. Named profiles select
+      // Cursor's vendor-supported file store, whose auth path is HOME/XDG/
+      // APPDATA-relocatable while config/session state is relocated separately.
       { source: "native_session", kind: "os_keychain", relocatable_by: ["HOME"] },
+      { source: "native_session", kind: "config_file", relocatable_by: ["HOME"] },
       { source: "api_key_env", kind: "env_var", relocatable_by: ["ENV"] },
     ],
   },
@@ -333,6 +336,7 @@ async function resolveCursorAuthRoute(
     authPreference?: AuthPreference;
     fresh?: boolean;
     abortSignal?: AbortSignal;
+    bridgeNativeSession?: boolean;
   },
 ): Promise<{
   route: CursorAuthRoute;
@@ -343,7 +347,7 @@ async function resolveCursorAuthRoute(
 }> {
   const env = cursorBaseEnv(input.env);
   const scopedHome = Boolean(input.env?.["HOME"]);
-  if (scopedHome) maybeBridgeScopedHome(env);
+  if (scopedHome && input.bridgeNativeSession !== false) maybeBridgeScopedHome(env);
   const authPreference = input.authPreference ?? "auto";
   const key = authPreference === "subscription" ? null : deps.cursorApiKey(input.env);
   const nativeProbe =
@@ -676,11 +680,8 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
       return listCursorModelsFromReadyRoute(runtime, spec);
     },
 
-    // INV-135 (release wave round-15 #1): a valid cursor profile must admit
-    // the route even when the default store is logged out — the orchestrator
-    // consults THIS probe to override the default auth verdict.
-    async probeCredentialProfile(profile) {
-      return probeCursorCredentialProfile(profile, runtime.resolveProfileSecret);
+    async probeCredentialProfile(profile, abortSignal) {
+      return probeCursorCredentialProfile(profile, runtime, abortSignal);
     },
   };
 }
@@ -723,24 +724,22 @@ async function* runCursor(
   // Cursor has no native system-prompt flag; layer instructions as a delimited
   // prompt prefix (the engine already withheld them from synthesis/reviewers).
   args.push(promptWithInstructions(spec));
-  // INV-135 strict profile routing: cursor's native login is a singleton, so
-  // a profile is exactly its secret-ref API key (smoked before use like the
-  // default key route); other kinds refuse typed.
+  // INV-135 strict profile routing lives in profile.ts; the callback resolves
+  // the engine-default credential ladder for profile-less (or API-key) runs.
   const profile = spec.credential_profile;
-  const profileGate = profile
-    ? cursorProfileKeyOrRefusal(profile, deps.resolveProfileSecret)
-    : null;
-  if (profileGate && "refusal" in profileGate) {
-    yield { type: "error", session_id: spec.session_id, ts: nowIso(), error: profileGate.refusal };
+  const resolved = await resolveCursorRunRoute(
+    spec,
+    deps,
+    ({ cursorApiKey, ...input }) =>
+      resolveCursorAuthRoute(cursorApiKey ? { ...deps, cursorApiKey } : deps, input),
+    abortSignalFromSpec(spec),
+  );
+  if ("refusal" in resolved) {
+    yield { type: "error", session_id: spec.session_id, ts: nowIso(), error: resolved.refusal };
     yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
     return;
   }
-  const routeDeps = profileGate ? { ...deps, cursorApiKey: () => profileGate.key } : deps;
-  const { route, env, key, nativeAuthed, scopedHome } = await resolveCursorAuthRoute(routeDeps, {
-    env: spec.env,
-    authPreference: profile ? "api_key" : spec.auth_preference,
-    abortSignal: abortSignalFromSpec(spec),
-  });
+  const { route, env, key, nativeAuthed, scopedHome } = resolved;
   if (route === "api_key" && key) {
     env.CURSOR_API_KEY = key;
     if (
@@ -792,10 +791,6 @@ async function* runCursor(
     env,
     label: "cursor-agent",
     redact: redactSecrets,
-    parseEvent: (obj, sessionId) => {
-      const out = cursorParser(obj, sessionId);
-      if (out && profile) for (const ev of out) ev.credential_profile_id = profile.profile_id;
-      return out;
-    },
+    parseEvent: stampCursorProfileEvents(profile, cursorParser),
   });
 }

@@ -283,13 +283,11 @@ pnpm test
   its cause plus Retry instead of an endless spinner. Run this in the isolated
   macOS VM with real HID clicks and screenshot evidence, not UI automation alone.
 - Review gate: the Release review protocol (see the section below) — optional
-  pre-freeze internal critics, then one parallel native full-context wave with
-  the exact reviewer pair the Release review protocol section defines, one
+  pre-freeze internal critics, then one parallel full-context wave with
+  the exact reviewer pair the Release review protocol section defines
+  (2026-08-06: Cursor operator subagents), one
   adjudication, one batched correction commit, and one confirmation wave
-  focused on that delta (per the INV-125 second amendment, the sol lane's
-  confirmation subject may be the sealed `DELTA.patch` since its last
-  completed full-context review, with the whole packet as context; the fable
-  lane always confirms in full context).
+  focused on that delta (the fable lane always confirms in full context).
 - Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
   come from GitHub Actions `candidate` then `publish` mode; missing signing or
   notarization credentials block publication. Publish promotes the exact
@@ -316,13 +314,13 @@ pnpm test
   Node version; a Windows support claim has a native
   extract/probe/handshake/graceful-stop smoke receipt.
 - The publish input is an annotated stable tag on exact `origin/main` plus a
-  signed schema-v5 attestation. It binds the candidate SHA/tree, exact full-gate
-  receipt, sealed evidence manifest/diff/wave, and the two required native
-  reviewer artifacts with non-blocking verdicts (see the Release review
-  protocol). Verify the Ed25519 signature against the tracked pinned public key
-  before semantic validation. Reject non-v5, unsigned, unknown-key, tampered,
-  substituted, incomplete, or route-unproven publish inputs; schema v2-v4 stays
-  signature-verifiable only as archived evidence.
+  signed schema-v6 attestation. It binds the candidate SHA/tree/version, exact
+  full-gate receipt, sealed evidence manifest/diff/wave, and the two required
+  operator reviewer reports (digests + model slugs) with non-blocking verdicts
+  (see the Release review protocol). Verify the Ed25519 signature against the
+  tracked pinned public key before semantic validation. Reject non-v6,
+  unsigned, unknown-key, tampered, substituted, or incomplete publish inputs;
+  schema v2-v5 stays signature-verifiable only as archived evidence.
 - Verify app, ZIP-contained app, and DMG signatures, notarization tickets,
   staples, checksums, SBOM, and GitHub provenance. Do not upload stale local
   `apps/macos/dist` artifacts.
@@ -476,7 +474,7 @@ pnpm test
   `reviewer.completed`, `reviewer.timed_out`, `reviewer.failed`) so a concurrent
   panel is diagnosable and does not look like a hang.
 
-### Release review protocol (native v5, owner-locked — INV-125/INV-139)
+### Release review protocol (v6, owner-locked — INV-125/INV-139)
 
 This is the ONLY release review protocol. History for context: the 2.1.0
 release ran 18 wave rounds without converging (~40% of findings re-surfaced
@@ -484,16 +482,54 @@ earlier "accepted" fixes; ~26% of the release diff was authored by the loop
 itself). This protocol bounds the loop mechanically while preserving the full
 repository context that small review packets lost.
 
+> **Owner amendment 2026-08-06 (panel/transport).** By explicit owner decision
+> («не надо вообще codex использовать… Используй своих субагентов, ты же
+> можешь у себя разные модели вызывать так как ты cursor»), the formal
+> reviewer pair executes as **Cursor operator subagents**, not as native
+> Claude Code/Cursor CLI runs through Claudexor: slot `fable` = one slug from
+> the owner-approved tier set {`claude-fable-5-thinking-max`,
+> `claude-fable-5-thinking-medium`} with the full context, slot `sol` = one
+> slug from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`}. The tier sets are an
+> operator decision of 2026-08-06 ~08:29 MSK under the owner authorization of
+> 08:04 MSK («меня удовлетворяют модели fable-5 и gpt-5.6-sol», given after
+> the sol max tier disappeared from the subagent model catalog): two catalog
+> flaps within one hour showed that a hard single-tier pin would block the
+> formal pair on a frozen SHA. The actually used slug is recorded in the
+> slot metadata and the signed entry; a slug outside the slot's set refuses
+> fail-closed. Each slot's sealed artifact is its markdown report plus
+> metadata (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
+> mandatory `review_scope: "full"`, report SHA-256), and the two executions
+> must genuinely overlap. The slot metadata — model, intervals, verdict,
+> scope — is a set of operator-attested statements: the new transport
+> produces no independent session or event proof of the subagent executions,
+> an accepted property of this owner decision. The signed
+> attestation is schema v6 (`cursor-operator-fable-sol-v1`); it still binds
+> the exact candidate SHA/tree/version, full-gate receipt, sealed evidence
+> manifest/diff/wave, and now both reports' digests and model slugs. Schema
+> v5 joins v2-v4 as archive-signature-only. The bullets below state the v6
+> transport directly; wave discipline, the sealed packet, the blocker
+> contract, adjudication, and the ship rule are unchanged.
+
+> **Historical, non-executable.** The retired v5 native-harness mechanics —
+> vendor-native Claude Code/Cursor CLI sessions with hard-pinned models,
+> observed stream models and route proofs, per-reviewer session identities,
+> frozen `external_context_policy=live` review specs, running the review
+> through the receipt-bound copied packaged CLI, the sol confirmation delta
+> scope, and the schema-v5 signature — are recorded in the CHANGELOG and the
+> INV-125 decision trail. None of them is a step of this protocol; do not
+> execute or re-create them.
+
 - **One wave, in parallel, on a frozen candidate SHA**: exactly two formal
-  native reviewers, Claude Code `claude-fable-5` at effort `max` and
-  `gpt-5.6-sol` at `xhigh` through the cursor harness (cursor model id
-  `gpt-5.6-sol-xhigh`; owner decision 2026-08-04: «зачем тебе кодекс? Ревьюй
-  курсором и клод кодом»), both through vendor-native local sessions.
-  They receive the complete Git-visible repository, complete diff, same sealed
-  evidence, owner dialogue/decisions, tests, and live internet access. Frozen
-  review specs must record `external_context_policy=live` and web tool policy
-  `live`; an automatic or cached policy is not release evidence. No substitute
-  model, API-key fallback, packet split, or extra critic can fill either slot.
+  full-context reviewers, executed as Cursor operator subagents per the
+  owner-approved panel (`OWNER_REVIEW_PANEL` in
+  `scripts/lib/release-review-contract.mjs`): slot `fable` = one slug from
+  {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`}, slot
+  `sol` = one slug from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`}. Each
+  reviewer receives the complete Git-visible candidate repository, complete
+  diff, the same sealed evidence, owner dialogue/decisions, and tests, and may
+  use live internet access where source verification is useful. No substitute
+  model, API-key fallback, packet split, or extra critic can fill either
+  slot; a slug outside a slot's tier set refuses fail-closed.
 - **One sealed packet** for every reviewer: `MANIFEST.sha256`,
   `FREEZE.json`, `DIFF.patch` + digest, `TESTS.txt`, the decision registry
   (change → D#/invariant mapping), `FORBIDDEN_FINDINGS.md`,
@@ -512,31 +548,37 @@ repository context that small review packets lost.
   row in `docs/reference/review-ledger.md` (the findings ledger); its
   declined rows are the next wave's `DECLINED_FINDINGS.md`.
 - **One confirmation wave**, focused on the fix diff and every file it
-  touched — the fable lane in the same full context; the sol lane may take
-  the sealed delta as its subject per the INV-125 second amendment. A
-  confirmation blocker on unchanged code without new evidence is invalid.
+  touched — both lanes still review in the same full context:
+  `review_scope: "full"` is the only value the v6 contract accepts, and the
+  retired sol delta scope can no longer satisfy any slot. A confirmation
+  blocker on unchanged code without new evidence is invalid.
 - **Stop.** New proven blockers after confirmation get a fix + targeted
   re-check of exactly those findings. Anything beyond that requires an
   explicit owner decision — the protocol never self-extends.
 - **Ship rule**: confirmation pass + every open finding at WARN-or-below
   (each with its FEATURES/BACKLOG/DECLINED row) is releasable. A perfectly
   clean board is not required.
-- **Reviewer liveness**: a slot counts only with a parsed typed verdict and
-  a duration of at least one second. The two executions must actually overlap
-  and use distinct recorded session identities. An empty, instant, or
-  unparseable response is an infrastructure failure. Frozen slots have no
-  internal transient retry; an operator retry uses fresh artifacts and a fresh
-  review wave on the same still-clean SHA. A failed required slot blocks
-  sealing.
-- **Review-harness self-test**: the evidence/verdict validator is exercised
-  in CI against synthetic fixtures (deep multi-row review, hostile JSON,
-  empty output, instant null verdict). Two identical failures from
-  different models mean the PROTOCOL is wrong, not the models.
+- **Reviewer liveness**: a slot counts only with a complete markdown report,
+  a `pass|warn` verdict, and a recorded duration of at least one second, and
+  the two executions must genuinely overlap in wall time; the two reports
+  must be byte-distinct. Models, intervals, verdicts, and scope are
+  operator-attested statements — this transport produces no independent
+  session or event proof (an accepted property of the owner decision above).
+  An empty or instant execution is an infrastructure failure. Frozen slots
+  have no internal transient retry; an operator retry uses fresh artifacts
+  and a fresh review wave on the same still-clean SHA. A failed required
+  slot blocks sealing.
+- **Review-contract self-test**: the schema-v6 contract and sealer
+  validators are exercised in CI against hostile fixtures (missing, extra,
+  or mismatched metadata fields, out-of-set model slugs, implausible or
+  non-overlapping timing, duplicate reports, tampered signatures). Two
+  identical failures from different models mean the PROTOCOL is wrong, not
+  the models.
 - **Evidence completeness is deterministic.** The sealed evidence packet owns
   the complete binary `DIFF.patch`, complete manifest, frozen SHA/tree and wave,
-  full-gate receipt, and `USER_DIALOGUE.md`. Both reviewers read that same
-  evidence plus the complete candidate repository through their native
-  workspaces. Missing, changed, ignored-only, or secret-bearing evidence fails
+  full-gate receipt, and `USER_DIALOGUE.md`. Both reviewer subagents read that
+  same evidence plus the complete candidate repository. Missing, changed,
+  ignored-only, or secret-bearing evidence fails
   before a review can count; no omission note or partial pack substitutes for
   access to the whole tree.
 - **Attestation:** `scripts/run-full-gate-receipt.mjs` runs exact
@@ -544,25 +586,29 @@ repository context that small review packets lost.
   directory, builds one small self-contained
   verifier from exact tracked HEAD sources, copies the packaged app's
   self-contained `claudexor.bundle.cjs`, and hashes both into the receipt. The
-  formal review must run through that copied CLI. Claudexor then runs the two
-  reviewers concurrently and persists each exact submitted prompt, normalized
-  stream, transcript, parsed verdict, session/timing/runtime metadata, and the
-  persistent evidence copy.
+  operator transport never executes that copied CLI; it travels only as
+  receipt-bound bytes. After both review subagents complete, the operator
+  writes one external review-artifacts directory with exactly two reviewer
+  directories (`01-fable/`, `02-sol/`), each holding `report.md` (the
+  reviewer's complete markdown report) and an exact-shape `metadata.json`
+  binding the slot, the actually used model slug, the candidate SHA and tree,
+  the packet manifest digest, the review wave UUID, the `sha256:`-prefixed
+  diff digest, exact ISO-8601 start/finish, a `pass|warn` verdict, the
+  mandatory `review_scope: "full"`, and the report's SHA-256.
   `scripts/seal-owner-review-attestation.mjs --full-gate-receipt <file>
   --evidence-dir <dir> --review-artifacts <dir> --private-key <file>
-  --authority release/review-attestation-authority.json --out <file>` reads the
-  receipt-bound verifier only after that exact gate passed, recomputes all
-  hashes from the sealed packet and regular non-symlink artifact files, and
-  re-derives the transcript byte-for-byte from normalized message events. It
-  signs schema v5 only for the final confirmation pair; the initial review and
+  --authority release/review-attestation-authority.json --out <file>` imports
+  the receipt-bound verifier bytes only after that exact gate passed,
+  re-verifies the sealed packet and recomputes every evidence and artifact
+  digest from regular non-symlink files, checks that `DIFF.patch` is the
+  exact base..candidate diff and that the packet carries the byte-identical
+  gate receipt, and refuses a missing, extra, malformed, or mismatched
+  metadata field, a slug outside its slot's tier set, implausible or
+  non-overlapping timing, duplicate report bytes, secret-like tokens, or any
+  verdict outside `pass|warn`. It signs schema v6 (contract `owner-review-v6`,
+  protocol `cursor-operator-fable-sol-v1`) offline with the same Ed25519
+  review key, only for the final confirmation pair; the initial review and
   adjudication remain in the ledger and sealed evidence, not a second signed
-  graph. It refuses anything
-  except exactly the completed reviewer pair the Release review protocol
-  section defines, each slot with the observed model matching its slot-pinned
-  expected form, honored effort, verified native route, no auth
-  switch or ignored setting, live external context/web policy, plausible
-  overlapping timing, distinct sessions, the same receipt-bound packaged CLI
-  bytes, a strict parsed completion envelope, and `pass` or `warn`.
-  `verify-release-input.mjs` verifies
-  the signature before semantic validation. Schema v2-v4 remains
+  graph. `verify-release-input.mjs` verifies
+  the signature before semantic validation. Schema v2-v5 remains
   signature-verifiable only for archived releases and cannot publish now.

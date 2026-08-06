@@ -3,7 +3,7 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
-- **v3.3.7** (2026-08-03): the Ouroboros-integration line, rebased onto the
+- **v3.3.7** (2026-08-06): the Ouroboros-integration line, rebased onto the
   3.2.1 release. The `CLAUDEXOR_CLAUDE_NATIVE_DIR`/`CLAUDEXOR_CODEX_NATIVE_HOME`
   override guards now confine to the Claudexor-owned root (`~/.claudexor`)
   instead of the narrower config root, so pointing a run at a registered
@@ -21,18 +21,25 @@ Release history for Claudexor. The current version is declared in the root
   appends its durable REMOVED record before mutating the live projection
   (matching the upsert and explicit-removal paths), so an append failure can
   no longer leave a restart resurrecting a vendor-revoked window. The release
-  review gate carries the owner's second INV-125 amendment: after a completed
-  full-context sol review of a candidate line, subsequent sol executions may
-  review the sealed delta since that review (`claudexor review
-  --delta-scope <harness>=<baseSha>`, sealed-packet mode only) with the whole
-  packet as context, while the fable lane always reviews the full context —
-  attestation protocol id `native-fable-full-sol-delta-v2`. The amendment is
-  integrity-pinned (wave-6 finding): `--delta-scope` takes only a base SHA —
-  the lane is pinned to the contract's sol slot, base and digest must match
-  the sealed FINGERPRINTS delta entries, `DELTA.patch` must verify as the
-  exact base..candidate diff, each reviewer's subject scope rides its
-  artifact metadata, and the sealer refuses to sign unless fable=full and
-  sol is full or that exact sealed delta. Claude and cursor logins no longer
+  now ships a relocatable managed runtime closure
+  (`claudexor-runtime-<version>.tar.gz`): the same single engine closure the
+  in-app updater installs also materializes internal package links into a
+  regular-file/directory-only archive, so a host application can embed the
+  exact-pinned runtime without a second payload or trust root. Credential
+  profiles gained named Cursor accounts: a cursor `config_dir_login` profile
+  selects the CLI's vendor file credential store inside a Claudexor-owned
+  profile HOME, the default login keeps the OS Keychain untouched, and a
+  logged-out or out-of-tree profile is a typed refusal before any child
+  spawns. The owner-review release gate moved to transport v6 (protocol
+  `cursor-operator-fable-sol-v1`, owner decision 2026-08-06): the formal
+  reviewer pair executes as Cursor operator subagents (one `fable` and one
+  `sol` slot, each restricted to its owner-approved tier set, both on the
+  full context), each slot sealing a markdown report plus exact-shape
+  operator-attested metadata (model slug, genuinely overlapping ISO
+  intervals, `pass|warn` verdict, mandatory `review_scope: "full"`, report
+  SHA-256); the native-harness schema-v5 sol-delta protocol
+  (`native-fable-full-sol-delta-v2`) joined v2-v4 as
+  archive-signature-only. Claude and cursor logins no longer
   open a Terminal window: both run as daemon-hosted detached runners
   (`url_disclosure` for cursor with `NO_OPEN_BROWSER=1` — its login
   self-completes by server-side polling from any browser; `url_disclosure_with_input`

@@ -1,8 +1,9 @@
 export const RELEASE_REVIEW_ATTESTATION_ALGORITHM: "Ed25519";
-export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION: 5;
-export const OWNER_REVIEW_PROTOCOL: "native-full-context-v1";
+export const OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION: 6;
+export const OWNER_REVIEW_PROTOCOL: "cursor-operator-fable-sol-v1";
 export const OWNER_REVIEW_VERDICTS: readonly ["pass", "warn"];
-export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS: readonly [2, 3, 4];
+export const OWNER_REVIEW_SCOPES: readonly ["full"];
+export const ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS: readonly [2, 3, 4, 5];
 export const RELEASE_REVIEW_VERIFIER_ARTIFACT_PATH: "release-review-verifier.mjs";
 export const RELEASE_REVIEW_CLI_ARTIFACT_PATH: "claudexor.bundle.cjs";
 export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS: readonly [
@@ -10,17 +11,20 @@ export const RELEASE_REVIEW_RUNTIME_ARTIFACT_PATHS: readonly [
   "claudexor.bundle.cjs",
 ];
 export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS: 1000;
-export const REQUIRED_NATIVE_REVIEWERS: readonly Readonly<{
-  slot: "fable" | "sol";
-  harnessId: "claude" | "cursor";
-  providerFamily: "anthropic" | "cursor";
-  requestedModel: "claude-fable-5" | "gpt-5.6-sol-xhigh";
-  requestedEffort: "max" | null;
-  /** INV-125 second amendment: fable is always full; sol may take the sealed delta. */
-  allowedScopes: readonly ("full" | "delta")[];
-}>[];
-export const EXPECTED_OBSERVED_MODELS: Readonly<Record<"fable" | "sol", string>>;
-export function expectedObservedModel(required: { slot: string; requestedModel: string }): string;
+/** Owner decision 2026-08-06: the review pair runs as Cursor operator
+ * subagents; both slots get the full context. Operator decision 2026-08-06
+ * ~08:29: each slot accepts one slug from its owner-approved tier set; the
+ * actually used slug is sealed, out-of-set membership refuses fail-closed. */
+export const OWNER_REVIEW_PANEL: readonly [
+  Readonly<{
+    slot: "fable";
+    allowedModels: readonly ["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"];
+  }>,
+  Readonly<{
+    slot: "sol";
+    allowedModels: readonly ["gpt-5.6-sol-max", "gpt-5.6-sol-medium"];
+  }>,
+];
 
 export function decodeReviewUtf8(value: string | Buffer, label?: string): string;
 export function validateReleaseInput(
@@ -57,3 +61,4 @@ export function validateReleaseAttestation(
   expected: { candidateSha: string; candidateTree: string; candidateVersion: string },
 ): { ok: boolean; reasons: string[] };
 export function pathIsWithin(root: string, target: string): boolean;
+export function hasExactKeys(value: unknown, keys: readonly string[]): boolean;

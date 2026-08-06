@@ -76,6 +76,10 @@ struct AccountRowModel: Identifiable {
 /// Pure assembly of account rows from the model's profile + readiness + quota
 /// state, plus the trigger's worst-of aggregates.
 enum AccountsPresentation {
+    /// Harnesses whose native subscription login can be isolated as an
+    /// additive config-dir/HOME profile.
+    static let configDirLoginHarnessIds = ["claude", "codex", "cursor"]
+
     /// Account controls belong to the active execution location. Local daemon
     /// health is neither necessary nor sufficient while a remote host is active.
     @MainActor
@@ -262,7 +266,7 @@ enum AccountsPresentation {
 // The accounts-popover toggle maps to each eligible harness's per-harness
 // `profile_limit_action` (rotate when on, fail when off). Only harnesses that
 // actually have a SECOND account can rotate, so the toggle targets exactly those
-// (a config_dir_login family — claude|codex — with ≥1 registered profile: the
+// (a config_dir_login family with ≥1 registered profile: the
 // native/CLI login + ≥1 profile = 2+ rotatable identities). Pure so the target
 // set and the aggregate state are unit-tested rather than eyeballed.
 enum AccountsAutoBalance {
@@ -271,7 +275,11 @@ enum AccountsAutoBalance {
     enum State: Equatable { case on, off, mixed, unavailable }
 
     /// The rotation action is only auto-balance-capable for config_dir_login
-    /// families; those are the ONLY families that can register a 2nd profile.
+    /// families that also have a quota/typed-limit source to trigger rotation.
+    /// Cursor profiles can register (see configDirLoginHarnessIds) but the
+    /// cursor adapter emits no quota snapshots or typed limit events yet, so a
+    /// cursor toggle would be a knob without an observable action (INV-023) —
+    /// it stays out until a vendor usage source exists.
     static let capableHarnessIds = ["claude", "codex"]
 
     /// Harnesses eligible for the toggle: a capable family with ≥1 registered

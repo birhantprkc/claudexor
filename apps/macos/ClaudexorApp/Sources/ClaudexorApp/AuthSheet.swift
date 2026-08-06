@@ -230,7 +230,8 @@ struct AuthSheet: View {
     /// Account-capable default surface: the implicit default login and every named
     /// profile render through ONE AccountsSurface (no parallel setup-vs-accounts UI).
     private var supportsAccountsPanel: Bool {
-        profileId == nil && (family.setupHarnessId == "claude" || family.setupHarnessId == "codex")
+        profileId == nil
+            && AccountsPresentation.configDirLoginHarnessIds.contains(family.setupHarnessId)
     }
 
     private var nativeSetupPanel: some View {
@@ -343,9 +344,7 @@ struct AuthSheet: View {
             status = "Engine offline: reconnect before starting \(family.label) setup."
             return
         }
-        guard nativeHarness != nil else {
-            return
-        }
+        guard nativeHarness != nil else { return }
         let lifecycleController = SetupLifecycleController(gateway: client)
         controller = lifecycleController
         lifecycle = SetupLifecycleSnapshot(connection: .recovering)
@@ -426,7 +425,6 @@ struct AuthSheet: View {
     /// is never a silent fallback.
     private func switchToBrowserCallback() async {
         guard let controller, let job else { return }
-        let continuationProfileId = job.profileId
         actionInFlight = true
         defer { actionInFlight = false }
         if job.isActive {
@@ -439,7 +437,7 @@ struct AuthSheet: View {
             }
         }
         await controller.start(harness: family.setupHarnessId, action: "login",
-                               profileId: continuationProfileId, loginFlow: .browserCallback)
+                               profileId: job.profileId, loginFlow: .browserCallback)
     }
 
     private func extendDeadline() async {

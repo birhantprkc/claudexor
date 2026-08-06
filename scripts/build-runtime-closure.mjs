@@ -2,13 +2,13 @@
 /**
  * M7 engine-runtime UPDATE unit builder (D22).
  *
- * The update unit shipped by the macOS app's auto-updater is the RUNTIME
- * CLOSURE — everything apps/macos/scripts/build-app.sh stages into the signed
- * app's Contents/Resources EXCEPT Node (Node stays app-owned; a Node bump ships
- * a new DMG). We build the tarball from the already-signed, already-verified app
- * bundle. Internal package links are materialized as regular files/directories
- * and links escaping their closure entry are refused. The resulting single
- * archive can be unpacked by hosts without POSIX symlink semantics.
+ * The update unit shipped by the macOS app's auto-updater is the fixed set of
+ * engine-owned resources listed in CLOSURE_ENTRIES. Node, the CLI, UI resources,
+ * and icons remain app-owned; a Node bump ships a new DMG. We build the tarball
+ * from the already-signed, already-verified app bundle. Internal package links
+ * are materialized as regular files/directories and links escaping their
+ * closure entry are refused. The resulting single archive can be unpacked by
+ * hosts without POSIX symlink semantics.
  *
  *   node scripts/build-runtime-closure.mjs \
  *     --app-bundle apps/macos/dist/Claudexor.app \

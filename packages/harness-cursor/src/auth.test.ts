@@ -1195,10 +1195,15 @@ describe("cursor credential-profile doctor probe (INV-135)", () => {
     const missing = await adapter.probeCredentialProfile!(profile());
     expect(missing).toMatchObject({ availability: "unavailable", verification: "not_run" });
     expect(reads).toEqual(["cursor:acc2"]);
-    const unsupported = await adapter.probeCredentialProfile!(
+    // config_dir_login IS a supported transport (valentine); this probe fails
+    // because "/x" is an out-of-tree isolation locator, which the profile
+    // route owner rejects before any vendor probe (see profile.test.ts for
+    // the valid config-dir routes).
+    const outOfTree = await adapter.probeCredentialProfile!(
       profile({ credential_kind: "config_dir_login", secret_ref: null, isolation_locator: "/x" }),
     );
-    expect(unsupported).toMatchObject({ availability: "unavailable", verification: "failed" });
+    expect(outOfTree).toMatchObject({ availability: "unavailable", verification: "failed" });
+    expect(outOfTree.detail).toContain("must live under");
   });
 });
 

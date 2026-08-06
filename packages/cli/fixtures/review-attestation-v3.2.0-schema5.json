@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 5,
+  "keyId": "claudexor-v2.0.0-review-ed25519-56c6abde94e2ecf8",
+  "algorithm": "Ed25519",
+  "payload": {
+    "contract": "owner-review-v5",
+    "reviewProtocol": "native-full-context-v1",
+    "candidateSha": "a22a15b4b8340e4cd7f29c9c6e4e7a59da8959bb",
+    "candidateTree": "a9819c3714fc842e7e29c7dcfc3209655b05a6bf",
+    "evidence": {
+      "manifestSha256": "63fa79645ceb646a82d19b4609c5eee0d35314e87e1afc7dca5df80bbe95ea1b",
+      "diffSha256": "1763406caf01a8059198c095d83fb52b7110e5ee5f2ed91b8f35a4e1e6480434",
+      "reviewWaveId": "038140a7-979f-4290-a647-a2ec23ef0fb9",
+      "metadataSha256": "d2b47ed9d7f17d1de68fc73a0f3533598f661f8397e61fad3e2c94d20807b139"
+    },
+    "fullGate": {
+      "receiptSha256": "e9506da747f0bf38cbc387fce94eff7e2873233147b04f40c74ba0c04a5f839a",
+      "program": "pnpm",
+      "argv": [
+        "pnpm",
+        "release:verify"
+      ],
+      "exitCode": 0,
+      "candidateUnchanged": true,
+      "beforeSha": "a22a15b4b8340e4cd7f29c9c6e4e7a59da8959bb",
+      "beforeTree": "a9819c3714fc842e7e29c7dcfc3209655b05a6bf",
+      "afterSha": "a22a15b4b8340e4cd7f29c9c6e4e7a59da8959bb",
+      "afterTree": "a9819c3714fc842e7e29c7dcfc3209655b05a6bf",
+      "stdoutSha256": "2e5bb3d21ccdddd58fd254b6c6b7ade25cf6a78a4ff1ff5b58988148faf83c02",
+      "stderrSha256": "47cef494b4addbc16c2548720ed7bdf91f508ea80bba4c1140fea363375f2d60"
+    },
+    "reviews": [
+      {
+        "slot": "fable",
+        "harnessId": "claude",
+        "providerFamily": "anthropic",
+        "requestedModel": "claude-fable-5",
+        "requestedEffort": "max",
+        "sessionId": "rev-dfb478e99732",
+        "externalContextPolicy": "live",
+        "toolWebPolicy": "live",
+        "observedModel": "claude-fable-5",
+        "observedSource": "stream_event",
+        "routeProofStatus": "verified",
+        "authMode": "local_session",
+        "authSwitched": false,
+        "effortHonored": true,
+        "reviewRuntimeVersion": "3.2.0",
+        "reviewRuntimeBuildSha": "a22a15b4b8340e4cd7f29c9c6e4e7a59da8959bb",
+        "reviewRuntimeEntrySha256": "66fed7fcbbfcbff035ea2b8f9b2ebc5caec783f5e56c26a8f4f736cea42d6d06",
+        "startedAt": "2026-07-31T04:42:12.980Z",
+        "completedAt": "2026-07-31T04:50:30.912Z",
+        "durationMs": 497932,
+        "promptSha256": "3b5863201d984cbaff98656f69900df2db5c1d339cd23eed4a45cc2f4c3d888f",
+        "reportSha256": "355fe4f81bdd1f01c75838149199330d1bcf52195126a83895aaa2f362642ed5",
+        "metadataSha256": "ee13cb7660a36596d98e7015a6e6c299384e3d0fe49f71eb9795d291b8285ee9",
+        "eventsSha256": "753a3ce650892c0bbb0c5f23495c35817097314df92f4becf95444f55c87c1d2",
+        "parsedSha256": "d5c6855575672d7cdbb2fe7e37ee5cea74421427ddad937dcdbcc7dca0c0faa9",
+        "verdict": "pass"
+      },
+      {
+        "slot": "codex",
+        "harnessId": "codex",
+        "providerFamily": "openai",
+        "requestedModel": "gpt-5.6-sol",
+        "requestedEffort": "xhigh",
+        "sessionId": "rev-a90b50e6141f",
+        "externalContextPolicy": "live",
+        "toolWebPolicy": "live",
+        "observedModel": "gpt-5.6-sol",
+        "observedSource": "transcript",
+        "routeProofStatus": "verified",
+        "authMode": "local_session",
+        "authSwitched": false,
+        "effortHonored": true,
+        "reviewRuntimeVersion": "3.2.0",
+        "reviewRuntimeBuildSha": "a22a15b4b8340e4cd7f29c9c6e4e7a59da8959bb",
+        "reviewRuntimeEntrySha256": "66fed7fcbbfcbff035ea2b8f9b2ebc5caec783f5e56c26a8f4f736cea42d6d06",
+        "startedAt": "2026-07-31T04:42:12.996Z",
+        "completedAt": "2026-07-31T04:46:03.022Z",
+        "durationMs": 230026,
+        "promptSha256": "1f198467bdd9c8399e53810b0df97ac2d3ef5b5e7de89c46c7ab7d90628ea0d0",
+        "reportSha256": "355fe4f81bdd1f01c75838149199330d1bcf52195126a83895aaa2f362642ed5",
+        "metadataSha256": "403bd7ccc9ab604c64161ddf6dc40f774798e2c08d2e9e22d46aea6eba612997",
+        "eventsSha256": "ef09eec4894d69fe5d8e7f6ea7fc5a87942d7c27bbbc735a734380ce85ee58f5",
+        "parsedSha256": "d5c6855575672d7cdbb2fe7e37ee5cea74421427ddad937dcdbcc7dca0c0faa9",
+        "verdict": "pass"
+      }
+    ],
+    "sealedAt": "2026-07-31T04:50:38.470Z"
+  },
+  "signature": "exa4eixuY0xbbGeiSDKHEv/MgaAPoIcfmInf18rEojeMY5wHy72j810xxHSSnzNQdkqla7Bqp4+HzbslQTqkBQ=="
+}

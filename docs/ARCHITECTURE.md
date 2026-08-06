@@ -480,9 +480,11 @@ the vendor: Codex reads a Claudexor-dedicated `CODEX_HOME` with
 `cli_auth_credentials_store="file"`, never the operator's ordinary Codex profile
 or OS Keychain; Claude reads a Claudexor-owned config dir and its disposable
 child HOME bridges only the macOS login Keychain; Cursor declares an
-OS-keychain native route. Claude/Cursor expose only that narrow host Keychain
-context; Codex keeps its separate vendor credential file outside every
-envelope. No route copies a vendor
+OS-keychain native route for the default login plus a `config_file` route for
+named profiles (the vendor file store scoped to a Claudexor-owned profile
+HOME, no Keychain bridge). Claude and default-Cursor expose only that narrow
+host Keychain context; Codex keeps its separate vendor credential file outside
+every envelope. No route copies a vendor
 credential file into an envelope. Separate fallback routes may materialize only
 their selected source: Codex API-key auth seeds a temporary scoped `auth.json`,
 Claude injects either the stored setup token or `ANTHROPIC_API_KEY`, and Cursor
@@ -517,9 +519,9 @@ A credential profile is an ADDITIVE identity for one harness beyond its
 engine-default credential ladder: `credential_profiles` in the global config
 holds durable NON-SECRET entries `{profile_id, harness_id, display_name,
 credential_kind, isolation_locator | secret_ref, enabled}`. `config_dir_login`
-profiles point at a Claudexor-scoped vendor config dir
-(`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, canonical absolute path, NEVER the default
-vendor store); `oauth_token`/`api_key` profiles point at a namespaced
+profiles point at a Claudexor-scoped vendor login root (`CLAUDE_CONFIG_DIR` /
+`CODEX_HOME` / the Cursor file-store HOME, canonical absolute path, NEVER the
+default vendor store); `oauth_token`/`api_key` profiles point at a namespaced
 secret-store name (`claude_oauth:work`, `anthropic:acc2`, …) — the namespace
 is REQUIRED (the schema refuses a bare engine-default slot like `anthropic`,
 which would silently alias the default credential), and each adapter binds the
@@ -529,6 +531,20 @@ projection (`GET /v2/credential-profiles`, `claudexor profiles`), never
 durable config; every adapter's profile probe enforces the SAME slot binding
 as its run route, so a misconfigured profile reads `unavailable` instead of
 being admitted and refused mid-run.
+
+Named Cursor accounts (v3.3.7) ride the vendor's own FILE credential store:
+the default/CLI login keeps the OS login Keychain untouched, while a
+`config_dir_login` cursor profile selects `AGENT_CLI_CREDENTIAL_STORE=file`
+inside its Claudexor-owned profile HOME (`~/.claudexor/profiles/cursor-<id>`),
+where the CLI's auth store is keyed by `HOME`/`USERPROFILE` (macOS),
+`XDG_CONFIG_HOME` (Linux), and `APPDATA` (Windows) — all pinned to the profile
+HOME for the login, the status probe, and every profiled run. Mutable
+config/session state relocates separately: `CURSOR_CONFIG_DIR` and
+`CURSOR_DATA_DIR` stay in the run's lane/envelope HOME so two profiles (or a
+profile and the default) never share chat/session state. No token is ever
+copied between stores, the profile env never receives the scoped-HOME
+login-Keychain bridge, and `CURSOR_API_KEY` is scrubbed from profiled native
+runs — the named identity is exactly its file store or a typed refusal.
 
 The orchestrator is the ONE resolve owner. There is no user-settable "Active"
 account — enabling/disabling a profile is the only routing control. The
@@ -549,8 +565,9 @@ setting, an auto pool drops it — nothing silently falls back INTO the disabled
 login. An explicit profile is STRICT in the adapter —
 exactly the profile's transport or a typed error event, never a fallback to
 default credentials (claude: config-dir login / stored token non-bare / stored
-key; codex: scoped `CODEX_HOME` login / scoped key `auth.json`; cursor,
-opencode, raw-api: secret-ref keys only). Adapters stamp
+key; codex: scoped `CODEX_HOME` login / scoped key `auth.json`; cursor: scoped
+file-store HOME login / namespaced key; opencode, raw-api: secret-ref keys
+only). Adapters stamp
 `credential_profile_id` beside `credential_route` on stream events so quota
 and retry evidence stays profile-attributable, and the run's `auth_route`
 receipt carries `profile_id`; Control API projects it as `authRoute.profileId`
@@ -1927,17 +1944,21 @@ detail as `candidates` from attempt/review/decision artifacts.
 
 Repository release review is cumulative and SHA-bound. The panel reviews the
 exact clean committed candidate against the checklists and docs; any tracked
-mutation invalidates every result and starts a new freeze, and the signed
-schemaVersion-5 attestation binds the candidate SHA/tree, exact full-gate
-receipt, sealed evidence manifest/diff/wave, and exactly two native full-context
-reviewer artifact sets — exactly the reviewer pair the release review
-protocol (docs/CHECKLISTS.md) defines (INV-125).
-Each set binds requested and observed route/model/effort, native auth,
-live external-context/web policy, distinct session identity, overlapping
-plausible timing, candidate-built review runtime identity,
-prompt/transcript/metadata/event digests, and a non-blocking verdict. The
-transcript is a deterministic byte projection of the persisted normalized
-message events. Older schemas are archival only:
+mutation invalidates every result and starts a new freeze. Since the owner
+decision of 2026-08-06 the formal pair executes as Cursor operator subagents
+(one `fable` slot and one `sol` slot, each pinned to its owner-approved tier
+set in the panel constant, both on the full context — INV-125), and the signed
+schemaVersion-6 attestation (protocol `cursor-operator-fable-sol-v1`) binds
+the candidate SHA/tree/version, the exact full-gate receipt, the sealed
+evidence manifest/diff/wave, and both reviewer entries. Each slot's artifact
+directory (`NN-<slot>/`) carries `report.md` plus an exact-shape
+`metadata.json` whose fields are operator-attested: the actually used model
+slug (validated against that slot's owner-approved tier set), exact ISO
+start/finish intervals that must genuinely overlap, a
+`pass|warn` verdict, the mandatory `review_scope: "full"`, and the report's
+SHA-256. The sealer does not launch any review CLI; it recomputes every
+digest and refuses anything missing, extra, malformed, or mismatched.
+Schemas v2-v5 are archival only:
 already-sealed attestations stay signature-verifiable for their releases,
 never as new publish input. The operational protocol — panel composition, wave
 discipline, blocker contract, and round bound — is defined ONCE in
@@ -1949,16 +1970,17 @@ release attestation.
 
 After exact `pnpm release:verify` passes, the gate builds a small
 self-contained verifier from tracked candidate sources and copies the packaged
-app's self-contained CLI, binding both byte digests into its receipt. Formal
-review executes through that copied CLI, and the sealer imports only the
-receipt-verified verifier bytes rather than mutable workspace `dist`. Both native reviewers receive one
-manifest-bound persistent evidence copy and fresh read-only workspaces that
-project the complete Git-visible candidate plus explicit evidence while
-excluding unrelated ignored local state. The sealer re-verifies that evidence,
-the exact candidate diff, every persisted reviewer artifact, session/timing
-overlap, and the runtime entry realpath/build SHA/digest; it does not trust
-caller-supplied digests or hand-authored verdicts. Frozen release slots force
-live external context/web policy and disable internal transient retries.
+app's self-contained CLI, binding both byte digests into its receipt. The
+operator transport never executes that copied CLI — it travels only as
+receipt-bound bytes — and the sealer imports only the receipt-verified
+verifier bytes rather than mutable workspace `dist`. The sealer re-verifies
+the sealed evidence packet against the candidate SHA/tree, the exact
+base..candidate diff byte-for-byte, the byte-identical receipt inside the
+packet, every reviewer artifact digest, and the interval overlap before
+signing. The slot metadata itself — model, intervals, verdict, scope — is a
+set of operator-attested statements, not independently observed session
+evidence (an accepted property of the owner's v6 transport decision recorded
+in `docs/CHECKLISTS.md`).
 
 Runtime resilience is typed. Adapters translate native transient failures
 (network lookup failures, stream disconnects, retryable HTTP statuses, timeouts)
@@ -2331,12 +2353,12 @@ continue.
 ### Engine runtime updater (M7, D22/D23)
 
 The app updates its **engine runtime closure** in place without a new DMG. The
-update unit is a `claudexor-runtime-<version>.tar.gz` — everything the DMG stages
-into `Contents/Resources` EXCEPT Node (the bundled daemon, the setup-login
-runner, the Browser MCP deployment, and the native process-identity helper).
-Node stays app-owned, so a Node bump ships a new signed DMG. Each release also
-publishes a **signed** `runtime-manifest.json` built straight from the signed
-app bundle by `scripts/build-runtime-closure.mjs`. The builder materializes
+update unit is a `claudexor-runtime-<version>.tar.gz` containing the engine-owned
+resources: the bundled daemon, the setup-login runner, the Browser MCP
+deployment, and the native process-identity helper. App-owned Node, the CLI,
+UI, and icons stay outside the closure, so a Node bump ships a new signed DMG.
+Each release also publishes a **signed** `runtime-manifest.json` built straight
+from the signed app bundle by `scripts/build-runtime-closure.mjs`. The builder materializes
 internal package links into regular files/directories, rejects links escaping
 their closure entry, special files, and `.node` addons, and suppresses macOS
 AppleDouble sidecars. The shipped file bytes therefore come from the exact app

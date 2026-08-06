@@ -7,6 +7,89 @@ function isWithin(parent, candidate) {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+export function isBatteryRepoRoot(reposDir, repoRoot) {
+  return typeof repoRoot === "string" && isWithin(resolve(reposDir), resolve(repoRoot));
+}
+
+export function validateBatteryTaskIdentity({ job, task, taskSchema }) {
+  if (
+    typeof job?.runId !== "string" ||
+    job.runId.length === 0 ||
+    typeof job?.taskId !== "string" ||
+    job.taskId.length === 0
+  ) {
+    return { valid: false, reason: "task_contract_missing_or_malformed", task: null };
+  }
+  const parsed = taskSchema.safeParse(task);
+  if (!parsed.success) {
+    return { valid: false, reason: "task_contract_missing_or_malformed", task: null };
+  }
+  if (parsed.data.task_id !== job.taskId) {
+    return { valid: false, reason: "artifact_identity_mismatch", task: null };
+  }
+  return { valid: true, reason: null, task: parsed.data };
+}
+
+export function validateBatteryRunArtifacts({
+  job,
+  task,
+  eventText,
+  telemetry,
+  telemetryPresent,
+  runEventSchema,
+  harnessEventSchema,
+  telemetrySchema,
+}) {
+  const lines =
+    typeof eventText === "string"
+      ? eventText.split("\n").filter((line) => line.trim().length > 0)
+      : [];
+  if (lines.length === 0) {
+    return { valid: false, reason: "run_events_missing_or_malformed" };
+  }
+  const events = [];
+  for (const line of lines) {
+    let raw;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      return { valid: false, reason: "run_events_missing_or_malformed" };
+    }
+    const parsed = runEventSchema.safeParse(raw);
+    if (!parsed.success) {
+      return { valid: false, reason: "run_events_missing_or_malformed" };
+    }
+    const event = parsed.data;
+    if (event.run_id !== job.runId || event.task_id !== task.task_id) {
+      return { valid: false, reason: "artifact_identity_mismatch" };
+    }
+    if (event.type === "harness.started" || event.type === "harness.event") {
+      if (
+        typeof event.payload.harness_id !== "string" ||
+        event.payload.harness_id.length === 0 ||
+        typeof event.payload.attempt_id !== "string" ||
+        event.payload.attempt_id.length === 0
+      ) {
+        return { valid: false, reason: "run_events_missing_or_malformed" };
+      }
+    }
+    if (event.type === "harness.event" && !harnessEventSchema.safeParse(event.payload).success) {
+      return { valid: false, reason: "run_events_missing_or_malformed" };
+    }
+    events.push(event);
+  }
+
+  if (!telemetryPresent) return { valid: true, reason: null, events, telemetry: null };
+  const parsedTelemetry = telemetrySchema.safeParse(telemetry);
+  if (!parsedTelemetry.success) {
+    return { valid: false, reason: "attempt_telemetry_missing_or_malformed" };
+  }
+  if (parsedTelemetry.data.run_id !== job.runId || parsedTelemetry.data.task_id !== task.task_id) {
+    return { valid: false, reason: "artifact_identity_mismatch" };
+  }
+  return { valid: true, reason: null, events, telemetry: parsedTelemetry.data };
+}
+
 function canonicalFuturePath(path) {
   const absolute = resolve(path);
   let ancestor = absolute;
@@ -79,8 +162,28 @@ export function isCrossFamilyConvergenceRefusal(result) {
   );
 }
 
-/** Normalize every durable route interval/switch without trusting first-route telemetry. */
-export function durableAttemptRouteEvidence(events) {
+/** Discover every required-harness attempt that reached either admission or a
+ * raw harness event in the canonical top-level run journal. */
+export function relevantRunAttemptKeys(events, requiredHarnesses) {
+  const required = new Set(requiredHarnesses);
+  const attempts = new Map();
+  for (const event of events) {
+    if (event?.type !== "harness.started" && event?.type !== "harness.event") continue;
+    const payload = event.payload;
+    if (!payload || typeof payload !== "object" || !required.has(payload.harness_id)) continue;
+    const key = `${payload.harness_id}\0${typeof payload.attempt_id}:${String(payload.attempt_id)}`;
+    attempts.set(key, {
+      harnessId: payload.harness_id,
+      attemptId: payload.attempt_id,
+    });
+  }
+  return [...attempts.values()];
+}
+
+/** Normalize every durable route interval/switch. Top-level run projection
+ * deliberately omits credential_source, so an exact native/native telemetry
+ * anchor may fill only that missing source; event route changes still win. */
+export function durableAttemptRouteEvidence(events, sourceAnchor = null) {
   const observed = [];
   let sawStarted = false;
   for (const event of events) {
@@ -95,7 +198,14 @@ export function durableAttemptRouteEvidence(events) {
             : event.credential_route === "managed_api_key"
               ? "api_key"
               : null,
-        authSource: typeof event.credential_source === "string" ? event.credential_source : null,
+        authSource:
+          typeof event.credential_source === "string"
+            ? event.credential_source
+            : event.credential_route === "vendor_native" &&
+                sourceAnchor?.authMode === "local_session" &&
+                sourceAnchor?.authSource === "native_session"
+              ? "native_session"
+              : null,
       });
       continue;
     }

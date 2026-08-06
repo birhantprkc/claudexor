@@ -225,8 +225,8 @@ public struct UpdateCredentialProfileRequest: Encodable, Sendable, Equatable {
 }
 
 /// Body for POST /v2/credential-profiles. Registration only covers
-/// config_dir_login harnesses (claude|codex); the server validates the slug
-/// and rejects a duplicate id (409) or an unsupported harness (400).
+/// config_dir_login harnesses (claude|codex|cursor); the server validates the
+/// slug and rejects a duplicate id (409) or an unsupported harness (400).
 public struct CreateCredentialProfileRequest: Encodable, Sendable, Equatable {
     public let harnessId: String
     public let profileId: String

@@ -18,7 +18,7 @@ import {
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
 import { MANAGED_SECRET_NAMES, isManagedSecretName } from "@claudexor/secrets";
 import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
-import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
+import { canonicalCursorProfileHome } from "@claudexor/harness-cursor";
 import { type ParsedArgs, flagStr } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
 import { ensureDaemon } from "./daemon-run.js";
@@ -79,14 +79,11 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
         `profile "${profileId}" is ${profile.credential_kind}; only config_dir_login profiles have a login flow (store its secret instead)`,
       );
     }
-    // Only harnesses with a RELOCATABLE config-dir login may profile-login
-    // (release wave tier1 #1): cursor's native login is a singleton keychain
-    // store — running it here would mutate the operator's real credentials
-    // while claiming profile isolation.
-    if (harness !== "claude" && harness !== "codex") {
+    // Only harnesses with a RELOCATABLE native login may profile-login.
+    if (harness !== "claude" && harness !== "codex" && harness !== "cursor") {
       return printUsageError(
         json,
-        `harness "${harness}" has no isolated config-dir login; only claude and codex profiles can log in here`,
+        `harness "${harness}" has no isolated config-dir login; only claude, codex, and cursor profiles can log in here`,
       );
     }
     // D-17: codex profile login rides the SAME durable setup job as the default
@@ -140,7 +137,7 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     const configDir =
       harness === "claude"
         ? canonicalProfileConfigDir(profile.isolation_locator ?? "")
-        : canonicalCodexProfileHome(profile.isolation_locator ?? "");
+        : canonicalCursorProfileHome(profile.isolation_locator ?? "");
     print(`running ${spec.displayCommand} into ${configDir}`);
     const child = spawnSync(spec.binary, spec.args, {
       stdio: "inherit",
@@ -169,7 +166,7 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     if (!harness || !profileId) {
       return printUsageError(
         json,
-        "usage: claudexor profiles add <claude|codex> <profile-id> [--display-name NAME]",
+        "usage: claudexor profiles add <claude|codex|cursor> <profile-id> [--display-name NAME]",
       );
     }
     try {

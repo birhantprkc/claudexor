@@ -48,10 +48,11 @@ describe("claudexor profiles add (INV-135)", () => {
   it("appends without clobbering an existing registry entry", async () => {
     await profilesCommand(parseArgs(["profiles", "add", "claude", "a"]), true);
     await profilesCommand(parseArgs(["profiles", "add", "codex", "b"]), true);
+    await profilesCommand(parseArgs(["profiles", "add", "cursor", "c"]), true);
     const ids = loadConfig(noProjectRepoRoot()).global.credential_profiles.map(
       (p) => `${p.harness_id}/${p.profile_id}`,
     );
-    expect(ids).toEqual(["claude/a", "codex/b"]);
+    expect(ids).toEqual(["claude/a", "codex/b", "cursor/c"]);
   });
 
   it("refuses a duplicate (harness, profile) id loudly, leaving the registry intact", async () => {
@@ -61,8 +62,10 @@ describe("claudexor profiles add (INV-135)", () => {
     expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(1);
   });
 
-  it("refuses a non-claude/codex harness and a malformed id", async () => {
-    expect(await profilesCommand(parseArgs(["profiles", "add", "cursor", "x"]), true)).not.toBe(0);
+  it("refuses a harness without config-dir profiles and a malformed id", async () => {
+    expect(await profilesCommand(parseArgs(["profiles", "add", "opencode", "x"]), true)).not.toBe(
+      0,
+    );
     expect(
       await profilesCommand(parseArgs(["profiles", "add", "claude", "Bad Id"]), true),
     ).not.toBe(0);

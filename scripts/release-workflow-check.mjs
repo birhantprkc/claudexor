@@ -46,7 +46,7 @@ const prepareJob = jobBody(release, "prepare");
 const packageMacosJob = jobBody(release, "package-macos");
 const publishNpmJob = jobBody(release, "publish-npm");
 const publishReleaseJob = jobBody(release, "publish-release");
-const staleAttestationSchemaPattern = /schema-v[234]/;
+const staleAttestationSchemaPattern = /schema-v[2345]/;
 const exactPromotionPairedNeedles = [
   [
     "SBOM license-input prepared-SHA binding",
@@ -68,10 +68,10 @@ for (const [label, pattern] of [
   ["workflow has publish mode", /publish/],
   ["review attestation is verified", /verify-release-input\.mjs/],
   [
-    // validateReleaseAttestation rejects any non-v5 attestation, so the
+    // validateReleaseAttestation rejects any non-v6 attestation, so the
     // workflow_dispatch input must document the schema owners actually sign.
-    "attestation input is documented as a schema-v5 native full-context owner-review attestation",
-    /review_attestation_b64:\s*\n\s*description:[^\n]*schema-v5 native full-context owner-review attestation/,
+    "attestation input is documented as a schema-v6 full-context owner-review attestation",
+    /review_attestation_b64:\s*\n\s*description:[^\n]*schema-v6 full-context owner-review attestation/,
   ],
   ["npm provenance is mandatory", /--provenance/],
   [
@@ -365,8 +365,8 @@ for (const [label, broken, expectedFinding] of exactPromotionMutationCases) {
     errors.push(`release-workflow-check self-test: failed to reject ${label}`);
   }
 }
-for (const staleVersion of ["schema-v2", "schema-v3", "schema-v4"]) {
-  const expected = "release.yml: stale schema-v2/v3/v4 attestation wording is forbidden";
+for (const staleVersion of ["schema-v2", "schema-v3", "schema-v4", "schema-v5"]) {
+  const expected = "release.yml: stale schema-v2/v3/v4/v5 attestation wording is forbidden";
   if (!staleAttestationFindings(`${release}\n# ${staleVersion}`).includes(expected)) {
     errors.push(`release-workflow-check self-test: failed to reject ${staleVersion}`);
   }
@@ -492,9 +492,9 @@ for (const [label, pattern] of [
     "imports only receipt-verified verifier bytes",
     /readVerifiedReleaseReviewRuntime[\s\S]*data:text\/javascript/,
   ],
-  ["replays normalized events into the transcript", /sealedReviewTranscriptFromEvents/],
-  ["checks actual native reviewer overlap", /validateReviewerOverlap/],
-  ["binds the packaged CLI runtime entry", /review_runtime_entry_sha256/],
+  ["pins the owner-approved operator reviewer panel", /OWNER_REVIEW_PANEL/],
+  ["checks actual operator reviewer overlap", /validateReviewerOverlap/],
+  ["binds each reviewer report by digest", /report_sha256/],
 ]) {
   if (!pattern.test(reviewSealer)) errors.push(`seal-owner-review-attestation.mjs: ${label}`);
 }
@@ -851,8 +851,8 @@ function replaceLastOccurrence(text, needle, replacement) {
 }
 
 function staleAttestationFindings(workflow) {
-  // The attestation is schema v5; stale v2/v3/v4 wording must never return.
+  // The attestation is schema v6; stale v2-v5 wording must never return.
   return staleAttestationSchemaPattern.test(workflow)
-    ? ["release.yml: stale schema-v2/v3/v4 attestation wording is forbidden"]
+    ? ["release.yml: stale schema-v2/v3/v4/v5 attestation wording is forbidden"]
     : [];
 }

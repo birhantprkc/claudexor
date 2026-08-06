@@ -12,14 +12,18 @@ import ClaudexorKit
         #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["claude"]) == ["claude"])
     }
 
-    @Test func bothCapableHarnessesEligibleInCanonicalOrder() {
-        let ids = AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["codex", "claude", "codex"])
+    @Test func capableHarnessesAreEligibleInCanonicalOrder() {
+        let ids = AccountsAutoBalance.eligibleHarnessIds(
+            profileHarnessIds: ["cursor", "codex", "claude", "codex"])
         #expect(ids == ["claude", "codex"])
     }
 
     @Test func nonCapableHarnessProfilesAreIgnored() {
-        // Only config_dir_login families can register a 2nd account.
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["cursor", "opencode"]).isEmpty)
+        // Only config_dir_login families with a quota/typed-limit source are
+        // capable: cursor can register a profile but has no rotation trigger
+        // yet, so its toggle would be a knob without an action (INV-023).
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["opencode"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["cursor"]).isEmpty)
     }
 
     @Test func stateAggregates() {

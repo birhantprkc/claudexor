@@ -17,10 +17,9 @@ import { describe, expect, it } from "vitest";
 import {
   ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS,
   OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION,
+  OWNER_REVIEW_PANEL,
   OWNER_REVIEW_PROTOCOL,
-  REQUIRED_NATIVE_REVIEWERS,
   decodeReviewUtf8,
-  expectedObservedModel,
   pathIsWithin,
   releaseAttestationSigningBytes,
   validateFullGateReceipt,
@@ -54,45 +53,26 @@ function fixture() {
     algorithm: "Ed25519",
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
   };
-  const reviews = REQUIRED_NATIVE_REVIEWERS.map(
-    ({ allowedScopes: _scopes, ...required }, index) => ({
-      ...required,
-      reviewScope: "full",
-      deltaBaseSha: null,
-      deltaSha256: null,
-      sessionId: `session-${index + 1}`,
-      externalContextPolicy: "live",
-      toolWebPolicy: "live",
-      observedModel: expectedObservedModel(required),
-      observedSource: index === 0 ? "stream_event" : "transcript",
-      routeProofStatus: "verified",
-      authMode: "local_session",
-      authSwitched: false,
-      effortHonored: true,
-      reviewRuntimeVersion: CLAUDEXOR_VERSION,
-      reviewRuntimeBuildSha: candidateSha,
-      reviewRuntimeEntrySha256: digest,
-      startedAt: `2026-07-30T00:00:0${index}.000Z`,
-      completedAt: `2026-07-30T00:00:0${index + 5}.000Z`,
-      durationMs: 5_000,
-      promptSha256: digest,
-      reportSha256: digest,
-      metadataSha256: digest,
-      eventsSha256: digest,
-      parsedSha256: digest,
-      verdict: index === 0 ? "pass" : "warn",
-    }),
-  );
+  const reviews = OWNER_REVIEW_PANEL.map((required, index) => ({
+    slot: required.slot,
+    model: required.allowedModels[0],
+    startedAt: `2026-08-06T00:00:0${index}.000Z`,
+    completedAt: `2026-08-06T00:00:0${index + 5}.000Z`,
+    verdict: index === 0 ? "pass" : "warn",
+    reviewScope: "full",
+    reportSha256: (index === 0 ? "d" : "e").repeat(64),
+    metadataSha256: digest,
+  }));
   const payload = {
-    contract: "owner-review-v5",
+    contract: "owner-review-v6",
     reviewProtocol: OWNER_REVIEW_PROTOCOL,
     candidateSha,
     candidateTree,
+    candidateVersion: CLAUDEXOR_VERSION,
     evidence: {
       manifestSha256: digest,
       diffSha256: digest,
       reviewWaveId: "11111111-1111-4111-8111-111111111111",
-      metadataSha256: digest,
     },
     fullGate: {
       receiptSha256: digest,
@@ -108,7 +88,7 @@ function fixture() {
       stderrSha256: digest,
     },
     reviews,
-    sealedAt: "2026-07-30T00:00:00.000Z",
+    sealedAt: "2026-08-06T00:00:00.000Z",
   };
   const resign = (unsigned: any) => ({
     ...unsigned,
@@ -123,7 +103,7 @@ function fixture() {
   return { attestation, authority, resign };
 }
 
-describe("native owner-review publishing contract", () => {
+describe("operator owner-review publishing contract", () => {
   it("requires the exact successful full-gate receipt shape", () => {
     const receipt = {
       program: "pnpm",
@@ -160,33 +140,21 @@ describe("native owner-review publishing contract", () => {
     }
   });
 
-  it("freezes the exact two native routes and accepts their signed v5 evidence", () => {
-    expect(OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION).toBe(5);
-    expect(OWNER_REVIEW_PROTOCOL).toBe("native-fable-full-sol-delta-v2");
-    expect(REQUIRED_NATIVE_REVIEWERS).toEqual([
+  it("freezes the exact two operator slots and accepts their signed v6 evidence", () => {
+    // Owner decision 2026-08-06 («не надо вообще codex использовать…
+    // Используй своих субагентов»): the formal pair runs as Cursor operator
+    // subagents. Operator decision 2026-08-06 ~08:29 (after two catalog
+    // flaps within one hour): each slot accepts one slug from its
+    // owner-approved tier set; the actually used slug is what gets sealed.
+    expect(OWNER_REVIEW_ATTESTATION_SCHEMA_VERSION).toBe(6);
+    expect(OWNER_REVIEW_PROTOCOL).toBe("cursor-operator-fable-sol-v1");
+    expect(OWNER_REVIEW_PANEL).toEqual([
       {
         slot: "fable",
-        harnessId: "claude",
-        providerFamily: "anthropic",
-        requestedModel: "claude-fable-5",
-        requestedEffort: "max",
-        // INV-125 second amendment: fable is ALWAYS full-context.
-        allowedScopes: ["full"],
+        allowedModels: ["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"],
       },
-      // Owner decision 2026-08-04: the sol slot rides the cursor harness;
-      // effort is carried inside cursor's native model id.
-      {
-        slot: "sol",
-        harnessId: "cursor",
-        providerFamily: "cursor",
-        requestedModel: "gpt-5.6-sol-xhigh",
-        requestedEffort: null,
-        // INV-125 second amendment: sol is full or the sealed exact delta.
-        allowedScopes: ["full", "delta"],
-      },
+      { slot: "sol", allowedModels: ["gpt-5.6-sol-max", "gpt-5.6-sol-medium"] },
     ]);
-    expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[0]!)).toBe("claude-fable-5");
-    expect(expectedObservedModel(REQUIRED_NATIVE_REVIEWERS[1]!)).toBe("GPT-5.6 Sol 1M Extra High");
     const { attestation, authority } = fixture();
     expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
       ok: true,
@@ -194,49 +162,74 @@ describe("native owner-review publishing contract", () => {
     });
   });
 
+  it("accepts every owner-approved tier of each slot", () => {
+    // At least one non-default tier per slot: fable drops to medium, sol
+    // rises to max — both stay inside the owner-approved sets.
+    const { attestation, authority, resign } = fixture();
+    const alternate = structuredClone(attestation);
+    alternate.payload.reviews[0].model = "claude-fable-5-thinking-medium";
+    alternate.payload.reviews[1].model = "gpt-5.6-sol-max";
+    expect(validateReleaseAttestation(resign(alternate), authority, expected)).toEqual({
+      ok: true,
+      reasons: [],
+    });
+  });
+
   it.each([
-    ["requested route", (a: any) => (a.payload.reviews[0].requestedModel = "claude-opus-5")],
-    ["observed model", (a: any) => (a.payload.reviews[1].observedModel = "gpt-5.5")],
-    ["observed source", (a: any) => (a.payload.reviews[0].observedSource = "request")],
-    ["route proof", (a: any) => (a.payload.reviews[1].routeProofStatus = "unverified")],
-    ["auth switch", (a: any) => (a.payload.reviews[0].authSwitched = true)],
-    ["ignored effort", (a: any) => (a.payload.reviews[1].effortHonored = false)],
-    ["cached context", (a: any) => (a.payload.reviews[0].externalContextPolicy = "cached")],
-    ["missing live web", (a: any) => (a.payload.reviews[1].toolWebPolicy = "deny")],
-    ["implausible duration", (a: any) => (a.payload.reviews[0].durationMs = 999)],
+    ["substituted model", (a: any) => (a.payload.reviews[0].model = "claude-opus-5")],
+    [
+      "same-family tier outside the owner-approved set",
+      (a: any) => (a.payload.reviews[1].model = "gpt-5.6-sol-xhigh"),
+    ],
+    ["cross-slot model", (a: any) => (a.payload.reviews[0].model = "gpt-5.6-sol-medium")],
+    ["swapped slot label", (a: any) => (a.payload.reviews[1].slot = "fable")],
+    ["missing report digest", (a: any) => delete a.payload.reviews[0].reportSha256],
+    ["malformed report digest", (a: any) => (a.payload.reviews[1].reportSha256 = "bad")],
+    ["malformed metadata digest", (a: any) => (a.payload.reviews[0].metadataSha256 = "bad")],
+    ["blocking verdict", (a: any) => (a.payload.reviews[1].verdict = "block")],
+    ["missing verdict", (a: any) => delete a.payload.reviews[0].verdict],
+    ["delta review scope", (a: any) => (a.payload.reviews[1].reviewScope = "delta")],
+    ["missing review scope", (a: any) => delete a.payload.reviews[0].reviewScope],
+    ["boolean review scope", (a: any) => (a.payload.reviews[0].reviewScope = false)],
+    ["non-ISO start", (a: any) => (a.payload.reviews[0].startedAt = "yesterday")],
     [
       "implausible wall time",
-      (a: any) => {
-        a.payload.reviews[0].completedAt = a.payload.reviews[0].startedAt;
-        a.payload.reviews[0].durationMs = 1_000;
-      },
-    ],
-    ["reused session", (a: any) => (a.payload.reviews[1].sessionId = "session-1")],
-    [
-      "different runtime bytes",
-      (a: any) => (a.payload.reviews[1].reviewRuntimeEntrySha256 = "e".repeat(64)),
+      (a: any) => (a.payload.reviews[0].completedAt = a.payload.reviews[0].startedAt),
     ],
     [
       "non-overlapping execution",
       (a: any) => {
-        a.payload.reviews[1].startedAt = "2026-07-30T00:00:10.000Z";
-        a.payload.reviews[1].completedAt = "2026-07-30T00:00:15.000Z";
+        a.payload.reviews[1].startedAt = "2026-08-06T00:00:10.000Z";
+        a.payload.reviews[1].completedAt = "2026-08-06T00:00:15.000Z";
       },
     ],
     [
       "zero overlap boundary",
       (a: any) => {
-        a.payload.reviews[1].startedAt = "2026-07-30T00:00:05.000Z";
-        a.payload.reviews[1].completedAt = "2026-07-30T00:00:10.000Z";
+        a.payload.reviews[1].startedAt = "2026-08-06T00:00:05.000Z";
+        a.payload.reviews[1].completedAt = "2026-08-06T00:00:10.000Z";
       },
     ],
-    ["runtime build", (a: any) => (a.payload.reviews[0].reviewRuntimeBuildSha = "c".repeat(40))],
-    ["blocking verdict", (a: any) => (a.payload.reviews[1].verdict = "block")],
+    [
+      "copied report bytes",
+      (a: any) => (a.payload.reviews[1].reportSha256 = a.payload.reviews[0].reportSha256),
+    ],
     ["evidence manifest", (a: any) => (a.payload.evidence.manifestSha256 = "bad")],
     ["review wave", (a: any) => (a.payload.evidence.reviewWaveId = "wave-1")],
+    [
+      "retired evidence metadata field",
+      (a: any) => (a.payload.evidence.metadataSha256 = "d".repeat(64)),
+    ],
     ["failed full gate", (a: any) => (a.payload.fullGate.exitCode = 1)],
     ["changed candidate", (a: any) => (a.payload.candidateSha = "c".repeat(40))],
+    ["changed candidate version", (a: any) => (a.payload.candidateVersion = "0.0.0")],
+    ["missing candidate version", (a: any) => delete a.payload.candidateVersion],
+    ["wrong protocol", (a: any) => (a.payload.reviewProtocol = "native-fable-full-sol-delta-v2")],
     ["extra retired field", (a: any) => (a.payload.coverageReceipt = {})],
+    [
+      "retired native entry field",
+      (a: any) => (a.payload.reviews[0].routeProofStatus = "verified"),
+    ],
   ])("rejects a freshly signed semantic forgery: %s", (_label, mutate) => {
     const { attestation, authority, resign } = fixture();
     const forged = structuredClone(attestation);
@@ -265,8 +258,9 @@ describe("native owner-review publishing contract", () => {
     );
   });
 
-  it("verifies schemas 2-4 only as historical signed bytes and never publishes them", () => {
+  it("verifies schemas 2-5 only as historical signed bytes and never publishes them", () => {
     const { attestation, authority, resign } = fixture();
+    expect(ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS).toEqual([2, 3, 4, 5]);
     for (const schemaVersion of ARCHIVED_OWNER_REVIEW_SCHEMA_VERSIONS) {
       const archived = resign({ ...attestation, schemaVersion, payload: { historical: true } });
       expect(verifyArchivedReleaseAttestationSignature(archived, authority)).toEqual({
@@ -278,6 +272,36 @@ describe("native owner-review publishing contract", () => {
       );
     }
     expect(verifyArchivedReleaseAttestationSignature(attestation, authority).ok).toBe(false);
+  });
+
+  it("verifies the REAL published v3.2.0 schema-5 attestation bytes with the pinned authority", () => {
+    // Immutable fixture: the exact REVIEW_ATTESTATION.json asset published on
+    // GitHub release v3.2.0 (sha256 b3760d68ee9196bae883a198887f1f86e8bf2f28
+    // cf5bfaf960e43d8ba22c661e), verified against the tracked production
+    // authority — not a synthetic re-signed shape. This pins archive
+    // compatibility to real released bytes: a canonicalization or dispatch
+    // drift that a fixture-key round-trip would survive fails here.
+    const attestation = JSON.parse(
+      readFileSync(
+        resolve(repoRoot, "packages/cli/fixtures/review-attestation-v3.2.0-schema5.json"),
+        "utf8",
+      ),
+    );
+    const authority = JSON.parse(
+      readFileSync(resolve(repoRoot, "release/review-attestation-authority.json"), "utf8"),
+    );
+    expect(attestation.schemaVersion).toBe(5);
+    expect(verifyArchivedReleaseAttestationSignature(attestation, authority)).toEqual({
+      ok: true,
+      reasons: [],
+    });
+    expect(
+      validateReleaseAttestation(attestation, authority, expected).reasons.join(" "),
+    ).toContain("archive-signature-only");
+    // Any byte-level tamper of the published archive breaks its signature.
+    const tampered = structuredClone(attestation);
+    tampered.payload.candidateSha = "f".repeat(40);
+    expect(verifyArchivedReleaseAttestationSignature(tampered, authority).ok).toBe(false);
   });
 
   it("keeps input, path and strict UTF-8 checks small and fail-closed", () => {
@@ -316,9 +340,9 @@ describe("native owner-review publishing contract", () => {
   });
 });
 
-describe("native owner-review sealer", () => {
+describe("operator owner-review sealer", () => {
   it("derives a signed pass/warn pair from clean on-disk artifacts", async () => {
-    const root = mkdtempSync(join(tmpdir(), "claudexor-v5-sealer-"));
+    const root = mkdtempSync(join(tmpdir(), "claudexor-v6-sealer-"));
     const candidate = join(root, "candidate");
     const evidence = join(root, "evidence");
     const artifacts = join(root, "artifacts");
@@ -353,107 +377,10 @@ describe("native owner-review sealer", () => {
       const cliPath = join(gateDir, "claudexor.bundle.cjs");
       const verifierBuild = await bundleReleaseReviewVerifier(repoRoot, verifierPath);
       write(verifierPath, Buffer.from(verifierBuild.contents));
-      const reviewEnginePath = resolve(repoRoot, "packages/review/src/reviewEngine.ts");
-      write(
-        cliPath,
-        `#!/usr/bin/env node
-// Candidate ${sha}
-const { readFileSync } = require("node:fs");
-const { pathToFileURL } = require("node:url");
-(async () => {
-  const config = JSON.parse(readFileSync(process.argv[2], "utf8"));
-  const { reviewCandidate } = await import(pathToFileURL(config.reviewEnginePath).href);
-  const reviewers = config.reviewers.map((required, index) => ({
-    providerFamily: required.providerFamily,
-    requestedModel: required.requestedModel,
-    requestedEffort: required.requestedEffort,
-    authPreference: "subscription",
-    adapter: {
-      id: required.harnessId,
-      async *run(spec) {
-        const started = new Date().toISOString();
-        const observedSource = index === 0 ? "stream_event" : "transcript";
-        // The cursor slot mirrors measured cursor reality (2026-08-04):
-        // observed_model is a display name and credential_source is ABSENT
-        // from routed events — this fixture exercises the sealer's
-        // cursor-slot tolerance.
-        yield {
-          type: "started",
-          session_id: spec.session_id,
-          ts: started,
-          observed_model: config.expectedObserved[index],
-          credential_route: "vendor_native",
-          ...(required.harnessId === "cursor" ? {} : { credential_source: "native_session" }),
-          payload: observedSource === "transcript" ? { observed_model_source: "transcript" } : {},
-        };
-        await new Promise((resolve) => setTimeout(resolve, 1_100));
-        const findings = index === 0 ? [] : [{
-          severity: "WARN",
-          category: "correctness",
-          claim: "Non-blocking fixture finding",
-          evidence: {
-            files: [{ path: "file.txt", lines: "1" }],
-            diff_hunks: [],
-            commands: [],
-            logs: [],
-          },
-          proposed_fix: "No release-blocking change required.",
-        }];
-        const envelope = {
-          completion: {
-            verdict: "PASS",
-            checklist: [
-              "sealed_evidence",
-              "intent_and_scope",
-              "runtime_and_security",
-              "tests_and_release",
-            ].map((item) => ({ item, completed: true })),
-            findingCount: findings.length,
-          },
-          findings,
-        };
-        const completed = new Date().toISOString();
-        const finalText = JSON.stringify(envelope) + "\\n";
-        yield {
-          type: "message",
-          session_id: spec.session_id,
-          ts: completed,
-          text: finalText,
-        };
-        yield {
-          type: "message",
-          session_id: spec.session_id,
-          ts: completed,
-          text: finalText,
-          final: true,
-          payload: { final_source: index === 0 ? "structured_output" : "last_agent_message" },
-        };
-        yield {
-          type: "completed",
-          session_id: spec.session_id,
-          ts: completed,
-          payload: { exit_code: 0 },
-        };
-      },
-    },
-  }));
-  await reviewCandidate({
-    candidateLabel: "Release candidate",
-    diff: readFileSync(config.diffPath, "utf8"),
-    evidenceDir: config.evidenceDir,
-    evidenceReadOnly: true,
-    frozenIdentity: config.frozenIdentity,
-    env: { CLAUDEXOR_REVIEW_WAVE_ID: config.wave },
-    artifactsDir: config.artifactsDir,
-    cwd: config.candidate,
-    reviewers,
-  });
-})().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
-`,
-      );
+      // The packaged-CLI artifact still travels with the gate receipt; the
+      // operator transport never executes it, so any candidate-stamped bytes
+      // satisfy the digest binding here.
+      write(cliPath, `#!/usr/bin/env node\n// Candidate ${sha}\n`);
       const reviewRuntimeArtifacts = [verifierPath, cliPath].map((path) => ({
         path: path.endsWith(".mjs") ? "release-review-verifier.mjs" : "claudexor.bundle.cjs",
         bytes: readFileSync(path).length,
@@ -475,7 +402,7 @@ const { pathToFileURL } = require("node:url");
         stderr: { path: gateStderrPath, sha256: hash(readFileSync(gateStderrPath)) },
         reviewRuntimeArtifacts,
         reviewRuntimeArtifactError: null,
-        finishedAt: "2026-07-30T00:00:00.000Z",
+        finishedAt: "2026-08-06T00:00:00.000Z",
       };
       const gateBytes = json(gate);
       write(gatePath, gateBytes);
@@ -498,51 +425,32 @@ const { pathToFileURL } = require("node:url");
           .join("\n") + "\n",
       );
       const manifestSha256 = hash(readFileSync(join(evidence, "MANIFEST.sha256")));
-      const reviewConfigPath = join(root, "review-config.json");
-      write(
-        reviewConfigPath,
-        json({
-          reviewEnginePath,
-          candidate,
-          evidenceDir: evidence,
-          artifactsDir: artifacts,
-          diffPath: join(evidence, "DIFF.patch"),
-          wave,
-          frozenIdentity: {
-            candidateSha: sha,
-            candidateTree: tree,
-            packetManifestSha256: manifestSha256,
-          },
-          reviewers: REQUIRED_NATIVE_REVIEWERS,
-          expectedObserved: REQUIRED_NATIVE_REVIEWERS.map((r) => expectedObservedModel(r)),
-        }),
-      );
-      const engine = spawnSync(process.execPath, ["--import", "tsx", cliPath, reviewConfigPath], {
-        cwd: repoRoot,
-        encoding: "utf8",
-        env: { ...process.env, CLAUDEXOR_BUILD_SHA: sha },
+      const diffSha256 = hash(diff);
+
+      // Operator subagent artifacts: one markdown report + metadata per slot,
+      // written by the Cursor operator after the two subagents completed.
+      const reviewerDirs = { fable: join(artifacts, "01-fable"), sol: join(artifacts, "02-sol") };
+      const reports = {
+        fable: "# Fable review\n\nNo blocking findings. PASS.\n",
+        sol: "# Sol review\n\nOne non-blocking observation. WARN.\n",
+      };
+      const metadataFor = (slot: "fable" | "sol") => ({
+        slot,
+        model: slot === "fable" ? "claude-fable-5-thinking-max" : "gpt-5.6-sol-medium",
+        candidate_sha: sha,
+        candidate_tree: tree,
+        packet_manifest_sha256: manifestSha256,
+        review_wave_id: wave,
+        diff_sha256: `sha256:${diffSha256}`,
+        started_at: slot === "fable" ? "2026-08-06T00:00:00.000Z" : "2026-08-06T00:00:01.000Z",
+        completed_at: slot === "fable" ? "2026-08-06T00:10:00.000Z" : "2026-08-06T00:09:00.000Z",
+        verdict: slot === "fable" ? "pass" : "warn",
+        review_scope: "full",
+        report_sha256: hash(reports[slot]),
       });
-      expect(engine.stderr).toBe("");
-      expect(engine.status).toBe(0);
-      for (const [index, required] of REQUIRED_NATIVE_REVIEWERS.entries()) {
-        const reviewerDir = join(
-          artifacts,
-          `${String(index + 1).padStart(2, "0")}-${required.harnessId}`,
-        );
-        const messages = readFileSync(join(reviewerDir, "raw-normalized-stream.jsonl"), "utf8")
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line))
-          .filter((event) => event.type === "message");
-        expect(messages).toHaveLength(2);
-        expect(messages[0].text).toBe(messages[1].text);
-        expect(messages[1]).toMatchObject({
-          final: true,
-          payload: {
-            final_source: index === 0 ? "structured_output" : "last_agent_message",
-          },
-        });
-        expect(readFileSync(join(reviewerDir, "transcript.md"), "utf8")).toBe(messages[1].text);
+      for (const slot of ["fable", "sol"] as const) {
+        write(join(reviewerDirs[slot], "report.md"), reports[slot]);
+        write(join(reviewerDirs[slot], "metadata.json"), json(metadataFor(slot)));
       }
 
       const keys = generateKeyPairSync("ed25519");
@@ -581,9 +489,30 @@ const { pathToFileURL } = require("node:url");
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);
       expect(JSON.parse(readFileSync(out, "utf8"))).toMatchObject({
-        schemaVersion: 5,
-        payload: { candidateSha: sha, reviews: [{ verdict: "pass" }, { verdict: "warn" }] },
+        schemaVersion: 6,
+        payload: {
+          candidateSha: sha,
+          candidateVersion: CLAUDEXOR_VERSION,
+          reviewProtocol: "cursor-operator-fable-sol-v1",
+          reviews: [
+            {
+              slot: "fable",
+              model: "claude-fable-5-thinking-max",
+              verdict: "pass",
+              reviewScope: "full",
+              reportSha256: hash(reports.fable),
+            },
+            {
+              slot: "sol",
+              model: "gpt-5.6-sol-medium",
+              verdict: "warn",
+              reviewScope: "full",
+              reportSha256: hash(reports.sol),
+            },
+          ],
+        },
       });
+
       const partialGatePath = join(gateDir, "partial-full-gate-receipt.json");
       const partialGate = structuredClone(gate) as any;
       delete partialGate.gateExitCode;
@@ -640,35 +569,97 @@ const { pathToFileURL } = require("node:url");
       expect(sameOutputRefused.status).toBe(1);
       expect(sameOutputRefused.stderr).toContain("must be different paths");
 
-      const codexMetadataPath = join(artifacts, "02-cursor", "metadata.json");
-      const codexMetadata = JSON.parse(readFileSync(codexMetadataPath, "utf8"));
-      write(codexMetadataPath, json({ ...codexMetadata, ignored_settings: ["effort=xhigh"] }));
-      const refused = runSealer(join(root, "refused.json"));
-      expect(refused.status).toBe(1);
-      expect(refused.stderr).toContain("ignored requested settings");
+      // Tampered report bytes: the metadata digest binding refuses.
+      const solReportPath = join(reviewerDirs.sol, "report.md");
+      write(solReportPath, reports.sol + "drift\n");
+      const reportDriftRefused = runSealer(join(root, "report-drift-refused.json"));
+      expect(reportDriftRefused.status).toBe(1);
+      expect(reportDriftRefused.stderr).toContain("does not match its metadata binding");
+      write(solReportPath, reports.sol);
 
-      write(codexMetadataPath, json(codexMetadata));
-      const codexTranscriptPath = join(artifacts, "02-cursor", "transcript.md");
-      const codexTranscript = readFileSync(codexTranscriptPath);
-      write(codexTranscriptPath, Buffer.concat([codexTranscript, Buffer.from("drift\n")]));
-      const transcriptRefused = runSealer(join(root, "transcript-refused.json"));
-      expect(transcriptRefused.status).toBe(1);
-      expect(transcriptRefused.stderr).toContain("exact normalized event projection");
+      // A verdict outside pass|warn refuses (fail-closed blocking verdicts).
+      const solMetadataPath = join(reviewerDirs.sol, "metadata.json");
+      write(solMetadataPath, json({ ...metadataFor("sol"), verdict: "block" }));
+      const blockingRefused = runSealer(join(root, "blocking-refused.json"));
+      expect(blockingRefused.status).toBe(1);
+      expect(blockingRefused.stderr).toContain("is not pass or warn");
 
-      write(codexTranscriptPath, codexTranscript);
+      // A slug outside the owner-approved tier set refuses, even from the
+      // same model family: membership is fail-closed.
+      write(solMetadataPath, json({ ...metadataFor("sol"), model: "gpt-5.6-sol-xhigh" }));
+      const substituteRefused = runSealer(join(root, "substitute-refused.json"));
+      expect(substituteRefused.status).toBe(1);
+      expect(substituteRefused.stderr).toContain("outside the owner-approved tier set");
+
+      // Non-overlapping executions refuse: the pair must run concurrently.
       write(
-        codexMetadataPath,
+        solMetadataPath,
         json({
-          ...codexMetadata,
-          start_time: "2026-07-30T00:00:10.000Z",
-          first_event_time: "2026-07-30T00:00:11.000Z",
-          completion_time: "2026-07-30T00:00:15.000Z",
-          duration_ms: 5_000,
+          ...metadataFor("sol"),
+          started_at: "2026-08-06T00:20:00.000Z",
+          completed_at: "2026-08-06T00:30:00.000Z",
         }),
       );
       const overlapRefused = runSealer(join(root, "overlap-refused.json"));
       expect(overlapRefused.status).toBe(1);
       expect(overlapRefused.stderr).toContain("did not overlap");
+
+      // A delta review scope refuses: both slots must review the full context.
+      write(solMetadataPath, json({ ...metadataFor("sol"), review_scope: "delta" }));
+      const deltaScopeRefused = runSealer(join(root, "delta-scope-refused.json"));
+      expect(deltaScopeRefused.status).toBe(1);
+      expect(deltaScopeRefused.stderr).toContain("is not full");
+
+      // A boolean review scope refuses the same way.
+      write(solMetadataPath, json({ ...metadataFor("sol"), review_scope: false }));
+      const falseScopeRefused = runSealer(join(root, "false-scope-refused.json"));
+      expect(falseScopeRefused.status).toBe(1);
+      expect(falseScopeRefused.stderr).toContain("is not full");
+
+      // A missing review_scope refuses on the exact-key metadata shape.
+      const { review_scope: _omitted, ...withoutScope } = metadataFor("sol");
+      write(solMetadataPath, json(withoutScope));
+      const missingScopeRefused = runSealer(join(root, "missing-scope-refused.json"));
+      expect(missingScopeRefused.status).toBe(1);
+      expect(missingScopeRefused.stderr).toContain("metadata shape is invalid");
+
+      // An extra unknown metadata key refuses: nothing is silently ignored.
+      write(solMetadataPath, json({ ...metadataFor("sol"), full_context: true }));
+      const extraKeyRefused = runSealer(join(root, "extra-key-refused.json"));
+      expect(extraKeyRefused.status).toBe(1);
+      expect(extraKeyRefused.stderr).toContain("metadata shape is invalid");
+      write(solMetadataPath, json(metadataFor("sol")));
+
+      // A secret-like token in a report refuses before any signing.
+      write(solReportPath, `${reports.sol}\nsk-ant-api03-${"a".repeat(93)}\n`);
+      const secretRefused = runSealer(join(root, "secret-refused.json"));
+      expect(secretRefused.status).toBe(1);
+      expect(secretRefused.stderr).toContain("secret-like token");
+      write(solReportPath, reports.sol);
+
+      // A missing report file refuses: both artifacts are mandatory.
+      rmSync(join(reviewerDirs.fable, "report.md"));
+      const missingRefused = runSealer(join(root, "missing-refused.json"));
+      expect(missingRefused.status).toBe(1);
+      write(join(reviewerDirs.fable, "report.md"), reports.fable);
+
+      // The alternate owner-approved tier of each slot seals successfully,
+      // and the actually used slugs land in the signed entries.
+      const fableMetadataPath = join(reviewerDirs.fable, "metadata.json");
+      write(
+        fableMetadataPath,
+        json({ ...metadataFor("fable"), model: "claude-fable-5-thinking-medium" }),
+      );
+      write(solMetadataPath, json({ ...metadataFor("sol"), model: "gpt-5.6-sol-max" }));
+      const alternateOut = join(root, "alternate-tier-attestation.json");
+      const alternateResult = runSealer(alternateOut);
+      expect(alternateResult.stderr).toBe("");
+      expect(alternateResult.status).toBe(0);
+      expect(
+        JSON.parse(readFileSync(alternateOut, "utf8")).payload.reviews.map(
+          (review: any) => review.model,
+        ),
+      ).toEqual(["claude-fable-5-thinking-medium", "gpt-5.6-sol-max"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

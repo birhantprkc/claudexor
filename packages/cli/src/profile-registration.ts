@@ -26,10 +26,10 @@ export function registerConfigDirProfile(input: RegisterProfileInput): {
   configPath: string;
 } {
   const { harnessId, profileId } = input;
-  if (harnessId !== "claude" && harnessId !== "codex") {
+  if (harnessId !== "claude" && harnessId !== "codex" && harnessId !== "cursor") {
     throw Object.assign(
       new Error(
-        `harness "${harnessId}" has no isolated config-dir login; register claude or codex profiles here (secret-ref profiles for other harnesses are hand-registered in the global config)`,
+        `harness "${harnessId}" has no isolated config-dir login; register claude, codex, or cursor profiles here (secret-ref profiles for other harnesses are hand-registered in the global config)`,
       ),
       { status: 400 },
     );

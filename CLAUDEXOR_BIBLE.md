@@ -674,46 +674,51 @@ invariant or owner decision before proceeding.
   fix because appending is cheapest. verify:
   `scripts/complexity-ratchet.mjs` in CI.
 - **INV-125** Release tags additionally pass the owner-review gate: ONE
-  parallel native full-context wave on the frozen candidate SHA with EXACTLY
-  two required reviewers — Claude Code `claude-fable-5` at effort `max` on its
-  vendor-native local session, and `gpt-5.6-sol` at `xhigh` through the cursor
-  harness's native local session (cursor carries the effort inside its model
-  id `gpt-5.6-sol-xhigh`). Owner decision 2026-08-04, verbatim: «зачем тебе
-  кодекс? Ревьюй курсором и клод кодом» — the sol slot moved from the codex
-  harness to cursor; models, efforts, cross-family independence, and the
-  overlapping-execution requirement are unchanged. Second owner decision
-  2026-08-04 (session transcript 5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl
-  line 1824), verbatim: «C (моя текущая рекомендация): cursor-полоса ревьюит
-  только дельту с прошлого прогона — три маленьких фикс-коммита; сходимость
-  почти гарантирована за круг, два вердикта сохраняются. и одного агента на
-  fable собсвенного прогони тоже» — after a completed full-context sol review
-  of the candidate line, subsequent sol executions may take the DELTA since
-  that reviewer's last completed full-context review as their review subject
-  (the sealed `DELTA.patch`, with the complete packet and ledgers as context);
-  the fable slot always reviews the full context, keeping one full-context
-  vendor lane under every attestation. The amendment is mechanically
-  enforced end-to-end: the delta lane is pinned to the sol slot's harness
-  (no harness parameter exists), the requested base and digest must match
-  the sealed packet's FINGERPRINTS delta entries, `DELTA.patch` must verify
-  as the exact base..candidate diff, each reviewer's subject scope is
-  persisted in its artifact metadata, and the sealer refuses to sign unless
-  fable reviewed the full context and sol reviewed the full context or that
-  exact sealed delta.
+  parallel full-context wave on the frozen candidate SHA with EXACTLY two
+  required reviewers — the fable slot on one slug from the owner-approved
+  tier set {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`}
+  and the sol slot on one slug from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`},
+  both executed as the Cursor operator's
+  own subagents (protocol `cursor-operator-fable-sol-v1`). Decision trail:
+  owner decision 2026-08-04, verbatim: «зачем тебе кодекс? Ревьюй курсором и
+  клод кодом» — the sol slot moved from the codex harness to cursor. Second
+  owner decision 2026-08-04 (session transcript
+  5349be54-a1d2-46bb-a6ef-52a2e43b91ee.jsonl line 1824) allowed the native
+  sol lane to review the sealed delta after a completed full-context pass.
+  Owner decision 2026-08-06 (takeover session), verbatim: «не надо вообще
+  codex использовать, я же сказал. Используй своих субагентов, ты же можешь
+  у себя разные модели вызывать так как ты cursor» — the whole panel moved
+  from vendor-native harness sessions to Cursor operator subagents; the
+  native-lane mechanics (route/effort observation, the sol delta scope)
+  retired with that transport, and both slots now review the full context.
+  Operator decision 2026-08-06 ~08:29 MSK, under the owner authorization of
+  08:04 MSK the same day («меня удовлетворяют модели fable-5 и gpt-5.6-sol»,
+  given after the sol max tier disappeared from the subagent model catalog):
+  the panel moved from one hard-pinned slug per slot to the owner-approved
+  tier sets above. Motive: two subagent-model catalog flaps within one hour
+  (sol max, then fable max); a hard single-tier pin would have blocked the
+  formal pair on the frozen SHA, and a new SHA re-runs every gate. The
+  actually used slug is recorded in the reviewer metadata and the signed
+  review entry; a slug outside the slot's set refuses fail-closed.
+  Slot artifacts are the reviewer's complete report plus exact-shape metadata
+  — model slug, ISO start/finish intervals, verdict, the mandatory
+  `review_scope: "full"`, report SHA-256 — sealed against the packet; real
+  execution overlap stays mandatory; the two reports must be distinct.
   Each reviewer receives the same complete Git-visible candidate,
   complete diff, sealed evidence, user dialogue and owner decisions, test and
-  gate receipts, and internet access (the sol slot's review SUBJECT may be the
-  owner-amended delta scope above; what each reviewer receives is unchanged);
+  gate receipts, and internet access;
   packet splitting and substitute models cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched
   correction commit; ONE parallel confirmation wave in the same full context,
   focused on the correction delta. Any tracked mutation re-freezes the
-  candidate. A blocking, missing, malformed, route-unproven, or incomplete
+  candidate. A blocking, missing, malformed, or incomplete
   required verdict cannot be sealed. Rounds beyond confirmation require an
-  explicit owner decision. The signed schema-v5 owner-review attestation binds
-  the candidate SHA/tree, exact full-gate receipt, sealed evidence manifest,
-  diff and wave, and both reviewers' requested and observed route/model/effort,
-  native auth, candidate-built review runtime, prompt/report/metadata/event
-  digests, and non-blocking verdicts. Extra critics are advisory and never
-  satisfy either required slot. Schema v2-v4 attestations remain
+  explicit owner decision. The signed schema-v6 owner-review attestation binds
+  the candidate SHA/tree/version, exact full-gate receipt, sealed evidence
+  manifest, diff and wave, and both reviewers' model slugs, execution
+  intervals, review scopes, report and metadata digests, and non-blocking
+  verdicts. Extra
+  critics are advisory and never satisfy either required slot. Schema v2-v5
+  attestations remain
   cryptographically verifiable only as historical records and are rejected as
   current publish input.
   A whole-tree immune scan (docs-vs-code, dead surface,

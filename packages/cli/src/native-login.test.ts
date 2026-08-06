@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { userConfigDir } from "@claudexor/util";
@@ -161,5 +161,37 @@ describe("native login specs", () => {
     expect(nativeLoginEnv("claude", source).CLAUDE_CONFIG_DIR).toBe(defaultNativeClaudeConfigDir());
     expect(nativeLoginEnv("cursor", source).HOME).toBe("/daemon/home");
     expect(nativeLoginEnv("cursor", source).CURSOR_API_KEY).toBeUndefined();
+  });
+
+  it("pins a named Cursor login to its own file store without changing the default route", () => {
+    const profiles = join(userConfigDir(), "profiles");
+    mkdirSync(profiles, { recursive: true });
+    // realpath: the canonicalizer resolves the macOS /var → /private/var
+    // symlink, so the expected paths must use the resolved spelling.
+    const profileHome = realpathSync(mkdtempSync(join(profiles, "cursor-login-")));
+    try {
+      const env = nativeLoginEnv(
+        "cursor",
+        { HOME: "/daemon/home", PATH: "/custom/bin", CURSOR_API_KEY: "must-scrub" },
+        profileHome,
+      );
+      expect(env).toMatchObject({
+        HOME: profileHome,
+        USERPROFILE: profileHome,
+        APPDATA: join(profileHome, "AppData", "Roaming"),
+        XDG_CONFIG_HOME: join(profileHome, ".config"),
+        CURSOR_CONFIG_DIR: join(profileHome, ".cursor"),
+        CURSOR_DATA_DIR: join(profileHome, ".cursor"),
+        AGENT_CLI_CREDENTIAL_STORE: "file",
+        NO_OPEN_BROWSER: "1",
+      });
+      expect(env.CURSOR_API_KEY).toBeUndefined();
+      expect(nativeLoginEnv("cursor", { HOME: "/daemon/home" }).HOME).toBe("/daemon/home");
+      expect(
+        nativeLoginEnv("cursor", { HOME: "/daemon/home" }).AGENT_CLI_CREDENTIAL_STORE,
+      ).toBeUndefined();
+    } finally {
+      rmSync(profileHome, { recursive: true, force: true });
+    }
   });
 });

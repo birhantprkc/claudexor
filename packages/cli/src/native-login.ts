@@ -1,6 +1,7 @@
 import { harnessRuntimeEnv, resolveHarnessBinary } from "@claudexor/core";
 import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { CODEX_FILE_AUTH_ARGS, defaultNativeCodexHome } from "@claudexor/harness-codex";
+import { canonicalCursorProfileHome, cursorProfilePathEnv } from "@claudexor/harness-cursor";
 import { ensureDir } from "@claudexor/util";
 import { isAbsolute } from "node:path";
 
@@ -189,12 +190,12 @@ export function nativeLoginEnv(
     // url_disclosure: the CLI must print its sign-in URL instead of opening a
     // browser on the daemon host (the user may be on another device). The
     // vendor gates this on NO_OPEN_BROWSER (verified in the shipped bundle).
-    // NOTE cursor store isolation stays absent BY MEASUREMENT: the binary's
-    // darwin credential file is homedir-fixed (~/.cursor/auth.json) and the
-    // default store is the global-service Keychain — CURSOR_CONFIG_DIR
-    // relocates config, not credentials, so wiring it would only split the
-    // account's own state. One cursor account per machine user.
     env.NO_OPEN_BROWSER = "1";
+    if (configDirOverride) {
+      const home = canonicalCursorProfileHome(configDirOverride);
+      ensureDir(home);
+      Object.assign(env, cursorProfilePathEnv(home));
+    }
   }
   return env;
 }

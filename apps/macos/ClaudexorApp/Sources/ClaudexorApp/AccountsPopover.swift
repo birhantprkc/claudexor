@@ -350,12 +350,12 @@ struct AccountsSurface: View {
     @State private var pendingDelete: AccountRowModel?
     @State private var deleting = false
     @State private var deleteNotice: String?
-    /// The add form registers config_dir_login profiles (claude|codex only —
-    /// the same rule the daemon enforces).
+    /// The add form registers config_dir_login profiles using the same
+    /// harness set the daemon supports.
     private var addHarness: String? {
         guard let family else { return addHarnessChoice }
         let id = family.setupHarnessId
-        return id == "claude" || id == "codex" ? id : nil
+        return AccountsPresentation.configDirLoginHarnessIds.contains(id) ? id : nil
     }
 
     private var rows: [AccountRowModel] {
@@ -481,6 +481,7 @@ struct AccountsSurface: View {
                     Picker("", selection: $addHarnessChoice) {
                         Text("Claude").tag("claude")
                         Text("Codex").tag("codex")
+                        Text("Cursor").tag("cursor")
                     }
                     .labelsHidden()
                     .fixedSize()
@@ -494,7 +495,7 @@ struct AccountsSurface: View {
                 Text(err).font(.caption2).foregroundStyle(Theme.status(.negative)).textSelection(.enabled)
             }
             HStack {
-                Text("A second \(family?.label ?? "Claude/Codex") subscription — one click opens the official CLI login.")
+                Text("A second \(family?.label ?? "Claude, Codex, or Cursor") subscription — one click opens the official CLI login.")
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button(adding ? "Adding…" : "Add & log in") { Task { await addAccount() } }

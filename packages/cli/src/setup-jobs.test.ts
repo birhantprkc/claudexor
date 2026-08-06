@@ -36,7 +36,7 @@ import {
   SETUP_LOGIN_PROTOCOL_VERSION,
 } from "./setup-login-protocol.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
-import { resolveSetupLoginRunnerPath } from "./setup-job-support.js";
+import { resolveProfileBinding, resolveSetupLoginRunnerPath } from "./setup-job-support.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 
 let root: string;
@@ -2254,6 +2254,14 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     expect(() => manager.create(LOGIN_REQUEST)).toThrow(/another codex login job is active/);
   });
 
+  it("binds a cursor profile login to its canonical Claudexor-owned HOME (valentine)", () => {
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg");
+    const { profile } = registerConfigDirProfile({ harnessId: "cursor", profileId: "valentine" });
+    const binding = resolveProfileBinding("cursor", "valentine");
+    expect(binding?.profileId).toBe("valentine");
+    expect(binding?.configDir).toBe(realpathSync(profile.isolation_locator!));
+  });
+
   it("default-store jobs seal the daemon-resolved default store (field stays optional for pre-upgrade digests)", () => {
     // Hit live 2026-08-04: leaving the default lane's target store implicit
     // let the detached worker re-derive it from an env without the daemon's
@@ -2547,6 +2555,35 @@ describe("D-17 codex device-code login", () => {
 describe("one-shot sign-in input (url_disclosure_with_input, owner directive 2026-08-04)", () => {
   const CLAUDE_LOGIN = { harness: "claude", action: "login", authRequest: "subscription" } as const;
   const CURSOR_LOGIN = { harness: "cursor", action: "login", authRequest: "subscription" } as const;
+
+  // Hermetic like the file-level fake codex: without these, create() resolves
+  // the real host `claude`/`cursor-agent`, and on a host without them the job
+  // finishes not_supported before input() — the state guard then fires instead
+  // of the flow-type guard (exactly the GitHub-runner failure of run
+  // 31090176293). The tests here assert guard semantics, not host installs.
+  let oldClaudeBin: string | undefined;
+  let oldCursorBin: string | undefined;
+
+  beforeEach(() => {
+    oldClaudeBin = process.env.CLAUDEXOR_CLAUDE_BIN;
+    oldCursorBin = process.env.CLAUDEXOR_CURSOR_BIN;
+    for (const [envKey, name] of [
+      ["CLAUDEXOR_CLAUDE_BIN", "fake-claude"],
+      ["CLAUDEXOR_CURSOR_BIN", "fake-cursor-agent"],
+    ] as const) {
+      const binary = join(root, name);
+      writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      chmodSync(binary, 0o700);
+      process.env[envKey] = binary;
+    }
+  });
+
+  afterEach(() => {
+    if (oldClaudeBin === undefined) delete process.env.CLAUDEXOR_CLAUDE_BIN;
+    else process.env.CLAUDEXOR_CLAUDE_BIN = oldClaudeBin;
+    if (oldCursorBin === undefined) delete process.env.CLAUDEXOR_CURSOR_BIN;
+    else process.env.CLAUDEXOR_CURSOR_BIN = oldCursorBin;
+  });
 
   it("writes the transient input sidecar exactly once and never journals the value", async () => {
     const manager = createSetupJobManager({

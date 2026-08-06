@@ -113,21 +113,25 @@ After review, `publish` accepts only an annotated stable tag on the exact
 `origin/main` commit plus a base64 signed review attestation. The workflow
 verifies its Ed25519 signature against the pinned public release-review key
 before reading any review claims, then recomputes the commit tree and
-validates the current schemaVersion 5 payload. It binds the candidate SHA/tree,
-exact `pnpm release:verify` receipt, sealed evidence manifest/diff/wave, and
-exactly two native full-context reviewer artifact sets: Claude Code
-`claude-fable-5` at `max` and `gpt-5.6-sol` at `xhigh` through the cursor
-harness (cursor model id `gpt-5.6-sol-xhigh`; owner decision 2026-08-04:
-«зачем тебе кодекс? Ревьюй курсором и клод кодом»), both on verified
-vendor-native local sessions. The sealer recomputes every evidence and reviewer
-digest, verifies the observed model against the slot's pinned expected form
-(cursor reports a display name), refuses auth switches
-or ignored settings, requires live external context and web policy, distinct
-overlapping sessions of at least one second, and requires each strict completion
-envelope to derive a non-blocking `pass` or `warn` verdict. The v5 attestation
+validates the current schemaVersion 6 payload. It binds the candidate
+SHA/tree/version, exact `pnpm release:verify` receipt, sealed evidence
+manifest/diff/wave, and exactly two operator reviewer reports (owner decision
+2026-08-06: the pair runs as Cursor operator subagents — slot `fable` = one
+slug from the owner-approved tier set {`claude-fable-5-thinking-max`,
+`claude-fable-5-thinking-medium`} with the full context, slot `sol` = one slug
+from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`}; operator decision 2026-08-06
+~08:29 after two subagent-model catalog flaps within one hour). The sealer
+recomputes every evidence and report digest,
+requires each slot's metadata to bind the exact packet identity, a model slug
+inside the slot's owner-approved tier set (the actually used slug is what gets
+sealed and signed; anything outside the set refuses fail-closed), exact ISO
+start/finish of at least one second with
+genuinely overlapping executions, the mandatory `review_scope: "full"`, and a
+non-blocking `pass` or `warn`
+verdict. The v6 attestation
 seals the final confirmation pair; the initial review and adjudication remain
 ledgered evidence. Panel composition and wave discipline
-live only in `docs/CHECKLISTS.md`. Historical signed schemas 2, 3, and 4 remain
+live only in `docs/CHECKLISTS.md`. Historical signed schemas 2 through 5 remain
 cryptographically verifiable as archives but fail current semantic publish
 validation.
 Only after that authority check does the workflow promote the candidate run's
@@ -242,27 +246,25 @@ blocker contract, wave discipline) is defined ONCE, in `docs/CHECKLISTS.md`
 Do not hand-author the attestation JSON. Run
 `scripts/seal-owner-review-attestation.mjs` with the gate receipt
 (`scripts/run-full-gate-receipt.mjs` runs `pnpm release:verify` and seals
-it), the external sealed evidence directory, Claudexor's external native-review
+it), the external sealed evidence directory, the external operator review
 artifacts directory, the external 0600 private key, the tracked
-`release/review-attestation-authority.json`, and a new external output path:
+`release/review-attestation-authority.json`, and a new external output path.
+The artifacts directory holds exactly two reviewer directories (`01-fable/`,
+`02-sol/`), each written by the Cursor operator after its review subagent
+completed: `report.md` (the reviewer's complete markdown report) and an
+exact-shape `metadata.json` binding the slot, the actually used model slug
+(which must belong to that slot's owner-approved tier set), the
+candidate SHA and tree, the packet manifest digest, the review wave UUID, the
+`sha256:`-prefixed diff digest, exact ISO start/finish, a `pass|warn`
+verdict, the mandatory `review_scope: "full"`, and the report's SHA-256:
 
 ```bash
 node scripts/run-full-gate-receipt.mjs <external-gate-dir>
 
-CLAUDEXOR_REVIEW_WAVE_ID=<uuid-v4> \
-  ~/.claudexor/node/bin/node <external-gate-dir>/claudexor.bundle.cjs review \
-  --evidence-dir <sealed-evidence-dir> \
-  --artifacts-dir <native-review-artifacts-dir> \
-  --candidate-sha <candidate-sha> \
-  --candidate-tree <candidate-tree> \
-  --packet-manifest-digest <manifest-sha256> \
-  --reviewer-panel claude=claude-fable-5:max \
-  --reviewer-panel cursor=gpt-5.6-sol-xhigh
-
 node scripts/seal-owner-review-attestation.mjs \
   --full-gate-receipt <external-gate-dir>/full-gate-receipt.json \
   --evidence-dir <sealed-evidence-dir> \
-  --review-artifacts <native-review-artifacts-dir> \
+  --review-artifacts <operator-review-artifacts-dir> \
   --private-key ~/.claudexor/release-authority/v2.0.0/review-attestation-private.pem \
   --authority release/review-attestation-authority.json \
   --out <attestation.json> \
@@ -273,14 +275,19 @@ The signer executes only receipt-bound candidate verifier bytes after the exact
 full gate passes. That gate writes a tiny self-contained verifier and a copy of
 the packaged app's self-contained `claudexor.bundle.cjs` beside the receipt in
 an output directory outside the candidate and evidence/artifact trees, with
-both byte digests in the receipt. Invoke formal review through
-that copied CLI. The sealer imports only the verified verifier bytes, checks
-the recorded CLI realpath and digest, replays normalized message events into
-the exact transcript, and derives verdicts from the strict envelope; callers
-cannot supply a report digest or verdict. A failed frozen slot is not retried
-inside its session: rerun it with fresh artifacts and a fresh wave. The retired
+both byte digests in the receipt. The operator transport never executes the
+copied CLI; it travels only as receipt-bound bytes. The sealer imports only
+the verified verifier bytes, recomputes every evidence and artifact digest,
+and refuses a missing, extra, malformed, or mismatched metadata field, a
+non-overlapping pair, duplicate report bytes, or any verdict outside
+`pass|warn`. Verdicts, models, intervals, and scope are operator-attested
+metadata (see the owner amendment in `docs/CHECKLISTS.md`); the digest and
+packet-identity bindings are what the sealer proves mechanically. A failed
+frozen slot is not retried in place: rerun it with fresh artifacts and a
+fresh wave. The retired native-harness transport (schema v5, protocol
+`native-fable-full-sol-delta-v2`) and the older
 packet-split OpenRouter transport and its broad coverage/runtime-bundle tools
-are deleted, not fallback paths. Schemas 2-4 stay signature-verifiable only for
+are deleted, not fallback paths. Schemas 2-5 stay signature-verifiable only for
 already-sealed historical evidence. Never put raw transcripts, the private
 key, or secrets in the repository or workflow input.
 

@@ -28,11 +28,15 @@ import {
   describeFileSnapshot,
   durableAttemptRouteEvidence,
   evaluateRequiredNativeRoutes,
+  isBatteryRepoRoot,
   isCrossFamilyConvergenceRefusal,
+  relevantRunAttemptKeys,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
   sameDaemonLease,
   snapshotRegularFile,
+  validateBatteryRunArtifacts,
+  validateBatteryTaskIdentity,
 } from "./lib/real-harness-battery-state.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -82,7 +86,14 @@ const {
   readToken,
   socketAlive,
 } = daemonModule;
-const { ControlRunDetail, RunDeliveryState } = schemaModule;
+const {
+  ControlRunDetail,
+  FrozenTaskContractArtifact,
+  HarnessEvent,
+  RunDeliveryState,
+  RunEvent,
+  RunTelemetry,
+} = schemaModule;
 const { CLAUDEXOR_VERSION, redactSecrets } = utilModule;
 const { admitAndAwaitRuntimeReplacementStop } = runtimeStopModule;
 
@@ -482,51 +493,130 @@ async function verifyNativeSessionRoutes() {
     });
     return;
   }
-  const batteryJobs = jobs.filter((job) => !runtimeState.baselineJobIds.has(job.id));
+  const postBaselineJobs = jobs.filter((job) => !runtimeState.baselineJobIds.has(job.id));
+  const batteryJobs = [];
+  const concurrentJobs = [];
   const inventoryErrors = [];
-  const seenRunDirs = new Set();
-  for (const job of batteryJobs) {
-    if (typeof job.runDir !== "string") continue;
-    if (seenRunDirs.has(job.runDir)) continue;
-    seenRunDirs.add(job.runDir);
-    const telemetry = new ArtifactStore(root).readYaml(join(job.runDir, "final", "telemetry.yaml"));
-    if (!telemetry || !Array.isArray(telemetry.attempts)) {
+  const store = new ArtifactStore(root);
+  for (const job of postBaselineJobs) {
+    const rawTask =
+      typeof job.runDir === "string"
+        ? store.readYaml(join(job.runDir, "context", "task.yaml"))
+        : null;
+    const taskResult = validateBatteryTaskIdentity({
+      job,
+      task: rawTask,
+      taskSchema: FrozenTaskContractArtifact,
+    });
+    if (!taskResult.valid) {
       inventoryErrors.push({
         jobId: job.id,
         runId: job.runId ?? null,
-        reason: "telemetry_missing",
+        reason: taskResult.reason,
       });
       continue;
     }
-    for (const attempt of telemetry.attempts) {
-      if (!requiredHarnesses.includes(attempt.harness_id)) continue;
+    if (isBatteryRepoRoot(reposDir, taskResult.task.repo.root)) {
+      batteryJobs.push({ job, task: taskResult.task });
+    } else
+      concurrentJobs.push({
+        jobId: job.id,
+        runId: job.runId ?? null,
+        state: job.state ?? null,
+      });
+  }
+  const seenRunDirs = new Set();
+  for (const { job, task } of batteryJobs) {
+    if (typeof job.runDir !== "string") continue;
+    if (seenRunDirs.has(job.runDir)) continue;
+    seenRunDirs.add(job.runDir);
+    const telemetryPath = join(job.runDir, "final", "telemetry.yaml");
+    let eventText;
+    try {
+      eventText = readFileSync(join(job.runDir, "events.jsonl"), "utf8");
+    } catch {
+      inventoryErrors.push({
+        jobId: job.id,
+        runId: job.runId ?? null,
+        reason: "run_events_missing_or_malformed",
+      });
+      continue;
+    }
+    const artifactResult = validateBatteryRunArtifacts({
+      job,
+      task,
+      eventText,
+      telemetry: store.readYaml(telemetryPath),
+      telemetryPresent: existsSync(telemetryPath),
+      runEventSchema: RunEvent,
+      harnessEventSchema: HarnessEvent,
+      telemetrySchema: RunTelemetry,
+    });
+    if (!artifactResult.valid) {
+      inventoryErrors.push({
+        jobId: job.id,
+        runId: job.runId ?? null,
+        reason: artifactResult.reason,
+      });
+      continue;
+    }
+    const runEvents = artifactResult.events;
+    const telemetryAttempts = artifactResult.telemetry?.attempts ?? [];
+    const attemptKeys = relevantRunAttemptKeys(runEvents, requiredHarnesses);
+    for (const attempt of telemetryAttempts) {
+      if (
+        requiredHarnesses.includes(attempt.harness_id) &&
+        !attemptKeys.some(
+          (key) => key.harnessId === attempt.harness_id && key.attemptId === attempt.attempt_id,
+        )
+      ) {
+        attemptKeys.push({ harnessId: attempt.harness_id, attemptId: attempt.attempt_id });
+      }
+    }
+    // Expected preflight refusals have neither a started attempt nor telemetry.
+    if (attemptKeys.length === 0) continue;
+    for (const key of attemptKeys) {
       const base = {
         jobId: job.id,
         runId: job.runId ?? null,
-        attemptId: attempt.attempt_id,
-        harnessId: attempt.harness_id,
+        attemptId: key.attemptId,
+        harnessId: key.harnessId,
       };
-      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(attempt.attempt_id ?? "")) {
+      if (
+        typeof key.attemptId !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(key.attemptId)
+      ) {
         observed.push({ ...base, kind: "invalid_attempt_id", authMode: null, authSource: null });
         continue;
       }
-      const eventsPath = join(job.runDir, "attempts", attempt.attempt_id, "events.jsonl");
-      let events;
-      try {
-        events = readFileSync(eventsPath, "utf8")
-          .split("\n")
-          .filter((line) => line.trim().length > 0)
-          .map((line) => JSON.parse(line));
-      } catch {
-        observed.push({
+      const matchingTelemetry = telemetryAttempts.filter(
+        (attempt) => attempt.harness_id === key.harnessId && attempt.attempt_id === key.attemptId,
+      );
+      if (matchingTelemetry.length !== 1) {
+        inventoryErrors.push({
           ...base,
-          kind: "events_missing_or_malformed",
-          authMode: null,
-          authSource: null,
+          reason:
+            matchingTelemetry.length === 0
+              ? "attempt_telemetry_missing"
+              : "attempt_telemetry_duplicate",
         });
         continue;
       }
-      const durable = durableAttemptRouteEvidence(events);
+      const attempt = matchingTelemetry[0];
+      const sourceAnchor = {
+        authMode: attempt.auth_mode ?? null,
+        authSource: attempt.auth_source ?? null,
+      };
+      observed.push({ ...base, kind: "telemetry", ...sourceAnchor });
+      const events = runEvents
+        .filter(
+          (event) =>
+            event?.type === "harness.event" &&
+            event.payload?.harness_id === key.harnessId &&
+            event.payload?.attempt_id === key.attemptId,
+        )
+        .map((event) => event.payload);
+      const durable = durableAttemptRouteEvidence(events, sourceAnchor);
       for (const route of durable.observed) observed.push({ ...base, ...route });
       if (!durable.sawStarted) {
         observed.push({ ...base, kind: "started_route_missing", authMode: null, authSource: null });
@@ -542,6 +632,11 @@ async function verifyNativeSessionRoutes() {
     missing: routeResult.missing,
     nonNative: routeResult.nonNative,
   });
+  (concurrentJobs.length === 0 ? pass : fail)(
+    "acceptance",
+    "battery submission window stayed exclusive",
+    { concurrentJobs },
+  );
 }
 
 async function controlRunDetail(runId) {

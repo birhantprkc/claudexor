@@ -1,6 +1,5 @@
 import { namespacedSecretRefBase, resolveSecret } from "@claudexor/secrets";
-import type { AuthPreference, CredentialProfile, CredentialProfileStatus } from "@claudexor/schema";
-import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
+import type { AuthPreference } from "@claudexor/schema";
 import { runCapture } from "@claudexor/core";
 import { redactSecrets } from "@claudexor/util";
 
@@ -105,9 +104,12 @@ export function shouldSmokeCursorApiKey(input: {
 }
 
 /**
- * INV-135: a cursor profile is exactly its secret-ref API key; other kinds,
- * a non-namespaced or foreign-slot ref (which would alias the engine default
- * or route another provider's key), and a missing secret are a typed refusal,
+ * INV-135: an API-key cursor profile is exactly its namespaced secret-ref key.
+ * `config_dir_login` profiles are supported but resolved earlier by the
+ * profile route owner (profile.ts), so this helper only ever sees the
+ * remaining kinds: a non-api_key kind here (e.g. `oauth_token`), a
+ * non-namespaced or foreign-slot ref (which would alias the engine default or
+ * route another provider's key), and a missing secret are a typed refusal,
  * never the default ladder. ONE owner for the run route and the doctor probe.
  */
 export function cursorProfileKeyOrRefusal(
@@ -120,7 +122,7 @@ export function cursorProfileKeyOrRefusal(
 ): { key: string } | { refusal: string; reason: "misconfigured" | "missing_secret" } {
   if (profile.credential_kind !== "api_key")
     return {
-      refusal: `credential profile "${profile.profile_id}": cursor supports only the api_key transport`,
+      refusal: `credential profile "${profile.profile_id}": cursor credential kind "${profile.credential_kind}" is not supported (use api_key or config_dir_login)`,
       reason: "misconfigured",
     };
   const ref = profile.secret_ref ?? "";
@@ -136,40 +138,4 @@ export function cursorProfileKeyOrRefusal(
       reason: "missing_secret",
     };
   return { key };
-}
-
-/**
- * Doctor projection for one cursor profile (INV-135, release wave round-15
- * #1): the SAME resolution the run route uses, mapped to a status. PRESENCE
- * is the honest doctor fact for a stored key; liveness stays the API-key
- * smoke's job at run time.
- */
-export function probeCursorCredentialProfile(
-  profile: CredentialProfile,
-  resolve: (ref: string) => string | null = resolveSecret,
-): CredentialProfileStatus {
-  const base = { profile_id: profile.profile_id, harness_id: "cursor" };
-  try {
-    const gate = cursorProfileKeyOrRefusal(profile, resolve);
-    if ("refusal" in gate)
-      return CredentialProfileStatusSchema.parse({
-        ...base,
-        availability: "unavailable",
-        verification: gate.reason === "missing_secret" ? "not_run" : "failed",
-        detail: gate.refusal,
-      });
-    return CredentialProfileStatusSchema.parse({
-      ...base,
-      availability: "available",
-      verification: "not_run",
-      detail: `secret "${profile.secret_ref}" is stored`,
-    });
-  } catch (err) {
-    return CredentialProfileStatusSchema.parse({
-      ...base,
-      availability: "unavailable",
-      verification: "failed",
-      detail: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
-    });
-  }
 }

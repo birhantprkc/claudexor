@@ -5,10 +5,10 @@ import { AuthAvailability, AuthVerification } from "./auth.js";
 
 /**
  * The credential transport a profile isolates (INV-135). `config_dir_login` is
- * a vendor-owned login living in a Claudexor-scoped config dir (claude
- * CLAUDE_CONFIG_DIR / codex CODEX_HOME); `oauth_token` and `api_key` are
- * secret-store references. The default vendor dirs (~/.claude, native codex
- * home) are NEVER a profile's isolation locator — profiles are additive.
+ * a vendor-owned login living in a Claudexor-scoped config dir or HOME
+ * (Claude CLAUDE_CONFIG_DIR / Codex CODEX_HOME / Cursor file-store HOME);
+ * `oauth_token` and `api_key` are secret-store references. Default vendor
+ * stores are NEVER a profile's isolation locator — profiles are additive.
  */
 export const CredentialKind = z
   .enum(["config_dir_login", "oauth_token", "api_key"])
@@ -282,11 +282,13 @@ export type ControlCredentialProfileUpdateResponse = z.infer<
   typeof ControlCredentialProfileUpdateResponse
 >;
 
-/** Register a config-dir login profile (claude/codex) from a UI surface —
+/** Register a config-dir login profile (claude/codex/cursor) from a UI surface —
  * the same ONE locked registration owner `claudexor profiles add` uses. */
 export const ControlCredentialProfileCreateRequest = z
   .object({
-    harnessId: Id.describe("Harness family (claude | codex) for the config-dir login profile."),
+    harnessId: Id.describe(
+      "Harness family (claude | codex | cursor) for the config-dir login profile.",
+    ),
     profileId: Id.describe("New profile id (bounded slug, unique per harness)."),
     displayName: z
       .string()

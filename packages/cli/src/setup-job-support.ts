@@ -14,6 +14,7 @@ import {
 import { loadConfig } from "@claudexor/config";
 import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
 import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
+import { canonicalCursorProfileHome } from "@claudexor/harness-cursor";
 import type {
   ControlHarnessSetupHarness,
   ControlSetupJob,
@@ -54,10 +55,10 @@ export function resolveProfileBinding(
   profileId: string | undefined,
 ): { profileId: string; configDir: string } | null {
   if (!profileId) return null;
-  if (harness !== "claude" && harness !== "codex") {
+  if (harness !== "claude" && harness !== "codex" && harness !== "cursor") {
     throw Object.assign(
       new Error(
-        `harness "${harness}" has no isolated config-dir login; only claude and codex support profile logins`,
+        `harness "${harness}" has no isolated config-dir login; only claude, codex, and cursor support profile logins`,
       ),
       { status: 400 },
     );
@@ -89,7 +90,9 @@ export function resolveProfileBinding(
   const configDir =
     harness === "claude"
       ? canonicalProfileConfigDir(profile.isolation_locator ?? "")
-      : canonicalCodexProfileHome(profile.isolation_locator ?? "");
+      : harness === "codex"
+        ? canonicalCodexProfileHome(profile.isolation_locator ?? "")
+        : canonicalCursorProfileHome(profile.isolation_locator ?? "");
   return { profileId, configDir };
 }
 
