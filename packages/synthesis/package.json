@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/synthesis",
-  "version": "3.3.8",
+  "version": "3.3.9",
   "license": "MIT",
   "description": "Synthesis decision + plan: when to merge candidates into a new (re-checked) candidate.",
   "type": "module",

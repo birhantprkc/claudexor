@@ -130,6 +130,36 @@ describe("Git capability", () => {
     }
   });
 
+  it("resolves git.exe on win32 where the bare name never exists", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-git-win32-"));
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    // Real Windows PATH dirs hold git.exe, never an extensionless git.
+    writeFileSync(join(bin, "git.exe"), "MZ", { mode: 0o700 });
+    chmodSync(join(bin, "git.exe"), 0o700);
+    try {
+      expect(resolveGitExecutable(bin, "win32")).toBe(realpathSync(join(bin, "git.exe")));
+      // POSIX resolution must NOT pick up the Windows-only name.
+      expect(resolveGitExecutable(bin, "linux")).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resolve a POSIX-named git on win32", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-git-win32-neg-"));
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(join(bin, "git"), 0o700);
+    try {
+      expect(resolveGitExecutable(bin, "win32")).toBeNull();
+      expect(resolveGitExecutable(bin, "linux")).toBe(realpathSync(join(bin, "git")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("resolves from the same normalized mirror-native PATH used for execution", () => {
     const root = mkdtempSync(join(tmpdir(), "claudexor-git-env-"));
     const managed = join(root, "managed");

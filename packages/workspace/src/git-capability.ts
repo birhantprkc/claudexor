@@ -46,15 +46,31 @@ function appleDeveloperToolsStub(detail: string): boolean {
   return normalized.includes("xcode-select") && normalized.includes("developer tools");
 }
 
+/**
+ * Spawnable Git file names for a platform. Windows has no extensionless `git`:
+ * every real distribution (Git for Windows, Scoop/Chocolatey shims) ships
+ * `git.exe`, so probing the bare name resolved nothing and every engine
+ * reported `git_missing`. The set is deliberately just `git.exe` — `git.cmd`
+ * died with msysgit 1.x, and Node's execFile refuses `.cmd` without a shell —
+ * not a general PATHEXT walk. POSIX keeps the bare name.
+ */
+function gitNameCandidates(platform: NodeJS.Platform): readonly string[] {
+  return platform === "win32" ? ["git.exe"] : ["git"];
+}
+
 export function resolveGitExecutable(
   path = composeBaseEnv("mirror_native").PATH ?? "",
+  platform: NodeJS.Platform = process.platform,
 ): string | null {
+  const names = gitNameCandidates(platform);
   for (const entry of path.split(delimiter)) {
-    const candidate = join(entry || ".", "git");
-    try {
-      if (isLaunchableExecutable(candidate)) return realpathSync(candidate);
-    } catch {
-      // Continue to the next PATH entry.
+    for (const name of names) {
+      const candidate = join(entry || ".", name);
+      try {
+        if (isLaunchableExecutable(candidate)) return realpathSync(candidate);
+      } catch {
+        // Continue to the next candidate.
+      }
     }
   }
   return null;

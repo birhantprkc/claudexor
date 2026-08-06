@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/event-log",
-  "version": "3.3.8",
+  "version": "3.3.9",
   "license": "MIT",
   "description": "Append-only JSONL run-event log (a projection-friendly evidence ledger).",
   "type": "module",

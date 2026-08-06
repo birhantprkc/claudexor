@@ -3,6 +3,29 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.9** (2026-08-06): the next Windows-parity layer, one deeper than
+  3.3.8. With the daemon booting on Windows, the downstream 3-OS platform
+  gate's fixture lane died at the Git capability probe with `git_missing`:
+  `resolveGitExecutable` walked the engine PATH probing `<dir>/git` with no
+  extension, and Windows has no extensionless `git` — every real
+  distribution (Git for Windows, Scoop/Chocolatey shims) ships `git.exe` —
+  so the probe could never succeed there. The resolver now probes
+  platform-shaped candidate names (`git.exe` on win32, the bare name
+  elsewhere; deliberately not a general PATHEXT walk — `git.cmd` died with
+  msysgit 1.x and Node's execFile refuses `.cmd` without a shell), with the
+  platform injectable so both branches are unit-proven without a Windows
+  host. This repairs every consumer of the shared probe at its single root:
+  request preflight, run applicability, readiness/doctor capabilities,
+  control services, and accounts services. An audit of the rest of the
+  code the fixture lane reaches (handshake, project registration, fake-run
+  lifecycle, artifact read, identity-bound `--stop`) found no further
+  win32-fatal pattern of the 3.3.7/3.3.8 classes: the harness binary
+  resolver already carries PATHEXT candidates, direct `git` spawns resolve
+  `git.exe` through libuv's own PATH search, the directory
+  fchmod/fsync tolerance from 3.3.8 owns both directory-handle mutations,
+  path-prefix guards on this lane use `path.sep`, and the `ps`-based
+  envelope-owner start-time identity degrades to a declared bounded
+  freshness keep rather than a failure.
 - **v3.3.8** (2026-08-06): Windows daemon boot fix. Establishing a
   daemon-owned private directory (`ensureCanonicalPrivateDirectory`) applied
   `fchmod(fd, 0o700)` unconditionally, and win32 has no POSIX mode bits on
