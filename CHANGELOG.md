@@ -3,6 +3,24 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.10** (2026-08-07): Windows secret-store durability fix, discovered
+  by both live API-key lanes in the downstream 3-OS Ouroboros gate against
+  public 3.3.9. The Windows fixture lane passed runtime installation, daemon
+  boot, and the `git.exe` capability probe because it does not set a secret;
+  each live lane instead failed immediately after `claudexor secrets set`
+  with `EPERM: operation not permitted, fsync`. `SecretStore.writeFileStore`
+  kept its own direct directory-handle open/fsync/close sequence, bypassing
+  the shared `fsyncDirectory` durability owner whose win32-only tolerance
+  already handles that directory-handle refusal. The store now delegates its
+  post-rename directory flush to the shared helper. The temporary file's
+  descriptor-level fsync before rename, atomic replacement, 0600 file mode,
+  and non-win32 error behavior are unchanged. A package audit found no other
+  direct directory-fd fsync duplicate outside `@claudexor/util`. The same
+  bounded Windows live-path review found two regular-file durability checks
+  reopening an already-written temp read-only (`runFacts`, `ResourceStore`);
+  those handles are now opened read/write because Windows FlushFileBuffers
+  rejects read-only file handles, without changing file content or POSIX
+  ordering.
 - **v3.3.9** (2026-08-06): the next Windows-parity layer, one deeper than
   3.3.8. With the daemon booting on Windows, the downstream 3-OS platform
   gate's fixture lane died at the Git capability probe with `git_missing`:

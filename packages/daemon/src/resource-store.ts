@@ -43,7 +43,9 @@ function resourceError(message: string, status = 400, code = "resource_error"): 
 function atomicJson(path: string, value: unknown): void {
   const temp = `${path}.${newId("tmp")}`;
   writeFileSync(temp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  const fd = openSync(temp, "r");
+  // Windows FlushFileBuffers requires a write-capable file handle. The temp
+  // was already written above; r+ only changes handle rights, not contents.
+  const fd = openSync(temp, "r+");
   try {
     fsyncSync(fd);
   } finally {

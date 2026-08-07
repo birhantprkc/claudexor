@@ -489,15 +489,18 @@ repository context that small review packets lost.
 > Claude Code/Cursor CLI runs through Claudexor: slot `fable` = one slug from
 > the owner-approved tier set {`claude-fable-5-thinking-max`,
 > `claude-fable-5-thinking-medium`} with the full context, slot `sol` = one
-> slug from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`}. The tier sets are an
+> slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
+> `gpt-5.6-sol-medium`}. The tier sets are an
 > operator decision of 2026-08-06 ~08:29 MSK under the owner authorization of
 > 08:04 MSK («меня удовлетворяют модели fable-5 и gpt-5.6-sol», given after
 > the sol max tier disappeared from the subagent model catalog): two catalog
 > flaps within one hour showed that a hard single-tier pin would block the
 > formal pair on a frozen SHA. The actually used slug is recorded in the
 > slot metadata and the signed entry; a slug outside the slot's set refuses
-> fail-closed. Each slot's sealed artifact is its markdown report plus
-> metadata (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
+> fail-closed. The 2026-08-07 operator addendum admits the same-family `xhigh` Sol tier
+> after the live subagent catalog exposed only that tier; no other family is
+> admitted. Each slot's sealed artifact is its markdown report plus metadata
+> (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
 > mandatory `review_scope: "full"`, report SHA-256), and the two executions
 > must genuinely overlap. The slot metadata — model, intervals, verdict,
 > scope — is a set of operator-attested statements: the new transport
@@ -524,7 +527,8 @@ repository context that small review packets lost.
   owner-approved panel (`OWNER_REVIEW_PANEL` in
   `scripts/lib/release-review-contract.mjs`): slot `fable` = one slug from
   {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`}, slot
-  `sol` = one slug from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`}. Each
+  `sol` = one slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
+  `gpt-5.6-sol-medium`}. Each
   reviewer receives the complete Git-visible candidate repository, complete
   diff, the same sealed evidence, owner dialogue/decisions, and tests, and may
   use live internet access where source verification is useful. No substitute

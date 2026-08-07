@@ -153,7 +153,10 @@ describe("operator owner-review publishing contract", () => {
         slot: "fable",
         allowedModels: ["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"],
       },
-      { slot: "sol", allowedModels: ["gpt-5.6-sol-max", "gpt-5.6-sol-medium"] },
+      {
+        slot: "sol",
+        allowedModels: ["gpt-5.6-sol-xhigh", "gpt-5.6-sol-max", "gpt-5.6-sol-medium"],
+      },
     ]);
     const { attestation, authority } = fixture();
     expect(validateReleaseAttestation(attestation, authority, expected)).toEqual({
@@ -168,7 +171,7 @@ describe("operator owner-review publishing contract", () => {
     const { attestation, authority, resign } = fixture();
     const alternate = structuredClone(attestation);
     alternate.payload.reviews[0].model = "claude-fable-5-thinking-medium";
-    alternate.payload.reviews[1].model = "gpt-5.6-sol-max";
+    alternate.payload.reviews[1].model = "gpt-5.6-sol-xhigh";
     expect(validateReleaseAttestation(resign(alternate), authority, expected)).toEqual({
       ok: true,
       reasons: [],
@@ -179,7 +182,7 @@ describe("operator owner-review publishing contract", () => {
     ["substituted model", (a: any) => (a.payload.reviews[0].model = "claude-opus-5")],
     [
       "same-family tier outside the owner-approved set",
-      (a: any) => (a.payload.reviews[1].model = "gpt-5.6-sol-xhigh"),
+      (a: any) => (a.payload.reviews[1].model = "gpt-5.6-sol-high"),
     ],
     ["cross-slot model", (a: any) => (a.payload.reviews[0].model = "gpt-5.6-sol-medium")],
     ["swapped slot label", (a: any) => (a.payload.reviews[1].slot = "fable")],
@@ -586,7 +589,7 @@ describe("operator owner-review sealer", () => {
 
       // A slug outside the owner-approved tier set refuses, even from the
       // same model family: membership is fail-closed.
-      write(solMetadataPath, json({ ...metadataFor("sol"), model: "gpt-5.6-sol-xhigh" }));
+      write(solMetadataPath, json({ ...metadataFor("sol"), model: "gpt-5.6-sol-high" }));
       const substituteRefused = runSealer(join(root, "substitute-refused.json"));
       expect(substituteRefused.status).toBe(1);
       expect(substituteRefused.stderr).toContain("outside the owner-approved tier set");

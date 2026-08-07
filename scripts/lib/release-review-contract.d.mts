@@ -22,7 +22,7 @@ export const OWNER_REVIEW_PANEL: readonly [
   }>,
   Readonly<{
     slot: "sol";
-    allowedModels: readonly ["gpt-5.6-sol-max", "gpt-5.6-sol-medium"];
+    allowedModels: readonly ["gpt-5.6-sol-xhigh", "gpt-5.6-sol-max", "gpt-5.6-sol-medium"];
   }>,
 ];
 

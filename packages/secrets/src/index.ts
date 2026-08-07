@@ -15,7 +15,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
-import { userConfigDir } from "@claudexor/util";
+import { fsyncDirectory, userConfigDir } from "@claudexor/util";
 
 function configDir(): string {
   return userConfigDir();
@@ -101,12 +101,7 @@ export class SecretStore {
       fd = undefined;
       renameSync(temporaryPath, path);
       chmodSync(path, 0o600);
-      const dirFd = openSync(dir, constants.O_RDONLY);
-      try {
-        fsyncSync(dirFd);
-      } finally {
-        closeSync(dirFd);
-      }
+      fsyncDirectory(dir);
     } finally {
       if (fd !== undefined) closeSync(fd);
       try {

@@ -95,7 +95,9 @@ function writeYamlAtomically(ctx: AnnouncedRunContext, path: string, value: unkn
   const tmp = join(parent, `.run-facts-${randomUUID()}.tmp`);
   try {
     ctx.store.writeYaml(tmp, value);
-    const fileFd = openSync(tmp, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // FlushFileBuffers on win32 refuses a read-only handle even for a regular
+    // file. Open the already-written temp read/write; no content is changed.
+    const fileFd = openSync(tmp, constants.O_RDWR | constants.O_NOFOLLOW);
     try {
       fsyncSync(fileFd);
     } finally {

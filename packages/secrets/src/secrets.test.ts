@@ -1,7 +1,23 @@
-import { mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const durability = vi.hoisted(() => ({
+  observeDirectoryFsync: vi.fn<(path: string) => void>(),
+}));
+
+vi.mock("@claudexor/util", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@claudexor/util")>();
+  return {
+    ...actual,
+    fsyncDirectory: (path: string, platform?: NodeJS.Platform) => {
+      durability.observeDirectoryFsync(path);
+      actual.fsyncDirectory(path, platform);
+    },
+  };
+});
+
 import { SecretStore, isManagedSecretName, resolveSecret } from "./index.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -20,6 +36,7 @@ __afterAllReap(() => {
 let prev: string | undefined;
 
 beforeEach(() => {
+  durability.observeDirectoryFsync.mockReset();
   prev = process.env.CLAUDEXOR_CONFIG_DIR;
   process.env.CLAUDEXOR_CONFIG_DIR = reapMk(join(tmpdir(), "claudexor-secrets-"));
 });
@@ -37,6 +54,21 @@ describe("SecretStore backend", () => {
 });
 
 describe("SecretStore (file backend)", () => {
+  it("delegates post-rename directory durability to the common owner", () => {
+    const dir = process.env.CLAUDEXOR_CONFIG_DIR as string;
+    durability.observeDirectoryFsync.mockImplementationOnce((flushedDir) => {
+      expect(flushedDir).toBe(dir);
+      expect(JSON.parse(readFileSync(join(dir, "secrets.json"), "utf8"))).toEqual({
+        KEY: "from-store",
+      });
+      expect(readdirSync(dir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    });
+
+    new SecretStore().set("KEY", "from-store");
+
+    expect(durability.observeDirectoryFsync).toHaveBeenCalledOnce();
+  });
+
   it("round-trips set/get/delete and writes a 0600 file", () => {
     const store = new SecretStore();
     expect(store.set("OPENAI_API_KEY", "sk-test-123")).toBe("file");

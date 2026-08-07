@@ -58,7 +58,7 @@ export const OWNER_REVIEW_PANEL = Object.freeze([
   }),
   Object.freeze({
     slot: "sol",
-    allowedModels: Object.freeze(["gpt-5.6-sol-max", "gpt-5.6-sol-medium"]),
+    allowedModels: Object.freeze(["gpt-5.6-sol-xhigh", "gpt-5.6-sol-max", "gpt-5.6-sol-medium"]),
   }),
 ]);
 

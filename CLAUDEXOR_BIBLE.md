@@ -677,7 +677,8 @@ invariant or owner decision before proceeding.
   parallel full-context wave on the frozen candidate SHA with EXACTLY two
   required reviewers — the fable slot on one slug from the owner-approved
   tier set {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`}
-  and the sol slot on one slug from {`gpt-5.6-sol-max`, `gpt-5.6-sol-medium`},
+  and the sol slot on one slug from {`gpt-5.6-sol-xhigh`,
+  `gpt-5.6-sol-max`, `gpt-5.6-sol-medium`},
   both executed as the Cursor operator's
   own subagents (protocol `cursor-operator-fable-sol-v1`). Decision trail:
   owner decision 2026-08-04, verbatim: «зачем тебе кодекс? Ревьюй курсором и
@@ -700,6 +701,9 @@ invariant or owner decision before proceeding.
   formal pair on the frozen SHA, and a new SHA re-runs every gate. The
   actually used slug is recorded in the reviewer metadata and the signed
   review entry; a slug outside the slot's set refuses fail-closed.
+  Operator addendum 2026-08-07: the same-family `xhigh` Sol tier is admitted
+  after the live subagent catalog exposed only that tier; it restores the
+  original high-assurance Sol level without permitting another model family.
   Slot artifacts are the reviewer's complete report plus exact-shape metadata
   — model slug, ISO start/finish intervals, verdict, the mandatory
   `review_scope: "full"`, report SHA-256 — sealed against the packet; real
