@@ -384,7 +384,7 @@
       "applicability": "global",
       "summary": "Refresh and read per-profile harness quota snapshots.",
       "auth": "loopback_bearer",
-      "request_schema": null,
+      "request_schema": "ControlQuotaRefreshRequest",
       "parameters": [],
       "response_schema": "ControlQuotaResponse",
       "error_schema": "ControlProblem"

@@ -29,6 +29,7 @@ import {
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
+import { quotaControlServices } from "./quota-services.js";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
 import {
   StatusProjectionCache,
@@ -375,8 +376,7 @@ export function controlServices(
       return setupBinding.replaceAfter(() => journalManager.quarantineAndStartFresh(request));
     },
     settings: async () => settingsSnapshot(NO_PROJECT_ROOT),
-    quota: async () => quotaRegistry().read(),
-    refreshQuota: async () => quotaRegistry().refresh(),
+    ...quotaControlServices(quotaRegistry),
     // INV-135: durable registry + live doctor projection, one probe per
     // profile; adapters without profile support report honest unknown.
     credentialProfiles: createCredentialProfilesService(quotaRegistry),

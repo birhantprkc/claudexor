@@ -132,7 +132,15 @@ and unversioned product aliases do not exist.
 with provenance and freshness; `POST /v2/quota` requests a live refresh and
 fails explicitly when no official refresher is available. Missing usage stays
 unknown and an elapsed reset marks data stale rather than locally setting it to
-zero. The CLI projection is `claudexor quota [--refresh] --json`.
+zero. Each snapshot also carries a derived `availability` projection (`state`,
+`blocking_constraints`, earliest known `resets_at`,
+`model_scoped_exhaustions`): only windows applying to every model can set
+`exhausted`/`cooldown`, while a spent model-scoped window keeps the subject
+available and is disclosed separately, so consumers never aggregate raw
+constraints themselves. `POST /v2/quota` accepts an optional `{"model": …}`
+body to compute `state` against the model the caller intends to spend
+(case-insensitive alias containment in either direction). The CLI projection
+is `claudexor quota [--refresh] --json`.
 Codex refreshes through the vendor app-server (including the live-verified
 `rateLimitResetCredits` balance, surfaced only when positive). Claude's
 PRIMARY subscription source is the `api.anthropic.com/api/oauth/usage`

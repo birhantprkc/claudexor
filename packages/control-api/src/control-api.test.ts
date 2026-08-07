@@ -10247,6 +10247,7 @@ describe("DaemonControlApiServer", () => {
   it("serves quota snapshots and refresh through the v2 operation catalog", async () => {
     const { daemon } = fakeDaemon();
     let refreshes = 0;
+    const refreshBodies: unknown[] = [];
     const response = JSON.parse(
       readFileSync(
         join(
@@ -10270,12 +10271,30 @@ describe("DaemonControlApiServer", () => {
         });
         expect(refreshed.status).toBe(200);
         expect(refreshes).toBe(1);
+        // The optional model parameter reaches the service typed; an absent
+        // body stays the model-agnostic projection.
+        const scoped = await apiFetch(`${base}/quota`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ model: "claude-fable-5" }),
+        });
+        expect(scoped.status).toBe(200);
+        expect(refreshBodies).toEqual([{}, { model: "claude-fable-5" }]);
+        // An unknown body field is a typed 400, not a silent drop.
+        const rejected = await apiFetch(`${base}/quota`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ models: ["claude-fable-5"] }),
+        });
+        expect(rejected.status).toBe(400);
+        expect(refreshes).toBe(2);
       },
       undefined,
       {
         quota: async () => response,
-        refreshQuota: async () => {
+        refreshQuota: async (input) => {
           refreshes += 1;
+          refreshBodies.push(input);
           return response;
         },
       },

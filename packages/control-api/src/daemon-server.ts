@@ -156,6 +156,7 @@ import {
   PaidBudget,
   ControlSettingsSnapshot,
   ControlSettingsUpdateRequest,
+  ControlQuotaRefreshRequest,
   ControlQuotaResponse,
   ControlCredentialProfileCreateRequest,
   ControlCredentialProfileCreateResponse,
@@ -264,7 +265,7 @@ export interface DaemonControlApiOptions {
       settings?: () => Promise<unknown>;
       updateSettings?: (patch: unknown) => Promise<unknown>;
       quota?: () => Promise<unknown>;
-      refreshQuota?: () => Promise<unknown>;
+      refreshQuota?: (input?: ControlQuotaRefreshRequest) => Promise<unknown>;
       credentialProfiles?: (input?: { snapshot?: boolean }) => Promise<unknown>;
       runApplicability?: (input: { repoRoot: string }) => Promise<unknown>;
       createCredentialProfile?: (input: unknown) => Promise<unknown>;
@@ -1503,8 +1504,16 @@ export class DaemonControlApiServer {
     }
     if (method === "GET" && path === "/quota")
       return this.service(res, "quota", undefined, ControlQuotaResponse);
-    if (method === "POST" && path === "/quota")
-      return this.service(res, "refreshQuota", undefined, ControlQuotaResponse);
+    if (method === "POST" && path === "/quota") {
+      let body: ControlQuotaRefreshRequest;
+      try {
+        // An absent/empty body keeps the model-agnostic projection.
+        body = ControlQuotaRefreshRequest.parse(await this.readBody(req));
+      } catch (err) {
+        return this.requestError(res, err);
+      }
+      return this.service(res, "refreshQuota", body, ControlQuotaResponse);
+    }
     if (method === "GET" && path === "/credential-profiles") {
       try {
         const query = parseCredentialProfilesSnapshotQuery(url);

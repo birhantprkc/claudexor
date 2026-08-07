@@ -236,7 +236,7 @@ const operations: ControlOperationDescriptor[] = [
     "ControlCredentialProfileDeleteResponse",
     { idempotency: "natural" },
   ),
-  j("POST", "/v2/quota", "mutating", null, "ControlQuotaResponse", {
+  j("POST", "/v2/quota", "mutating", "ControlQuotaRefreshRequest", "ControlQuotaResponse", {
     idempotency: "natural",
   }),
   j("GET", "/v2/harnesses", "read_only", null, "ControlHarnessListResponse", {

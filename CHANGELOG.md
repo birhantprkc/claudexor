@@ -3,6 +3,25 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.11** (2026-08-07): typed model-aware availability on `/v2/quota`.
+  A downstream consumer buried a whole healthy claude route because a
+  `claude_oauth_usage` snapshot carried a spent model-scoped window
+  (`weekly_scoped:Fable`, `applies_to_models: ["fable","claude-fable-5",
+  "best"]`, `used_ratio: 1.0`) and the consumer's own aggregation read "any
+  spent constraint" as "profile dead". Each snapshot in the `/v2/quota`
+  response now carries a derived `availability` projection — `state`
+  (`available`/`exhausted`/`cooldown`), `blocking_constraints`, earliest
+  known `resets_at`, and `model_scoped_exhaustions` — so consumers no longer
+  invent constraint aggregation. Only windows applying to EVERY model can
+  set `exhausted`/`cooldown`; a model-scoped spent window keeps the subject
+  available and is disclosed separately. `POST /v2/quota` accepts an
+  optional `{"model": …}` body (case-insensitive alias containment in either
+  direction) to compute `state` against the model the caller intends to
+  spend; blocking semantics mirror the router's `BudgetLedger` (a spent
+  ratio whose reset elapsed or is unknown is stale data, not a live block).
+  Purely additive: the projection is applied at the response boundary, so
+  journals, projection signatures, raw embedded snapshots, and absences are
+  byte-identical.
 - **v3.3.10** (2026-08-07): Windows secret-store durability fix, discovered
   by both live API-key lanes in the downstream 3-OS Ouroboros gate against
   public 3.3.9. The Windows fixture lane passed runtime installation, daemon

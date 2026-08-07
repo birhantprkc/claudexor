@@ -94,9 +94,76 @@ export const QuotaAbsence = z
   .describe("A registered subject's typed missing-snapshot — absence is stated, never inferred.");
 export type QuotaAbsence = z.infer<typeof QuotaAbsence>;
 
+export const QuotaAvailabilityState = z
+  .enum(["available", "exhausted", "cooldown"])
+  .describe(
+    "Spendability verdict for one snapshot: exhausted = a spent window blocks every applicable request; cooldown = an applicable window is only rate-limit-cooling; available = nothing applicable blocks.",
+  );
+export type QuotaAvailabilityState = z.infer<typeof QuotaAvailabilityState>;
+
+export const QuotaModelScopedExhaustion = z
+  .object({
+    constraint_id: Id,
+    applies_to_models: z.array(Id).min(1),
+    resets_at: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict()
+  .describe(
+    "A spent or cooling window that applies only to the named models. Without a requested model it never sets the whole subject exhausted; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
+  );
+export type QuotaModelScopedExhaustion = z.infer<typeof QuotaModelScopedExhaustion>;
+
+export const QuotaAvailability = z
+  .object({
+    state: QuotaAvailabilityState,
+    blocking_constraints: z
+      .array(Id)
+      .describe("Ids of the constraints that produced a non-available state."),
+    resets_at: z
+      .string()
+      .datetime({ offset: true })
+      .nullable()
+      .describe(
+        "Earliest known instant at which any blocking constraint may release; null when nothing blocks or no reset is known.",
+      ),
+    model_scoped_exhaustions: z
+      .array(QuotaModelScopedExhaustion)
+      .describe(
+        "Every spent/cooling model-scoped window, listed regardless of state so consumers see partial exhaustion without re-deriving constraint scope.",
+      ),
+  })
+  .strict()
+  .describe(
+    "Derived model-aware availability projection for one quota snapshot. Without a requested model, only windows applying to EVERY model can set exhausted/cooldown — a model-scoped spent window keeps state available and is disclosed in model_scoped_exhaustions.",
+  );
+export type QuotaAvailability = z.infer<typeof QuotaAvailability>;
+
+export const ControlQuotaSnapshot = QuotaSnapshot.extend({
+  availability: QuotaAvailability.optional().describe(
+    "Typed availability projection derived by the /v2/quota route; absent on surfaces that embed raw snapshots.",
+  ),
+}).describe("One vendor-owned quota snapshot plus its derived availability projection.");
+export type ControlQuotaSnapshot = z.infer<typeof ControlQuotaSnapshot>;
+
+export const ControlQuotaRefreshRequest = z
+  .object({
+    model: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional model id/alias the caller intends to spend against. When present, each snapshot's availability.state is computed against this model (case-insensitive alias containment in either direction), so windows scoped to OTHER models never report the subject exhausted.",
+      ),
+  })
+  .strict()
+  .describe(
+    "Optional POST /v2/quota body; an empty or absent body keeps the model-agnostic projection.",
+  );
+export type ControlQuotaRefreshRequest = z.infer<typeof ControlQuotaRefreshRequest>;
+
 export const ControlQuotaResponse = z
   .object({
-    snapshots: z.array(QuotaSnapshot),
+    snapshots: z.array(ControlQuotaSnapshot),
     absences: z
       .array(QuotaAbsence)
       .default([])
@@ -108,3 +175,121 @@ export const ControlQuotaResponse = z
   .strict()
   .describe("Current quota snapshots without a fabricated aggregate.");
 export type ControlQuotaResponse = z.infer<typeof ControlQuotaResponse>;
+
+/** Millisecond instant of a still-future ISO timestamp, else null. */
+function futureMs(iso: string | null, now: number): number | null {
+  if (!iso) return null;
+  const at = Date.parse(iso);
+  return Number.isFinite(at) && at > now ? at : null;
+}
+
+/** API-parameter model matching, deliberately looser than the router's exact
+ * `quotaConstraintAppliesToModel` (@claudexor/budget): consumers pass whatever
+ * model string they route with ("claude-fable-5", "fable", a bracketed
+ * variant), while producers publish vendor alias lists — so match by
+ * case-insensitive alias containment in either direction. A null/empty scope
+ * list is a vendor-wide window and matches every model. */
+function modelScopeMatches(scope: readonly string[] | null | undefined, model: string): boolean {
+  if (scope == null || scope.length === 0) return true;
+  const target = model.trim().toLowerCase();
+  return scope.some((alias) => {
+    const candidate = alias.trim().toLowerCase();
+    return (
+      candidate !== "" &&
+      target !== "" &&
+      (candidate.includes(target) || target.includes(candidate))
+    );
+  });
+}
+
+/** Derive one snapshot's typed model-aware availability — a pure projection
+ * over the snapshot's own constraints, never an aggregate across subjects.
+ * Blocking semantics mirror the router's `BudgetLedger`: a window
+ * blocks while its cooldown_until is in the future, or while used_ratio >= 1
+ * with a still-future resets_at (a spent ratio whose reset elapsed or is
+ * unknown is stale data, not a live block). Without `model`, only windows that
+ * apply to EVERY model can block; model-scoped spent windows are disclosed in
+ * model_scoped_exhaustions and leave state available — including a spent
+ * scoped window whose reset is UNKNOWN (disclosed with resets_at null, never
+ * blocking); one whose reset ELAPSED is provably released and not disclosed.
+ * With `model`, scoped windows matching it block too.
+ * Full-coverage inference ("every model is
+ * covered by some spent scoped window") is deliberately not attempted: the
+ * model universe is unknowable here, so that case stays available + disclosed. */
+export function quotaSnapshotAvailability(
+  snapshot: Pick<QuotaSnapshot, "constraints">,
+  opts: { now?: Date; model?: string | null } = {},
+): QuotaAvailability {
+  const now = (opts.now ?? new Date()).getTime();
+  const model = opts.model ?? null;
+  const blocking: string[] = [];
+  const scopedExhaustions: QuotaModelScopedExhaustion[] = [];
+  let sawExhausted = false;
+  let earliestRelease: { iso: string; at: number } | null = null;
+  for (const constraint of snapshot.constraints) {
+    const resetAt = futureMs(constraint.resets_at, now);
+    const cooldownAt = futureMs(constraint.cooldown_until, now);
+    const exhausted =
+      constraint.used_ratio !== null && constraint.used_ratio >= 1 && resetAt !== null;
+    const cooling = cooldownAt !== null;
+    // A spent ratio with an UNKNOWN reset never blocks (BudgetLedger mirror:
+    // stale data, not a live block), but a scoped one is still DISCLOSED below
+    // with resets_at null; an elapsed reset is provably released and stays
+    // undisclosed.
+    const spentUnknownReset =
+      constraint.used_ratio !== null && constraint.used_ratio >= 1 && constraint.resets_at === null;
+    if (!exhausted && !cooling && !spentUnknownReset) continue;
+    // A constraint stays blocked until EVERY active condition lifts, so its
+    // own release is the LATER of the two; the snapshot-level resets_at below
+    // is the EARLIEST such release across blocking constraints. A
+    // disclosure-only window (spent, unknown reset) has no release instant.
+    const release =
+      !exhausted && !cooling
+        ? null
+        : exhausted && cooling
+          ? (resetAt as number) >= (cooldownAt as number)
+            ? { iso: constraint.resets_at as string, at: resetAt as number }
+            : { iso: constraint.cooldown_until as string, at: cooldownAt as number }
+          : exhausted
+            ? { iso: constraint.resets_at as string, at: resetAt as number }
+            : { iso: constraint.cooldown_until as string, at: cooldownAt as number };
+    const scope = constraint.applies_to_models ?? null;
+    const scoped = scope !== null && scope.length > 0;
+    if (scoped) {
+      scopedExhaustions.push({
+        constraint_id: constraint.id,
+        applies_to_models: [...scope],
+        resets_at: release?.iso ?? null,
+      });
+    }
+    if (release === null) continue;
+    if (scoped && (model === null || !modelScopeMatches(scope, model))) continue;
+    blocking.push(constraint.id);
+    if (exhausted) sawExhausted = true;
+    if (earliestRelease === null || release.at < earliestRelease.at) {
+      earliestRelease = release;
+    }
+  }
+  return QuotaAvailability.parse({
+    state: blocking.length === 0 ? "available" : sawExhausted ? "exhausted" : "cooldown",
+    blocking_constraints: blocking,
+    resets_at: earliestRelease?.iso ?? null,
+    model_scoped_exhaustions: scopedExhaustions,
+  });
+}
+
+/** Decorate a quota response with per-snapshot availability projections —
+ * applied at the /v2/quota boundary so journals, projection signatures, and
+ * embedded raw snapshots stay byte-identical. */
+export function withQuotaAvailability(
+  response: ControlQuotaResponse,
+  opts: { now?: Date; model?: string | null } = {},
+): ControlQuotaResponse {
+  return {
+    ...response,
+    snapshots: response.snapshots.map((snapshot) => ({
+      ...snapshot,
+      availability: quotaSnapshotAvailability(snapshot, opts),
+    })),
+  };
+}

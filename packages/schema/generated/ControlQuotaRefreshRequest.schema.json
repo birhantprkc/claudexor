@@ -1,0 +1,18 @@
+{
+  "$ref": "#/definitions/ControlQuotaRefreshRequest",
+  "definitions": {
+    "ControlQuotaRefreshRequest": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional model id/alias the caller intends to spend against. When present, each snapshot's availability.state is computed against this model (case-insensitive alias containment in either direction), so windows scoped to OTHER models never report the subject exhausted."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Optional POST /v2/quota body; an empty or absent body keeps the model-agnostic projection."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}
