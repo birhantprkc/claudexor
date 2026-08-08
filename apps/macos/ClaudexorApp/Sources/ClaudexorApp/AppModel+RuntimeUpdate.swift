@@ -15,8 +15,10 @@ extension AppModel {
     /// The honest status a dev build shows where the update chip would appear.
     static let devBuildUpdateStatus = "Dev build — update check not applicable"
 
-    /// The APP version the update flow reasons about (test seam; production
-    /// reads the bundle).
+    /// The APP version the update flow reasons about (the dev-build chip
+    /// suppression keys on it). Production always reads the bundle version;
+    /// tests inject a packaged/dev value via `appVersionOverrideForUpdates`
+    /// so they never depend on the test runner's bundle identity.
     var updateFlowAppVersion: String {
         appVersionOverrideForUpdates ?? Self.appVersionString()
     }

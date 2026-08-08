@@ -13,23 +13,15 @@ import {
 import { harnessRuntimeEnv } from "@claudexor/core";
 import { hashJson } from "@claudexor/util";
 import { CliError, controlProblemError } from "./cli-error.js";
-import { recordEngineSkew } from "./engine-skew.js";
+import { recordEngineSkew, type EngineIdentity } from "./engine-skew.js";
 import {
   controlApiAddress,
   controlApiFetch,
   handshakeControlApi,
-  processExitCodeForRunStatus,
   type ControlApiAddress,
 } from "./live.js";
-import { TERMINAL_LIFECYCLES, type RunOutcomeFacts, outcomeExitCode } from "@claudexor/schema";
-import {
-  projectApplyEligibility,
-  projectOutcomeBanner,
-  type ApplyEligibilityProjection,
-} from "./run-detail-projections.js";
-export { projectOutcomeBanner, type ApplyEligibilityProjection } from "./run-detail-projections.js";
-import { projectRunOutcomeFacts } from "./daemon-outcome.js";
-import { readRunDetailResponse } from "./run-detail-response.js";
+import { TERMINAL_LIFECYCLES } from "@claudexor/schema";
+export { projectOutcomeBanner } from "./run-detail-projections.js";
 export { projectRunOutcomeFacts, mergeDaemonRunOutcome } from "./daemon-outcome.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -42,20 +34,26 @@ async function daemonReachable(client: DaemonClientType): Promise<boolean> {
   );
 }
 
-/** Is the daemon's control-api up and answering /healthz right now?
+/** Is the daemon's control-api up and answering /healthz right now? Returns
+ * the address WITH the handshake's validated engine identity — callers that
+ * need capability negotiation (gc's data_root_report) reuse this one
+ * handshake instead of performing a second.
  * Absence-vs-refusal (#93): null means ABSENCE only — no pointer file, connect
  * refused/timeout, non-ok healthz (a STOPPING daemon's 503 included, R1 C-C3b),
  * or the same stopping daemon losing the healthz/handshake race and answering
  * the handshake with its typed `daemon_stopping` problem (R2) — and clears the
  * skew record; any OTHER typed handshake problem THROWS, because "not
  * reachable" would send callers into a doomed wait/auto-start. */
-async function controlApiReachable(): Promise<ControlApiAddress | null> {
+async function controlApiReachable(): Promise<{
+  addr: ControlApiAddress;
+  engine: EngineIdentity;
+} | null> {
   try {
     const addr = controlApiAddress();
     const res = await controlApiFetch(addr, "/healthz", { signal: AbortSignal.timeout(1500) });
     if (res.ok) {
-      await handshakeControlApi(addr);
-      return addr;
+      const engine = await handshakeControlApi(addr);
+      return { addr, engine };
     }
   } catch (err) {
     if (err instanceof CliError && err.code !== "daemon_stopping") throw err;
@@ -77,7 +75,7 @@ async function controlApiReachable(): Promise<ControlApiAddress | null> {
  */
 export async function ensureDaemon(
   timeoutMs = 30_000,
-): Promise<{ client: DaemonClientType; addr: ControlApiAddress }> {
+): Promise<{ client: DaemonClientType; addr: ControlApiAddress; engine: EngineIdentity }> {
   const token = ensureToken();
   const socketPath = defaultSocketPath();
   let client = new DaemonClient(socketPath, token);
@@ -121,20 +119,20 @@ export async function ensureDaemon(
 
   // The control API (HTTP/SSE viewport over the daemon) is what streams events
   // and resolves the run for apply/decision. Wait for its pointer to be written.
-  let addr = await controlApiReachable();
-  if (!addr) {
+  let reached = await controlApiReachable();
+  if (!reached) {
     const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline && !addr) {
+    while (Date.now() < deadline && !reached) {
       await sleep(150);
-      addr = await controlApiReachable();
+      reached = await controlApiReachable();
     }
   }
-  if (!addr) {
+  if (!reached) {
     throw new Error(
       `daemon is up but its control API is not reachable (no ${daemonDir()}/control-api.json); it may be disabled by CLAUDEXOR_NO_CONTROL_API=1`,
     );
   }
-  return { client, addr };
+  return { client, addr: reached.addr, engine: reached.engine };
 }
 
 /**
@@ -154,9 +152,9 @@ export async function connectDaemonIfRunning(): Promise<{
   if (!token) return null;
   const client = new DaemonClient(defaultSocketPath(), token);
   if (!(await daemonReachable(client))) return null;
-  const addr = await controlApiReachable();
-  if (!addr) return null;
-  return { client, addr };
+  const reached = await controlApiReachable();
+  if (!reached) return null;
+  return { client, addr: reached.addr };
 }
 
 /**
@@ -419,181 +417,16 @@ async function ensureRunProject(
   }
 }
 
-/** Daemon job state (= run lifecycle, D8) -> CLI exit code via the ONE
- * projection owner: a succeeded lifecycle is 0 (a "Done · needs review" run
- * included); everything else is 1. When the run's terminal outcome `facts` are
- * available, the D-16 outcome-aware projection is used instead so a
- * needs_input/incomplete work_state exits non-zero on a succeeded lifecycle. */
-export function exitCodeForState(state: string, facts?: RunOutcomeFacts | null): number {
-  if (facts) return outcomeExitCode(facts);
-  return processExitCodeForRunStatus(state);
-}
-
-/** Server-derived plan readiness projection (mode=plan runs). */
-export async function fetchPlanReadiness(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<{ state: string; questionCount: number } | null> {
-  if (!runId) return null;
-  try {
-    const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
-      headers: { authorization: `Bearer ${addr.token}` },
-    });
-    if (!res.ok) return null;
-    const detail = (await res.json()) as Record<string, unknown>;
-    const v = detail["planReadiness"];
-    return v && typeof v === "object" ? (v as { state: string; questionCount: number }) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The plan run's open questions (D17), projected from GET /runs/:id — the
- * SAME server artifact readiness derives from, never a client re-parse. Empty
- * for ready/unverified plans and every non-plan run. */
-export async function fetchPlanQuestions(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<import("@claudexor/schema").PlanQuestion[]> {
-  if (!runId) return [];
-  try {
-    const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
-      headers: { authorization: `Bearer ${addr.token}` },
-    });
-    if (!res.ok) return [];
-    const detail = (await res.json()) as Record<string, unknown>;
-    const v = detail["planQuestions"];
-    return Array.isArray(v) ? (v as import("@claudexor/schema").PlanQuestion[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-/** Council membership + merge disclosure (INV-031) for a --council plan run;
- * null for solo plans and non-plan runs. Server-projected — the CLI never
- * re-derives membership. */
-export async function fetchCouncil(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<{
-  requested: number;
-  drafted: number;
-  degraded: boolean;
-  mergedBy: string | null;
-  members: { harnessId: string; role: string; status: string; error: string | null }[];
-} | null> {
-  if (!runId) return null;
-  try {
-    const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
-      headers: { authorization: `Bearer ${addr.token}` },
-    });
-    if (!res.ok) return null;
-    const detail = (await res.json()) as Record<string, unknown>;
-    const v = detail["council"];
-    return v && typeof v === "object"
-      ? (v as {
-          requested: number;
-          drafted: number;
-          degraded: boolean;
-          mergedBy: string | null;
-          members: { harnessId: string; role: string; status: string; error: string | null }[];
-        })
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * ONE GET /runs/:id for the terminal path (INV-120/122): fetch the run detail
- * once and feed every pure projection below. Three-state semantics:
- * a MISSING detail (404 / legacy run) and a transport-UNAVAILABLE detail both
- * soft-fail to null (a hiccup must never eat a finished run's result), while a
- * typed problem response — especially 500 run_facts_invalid, the server's
- * verdict that the run's canonical receipt cannot be trusted — raises through
- * the typed CLI failure path (controlProblemError -> renderCliFailure,
- * non-zero exit) instead of masquerading as a legacy run. The per-projection
- * `fetch*` wrappers stay for callers that need exactly one projection.
- */
-export async function fetchRunDetail(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<Record<string, unknown> | null> {
-  if (!runId) return null;
-  let res: Awaited<ReturnType<typeof controlApiFetch>>;
-  try {
-    res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
-      headers: { authorization: `Bearer ${addr.token}` },
-    });
-  } catch {
-    return null;
-  }
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const body: unknown = await res.json().catch(() => ({}));
-    throw controlProblemError(res.status, body, `run detail failed (HTTP ${res.status})`);
-  }
-  return readRunDetailResponse(res);
-}
-
-export async function fetchApplyEligibility(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<ApplyEligibilityProjection | null> {
-  return projectApplyEligibility(await fetchRunDetail(addr, runId));
-}
-
-/**
- * The run's terminal outcome facts through fetchRunDetail's THREE-state
- * semantics (INV-120/122): missing/legacy detail and transport loss project
- * null (the lifecycle-only exit stands), while a typed problem response — the
- * server's verdict that the terminal cannot be trusted (500 run_facts_invalid)
- * — raises into the CLI failure path instead of silently exiting as if the
- * facts never existed. Makes the direct-run CLI exit outcome-aware for a
- * work_state veto (callers that need only this one projection).
- */
-export async function fetchRunOutcomeFacts(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<RunOutcomeFacts | null> {
-  return projectRunOutcomeFacts(await fetchRunDetail(addr, runId));
-}
-
-/**
- * The server-owned outcome banner for a run (D18): the single honest headline,
- * derived by the control-plane projection owner. The CLI PRINTS it verbatim —
- * it never re-derives a headline of its own, so model prose can never outrank
- * the arbitrated truth. Null while the run is not terminal or unavailable.
- */
-export async function fetchOutcomeBanner(
-  addr: ControlApiAddress,
-  runId: string,
-): Promise<string | null> {
-  return projectOutcomeBanner(await fetchRunDetail(addr, runId));
-}
-
-/**
- * Machine-readable reason for a non-clean DAEMON terminal (P2, D8). A
- * needs-decision run (review blocked / checks failed) has a SUCCEEDED lifecycle
- * and no `error`, so key the actionable decision hint on the run FACTS, not on
- * the lifecycle; other non-succeeded lifecycles use the error or a reason
- * label. A clean succeeded run returns undefined (no `summary` key emitted).
- */
-export function daemonOutcomeSummary(out: {
-  runId: string;
-  status: string;
-  error?: string;
-  outcomeFacts?: RunOutcomeFacts | null;
-}): string | undefined {
-  const facts = out.outcomeFacts ?? null;
-  const needsDecision =
-    !!facts &&
-    facts.lifecycle === "succeeded" &&
-    (facts.review === "blocked" || facts.checks === "failed");
-  if (needsDecision) {
-    return `run needs a human decision — claudexor decision ${out.runId} --accept-risk | --rerun --feedback "..."`;
-  }
-  if (out.error) return out.error;
-  if (exitCodeForState(out.status, facts) === 0) return undefined;
-  return `run ${out.status}${facts?.reason ? ` (${facts.reason})` : ""}`;
-}
+// Run-detail fetch wrappers + terminal projections live in run-detail-fetch.ts
+// (ratchet split); re-exported so existing import sites stay stable.
+export {
+  exitCodeForState,
+  fetchPlanReadiness,
+  fetchPlanQuestions,
+  fetchCouncil,
+  fetchRunDetail,
+  fetchApplyEligibility,
+  fetchRunOutcomeFacts,
+  fetchOutcomeBanner,
+  daemonOutcomeSummary,
+} from "./run-detail-fetch.js";
