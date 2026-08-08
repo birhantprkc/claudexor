@@ -14,6 +14,7 @@ import { join, sep } from "node:path";
 const state = vi.hoisted(() => ({
   vanishSuffix: null as string | null,
   epermSuffix: null as string | null,
+  eaccesSuffix: null as string | null,
 }));
 
 vi.mock("node:fs", async (importActual) => {
@@ -33,6 +34,11 @@ vi.mock("node:fs", async (importActual) => {
           code: "EPERM",
         });
       }
+      if (state.eaccesSuffix && p.endsWith(state.eaccesSuffix)) {
+        throw Object.assign(new Error(`EACCES: simulated access denial ${p}`), {
+          code: "EACCES",
+        });
+      }
       return (actual.lstatSync as (...a: unknown[]) => unknown)(path, ...rest);
     },
   };
@@ -43,7 +49,7 @@ vi.mock("node:fs", async (importActual) => {
 // to the mocked module (readdirSync/realpathSync/existsSync stay real).
 const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
 const { listArtifacts } = await import("./artifact-serve-routes.js");
-const { safeArtifactPath } = await import("./artifact-paths.js");
+const { safeArtifactPath, safeArtifactRoot } = await import("./artifact-paths.js");
 
 describe("artifact enumeration under concurrent-mutation races (GH #128)", () => {
   let dir: string;
@@ -51,10 +57,12 @@ describe("artifact enumeration under concurrent-mutation races (GH #128)", () =>
     dir = mkdtempSync(join(tmpdir(), "claudexor-artifact-race-"));
     state.vanishSuffix = null;
     state.epermSuffix = null;
+    state.eaccesSuffix = null;
   });
   afterEach(() => {
     state.vanishSuffix = null;
     state.epermSuffix = null;
+    state.eaccesSuffix = null;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -77,9 +85,9 @@ describe("artifact enumeration under concurrent-mutation races (GH #128)", () =>
     expect(paths.some((p) => p === ".git" || p.startsWith(".git/"))).toBe(false);
   });
 
-  it("resolves a fetch path that vanishes between exists and lstat to null, not a throw", () => {
+  it("resolves a fetch path whose lstat reports a mid-window vanish to null, not a throw", () => {
     writeFileSync(join(dir, "artifact.json"), "{}");
-    state.vanishSuffix = `${sep}artifact.json`; // existsSync saw it; lstat finds it gone
+    state.vanishSuffix = `${sep}artifact.json`; // on disk, yet lstat says gone — the vanish window
     expect(safeArtifactPath(dir, "artifact.json")).toBeNull();
   });
 
@@ -87,5 +95,25 @@ describe("artifact enumeration under concurrent-mutation races (GH #128)", () =>
     writeFileSync(join(dir, "locked.txt"), "x");
     state.epermSuffix = `${sep}locked.txt`;
     expect(() => listArtifacts(dir)).toThrow(/EPERM/);
+  });
+
+  // Guard level (no existsSync precheck — it would collapse EACCES into `false`
+  // and answer null, silently converting an access error into "no such
+  // artifact"): absence may only come from the lstat errno itself, and an
+  // access denial must propagate to the caller, never resolve to null.
+  it("propagates EACCES from the fetch-path lstat instead of answering null", () => {
+    writeFileSync(join(dir, "locked.txt"), "x");
+    state.eaccesSuffix = `${sep}locked.txt`;
+    expect(() => safeArtifactPath(dir, "locked.txt")).toThrow(/EACCES/);
+  });
+
+  it("propagates EACCES from the root lstat instead of answering null", () => {
+    state.eaccesSuffix = dir;
+    expect(() => safeArtifactRoot(dir)).toThrow(/EACCES/);
+  });
+
+  it("answers null for a genuinely missing root and path via the lstat errno (unmocked)", () => {
+    expect(safeArtifactRoot(join(dir, "never-created"))).toBeNull();
+    expect(safeArtifactPath(dir, "never-created.txt")).toBeNull();
   });
 });

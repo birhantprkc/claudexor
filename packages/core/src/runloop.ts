@@ -10,13 +10,18 @@ import type { ProcessTreeTerminationOutcome, ReapProcessTreeOptions } from "./pr
  * spawned binary and translates lines into normalized HarnessEvents. This loop
  * owns the parts that previously drifted between four copy-pasted variants:
  *
- * - stderr is captured (bounded ring buffer, adapter-redacted) and preserved on
- *   EVERY terminal `completed` payload as `stderr_tail` whenever it is non-empty
+ * - stderr is captured (bounded ring buffer, adapter-redacted) and attached to
+ *   the terminal `completed` payload as `stderr_tail` whenever it is non-empty
  *   — raw diagnostics only, never a verdict axis (INV-116 untouched), and
  *   double-redacted downstream (the orchestrator's redactHarnessEvent runs
- *   before events.jsonl persistence); on an unexplained nonzero exit the same
- *   tail is additionally folded into the synthesized error text (adapters
- *   parse that failure-path argument — deliberate duplication);
+ *   before events.jsonl persistence). The tail rides that terminal event, so
+ *   persistence into attempt events is guaranteed for consumers that drain
+ *   this stream to completion (zero and nonzero exits alike); an
+ *   orchestrator-side abort that stops consuming before the terminal event
+ *   will not persist it (bounded residue, ledgered). On an unexplained
+ *   nonzero exit the same tail is additionally folded into the synthesized
+ *   error text (adapters parse that failure-path argument — deliberate
+ *   duplication);
  * - unparseable stdout lines and recognized-but-unmapped native events are
  *   COUNTED and reported on the terminal `completed` event payload
  *   (`dropped_unparsed_lines` / `dropped_unrecognized_events`), never silently

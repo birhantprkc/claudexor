@@ -4,14 +4,17 @@
  * artifact could read arbitrary host files into an HTTP response), and `..`
  * traversal is structurally impossible.
  *
- * The exists→lstat→realpath windows here race concurrent tree mutation (git
+ * The lstat→realpath windows here race concurrent tree mutation (git
  * atomic tmp-object renames in reviewer workspaces, reviewer-workspace
  * cleanup, retention deletion — GH #128). A path that vanishes mid-check IS
  * "no such artifact": both guards answer null, the same clean 404/refusal
  * every call site already maps null to. Only vanish errnos are tolerated;
- * everything else (EPERM/EIO) stays loud.
+ * everything else (EACCES/EPERM/EIO) stays loud. Deliberately NO existsSync
+ * precheck: existsSync collapses every filesystem error into `false`, which
+ * would silently convert an access error into null and falsify that loudness
+ * contract — absence must come from the lstat errno itself.
  */
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { normalize, resolve, sep } from "node:path";
 
 /** Errno-scoped vanish check for filesystem races: ENOENT/ENOTDIR mean the
@@ -32,7 +35,6 @@ export function safeArtifactPath(root: string, requested: string): string | null
   const clean = normalize(parts.join(sep));
   const abs = resolve(base, clean);
   try {
-    if (!existsSync(abs)) return null;
     const lst = lstatSync(abs);
     if (lst.isSymbolicLink()) return null;
     const real = realpathSync(abs);
@@ -44,8 +46,8 @@ export function safeArtifactPath(root: string, requested: string): string | null
 }
 
 export function safeArtifactRoot(root: string): string | null {
+  if (!root) return null;
   try {
-    if (!root || !existsSync(root)) return null;
     const st = lstatSync(root);
     if (st.isSymbolicLink() || !st.isDirectory()) return null;
     return realpathSync(root);
