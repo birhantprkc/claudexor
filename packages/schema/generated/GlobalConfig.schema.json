@@ -235,7 +235,7 @@
             "harness_inactivity_timeout_ms": {
               "type": "integer",
               "exclusiveMinimum": 0,
-              "default": 1200000,
+              "default": 3600000,
               "description": "Inactivity watchdog for harness streams: no events for this window aborts the stream and fails the attempt with a typed timeout."
             }
           },

@@ -28,7 +28,7 @@ import { RunFailure } from "./control-run-failure.js";
 import { makeControlRunRetrySchemas } from "./control-run-retry.js";
 import { ControlAuthRoute } from "./control-auth-route.js";
 import { DelegatedChildRunIds, RunDelegationInfo } from "./delegation.js";
-import { InteractionTimeoutValue } from "./config.js";
+import { HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS, InteractionTimeoutValue } from "./config.js";
 
 export const RunExecution = z
   .object({
@@ -1464,7 +1464,7 @@ export const ControlSettingsSnapshot = z
           .number()
           .int()
           .positive()
-          .default(1_200_000)
+          .default(HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS)
           .describe("Inactivity watchdog for harness streams, in milliseconds."),
         transientRetry: z
           .object({
