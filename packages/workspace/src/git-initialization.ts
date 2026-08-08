@@ -1,4 +1,5 @@
-import { parse } from "node:path";
+import { realpathSync } from "node:fs";
+import { parse, resolve } from "node:path";
 import { WorkspaceError } from "@claudexor/core";
 import { canonicalProjectRoot, userHomeDir } from "@claudexor/util";
 import { probeGitCapability, requireGitCapability } from "./git-capability.js";
@@ -43,17 +44,19 @@ export class GitInitializationError extends WorkspaceError {
 }
 
 /** Why a root was refused as a Git-boundary initialization target. */
-export type GitBoundaryRootRefusalCause = "user_home" | "filesystem_root" | "unresolvable_home";
+export type GitBoundaryRootRefusalCause =
+  "user_home" | "filesystem_root" | "unresolvable_home" | "unresolvable_root";
 
 /**
  * The Git boundary REFUSED to initialize this root, BEFORE any mutation —
  * contrast GitInitializationError above, which is a partial-mutation receipt;
  * the two must never be merged. Auto-initialization is for plausible project
  * folders only: the user home directory and filesystem roots are refused, and
- * a root that cannot be classified (no safe home resolves) is refused
- * FAIL-CLOSED. The field contract {code, status, retryable, requiredActions,
- * context} mirrors the run-preflight throw shape so daemon job settlement
- * lifts it into a typed ThreadTurn.enqueue_error with no extra plumbing.
+ * a root that cannot be classified (no safe home resolves, or the root itself
+ * cannot be physically resolved) is refused FAIL-CLOSED. The field contract
+ * {code, status, retryable, requiredActions, context} mirrors the
+ * run-preflight throw shape so daemon job settlement lifts it into a typed
+ * ThreadTurn.enqueue_error with no extra plumbing.
  */
 export class GitBoundaryRootRefusedError extends WorkspaceError {
   readonly code = "git_boundary_root_refused";
@@ -76,10 +79,15 @@ export class GitBoundaryRootRefusedError extends WorkspaceError {
   }
 }
 
-/** Test seams for the boundary-root guard (home resolution + realpath). */
+/** Test seams for the boundary-root guard (home + path resolution). */
 export interface GitBoundaryRootPolicy {
   userHomeDir?: () => string;
+  /** HOME-side canonicalizer (defaults to canonicalProjectRoot). */
   canonicalize?: (path: string) => string;
+  /** ROOT-side PHYSICAL resolver (defaults to realpathSync.native on the RAW
+   * root spelling — symlinks resolved BEFORE `..`, the way git resolves
+   * `-C`). Never given the lexical canonicalizer: see boundaryRootRefusal. */
+  realpath?: (path: string) => string;
 }
 
 export interface EnsureGitRepositoryDependencies {
@@ -97,21 +105,41 @@ const SELF_INIT_REMEDIATION =
  * directory and filesystem roots are never auto-initialized: `git add -A`
  * over such a tree fails on protected paths, hashes unrelated secrets into
  * Git objects, and mutates state the user never framed as a project. A root
- * that cannot be classified because no safe home resolves is refused
- * FAIL-CLOSED with its own cause — unknown is never treated as ordinary.
- * Both sides are canonicalized (realpath) so a symlinked spelling can neither
- * bypass nor over-fire the guard. A home that is already a HEALTHY repository
- * never reaches this guard — the early return above respects it (dotfiles
- * users), which is also why the self-init remediation must name a FIRST
- * COMMIT: a bare `git init` leaves an unborn HEAD, and the whole-transaction
- * guard still refuses that.
+ * that cannot be classified — no safe home resolves, or the root itself does
+ * not physically resolve — is refused FAIL-CLOSED with its own cause: unknown
+ * is never treated as ordinary. The ROOT side is resolved PHYSICALLY from the
+ * raw spelling (realpath: symlinks BEFORE `..`), exactly the way `git -C`
+ * resolves it; the home side is canonicalized via canonicalProjectRoot. The
+ * lexical canonicalizer is unsuitable for the root side: its resolve()
+ * collapses `..` before following symlinks, so a root spelled
+ * `<symlink-into-home>/..` would canonicalize OUTSIDE home while git operates
+ * INSIDE it (and the mirror spelling would over-fire the guard). A home that
+ * is already a HEALTHY repository never reaches this guard — the early return
+ * above respects it (dotfiles users), which is also why the self-init
+ * remediation must name a FIRST COMMIT: a bare `git init` leaves an unborn
+ * HEAD, and the whole-transaction guard still refuses that.
  */
 function boundaryRootRefusal(
   repo: string,
   policy: GitBoundaryRootPolicy,
 ): GitBoundaryRootRefusedError | null {
   const canonicalize = policy.canonicalize ?? canonicalProjectRoot;
-  const root = canonicalize(repo);
+  // The directory exists by the time initialization is attempted, so a failed
+  // physical resolution is itself disqualifying (dangling link, denied
+  // traversal): refuse with the cause rather than guessing from a lexical
+  // collapse that git will not honor.
+  let root: string;
+  try {
+    root = (policy.realpath ?? realpathSync.native)(repo);
+  } catch (error) {
+    const shown = resolve(repo);
+    return new GitBoundaryRootRefusedError(
+      `refusing to initialize a git repository at ${shown}: the root could not be physically resolved (${error instanceof Error ? error.message : String(error)}), so it cannot be proven distinct from the user home directory or a filesystem root`,
+      shown,
+      "unresolvable_root",
+      ["Verify the project root exists and is accessible, then retry.", SELF_INIT_REMEDIATION],
+    );
+  }
   if (parse(root).root === root) {
     return new GitBoundaryRootRefusedError(
       `refusing to initialize a git repository over the filesystem root ${root}; Claudexor auto-initializes only plausible project folders`,
