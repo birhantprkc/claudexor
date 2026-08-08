@@ -11232,6 +11232,221 @@ describe("durable quota projection routing (QP3)", () => {
   });
 });
 
+describe("resolved auth preference in routing evidence (#121 part 1)", () => {
+  /** A lane whose doctor discloses BOTH a native session and a managed-key
+   * source, mirroring the real degraded-key shape (harness-codex reports
+   * provider_auth_file verification 'failed' when the key is present but its
+   * isolated smoke failed). Tests use an EXPLICIT single-harness pool: an
+   * auto pool drops the degraded lane and would pass for the wrong reason. */
+  const keyedAdapter = (
+    id: string,
+    keySmoke: "failed" | "passed",
+    nativeSmoke: "failed" | "passed",
+    specs: HarnessRunSpec[],
+  ): HarnessAdapter => ({
+    id,
+    async discover() {
+      return HarnessManifest.parse({
+        id,
+        display_name: id,
+        kind: "local_cli",
+        provider_family: "openai",
+        capabilities: { read_files: true },
+        auth_modes: ["local_session", "api_key"],
+        access_profiles_supported: ["readonly"],
+      });
+    },
+    async doctor() {
+      return ConformanceReport.parse({
+        harness_id: id,
+        status: keySmoke === "failed" || nativeSmoke === "failed" ? "degraded" : "ok",
+        enabled_intents: ["explain"],
+        auth_sources: [
+          { source: "native_session", availability: "available", verification: nativeSmoke },
+          { source: "provider_auth_file", availability: "available", verification: keySmoke },
+        ],
+      });
+    },
+    async *run(spec) {
+      specs.push(spec);
+      const ts = new Date().toISOString();
+      yield {
+        type: "started",
+        session_id: spec.session_id,
+        ts,
+        credential_route: "managed_api_key",
+      };
+      yield { type: "message", session_id: spec.session_id, ts, text: `from ${id}` };
+      yield { type: "completed", session_id: spec.session_id, ts };
+    },
+  });
+
+  it("survives a vendor-native cooldown when config-level auth_preference=api_key rides a degraded key (#121 repro)", async () => {
+    await withScopedConfigDir(async () => {
+      const repo = await initRepo();
+      writeFileSync(
+        join(process.env.CLAUDEXOR_CONFIG_DIR!, "config.yaml"),
+        "harnesses:\n  lane:\n    auth_preference: api_key\n",
+      );
+      const cooldown = new Date(Date.now() + 60_000).toISOString();
+      const snapshots = [
+        {
+          subject: {
+            harness: "lane",
+            credential_route: "vendor_native" as const,
+            plan_label: null,
+            subject_id: null,
+          },
+          constraints: [
+            {
+              id: "cooldown",
+              label: "Cooldown",
+              used_ratio: null,
+              window_seconds: null,
+              resets_at: null,
+              cooldown_until: cooldown,
+            },
+          ],
+          source: "codex_app_server" as const,
+          observed_at: new Date().toISOString(),
+          freshness: "fresh" as const,
+        },
+      ];
+      const specs: HarnessRunSpec[] = [];
+      const result = await new Orchestrator({
+        registry: new Map([["lane", keyedAdapter("lane", "failed", "passed", specs)]]),
+        reviewers: [],
+        quotaSnapshots: () => snapshots,
+      }).run({
+        repoRoot: repo,
+        prompt: "route on the configured key",
+        mode: "ask",
+        harnesses: ["lane"],
+        web: "off",
+      });
+      // The configured api_key preference classifies the lane on the managed
+      // key route, so the vendor_native cooldown must not eliminate it.
+      expect(legacyOutcome(result), result.summary).toBe("success");
+      expect(result.candidates).toEqual([
+        expect.objectContaining({ harnessId: "lane", status: "success" }),
+      ]);
+      // The spawned spec carries the RESOLVED preference, never raw "auto".
+      expect(specs).toHaveLength(1);
+      expect(specs[0]?.auth_preference).toBe("api_key");
+    });
+  });
+
+  it("classifies an auto-preference lane by its actually-selected managed-key route in billing rationale", async () => {
+    await withScopedConfigDir(async () => {
+      const repo = await initRepo();
+      const specs: HarnessRunSpec[] = [];
+      // Native readiness FAILED, managed key VERIFIED: the route estimate
+      // selects api_key, and billing evidence must follow that selection
+      // instead of a manifest-guessed subscription classification.
+      const result = await new Orchestrator({
+        registry: new Map([["lane", keyedAdapter("lane", "passed", "failed", specs)]]),
+        reviewers: [],
+        quotaSnapshots: () => [],
+      }).run({
+        repoRoot: repo,
+        prompt: "bill me honestly",
+        mode: "ask",
+        harnesses: ["lane"],
+        web: "off",
+      });
+      expect(legacyOutcome(result), result.summary).toBe("success");
+      const telemetry = readFileSync(join(result.runDir, "final", "telemetry.yaml"), "utf8");
+      // routing_rationale billing_knowledge matches the selected route.
+      expect(telemetry).toContain("routing_rationale");
+      expect(telemetry).toMatch(/billing_knowledge: metered/);
+      expect(telemetry).not.toMatch(/billing_knowledge: subscription_entitlement/);
+    });
+  });
+
+  it("honestly excludes a config-keyed lane under paid_fallback: never even when the key smoke passes", async () => {
+    await withScopedConfigDir(async () => {
+      const repo = await initRepo();
+      writeFileSync(
+        join(process.env.CLAUDEXOR_CONFIG_DIR!, "config.yaml"),
+        "routing:\n  paid_fallback: never\nharnesses:\n  lane:\n    auth_preference: api_key\n",
+      );
+      const specs: HarnessRunSpec[] = [];
+      const result = await new Orchestrator({
+        registry: new Map([["lane", keyedAdapter("lane", "passed", "passed", specs)]]),
+        reviewers: [],
+        quotaSnapshots: () => [],
+      }).run({
+        repoRoot: repo,
+        prompt: "never pay",
+        mode: "ask",
+        harnesses: ["lane"],
+        web: "off",
+      });
+      // DELIBERATE visible change: a config-level api_key preference with a
+      // verified key is a metered route — paid_fallback: never must exclude
+      // it instead of letting it ride a stale subscription classification
+      // (and then actually spawn on the paid key).
+      expect(legacyOutcome(result)).toBe("failed");
+      expect(result.summary).toMatch(/no harness remains eligible.*budget and quota routing/);
+      expect(specs).toHaveLength(0);
+    });
+  });
+
+  it("keeps no-config-preference routing unchanged (regression guard)", async () => {
+    await withScopedConfigDir(async () => {
+      const repo = await initRepo();
+      const specs: HarnessRunSpec[] = [];
+      // No config at all: auto preference over healthy native+key sources.
+      // The doctrine estimate keeps the native route; billing stays
+      // subscription_entitlement (never metered) and the lane spawns as before.
+      const result = await new Orchestrator({
+        registry: new Map([["lane", keyedAdapter("lane", "passed", "passed", specs)]]),
+        reviewers: [],
+        quotaSnapshots: () => [],
+      }).run({
+        repoRoot: repo,
+        prompt: "default routing",
+        mode: "ask",
+        harnesses: ["lane"],
+        web: "off",
+      });
+      expect(legacyOutcome(result), result.summary).toBe("success");
+      expect(specs[0]?.auth_preference).toBe("auto");
+      const telemetry = readFileSync(join(result.runDir, "final", "telemetry.yaml"), "utf8");
+      expect(telemetry).toMatch(/billing_knowledge: subscription_entitlement/);
+      expect(telemetry).not.toMatch(/billing_knowledge: metered/);
+    });
+  });
+});
+
+describe("convergence preflight remediation text (#133c)", () => {
+  it("pins the battery-matched first sentence and the honest second sentence", async () => {
+    const repo = await initRepo();
+    const registry = new Map<string, HarnessAdapter>([
+      ["fake-implement", createFakeHarness("fake-implement")],
+    ]);
+    const res = await new Orchestrator({
+      registry,
+      reviewers: [cleanReviewer("rev-openai", "openai")],
+    }).run({
+      repoRoot: repo,
+      prompt: "converge",
+      mode: "agent",
+      untilClean: true,
+      harnesses: ["fake-implement"],
+    });
+    expect(legacyOutcome(res)).toBe("failed");
+    // The FIRST sentence is byte-stable: scripts/lib/real-harness-battery-state.mjs
+    // isCrossFamilyConvergenceRefusal matches exactly this prefix. The SECOND
+    // sentence names only reachable remediations (no convergence-predicate
+    // knob exists on any run surface — INV-022).
+    expect(res.summary).toBe(
+      "convergence requires a cross-family clean review (>=2 healthy reviewer provider families); found 1. " +
+        "Configure reviewers from a second provider family and check `claudexor doctor` for reviewer readiness.",
+    );
+  });
+});
+
 describe("web evidence recovery keying (INV-043)", () => {
   it("keeps the failure DISCLOSED when an unrelated-target web success satisfies the evidence gate", async () => {
     const { createAttemptTelemetry, observeAttemptTelemetry, webUnsatisfied } =

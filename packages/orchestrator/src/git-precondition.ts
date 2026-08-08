@@ -5,6 +5,7 @@ import { makeOutcomeFacts, type ModeKind, type RunReason } from "@claudexor/sche
 import { noProjectRepoRoot } from "@claudexor/util";
 import {
   ensureGitRepository,
+  GitBoundaryRootRefusedError,
   GitCapabilityError,
   GitInitializationError,
   type EnsureGitRepositoryResult,
@@ -58,20 +59,25 @@ export async function ensureWriteModeGitBoundary(
     }
     // This boundary runs before a harness is admitted. Capability, filesystem,
     // and repository-initialization failures are all workspace failures; none
-    // is evidence that a provider process failed.
+    // is evidence that a provider process failed. A typed boundary-root
+    // refusal (home/filesystem root, INV-075) names its own remediations —
+    // forward them instead of the generic advice; the reason stays unchanged.
+    const refusal = error instanceof GitBoundaryRootRefusedError ? error : null;
     const reason: RunReason = "workspace_unavailable";
     writeFailure(store, paths, {
       phase: "workspace",
       category: "project",
       safeMessage: message,
       runDir: paths.root,
-      nextActions: prerequisite
-        ? [error.capability.remediation ?? "Install Git and retry", "Retry the run"]
-        : [
-            "Check the project folder permissions",
-            "Initialize git manually (git init)",
-            "Retry the run",
-          ],
+      nextActions: refusal
+        ? refusal.requiredActions
+        : prerequisite
+          ? [error.capability.remediation ?? "Install Git and retry", "Retry the run"]
+          : [
+              "Check the project folder permissions",
+              "Initialize git manually (git init)",
+              "Retry the run",
+            ],
     });
     store.writeText(
       join(paths.finalDir, "summary.md"),

@@ -14,6 +14,7 @@ import {
   type EnsureGitRepositoryResult,
 } from "./git-initialization.js";
 export {
+  GitBoundaryRootRefusedError,
   GitInitializationError,
   type EnsureGitRepositoryDependencies,
   type EnsureGitRepositoryResult,
@@ -75,7 +76,12 @@ export async function ensureGitRepository(
   repo: string,
   dependencies: EnsureGitRepositoryDependencies = {},
 ): Promise<EnsureGitRepositoryResult> {
-  return initializeGitRepository(repo, dependencies.runGit ?? git, dependencies.probeCapability);
+  return initializeGitRepository(
+    repo,
+    dependencies.runGit ?? git,
+    dependencies.probeCapability,
+    dependencies.rootPolicy,
+  );
 }
 
 export async function statusPorcelain(repo: string): Promise<string> {
