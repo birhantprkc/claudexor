@@ -49,7 +49,6 @@ describe("Git initialization progress", () => {
           runGit,
           rootPolicy: {
             userHomeDir: () => "/home/tester",
-            canonicalize: (path) => path,
             realpath: (path) => path,
           },
         }),
@@ -113,7 +112,6 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
         runGit: recordingGit(calls, unbornHead),
         rootPolicy: {
           userHomeDir: () => "/home/tester",
-          canonicalize: (path) => path,
           realpath: (path) => path,
         },
       }).catch((thrown: unknown) => thrown);
@@ -142,7 +140,6 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
       runGit: recordingGit(calls),
       rootPolicy: {
         userHomeDir: () => "/home/tester",
-        canonicalize: (path) => path,
         realpath: (path) => path,
       },
     }).catch((thrown: unknown) => thrown);
@@ -162,7 +159,6 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
         userHomeDir: () => {
           throw new Error("Unable to resolve a safe user home directory");
         },
-        canonicalize: (path) => path,
         realpath: (path) => path,
       },
     }).catch((thrown: unknown) => thrown);
@@ -171,6 +167,55 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
     expect(refusal.context).toEqual({ root: "/some/project", cause: "unresolvable_home" });
     expect(refusal.message).toContain("could not be resolved");
     expect(refusal.requiredActions.join("\n")).toContain("HOME");
+    expect(mutations(calls)).toEqual([]);
+  });
+
+  it("fails CLOSED when the home itself cannot be PHYSICALLY resolved", async () => {
+    // The home operand must go through the same strict physical resolver as
+    // the root side. A canonicalizer that swallows realpath failures would
+    // silently degrade this case to a lexical comparison against the
+    // physically resolved root — the guard must refuse instead.
+    const calls: string[][] = [];
+    const error: unknown = await ensureGitRepository("/some/project", {
+      probeCapability: availableGit,
+      runGit: recordingGit(calls),
+      rootPolicy: {
+        userHomeDir: () => "/home/dangling-link",
+        realpath: (path) => {
+          if (path === "/home/dangling-link") throw new Error("ENOENT: dangling home");
+          return path;
+        },
+      },
+    }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(GitBoundaryRootRefusedError);
+    const refusal = error as GitBoundaryRootRefusedError;
+    expect(refusal.context).toEqual({ root: "/some/project", cause: "unresolvable_home" });
+    expect(refusal.message).toContain("could not be resolved");
+    expect(refusal.requiredActions.join("\n")).toContain("HOME");
+    expect(mutations(calls)).toEqual([]);
+  });
+
+  it("refuses when the HOME is spelled through a symlink (symmetric-physical pin)", async () => {
+    // Mirror of the symlinked-ROOT test below: here the home is REPORTED
+    // through a link spelling while the root arrives as the real path. Both
+    // operands go through the same physical resolver, so the spellings unify
+    // and the refusal is user_home — not a silent pass on unequal strings.
+    const base = mkdtempSync(join(tmpdir(), "claudexor-boundary-homespell-"));
+    tempDirs.push(base);
+    const realHome = join(base, "real-home");
+    mkdirSync(realHome);
+    const linkedHome = join(base, "home-link");
+    symlinkSync(realHome, linkedHome);
+    const calls: string[][] = [];
+    const error: unknown = await ensureGitRepository(realHome, {
+      probeCapability: availableGit,
+      runGit: recordingGit(calls),
+      rootPolicy: { userHomeDir: () => linkedHome },
+    }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(GitBoundaryRootRefusedError);
+    const refusal = error as GitBoundaryRootRefusedError;
+    expect(refusal.context.cause).toBe("user_home");
+    expect(refusal.context.root).toBe(realpathSync.native(realHome));
     expect(mutations(calls)).toEqual([]);
   });
 
@@ -185,7 +230,7 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
     const result = await ensureGitRepository("/home/tester", {
       probeCapability: availableGit,
       runGit,
-      rootPolicy: { userHomeDir: () => "/home/tester", canonicalize: (path) => path },
+      rootPolicy: { userHomeDir: () => "/home/tester" },
     });
     expect(result).toEqual({
       initialized: false,
@@ -294,7 +339,6 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
       runGit: recordingGit(calls),
       rootPolicy: {
         userHomeDir: () => "/home/tester",
-        canonicalize: (path) => path,
         realpath: (path) => path,
       },
     });
@@ -315,7 +359,6 @@ describe("Git boundary root guard (INV-075 refusal exception)", () => {
       runGit: recordingGit(calls, true),
       rootPolicy: {
         userHomeDir: () => "/home/tester",
-        canonicalize: (path) => path,
         realpath: (path) => path,
       },
     });

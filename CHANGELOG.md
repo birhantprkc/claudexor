@@ -46,10 +46,13 @@ Release history for Claudexor. The current version is declared in the root
   directory or a filesystem root — or one that cannot be classified (no safe
   home resolves, or the root itself does not physically resolve; both fail
   closed) — is refused with the typed `git_boundary_root_refused` error
-  before any mutation, naming both remediations (choose a project subfolder,
-  or run `git init` plus a first commit yourself); the root is classified on
-  its physical resolution, so a symlinked spelling of the home cannot slip
-  past the guard; a home that is already a healthy repository (dotfiles
+  before any mutation, carrying cause-specific required actions: the home
+  and filesystem-root refusals offer a project subfolder or a self-run
+  `git init` plus a first commit, while an unclassifiable root names its
+  classification failure and its own remedy; both operands are classified
+  on their physical resolution, so a symlinked spelling of the home cannot
+  slip past the guard and a home that fails to resolve physically refuses
+  fail-closed; a home that is already a healthy repository (dotfiles
   users) is respected untouched, and ordinary non-git roots keep the
   announced auto-init (#130). Route classification consumes the frozen
   admission route first and the RESOLVED per-harness auth preference after

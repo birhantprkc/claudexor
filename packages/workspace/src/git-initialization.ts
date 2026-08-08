@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { parse, resolve } from "node:path";
 import { WorkspaceError } from "@claudexor/core";
-import { canonicalProjectRoot, userHomeDir } from "@claudexor/util";
+import { userHomeDir } from "@claudexor/util";
 import { probeGitCapability, requireGitCapability } from "./git-capability.js";
 
 export interface GitCommandResult {
@@ -82,11 +82,9 @@ export class GitBoundaryRootRefusedError extends WorkspaceError {
 /** Test seams for the boundary-root guard (home + path resolution). */
 export interface GitBoundaryRootPolicy {
   userHomeDir?: () => string;
-  /** HOME-side canonicalizer (defaults to canonicalProjectRoot). */
-  canonicalize?: (path: string) => string;
-  /** ROOT-side PHYSICAL resolver (defaults to realpathSync.native on the RAW
-   * root spelling — symlinks resolved BEFORE `..`, the way git resolves
-   * `-C`). Never given the lexical canonicalizer: see boundaryRootRefusal. */
+  /** PHYSICAL resolver for BOTH operands (defaults to realpathSync.native on
+   * the RAW spellings — symlinks resolved BEFORE `..`, the way git resolves
+   * `-C`). Never a lexical canonicalizer: see boundaryRootRefusal. */
   realpath?: (path: string) => string;
 }
 
@@ -107,13 +105,15 @@ const SELF_INIT_REMEDIATION =
  * Git objects, and mutates state the user never framed as a project. A root
  * that cannot be classified — no safe home resolves, or the root itself does
  * not physically resolve — is refused FAIL-CLOSED with its own cause: unknown
- * is never treated as ordinary. The ROOT side is resolved PHYSICALLY from the
- * raw spelling (realpath: symlinks BEFORE `..`), exactly the way `git -C`
- * resolves it; the home side is canonicalized via canonicalProjectRoot. The
- * lexical canonicalizer is unsuitable for the root side: its resolve()
- * collapses `..` before following symlinks, so a root spelled
- * `<symlink-into-home>/..` would canonicalize OUTSIDE home while git operates
- * INSIDE it (and the mirror spelling would over-fire the guard). A home that
+ * is never treated as ordinary. BOTH operands are resolved PHYSICALLY from
+ * their raw spellings (realpath: symlinks BEFORE `..`), exactly the way
+ * `git -C` resolves a path — a lexical canonicalizer is unsuitable on either
+ * side: its resolve() collapses `..` before following symlinks, so a root
+ * spelled `<symlink-into-home>/..` would canonicalize OUTSIDE home while git
+ * operates INSIDE it (and the mirror spelling would over-fire the guard), and
+ * a canonicalizer that swallows realpath failures would silently degrade the
+ * home side to a lexical comparison — a home whose physical resolution fails
+ * refuses fail-closed as `unresolvable_home` instead. A home that
  * is already a HEALTHY repository never reaches this guard — the early return
  * above respects it (dotfiles users), which is also why the self-init
  * remediation must name a FIRST COMMIT: a bare `git init` leaves an unborn
@@ -123,14 +123,14 @@ function boundaryRootRefusal(
   repo: string,
   policy: GitBoundaryRootPolicy,
 ): GitBoundaryRootRefusedError | null {
-  const canonicalize = policy.canonicalize ?? canonicalProjectRoot;
+  const realpath = policy.realpath ?? realpathSync.native;
   // The directory exists by the time initialization is attempted, so a failed
   // physical resolution is itself disqualifying (dangling link, denied
   // traversal): refuse with the cause rather than guessing from a lexical
   // collapse that git will not honor.
   let root: string;
   try {
-    root = (policy.realpath ?? realpathSync.native)(repo);
+    root = realpath(repo);
   } catch (error) {
     const shown = resolve(repo);
     return new GitBoundaryRootRefusedError(
@@ -148,9 +148,13 @@ function boundaryRootRefusal(
       [SUBFOLDER_REMEDIATION, SELF_INIT_REMEDIATION],
     );
   }
+  // The home operand goes through the SAME strict physical resolver as the
+  // root side — never a canonicalizer that swallows realpath failures into a
+  // lexical fallback. Either throw here (no safe home resolves, or the home
+  // does not physically resolve) refuses fail-closed with the same cause.
   let home: string;
   try {
-    home = canonicalize((policy.userHomeDir ?? userHomeDir)());
+    home = realpath((policy.userHomeDir ?? userHomeDir)());
   } catch (error) {
     return new GitBoundaryRootRefusedError(
       `refusing to initialize a git repository at ${root}: the user home directory could not be resolved (${error instanceof Error ? error.message : String(error)}), so this root cannot be proven distinct from it`,

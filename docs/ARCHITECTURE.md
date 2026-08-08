@@ -753,11 +753,14 @@ a silent mutation. Exception (INV-075): a root equal to the user home
 directory or a filesystem root — or one that cannot be classified (no safe
 home resolves, or the root itself does not physically resolve; both fail
 closed) — is refused with the typed `git_boundary_root_refused` error before
-any mutation, naming both remediations (choose a project subfolder, or run
-`git init` plus a first commit yourself); a home that is already a healthy
-repository is respected untouched. The root is classified on its PHYSICAL
-resolution (realpath of the raw spelling, exactly git's own `-C` resolution),
-so a symlinked spelling of the home cannot slip past the guard. Ordinary
+any mutation, carrying cause-specific required actions: the home and
+filesystem-root refusals offer a project subfolder or a self-run `git init`
+plus a first commit, while an unclassifiable root names its classification
+failure and its own remedy; a home that is already a healthy repository is
+respected untouched. Both operands are classified on their PHYSICAL
+resolution (realpath of the raw spellings, exactly git's own `-C`
+resolution), so a symlinked spelling of the home cannot slip past the guard
+and a home that fails to resolve physically refuses fail-closed. Ordinary
 non-git roots keep the announced auto-init. If a non-transactional Git step fails after
 repository metadata may have changed, that same event carries `partial:true`,
 the failed stage, and the proven progress before the workspace failure; CLI and

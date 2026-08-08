@@ -275,9 +275,11 @@ comparator shares — no one silently initializes an existing user home
 directory: a root equal to the user home or a filesystem root, or one that
 cannot be classified (no safe home resolves, or the root itself does not
 physically resolve — both fail closed), is refused with the typed
-`git_boundary_root_refused` error naming both remediations (choose a project
-subfolder, or initialize the folder yourself with `git init` plus a first
-commit); a home that is already a healthy repository (dotfiles users) is
+`git_boundary_root_refused` error carrying cause-specific required actions
+(the home and filesystem-root refusals offer a project subfolder or a
+self-run `git init` plus a first commit; an unclassifiable root names its
+classification failure and its own remedy); a home that is already a healthy
+repository (dotfiles users) is
 respected untouched, mirroring Claude Code's `$HOME` rail and Aider's home
 guard. A fuller consent model — auto-init only for empty or freshly created
 roots, consent prompts for non-empty ones, a user's own `git init` as consent,

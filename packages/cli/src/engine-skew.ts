@@ -42,11 +42,14 @@ export interface EngineIdentity {
 }
 
 /** The ONE remedy wording — stderr advisory and typed requiredActions speak
- * with the same voice. Accurate remedy: `ensureDaemon` auto-starts the CLI's
- * own dist daemon, which cannot mismatch (a running macOS app may still
- * relaunch its own runtime afterwards; its reconciler owns that lifecycle). */
+ * with the same voice, so it must stay CALLER-NEUTRAL: acting commands
+ * (`ensureDaemon`) auto-start the CLI's own dist daemon after the stop, which
+ * cannot mismatch, but read-only paths (`connectDaemonIfRunning`: bare
+ * `follow`/`inspect`, the release check) never auto-start and need an
+ * explicit `claudexor daemon start` (a running macOS app may still relaunch
+ * its own runtime afterwards; its reconciler owns that lifecycle). */
 export const ENGINE_STOP_REMEDY =
-  "run `claudexor daemon stop` and rerun the command so a matching daemon starts";
+  "run `claudexor daemon stop`, then rerun — an acting command starts a matching daemon (read-only commands: run `claudexor daemon start` first)";
 
 let observedSkew: EngineSkew | null = null;
 
