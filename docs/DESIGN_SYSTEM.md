@@ -771,7 +771,10 @@ views in the shared design-system files; screens compose them.
     that explicit choice authorizes the server's one-time Git initialization for
     Ask, Plan, or Agent; the composer's enabled state and reason come from the
     exact-root run-applicability matrix, while supported in-place non-Git shapes
-    remain selectable;
+    remain selectable. A git-boundary root refusal (user home / filesystem
+    root, INV-075) renders as the turn's typed inline refusal — the
+    refused-turn card on isolated threads, the failed-run card in-place —
+    carrying the error's own required actions; no new UI element;
   - **repair strategies** (until-clean / max-attempts) for agent turns.
   - **Delegate** remains visible for every Agent turn. It is enabled only from
     the selected route's engine-owned Delegate capability projection (Auto may

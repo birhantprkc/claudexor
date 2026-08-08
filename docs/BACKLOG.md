@@ -6,6 +6,35 @@ Silent drops are the failure mode this file exists to prevent — the 2.1.0
 audit found ten F2.5 leftovers that were neither shipped nor consciously
 deferred; they are recorded here now.
 
+## 3.3.12 mini-release deferrals (dev R1/R2 adjudication)
+
+- #120 abort drain: an orchestrator-side abort stops consuming the harness
+  stream before the terminal event, so the terminal `stderr_tail` is not
+  persisted for aborted attempts (bounded residue, disclosed in the run-loop
+  header contract). Draining to the terminal event before abort teardown must
+  not slow cancel-fast paths (canary risk), so it needs its own bounded design
+  rather than a release patch.
+- #128 content-read windows: reads between the path guard's answer and the
+  subsequent lstat/read remain in `serveArtifactFile`
+  (artifact-serve-routes.ts:189), `readRawTextArtifact` (daemon-server.ts:2729),
+  `readPatch` (:2871), and `validOperatorDecisionFor` (:1980) — a vanish inside
+  those windows still throws raw ENOENT. Single-path fetches over live churn
+  are a far smaller surface than the fixed full-tree walks; partial
+  mid-retention listings are deliberate (the listing feeds no GC/apply
+  decision).
+- #130 guard-vs-git TOCTOU: a path component swapped for a symlink between the
+  guard's realpath and git's own `-C` resolution can still divert the init —
+  local-privilege racing kept as proportionality residue. Same family: the
+  60-second `git add` timeout on a legitimately huge plausible root leaves an
+  `index.lock`; a partial init failure does not roll back a self-created
+  `.git`.
+- #130 consent model (designed, owner-locked deferral): auto-init only for
+  empty or freshly created roots, consent prompts for non-empty ones, a user's
+  own `git init` as consent, a one-click Initialize remediation, and composer
+  pre-disable via the run-applicability matrix. The comparator rationale lives
+  in `docs/WHITEPAPER.md` (Workspace Semantics); the release process files
+  this as a GitHub issue from the project tracker account.
+
 ## v3.2.0 post-dogfood adjudication deferrals
 
 - PDR-01: make the local `events.jsonl` append of `run.created` transactional
@@ -95,6 +124,30 @@ deferred; they are recorded here now.
   per-command golden tests because these endpoints mix problem, result, binary,
   SSE, and interactive transports; do not hide the behavior change in one
   generic fetch wrapper. Existing N2 and X208/F45 are subsets of this item.
+  The #93 typed-handshake work adds these named residues to the same sweep:
+  `claudexor release check` still collapses every failure — typed handshake
+  refusals and a corrupt pointer included — to "engine unknown" (read-only by
+  design); `claudexor daemon start` human wording ("socket is alive but its
+  control API is not ready" / "did not become ready within 15s") predates
+  typed refusals, though the refusal itself now propagates typed;
+  `daemonReachable`'s socket-RPC health() still flattens every socket-level
+  failure to "not reachable" (a diverged future socket protocol would
+  auto-start into the singleton guard — same class, different transport); MCP
+  catalog/recovery/journal queries and quota/trust/credential/gc response
+  failures still throw hand-rolled plain Errors instead of
+  controlProblemError, so they carry no skew context; the MCP SDK tool-error
+  projection renders only the message, dropping requiredActions/context
+  (engineSkew included) on the MCP host surface; `claudexor follow`'s
+  human-fallback one-liner stays for UNTYPED transport errors only; REPL turn
+  failures stay message-only; the corrupt-pointer CliError is minted without
+  stampEngineSkew and socket-absence returns do not clear the skew record (a
+  practically unstampable window); the corrupt-pointer + auto-start
+  first-poll race is one-shot and self-heals on rerun; `engine.entry` is
+  canonically validated but not exposed (no consumer exists);
+  `daemon-run.ts` sits exactly at its 600-line ratchet cap, so any future
+  edit must move logic out first (engine-skew.ts has headroom); and the
+  absence-vs-refusal socket test fixtures are Unix-socket-only — a win32 CI
+  leg would need named-pipe variants.
 
 ## Discovery/distribution review advisories (3.2 wave; X243-X261)
 

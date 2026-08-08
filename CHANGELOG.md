@@ -3,6 +3,77 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.12** (2026-08-08) — an eight-issue fix batch on top of 3.3.11.
+  Harness stderr is no longer discarded on clean exits: the shared CLI run
+  loop attaches a bounded, redacted `stderr_tail` to the terminal completed
+  payload on every exit path (zero exit and abort included; previously
+  nonzero-exit only), reaching the raw attempt-event channel (events.jsonl /
+  SSE / `--json-stream`) whenever the stream is drained to completion; an
+  orchestrator-side abort that stops consuming before the terminal event does
+  not persist the tail (bounded residue, ledgered). Raw diagnostics only: no
+  timeline/CLI surfacing, no severity classification, no schema field (#120).
+  Artifact listings and the review-findings projection now tolerate
+  concurrent tree mutation (a vanished entry/directory yields a partial
+  snapshot instead of a 500), and `.git` entries are never enumerated in
+  listings — they remain fetchable by explicit path (#128). The harness
+  inactivity watchdog default (`runtime.harness_inactivity_timeout_ms`) is
+  raised from 20 to 60 minutes: long silent reasoning stretches (codex exec
+  has no delta transport; racing/agent claude lanes are delta-free by design)
+  were killed as false-positive hangs. The issue asked to raise the default
+  for reasoning tiers; what ships is a flat bump for every tier — per-effort
+  scaling was investigated and rejected because explicit-vs-default
+  provenance is lost at config parse. Tradeoff: a genuinely wedged CLI now
+  parks up to 60 minutes before its typed timeout. The new default applies
+  only to configs without an explicit value — an existing persisted `1200000`
+  is never migrated; to adopt the new value, edit
+  `runtime.harness_inactivity_timeout_ms` in `~/.claudexor/v3/config.yaml` or
+  set `CLAUDEXOR_HARNESS_INACTIVITY_TIMEOUT_MS` (#129). A daemon that refuses
+  the control-protocol handshake now surfaces the server's typed
+  `incompatible_protocol_major` problem with the `claudexor daemon stop`
+  remedy instead of the misleading "control API is not reachable
+  (CLAUDEXOR_NO_CONTROL_API=1)" timeout — and the remedy shows on the
+  terminal, not only in the machine envelope; read-only lookups no longer
+  report a live incompatible daemon as "not running"/"no such run";
+  `claudexor follow` reports typed daemon problems through the canonical
+  failure envelope instead of a flattened one-liner; a corrupt
+  `control-api.json` pointer is reported loudly with its path instead of
+  reading as "daemon not running"; and when a same-major daemon/CLI version
+  skew was observed on the connection, every typed daemon failure
+  (`config_invalid` included) additionally carries `context.engineSkew`
+  {daemonVersion, daemonSha?, cliVersion} plus the stop remedy in
+  requiredActions (#93). Write-mode Git auto-initialization refuses
+  implausible roots (INV-075 exception): a root equal to the user home
+  directory or a filesystem root — or one that cannot be classified (no safe
+  home resolves, or the root itself does not physically resolve; both fail
+  closed) — is refused with the typed `git_boundary_root_refused` error
+  before any mutation, naming both remediations (choose a project subfolder,
+  or run `git init` plus a first commit yourself); the root is classified on
+  its physical resolution, so a symlinked spelling of the home cannot slip
+  past the guard; a home that is already a healthy repository (dotfiles
+  users) is respected untouched, and ordinary non-git roots keep the
+  announced auto-init (#130). Route classification consumes the frozen
+  admission route first and the RESOLVED per-harness auth preference after
+  it, instead of the raw request field, so the documented config-level
+  `auth_preference: api_key` workaround is reliable (the reporter's
+  degraded-key + native-cooldown pool survives and spawns with the api_key
+  preference). Deliberate visibility change: a config-level API key with a
+  passing smoke now honestly classifies as metered billing, so
+  `paid_fallback: never` excludes that lane — matching run-level
+  `--auth api_key` semantics (#121, part 1). macOS: storing an OpenRouter key
+  works end-to-end — the auth sheet maps openrouter to its managed secret
+  slot and both API-key readiness mappings — and the Store-key control for
+  every key family (opencode, raw, openrouter) visibly disables with a
+  cause-specific hover (engine offline / action in flight / empty key field)
+  instead of silently doing nothing. After storing an API key the harness
+  honestly reports degraded — key present but route unproven — because the
+  raw-api doctor never spends paid calls to verify it; the harness card now
+  reflects that state immediately after the store, and the sheet's footer
+  offers Retry check (not Done) to run a real fresh probe (#132). The agent
+  convergence-preflight refusal's remediation is honest: it now says
+  "Configure reviewers from a second provider family and check
+  `claudexor doctor` for reviewer readiness" instead of advising a
+  nonexistent knob; the machine-matched first sentence is unchanged
+  (#133, part c).
 - **v3.3.11** (2026-08-07): typed model-aware availability on `/v2/quota`.
   A downstream consumer buried a whole healthy claude route because a
   `claude_oauth_usage` snapshot carried a spent model-scoped window

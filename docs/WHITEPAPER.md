@@ -255,6 +255,35 @@ a non-git project loudly, while supported in-place paths remain available
 without initialization. Vendor homes and scoped auth state live outside every
 worktree so `git add -A` can never capture credentials.
 
+Automatic Git initialization is a deliberate outlier among coding agents, and
+the position is architectural, not accidental: the envelope/worktree model
+needs a real Git boundary at the project for honest diffs, and the mutation is
+announced via a typed `project.git.initialized` event — never silent. The
+comparator field:
+
+| Agent       | Non-git project root                                                                             | User home directory                             |
+| ----------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| Codex CLI   | `codex exec` refuses to run outside a trusted git repository unless `--skip-git-repo-check`; never runs `git init` in a user's project | the same refusal                                |
+| Claude Code | requires no git (checkpoints/rewind degrade); never initializes one                               | non-persisted trust prompt re-asked every session |
+| Cursor CLI  | no git requirement; creates nothing                                                               | no special rail                                 |
+| Aider       | default-yes consent prompt to create a repo                                                       | refuses to even offer init in the home directory |
+
+(Gemini CLI and opencode keep shadow git state outside the project tree;
+scaffolders such as `cargo new` and `create-next-app` init git only for
+projects they themselves create.) Claudexor also adopts the one norm every
+comparator shares — no one silently initializes an existing user home
+directory: a root equal to the user home or a filesystem root, or one that
+cannot be classified (no safe home resolves, or the root itself does not
+physically resolve — both fail closed), is refused with the typed
+`git_boundary_root_refused` error naming both remediations (choose a project
+subfolder, or initialize the folder yourself with `git init` plus a first
+commit); a home that is already a healthy repository (dotfiles users) is
+respected untouched, mirroring Claude Code's `$HOME` rail and Aider's home
+guard. A fuller consent model — auto-init only for empty or freshly created
+roots, consent prompts for non-empty ones, a user's own `git init` as consent,
+a one-click initialize remediation — is a designed backlog item
+(`docs/BACKLOG.md`), not a rejected idea.
+
 Instruction files stay unified. The recommendation is one `AGENTS.md` at the
 project root — the file Codex, Cursor, and OpenCode already read natively. So a
 Claude Code executor reads the same guidance, Claudexor bridges it with a thin

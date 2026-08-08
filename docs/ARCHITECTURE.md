@@ -749,7 +749,16 @@ deterministic baseline commit (author `Claudexor`) make worktree diffs honest
 from the first run. Claudexor never creates or edits the project's `.gitignore`;
 repo `.claudexor/` is user-owned config and runtime stays external. The action
 is announced via a `project.git.initialized` run event in the timeline — never
-a refusal, never a silent mutation. If a non-transactional Git step fails after
+a silent mutation. Exception (INV-075): a root equal to the user home
+directory or a filesystem root — or one that cannot be classified (no safe
+home resolves, or the root itself does not physically resolve; both fail
+closed) — is refused with the typed `git_boundary_root_refused` error before
+any mutation, naming both remediations (choose a project subfolder, or run
+`git init` plus a first commit yourself); a home that is already a healthy
+repository is respected untouched. The root is classified on its PHYSICAL
+resolution (realpath of the raw spelling, exactly git's own `-C` resolution),
+so a symlinked spelling of the home cannot slip past the guard. Ordinary
+non-git roots keep the announced auto-init. If a non-transactional Git step fails after
 repository metadata may have changed, that same event carries `partial:true`,
 the failed stage, and the proven progress before the workspace failure; CLI and
 Control timeline render the incomplete initialization as a warning instead of
@@ -1076,6 +1085,12 @@ Endpoint semantics beyond the inventory:
 - `GET /v2/runs/:id/produced` and `GET /v2/runs/:id/produced/<path>` serve the
   project's PRODUCED outputs — the repo `artifacts/` dir, the macOS workspace
   Artifacts-tab source — distinct from the run-internal `GET /v2/runs/:id/artifacts` tree.
+  Artifact listings and the review-findings projection are point-in-time
+  snapshots that tolerate vanish races (ENOENT/ENOTDIR) as partial snapshots,
+  never a 500 — a poll concurrent with reviewer-workspace churn serves the
+  survivors; other errnos stay loud. `.git` entries are never enumerated
+  (name-based skip — gitlink FILES are skipped too, not only `.git`
+  directories) but remain fetchable by explicit path.
 - `GET /v2/runs` returns a BOUNDED, newest-first, keyset-paginated page of run
   summaries (QA-052), not the whole retained registry. `limit` (1..1000, default
   200), `state`, and an opaque `cursor` are strict and typed — a typoed or
@@ -1686,6 +1701,9 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    Fence: the mutation is announced via a typed `project.git.initialized` run
    event — never silent. A partial non-transactional failure emits the same
    event with its failed stage and proven progress before terminalizing.
+   Second fence: a user-home, filesystem-root, or unclassifiable root is
+   refused with the typed `git_boundary_root_refused` error before any
+   mutation (INV-075 exception); a healthy home repository is untouched.
 6. **`revert_run`** — the server-owned in-place revert reads the immutable
    external patch anchor and reverses only bytes still equal to the recorded
    Claudexor postimage; a conflicting user edit is refused and left untouched.
@@ -1870,6 +1888,14 @@ telemetry's `transient_failures`, and drives required-actions — authentication
 guidance appears ONLY on a classified `auth_failed`, never on a timeout, rate
 limit, or crash.
 
+On every terminal path (zero exit, nonzero exit, abort), the shared CLI run
+loop attaches a bounded, adapter-redacted `stderr_tail` to the terminal
+`completed` payload — raw diagnostics on the attempts channel (events.jsonl /
+SSE / `--json-stream`), never a verdict axis. Persistence into attempt events
+is guaranteed for consumers that drain the stream to completion; an
+orchestrator-side abort that stops consuming before the terminal event does
+not persist it (bounded residue).
+
 Structured output: routes whose manifest declares `json_schema_output`
 receive `HarnessRunSpec.output_schema` — a CALLER-supplied per-run schema the
 run's final answer must conform to (agent race / ask answers), normalized and
@@ -1989,7 +2015,7 @@ global `runtime.transient_retry` policy and only when the failed attempt produce
 no deliverable. Reviewer panels use `runtime.reviewer_timeout_ms` (default 10
 minutes). A timed-out reviewer still records any observed model/route proof that
 streamed before timeout. Candidate/planner/read-only harness streams carry an
-INACTIVITY watchdog (`runtime.harness_inactivity_timeout_ms`, default 20
+INACTIVITY watchdog (`runtime.harness_inactivity_timeout_ms`, default 60
 minutes; env `CLAUDEXOR_HARNESS_INACTIVITY_TIMEOUT_MS`): no useful agent
 progress for the window means the vendor CLI is wedged — the stream is aborted
 (process-group kill) and the attempt fails with a typed message instead of
@@ -2648,6 +2674,10 @@ code touching one of these areas must honor it or change it explicitly here.
   for diffing. An explicitly isolated read-only thread initializes the Git
   boundary first, while Git-backed write envelopes initialize per INV-075 and
   the implemented live Agent convergence path keeps its non-Git copied baseline.
+  A root equal to the user home directory or a filesystem root — or one that
+  cannot be classified — is refused with the typed `git_boundary_root_refused`
+  error before any mutation instead of being initialized (INV-075 exception);
+  ordinary non-git roots keep the announced auto-init.
   If exact capture or reversal cannot be proven for an explicit in-place run,
   Claudexor fails closed with a sanitized `manual_cleanup` receipt; it never
   substitutes an empty diff and asks reviewers to trust the live tree.

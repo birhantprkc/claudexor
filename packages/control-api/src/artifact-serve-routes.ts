@@ -248,7 +248,7 @@ function expiredRunBody(tombstone: { run_id: string; deleted_at: string }): {
  * cleanup, retention deletion) is skipped and a directory that vanishes
  * mid-walk lists as empty — a partial snapshot, never a 500. Only vanish
  * errnos (ENOENT/ENOTDIR) are tolerated; anything else stays loud. `.git`
- * subtrees are never enumerated (engine-owned churn — the reviewer-workspace
+ * entries are never enumerated (engine-owned churn — the reviewer-workspace
  * baseline repo lives inside the run tree) but remain fetchable by explicit
  * path. Symlinks are likewise skipped from the listing (pinned behavior).
  */

@@ -175,7 +175,10 @@ count.
 live Workspace Git status plus the engine-owned in-place/isolated run-shape
 matrix. Every isolated Ask/Plan/Agent thread needs Git and may initialize a
 non-Git project when explicitly selected; supported in-place non-Git paths stay
-available. Direct runs use eager Git admission. Thread turns persist first and
+available. Write-mode runs auto-initialize the Git boundary on ordinary
+non-git roots; the user home directory and filesystem roots get a typed
+refusal (`git_boundary_root_refused`) naming the remediation instead.
+Direct runs use eager Git admission. Thread turns persist first and
 run the same canonical preflight in the durable job before provider execution,
 so a refusal is inspectable and Exact Retry replays the unchanged request after
 Git is repaired.

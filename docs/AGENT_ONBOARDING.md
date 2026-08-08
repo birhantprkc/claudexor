@@ -152,7 +152,10 @@ Every mutating result carries a `runId`. The decision tree:
 - A run against a large non-git folder selects Isolated or another Git-backed
   shape: Claudexor may create a deterministic, announced baseline commit, so
   confirm with the human first. Supported in-place non-Git shapes do not trigger
-  that mutation.
+  that mutation. Never register the user home directory or a filesystem root
+  as a project root: write runs refuse to initialize a Git boundary there
+  (`git_boundary_root_refused`) — pick a project subfolder or run `git init`
+  plus a first commit yourself.
 
 ## Using Claudexor vs changing Claudexor
 
