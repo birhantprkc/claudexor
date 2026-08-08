@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeOutcomeFacts } from "@claudexor/schema";
+import { CLAUDEXOR_VERSION } from "@claudexor/util";
+import { CliError, controlProblemError, renderCliFailure } from "./cli-error.js";
+import { ENGINE_STOP_REMEDY, observedEngineSkew, recordEngineSkew } from "./engine-skew.js";
 import {
+  controlApiAddress,
   controlApiFetch,
   createRunEventLineFormatter,
   followRun,
@@ -694,16 +698,44 @@ describe("controlApiFetch create idempotency", () => {
   });
 });
 
-describe("handshake engine identity (v3.0.3 S4c)", () => {
-  it("discloses a daemon/CLI version skew from the handshake body on stderr, once", async () => {
-    const requests: string[] = [];
+/** Canonical ControlHandshakeResponse body for a serving engine identity. */
+function handshakeBody(version: string, sha = "unknown"): string {
+  return JSON.stringify({
+    protocolMajor: 3,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version, sha, entry: "/e" },
+  });
+}
+
+function jsonServer(
+  handler: (req: import("node:http").IncomingMessage) => {
+    status: number;
+    body: string;
+  },
+): Promise<{ server: Server; port: number; requests: string[] }> {
+  const requests: string[] = [];
+  return new Promise((resolve) => {
     const server = createServer((req, res) => {
       requests.push(req.url ?? "");
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: true, engine: { version: "9.9.9", sha: "x", entry: "/e" } }));
+      const out = handler(req);
+      res.writeHead(out.status, { "content-type": "application/json" });
+      res.end(out.body);
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const port = (server.address() as { port: number }).port;
+    server.listen(0, "127.0.0.1", () => {
+      resolve({ server, port: (server.address() as { port: number }).port, requests });
+    });
+  });
+}
+
+describe("handshake engine identity (v3.0.3 S4c)", () => {
+  afterEach(() => recordEngineSkew(null));
+
+  it("discloses a daemon/CLI version skew on stderr once per handshake AND records the skew", async () => {
+    const { server, port, requests } = await jsonServer(() => ({
+      status: 200,
+      body: handshakeBody("9.9.9", "x"),
+    }));
     const chunks: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
     (process.stderr as unknown as { write: (c: unknown) => boolean }).write = (c: unknown) => {
@@ -722,5 +754,415 @@ describe("handshake engine identity (v3.0.3 S4c)", () => {
     expect(warned).toContain("daemon is engine 9.9.9");
     expect(warned).toContain("claudexor daemon stop");
     expect(warned.match(/daemon is engine 9\.9\.9/g)).toHaveLength(2);
+    // The observed skew is recorded for the typed failure envelope (#93); the
+    // malformed "x" sha never rides along (echo hygiene).
+    expect(observedEngineSkew()).toEqual({
+      daemonVersion: "9.9.9",
+      cliVersion: CLAUDEXOR_VERSION,
+    });
+  });
+
+  it("overwrites a prior skew record on every successful handshake (clears when matching)", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 200,
+      body: handshakeBody(CLAUDEXOR_VERSION),
+    }));
+    recordEngineSkew({ daemonVersion: "9.9.9", cliVersion: CLAUDEXOR_VERSION });
+    try {
+      const identity = await handshakeControlApi({
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: "t",
+      });
+      expect(identity).toEqual({ engineVersion: CLAUDEXOR_VERSION, engineBuildSha: "unknown" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    // A long-lived MCP/ACP process that reconnects to a FIXED daemon must not
+    // keep annotating failures with the stale pre-fix skew.
+    expect(observedEngineSkew()).toBeNull();
+  });
+});
+
+/** Every projection-visible CliError field, for byte-identity comparisons. */
+function projectCliError(e: CliError): Record<string, unknown> {
+  return {
+    category: e.category,
+    message: e.message,
+    code: e.code,
+    retryable: e.retryable,
+    fieldErrors: e.fieldErrors,
+    requiredActions: e.requiredActions,
+    details: e.details,
+    context: e.context,
+  };
+}
+
+describe("typed handshake refusal (#93)", () => {
+  afterEach(() => recordEngineSkew(null));
+
+  it("preserves the server's typed 426 problem and appends the stop remedy", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 426,
+      body: JSON.stringify({
+        code: "incompatible_protocol_major",
+        message: "control protocol major 3 is incompatible; server requires 4",
+        retryable: false,
+        fieldErrors: {},
+        requiredActions: ["use control protocol major 4"],
+        evidenceRefs: [],
+      }),
+    }));
+    // A stale same-major record from an earlier daemon must NOT annotate the
+    // refusal of a daemon this handshake can no longer identify.
+    recordEngineSkew({ daemonVersion: "3.2.1", cliVersion: CLAUDEXOR_VERSION });
+    const stderrChunks: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown): boolean => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+    try {
+      const err = await handshakeControlApi({
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: "t",
+      }).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      const problem = err as CliError;
+      // The WIRE code rides intact — no parallel CLI-minted code.
+      expect(problem.code).toBe("incompatible_protocol_major");
+      expect(problem.message).toBe("control protocol major 3 is incompatible; server requires 4");
+      expect(problem.category).toBe("operational");
+      expect(problem.retryable).toBe(false);
+      expect(problem.requiredActions).toEqual(["use control protocol major 4", ENGINE_STOP_REMEDY]);
+      expect(problem.context?.["engineSkew"]).toBeUndefined();
+      expect(observedEngineSkew()).toBeNull();
+      // R1 C-C1: the typed problem's own message wins in the human projector,
+      // so the remedy must ALSO reach human stderr as one bounded advisory
+      // line (same voice as the same-major skew advisory).
+      const advisory = stderrChunks.join("");
+      expect(advisory).toContain("refused the control API handshake (HTTP 426)");
+      expect(advisory).toContain(ENGINE_STOP_REMEDY);
+      expect(advisory).not.toContain("server requires 4"); // bounded: no server text
+    } finally {
+      stderrSpy.mockRestore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.each(["daemon_stopping", "route_quarantined"])(
+    "passes a typed %s problem through UNCHANGED — no advisory, no appended remedy (R2)",
+    async (code) => {
+      // Only an ACTUAL protocol mismatch earns the mismatch treatment. A typed
+      // non-mismatch refusal (a healthy MATCHING daemon answering the handshake
+      // with daemon_stopping mid-shutdown, or any other typed problem) must be
+      // byte-identical to the plain controlProblemError projection of the same
+      // wire body: its own actions already say what to do, and the mismatch
+      // remedy would be a false diagnosis.
+      const wireBody = {
+        code,
+        message: "the daemon declined this handshake for its own typed reason",
+        retryable: true,
+        fieldErrors: {},
+        requiredActions: ["reconnect"],
+        evidenceRefs: [],
+      };
+      const { server, port } = await jsonServer(() => ({
+        status: 503,
+        body: JSON.stringify(wireBody),
+      }));
+      const stderrChunks: string[] = [];
+      const stderrSpy = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation((chunk: unknown): boolean => {
+          stderrChunks.push(String(chunk));
+          return true;
+        });
+      try {
+        const err = await handshakeControlApi({
+          baseUrl: `http://127.0.0.1:${port}`,
+          token: "t",
+        }).then(
+          () => null,
+          (thrown: unknown) => thrown,
+        );
+        expect(err).toBeInstanceOf(CliError);
+        const expected = controlProblemError(
+          503,
+          wireBody,
+          "the daemon refused the control API handshake (HTTP 503)",
+        );
+        expect(projectCliError(err as CliError)).toEqual(projectCliError(expected));
+        expect((err as CliError).requiredActions).toEqual(["reconnect"]);
+        expect(stderrChunks.join("")).toBe("");
+      } finally {
+        stderrSpy.mockRestore();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it("names the daemon and the stop remedy for an ancient daemon without /v2/handshake", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 404,
+      body: "<html>not found</html>",
+    }));
+    const stderrChunks: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown): boolean => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+    try {
+      const err = await handshakeControlApi({
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: "t",
+      }).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      const problem = err as CliError;
+      // Never the CLAUDEXOR_NO_CONTROL_API flatten, never echoed response text.
+      expect(problem.message).toContain("daemon");
+      expect(problem.message).toContain("claudexor daemon stop");
+      expect(problem.message).not.toContain("<html>");
+      expect(problem.requiredActions).toEqual([ENGINE_STOP_REMEDY]);
+      // The untyped fallback's own message names the remedy, so the human
+      // projector already shows it — no doubled advisory line (R1 C-C1).
+      expect(stderrChunks.join("")).toBe("");
+    } finally {
+      stderrSpy.mockRestore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("follow surfaces typed refusals through the projector (#93 R1)", () => {
+  let dir: string;
+  let prevConfigDir: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(realpathSync(tmpdir()), "claudexor-follow-r1-"));
+    prevConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    recordEngineSkew(null);
+  });
+  afterEach(() => {
+    if (prevConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+    else process.env.CLAUDEXOR_CONFIG_DIR = prevConfigDir;
+    recordEngineSkew(null);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writePointer(content: string): void {
+    const daemonDir = join(dir, "daemon");
+    mkdirSync(daemonDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(daemonDir, "control-api.json"), content, { mode: 0o600 });
+    writeFileSync(join(daemonDir, "token"), "tkn-r1", { mode: 0o600 });
+  }
+
+  function captureStderr(): { chunks: string[]; restore: () => void } {
+    const chunks: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
+      chunks.push(String(chunk));
+      return true;
+    });
+    return { chunks, restore: () => spy.mockRestore() };
+  }
+
+  it("rethrows the typed 426 and `follow --json` renders the canonical envelope", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 426,
+      body: JSON.stringify({
+        code: "incompatible_protocol_major",
+        message: "control protocol major 3 is incompatible; server requires 4",
+        retryable: false,
+        fieldErrors: {},
+        requiredActions: ["use control protocol major 4"],
+        evidenceRefs: [],
+      }),
+    }));
+    writePointer(JSON.stringify({ host: "127.0.0.1", port }));
+    const stderr = captureStderr();
+    try {
+      const err: unknown = await followRun("run-r1", true).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      // The typed CliError reaches the top-level projector intact — never the
+      // pre-fix `claudexor follow: <message>` flatten (return 1).
+      expect(err).toBeInstanceOf(CliError);
+      // Exactly what `claudexor follow --json` prints: renderCliFailure is the
+      // one projector the top-level catch feeds every thrown CliError into.
+      const stdoutChunks: string[] = [];
+      const stdoutSpy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: unknown): boolean => {
+          stdoutChunks.push(String(chunk));
+          return true;
+        });
+      let exitCode: number;
+      try {
+        exitCode = renderCliFailure(true, err);
+      } finally {
+        stdoutSpy.mockRestore();
+      }
+      expect(exitCode).toBe(1);
+      const envelope = JSON.parse(stdoutChunks.join("")) as Record<string, unknown>;
+      expect(envelope["ok"]).toBe(false);
+      expect(envelope["code"]).toBe("incompatible_protocol_major");
+      expect(envelope["message"]).toBe(
+        "control protocol major 3 is incompatible; server requires 4",
+      );
+      expect(envelope["retryable"]).toBe(false);
+      expect(envelope["requiredActions"]).toEqual([
+        "use control protocol major 4",
+        ENGINE_STOP_REMEDY,
+      ]);
+    } finally {
+      stderr.restore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("human path: the stop-remedy advisory reaches stderr before the rethrow", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 426,
+      body: JSON.stringify({
+        code: "incompatible_protocol_major",
+        message: "control protocol major 3 is incompatible; server requires 4",
+        retryable: false,
+        fieldErrors: {},
+        requiredActions: [],
+        evidenceRefs: [],
+      }),
+    }));
+    writePointer(JSON.stringify({ host: "127.0.0.1", port }));
+    const stderr = captureStderr();
+    try {
+      const err: unknown = await followRun("run-r1", false).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      const advisory = stderr.chunks.join("");
+      expect(advisory).toContain("refused the control API handshake (HTTP 426)");
+      expect(advisory).toContain(ENGINE_STOP_REMEDY);
+      // The rethrow means follow itself no longer prints the flatten line.
+      expect(advisory).not.toContain("claudexor follow:");
+    } finally {
+      stderr.restore();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("keeps the message-only fallback for UNTYPED transport errors (connect refused)", async () => {
+    // A pointer naming a port nobody listens on: fetch rejects with an untyped
+    // transport error — follow's bounded flatten stays, exit 1, no throw.
+    const probe = await jsonServer(() => ({ status: 200, body: "{}" }));
+    const deadPort = probe.port;
+    await new Promise<void>((resolve) => probe.server.close(() => resolve()));
+    writePointer(JSON.stringify({ host: "127.0.0.1", port: deadPort }));
+    const stderr = captureStderr();
+    try {
+      const code = await followRun("run-r1", false);
+      expect(code).toBe(1);
+      expect(stderr.chunks.join("")).toContain("claudexor follow:");
+    } finally {
+      stderr.restore();
+    }
+  });
+
+  it("is LOUD and bounded on a corrupt control-api pointer (R1 C-C3a)", async () => {
+    writePointer("{corrupt-not-json");
+    const stderr = captureStderr();
+    try {
+      const err: unknown = await followRun("run-r1", false).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      const problem = err as CliError;
+      expect(problem.code).toBe("control_pointer_invalid");
+      expect(problem.category).toBe("operational");
+      // Bounded: names the pointer path and the remedy, never the raw bytes.
+      expect(problem.message).toContain("control-api.json");
+      expect(problem.message).toContain("claudexor daemon stop");
+      expect(problem.message).not.toContain("{corrupt-not-json");
+      expect(problem.context).toEqual({ pointer: join(dir, "daemon", "control-api.json") });
+    } finally {
+      stderr.restore();
+    }
+  });
+});
+
+describe("control-api pointer structural validation (#93 R2)", () => {
+  let dir: string;
+  let prevConfigDir: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(realpathSync(tmpdir()), "claudexor-pointer-r2-"));
+    prevConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+  });
+  afterEach(() => {
+    if (prevConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+    else process.env.CLAUDEXOR_CONFIG_DIR = prevConfigDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writePointer(content: string): void {
+    const daemonDir = join(dir, "daemon");
+    mkdirSync(daemonDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(daemonDir, "control-api.json"), content, { mode: 0o600 });
+    writeFileSync(join(daemonDir, "token"), "tkn-r2", { mode: 0o600 });
+  }
+
+  function thrownBy(fn: () => unknown): unknown {
+    try {
+      fn();
+      return null;
+    } catch (err) {
+      return err;
+    }
+  }
+
+  it.each([
+    ["an empty object", "{}"],
+    ["a JSON null literal", "null"],
+    ["an empty host", '{"host":"","port":1}'],
+    ["a string port", '{"host":"127.0.0.1","port":"80"}'],
+    ["a non-integer port", '{"host":"127.0.0.1","port":80.5}'],
+    ["an out-of-range port", '{"host":"127.0.0.1","port":0}'],
+  ])("is LOUD control_pointer_invalid on %s (nonempty structural corruption)", (_name, content) => {
+    writePointer(content);
+    const err = thrownBy(() => controlApiAddress());
+    expect(err).toBeInstanceOf(CliError);
+    const problem = err as CliError;
+    expect(problem.code).toBe("control_pointer_invalid");
+    expect(problem.category).toBe("operational");
+    // Bounded: the pointer path and a short cause ride along — never the raw
+    // file content (the '"port"' key would only appear via a raw dump).
+    expect(problem.message).toContain("control-api.json");
+    expect(problem.message).toContain("structurally invalid");
+    expect(problem.message).toContain("claudexor daemon stop");
+    expect(problem.message).not.toContain('"port"');
+    expect(problem.context).toEqual({ pointer: join(dir, "daemon", "control-api.json") });
+  });
+
+  it.each([
+    ["zero-byte", ""],
+    ["whitespace-only", " \n\t"],
+  ])("keeps %s content as ABSENCE (adjudicated mid-write race window)", (_name, content) => {
+    writePointer(content);
+    const err = thrownBy(() => controlApiAddress());
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(CliError);
+    expect((err as Error).message).toContain("daemon control API is not available");
   });
 });

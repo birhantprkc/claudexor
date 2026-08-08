@@ -827,7 +827,7 @@ async function decisionCommand(args: ParsedArgs, json: boolean): Promise<number>
  *      the daemon for the run's absolute runDir (GET /runs/:id ->
  *      summary.runDir) and rebuild a store whose runPaths(runId).root matches.
  * Returns null when no store can be located (the run does not exist anywhere
- * reachable). Never throws on daemon unavailability — it falls through.
+ * reachable). Daemon absence falls through; a typed refusal (#93) propagates.
  */
 async function resolveRunStore(
   runId: string,
@@ -850,10 +850,10 @@ async function resolveRunStore(
   //    read-only lookup (a typo'd id must report "no such run", not silently
   //    launch a background daemon). Acting paths (decision/enqueue) still use
   //    ensureDaemon().
+  const conn = await connectDaemonIfRunning(); // typed refusal (#93) propagates
+  if (!conn) return null;
+  const { addr } = conn;
   try {
-    const conn = await connectDaemonIfRunning();
-    if (!conn) return null;
-    const { addr } = conn;
     const resp = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}`, {
       headers: { Authorization: `Bearer ${addr.token}` },
     });

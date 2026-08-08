@@ -12,7 +12,8 @@ import {
 } from "@claudexor/daemon";
 import { harnessRuntimeEnv } from "@claudexor/core";
 import { hashJson } from "@claudexor/util";
-import { controlProblemError } from "./cli-error.js";
+import { CliError, controlProblemError } from "./cli-error.js";
+import { recordEngineSkew } from "./engine-skew.js";
 import {
   controlApiAddress,
   controlApiFetch,
@@ -35,25 +36,32 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Is something accepting on the daemon socket right now? (cheap reachability probe). */
 async function daemonReachable(client: DaemonClientType): Promise<boolean> {
-  try {
-    await client.health();
-    return true;
-  } catch {
-    return false;
-  }
+  return client.health().then(
+    () => true,
+    () => false,
+  );
 }
 
-/** Is the daemon's control-api up and answering /healthz right now? */
+/** Is the daemon's control-api up and answering /healthz right now?
+ * Absence-vs-refusal (#93): null means ABSENCE only — no pointer file, connect
+ * refused/timeout, non-ok healthz (a STOPPING daemon's 503 included, R1 C-C3b),
+ * or the same stopping daemon losing the healthz/handshake race and answering
+ * the handshake with its typed `daemon_stopping` problem (R2) — and clears the
+ * skew record; any OTHER typed handshake problem THROWS, because "not
+ * reachable" would send callers into a doomed wait/auto-start. */
 async function controlApiReachable(): Promise<ControlApiAddress | null> {
   try {
     const addr = controlApiAddress();
     const res = await controlApiFetch(addr, "/healthz", { signal: AbortSignal.timeout(1500) });
-    if (!res.ok) return null;
-    await handshakeControlApi(addr);
-    return addr;
-  } catch {
-    return null;
+    if (res.ok) {
+      await handshakeControlApi(addr);
+      return addr;
+    }
+  } catch (err) {
+    if (err instanceof CliError && err.code !== "daemon_stopping") throw err;
   }
+  recordEngineSkew(null); // absence (stopping included): no live connection to be skewed with
+  return null;
 }
 
 /**
@@ -63,6 +71,9 @@ async function controlApiReachable(): Promise<ControlApiAddress | null> {
  * socket and the control-api.json pointer to come up. FAILS LOUDLY if the daemon
  * cannot be started — never silently falls back to an in-process run (the apply
  * gate refuses a run no daemon tracks, so an in-process run is un-unblockable).
+ * A daemon that is up but REFUSES the typed handshake fails IMMEDIATELY with
+ * that typed problem — including after an auto-start that lost the singleton
+ * race to a foreign daemon (macOS app relaunch) this CLI then handshakes (#93).
  */
 export async function ensureDaemon(
   timeoutMs = 30_000,
@@ -132,7 +143,8 @@ export async function ensureDaemon(
  * API is down. Used by read-only-looking run lookups (inspect/apply) so a typo'd
  * run id reports "no such run" instead of silently launching a background daemon
  * (`ensureDaemon`, by contrast, auto-starts and is reserved for paths that act —
- * enqueue/decision).
+ * enqueue/decision). A daemon that REFUSES the typed handshake is NOT "not
+ * running": the typed problem propagates — still without spawning (#93).
  */
 export async function connectDaemonIfRunning(): Promise<{
   client: DaemonClientType;
@@ -150,7 +162,8 @@ export async function connectDaemonIfRunning(): Promise<{
 /**
  * Poll until the daemon (socket + control API) is fully ready, or the timeout
  * elapses. Lets `claudexor daemon start` return only once a subsequent `status`
- * is guaranteed to succeed (no start/status race).
+ * is guaranteed to succeed (no start/status race). A typed handshake refusal
+ * propagates — waiting cannot fix an incompatible daemon (#93).
  */
 export async function waitForDaemonReady(
   timeoutMs = 15_000,

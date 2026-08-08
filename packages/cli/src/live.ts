@@ -12,7 +12,8 @@ import {
   processExitCode,
   runOutcomeLabel,
 } from "@claudexor/schema";
-import { CLAUDEXOR_VERSION } from "@claudexor/util";
+import { CliError, handshakeRefusalError } from "./cli-error.js";
+import { consumeHandshakeIdentity, recordEngineSkew, type EngineIdentity } from "./engine-skew.js";
 import { promptQuestionsOnTty } from "./interaction-prompt.js";
 export { collectInteractionAnswers } from "./interaction-prompt.js";
 
@@ -239,14 +240,45 @@ import { CONTROL_PROTOCOL_MAJOR } from "@claudexor/schema";
 export { CONTROL_PROTOCOL_MAJOR };
 
 export function controlApiAddress(): ControlApiAddress {
-  const info = JSON.parse(readFileSync(join(daemonDir(), "control-api.json"), "utf8")) as {
-    host?: string;
-    port?: number;
-  };
+  const pointer = join(daemonDir(), "control-api.json");
+  const absence = (): Error =>
+    new Error("daemon control API is not available (run: claudexor daemon start)");
+  // Corrupt local state must be LOUD (#93 R1/R2): a pointer that exists but is
+  // unreadable, unparsable, or structurally invalid ({} / null / wrong host or
+  // port types) is never "daemon not running". Bounded — the path and a short
+  // cause only, no raw dump of the file.
+  const invalid = (cause: string): CliError =>
+    new CliError(
+      "operational",
+      `daemon control-api pointer ${pointer} is ${cause}; ` +
+        "run `claudexor daemon stop` and rerun so a healthy daemon rewrites it",
+      { code: "control_pointer_invalid", retryable: false, context: { pointer } },
+    );
+  let raw: string;
+  try {
+    raw = readFileSync(pointer, "utf8").trim();
+  } catch (err) {
+    const errno = (err as NodeJS.ErrnoException).code;
+    if (errno === "ENOENT" || errno === "ENOTDIR") throw absence();
+    throw invalid(`unreadable${errno ? ` (${errno})` : ""}`);
+  }
+  // An EMPTY (or whitespace-only) pointer stays ABSENCE: the daemon's pointer
+  // write has an open-truncate→write window, and a racing reader must keep
+  // polling, never fail loud on the transient zero-byte state.
+  if (raw === "") throw absence();
+  let info: { host?: unknown; port?: unknown };
+  try {
+    info = (JSON.parse(raw) ?? {}) as { host?: unknown; port?: unknown };
+  } catch {
+    throw invalid("not valid JSON");
+  }
+  const { host, port } = info;
+  if (typeof host !== "string" || host === "") throw invalid("structurally invalid (bad host)");
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)
+    throw invalid("structurally invalid (bad port)");
   const token = readToken();
-  if (!info.host || !info.port || !token)
-    throw new Error("daemon control API is not available (run: claudexor daemon start)");
-  return { baseUrl: `http://${info.host}:${info.port}`, token };
+  if (!token) throw absence();
+  return { baseUrl: `http://${host}:${port}`, token };
 }
 
 /** One control-plane transport boundary for CLI, MCP and ACP projections. */
@@ -284,15 +316,6 @@ export function controlApiFetch(
   return fetch(`${addr.baseUrl}${externalPath}`, { ...init, headers });
 }
 
-/** The daemon's validated build identity from a successful handshake. The
- * engine version is the AUTHORITATIVE running-engine version (QA-033a): a
- * `release check` must trust this live process identity over the executing CLI
- * package constant. Null when the daemon did not report a well-formed version. */
-export interface EngineIdentity {
-  engineVersion: string | null;
-  engineBuildSha: string | null;
-}
-
 export async function handshakeControlApi(
   addr: ControlApiAddress,
   client = "claudexor-cli",
@@ -303,39 +326,24 @@ export async function handshakeControlApi(
     body: JSON.stringify({ protocolMajor: CONTROL_PROTOCOL_MAJOR, client }),
   });
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(
-      `control API handshake failed (HTTP ${response.status})${detail ? `: ${detail}` : ""}`,
-    );
+    // A refusing daemon IS running — never flatten this to "not reachable"
+    // (issue #93). handshakeRefusalError keeps the server's typed problem
+    // intact; only an ACTUAL protocol mismatch gets the stop remedy + human
+    // stderr advisory (R1 C-C1, R2). Clear any earlier skew record FIRST: it
+    // belonged to a daemon this handshake can no longer see and must not
+    // annotate this refusal as stale evidence.
+    recordEngineSkew(null);
+    throw handshakeRefusalError(response.status, await response.json().catch(() => null));
   }
-  // The handshake already reports the daemon's build identity precisely so a
-  // stale daemon is visible HERE instead of guessed later — consume it. A
-  // version skew is advisory (the protocol major gate above is the hard
-  // fence): disclose with the remedy. A CLI process handshakes once, so no
-  // dedup state is needed. The validated version is ALSO returned so callers
-  // (release check) can adopt the running engine's identity (QA-033a).
-  try {
-    const body = (await response.json()) as { engine?: { version?: string; sha?: string } };
-    const raw = body.engine?.version;
-    const rawSha = body.engine?.sha;
-    // Same echo hygiene as the plugin-skew check: never print an arbitrary
-    // response-sourced string into the terminal.
-    const daemonVersion = raw && /^[\w.+-]{1,32}$/.test(raw) ? raw : undefined;
-    if (daemonVersion && daemonVersion !== CLAUDEXOR_VERSION) {
-      process.stderr.write(
-        `claudexor: daemon is engine ${daemonVersion} but this CLI is ${CLAUDEXOR_VERSION}; ` +
-          `run \`claudexor daemon stop\` and rerun the command so a matching daemon starts\n`,
-      );
-    }
-    const daemonBuildSha =
-      rawSha === "unknown" || (typeof rawSha === "string" && /^[0-9a-f]{40}$/.test(rawSha))
-        ? rawSha
-        : null;
-    return { engineVersion: daemonVersion ?? null, engineBuildSha: daemonBuildSha };
-  } catch {
-    // Identity is advisory; a body parse failure never fails the handshake.
-    return { engineVersion: null, engineBuildSha: null };
-  }
+  // The handshake reports the daemon's build identity precisely so a stale
+  // daemon is visible HERE instead of guessed later (QA-033a). The canonical
+  // envelope parse, echo hygiene, and the module-scoped skew record (consumed
+  // by controlProblemError as typed failure evidence) live in engine-skew.ts.
+  // A same-major skew stays ADVISORY — the protocol major gate above is the
+  // only hard fence — and is disclosed once per handshake with the remedy.
+  const identity = consumeHandshakeIdentity(await response.json().catch(() => null));
+  if (identity.skewAdvisory) process.stderr.write(identity.skewAdvisory);
+  return identity.engine;
 }
 
 /**
@@ -352,6 +360,11 @@ export async function followRun(runId: string, json: boolean): Promise<number> {
     addr = controlApiAddress();
     await handshakeControlApi(addr);
   } catch (err) {
+    // A typed CliError (the 426 refusal, a corrupt pointer) carries code/
+    // retryable/requiredActions — rethrow to the top-level projector so
+    // `follow --json` gets the canonical envelope (R1 C-C2). Only untyped
+    // transport errors keep the bounded message-only fallback.
+    if (err instanceof CliError) throw err;
     process.stderr.write(`claudexor follow: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;
   }

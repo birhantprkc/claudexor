@@ -22,6 +22,7 @@
 import { ControlProblem } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import { printJson, printJsonLine } from "./cli-io.js";
+import { ENGINE_STOP_REMEDY, stampEngineSkew } from "./engine-skew.js";
 
 export type CliErrorCategory = "usage" | "operational";
 
@@ -375,25 +376,40 @@ export function renderCliFailure(
  * derived from the HTTP status: 400/422 are validation (exit 2), everything
  * else is an operational failure (exit 1). Context strings are bounded so a
  * localized git/tool stderr rides as bounded evidence.
+ *
+ * This is ALSO the one choke point where an observed daemon/CLI version skew
+ * is stamped onto every typed control failure (`stampEngineSkew`, issue #93):
+ * a stale daemon's own problem (e.g. 422 config_invalid) then names its real
+ * cause and the stop remedy. Unskewed connections pass through untouched.
+ * `opts.appendRequiredActions` lets a caller (the handshake-refusal path)
+ * append remedy actions without forging the problem's own fields.
  */
 export function controlProblemError(
   status: number,
   body: unknown,
   fallbackMessage: string,
+  opts: { appendRequiredActions?: string[] } = {},
 ): CliError {
   const category: CliErrorCategory = status === 400 || status === 422 ? "usage" : "operational";
   const parsed = ControlProblem.safeParse(body);
   if (parsed.success) {
     const pb = parsed.data;
-    return new CliError(category, pb.message || fallbackMessage, {
-      code: pb.code,
-      retryable: pb.retryable,
-      fieldErrors: nonEmptyRecord(pb.fieldErrors),
-      requiredActions: nonEmptyArray(pb.requiredActions),
-      // RAW: redactProblem redacts before it bounds (finding 6).
-      context: nonEmptyContext(pb.context),
-      ...(pb.evidenceRefs.length > 0 ? { details: { evidenceRefs: pb.evidenceRefs } } : {}),
-    });
+    return new CliError(
+      category,
+      pb.message || fallbackMessage,
+      stampEngineSkew(
+        {
+          code: pb.code,
+          retryable: pb.retryable,
+          fieldErrors: nonEmptyRecord(pb.fieldErrors),
+          requiredActions: nonEmptyArray(pb.requiredActions),
+          // RAW: redactProblem redacts before it bounds (finding 6).
+          context: nonEmptyContext(pb.context),
+          ...(pb.evidenceRefs.length > 0 ? { details: { evidenceRefs: pb.evidenceRefs } } : {}),
+        },
+        opts.appendRequiredActions,
+      ),
+    );
   }
   // Not a typed ControlProblem: salvage message/error/code without inventing fields.
   const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
@@ -406,5 +422,46 @@ export function controlProblemError(
   const code = typeof record["code"] === "string" ? (record["code"] as string) : undefined;
   const retryable =
     typeof record["retryable"] === "boolean" ? (record["retryable"] as boolean) : undefined;
-  return new CliError(category, message, { code, retryable });
+  return new CliError(
+    category,
+    message,
+    stampEngineSkew({ code, retryable }, opts.appendRequiredActions),
+  );
+}
+
+/**
+ * The handshake-refusal problem (#93): a daemon that ANSWERS but refuses this
+ * CLI's /v2/handshake. The version-mismatch treatment — the appended stop
+ * remedy plus ONE bounded stderr advisory line naming it (the human projector
+ * prints only `message`, so requiredActions alone would keep the remedy
+ * machine-side, R1 C-C1) — fires ONLY for an ACTUAL protocol mismatch (typed
+ * 426 incompatible_protocol_major). Any OTHER typed problem (e.g. a healthy
+ * matching daemon answering `daemon_stopping` mid-shutdown) rides through
+ * `controlProblemError` UNCHANGED — no advisory, no appended action — because
+ * its own code and actions already say what to do, and the mismatch remedy
+ * would be a false diagnosis (R2). An ancient daemon without the route (404,
+ * non-problem body) keeps the daemon-naming fallback message instead of echoed
+ * response text; that message names the remedy itself, so no advisory either.
+ */
+export function handshakeRefusalError(status: number, body: unknown): CliError {
+  const problem = ControlProblem.safeParse(body);
+  if (problem.success && problem.data.code !== "incompatible_protocol_major") {
+    return controlProblemError(
+      status,
+      body,
+      `the daemon refused the control API handshake (HTTP ${status})`,
+    );
+  }
+  if (problem.success) {
+    process.stderr.write(
+      `claudexor: the daemon refused the control API handshake (HTTP ${status}); ${ENGINE_STOP_REMEDY}\n`,
+    );
+  }
+  return controlProblemError(
+    status,
+    problem.success ? body : null,
+    `the daemon refused the control API handshake (HTTP ${status}); ` +
+      `an incompatible or older daemon build may be holding this socket — ${ENGINE_STOP_REMEDY}`,
+    { appendRequiredActions: [ENGINE_STOP_REMEDY] },
+  );
 }
