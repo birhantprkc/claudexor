@@ -1,5 +1,11 @@
 # @claudexor/secrets
 
+## 3.3.12
+
+### Patch Changes
+
+- @claudexor/util@3.3.12
+
 ## 3.3.0
 
 ### Patch Changes

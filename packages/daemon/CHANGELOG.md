@@ -1,5 +1,14 @@
 # @claudexor/daemon
 
+## 3.3.12
+
+### Patch Changes
+
+- @claudexor/core@3.3.12
+- @claudexor/journal@3.3.12
+- @claudexor/schema@3.3.12
+- @claudexor/util@3.3.12
+
 ## 3.3.0
 
 ### Patch Changes
