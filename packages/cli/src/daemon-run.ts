@@ -36,12 +36,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Is something accepting on the daemon socket right now? (cheap reachability probe). */
 async function daemonReachable(client: DaemonClientType): Promise<boolean> {
-  try {
-    await client.health();
-    return true;
-  } catch {
-    return false;
-  }
+  return client.health().then(
+    () => true,
+    () => false,
+  );
 }
 
 /** Is the daemon's control-api up and answering /healthz right now?
@@ -53,6 +51,8 @@ async function controlApiReachable(): Promise<ControlApiAddress | null> {
   try {
     const addr = controlApiAddress();
     const res = await controlApiFetch(addr, "/healthz", { signal: AbortSignal.timeout(1500) });
+    // DECLINED loudness (R1 C-C3b): a non-ok healthz — a STOPPING daemon's 503
+    // included — is absence-in-progress; waiting/auto-start is the designed UX.
     if (res.ok) {
       await handshakeControlApi(addr);
       return addr;

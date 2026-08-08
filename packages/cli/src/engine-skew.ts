@@ -32,6 +32,15 @@ export interface EngineSkew {
   cliVersion: string;
 }
 
+/** The daemon's validated build identity from a successful handshake. The
+ * engine version is the AUTHORITATIVE running-engine version (QA-033a): a
+ * `release check` must trust this live process identity over the executing CLI
+ * package constant. Null when the daemon did not report a well-formed version. */
+export interface EngineIdentity {
+  engineVersion: string | null;
+  engineBuildSha: string | null;
+}
+
 /** The ONE remedy wording — stderr advisory and typed requiredActions speak
  * with the same voice. Accurate remedy: `ensureDaemon` auto-starts the CLI's
  * own dist daemon, which cannot mismatch (a running macOS app may still
@@ -61,7 +70,7 @@ const BUILD_SHA_RE = /^[0-9a-f]{40}$/;
 
 export interface HandshakeIdentity {
   /** The daemon's validated build identity (QA-033a); nulls when unreported. */
-  engine: { engineVersion: string | null; engineBuildSha: string | null };
+  engine: EngineIdentity;
   /** Pre-formatted stderr advisory line for a same-major skew; null when the
    * daemon matches this CLI (or reported no well-formed version). */
   skewAdvisory: string | null;

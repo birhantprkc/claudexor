@@ -22,7 +22,7 @@
 import { ControlProblem } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import { printJson, printJsonLine } from "./cli-io.js";
-import { stampEngineSkew } from "./engine-skew.js";
+import { ENGINE_STOP_REMEDY, stampEngineSkew } from "./engine-skew.js";
 
 export type CliErrorCategory = "usage" | "operational";
 
@@ -426,5 +426,35 @@ export function controlProblemError(
     category,
     message,
     stampEngineSkew({ code, retryable }, opts.appendRequiredActions),
+  );
+}
+
+/**
+ * The handshake-refusal problem (#93): a daemon that ANSWERS but refuses this
+ * CLI's /v2/handshake. The server's typed problem (426
+ * incompatible_protocol_major) rides intact with the stop remedy appended; an
+ * ancient daemon without the route (404, non-problem body) gets a
+ * daemon-naming fallback instead of echoed response text.
+ *
+ * The human projector prints only `message`, so a typed problem's own wording
+ * would keep the remedy machine-side (requiredActions) — invisible on a
+ * terminal. A TYPED refusal therefore also writes ONE bounded stderr advisory
+ * line naming the stop remedy, in the same voice as the same-major skew
+ * advisory (R1 C-C1); the typed envelope itself is unchanged. The untyped
+ * fallback path already names the remedy in its message and gets no advisory.
+ */
+export function handshakeRefusalError(status: number, body: unknown): CliError {
+  const typed = ControlProblem.safeParse(body).success;
+  if (typed) {
+    process.stderr.write(
+      `claudexor: the daemon refused the control API handshake (HTTP ${status}); ${ENGINE_STOP_REMEDY}\n`,
+    );
+  }
+  return controlProblemError(
+    status,
+    typed ? body : null,
+    `the daemon refused the control API handshake (HTTP ${status}); ` +
+      `an incompatible or older daemon build may be holding this socket — ${ENGINE_STOP_REMEDY}`,
+    { appendRequiredActions: [ENGINE_STOP_REMEDY] },
   );
 }

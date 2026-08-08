@@ -431,6 +431,35 @@ describe("absence vs refusal discrimination (#93)", () => {
     expect(observedEngineSkew()).toBeNull();
   });
 
+  it("connectDaemonIfRunning: a CORRUPT control-api pointer is LOUD, never 'not running' (R1 C-C3a)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const daemonDir = join(dir, "daemon");
+    mkdirSync(daemonDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(daemonDir, "token"), "tkn-93\n", { mode: 0o600 });
+    writeFileSync(join(daemonDir, "control-api.json"), "{corrupt-not-json", { mode: 0o600 });
+    const err: unknown = await connectDaemonIfRunning().then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    const problem = err as CliError;
+    expect(problem.code).toBe("control_pointer_invalid");
+    // Bounded: the pointer path rides along; the raw bytes never do.
+    expect(problem.message).toContain("control-api.json");
+    expect(problem.message).not.toContain("{corrupt-not-json");
+  });
+
+  it("connectDaemonIfRunning: an EMPTY pointer (mid-write race window) stays absence", async () => {
+    // The daemon's pointer write has an open-truncate→write window; a reader
+    // racing it sees zero bytes and must keep polling, not fail loud.
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const daemonDir = join(dir, "daemon");
+    mkdirSync(daemonDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(daemonDir, "token"), "tkn-93\n", { mode: 0o600 });
+    writeFileSync(join(daemonDir, "control-api.json"), "", { mode: 0o600 });
+    expect(await connectDaemonIfRunning()).toBeNull();
+  });
+
   it("connectDaemonIfRunning: a typed handshake refusal PROPAGATES instead of reading as 'not running'", async () => {
     socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
     const api = await fakeControlApi(TYPED_426);
