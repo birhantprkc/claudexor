@@ -214,3 +214,109 @@ describe("runCliHarness proven-death terminal", () => {
     expect(tu?.unresolved).toHaveLength(1);
   }, 15_000);
 });
+
+// GH #120: the redacted stderr tail must ride the terminal completed payload on
+// EVERY exit path — zero exit and abort included — whenever the ring is
+// non-empty after trim. It is a raw diagnostics channel (events.jsonl / SSE /
+// --json-stream), never a verdict axis and never severity-classified (INV-049).
+// Children write stderr via fs.writeSync(2, ...) so the bytes are in the pipe
+// synchronously — console.error to a pipe is async on POSIX and process.exit
+// (or a kill) could truncate it, making the ring assertion flaky.
+describe("runCliHarness stderr tail on every exit path", () => {
+  const collect = async (opts: {
+    args: string[];
+    redact?: (text: string) => string;
+    parseStderrFailure?: (stderr: string, sessionId: string) => HarnessEvent | null;
+  }): Promise<HarnessEvent[]> => {
+    const events: HarnessEvent[] = [];
+    for await (const ev of runCliHarness({
+      bin: process.execPath,
+      args: opts.args,
+      spec: spec(),
+      parseEvent: () => null,
+      ...(opts.redact ? { redact: opts.redact } : {}),
+      ...(opts.parseStderrFailure ? { parseStderrFailure: opts.parseStderrFailure } : {}),
+    })) {
+      events.push(ev);
+    }
+    return events;
+  };
+
+  it("attaches a redacted stderr_tail on a ZERO exit (custom redact proves the seam)", async () => {
+    const events = await collect({
+      args: ["-e", "require('node:fs').writeSync(2, 'diag: token tok-cafebabe seen\\n')"],
+      redact: (text) => text.replaceAll("tok-cafebabe", "[scrubbed]"),
+    });
+    const completed = events.at(-1);
+    expect(completed?.type).toBe("completed");
+    expect(completed?.payload?.["exit_code"]).toBe(0);
+    const tail = completed?.payload?.["stderr_tail"];
+    expect(typeof tail).toBe("string");
+    expect(tail).toContain("[scrubbed]");
+    expect(tail).not.toContain("tok-cafebabe");
+  }, 15_000);
+
+  it("omits the key entirely for a provably-silent child (trim semantics)", async () => {
+    // An empty -e script writes nothing to stderr; the tail is empty after
+    // trim, so the key must be ABSENT — not present-and-empty.
+    const events = await collect({ args: ["-e", ""] });
+    const completed = events.at(-1);
+    expect(completed?.type).toBe("completed");
+    expect(completed?.payload?.["exit_code"]).toBe(0);
+    expect(completed?.payload && "stderr_tail" in completed.payload).toBe(false);
+  }, 15_000);
+
+  it("preserves the tail on the ABORT path", async () => {
+    // The child writes its stderr line SYNCHRONOUSLY before announcing
+    // readiness on stdout, so the bytes are already buffered parent-side when
+    // the abort kills it — the ring drains them while the stream winds down.
+    const ac = new AbortController();
+    const runSpec = spec();
+    runSpec.extra["abortSignal"] = ac.signal;
+    const events: HarnessEvent[] = [];
+    for await (const ev of runCliHarness({
+      bin: process.execPath,
+      args: [
+        "-e",
+        "require('node:fs').writeSync(2, 'pre-abort stderr noise\\n');" +
+          "console.log(JSON.stringify({ type: 'ready' }));" +
+          "setTimeout(() => {}, 5000)",
+      ],
+      spec: runSpec,
+      parseEvent: (obj) => {
+        if ((obj as Record<string, unknown>)["type"] === "ready") {
+          ac.abort();
+          return [];
+        }
+        return null;
+      },
+    })) {
+      events.push(ev);
+    }
+    const completed = events.at(-1);
+    expect(completed?.type).toBe("completed");
+    expect(completed?.payload?.["aborted"]).toBe(true);
+    expect(completed?.payload?.["stderr_tail"]).toContain("pre-abort stderr noise");
+  }, 15_000);
+
+  it("keeps the NONZERO path unchanged: prose fold + parseStderrFailure argument, plus the typed tail", async () => {
+    let failureTailArg: string | null = null;
+    const events = await collect({
+      args: ["-e", "require('node:fs').writeSync(2, 'fatal: broke badly\\n'); process.exit(3)"],
+      parseStderrFailure: (stderr) => {
+        failureTailArg = stderr;
+        return null; // fall through to the generic synthesized error
+      },
+    });
+    // The failure-path argument still receives the tail (harness-codex depends on it) ...
+    expect(failureTailArg).toContain("fatal: broke badly");
+    // ... the synthesized error still folds the tail into prose ...
+    const err = events.find((e) => e.type === "error");
+    expect(err?.error).toMatch(/exited with code 3: [\s\S]*fatal: broke badly/);
+    // ... and the terminal payload now ALSO carries the typed copy (deliberate duplication).
+    const completed = events.at(-1);
+    expect(completed?.type).toBe("completed");
+    expect(completed?.payload?.["exit_code"]).toBe(3);
+    expect(completed?.payload?.["stderr_tail"]).toContain("fatal: broke badly");
+  }, 15_000);
+});

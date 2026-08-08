@@ -26,6 +26,15 @@ export const InteractionTimeoutValue = z
   .max(INTERACTION_TIMEOUT_MAX_MS)
   .nullable();
 
+/** Canonical default for the harness inactivity watchdog (GH #129): how long a
+ * harness stream may stay without typed agent progress before it is aborted
+ * with a typed timeout. One named owner consumed by BOTH default sites —
+ * `GlobalConfig.runtime.harness_inactivity_timeout_ms` here and the read-only
+ * `ControlSettingsSnapshot.runtime.harnessInactivityTimeoutMs` mirror in
+ * control.ts — so the two literals cannot drift. This is an absent-field
+ * default only: an explicit persisted value is never migrated. */
+export const HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS = 3_600_000;
+
 const ProjectProtectedPathGlob = NonBlankString.regex(
   /^(?!\/)(?![A-Za-z]:)(?!.*\\)(?!.*\0)(?!.*\/\/)(?!.*\/$)(?!.*(?:^|\/)\.\.?(?:\/|$))\S(?:.*\S)?$/,
   "must be a canonical repo-relative glob using forward slashes, without absolute roots, empty/dot segments, or '..' traversal",
@@ -236,15 +245,19 @@ export const GlobalConfig = z
          * aborted (process-group kill) and the attempt fails with a typed
          * timeout instead of parking the run in `running` forever. Distinct
          * from the reviewer wall-clock timeout: long runs are fine as long as
-         * they keep emitting. Note the timer resets on HARNESS events — a tool
-         * call that streams nothing for the whole window is indistinguishable
-         * from a hang and will be killed.
+         * they keep making useful progress. The timer re-arms ONLY on typed
+         * agent progress (non-empty thinking/message, tool calls/results,
+         * file changes, plan progress, completed compaction — the
+         * countsAsAgentProgress policy in @claudexor/core); status/usage/
+         * transport chatter never postpones it, waiting on a user interaction
+         * suspends it, and a single tool call that streams nothing for the
+         * whole window is indistinguishable from a hang and will be killed.
          */
         harness_inactivity_timeout_ms: z
           .number()
           .int()
           .positive()
-          .default(1_200_000)
+          .default(HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS)
           .describe(
             "Inactivity watchdog for harness streams: no events for this window aborts the stream and fails the attempt with a typed timeout.",
           ),

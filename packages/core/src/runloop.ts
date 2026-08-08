@@ -10,8 +10,18 @@ import type { ProcessTreeTerminationOutcome, ReapProcessTreeOptions } from "./pr
  * spawned binary and translates lines into normalized HarnessEvents. This loop
  * owns the parts that previously drifted between four copy-pasted variants:
  *
- * - stderr is captured (bounded ring buffer) and surfaced on failure instead of
- *   being silently dropped;
+ * - stderr is captured (bounded ring buffer, adapter-redacted) and attached to
+ *   the terminal `completed` payload as `stderr_tail` whenever it is non-empty
+ *   — raw diagnostics only, never a verdict axis (INV-116 untouched), and
+ *   double-redacted downstream (the orchestrator's redactHarnessEvent runs
+ *   before events.jsonl persistence). The tail rides that terminal event, so
+ *   persistence into attempt events is guaranteed for consumers that drain
+ *   this stream to completion (zero and nonzero exits alike); an
+ *   orchestrator-side abort that stops consuming before the terminal event
+ *   will not persist it (bounded residue, ledgered). On an unexplained
+ *   nonzero exit the same tail is additionally folded into the synthesized
+ *   error text (adapters parse that failure-path argument — deliberate
+ *   duplication);
  * - unparseable stdout lines and recognized-but-unmapped native events are
  *   COUNTED and reported on the terminal `completed` event payload
  *   (`dropped_unparsed_lines` / `dropped_unrecognized_events`), never silently
@@ -243,6 +253,12 @@ export async function* runCliHarness(opts: CliRunLoopOptions): AsyncGenerator<Ha
   // a process crash the orchestrator classifies without parsing prose.
   if (!aborted && exitSignal) payload["exit_signal"] = exitSignal;
   if (spawnFailed) payload["spawn_failed"] = true;
+  // Raw stderr diagnostics ride EVERY terminal payload (GH #120) — zero-exit and
+  // aborted runs previously discarded the ring. Bounded + redacted here, redacted
+  // again by the orchestrator before persistence; surfaced only through the raw
+  // diagnostics channel (events.jsonl / SSE / --json-stream), never classified.
+  const stderrDetail = stderrTail();
+  if (stderrDetail) payload["stderr_tail"] = stderrDetail;
   yield {
     type: "completed",
     session_id: spec.session_id,

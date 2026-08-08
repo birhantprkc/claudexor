@@ -14,7 +14,7 @@ import {
   type ControlArtifactInfo,
 } from "@claudexor/schema";
 import { containsSecretLikeToken, redactSecrets } from "@claudexor/util";
-import { safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
+import { isVanishedErrno, safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
 import { readRunTombstone } from "./retention.js";
 import type { DaemonRunRecord } from "./daemon-server.js";
 
@@ -241,14 +241,39 @@ function expiredRunBody(tombstone: { run_id: string; deleted_at: string }): {
   };
 }
 
+/**
+ * Enumerate an artifact tree as a point-in-time SNAPSHOT that tolerates
+ * concurrent mutation (GH #128): an entry that vanishes between readdir and
+ * lstat (git's atomic tmp-object renames in reviewer workspaces, workspace
+ * cleanup, retention deletion) is skipped and a directory that vanishes
+ * mid-walk lists as empty — a partial snapshot, never a 500. Only vanish
+ * errnos (ENOENT/ENOTDIR) are tolerated; anything else stays loud. `.git`
+ * subtrees are never enumerated (engine-owned churn — the reviewer-workspace
+ * baseline repo lives inside the run tree) but remain fetchable by explicit
+ * path. Symlinks are likewise skipped from the listing (pinned behavior).
+ */
 export function listArtifacts(root: string): ControlArtifactInfo[] {
   const safeRoot = safeArtifactRoot(root);
   if (!safeRoot) return [];
   const out: ControlArtifactInfo[] = [];
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch (err) {
+      if (isVanishedErrno(err)) return; // directory vanished mid-walk → empty subtree
+      throw err;
+    }
+    for (const name of names) {
+      if (name === ".git") continue;
       const abs = join(dir, name);
-      const st = lstatSync(abs);
+      let st: ReturnType<typeof lstatSync>;
+      try {
+        st = lstatSync(abs);
+      } catch (err) {
+        if (isVanishedErrno(err)) continue; // entry vanished between readdir and lstat
+        throw err;
+      }
       if (st.isSymbolicLink()) continue;
       const rel = relative(safeRoot, abs).split(sep).join("/");
       out.push({

@@ -46,11 +46,13 @@ function unknownEventKindIsNotProgress(_kind: never): false {
 }
 
 /**
- * The one closed policy for the 20-minute no-agent-progress window.
- * Lifecycle, transport, retry, usage, error, and interaction events stay in
- * telemetry/UI but cannot postpone the watchdog. Interaction waiting is
- * handled separately by `isSuspended`: the interaction policy may impose a
- * finite answer deadline or disable it until answer/cancel/terminal/restart.
+ * The one closed policy for the no-agent-progress window
+ * (`runtime.harness_inactivity_timeout_ms`; its default is owned by the
+ * config schema). Lifecycle, transport, retry, usage, error, and interaction
+ * events stay in telemetry/UI but cannot postpone the watchdog. Interaction
+ * waiting is handled separately by `isSuspended`: the interaction policy may
+ * impose a finite answer deadline or disable it until
+ * answer/cancel/terminal/restart.
  */
 export function countsAsAgentProgress(event: HarnessEvent): boolean {
   if (event.plan_progress !== undefined) return true;

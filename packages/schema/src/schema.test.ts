@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { EffortHint, mergeEffortLadders } from "./effort.js";
 import {
   CredentialProfile,
+  HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
   ControlCredentialProfilesResponse,
   ControlRunDecisionRequest,
   ControlRunSummary,
@@ -149,6 +150,24 @@ describe("ControlSettingsSnapshot", () => {
     expect(snapshot.runtime.transientRetry.maxRetries).toBe(3);
     expect(snapshot.runtime.transientRetry.initialDelayMs).toBe(2_000);
     expect(snapshot.runtime.transientRetry.maxDelayMs).toBe(20_000);
+  });
+});
+
+// GH #129: the harness inactivity watchdog default has ONE named owner
+// (HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS in the config schema module) consumed
+// by BOTH default sites, so the persisted-config and wire-snapshot literals
+// cannot drift. Absent-field semantics only: explicit values are never migrated.
+describe("harness inactivity watchdog default", () => {
+  it("defaults runtime.harness_inactivity_timeout_ms to the named constant", () => {
+    expect(GlobalConfig.parse({}).runtime.harness_inactivity_timeout_ms).toBe(
+      HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
+    );
+  });
+
+  it("mirrors the same default on the ControlSettingsSnapshot wire schema", () => {
+    expect(ControlSettingsSnapshot.parse({}).runtime.harnessInactivityTimeoutMs).toBe(
+      HARNESS_INACTIVITY_TIMEOUT_DEFAULT_MS,
+    );
   });
 });
 
