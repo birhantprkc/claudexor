@@ -173,6 +173,18 @@ describe("an applied boundary is a proof, never a name", () => {
       applyConfinement({ ...fixture.input, worktree: fixture.input.operatorHome }),
     ).toThrowError(ConfinementUnavailableError);
   });
+
+  it("refuses that same contradiction on hosts that have no boundary mechanism at all", () => {
+    // The regression this pins: a host with no mechanism (every non-macOS
+    // platform, and a macOS without sandbox-exec) used to return "no boundary
+    // here" BEFORE the self-defeating layout was noticed, so the contradiction
+    // sailed through as a quiet scoped-HOME run. The refusal is about the
+    // policy's own shape and must not depend on the platform probe.
+    const swallowing = { ...fixture.input, worktree: fixture.input.operatorHome };
+    for (const host of [LINUX_HOST, WINDOWS_HOST, DARWIN_WITHOUT_SEATBELT]) {
+      expect(() => applyConfinement(swallowing, host)).toThrowError(ConfinementUnavailableError);
+    }
+  });
 });
 
 describe("a host with no boundary works and says so", () => {

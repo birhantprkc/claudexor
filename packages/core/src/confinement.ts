@@ -358,12 +358,13 @@ export function applyConfinement(
   input: ConfinementInput,
   host: ConfinementHost = DEFAULT_HOST,
 ): ConfinementOutcome {
-  const available = confinementMechanism(host);
-  if (!available.mechanism) return { confinement: null, unavailableReason: available.reason };
   const denied = confinementDeniedReadPaths(input);
   // The carve-outs re-open whatever they contain, so an "own root" that CONTAINS
-  // a denied path silently defeats the policy. Refuse rather than emit one that
-  // reads like a boundary and is not.
+  // a denied path silently defeats the policy. This contradiction is Claudexor's
+  // own layout being wrong, not a platform fact, so it is refused BEFORE the
+  // host is asked whether it can enforce anything: a host with no boundary must
+  // not turn a self-defeating policy into a quiet scoped-HOME run. Refuse rather
+  // than emit one that reads like a boundary and is not.
   const swallowed = ownRoots(input).find((root) =>
     denied.some((path) => path !== root && contains(root, path)),
   );
@@ -372,6 +373,8 @@ export function applyConfinement(
       `filesystem confinement would be self-defeating: the allowed root ${swallowed} contains a path the policy must deny`,
     );
   }
+  const available = confinementMechanism(host);
+  if (!available.mechanism) return { confinement: null, unavailableReason: available.reason };
   const profile = available.mechanism.buildProfile(input, available.bin);
   const probeCandidate = denied.find((path) => host.exists(path));
   if (!probeCandidate) {
