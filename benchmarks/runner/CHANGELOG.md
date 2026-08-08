@@ -1,5 +1,11 @@
 # claudexor-benchmark-runner
 
+## 3.3.13
+
+### Patch Changes
+
+- @claudexor/util@3.3.13
+
 ## 3.3.12
 
 ### Patch Changes

@@ -1,5 +1,32 @@
 # @claudexor/cli
 
+## 3.3.13
+
+### Patch Changes
+
+- @claudexor/acp-server@3.3.13
+- @claudexor/artifact-store@3.3.13
+- @claudexor/config@3.3.13
+- @claudexor/control-api@3.3.13
+- @claudexor/core@3.3.13
+- @claudexor/daemon@3.3.13
+- @claudexor/delivery@3.3.13
+- @claudexor/gateway@3.3.13
+- @claudexor/harness-claude@3.3.13
+- @claudexor/harness-codex@3.3.13
+- @claudexor/harness-cursor@3.3.13
+- @claudexor/harness-fake@3.3.13
+- @claudexor/harness-opencode@3.3.13
+- @claudexor/harness-raw-api@3.3.13
+- @claudexor/journal@3.3.13
+- @claudexor/mcp-server@3.3.13
+- @claudexor/orchestrator@3.3.13
+- @claudexor/review@3.3.13
+- @claudexor/schema@3.3.13
+- @claudexor/secrets@3.3.13
+- @claudexor/util@3.3.13
+- @claudexor/workspace@3.3.13
+
 ## 3.3.12
 
 ### Patch Changes
