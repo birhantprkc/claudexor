@@ -3016,11 +3016,11 @@ export class Orchestrator {
     log.emit("task.contract.created", { task_contract_hash: hashJson(contract) });
 
     // Write modes need a git boundary for worktree isolation and honest diffs.
-    // A non-git project folder is initialized automatically (gitignore seed +
-    // baseline commit), announced in the timeline — never a refusal, never a
-    // silent mutation (user-locked decision, comparator: Codex requires git).
-    // For an isolated thread the execution root is already a git worktree, so
-    // this is a no-op there; for in-place it ensures the live project is git.
+    // A non-git project folder is initialized automatically (baseline commit),
+    // announced in the timeline — except an implausible root (the user home
+    // directory, a filesystem root, or one that cannot be classified), which
+    // gets a typed refusal BEFORE any mutation (INV-075). For an isolated
+    // thread the execution root is already a git worktree: a no-op there.
     const gitPreconditionError = await ensureWriteModeGitBoundary(
       execRoot,
       log,

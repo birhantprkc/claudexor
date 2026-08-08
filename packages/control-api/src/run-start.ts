@@ -80,7 +80,8 @@ export function normalizeRunStart(parsed: ControlRunStartRequest): ControlRunSta
   if (parsed.scope.kind === "project") {
     // Existence is the only filesystem precondition here: a NON-GIT folder is
     // fine — write modes initialize the git boundary themselves (announced via
-    // the project.git.initialized run event).
+    // the project.git.initialized run event; implausible roots — the user home
+    // or a filesystem root — are refused there with a typed error, INV-075).
     const repoRoot = normalizeExistingProjectRoot(parsed.scope.root);
     return {
       ...parsed,

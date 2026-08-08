@@ -1,4 +1,6 @@
+import { parse } from "node:path";
 import { WorkspaceError } from "@claudexor/core";
+import { canonicalProjectRoot, userHomeDir } from "@claudexor/util";
 import { probeGitCapability, requireGitCapability } from "./git-capability.js";
 
 export interface GitCommandResult {
@@ -40,9 +42,107 @@ export class GitInitializationError extends WorkspaceError {
   }
 }
 
+/** Why a root was refused as a Git-boundary initialization target. */
+export type GitBoundaryRootRefusalCause = "user_home" | "filesystem_root" | "unresolvable_home";
+
+/**
+ * The Git boundary REFUSED to initialize this root, BEFORE any mutation —
+ * contrast GitInitializationError above, which is a partial-mutation receipt;
+ * the two must never be merged. Auto-initialization is for plausible project
+ * folders only: the user home directory and filesystem roots are refused, and
+ * a root that cannot be classified (no safe home resolves) is refused
+ * FAIL-CLOSED. The field contract {code, status, retryable, requiredActions,
+ * context} mirrors the run-preflight throw shape so daemon job settlement
+ * lifts it into a typed ThreadTurn.enqueue_error with no extra plumbing.
+ */
+export class GitBoundaryRootRefusedError extends WorkspaceError {
+  readonly code = "git_boundary_root_refused";
+  readonly status = 400;
+  /** An exact retry can succeed after the named user actions. */
+  readonly retryable = true;
+  readonly requiredActions: string[];
+  readonly context: { root: string; cause: GitBoundaryRootRefusalCause };
+
+  constructor(
+    message: string,
+    root: string,
+    cause: GitBoundaryRootRefusalCause,
+    requiredActions: string[],
+  ) {
+    super(message);
+    this.name = "GitBoundaryRootRefusedError";
+    this.requiredActions = requiredActions;
+    this.context = { root, cause };
+  }
+}
+
+/** Test seams for the boundary-root guard (home resolution + realpath). */
+export interface GitBoundaryRootPolicy {
+  userHomeDir?: () => string;
+  canonicalize?: (path: string) => string;
+}
+
 export interface EnsureGitRepositoryDependencies {
   probeCapability?: typeof probeGitCapability;
   runGit?: GitRunner;
+  rootPolicy?: GitBoundaryRootPolicy;
+}
+
+const SUBFOLDER_REMEDIATION = "Choose a project subfolder as the project root instead.";
+const SELF_INIT_REMEDIATION =
+  "If you really mean this folder, initialize it yourself: run `git init` and create a first commit — Claudexor respects an existing healthy repository.";
+
+/**
+ * Refusal (or null) for creating a Git boundary at `repo`. The user home
+ * directory and filesystem roots are never auto-initialized: `git add -A`
+ * over such a tree fails on protected paths, hashes unrelated secrets into
+ * Git objects, and mutates state the user never framed as a project. A root
+ * that cannot be classified because no safe home resolves is refused
+ * FAIL-CLOSED with its own cause — unknown is never treated as ordinary.
+ * Both sides are canonicalized (realpath) so a symlinked spelling can neither
+ * bypass nor over-fire the guard. A home that is already a HEALTHY repository
+ * never reaches this guard — the early return above respects it (dotfiles
+ * users), which is also why the self-init remediation must name a FIRST
+ * COMMIT: a bare `git init` leaves an unborn HEAD, and the whole-transaction
+ * guard still refuses that.
+ */
+function boundaryRootRefusal(
+  repo: string,
+  policy: GitBoundaryRootPolicy,
+): GitBoundaryRootRefusedError | null {
+  const canonicalize = policy.canonicalize ?? canonicalProjectRoot;
+  const root = canonicalize(repo);
+  if (parse(root).root === root) {
+    return new GitBoundaryRootRefusedError(
+      `refusing to initialize a git repository over the filesystem root ${root}; Claudexor auto-initializes only plausible project folders`,
+      root,
+      "filesystem_root",
+      [SUBFOLDER_REMEDIATION, SELF_INIT_REMEDIATION],
+    );
+  }
+  let home: string;
+  try {
+    home = canonicalize((policy.userHomeDir ?? userHomeDir)());
+  } catch (error) {
+    return new GitBoundaryRootRefusedError(
+      `refusing to initialize a git repository at ${root}: the user home directory could not be resolved (${error instanceof Error ? error.message : String(error)}), so this root cannot be proven distinct from it`,
+      root,
+      "unresolvable_home",
+      [
+        "Set HOME (or USERPROFILE on Windows) to your user home directory so the root can be classified, then retry.",
+        SELF_INIT_REMEDIATION,
+      ],
+    );
+  }
+  if (root === home) {
+    return new GitBoundaryRootRefusedError(
+      `refusing to initialize a git repository over the user home directory ${root}; Claudexor auto-initializes only plausible project folders`,
+      root,
+      "user_home",
+      [SUBFOLDER_REMEDIATION, SELF_INIT_REMEDIATION],
+    );
+  }
+  return null;
 }
 
 /**
@@ -54,6 +154,7 @@ export async function initializeGitRepository(
   repo: string,
   runGit: GitRunner,
   probeCapability: typeof probeGitCapability = probeGitCapability,
+  rootPolicy: GitBoundaryRootPolicy = {},
 ): Promise<EnsureGitRepositoryResult> {
   requireGitCapability(await probeCapability());
   const inside = await runGit(repo, ["rev-parse", "--is-inside-work-tree"]);
@@ -70,6 +171,13 @@ export async function initializeGitRepository(
       headSha: head.stdout.trim(),
     };
   }
+
+  // INV-075 exception: the auto-init transaction (fresh `git init` AND the
+  // unborn-HEAD `add -A`/commit below) refuses implausible roots before any
+  // mutation. Placed AFTER the healthy-repo return so a deliberately
+  // user-initialized home (init + first commit) is respected untouched.
+  const refusal = boundaryRootRefusal(repo, rootPolicy);
+  if (refusal) throw refusal;
 
   let initialized = false;
   const partial = (

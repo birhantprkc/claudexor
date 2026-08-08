@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
-import { GitInitializationError } from "@claudexor/workspace";
+import { GitBoundaryRootRefusedError, GitInitializationError } from "@claudexor/workspace";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureWriteModeGitBoundary } from "./git-precondition.js";
 
@@ -50,6 +50,47 @@ describe("write-mode Git precondition", () => {
       };
       expect(terminal.type).toBe("run.failed");
       expect(terminal.payload.reason).toBe("workspace_unavailable");
+    } finally {
+      log.dispose();
+    }
+  });
+
+  it("forwards a typed boundary-root refusal's own remediations as next actions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claudexor-git-precondition-"));
+    roots.push(root);
+    const store = new ArtifactStore(root, { claudexorDir: join(root, "runtime") });
+    const paths = store.createRun("run-root-refusal");
+    const log = new EventLog(paths.eventsPath, "run-root-refusal", "task-root-refusal");
+
+    try {
+      const refusal = new GitBoundaryRootRefusedError(
+        "refusing to initialize a git repository over the user home directory /home/tester",
+        "/home/tester",
+        "user_home",
+        ["Choose a project subfolder as the project root instead.", "Self-init with a commit."],
+      );
+      const failure = await ensureWriteModeGitBoundary(
+        root,
+        log,
+        store,
+        paths,
+        "run-root-refusal",
+        "agent",
+        async () => {
+          throw refusal;
+        },
+      );
+
+      // The reason is UNCHANGED (workspace_unavailable, no RunReason schema
+      // change); the refusal's message and its own requiredActions surface.
+      expect(failure).toEqual({ message: refusal.message, reason: "workspace_unavailable" });
+      const failureYaml = readFileSync(join(paths.finalDir, "failure.yaml"), "utf8");
+      expect(failureYaml).toContain("Choose a project subfolder as the project root instead.");
+      expect(failureYaml).toContain("Self-init with a commit.");
+      expect(failureYaml).not.toContain("Check the project folder permissions");
+      // No partial-mutation event: the refusal happened before any mutation.
+      const events = readFileSync(paths.eventsPath, "utf8").trim().split("\n");
+      expect(events.some((line) => line.includes("project.git.initialized"))).toBe(false);
     } finally {
       log.dispose();
     }

@@ -43,8 +43,9 @@ export async function ensureThreadWorktree(
     throw new WorkspaceError(`threadId '${threadId}' is not a safe path segment`);
   }
   // Explicitly choosing an isolated thread authorizes this one idempotent
-  // project mutation. The same canonical initializer is used by other
-  // write-mode Git boundaries; in-place read-only work remains untouched.
+  // project mutation — on a plausible root: the canonical initializer refuses
+  // the user home directory and filesystem roots with a typed error
+  // (INV-075). In-place read-only work remains untouched.
   const gitInitialization = await ensureGitRepository(projectRoot);
   const projectGitInitialization =
     gitInitialization.initialized || gitInitialization.baselineCommitted ? gitInitialization : null;

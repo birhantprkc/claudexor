@@ -429,12 +429,16 @@ invariant or owner decision before proceeding.
   folder is initialized automatically (`git init` + a deterministic baseline
   commit) when the user selects an isolated Ask, Plan, or Agent workspace, or
   another Git-backed envelope path. The mutation is announced via a typed
-  `project.git.initialized` event — never a refusal, never silent. Supported
-  in-place paths that do not cross a Git boundary remain available without
-  initialization. Claudexor never creates or edits the project's `.gitignore`;
-  repo `.claudexor/` is user-owned state and runtime stays external. verify:
-  git-init, isolated-thread, run-applicability, and gitignore non-interference
-  workspace tests.
+  `project.git.initialized` event — never silent. Exception: a root equal to
+  the user home directory or a filesystem root — or one that cannot be
+  classified because no safe home resolves — is refused with a typed error
+  naming the remediation BEFORE any mutation, instead of being initialized;
+  a home that is already a healthy repository is respected untouched.
+  Supported in-place paths that do not cross a Git boundary remain available
+  without initialization. Claudexor never creates or edits the project's
+  `.gitignore`; repo `.claudexor/` is user-owned state and runtime stays
+  external. verify: git-init, boundary-root refusal, isolated-thread,
+  run-applicability, and gitignore non-interference workspace tests.
 
 ## 8. Plan-Driven Work Is First-Class
 
