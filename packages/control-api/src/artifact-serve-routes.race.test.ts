@@ -41,12 +41,24 @@ vi.mock("node:fs", async (importActual) => {
       }
       return (actual.lstatSync as (...a: unknown[]) => unknown)(path, ...rest);
     },
+    // Mirror the real existsSync semantics for the simulated EACCES paths:
+    // Node's existsSync collapses EVERY stat failure into `false`, which is
+    // exactly why the guards must not precheck with it (E-C2). Without this
+    // branch, an existsSync precheck reintroduced into artifact-paths.ts
+    // would pass the mocked EACCES tests (real dirs exist on disk), making
+    // the regression pin revert-invariant — proven by the R2 revert-probe.
+    existsSync: (path: Parameters<typeof actual.existsSync>[0]) => {
+      const p = String(path);
+      if (state.eaccesSuffix && p.endsWith(state.eaccesSuffix)) return false;
+      return actual.existsSync(path);
+    },
   };
 });
 
 // Imported AFTER the mock declaration; vi.mock is hoisted so the named
 // `lstatSync` bindings in artifact-paths.ts / artifact-serve-routes.ts resolve
-// to the mocked module (readdirSync/realpathSync/existsSync stay real).
+// to the mocked module (readdirSync/realpathSync stay real; existsSync is
+// mocked ONLY for the simulated-EACCES paths, real everywhere else).
 const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
 const { listArtifacts } = await import("./artifact-serve-routes.js");
 const { safeArtifactPath, safeArtifactRoot } = await import("./artifact-paths.js");
