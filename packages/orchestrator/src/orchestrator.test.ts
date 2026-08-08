@@ -11419,6 +11419,34 @@ describe("resolved auth preference in routing evidence (#121 part 1)", () => {
   });
 });
 
+describe("convergence preflight remediation text (#133c)", () => {
+  it("pins the battery-matched first sentence and the honest second sentence", async () => {
+    const repo = await initRepo();
+    const registry = new Map<string, HarnessAdapter>([
+      ["fake-implement", createFakeHarness("fake-implement")],
+    ]);
+    const res = await new Orchestrator({
+      registry,
+      reviewers: [cleanReviewer("rev-openai", "openai")],
+    }).run({
+      repoRoot: repo,
+      prompt: "converge",
+      mode: "agent",
+      untilClean: true,
+      harnesses: ["fake-implement"],
+    });
+    expect(legacyOutcome(res)).toBe("failed");
+    // The FIRST sentence is byte-stable: scripts/lib/real-harness-battery-state.mjs
+    // isCrossFamilyConvergenceRefusal matches exactly this prefix. The SECOND
+    // sentence names only reachable remediations (no convergence-predicate
+    // knob exists on any run surface — INV-022).
+    expect(res.summary).toBe(
+      "convergence requires a cross-family clean review (>=2 healthy reviewer provider families); found 1. " +
+        "Configure reviewers from a second provider family and check `claudexor doctor` for reviewer readiness.",
+    );
+  });
+});
+
 describe("web evidence recovery keying (INV-043)", () => {
   it("keeps the failure DISCLOSED when an unrelated-target web success satisfies the evidence gate", async () => {
     const { createAttemptTelemetry, observeAttemptTelemetry, webUnsatisfied } =

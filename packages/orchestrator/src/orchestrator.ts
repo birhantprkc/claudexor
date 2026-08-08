@@ -4848,7 +4848,7 @@ export class Orchestrator {
     if (contract.convergence.require_final_cross_family_clean_review && !reviewVerified) {
       const message =
         `convergence requires a cross-family clean review (>=2 healthy reviewer provider families); found ${new Set(reviewers.map((r) => r.providerFamily)).size}. ` +
-        "Configure reviewers for a second provider family, or run with a convergence predicate that does not require cross-family review.";
+        "Configure reviewers from a second provider family and check `claudexor doctor` for reviewer readiness.";
       store.writeText(
         join(paths.contextDir, "context_error.md"),
         `# Convergence Preflight Error\n\n${message}\n`,
