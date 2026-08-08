@@ -3,6 +3,26 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.13** (2026-08-08) — dev-hygiene follow-up. The packaged macOS app
+  bundle and the DMG staging directory now build into
+  `apps/macos/dist/bundle.noindex/`, which Spotlight does not index, so local
+  release builds across many worktrees no longer flood Launchpad and search
+  with duplicate Claudexor icons; the DMG/ZIP outputs and the release
+  byte-promotion contract remain on their existing `apps/macos/dist/` paths.
+  A source-built dev app (version "dev") no longer presents the automatic
+  "Update available" chip it used to recompute from the shared
+  `~/.claudexor/runtime/current.json` pointer; it shows an honest dev-build
+  status instead, and the manual Check for Updates flow is unchanged.
+  `claudexor gc` can now report top-level entries of the Claudexor data root
+  that the engine does not own, as an opt-in advisory on the receipt
+  (`data_root_unrecognized`): the CLI requests it only from a same-version
+  daemon, so both skew directions keep their exact pre-3.3.13 shapes; the
+  scan flags wrong-kind/symlink anomalies, never deletes anything, and scan
+  failures land in the existing `errors[]`. Confinement policy-shape
+  contradictions (a carve-out that would swallow a denied path) are now
+  refused before the platform-availability probe, identically on every OS —
+  this was latent on Linux since v3.3.7 and kept CI red; the fix restored the
+  green matrix.
 - **v3.3.12** (2026-08-08) — an eight-issue fix batch on top of 3.3.11.
   Harness stderr is no longer discarded on clean exits: the shared CLI run
   loop attaches a bounded, redacted `stderr_tail` to the terminal completed
