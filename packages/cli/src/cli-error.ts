@@ -22,6 +22,7 @@
 import { ControlProblem } from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import { printJson, printJsonLine } from "./cli-io.js";
+import { stampEngineSkew } from "./engine-skew.js";
 
 export type CliErrorCategory = "usage" | "operational";
 
@@ -375,25 +376,40 @@ export function renderCliFailure(
  * derived from the HTTP status: 400/422 are validation (exit 2), everything
  * else is an operational failure (exit 1). Context strings are bounded so a
  * localized git/tool stderr rides as bounded evidence.
+ *
+ * This is ALSO the one choke point where an observed daemon/CLI version skew
+ * is stamped onto every typed control failure (`stampEngineSkew`, issue #93):
+ * a stale daemon's own problem (e.g. 422 config_invalid) then names its real
+ * cause and the stop remedy. Unskewed connections pass through untouched.
+ * `opts.appendRequiredActions` lets a caller (the handshake-refusal path)
+ * append remedy actions without forging the problem's own fields.
  */
 export function controlProblemError(
   status: number,
   body: unknown,
   fallbackMessage: string,
+  opts: { appendRequiredActions?: string[] } = {},
 ): CliError {
   const category: CliErrorCategory = status === 400 || status === 422 ? "usage" : "operational";
   const parsed = ControlProblem.safeParse(body);
   if (parsed.success) {
     const pb = parsed.data;
-    return new CliError(category, pb.message || fallbackMessage, {
-      code: pb.code,
-      retryable: pb.retryable,
-      fieldErrors: nonEmptyRecord(pb.fieldErrors),
-      requiredActions: nonEmptyArray(pb.requiredActions),
-      // RAW: redactProblem redacts before it bounds (finding 6).
-      context: nonEmptyContext(pb.context),
-      ...(pb.evidenceRefs.length > 0 ? { details: { evidenceRefs: pb.evidenceRefs } } : {}),
-    });
+    return new CliError(
+      category,
+      pb.message || fallbackMessage,
+      stampEngineSkew(
+        {
+          code: pb.code,
+          retryable: pb.retryable,
+          fieldErrors: nonEmptyRecord(pb.fieldErrors),
+          requiredActions: nonEmptyArray(pb.requiredActions),
+          // RAW: redactProblem redacts before it bounds (finding 6).
+          context: nonEmptyContext(pb.context),
+          ...(pb.evidenceRefs.length > 0 ? { details: { evidenceRefs: pb.evidenceRefs } } : {}),
+        },
+        opts.appendRequiredActions,
+      ),
+    );
   }
   // Not a typed ControlProblem: salvage message/error/code without inventing fields.
   const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
@@ -406,5 +422,9 @@ export function controlProblemError(
   const code = typeof record["code"] === "string" ? (record["code"] as string) : undefined;
   const retryable =
     typeof record["retryable"] === "boolean" ? (record["retryable"] as boolean) : undefined;
-  return new CliError(category, message, { code, retryable });
+  return new CliError(
+    category,
+    message,
+    stampEngineSkew({ code, retryable }, opts.appendRequiredActions),
+  );
 }

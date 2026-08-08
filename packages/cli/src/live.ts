@@ -5,6 +5,7 @@ import { daemonDir, readToken } from "@claudexor/daemon";
 import type { InteractionQuestion } from "@claudexor/schema";
 import type { RunOutcomeFacts } from "@claudexor/schema";
 import {
+  ControlProblem,
   InteractionQuestion as InteractionQuestionSchema,
   RunOutcomeFacts as RunOutcomeFactsSchema,
   continuityLabel,
@@ -12,7 +13,8 @@ import {
   processExitCode,
   runOutcomeLabel,
 } from "@claudexor/schema";
-import { CLAUDEXOR_VERSION } from "@claudexor/util";
+import { controlProblemError } from "./cli-error.js";
+import { ENGINE_STOP_REMEDY, consumeHandshakeIdentity, recordEngineSkew } from "./engine-skew.js";
 import { promptQuestionsOnTty } from "./interaction-prompt.js";
 export { collectInteractionAnswers } from "./interaction-prompt.js";
 
@@ -303,39 +305,32 @@ export async function handshakeControlApi(
     body: JSON.stringify({ protocolMajor: CONTROL_PROTOCOL_MAJOR, client }),
   });
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(
-      `control API handshake failed (HTTP ${response.status})${detail ? `: ${detail}` : ""}`,
+    // A refusing daemon IS running — never flatten this to "not reachable"
+    // (issue #93). The server's typed problem (426 incompatible_protocol_major)
+    // rides intact with the stop remedy appended; an ancient daemon without
+    // /v2/handshake (404, non-problem body) still gets a daemon-naming
+    // fallback instead of echoing arbitrary response text. Any earlier skew
+    // record belonged to a daemon this handshake can no longer see: clear it
+    // so the refusal is not annotated with stale evidence.
+    recordEngineSkew(null);
+    const body: unknown = await response.json().catch(() => null);
+    throw controlProblemError(
+      response.status,
+      ControlProblem.safeParse(body).success ? body : null,
+      `the daemon refused the control API handshake (HTTP ${response.status}); ` +
+        `an incompatible or older daemon build may be holding this socket — ${ENGINE_STOP_REMEDY}`,
+      { appendRequiredActions: [ENGINE_STOP_REMEDY] },
     );
   }
-  // The handshake already reports the daemon's build identity precisely so a
-  // stale daemon is visible HERE instead of guessed later — consume it. A
-  // version skew is advisory (the protocol major gate above is the hard
-  // fence): disclose with the remedy. A CLI process handshakes once, so no
-  // dedup state is needed. The validated version is ALSO returned so callers
-  // (release check) can adopt the running engine's identity (QA-033a).
-  try {
-    const body = (await response.json()) as { engine?: { version?: string; sha?: string } };
-    const raw = body.engine?.version;
-    const rawSha = body.engine?.sha;
-    // Same echo hygiene as the plugin-skew check: never print an arbitrary
-    // response-sourced string into the terminal.
-    const daemonVersion = raw && /^[\w.+-]{1,32}$/.test(raw) ? raw : undefined;
-    if (daemonVersion && daemonVersion !== CLAUDEXOR_VERSION) {
-      process.stderr.write(
-        `claudexor: daemon is engine ${daemonVersion} but this CLI is ${CLAUDEXOR_VERSION}; ` +
-          `run \`claudexor daemon stop\` and rerun the command so a matching daemon starts\n`,
-      );
-    }
-    const daemonBuildSha =
-      rawSha === "unknown" || (typeof rawSha === "string" && /^[0-9a-f]{40}$/.test(rawSha))
-        ? rawSha
-        : null;
-    return { engineVersion: daemonVersion ?? null, engineBuildSha: daemonBuildSha };
-  } catch {
-    // Identity is advisory; a body parse failure never fails the handshake.
-    return { engineVersion: null, engineBuildSha: null };
-  }
+  // The handshake reports the daemon's build identity precisely so a stale
+  // daemon is visible HERE instead of guessed later (QA-033a). The canonical
+  // envelope parse, echo hygiene, and the module-scoped skew record (consumed
+  // by controlProblemError as typed failure evidence) live in engine-skew.ts.
+  // A same-major skew stays ADVISORY — the protocol major gate above is the
+  // only hard fence — and is disclosed once per handshake with the remedy.
+  const identity = consumeHandshakeIdentity(await response.json().catch(() => null));
+  if (identity.skewAdvisory) process.stderr.write(identity.skewAdvisory);
+  return identity.engine;
 }
 
 /**

@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeOutcomeFacts } from "@claudexor/schema";
+import { CLAUDEXOR_VERSION } from "@claudexor/util";
+import { CliError } from "./cli-error.js";
+import { ENGINE_STOP_REMEDY, observedEngineSkew, recordEngineSkew } from "./engine-skew.js";
 import {
   controlApiFetch,
   createRunEventLineFormatter,
@@ -694,16 +697,44 @@ describe("controlApiFetch create idempotency", () => {
   });
 });
 
-describe("handshake engine identity (v3.0.3 S4c)", () => {
-  it("discloses a daemon/CLI version skew from the handshake body on stderr, once", async () => {
-    const requests: string[] = [];
+/** Canonical ControlHandshakeResponse body for a serving engine identity. */
+function handshakeBody(version: string, sha = "unknown"): string {
+  return JSON.stringify({
+    protocolMajor: 3,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version, sha, entry: "/e" },
+  });
+}
+
+function jsonServer(
+  handler: (req: import("node:http").IncomingMessage) => {
+    status: number;
+    body: string;
+  },
+): Promise<{ server: Server; port: number; requests: string[] }> {
+  const requests: string[] = [];
+  return new Promise((resolve) => {
     const server = createServer((req, res) => {
       requests.push(req.url ?? "");
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: true, engine: { version: "9.9.9", sha: "x", entry: "/e" } }));
+      const out = handler(req);
+      res.writeHead(out.status, { "content-type": "application/json" });
+      res.end(out.body);
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const port = (server.address() as { port: number }).port;
+    server.listen(0, "127.0.0.1", () => {
+      resolve({ server, port: (server.address() as { port: number }).port, requests });
+    });
+  });
+}
+
+describe("handshake engine identity (v3.0.3 S4c)", () => {
+  afterEach(() => recordEngineSkew(null));
+
+  it("discloses a daemon/CLI version skew on stderr once per handshake AND records the skew", async () => {
+    const { server, port, requests } = await jsonServer(() => ({
+      status: 200,
+      body: handshakeBody("9.9.9", "x"),
+    }));
     const chunks: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
     (process.stderr as unknown as { write: (c: unknown) => boolean }).write = (c: unknown) => {
@@ -722,5 +753,98 @@ describe("handshake engine identity (v3.0.3 S4c)", () => {
     expect(warned).toContain("daemon is engine 9.9.9");
     expect(warned).toContain("claudexor daemon stop");
     expect(warned.match(/daemon is engine 9\.9\.9/g)).toHaveLength(2);
+    // The observed skew is recorded for the typed failure envelope (#93); the
+    // malformed "x" sha never rides along (echo hygiene).
+    expect(observedEngineSkew()).toEqual({
+      daemonVersion: "9.9.9",
+      cliVersion: CLAUDEXOR_VERSION,
+    });
+  });
+
+  it("overwrites a prior skew record on every successful handshake (clears when matching)", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 200,
+      body: handshakeBody(CLAUDEXOR_VERSION),
+    }));
+    recordEngineSkew({ daemonVersion: "9.9.9", cliVersion: CLAUDEXOR_VERSION });
+    try {
+      const identity = await handshakeControlApi({
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: "t",
+      });
+      expect(identity).toEqual({ engineVersion: CLAUDEXOR_VERSION, engineBuildSha: "unknown" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    // A long-lived MCP/ACP process that reconnects to a FIXED daemon must not
+    // keep annotating failures with the stale pre-fix skew.
+    expect(observedEngineSkew()).toBeNull();
+  });
+});
+
+describe("typed handshake refusal (#93)", () => {
+  afterEach(() => recordEngineSkew(null));
+
+  it("preserves the server's typed 426 problem and appends the stop remedy", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 426,
+      body: JSON.stringify({
+        code: "incompatible_protocol_major",
+        message: "control protocol major 3 is incompatible; server requires 4",
+        retryable: false,
+        fieldErrors: {},
+        requiredActions: ["use control protocol major 4"],
+        evidenceRefs: [],
+      }),
+    }));
+    // A stale same-major record from an earlier daemon must NOT annotate the
+    // refusal of a daemon this handshake can no longer identify.
+    recordEngineSkew({ daemonVersion: "3.2.1", cliVersion: CLAUDEXOR_VERSION });
+    try {
+      const err = await handshakeControlApi({
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: "t",
+      }).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      const problem = err as CliError;
+      // The WIRE code rides intact — no parallel CLI-minted code.
+      expect(problem.code).toBe("incompatible_protocol_major");
+      expect(problem.message).toBe("control protocol major 3 is incompatible; server requires 4");
+      expect(problem.category).toBe("operational");
+      expect(problem.retryable).toBe(false);
+      expect(problem.requiredActions).toEqual(["use control protocol major 4", ENGINE_STOP_REMEDY]);
+      expect(problem.context?.["engineSkew"]).toBeUndefined();
+      expect(observedEngineSkew()).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("names the daemon and the stop remedy for an ancient daemon without /v2/handshake", async () => {
+    const { server, port } = await jsonServer(() => ({
+      status: 404,
+      body: "<html>not found</html>",
+    }));
+    try {
+      const err = await handshakeControlApi({
+        baseUrl: `http://127.0.0.1:${port}`,
+        token: "t",
+      }).then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(err).toBeInstanceOf(CliError);
+      const problem = err as CliError;
+      // Never the CLAUDEXOR_NO_CONTROL_API flatten, never echoed response text.
+      expect(problem.message).toContain("daemon");
+      expect(problem.message).toContain("claudexor daemon stop");
+      expect(problem.message).not.toContain("<html>");
+      expect(problem.requiredActions).toEqual([ENGINE_STOP_REMEDY]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

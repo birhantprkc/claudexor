@@ -31,7 +31,7 @@ import {
   GitCapability,
 } from "@claudexor/schema";
 import { type ParsedArgs, flagBool, flagStr } from "./args.js";
-import { controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
+import { CliError, controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
 import { profilesCommand, secretsCommand } from "./credential-commands.js";
 import {
   authSourceAvailability,
@@ -103,7 +103,11 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
             "claudexord socket is alive but its control API is not ready; inspect `claudexor daemon logs`",
           );
         return 1;
-      } catch {
+      } catch (err) {
+        // Absence starts a fresh daemon below. A TYPED handshake refusal means
+        // an incompatible daemon HOLDS the socket — a fresh spawn would only
+        // die on the singleton guard, so surface the typed problem (#93).
+        if (err instanceof CliError) throw err;
         /* not reachable — start a fresh daemon below */
       }
     }
