@@ -18,7 +18,7 @@ import {
   verifyAndDeliver,
 } from "@claudexor/delivery";
 import { appendRunEvent, lastSeqInFile } from "@claudexor/event-log";
-import { safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
+import { isVanishedErrno, safeArtifactPath, safeArtifactRoot } from "./artifact-paths.js";
 import { TERMINAL_STATES } from "./sse-shared.js";
 import { streamRunEvents } from "./run-events-stream.js";
 import { boundedArtifactText, outputReadyState, primaryOutput } from "./primary-output.js";
@@ -3039,10 +3039,19 @@ function gateSpecsForRun(
 
 function readReviewFindings(rec: DaemonRunRecord): ReviewFinding[] {
   if (!rec.runDir) return [];
-  const reviewsDir = safeArtifactPath(rec.runDir, "reviews");
-  if (!reviewsDir || !lstatSync(reviewsDir).isDirectory()) return [];
+  let names: string[];
+  try {
+    const reviewsDir = safeArtifactPath(rec.runDir, "reviews");
+    if (!reviewsDir || !lstatSync(reviewsDir).isDirectory()) return [];
+    names = readdirSync(reviewsDir).sort();
+  } catch (err) {
+    // reviews/ vanished between resolve and read (GH #128 race class): no
+    // findings, never a 500. Non-vanish errnos stay loud.
+    if (isVanishedErrno(err)) return [];
+    throw err;
+  }
   const out: ReviewFinding[] = [];
-  for (const name of readdirSync(reviewsDir).sort()) {
+  for (const name of names) {
     const ext = extname(name);
     if (ext !== ".yaml" && ext !== ".yml" && ext !== ".json") continue;
     try {
