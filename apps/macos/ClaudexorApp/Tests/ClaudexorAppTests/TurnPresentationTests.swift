@@ -304,6 +304,20 @@ import ClaudexorKit
         ) == "Run a fresh, non-cached Harness Doctor probe.")
     }
 
+    /// #132 R1 (M-C2): the family→managed-slot mapping is a pure helper the
+    /// sheet consumes, pinned HERE against the exact engine grammar
+    /// (packages/util/src/secret-names.ts) — a view-only revert of
+    /// AuthSheet.swift can no longer silently drop a family's slot while the
+    /// suite stays green. Rendering of the private view state still needs the
+    /// VM visual acceptance.
+    @Test func managedSecretSlotPinsTheEngineGrammarPerFamily() {
+        #expect(AuthSheetPresentation.managedSecretSlot(for: .openrouter) == "openrouter")
+        #expect(AuthSheetPresentation.managedSecretSlot(for: .raw) == "raw")
+        // A family without an API-key fallback maps to nil: no key panel,
+        // no Store-key CTA.
+        #expect(AuthSheetPresentation.managedSecretSlot(for: .fake) == nil)
+    }
+
     @Test func serverOwnedJobTargetWinsWithoutTreatingDefaultAsMissing() {
         let profileJob = fallbackJob(
             harness: .codex, state: .notSupported,

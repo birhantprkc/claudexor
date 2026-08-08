@@ -2130,6 +2130,10 @@ struct AppModelRefreshTests {
                     headerFields: ["Content-Type":"application/problem+json"]
                 )!
                 return (response, Data(#"{"code":"probe_failed","message":"offline","retryable":true}"#.utf8))
+            case ("GET", "/v2/harnesses"):
+                // R1 M-C1: the store now always ends with the fresh aggregate
+                // re-list; the probe failure above stays this test's subject.
+                return (appResponse(for: request), Data(#"{"harnesses":[]}"#.utf8))
             default:
                 throw AppRefreshTestError.badRequest
             }
@@ -2145,9 +2149,11 @@ struct AppModelRefreshTests {
     }
 
     /// #132 end-to-end: storing the OpenRouter key reaches the daemon with the
-    /// exact managed slot name `openrouter` and then requests the exact
-    /// api_key_env readiness refresh for the `openrouter` harness — the flow
-    /// that silently did nothing while the family had no secretName mapping.
+    /// exact managed slot name `openrouter`, requests the exact api_key_env
+    /// readiness refresh for the `openrouter` harness, and (R1 M-C1) re-lists
+    /// the harnesses FRESH — so the card leaves its pre-store "Unavailable"
+    /// for the locked post-store state (degraded "key present but route
+    /// unproven" + Retry check) without a manual full refresh.
     @MainActor
     @Test func openrouterStoreKeyUsesTheManagedSlotAndRefreshesExactReadiness() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
@@ -2170,7 +2176,8 @@ struct AppModelRefreshTests {
                 }
                 return (appResponse(for: request), Data("{}".utf8))
             case ("GET", "/v2/secrets"):
-                return (appResponse(for: request), Data(#"{"backend":"file","secrets":[]}"#.utf8))
+                return (appResponse(for: request), Data(
+                    #"{"backend":"file","secrets":[{"name":"openrouter","backend":"file","present":true}]}"#.utf8))
             case ("POST", "/v2/harnesses/openrouter/auth-readiness"):
                 guard let body = appTestRequestBody(request),
                       let object = try JSONSerialization.jsonObject(with: body) as? [String: String],
@@ -2181,15 +2188,49 @@ struct AppModelRefreshTests {
                     appResponse(for: request),
                     Data(#"{"harnessId":"openrouter","authRequest":"api_key","requestedSource":"api_key_env","observedAt":"2026-08-08T00:00:00Z","readiness":{"source":"api_key_env","availability":"available","verification":"not_run","detail":"key present; route unproven"}}"#.utf8)
                 )
+            case ("GET", "/v2/harnesses"):
+                // Seed (no query): the pre-store card truth — unavailable.
+                // The post-store aggregate refresh must be the NON-CACHED
+                // re-list Recheck runs (fresh=true) — only it serves the
+                // degraded daemon-normalized snapshot.
+                guard request.url?.query == "fresh=true" else {
+                    return (appResponse(for: request), Data(
+                        #"{"harnesses":[{"id":"openrouter","status":"unavailable","manifest":null}]}"#.utf8))
+                }
+                return (appResponse(for: request), Data(
+                    #"{"harnesses":[{"id":"openrouter","status":"degraded","manifest":null,"reasons":["key present but route unproven"],"authSources":[{"source":"api_key_env","availability":"available","verification":"not_run","detail":"key present; route unproven"}]}]}"#.utf8))
             default:
                 throw AppRefreshTestError.badRequest
             }
         }
 
+        // Seed the pre-store truth: the harness card shows "Unavailable".
+        #expect(await model.refreshHarnesses())
+        #expect(model.harnessInfo(for: .openrouter)?.health == .unavailable)
+
         let outcome = await model.storeSecret(name: "openrouter", value: "redacted", for: .openrouter)
         #expect(outcome.stored)
         #expect(outcome.readinessRefreshed)
         #expect(model.authSource(for: .openrouter, source: .apiKeyEnvironment)?.verification == "not_run")
+
+        // R1 M-C1: the store itself lands the card in the locked post-store
+        // state — degraded with the daemon's reason — no manual refresh.
+        let info = try #require(model.harnessInfo(for: .openrouter))
+        #expect(info.health == .degraded)
+        #expect(info.reasons == ["key present but route unproven"])
+
+        // …and the footer CTA becomes Retry check, exactly as the sheet
+        // wires it: health not ok, no native path, key now stored.
+        let cta = AuthSheetPresentation.primaryCTA(
+            healthOk: info.health == .ok,
+            nativeSupported: SetupHarness(rawValue: HarnessFamily.openrouter.setupHarnessId) != nil,
+            nativeReady: false,
+            keyStored: model.activeStoredSecrets.contains { $0.name == "openrouter" },
+            streamLost: false,
+            jobActive: false,
+            blocksReplacement: false)
+        #expect(cta == .retryProbe)
+        #expect(cta.label == "Retry check")
     }
 
     @MainActor

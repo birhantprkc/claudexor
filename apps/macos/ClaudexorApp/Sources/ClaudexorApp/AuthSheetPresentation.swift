@@ -39,6 +39,20 @@ enum AuthSheetPresentation {
         profileId == nil && secretName != nil
     }
 
+    /// The managed secret-store slot a family's auth sheet writes — the EXACT
+    /// engine grammar (packages/util/src/secret-names.ts); nil = no API-key
+    /// fallback for the family (no panel, no Store-key CTA). Extracted from
+    /// the view (#132 R1) so the mapping is unit-pinned: a view-only revert of
+    /// AuthSheet.swift can no longer silently drop a family's slot while the
+    /// whole suite stays green.
+    static func managedSecretSlot(for family: HarnessFamily) -> String? {
+        switch family {
+        case .codex: "openai"; case .claude: "anthropic"; case .cursor: "cursor"
+        case .opencode: "opencode"; case .raw: "raw"; case .openrouter: "openrouter"
+        default: nil
+        }
+    }
+
     /// The ONE presentational owner of the Store-key action's availability
     /// (issue #132 class fix, INV-134): the inner panel button AND the footer
     /// "Store key" CTA both derive disabled + hover from THIS projection, so

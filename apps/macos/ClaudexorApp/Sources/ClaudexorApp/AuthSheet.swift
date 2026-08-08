@@ -24,12 +24,7 @@ struct AuthSheet: View {
     @State private var didAutoStartLogin = false
     @State private var showTerminalCaveat = false
 
-    private var secretName: String? {
-        switch family {
-        case .codex: "openai"; case .claude: "anthropic"; case .cursor: "cursor"
-        case .opencode: "opencode"; case .raw: "raw"; case .openrouter: "openrouter"; default: nil
-        }
-    }
+    private var secretName: String? { AuthSheetPresentation.managedSecretSlot(for: family) }
 
     private var currentInfo: HarnessInfo? { model.harnessInfo(for: family) }
     private var isReady: Bool { currentInfo?.health == .ok }
