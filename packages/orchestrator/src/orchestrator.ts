@@ -121,6 +121,7 @@ import {
   withInactivityWatchdog,
 } from "@claudexor/core";
 import { assertRouteModelsAllowed } from "./modelGovernance.js";
+import { authModeForCredentialRoute, authModeForPreference } from "./auth-route-classification.js";
 import { governRouteEffort } from "./effortGovernance.js";
 import { isFullAccess, RequestRequirementsResolver } from "./requestRequirements.js";
 import { DelegationBudgetAuthority } from "./delegationBudgetAuthority.js";
@@ -1707,22 +1708,20 @@ export class Orchestrator {
           : authModes.includes("api_key")
             ? ("api_key" as const)
             : ("unknown" as const);
-        // The quota-preflight profile's credential_kind decides the route
-        // outright (round-18 #2). This includes an unpinned default subject
-        // that rotated before ranking; an api_key profile must never inherit a
-        // subscription classification from the default store's metric.
-        const admittedProfileRoute = r.quotaAdmission.profile
-          ? r.quotaAdmission.profile.credential_kind === "api_key"
-            ? ("api_key" as const)
-            : ("local_session" as const)
-          : null;
+        // The FROZEN quota-admission route decides outright (round-18 #2):
+        // the admitted profile's credential_kind when a profile exists, else
+        // the config-aware estimate — an api_key lane must never inherit a
+        // subscription classification from the default store's metric. With
+        // no route fact, the RESOLVED preference (per-run > per-harness
+        // config > global config) speaks, never the raw run input (#121);
+        // only then the last settled metric / manifest guess.
         const authMode =
-          admittedProfileRoute ??
-          (input.authPreference === "api_key"
-            ? ("api_key" as const)
-            : input.authPreference === "subscription"
-              ? ("local_session" as const)
-              : (metric?.last_auth_mode ?? guessedAuthMode));
+          authModeForCredentialRoute(r.quotaAdmission.route) ??
+          authModeForPreference(
+            this.authPreferenceForHarness(input.repoRoot, r.adapter.id, input.authPreference),
+          ) ??
+          metric?.last_auth_mode ??
+          guessedAuthMode;
         // The exact quota subject selected before ranking: profile id or the
         // engine default. Profile A's cooldown never excludes profile B or the
         // default on the same harness and route.
@@ -6239,8 +6238,13 @@ export class Orchestrator {
     // A selected profile's credential_kind decides billing (round-18 #2).
     const profileRoute = this.profileAuthRoute(input, harnessId);
     if (profileRoute) return profileRoute === "api_key" ? "metered" : "unknown";
-    if (input.authPreference === "api_key") return "metered";
-    if (input.authPreference === "subscription") return "unknown";
+    // Deps-closure site: no selected route exists yet, so the RESOLVED
+    // preference (per-run > per-harness config > global) speaks — never the
+    // raw run input (#121).
+    const mode = authModeForPreference(
+      this.authPreferenceForHarness(input.repoRoot, harnessId, input.authPreference),
+    );
+    if (mode) return mode === "api_key" ? "metered" : "unknown";
     return loadHarnessMetrics(globalConfigDir())[harnessId]?.last_auth_mode === "api_key"
       ? "metered"
       : "unknown";
