@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeOutcomeFacts } from "@claudexor/schema";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
-import { CliError, renderCliFailure } from "./cli-error.js";
+import { CliError, controlProblemError, renderCliFailure } from "./cli-error.js";
 import { ENGINE_STOP_REMEDY, observedEngineSkew, recordEngineSkew } from "./engine-skew.js";
 import {
+  controlApiAddress,
   controlApiFetch,
   createRunEventLineFormatter,
   followRun,
@@ -782,6 +783,20 @@ describe("handshake engine identity (v3.0.3 S4c)", () => {
   });
 });
 
+/** Every projection-visible CliError field, for byte-identity comparisons. */
+function projectCliError(e: CliError): Record<string, unknown> {
+  return {
+    category: e.category,
+    message: e.message,
+    code: e.code,
+    retryable: e.retryable,
+    fieldErrors: e.fieldErrors,
+    requiredActions: e.requiredActions,
+    details: e.details,
+    context: e.context,
+  };
+}
+
 describe("typed handshake refusal (#93)", () => {
   afterEach(() => recordEngineSkew(null));
 
@@ -837,6 +852,58 @@ describe("typed handshake refusal (#93)", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it.each(["daemon_stopping", "route_quarantined"])(
+    "passes a typed %s problem through UNCHANGED — no advisory, no appended remedy (R2)",
+    async (code) => {
+      // Only an ACTUAL protocol mismatch earns the mismatch treatment. A typed
+      // non-mismatch refusal (a healthy MATCHING daemon answering the handshake
+      // with daemon_stopping mid-shutdown, or any other typed problem) must be
+      // byte-identical to the plain controlProblemError projection of the same
+      // wire body: its own actions already say what to do, and the mismatch
+      // remedy would be a false diagnosis.
+      const wireBody = {
+        code,
+        message: "the daemon declined this handshake for its own typed reason",
+        retryable: true,
+        fieldErrors: {},
+        requiredActions: ["reconnect"],
+        evidenceRefs: [],
+      };
+      const { server, port } = await jsonServer(() => ({
+        status: 503,
+        body: JSON.stringify(wireBody),
+      }));
+      const stderrChunks: string[] = [];
+      const stderrSpy = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation((chunk: unknown): boolean => {
+          stderrChunks.push(String(chunk));
+          return true;
+        });
+      try {
+        const err = await handshakeControlApi({
+          baseUrl: `http://127.0.0.1:${port}`,
+          token: "t",
+        }).then(
+          () => null,
+          (thrown: unknown) => thrown,
+        );
+        expect(err).toBeInstanceOf(CliError);
+        const expected = controlProblemError(
+          503,
+          wireBody,
+          "the daemon refused the control API handshake (HTTP 503)",
+        );
+        expect(projectCliError(err as CliError)).toEqual(projectCliError(expected));
+        expect((err as CliError).requiredActions).toEqual(["reconnect"]);
+        expect(stderrChunks.join("")).toBe("");
+      } finally {
+        stderrSpy.mockRestore();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
 
   it("names the daemon and the stop remedy for an ancient daemon without /v2/handshake", async () => {
     const { server, port } = await jsonServer(() => ({
@@ -1031,5 +1098,71 @@ describe("follow surfaces typed refusals through the projector (#93 R1)", () => 
     } finally {
       stderr.restore();
     }
+  });
+});
+
+describe("control-api pointer structural validation (#93 R2)", () => {
+  let dir: string;
+  let prevConfigDir: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(realpathSync(tmpdir()), "claudexor-pointer-r2-"));
+    prevConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+  });
+  afterEach(() => {
+    if (prevConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+    else process.env.CLAUDEXOR_CONFIG_DIR = prevConfigDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writePointer(content: string): void {
+    const daemonDir = join(dir, "daemon");
+    mkdirSync(daemonDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(daemonDir, "control-api.json"), content, { mode: 0o600 });
+    writeFileSync(join(daemonDir, "token"), "tkn-r2", { mode: 0o600 });
+  }
+
+  function thrownBy(fn: () => unknown): unknown {
+    try {
+      fn();
+      return null;
+    } catch (err) {
+      return err;
+    }
+  }
+
+  it.each([
+    ["an empty object", "{}"],
+    ["a JSON null literal", "null"],
+    ["an empty host", '{"host":"","port":1}'],
+    ["a string port", '{"host":"127.0.0.1","port":"80"}'],
+    ["a non-integer port", '{"host":"127.0.0.1","port":80.5}'],
+    ["an out-of-range port", '{"host":"127.0.0.1","port":0}'],
+  ])("is LOUD control_pointer_invalid on %s (nonempty structural corruption)", (_name, content) => {
+    writePointer(content);
+    const err = thrownBy(() => controlApiAddress());
+    expect(err).toBeInstanceOf(CliError);
+    const problem = err as CliError;
+    expect(problem.code).toBe("control_pointer_invalid");
+    expect(problem.category).toBe("operational");
+    // Bounded: the pointer path and a short cause ride along — never the raw
+    // file content (the '"port"' key would only appear via a raw dump).
+    expect(problem.message).toContain("control-api.json");
+    expect(problem.message).toContain("structurally invalid");
+    expect(problem.message).toContain("claudexor daemon stop");
+    expect(problem.message).not.toContain('"port"');
+    expect(problem.context).toEqual({ pointer: join(dir, "daemon", "control-api.json") });
+  });
+
+  it.each([
+    ["zero-byte", ""],
+    ["whitespace-only", " \n\t"],
+  ])("keeps %s content as ABSENCE (adjudicated mid-write race window)", (_name, content) => {
+    writePointer(content);
+    const err = thrownBy(() => controlApiAddress());
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(CliError);
+    expect((err as Error).message).toContain("daemon control API is not available");
   });
 });

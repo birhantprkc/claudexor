@@ -240,33 +240,45 @@ import { CONTROL_PROTOCOL_MAJOR } from "@claudexor/schema";
 export { CONTROL_PROTOCOL_MAJOR };
 
 export function controlApiAddress(): ControlApiAddress {
-  type Pointer = { host?: string; port?: number } | null;
   const pointer = join(daemonDir(), "control-api.json");
-  let info: Pointer;
-  try {
-    // `|| "null"`: an EMPTY pointer reads as absence below — the daemon's
-    // pointer write has an open-truncate→write window, and a racing reader
-    // must keep polling, never fail loud on the transient zero-byte state.
-    info = JSON.parse(readFileSync(pointer, "utf8") || "null") as Pointer;
-  } catch (err) {
-    const errno = (err as NodeJS.ErrnoException).code;
-    if (errno === "ENOENT" || errno === "ENOTDIR")
-      throw new Error("daemon control API is not available (run: claudexor daemon start)");
-    // Corrupt local state must be LOUD (#93 R1): a pointer that exists but is
-    // unreadable or unparsable is never "daemon not running". Bounded — the
-    // path and errno only, no raw dump of the file.
-    throw new CliError(
+  const absence = (): Error =>
+    new Error("daemon control API is not available (run: claudexor daemon start)");
+  // Corrupt local state must be LOUD (#93 R1/R2): a pointer that exists but is
+  // unreadable, unparsable, or structurally invalid ({} / null / wrong host or
+  // port types) is never "daemon not running". Bounded — the path and a short
+  // cause only, no raw dump of the file.
+  const invalid = (cause: string): CliError =>
+    new CliError(
       "operational",
-      `daemon control-api pointer ${pointer} is ` +
-        `${errno ? `unreadable (${errno})` : "not valid JSON"}; ` +
+      `daemon control-api pointer ${pointer} is ${cause}; ` +
         "run `claudexor daemon stop` and rerun so a healthy daemon rewrites it",
       { code: "control_pointer_invalid", retryable: false, context: { pointer } },
     );
+  let raw: string;
+  try {
+    raw = readFileSync(pointer, "utf8").trim();
+  } catch (err) {
+    const errno = (err as NodeJS.ErrnoException).code;
+    if (errno === "ENOENT" || errno === "ENOTDIR") throw absence();
+    throw invalid(`unreadable${errno ? ` (${errno})` : ""}`);
   }
+  // An EMPTY (or whitespace-only) pointer stays ABSENCE: the daemon's pointer
+  // write has an open-truncate→write window, and a racing reader must keep
+  // polling, never fail loud on the transient zero-byte state.
+  if (raw === "") throw absence();
+  let info: { host?: unknown; port?: unknown };
+  try {
+    info = (JSON.parse(raw) ?? {}) as { host?: unknown; port?: unknown };
+  } catch {
+    throw invalid("not valid JSON");
+  }
+  const { host, port } = info;
+  if (typeof host !== "string" || host === "") throw invalid("structurally invalid (bad host)");
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)
+    throw invalid("structurally invalid (bad port)");
   const token = readToken();
-  if (!info?.host || !info.port || !token)
-    throw new Error("daemon control API is not available (run: claudexor daemon start)");
-  return { baseUrl: `http://${info.host}:${info.port}`, token };
+  if (!token) throw absence();
+  return { baseUrl: `http://${host}:${port}`, token };
 }
 
 /** One control-plane transport boundary for CLI, MCP and ACP projections. */
@@ -316,10 +328,10 @@ export async function handshakeControlApi(
   if (!response.ok) {
     // A refusing daemon IS running — never flatten this to "not reachable"
     // (issue #93). handshakeRefusalError keeps the server's typed problem
-    // intact (stop remedy appended, plus a human stderr advisory for typed
-    // bodies — R1 C-C1). Clear any earlier skew record FIRST: it belonged to
-    // a daemon this handshake can no longer see and must not annotate this
-    // refusal as stale evidence.
+    // intact; only an ACTUAL protocol mismatch gets the stop remedy + human
+    // stderr advisory (R1 C-C1, R2). Clear any earlier skew record FIRST: it
+    // belonged to a daemon this handshake can no longer see and must not
+    // annotate this refusal as stale evidence.
     recordEngineSkew(null);
     throw handshakeRefusalError(response.status, await response.json().catch(() => null));
   }

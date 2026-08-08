@@ -43,24 +43,24 @@ async function daemonReachable(client: DaemonClientType): Promise<boolean> {
 }
 
 /** Is the daemon's control-api up and answering /healthz right now?
- * Absence-vs-refusal (#93): null means TRANSPORT ABSENCE only (no pointer
- * file, connect refused/timeout, non-ok healthz) and clears the skew record;
- * a daemon that ANSWERS but refuses the typed handshake THROWS that typed
- * problem — "not reachable" would send callers into a doomed wait/auto-start. */
+ * Absence-vs-refusal (#93): null means ABSENCE only — no pointer file, connect
+ * refused/timeout, non-ok healthz (a STOPPING daemon's 503 included, R1 C-C3b),
+ * or the same stopping daemon losing the healthz/handshake race and answering
+ * the handshake with its typed `daemon_stopping` problem (R2) — and clears the
+ * skew record; any OTHER typed handshake problem THROWS, because "not
+ * reachable" would send callers into a doomed wait/auto-start. */
 async function controlApiReachable(): Promise<ControlApiAddress | null> {
   try {
     const addr = controlApiAddress();
     const res = await controlApiFetch(addr, "/healthz", { signal: AbortSignal.timeout(1500) });
-    // DECLINED loudness (R1 C-C3b): a non-ok healthz — a STOPPING daemon's 503
-    // included — is absence-in-progress; waiting/auto-start is the designed UX.
     if (res.ok) {
       await handshakeControlApi(addr);
       return addr;
     }
   } catch (err) {
-    if (err instanceof CliError) throw err;
+    if (err instanceof CliError && err.code !== "daemon_stopping") throw err;
   }
-  recordEngineSkew(null); // transport absence: no live connection to be skewed with
+  recordEngineSkew(null); // absence (stopping included): no live connection to be skewed with
   return null;
 }
 

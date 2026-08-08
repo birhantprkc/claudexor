@@ -371,6 +371,19 @@ const TYPED_426 = () => ({
   }),
 });
 
+/** The daemon-server's own stopping refusal (daemon-server.ts, `this.stopping`). */
+const TYPED_STOPPING_503 = () => ({
+  status: 503,
+  body: JSON.stringify({
+    code: "daemon_stopping",
+    message: "daemon is stopping; no new product request was admitted",
+    retryable: true,
+    fieldErrors: {},
+    requiredActions: ["reconnect"],
+    evidenceRefs: [],
+  }),
+});
+
 describe("absence vs refusal discrimination (#93)", () => {
   let dir: string;
   let prevConfigDir: string | undefined;
@@ -472,6 +485,32 @@ describe("absence vs refusal discrimination (#93)", () => {
     expect(err).toBeInstanceOf(CliError);
     expect((err as CliError).code).toBe("incompatible_protocol_major");
     expect((err as CliError).requiredActions).toContain(ENGINE_STOP_REMEDY);
+  });
+
+  it("connectDaemonIfRunning: a typed daemon_stopping handshake refusal reads as ABSENCE (R2)", async () => {
+    // Healthz answered ok, then the daemon began stopping before the handshake
+    // landed: a MATCHING daemon's typed daemon_stopping is absence-in-progress
+    // (the same stopping-as-absence semantics as the 503 health case, R1
+    // C-C3b) — null, no throw, no mismatch advisory, skew record cleared.
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(TYPED_STOPPING_503);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    recordEngineSkew({ daemonVersion: "9.9.9", cliVersion: CLAUDEXOR_VERSION });
+    const stderrChunks: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown): boolean => {
+        stderrChunks.push(String(chunk));
+        return true;
+      });
+    try {
+      expect(await connectDaemonIfRunning()).toBeNull();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(observedEngineSkew()).toBeNull();
+    expect(stderrChunks.join("")).toBe("");
   });
 
   it("ensureDaemon: a typed refusal short-circuits (no 10s control-API wait, no NO_CONTROL_API flatten)", async () => {

@@ -431,28 +431,35 @@ export function controlProblemError(
 
 /**
  * The handshake-refusal problem (#93): a daemon that ANSWERS but refuses this
- * CLI's /v2/handshake. The server's typed problem (426
- * incompatible_protocol_major) rides intact with the stop remedy appended; an
- * ancient daemon without the route (404, non-problem body) gets a
- * daemon-naming fallback instead of echoed response text.
- *
- * The human projector prints only `message`, so a typed problem's own wording
- * would keep the remedy machine-side (requiredActions) — invisible on a
- * terminal. A TYPED refusal therefore also writes ONE bounded stderr advisory
- * line naming the stop remedy, in the same voice as the same-major skew
- * advisory (R1 C-C1); the typed envelope itself is unchanged. The untyped
- * fallback path already names the remedy in its message and gets no advisory.
+ * CLI's /v2/handshake. The version-mismatch treatment — the appended stop
+ * remedy plus ONE bounded stderr advisory line naming it (the human projector
+ * prints only `message`, so requiredActions alone would keep the remedy
+ * machine-side, R1 C-C1) — fires ONLY for an ACTUAL protocol mismatch (typed
+ * 426 incompatible_protocol_major). Any OTHER typed problem (e.g. a healthy
+ * matching daemon answering `daemon_stopping` mid-shutdown) rides through
+ * `controlProblemError` UNCHANGED — no advisory, no appended action — because
+ * its own code and actions already say what to do, and the mismatch remedy
+ * would be a false diagnosis (R2). An ancient daemon without the route (404,
+ * non-problem body) keeps the daemon-naming fallback message instead of echoed
+ * response text; that message names the remedy itself, so no advisory either.
  */
 export function handshakeRefusalError(status: number, body: unknown): CliError {
-  const typed = ControlProblem.safeParse(body).success;
-  if (typed) {
+  const problem = ControlProblem.safeParse(body);
+  if (problem.success && problem.data.code !== "incompatible_protocol_major") {
+    return controlProblemError(
+      status,
+      body,
+      `the daemon refused the control API handshake (HTTP ${status})`,
+    );
+  }
+  if (problem.success) {
     process.stderr.write(
       `claudexor: the daemon refused the control API handshake (HTTP ${status}); ${ENGINE_STOP_REMEDY}\n`,
     );
   }
   return controlProblemError(
     status,
-    typed ? body : null,
+    problem.success ? body : null,
     `the daemon refused the control API handshake (HTTP ${status}); ` +
       `an incompatible or older daemon build may be holding this socket — ${ENGINE_STOP_REMEDY}`,
     { appendRequiredActions: [ENGINE_STOP_REMEDY] },
