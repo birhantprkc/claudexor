@@ -39,6 +39,68 @@ enum AuthSheetPresentation {
         profileId == nil && secretName != nil
     }
 
+    /// The managed secret-store slot a family's auth sheet writes — the EXACT
+    /// engine grammar (packages/util/src/secret-names.ts); nil = no API-key
+    /// fallback for the family (no panel, no Store-key CTA). Extracted from
+    /// the view (#132 R1) so the mapping is unit-pinned: a view-only revert of
+    /// AuthSheet.swift can no longer silently drop a family's slot while the
+    /// whole suite stays green.
+    static func managedSecretSlot(for family: HarnessFamily) -> String? {
+        switch family {
+        case .codex: "openai"; case .claude: "anthropic"; case .cursor: "cursor"
+        case .opencode: "opencode"; case .raw: "raw"; case .openrouter: "openrouter"
+        default: nil
+        }
+    }
+
+    /// The ONE presentational owner of the Store-key action's availability
+    /// (issue #132 class fix, INV-134): the inner panel button AND the footer
+    /// "Store key" CTA both derive disabled + hover from THIS projection, so
+    /// an unavailable store is a visibly disabled control that explains its
+    /// real cause — never a silent no-op click. Causes rank by severity:
+    /// an offline engine makes busy/empty moot; busy outranks the empty field.
+    struct StoreKeyAvailability: Equatable {
+        enum BlockedReason: Equatable {
+            case gatewayOffline
+            case actionInFlight
+            case emptyKeyField
+
+            /// Cause-specific hover text — it must never claim "empty field"
+            /// while the real blocker is the engine connection.
+            var help: String {
+                switch self {
+                case .gatewayOffline: return "Engine offline: reconnect before storing a key."
+                case .actionInFlight: return "Wait for the current action to finish."
+                case .emptyKeyField: return "Enter the API key in the fallback field first."
+                }
+            }
+        }
+
+        let blockedReason: BlockedReason?
+        var enabled: Bool { blockedReason == nil }
+
+        /// Hover help for the panel's Store Key button: the blocking cause
+        /// while disabled, else the plain action description.
+        var panelHelp: String {
+            blockedReason?.help
+                ?? "Store this fallback API key, then refresh exactly that credential source."
+        }
+
+        /// Whitespace-only input counts as empty — the store guard trims the
+        /// field before writing, so an untrimmed "enabled" would be a lie.
+        init(gatewayAvailable: Bool, actionInFlight: Bool, keyField: String) {
+            if !gatewayAvailable {
+                blockedReason = .gatewayOffline
+            } else if actionInFlight {
+                blockedReason = .actionInFlight
+            } else if keyField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                blockedReason = .emptyKeyField
+            } else {
+                blockedReason = nil
+            }
+        }
+    }
+
     /// What the login-disclosure card may SAY and OFFER. The card is not
     /// codex-only — a terminal-mode claude/cursor login discloses its captured
     /// `oauth_url` through the same overlay — so both answers come from the
@@ -171,7 +233,13 @@ enum AuthSheetPresentation {
 extension AuthSheetPresentation.PrimaryCTA {
     /// INV-134: a disabled control explains why — the DISABLING cause wins
     /// over the plain action description.
-    func help(family: String, busy: Bool = false, loginBlocked: Bool = false) -> String {
+    func help(family: String, busy: Bool = false, loginBlocked: Bool = false,
+              storeKeyBlocked: AuthSheetPresentation.StoreKeyAvailability.BlockedReason? = nil)
+        -> String
+    {
+        // The store-key projection carries its own severity order (offline
+        // beats busy beats empty), so its cause wins the merged ladder here.
+        if self == .storeKey, let cause = storeKeyBlocked { return cause.help }
         if busy { return "Wait for the current action to finish." }
         if loginBlocked, self == .login {
             return "Login is unavailable until setup state resolves (an active job, recovery, or an unconfirmed prior process)."

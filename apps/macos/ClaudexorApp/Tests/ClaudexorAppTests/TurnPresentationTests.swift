@@ -254,6 +254,70 @@ import ClaudexorKit
             profileId: nil, secretName: nil))
     }
 
+    /// #132 class fix: the Store-key action has ONE availability owner. Its
+    /// causes rank by severity — offline beats busy beats empty field — and
+    /// each cause explains itself, so the hover never claims "empty field"
+    /// while the real blocker is the engine connection or a running action.
+    @Test func storeKeyAvailabilityRanksItsCausesAndExplainsEachOne() {
+        typealias Availability = AuthSheetPresentation.StoreKeyAvailability
+        let offline = Availability(gatewayAvailable: false, actionInFlight: true, keyField: "")
+        #expect(offline.blockedReason == .gatewayOffline)
+        #expect(!offline.enabled)
+        #expect(offline.panelHelp == "Engine offline: reconnect before storing a key.")
+
+        let busy = Availability(gatewayAvailable: true, actionInFlight: true, keyField: "")
+        #expect(busy.blockedReason == .actionInFlight)
+        #expect(busy.panelHelp == "Wait for the current action to finish.")
+
+        // Whitespace-only input is as empty as no input: the store guard
+        // trims before writing, so the projection trims before enabling.
+        let empty = Availability(gatewayAvailable: true, actionInFlight: false, keyField: " \n")
+        #expect(empty.blockedReason == .emptyKeyField)
+        #expect(empty.panelHelp == "Enter the API key in the fallback field first.")
+
+        let ready = Availability(gatewayAvailable: true, actionInFlight: false, keyField: "sk-x")
+        #expect(ready.enabled)
+        #expect(ready.blockedReason == nil)
+        #expect(ready.panelHelp
+            == "Store this fallback API key, then refresh exactly that credential source.")
+    }
+
+    /// The projection takes no family input, so every key family (opencode,
+    /// raw, openrouter) shares it by construction; the footer help path is
+    /// the one place a family enters the signature — pin that each family
+    /// gets the SAME cause-specific text there, and that the projection's
+    /// cause outranks the generic busy wording for the store-key CTA only.
+    @Test func storeKeyFooterHelpIsCauseSpecificForEveryKeyFamily() {
+        for family in [HarnessFamily.opencode, .raw, .openrouter] {
+            #expect(AuthSheetPresentation.PrimaryCTA.storeKey.help(
+                family: family.label, busy: false, storeKeyBlocked: .emptyKeyField
+            ) == "Enter the API key in the fallback field first.")
+            // Offline outranks busy: the footer must not say "wait" while
+            // the engine is unreachable.
+            #expect(AuthSheetPresentation.PrimaryCTA.storeKey.help(
+                family: family.label, busy: true, storeKeyBlocked: .gatewayOffline
+            ) == "Engine offline: reconnect before storing a key.")
+        }
+        // A non-storeKey CTA ignores the store-key cause and keeps its ladder.
+        #expect(AuthSheetPresentation.PrimaryCTA.retryProbe.help(
+            family: "OpenRouter", busy: false, storeKeyBlocked: .emptyKeyField
+        ) == "Run a fresh, non-cached Harness Doctor probe.")
+    }
+
+    /// #132 R1 (M-C2): the family→managed-slot mapping is a pure helper the
+    /// sheet consumes, pinned HERE against the exact engine grammar
+    /// (packages/util/src/secret-names.ts) — a view-only revert of
+    /// AuthSheet.swift can no longer silently drop a family's slot while the
+    /// suite stays green. Rendering of the private view state still needs the
+    /// VM visual acceptance.
+    @Test func managedSecretSlotPinsTheEngineGrammarPerFamily() {
+        #expect(AuthSheetPresentation.managedSecretSlot(for: .openrouter) == "openrouter")
+        #expect(AuthSheetPresentation.managedSecretSlot(for: .raw) == "raw")
+        // A family without an API-key fallback maps to nil: no key panel,
+        // no Store-key CTA.
+        #expect(AuthSheetPresentation.managedSecretSlot(for: .fake) == nil)
+    }
+
     @Test func serverOwnedJobTargetWinsWithoutTreatingDefaultAsMissing() {
         let profileJob = fallbackJob(
             harness: .codex, state: .notSupported,

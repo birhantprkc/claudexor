@@ -1658,7 +1658,14 @@ final class AppModel {
             try await requestClient.setSecret(name: name, value: value)
             await refreshSecrets(locationID: locationID)
             guard let request = family.apiKeyAuthReadinessRequest else { return (true, false) }
-            return (true, await refreshAuthReadiness(for: family, request: request))
+            let refreshed = await refreshAuthReadiness(for: family, request: request)
+            // The harness CARD renders daemon-NORMALIZED rows, which only a
+            // fresh harness-list refresh rebuilds — the same location-bound
+            // aggregate refresh Recheck runs (#132 R1: without it a stored key
+            // left the card frozen on "Unavailable" until a manual refresh).
+            _ = await refreshHarnesses(
+                fresh: true, locationID: locationID, markStaleOnFailure: true)
+            return (true, refreshed)
         } catch {
             return (false, false)
         }
