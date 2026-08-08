@@ -2090,6 +2090,22 @@ struct AppModelRefreshTests {
         ))
     }
 
+    /// #132: the openrouter sheet's readiness mappings exist and target the
+    /// `openrouter` harness id. Without BOTH requests the sheet's Recheck and
+    /// the post-store verify always reported "refresh failed" without probing.
+    @MainActor
+    @Test func openrouterAuthReadinessMappingsTargetTheOpenrouterHarness() async throws {
+        #expect(HarnessFamily.openrouter.setupHarnessId == "openrouter")
+        #expect(HarnessFamily.openrouter.defaultAuthReadinessRequest == AuthReadinessRefreshRequest(
+            authRequest: .apiKey,
+            source: .apiKeyEnvironment
+        ))
+        #expect(HarnessFamily.openrouter.apiKeyAuthReadinessRequest == AuthReadinessRefreshRequest(
+            authRequest: .apiKey,
+            source: .apiKeyEnvironment
+        ))
+    }
+
     @MainActor
     @Test func successfulSecretWriteIsNotReportedAsFailedWhenExactProbeFails() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
@@ -2119,10 +2135,61 @@ struct AppModelRefreshTests {
             }
         }
 
-        let outcome = await model.storeSecret(name: "raw_api", value: "redacted", for: .raw)
+        // "raw" is the REAL managed slot name for this family (packages/util/
+        // src/secret-names.ts) — the retired "raw_api" string was never in the
+        // managed grammar and would be refused by the live daemon.
+        let outcome = await model.storeSecret(name: "raw", value: "redacted", for: .raw)
         #expect(outcome.stored)
         #expect(!outcome.readinessRefreshed)
         #expect(model.secretBackend == "file")
+    }
+
+    /// #132 end-to-end: storing the OpenRouter key reaches the daemon with the
+    /// exact managed slot name `openrouter` and then requests the exact
+    /// api_key_env readiness refresh for the `openrouter` harness — the flow
+    /// that silently did nothing while the family had no secretName mapping.
+    @MainActor
+    @Test func openrouterStoreKeyUsesTheManagedSlotAndRefreshesExactReadiness() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [AppRequestStubURLProtocol.self]
+        let client = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!,
+            token: "test",
+            session: URLSession(configuration: config)
+        )
+        let model = AppModel(client: client, requestNotificationAuthorization: false)
+
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/secrets"):
+                guard let body = appTestRequestBody(request),
+                      let object = try JSONSerialization.jsonObject(with: body) as? [String: String],
+                      object == ["name": "openrouter", "value": "redacted"] else {
+                    throw AppRefreshTestError.badRequest
+                }
+                return (appResponse(for: request), Data("{}".utf8))
+            case ("GET", "/v2/secrets"):
+                return (appResponse(for: request), Data(#"{"backend":"file","secrets":[]}"#.utf8))
+            case ("POST", "/v2/harnesses/openrouter/auth-readiness"):
+                guard let body = appTestRequestBody(request),
+                      let object = try JSONSerialization.jsonObject(with: body) as? [String: String],
+                      object == ["authRequest": "api_key", "source": "api_key_env"] else {
+                    throw AppRefreshTestError.badRequest
+                }
+                return (
+                    appResponse(for: request),
+                    Data(#"{"harnessId":"openrouter","authRequest":"api_key","requestedSource":"api_key_env","observedAt":"2026-08-08T00:00:00Z","readiness":{"source":"api_key_env","availability":"available","verification":"not_run","detail":"key present; route unproven"}}"#.utf8)
+                )
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let outcome = await model.storeSecret(name: "openrouter", value: "redacted", for: .openrouter)
+        #expect(outcome.stored)
+        #expect(outcome.readinessRefreshed)
+        #expect(model.authSource(for: .openrouter, source: .apiKeyEnvironment)?.verification == "not_run")
     }
 
     @MainActor

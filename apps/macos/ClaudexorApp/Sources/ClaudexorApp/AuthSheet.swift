@@ -27,7 +27,7 @@ struct AuthSheet: View {
     private var secretName: String? {
         switch family {
         case .codex: "openai"; case .claude: "anthropic"; case .cursor: "cursor"
-        case .opencode: "opencode"; case .raw: "raw"; default: nil
+        case .opencode: "opencode"; case .raw: "raw"; case .openrouter: "openrouter"; default: nil
         }
     }
 
@@ -66,9 +66,9 @@ struct AuthSheet: View {
         controller == nil || actionInFlight || hasActiveJob || activeStateUnknown
             || job?.blocksReplacement == true
     }
-    private var secretWriteDisabled: Bool {
-        model.gateway(for: model.activeExecutionLocation) == nil || actionInFlight
-            || secretValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private var storeKeyAvailability: AuthSheetPresentation.StoreKeyAvailability {
+        .init(gatewayAvailable: model.gateway(for: model.activeExecutionLocation) != nil,
+              actionInFlight: actionInFlight, keyField: secretValue)
     }
     private var closeRequiresConfirmation: Bool {
         AuthSheetClosePolicy.requiresConfirmation(
@@ -177,9 +177,11 @@ struct AuthSheet: View {
                         Button(cta.label) { Task { await performPrimary(cta) } }
                             .buttonStyle(.borderedProminent)
                             .tint(Theme.accentSolid)
-                            .disabled(actionInFlight || (cta == .login && newSetupDisabled))
+                            .disabled(actionInFlight || (cta == .login && newSetupDisabled)
+                                || (cta == .storeKey && !storeKeyAvailability.enabled))
                             .help(cta.help(family: family.label, busy: actionInFlight,
-                                           loginBlocked: cta == .login && newSetupDisabled))
+                                           loginBlocked: cta == .login && newSetupDisabled,
+                                           storeKeyBlocked: storeKeyAvailability.blockedReason))
                         Button("Done") { requestClose() }.buttonStyle(.bordered)
                     }
                 }
@@ -307,8 +309,8 @@ struct AuthSheet: View {
                 SecureField("\(name) key", text: $secretValue).textFieldStyle(.roundedBorder)
                 Button { Task { await storeKey(name) } } label: { Label("Store Key", systemImage: "key.fill") }
                     .buttonStyle(.bordered)
-                    .disabled(secretWriteDisabled)
-                    .help("Store this fallback API key, then refresh exactly that credential source.")
+                    .disabled(!storeKeyAvailability.enabled)
+                    .help(storeKeyAvailability.panelHelp)
             }
         }
     }
