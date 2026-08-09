@@ -18,12 +18,18 @@ Release history for Claudexor. The current version is declared in the root
   Daemon polling now derives demand only from each enabled subject's primary
   refreshable source, ignores stale reactive evidence as a trigger, runs the
   three top-level refreshers concurrently, and applies completion-anchored
-  single-flight exponential pacing after partial or absent observations.
+  single-flight exponential pacing after partial or absent observations. A
+  credential-generation fence retires an older provider cycle before it can
+  restore a removed account or satisfy a post-login refresh with the old
+  credential; post-change callers coalesce into one current-generation cycle.
   Large compacted journals reopen and compact iteratively instead of passing
   roughly 176,000 records as JavaScript call arguments, fixing the 3.3.13
   machine-wide startup failure. Browser media uses a marker-owned per-run child
   so a pre-existing `.claudexor-artifacts` root and unrelated same-basename
-  paths are captured and preserved. The release also pins the ACP/daemon typed
+  paths are captured and preserved. Crash recovery persists the envelope id and
+  workspace mode, so startup cleanup removes that same marked child from an
+  in-place project without touching the shared root or user siblings. The
+  release also pins the ACP/daemon typed
   inline-secret refusals and removes wall-clock timing from the reported macOS
   replay-order test.
 - **v3.3.13** (2026-08-08) — dev-hygiene follow-up. The packaged macOS app

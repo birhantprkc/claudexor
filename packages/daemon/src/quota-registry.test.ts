@@ -74,6 +74,216 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("retires a held old-credential cycle before delete and recreate can resurrect it", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-generation-delete-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    let credential: "old" | "new" = "old";
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    let releaseOld!: () => void;
+    const oldHeld = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          const captured = credential;
+          try {
+            if (calls === 1) await oldHeld;
+            return {
+              snapshots: [quotaSnapshot("claude", "work", captured === "old" ? 0.2 : 0.7)],
+            };
+          } finally {
+            active -= 1;
+          }
+        },
+      ],
+      () => new Date("2026-07-28T00:00:01.000Z"),
+    );
+
+    const startedBeforeDelete = registry.refreshWithCursor();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+
+    registry.removeSubject("claude", "work");
+    credential = "new";
+    registry.noteCredentialChange();
+    const startedAfterRecreate = registry.refreshWithCursor();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+
+    releaseOld();
+    const [beforeDeleteResult, afterRecreateResult] = await Promise.all([
+      startedBeforeDelete,
+      startedAfterRecreate,
+    ]);
+
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(1);
+    for (const result of [beforeDeleteResult, afterRecreateResult]) {
+      expect(result.response.snapshots).toEqual([
+        expect.objectContaining({
+          subject: expect.objectContaining({ subject_id: "work" }),
+          constraints: [expect.objectContaining({ used_ratio: 0.7 })],
+        }),
+      ]);
+    }
+    const records = journal.records();
+    expect(records.map((record) => record.type)).toEqual([
+      "quota.subject.removed",
+      "quota.projection.updated",
+      "quota.snapshot.upserted",
+      "quota.projection.updated",
+    ]);
+    expect(
+      records
+        .filter((record) => record.type === "quota.snapshot.upserted")
+        .map(
+          (record) =>
+            (record.payload as ReturnType<typeof quotaSnapshot>).constraints[0]?.used_ratio,
+        ),
+    ).toEqual([0.7]);
+    const finalCursor = journal.cursorFor(records.at(-1)!);
+    expect(beforeDeleteResult.quotaEventCursor).toBe(finalCursor);
+    expect(afterRecreateResult.quotaEventCursor).toBe(finalCursor);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("makes post-login foreground refresh wait for the obsolete poll, then join one new cycle", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-generation-login-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const subject = quotaSnapshot("claude", null, 0).subject;
+    let credential: "logged_out" | "logged_in" = "logged_out";
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+    let releaseOld!: () => void;
+    const oldHeld = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          const captured = credential;
+          try {
+            if (calls === 1) await oldHeld;
+            return captured === "logged_in"
+              ? { snapshots: [quotaSnapshot("claude", null, 0.4)] }
+              : {
+                  snapshots: [],
+                  absences: [
+                    {
+                      subject,
+                      reason: "not_logged_in" as const,
+                      detail: null,
+                      observed_at: "2026-07-28T00:00:00.000Z",
+                    },
+                  ],
+                };
+          } finally {
+            active -= 1;
+          }
+        },
+      ],
+      () => new Date("2026-07-28T00:00:01.000Z"),
+      () => [subject],
+    );
+
+    const oldPoll = registry.pollStale();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    credential = "logged_in";
+    registry.noteCredentialChange();
+    const foreground = registry.refreshWithCursor();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+
+    releaseOld();
+    const [polled, fenced] = await Promise.all([oldPoll, foreground]);
+    expect(polled).toBe(false);
+    expect(calls).toBe(2);
+    expect(maxActive).toBe(1);
+    expect(fenced.response.snapshots).toEqual([
+      expect.objectContaining({ constraints: [expect.objectContaining({ used_ratio: 0.4 })] }),
+    ]);
+    expect(fenced.response.absences).toEqual([]);
+    const records = journal.records();
+    expect(
+      records
+        .filter((record) => record.type === "quota.snapshot.upserted")
+        .map(
+          (record) =>
+            (record.payload as ReturnType<typeof quotaSnapshot>).constraints[0]?.used_ratio,
+        ),
+    ).toEqual([0.4]);
+    expect(
+      records.filter(
+        (record) =>
+          record.type === "quota.projection.updated" &&
+          (record.payload as { reason?: unknown }).reason === "refresh",
+      ),
+    ).toHaveLength(1);
+    expect(fenced.quotaEventCursor).toBe(journal.cursorFor(records.at(-1)!));
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reports a current-generation failure instead of an obsolete success", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-generation-failure-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    let calls = 0;
+    let releaseOld!: () => void;
+    const oldHeld = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    const registry = new QuotaRegistry(journal, [
+      async () => {
+        calls += 1;
+        if (calls === 1) {
+          await oldHeld;
+          return { snapshots: [quotaSnapshot("claude", null, 0.2)] };
+        }
+        throw new Error("new credential unavailable");
+      },
+    ]);
+
+    const obsoleteCaller = registry.refresh();
+    await Promise.resolve();
+    registry.noteCredentialChange();
+    const currentCaller = registry.refreshWithCursor();
+    releaseOld();
+
+    const outcomes = await Promise.allSettled([obsoleteCaller, currentCaller]);
+    expect(calls).toBe(2);
+    expect(outcomes).toEqual([
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "quota_refresh_unavailable", status: 503 }),
+      }),
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "quota_refresh_unavailable", status: 503 }),
+      }),
+    ]);
+    expect(journal.records()).toEqual([]);
+    expect(registry.read().snapshots).toEqual([]);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("starts top-level refreshers together but folds validated results in declaration order", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-parallel-")));
     const journal = new DurableJournal({ rootDir: root, partition: "global" });
@@ -1268,7 +1478,7 @@ describe("QuotaRegistry", () => {
     expect(calls).toBe(1);
     registry.noteCredentialChange();
     release();
-    await expect(oldPoll).resolves.toBe(true);
+    await expect(oldPoll).resolves.toBe(false);
     await expect(registry.pollStale()).resolves.toBe(true);
     expect(calls).toBe(2);
 

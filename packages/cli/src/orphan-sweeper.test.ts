@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   utimesSync,
@@ -11,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { processStartTime } from "@claudexor/workspace";
+import { processStartTime, WorkspaceManager } from "@claudexor/workspace";
 import { projectRuntimeDir } from "@claudexor/util";
 import { DurableJournal } from "@claudexor/journal";
 import { sweepOrphanWorkspaces } from "./orphan-sweeper.js";
@@ -132,6 +133,48 @@ describe("crash-GC live-owner guard", () => {
       expect(existsSync(fresh)).toBe(true);
       expect(existsSync(stale)).toBe(false);
       expect(existsSync(nested)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("startup sweep removes a dead in-place run's marked artifact child and preserves siblings", async () => {
+    const root = initRepo();
+    const stateDir = mkdtempSync(join(tmpdir(), "claudexor-sweep-state-"));
+    try {
+      const artifactRoot = join(root, ".claudexor-artifacts");
+      mkdirSync(artifactRoot);
+      const userFile = join(artifactRoot, "user-notes.txt");
+      writeFileSync(userFile, "preserve me\n");
+      const manager = new WorkspaceManager(root);
+      const env = await manager.create({
+        taskId: "task-inplace-orphan",
+        attemptId: "a01",
+        inPlace: true,
+      });
+      const owned = manager.ensureArtifactDirectory(env);
+      writeFileSync(join(owned, "shot.png"), Buffer.from([0x89, 0x50]));
+      const base = join(projectRuntimeDir(root), "workspaces", "task-inplace-orphan", "a01");
+      const ownerPath = join(base, "owner.json");
+      const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+      writeFileSync(
+        ownerPath,
+        `${JSON.stringify({
+          ...owner,
+          pid: 999_999_990,
+          started: "Thu Jan  1 00:00:00 1970",
+        })}\n`,
+      );
+      const journalRoot = recordProject(stateDir, root);
+
+      const actions = await sweepOrphanWorkspaces({ journalRoot });
+
+      expect(actions.some((action) => action.includes("task-inplace-orphan/a01"))).toBe(true);
+      expect(existsSync(base)).toBe(false);
+      expect(existsSync(owned)).toBe(false);
+      expect(existsSync(artifactRoot)).toBe(true);
+      expect(readFileSync(userFile, "utf8")).toBe("preserve me\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(stateDir, { recursive: true, force: true });

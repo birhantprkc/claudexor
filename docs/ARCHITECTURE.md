@@ -446,7 +446,12 @@ project namespace. A persisted ownership marker outside the project binds the
 exact child used by Browser output, candidate-media collection, diff exclusion,
 secret scanning, and cleanup. A pre-existing `.claudexor-artifacts` root and
 every sibling remain ordinary project/user state: they are captured when
-changed and are never recursively removed by run disposal.
+changed and are never recursively removed by run disposal. The envelope owner
+record also persists the original envelope id and whether the workspace is
+in-place, so crash/startup disposal reconstructs the same marker identity and
+removes the same child before deleting recovery evidence. An artifact marker
+without valid recovery identity refuses cleanup rather than orphaning the child
+by deleting its only proof.
 
 `auto` is evidence-driven: it permits web tools where the harness supports them
 and records whether the harness actually attempted web. If a web tool is
@@ -1409,9 +1414,12 @@ seeded-credential homes), dead per-attempt `claudexor/<task>/<attempt>`
 branches, leaked `claudexor/verify-*` branches, and stale
 `claudexor-ro-*`/`claudexor-verify-*` tmp dirs. Envelopes whose creating
 process is STILL ALIVE survive the sweep: `WorkspaceManager.create()` records
-an owner marker (pid + kernel start time — recycling-proof) that the sweeper
-honors, so a workspace whose owner is still active is never garbage-collected
-by a daemon starting mid-flight. One bounded exception: when start-time proof is
+an owner marker (pid + kernel start time — recycling-proof, plus the envelope id
+and in-place/isolated recovery mode) that the sweeper honors, so a workspace
+whose owner is still active is never garbage-collected by a daemon starting
+mid-flight. A dead in-place envelope is reconstructed with that exact identity,
+allowing marker-bound Browser cleanup without treating the live project as an
+isolated worktree. One bounded exception: when start-time proof is
 unavailable on either side (`ps`-less or sandboxed environment, legacy
 marker), a live pid keeps the envelope only while its working dirs are fresh
 (24h window over the newest mtime of the envelope base, owner marker, and
@@ -1785,7 +1793,10 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    sibling/user files are never excluded or deleted. A symlink or non-directory
    root refuses before Browser starts, and cleanup never widens beyond the
    marker-bound child. The shared root is removed only when this run created it
-   and it is still empty.
+   and it is still empty. The envelope owner record persists that exact id and
+   the workspace mode before Browser can run. Normal dispose and crash/startup
+   recovery therefore remove the same marker-bound child; malformed recovery
+   identity preserves both the marker and envelope base for manual recovery.
 
 Reviewer selection is Agent-only and schema-owned. Ask and Plan reject reviewer
 panels and protected-path approvals; Council is Plan's critique path. The
@@ -1880,7 +1891,12 @@ exponential pacing; reactive rollout/retry and status-line evidence remains
 available to display and routing without triggering or satisfying primary
 demand. The poll lifecycle is single-flight, anchors its next eligibility to
 completion rather than start, advances backoff after partial/absence outcomes,
-and resets when credential or routability state changes. The three top-level
+and resets when credential or routability state changes. A registry-owned
+credential generation fences a provider cycle after validation and before its
+first journal, memory, absence, marker, response, or cursor write. A foreground
+caller from a newer generation waits for obsolete work to retire, then all such
+callers coalesce into one current-generation cycle; an obsolete poll cannot
+restore removed evidence or satisfy a post-login refresh. The three top-level
 refreshers run concurrently, validate every fulfilled snapshot and absence
 before the first write, then fold in declaration order so first-claim and marker
 semantics remain deterministic; each refresher's per-account vendor calls stay

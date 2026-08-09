@@ -1054,6 +1054,76 @@ describe("disposeOrphan (crash GC)", () => {
     expect(branches.trim()).toBe("");
     rmSync(repo, { recursive: true, force: true });
   });
+
+  it("recovers an in-place envelope identity and removes its run-created artifact root", async () => {
+    const repo = await initRepo();
+    const artifactRoot = join(repo, ".claudexor-artifacts");
+    const runtimeRoot = reapMk(join(tmpdir(), "claudexor-orphan-inplace-"));
+    const wsm = new WorkspaceManager(repo, { runtimeRoot });
+    const env = await wsm.create({ taskId: "task-orph-ip", attemptId: "a01", inPlace: true });
+    const owned = wsm.ensureArtifactDirectory(env);
+    writeFileSync(join(owned, "shot.png"), Buffer.from([0x89, 0x50]));
+    const base = join(runtimeRoot, "workspaces", "task-orph-ip", "a01");
+
+    await new WorkspaceManager(repo, { runtimeRoot }).disposeOrphan("task-orph-ip", "a01");
+
+    expect(existsSync(base)).toBe(false);
+    expect(existsSync(owned)).toBe(false);
+    expect(existsSync(artifactRoot)).toBe(false);
+  });
+
+  it("preserves recovery evidence when an artifact marker has no valid envelope identity", async () => {
+    const repo = await initRepo();
+    const runtimeRoot = reapMk(join(tmpdir(), "claudexor-orphan-invalid-owner-"));
+    const wsm = new WorkspaceManager(repo, { runtimeRoot });
+    const env = await wsm.create({
+      taskId: "task-orph-invalid",
+      attemptId: "a01",
+      inPlace: true,
+    });
+    const owned = wsm.ensureArtifactDirectory(env);
+    writeFileSync(join(owned, "shot.png"), Buffer.from([0x89, 0x50]));
+    const base = join(runtimeRoot, "workspaces", "task-orph-invalid", "a01");
+    writeFileSync(
+      join(base, "owner.json"),
+      `${JSON.stringify({ pid: 999_999_990, created_at: new Date().toISOString() })}\n`,
+    );
+
+    await expect(
+      new WorkspaceManager(repo, { runtimeRoot }).disposeOrphan("task-orph-invalid", "a01"),
+    ).rejects.toThrow(/artifact ownership exists without valid recovery identity/);
+    expect(existsSync(base)).toBe(true);
+    expect(existsSync(join(base, "artifact-created.json"))).toBe(true);
+    expect(existsSync(owned)).toBe(true);
+
+    await wsm.dispose(env);
+  });
+
+  it("preserves recovery evidence when owner and artifact envelope identities disagree", async () => {
+    const repo = await initRepo();
+    const runtimeRoot = reapMk(join(tmpdir(), "claudexor-orphan-mismatched-owner-"));
+    const wsm = new WorkspaceManager(repo, { runtimeRoot });
+    const env = await wsm.create({
+      taskId: "task-orph-mismatch",
+      attemptId: "a01",
+      inPlace: true,
+    });
+    const owned = wsm.ensureArtifactDirectory(env);
+    writeFileSync(join(owned, "shot.png"), Buffer.from([0x89, 0x50]));
+    const base = join(runtimeRoot, "workspaces", "task-orph-mismatch", "a01");
+    const ownerPath = join(base, "owner.json");
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(ownerPath, `${JSON.stringify({ ...owner, envelope_id: "env-other" })}\n`);
+
+    await expect(
+      new WorkspaceManager(repo, { runtimeRoot }).disposeOrphan("task-orph-mismatch", "a01"),
+    ).rejects.toThrow(/artifact ownership does not match recovery identity/);
+    expect(existsSync(base)).toBe(true);
+    expect(existsSync(join(base, "artifact-created.json"))).toBe(true);
+    expect(existsSync(owned)).toBe(true);
+
+    await wsm.dispose(env);
+  });
 });
 
 describe("diff fidelity", () => {

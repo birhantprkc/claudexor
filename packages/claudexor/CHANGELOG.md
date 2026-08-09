@@ -11,6 +11,9 @@
   to account-wide exhaustion. Stabilize daemon quota demand and pacing, recover
   large compacted journals without unbounded argument spreads, pin inline-secret
   ingress coverage, and confine browser artifacts to marker-owned run subtrees.
+  Fence in-flight provider results across account deletion and login changes,
+  and recover the exact in-place artifact owner after a crash so startup cleanup
+  removes only that run's child while preserving shared-root siblings.
   - @claudexor/cli@3.3.14
 
 ## 3.3.13

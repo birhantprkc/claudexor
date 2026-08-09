@@ -12,6 +12,7 @@ import {
   type QuotaSubject,
 } from "@claudexor/schema";
 import { QuotaPollPacer } from "./quota-poll-pacer.js";
+import { QuotaRefreshCoordinator } from "./quota-refresh-coordinator.js";
 import { quotaSubjectIdentity, remainingQuotaRefreshDemand } from "./quota-refresh-demand.js";
 
 const UPSERTED = "quota.snapshot.upserted";
@@ -48,7 +49,9 @@ export class QuotaRegistry {
    * evidence may span several records; this is the commit/recovery boundary
    * consumed by snapshot-then-SSE clients. */
   private lastPublishedProjectionSignature: string | null = null;
-  private refreshInFlight: ReturnType<QuotaRegistry["performRefreshCycle"]> | null = null;
+  private readonly refreshCoordinator = new QuotaRefreshCoordinator<
+    Awaited<ReturnType<QuotaRegistry["performRefreshCycle"]>>
+  >();
   private readonly pollPacer: QuotaPollPacer;
 
   constructor(
@@ -132,7 +135,7 @@ export class QuotaRegistry {
       hasDemand: (now) =>
         remainingQuotaRefreshDemand(this.activeSnapshots(now), this.subjects?.()).size > 0,
       refresh: async () => {
-        await this.refreshCycle();
+        await this.refreshCycle(false);
       },
     });
   }
@@ -182,16 +185,16 @@ export class QuotaRegistry {
 
   /** One coalesced atomic refresh cycle shared by foreground and background
    * callers; poll pacing derives from post-cycle demand, never shared counters. */
-  private refreshCycle() {
-    if (this.refreshInFlight) return this.refreshInFlight;
-    const cycle = this.performRefreshCycle().finally(() => {
-      if (this.refreshInFlight === cycle) this.refreshInFlight = null;
-    });
-    this.refreshInFlight = cycle;
-    return cycle;
+  private async refreshCycle(
+    followCredentialChanges = true,
+  ): ReturnType<QuotaRegistry["performRefreshCycle"]> {
+    return this.refreshCoordinator.run(
+      (credentialGeneration) => this.performRefreshCycle(credentialGeneration),
+      followCredentialChanges,
+    );
   }
 
-  private async performRefreshCycle() {
+  private async performRefreshCycle(credentialGeneration: number) {
     if (this.refreshers.length === 0) {
       throw Object.assign(new Error("no live vendor-owned quota refresh source is available"), {
         code: "quota_refresh_unavailable",
@@ -229,6 +232,13 @@ export class QuotaRegistry {
         code: "quota_refresh_unavailable",
         status: 503,
       });
+    }
+    // Everything below mutates the journal or live projection without an
+    // await. Fence the whole commit boundary before its first write: a cycle
+    // that captured retired credentials contributes no snapshot, absence,
+    // marker, response, or cursor.
+    if (!this.refreshCoordinator.isCurrent(credentialGeneration)) {
+      throw new Error("quota refresh superseded by a credential change");
     }
     const claims: QuotaAbsence[] = [];
     for (const batch of batches) {
@@ -316,6 +326,7 @@ export class QuotaRegistry {
    * drop absence backoff so the next poll observes the new subject universe
    * instead of waiting out up to 15 minutes of old-state pacing. */
   noteCredentialChange(): void {
+    this.refreshCoordinator.retireCredentialGeneration();
     this.pollPacer.noteCredentialChange();
   }
 
@@ -389,6 +400,8 @@ export class QuotaRegistry {
   }
 
   removeSubject(harness: string, subjectId: string): number {
+    // Fence held official work at the earliest credential-deletion boundary.
+    this.noteCredentialChange();
     const removed = [...this.snapshots.values()].filter(
       (snapshot) =>
         snapshot.subject.harness === harness && snapshot.subject.subject_id === subjectId,

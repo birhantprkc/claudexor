@@ -14,6 +14,7 @@ import {
 } from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
 import { ArtifactOwnership } from "./artifact-ownership.js";
+import { readEnvelopeRecoveryRecord } from "./envelope-recovery.js";
 import {
   excludePlainDiffPathPrefix,
   plainDiffBinarySecretLike,
@@ -145,6 +146,8 @@ export class WorkspaceManager {
     // envelope; adapters may add only capability-declared, vendor-specific
     // child context (Claude/Cursor macOS Keychain bridge, INV-067).
     const base = this.envelopeBase(opts.taskId, opts.attemptId);
+    const envelopeId = newId("env");
+    const workspaceMode = opts.inPlace ? "in_place" : "isolated";
     ensureDir(base);
     const homeDir = join(base, "home");
     const codexHome = join(homeDir, ".codex");
@@ -172,6 +175,8 @@ export class WorkspaceManager {
         pid: process.pid,
         started: processStartTime(process.pid),
         created_at: nowIso(),
+        envelope_id: envelopeId,
+        workspace_mode: workspaceMode,
       }) + "\n",
     );
 
@@ -185,7 +190,7 @@ export class WorkspaceManager {
       const baseSha = gitRepo ? await snapshotTree(this.repoRoot) : null;
       if (!gitRepo) this.snapshotBaseline(base);
       return WorkspaceEnvelopeSchema.parse({
-        id: newId("env"),
+        id: envelopeId,
         task_id: opts.taskId,
         attempt_id: opts.attemptId,
         repo_root: this.repoRoot,
@@ -246,7 +251,7 @@ export class WorkspaceManager {
     }
 
     const envelope = WorkspaceEnvelopeSchema.parse({
-      id: newId("env"),
+      id: envelopeId,
       task_id: opts.taskId,
       attempt_id: opts.attemptId,
       repo_root: this.repoRoot,
@@ -528,33 +533,46 @@ export class WorkspaceManager {
   /**
    * Dispose an ORPHANED envelope by ids alone (crash GC): a daemon
    * crash leaves envelopes with no live job. Reconstructs the disposal
-   * surface (worktree path, branch name, envelope base) from the same id
-   * derivation create() used, so the safety invariants (id-validated base,
-   * never the live tree) hold without a persisted envelope record.
+   * surface from the envelope owner record when exact in-place identity is
+   * needed, while legacy isolated envelopes retain the deterministic-path
+   * fallback. Marker-bearing in-place state without valid recovery identity
+   * is preserved for manual recovery rather than partially disposed.
    */
   async disposeOrphan(taskId: string, attemptId: string): Promise<void> {
     const base = this.envelopeBase(taskId, attemptId);
-    await this.dispose(
-      WorkspaceEnvelopeSchema.parse({
-        id: newId("env"),
-        task_id: taskId,
-        attempt_id: attemptId,
-        repo_root: this.repoRoot,
-        base_ref: "HEAD",
-        base_sha: "0000000000000000000000000000000000000000",
-        worktree_path: join(base, "tree"),
-        branch_name: `claudexor/${taskId}/${attemptId}`,
-        home_dir: join(base, "home"),
-        harness_config_dirs: {
-          codex_home: join(base, "home", ".codex"),
-          claude_config: join(base, "home", ".claude"),
-          cursor_config: join(base, "home", ".cursor"),
-          opencode_config: join(base, "home", ".config", "opencode"),
-        },
-        policy_profile: "workspace_write",
-        dirty_policy: "snapshot",
-        created_at: nowIso(),
-      }),
-    );
+    const recovery = readEnvelopeRecoveryRecord(base);
+    const artifactMarkerExists = existsSync(join(base, "artifact-created.json"));
+    if (!recovery && artifactMarkerExists) {
+      throw new WorkspaceError(
+        `refusing to dispose orphan ${taskId}/${attemptId}: artifact ownership exists without valid recovery identity`,
+      );
+    }
+    const inPlace = recovery?.workspaceMode === "in_place";
+    const envelope = WorkspaceEnvelopeSchema.parse({
+      id: recovery?.envelopeId ?? newId("env"),
+      task_id: taskId,
+      attempt_id: attemptId,
+      repo_root: this.repoRoot,
+      base_ref: "HEAD",
+      base_sha: inPlace ? null : "0000000000000000000000000000000000000000",
+      worktree_path: inPlace ? this.repoRoot : join(base, "tree"),
+      branch_name: inPlace ? "inplace" : `claudexor/${taskId}/${attemptId}`,
+      home_dir: join(base, "home"),
+      harness_config_dirs: {
+        codex_home: join(base, "home", ".codex"),
+        claude_config: join(base, "home", ".claude"),
+        cursor_config: join(base, "home", ".cursor"),
+        opencode_config: join(base, "home", ".config", "opencode"),
+      },
+      policy_profile: "workspace_write",
+      dirty_policy: "snapshot",
+      created_at: nowIso(),
+    });
+    if (artifactMarkerExists && this.artifactOwnership.relativeDirectory(envelope) === null) {
+      throw new WorkspaceError(
+        `refusing to dispose orphan ${taskId}/${attemptId}: artifact ownership does not match recovery identity`,
+      );
+    }
+    await this.dispose(envelope);
   }
 }

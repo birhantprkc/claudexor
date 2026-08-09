@@ -569,3 +569,12 @@ authoritative for each exact disposition.
   semantics.
 - Add explicit finite-cap route-disclosure pins for every optional adapter lane
   so route-silent streams remain an intentional typed refusal.
+
+## 3.3.14 formal-review advisory
+
+- A bare GNU binary-diff stub whose filename itself contains the delimiter
+  ` and ` can be split at the first such delimiter by the non-Git path parser.
+  The failure direction retains the owned artifact record as visible diff noise
+  rather than excluding user work, and Claudexor-generated artifact filenames
+  do not use this shape. Keep this as parser-hardening backlog rather than
+  widening the 3.3.14 correction batch.
