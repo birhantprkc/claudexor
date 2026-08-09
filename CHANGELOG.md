@@ -3,6 +3,29 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.14** (2026-08-09) — Accounts and quota reliability. The macOS
+  Accounts popover now keeps its header fixed above a screen-bounded scroller,
+  labels the implicit vendor identity `CLI login`, and carries Cursor emails
+  from the existing typed status probe without another subprocess. Opening or
+  connecting hydrates the cacheable account registry instead of launching a
+  full provider cycle; expensive readiness/quota refresh is explicit, while
+  live quota markers coalesce into a display-only read with at most one
+  trailing request. Last-known figures remain visible with a stale/error
+  disclosure, and a failed refresh no longer erases account rows or presents
+  old readiness as current. Model-scoped windows and the server-owned quota
+  availability projection now reach Swift, so a Fable-only exhausted window is
+  labelled as scoped and cannot become an unqualified account-wide 100%.
+  Daemon polling now derives demand only from each enabled subject's primary
+  refreshable source, ignores stale reactive evidence as a trigger, runs the
+  three top-level refreshers concurrently, and applies completion-anchored
+  single-flight exponential pacing after partial or absent observations.
+  Large compacted journals reopen and compact iteratively instead of passing
+  roughly 176,000 records as JavaScript call arguments, fixing the 3.3.13
+  machine-wide startup failure. Browser media uses a marker-owned per-run child
+  so a pre-existing `.claudexor-artifacts` root and unrelated same-basename
+  paths are captured and preserved. The release also pins the ACP/daemon typed
+  inline-secret refusals and removes wall-clock timing from the reported macOS
+  replay-order test.
 - **v3.3.13** (2026-08-08) — dev-hygiene follow-up. The packaged macOS app
   bundle and the DMG staging directory now build into
   `apps/macos/dist/bundle.noindex/`, which Spotlight does not index, so local

@@ -1,6 +1,6 @@
 {
   "name": "@claudexor/journal",
-  "version": "3.3.13",
+  "version": "3.3.14",
   "license": "MIT",
   "description": "Checksummed append-only durable journal for daemon command and lifecycle state.",
   "type": "module",
