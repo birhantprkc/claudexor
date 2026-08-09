@@ -31,4 +31,13 @@ describe("ACP run-control applicability", () => {
       }),
     ).toBeNull();
   });
+
+  it("rejects inline secret fixtures with the typed ACP error code", () => {
+    const rejected = validateRunControls({
+      mode: "agent",
+      prompt: `use sk-${"a".repeat(32)}`,
+    });
+    expect(rejected).toMatchObject({ code: "inline_secret_rejected" });
+    expect(rejected?.message).toMatch(/secret-like/i);
+  });
 });

@@ -1802,9 +1802,12 @@ describe("DaemonServer", () => {
           },
         ],
       ]);
-      await expect(client.enqueue({ prompt: `use sk-${"a".repeat(32)}` })).rejects.toThrow(
-        /secret-like/i,
-      );
+      const inlineSecretError = await client
+        .enqueue({ prompt: `use sk-${"a".repeat(32)}` })
+        .catch((error: unknown) => error);
+      expect(inlineSecretError).toMatchObject({ code: "inline_secret_rejected" });
+      expect(inlineSecretError).toBeInstanceOf(Error);
+      expect((inlineSecretError as Error).message).toMatch(/secret-like/i);
       expect(authority.store.records()).toHaveLength(1);
     } finally {
       await server.stop();
