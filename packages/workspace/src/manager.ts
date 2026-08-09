@@ -1,26 +1,10 @@
 import { execFileSync } from "node:child_process";
-import {
-  cpSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type { AccessProfile, DirtyPolicy, WorkspaceEnvelope } from "@claudexor/schema";
 import { WorkspaceEnvelope as WorkspaceEnvelopeSchema } from "@claudexor/schema";
-import {
-  CLAUDEXOR_ARTIFACT_DIR,
-  claudexorArtifactRunDirectory,
-  runCaptureRaw,
-  WorkspaceError,
-} from "@claudexor/core";
+import { runCaptureRaw, WorkspaceError } from "@claudexor/core";
 import {
   containsSecretLikeToken,
   ensureDir,
@@ -29,6 +13,7 @@ import {
   projectRuntimeDir,
 } from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
+import { ArtifactOwnership } from "./artifact-ownership.js";
 import {
   excludePlainDiffPathPrefix,
   plainDiffBinarySecretLike,
@@ -70,13 +55,6 @@ export interface CreateEnvelopeOptions {
   inPlace?: boolean;
 }
 
-interface ArtifactOwnershipMarker {
-  version: 1;
-  envelope_id: string;
-  relative_path: string;
-  root_created: boolean;
-}
-
 /**
  * Manages WorkspaceEnvelopes: an isolated Git checkout plus scoped HOME and
  * per-harness config dirs, and dirty-tree handling. Claudexor owns these
@@ -98,6 +76,7 @@ export function processStartTime(pid: number): string | null {
 
 export class WorkspaceManager {
   private readonly runtimeRoot: string;
+  private readonly artifactOwnership: ArtifactOwnership;
 
   /**
    * Envelope ids whose worktree bridge THIS manager's prep actually created
@@ -118,6 +97,9 @@ export class WorkspaceManager {
     options: { runtimeRoot?: string } = {},
   ) {
     this.runtimeRoot = options.runtimeRoot ?? projectRuntimeDir(repoRoot);
+    this.artifactOwnership = new ArtifactOwnership((env) =>
+      join(this.envelopeBase(env.task_id, env.attempt_id), "artifact-created.json"),
+    );
   }
 
   private workspacesDir(): string {
@@ -147,126 +129,12 @@ export class WorkspaceManager {
     return base;
   }
 
-  private artifactMarkerPath(env: WorkspaceEnvelope): string {
-    return join(this.envelopeBase(env.task_id, env.attempt_id), "artifact-created.json");
-  }
-
-  private artifactMarker(env: WorkspaceEnvelope): ArtifactOwnershipMarker | null {
-    try {
-      const parsed = JSON.parse(
-        readFileSync(this.artifactMarkerPath(env), "utf8"),
-      ) as Partial<ArtifactOwnershipMarker>;
-      const relative = claudexorArtifactRunDirectory(env.id);
-      if (
-        parsed.version !== 1 ||
-        parsed.envelope_id !== env.id ||
-        parsed.relative_path !== relative ||
-        typeof parsed.root_created !== "boolean"
-      ) {
-        return null;
-      }
-      return parsed as ArtifactOwnershipMarker;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Lazily reserve the one run-owned artifact subtree. A pre-existing shared
-   * root is ordinary user state; only this marker-bound child is excluded,
-   * collected, and cleaned. */
   ensureArtifactDirectory(env: WorkspaceEnvelope): string {
-    const relative = claudexorArtifactRunDirectory(env.id);
-    const root = join(env.worktree_path, CLAUDEXOR_ARTIFACT_DIR);
-    const path = join(env.worktree_path, relative);
-    const marker = this.artifactMarker(env);
-    if (marker) {
-      this.ensureSafeArtifactRoot(root);
-      if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
-      const stat = lstatSync(path);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) {
-        throw new WorkspaceError("owned artifact path is no longer a private directory");
-      }
-      return path;
-    }
-
-    let rootCreated = false;
-    try {
-      mkdirSync(root, { mode: 0o700 });
-      rootCreated = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    this.ensureSafeArtifactRoot(root);
-    try {
-      mkdirSync(path, { mode: 0o700 });
-    } catch (error) {
-      if (rootCreated) {
-        try {
-          rmdirSync(root);
-        } catch {
-          /* preserve a raced/non-empty root */
-        }
-      }
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new WorkspaceError("owned artifact path unexpectedly already exists");
-      }
-      throw error;
-    }
-    const ownership: ArtifactOwnershipMarker = {
-      version: 1,
-      envelope_id: env.id,
-      relative_path: relative,
-      root_created: rootCreated,
-    };
-    try {
-      writeFileSync(this.artifactMarkerPath(env), `${JSON.stringify(ownership)}\n`, {
-        flag: "wx",
-        mode: 0o600,
-      });
-    } catch (error) {
-      rmSync(path, { recursive: true, force: true });
-      if (rootCreated) {
-        try {
-          rmdirSync(root);
-        } catch {
-          /* preserve a raced/non-empty root */
-        }
-      }
-      throw error;
-    }
-    return path;
+    return this.artifactOwnership.ensureDirectory(env);
   }
 
   ownedArtifactRelativeDirectory(env: WorkspaceEnvelope): string | null {
-    return this.artifactMarker(env)?.relative_path ?? null;
-  }
-
-  private ensureSafeArtifactRoot(root: string): void {
-    const stat = lstatSync(root);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new WorkspaceError("shared artifact root is not a real directory");
-    }
-  }
-
-  private removeOwnedArtifactDirectory(env: WorkspaceEnvelope): void {
-    const marker = this.artifactMarker(env);
-    if (!marker) return;
-    const root = join(env.worktree_path, CLAUDEXOR_ARTIFACT_DIR);
-    const path = join(env.worktree_path, marker.relative_path);
-    try {
-      rmSync(path, { recursive: true, force: true });
-    } catch {
-      /* best-effort: never broaden cleanup beyond the marker-bound child */
-    }
-    if (!marker.root_created) return;
-    try {
-      const stat = lstatSync(root);
-      if (stat.isDirectory() && !stat.isSymbolicLink() && readdirSync(root).length === 0) {
-        rmdirSync(root);
-      }
-    } catch {
-      /* preserve a missing, replaced, raced, or non-empty shared root */
-    }
+    return this.artifactOwnership.relativeDirectory(env);
   }
 
   async create(opts: CreateEnvelopeOptions): Promise<WorkspaceEnvelope> {
@@ -606,7 +474,7 @@ export class WorkspaceManager {
     // In-place envelopes point worktree_path at the live repo root; NEVER remove a
     // worktree or the tree itself in that case.
     const inPlace = env.worktree_path === env.repo_root;
-    if (inPlace) this.removeOwnedArtifactDirectory(env);
+    if (inPlace) this.artifactOwnership.removeDirectory(env);
     if (!inPlace) {
       const privateClone = existsSync(
         join(this.envelopeBase(env.task_id, env.attempt_id), "private-clone-v1"),
