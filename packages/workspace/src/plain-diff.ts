@@ -73,34 +73,23 @@ export function excludePlainDiffPathPrefix(text: string, relativeDir: string): s
   const ownedPrefix = `${normalized}/`;
   const pathsAreOwned = (paths: string[]): boolean =>
     paths.length > 0 && paths.every((path) => path === normalized || path.startsWith(ownedPrefix));
-  const starts = [...text.matchAll(/^diff .+$/gm)]
+  // GNU may emit a bare `Binary files … differ` record with no `diff …`
+  // delimiter. Treat both structural forms as file-record boundaries so an
+  // owned text record cannot absorb a following unrelated binary record (or
+  // vice versa). Hunk content cannot match: it always has a ' '/'+'/'-' prefix.
+  const starts = [...text.matchAll(/^(?:diff .+|Binary files .+ differ)$/gm)]
     .map((match) => match.index)
     .filter((index): index is number => index !== undefined);
-  let filtered = text;
-  if (starts.length > 0) {
-    filtered = text.slice(0, starts[0]);
-    for (let index = 0; index < starts.length; index += 1) {
-      const block = text.slice(starts[index], starts[index + 1] ?? text.length);
-      const files = parseUnifiedDiff(block).files;
-      const paths = files
-        .flatMap((file) => [file.oldPath, file.newPath])
-        .filter(Boolean) as string[];
-      if (!pathsAreOwned(paths)) filtered += block;
-    }
+  if (starts.length === 0) return text;
+  let filtered = text.slice(0, starts[0]);
+  for (let index = 0; index < starts.length; index += 1) {
+    const block = text.slice(starts[index], starts[index + 1] ?? text.length);
+    const paths = parseUnifiedDiff(block)
+      .files.flatMap((file) => [file.oldPath, file.newPath])
+      .filter(Boolean) as string[];
+    if (!pathsAreOwned(paths)) filtered += block;
   }
-  // GNU diff emits a binary comparison as a standalone `Binary files … differ`
-  // line with no preceding `diff …` block. Strip that line only when its parsed
-  // old/new paths are both inside the same exact owned prefix.
-  return filtered
-    .split("\n")
-    .filter((line) => {
-      if (!line.startsWith("Binary files ") || !line.endsWith(" differ")) return true;
-      const paths = parseUnifiedDiff(line)
-        .files.flatMap((file) => [file.oldPath, file.newPath])
-        .filter(Boolean) as string[];
-      return !pathsAreOwned(paths);
-    })
-    .join("\n");
+  return filtered;
 }
 
 /** `diff -ruN` carries no binary payload, so inspect each live binary
