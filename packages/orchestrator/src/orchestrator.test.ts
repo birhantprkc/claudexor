@@ -11808,7 +11808,7 @@ describe("delegation belt injection (D32)", () => {
     usageCostUsd?: number,
     beltToolStatuses: Array<"ok" | "error"> = [],
     afterBeltToolResult?: () => void,
-    writeCandidate?: (cwd: string) => void,
+    writeCandidate?: (cwd: string, spec: HarnessRunSpec) => void,
     responseText = "Implemented.",
   ): HarnessAdapter {
     return {
@@ -11819,7 +11819,7 @@ describe("delegation belt injection (D32)", () => {
           display_name: id,
           kind: "local_cli",
           provider_family: "anthropic",
-          capabilities: { implement: true, create_from_scratch: true },
+          capabilities: { implement: true, create_from_scratch: true, browser_tool: true },
           capability_profile: {
             mcp_injection: mcpInjection,
             mcp_injection_requires_full_access: requiresFullAccess,
@@ -11871,7 +11871,7 @@ describe("delegation belt injection (D32)", () => {
           };
           afterBeltToolResult?.();
         }
-        if (writeCandidate) writeCandidate(spec.cwd);
+        if (writeCandidate) writeCandidate(spec.cwd, spec);
         else writeFileSync(join(spec.cwd, "CHANGED.txt"), "change\n");
         yield { type: "message", session_id: spec.session_id, ts, text: responseText };
         if (usageCostUsd) {
@@ -12893,16 +12893,18 @@ describe("delegation belt injection (D32)", () => {
         undefined,
         [],
         undefined,
-        (cwd) => {
+        (cwd, spec) => {
+          const ownedRoot = spec.browser?.output_dir;
+          if (source === "owned artifact" && !ownedRoot) throw new Error("missing browser output");
           const path =
-            source === "owned artifact"
-              ? join(cwd, ".claudexor-artifacts", "browser", "shot.png")
-              : join(cwd, "preview.png");
+            source === "owned artifact" ? join(ownedRoot!, "shot.png") : join(cwd, "preview.png");
           mkdirSync(join(path, ".."), { recursive: true });
           writeFileSync(path, Buffer.concat([Buffer.from([0]), Buffer.from(secret)]));
-          const clean = join(cwd, ".claudexor-artifacts", "browser", "clean.png");
-          mkdirSync(join(clean, ".."), { recursive: true });
-          writeFileSync(clean, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+          if (ownedRoot) {
+            const clean = join(ownedRoot, "clean.png");
+            mkdirSync(join(clean, ".."), { recursive: true });
+            writeFileSync(clean, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+          }
         },
         source === "ignored markdown link" ? "![preview](preview.png)" : "Implemented.",
       );
@@ -12912,6 +12914,8 @@ describe("delegation belt injection (D32)", () => {
         prompt: "x",
         mode: "agent",
         harnesses: ["deleg"],
+        access: "external_sandbox_full",
+        browser: true,
       });
 
       expect(res.lifecycle).toBe("failed");
@@ -12976,7 +12980,7 @@ describe("delegation belt injection (D32)", () => {
     async (state) => {
       const repo = reapMk(join(tmpdir(), `claudexor-raster-${state}-`));
       writeFileSync(join(repo, "README.md"), "# test\n");
-      const raster = join(repo, ".claudexor-artifacts", "preview.png");
+      let raster: string | null = null;
       const adapter = delegatingAdapter(
         "raster",
         true,
@@ -12986,8 +12990,10 @@ describe("delegation belt injection (D32)", () => {
         undefined,
         [],
         undefined,
-        (cwd) => {
-          const output = join(cwd, ".claudexor-artifacts", "preview.png");
+        (_cwd, spec) => {
+          if (!spec.browser?.output_dir) throw new Error("missing browser output");
+          const output = join(spec.browser.output_dir, "preview.png");
+          raster = output;
           mkdirSync(join(output, ".."), { recursive: true });
           writeFileSync(
             output,
@@ -13010,6 +13016,8 @@ describe("delegation belt injection (D32)", () => {
         harnesses: ["raster"],
         attempts: 2,
         inPlace: true,
+        access: "external_sandbox_full",
+        browser: true,
       });
 
       expect(res.lifecycle).toBe("failed");
@@ -13017,9 +13025,7 @@ describe("delegation belt injection (D32)", () => {
       const workProduct = readFileSync(join(res.runDir, "final", "work_product.yaml"), "utf8");
       expect(workProduct).toContain("secret_recovery: manual_cleanup");
       expect(workProduct.replace(/\s+/g, " ")).toContain(
-        state === "oversized"
-          ? "could not be proven reversible"
-          : "could not be proven secret-safe or captured as an exact reversible patch",
+        "could not be proven secret-safe or captured as an exact reversible patch",
       );
       expect(workProduct).not.toContain("later user edits");
       const refusalSurface = [
@@ -13029,7 +13035,7 @@ describe("delegation belt injection (D32)", () => {
       ].join("\n");
       expect(refusalSurface).toContain("could not be proven secret-safe");
       expect(refusalSurface).not.toContain("contains secret-like token");
-      if (state === "unreadable" && existsSync(raster)) chmodSync(raster, 0o600);
+      if (state === "unreadable" && raster && existsSync(raster)) chmodSync(raster, 0o600);
     },
   );
 

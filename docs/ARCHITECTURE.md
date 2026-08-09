@@ -440,6 +440,14 @@ markdown screenshot links remain inspectable after the worktree is disposed;
 they remain INTERNAL run evidence until the patch is applied to the project,
 preserving INV-051's two artifact planes.
 
+Browser-produced media is written below one envelope-owned child,
+`.claudexor-artifacts/<envelope-id>/`, never into a shared Claudexor-owned
+project namespace. A persisted ownership marker outside the project binds the
+exact child used by Browser output, candidate-media collection, diff exclusion,
+secret scanning, and cleanup. A pre-existing `.claudexor-artifacts` root and
+every sibling remain ordinary project/user state: they are captured when
+changed and are never recursively removed by run disposal.
+
 `auto` is evidence-driven: it permits web tools where the harness supports them
 and records whether the harness actually attempted web. If a web tool is
 attempted and its `tool_result` errors, the attempt is `web-unsatisfied` until a
@@ -1736,7 +1744,8 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    excluded; a candidate-authored `CLAUDE.md`, or any candidate EDIT of the bridge
    — even one that keeps the ownership marker comment — differs from the exact
    bytes and is captured in `patch.diff` like any other real change, the same
-   doctrine as the `.claudexor` artifact-dir exclusion. Fences on both writes: the create is EXCLUSIVE (`O_CREAT|O_EXCL`)
+   positive-ownership doctrine as the marker-bound artifact-child exclusion.
+   Fences on both writes: the create is EXCLUSIVE (`O_CREAT|O_EXCL`)
    and NO-FOLLOW, so a hand-written `CLAUDE.md`, a symlink (even dangling), or a
    directory at that path is never overwritten or written through; it is
    idempotent, so a second or concurrent prep is a no-op; the project-root write
@@ -1744,6 +1753,24 @@ fence (Bible INV-113); an unlisted mutation path is a release blocker:
    admission is determined independently by the semantic run-shape predicate
    above. A bridge failure never fails the run (it is a convenience, not a
    precondition).
+8. **Secret-diff quarantine rollback** — when an in-place candidate contains
+   secret-like bytes, the orchestrator reverse-applies only that candidate's
+   transient patch. The workspace rollback verifies the exact postimage before
+   mutation and refuses if concurrent/user bytes diverged; Git object writes
+   use the isolated scratch object database. A refusal or unproven scratch
+   cleanup becomes a typed manual-cleanup receipt, never a broader reset. This
+   path does not yet take the repository mutation lease; that hardening remains
+   a separately owned follow-up rather than an undocumented mutation.
+9. **In-place browser artifact cleanup** — when Browser is effective, workspace
+   prep lazily creates one unique `.claudexor-artifacts/<envelope-id>` child and
+   persists an envelope-id-bound ownership marker outside the live tree. Only
+   that child is passed as Browser output, excluded from Git/non-Git capture,
+   collected into Evidence, scanned for secret risk, and removed at dispose.
+   A pre-existing shared root is validated as a real directory and preserved;
+   sibling/user files are never excluded or deleted. A symlink or non-directory
+   root refuses before Browser starts, and cleanup never widens beyond the
+   marker-bound child. The shared root is removed only when this run created it
+   and it is still empty.
 
 Reviewer selection is Agent-only and schema-owned. Ask and Plan reject reviewer
 panels and protected-path approvals; Council is Plan's critique path. The

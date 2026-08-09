@@ -114,8 +114,18 @@ function candidatePathStatus(root: string, raw: string): CandidatePathStatus {
   return { kind: "unsafe" };
 }
 
-function artifactMediaPaths(root: string): { paths: string[]; unsafe: boolean } {
-  const artifactRoot = join(root, CLAUDEXOR_ARTIFACT_DIR);
+function artifactMediaPaths(
+  root: string,
+  artifactRelativeDir: string | null,
+): { paths: string[]; unsafe: boolean } {
+  if (artifactRelativeDir === null) return { paths: [], unsafe: false };
+  const normalized = artifactRelativeDir.split("\\").join("/");
+  const prefix = `${CLAUDEXOR_ARTIFACT_DIR}/`;
+  const envelopeId = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : "";
+  if (!/^[A-Za-z0-9._-]+$/.test(envelopeId) || envelopeId.includes("/")) {
+    return { paths: [], unsafe: true };
+  }
+  const artifactRoot = join(root, artifactRelativeDir);
   const rootStatus = candidatePathStatus(root, artifactRoot);
   if (rootStatus.kind === "missing") return { paths: [], unsafe: false };
   if (rootStatus.kind !== "safe" || !rootStatus.stat.isDirectory()) {
@@ -250,8 +260,8 @@ export function persistCandidateOutputs(input: {
 }
 
 /**
- * Collect media the harness saved for the USER into the claudexor-owned
- * artifact dir (F4). These files are EXCLUDED from the candidate diff
+ * Collect media the harness saved for the USER into this envelope's
+ * marker-bound artifact child (F4). These files are EXCLUDED from the candidate diff
  * (so a screenshot-only run reads as noChanges), so they never appear in the
  * diff's changed paths — this walk is how they reach the Evidence gallery.
  * Returns worktree-relative paths (retaining the `.claudexor-artifacts/`
@@ -261,11 +271,12 @@ export function persistCandidateOutputs(input: {
 export function collectArtifactDirMedia(input: {
   worktreePath: string;
   attemptDir: string;
+  artifactRelativeDir: string | null;
 }): string[] {
   const root = resolve(input.worktreePath);
   let total = 0;
   const preserved: string[] = [];
-  for (const rel of artifactMediaPaths(root).paths) {
+  for (const rel of artifactMediaPaths(root, input.artifactRelativeDir).paths) {
     const status = candidatePathStatus(root, rel);
     if (status.kind !== "safe" || !status.stat.isFile()) continue;
     const target = join(input.attemptDir, "produced", rel);
@@ -284,6 +295,7 @@ export function collectArtifactDirMedia(input: {
 export function candidateOutputsContainSecret(input: {
   worktreePath: string;
   changedPaths: readonly string[];
+  artifactRelativeDir: string | null;
 }): boolean {
   return candidateOutputSecretRisk(input).risky;
 }
@@ -291,6 +303,7 @@ export function candidateOutputsContainSecret(input: {
 export function candidateOutputSecretRisk(input: {
   worktreePath: string;
   changedPaths: readonly string[];
+  artifactRelativeDir: string | null;
 }): {
   risky: boolean;
   riskyPaths: string[];
@@ -298,7 +311,7 @@ export function candidateOutputSecretRisk(input: {
   artifactDirectoryUnsafe: boolean;
 } {
   const root = resolve(input.worktreePath);
-  const artifactMedia = artifactMediaPaths(root);
+  const artifactMedia = artifactMediaPaths(root, input.artifactRelativeDir);
   const riskyPaths: string[] = [];
   const nonReversiblePaths: string[] = [];
   const paths = [...input.changedPaths, ...artifactMedia.paths];
@@ -343,6 +356,7 @@ export function writeCandidateAttemptArtifacts(input: {
   store: ArtifactStore;
   attemptDir: string;
   worktreePath: string;
+  artifactRelativeDir: string | null;
   diff: string;
   /** False for a secret-refused candidate: even an empty placeholder named
    * patch.diff would falsely imply that an inspectable patch was retained. */
@@ -370,7 +384,7 @@ export function writeCandidateAttemptArtifacts(input: {
           changedPaths: [
             ...stats.paths,
             ...rasterLinksInMarkdown(input.answerText ?? ""),
-            ...artifactMediaPaths(resolve(input.worktreePath)).paths,
+            ...artifactMediaPaths(resolve(input.worktreePath), input.artifactRelativeDir).paths,
           ],
         });
   input.store.writeYaml(join(input.attemptDir, "attempt.yaml"), {

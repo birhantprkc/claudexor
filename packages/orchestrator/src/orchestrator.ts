@@ -113,7 +113,6 @@ import { globalConfigDir, loadConfig } from "@claudexor/config";
 import type { AdapterRegistry, HarnessAdapter, InteractionChannel } from "@claudexor/core";
 import {
   AnswerAssembly,
-  CLAUDEXOR_ARTIFACT_DIR,
   CLAUDEXOR_BROWSER_ARTIFACT_SUBDIR,
   countsAsAgentProgress,
   HarnessUnavailableError,
@@ -2404,6 +2403,12 @@ export class Orchestrator {
           log,
         )
       : null;
+    const artifactRelativeDir = routed.browserRequirement.effective
+      ? (wsm.ensureArtifactDirectory(envelope), wsm.ownedArtifactRelativeDirectory(envelope))
+      : null;
+    if (routed.browserRequirement.effective && artifactRelativeDir === null) {
+      throw new Error("browser artifact ownership marker was not persisted");
+    }
     let spec = HarnessRunSpec.parse({
       session_id: newId("ses"),
       intent,
@@ -2422,9 +2427,11 @@ export class Orchestrator {
       attachments: runInput?.attachments ?? [],
       browser: this.requestRequirements.browserSpec(
         routed.browserRequirement,
-        // F4: browser-MCP screenshots land in the claudexor-owned
-        // artifact dir inside the worktree — excluded from the diff, gallery-collected.
-        join(envelope.worktree_path, CLAUDEXOR_ARTIFACT_DIR, CLAUDEXOR_BROWSER_ARTIFACT_SUBDIR),
+        // Browser-MCP screenshots land in this envelope's marker-bound child
+        // below the shared root. Only that child is excluded/collected/cleaned.
+        artifactRelativeDir === null
+          ? ""
+          : join(envelope.worktree_path, artifactRelativeDir, CLAUDEXOR_BROWSER_ARTIFACT_SUBDIR),
       ),
       extra_mcp_servers: this.delegationBeltFor(
         runInput,
@@ -2859,6 +2866,7 @@ export class Orchestrator {
           store,
           attemptDir,
           worktreePath: envelope.worktree_path,
+          artifactRelativeDir,
           diff,
           persistPatch: secretDiffRefusal === undefined,
           persistProducedMedia: secretDiffRefusal === undefined,

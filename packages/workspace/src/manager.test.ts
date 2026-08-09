@@ -398,17 +398,15 @@ describe("WorkspaceManager", () => {
     rmSync(runnerDir, { recursive: true, force: true });
   });
 
-  it("excludes the claudexor-owned artifact dir from the candidate diff but keeps real code (F4)", async () => {
+  it("excludes the run-owned artifact child from the candidate diff but keeps real code (F4)", async () => {
     const repo = await initRepo();
     const mgr = new WorkspaceManager(repo);
     const env = await mgr.create({ taskId: "task-art", attemptId: "a01", baseRef: "HEAD" });
 
-    // A harness saves a screenshot for the user into the owned artifact dir...
-    mkdirSync(join(env.worktree_path, ".claudexor-artifacts", "browser"), { recursive: true });
-    writeFileSync(
-      join(env.worktree_path, ".claudexor-artifacts", "browser", "shot.png"),
-      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-    );
+    // A harness saves a screenshot for the user into its run-owned artifact child...
+    const artifactDir = mgr.ensureArtifactDirectory(env);
+    mkdirSync(join(artifactDir, "browser"), { recursive: true });
+    writeFileSync(join(artifactDir, "browser", "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     // ...and a screenshot-only run yields NO candidate diff → noChanges.
     expect((await mgr.diff(env)).trim()).toBe("");
 
@@ -421,6 +419,42 @@ describe("WorkspaceManager", () => {
     expect(mixed).not.toContain(".claudexor-artifacts");
 
     await mgr.dispose(env);
+  });
+
+  it("excludes and cleans only the run-owned artifact child in an in-place repo", async () => {
+    const repo = await initRepo();
+    const artifactRoot = join(repo, ".claudexor-artifacts");
+    mkdirSync(artifactRoot);
+    const userFile = join(artifactRoot, "user-notes.txt");
+    writeFileSync(userFile, "pre-existing\n");
+    await git(repo, ["add", "--", ".claudexor-artifacts/user-notes.txt"]);
+    await git(repo, [
+      "-c",
+      "user.email=t@t.dev",
+      "-c",
+      "user.name=Test",
+      "commit",
+      "-m",
+      "user artifacts",
+    ]);
+
+    const runtimeRoot = reapMk(join(tmpdir(), "claudexor-artifact-owner-"));
+    const mgr = new WorkspaceManager(repo, { runtimeRoot });
+    const env = await mgr.create({ taskId: "task-owned-art", attemptId: "a01", inPlace: true });
+    const owned = mgr.ensureArtifactDirectory(env);
+    mkdirSync(join(owned, "browser"));
+    writeFileSync(join(owned, "browser", "shot.png"), Buffer.from([0x89, 0x50]));
+    writeFileSync(userFile, "user edit after run start\n");
+
+    const diff = await mgr.diff(env);
+    expect(diff).toContain("user edit after run start");
+    expect(diff).not.toContain(env.id);
+    expect(diff).not.toContain("shot.png");
+
+    await mgr.dispose(env);
+    expect(readFileSync(userFile, "utf8")).toBe("user edit after run start\n");
+    expect(existsSync(owned)).toBe(false);
+    expect(existsSync(artifactRoot)).toBe(true);
   });
 
   it("capture/create/diff/dispose preserves the live index and arbitrary project .claudexor bytes", async () => {

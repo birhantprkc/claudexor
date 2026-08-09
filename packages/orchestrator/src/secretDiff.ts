@@ -139,6 +139,7 @@ export async function quarantineCandidateWorkspace(
   const mediaRisk = candidateOutputSecretRisk({
     worktreePath: envelope.worktree_path,
     changedPaths: [...diffPaths, ...linkedPaths],
+    artifactRelativeDir: wsm.ownedArtifactRelativeDirectory(envelope),
   });
   const diffIdentities = new Set(
     diffPaths.map((path) => candidatePathIdentity(envelope.worktree_path, path)),

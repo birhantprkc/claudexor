@@ -1,10 +1,26 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type { AccessProfile, DirtyPolicy, WorkspaceEnvelope } from "@claudexor/schema";
 import { WorkspaceEnvelope as WorkspaceEnvelopeSchema } from "@claudexor/schema";
-import { CLAUDEXOR_ARTIFACT_DIR, runCaptureRaw, WorkspaceError } from "@claudexor/core";
+import {
+  CLAUDEXOR_ARTIFACT_DIR,
+  claudexorArtifactRunDirectory,
+  runCaptureRaw,
+  WorkspaceError,
+} from "@claudexor/core";
 import {
   containsSecretLikeToken,
   ensureDir,
@@ -48,6 +64,13 @@ export interface CreateEnvelopeOptions {
    * snapshot backs `diff()` and reviewers also read the live tree directly.
    */
   inPlace?: boolean;
+}
+
+interface ArtifactOwnershipMarker {
+  version: 1;
+  envelope_id: string;
+  relative_path: string;
+  root_created: boolean;
 }
 
 /**
@@ -118,6 +141,128 @@ export class WorkspaceManager {
       throw new WorkspaceError(`envelope base escapes the workspaces dir: ${base}`);
     }
     return base;
+  }
+
+  private artifactMarkerPath(env: WorkspaceEnvelope): string {
+    return join(this.envelopeBase(env.task_id, env.attempt_id), "artifact-created.json");
+  }
+
+  private artifactMarker(env: WorkspaceEnvelope): ArtifactOwnershipMarker | null {
+    try {
+      const parsed = JSON.parse(
+        readFileSync(this.artifactMarkerPath(env), "utf8"),
+      ) as Partial<ArtifactOwnershipMarker>;
+      const relative = claudexorArtifactRunDirectory(env.id);
+      if (
+        parsed.version !== 1 ||
+        parsed.envelope_id !== env.id ||
+        parsed.relative_path !== relative ||
+        typeof parsed.root_created !== "boolean"
+      ) {
+        return null;
+      }
+      return parsed as ArtifactOwnershipMarker;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Lazily reserve the one run-owned artifact subtree. A pre-existing shared
+   * root is ordinary user state; only this marker-bound child is excluded,
+   * collected, and cleaned. */
+  ensureArtifactDirectory(env: WorkspaceEnvelope): string {
+    const relative = claudexorArtifactRunDirectory(env.id);
+    const root = join(env.worktree_path, CLAUDEXOR_ARTIFACT_DIR);
+    const path = join(env.worktree_path, relative);
+    const marker = this.artifactMarker(env);
+    if (marker) {
+      this.ensureSafeArtifactRoot(root);
+      if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+      const stat = lstatSync(path);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new WorkspaceError("owned artifact path is no longer a private directory");
+      }
+      return path;
+    }
+
+    let rootCreated = false;
+    try {
+      mkdirSync(root, { mode: 0o700 });
+      rootCreated = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    this.ensureSafeArtifactRoot(root);
+    try {
+      mkdirSync(path, { mode: 0o700 });
+    } catch (error) {
+      if (rootCreated) {
+        try {
+          rmdirSync(root);
+        } catch {
+          /* preserve a raced/non-empty root */
+        }
+      }
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new WorkspaceError("owned artifact path unexpectedly already exists");
+      }
+      throw error;
+    }
+    const ownership: ArtifactOwnershipMarker = {
+      version: 1,
+      envelope_id: env.id,
+      relative_path: relative,
+      root_created: rootCreated,
+    };
+    try {
+      writeFileSync(this.artifactMarkerPath(env), `${JSON.stringify(ownership)}\n`, {
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (error) {
+      rmSync(path, { recursive: true, force: true });
+      if (rootCreated) {
+        try {
+          rmdirSync(root);
+        } catch {
+          /* preserve a raced/non-empty root */
+        }
+      }
+      throw error;
+    }
+    return path;
+  }
+
+  ownedArtifactRelativeDirectory(env: WorkspaceEnvelope): string | null {
+    return this.artifactMarker(env)?.relative_path ?? null;
+  }
+
+  private ensureSafeArtifactRoot(root: string): void {
+    const stat = lstatSync(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new WorkspaceError("shared artifact root is not a real directory");
+    }
+  }
+
+  private removeOwnedArtifactDirectory(env: WorkspaceEnvelope): void {
+    const marker = this.artifactMarker(env);
+    if (!marker) return;
+    const root = join(env.worktree_path, CLAUDEXOR_ARTIFACT_DIR);
+    const path = join(env.worktree_path, marker.relative_path);
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {
+      /* best-effort: never broaden cleanup beyond the marker-bound child */
+    }
+    if (!marker.root_created) return;
+    try {
+      const stat = lstatSync(root);
+      if (stat.isDirectory() && !stat.isSymbolicLink() && readdirSync(root).length === 0) {
+        rmdirSync(root);
+      }
+    } catch {
+      /* preserve a missing, replaced, raced, or non-empty shared root */
+    }
   }
 
   async create(opts: CreateEnvelopeOptions): Promise<WorkspaceEnvelope> {
@@ -349,9 +494,15 @@ export class WorkspaceManager {
     // temporary object database so a secret refusal cannot leave its bytes as
     // dangling objects in the user's repository. The exact per-turn base still
     // folds prior dirty state out of this turn's diff.
+    const artifactRelative = this.ownedArtifactRelativeDirectory(env);
+    const artifactExcludes = artifactRelative ? [`:(exclude,top)${artifactRelative}`] : [];
     if (env.worktree_path === env.repo_root) {
       if (env.base_sha) {
-        const captured = await captureWorkingTreeTransient(env.repo_root, env.base_sha);
+        const captured = await captureWorkingTreeTransient(
+          env.repo_root,
+          env.base_sha,
+          artifactExcludes,
+        );
         return { diff: captured.patch, binarySecretLike: captured.binarySecretLike };
       }
       // Non-git fallback: diff the best-effort cpSync baseline against the live
@@ -374,6 +525,7 @@ export class WorkspaceManager {
             ".venv",
             "-x",
             "venv",
+            ...(artifactRelative ? ["-x", env.id] : []),
             baseline,
             env.repo_root,
           ],
@@ -416,18 +568,17 @@ export class WorkspaceManager {
     // the created fact is absent (pre-existing file, or a prior run), we NEVER
     // exclude — failing toward CAPTURE. Condition (2) keeps a candidate that
     // EDITED the bridge we DID create in the diff. Same exact-path doctrine as
-    // the `.claudexor` artifact-dir exclusion. The fact survives a manager
+    // the marker-bound artifact-child exclusion. The fact survives a manager
     // restart via the persisted bridge-created.json marker (envelope-id-bound),
     // read only when the in-memory set lacks the id.
     const bridgeExcludes =
       this.bridgeCreatedFact(env) && isGeneratedClaudeBridge(env.worktree_path)
         ? [`:(exclude,top)${CLAUDE_BRIDGE_BASENAME}`]
         : [];
-    const captured = await captureWorkingTreeTransient(
-      env.worktree_path,
-      env.base_sha ?? "HEAD",
-      bridgeExcludes,
-    );
+    const captured = await captureWorkingTreeTransient(env.worktree_path, env.base_sha ?? "HEAD", [
+      ...artifactExcludes,
+      ...bridgeExcludes,
+    ]);
     return { diff: captured.patch, binarySecretLike: captured.binarySecretLike };
   }
 
@@ -449,17 +600,7 @@ export class WorkspaceManager {
     // In-place envelopes point worktree_path at the live repo root; NEVER remove a
     // worktree or the tree itself in that case.
     const inPlace = env.worktree_path === env.repo_root;
-    if (inPlace) {
-      // F4: for an in-place run the claudexor-owned artifact dir was
-      // written into the user's LIVE repo — its media is already collected into
-      // Evidence, so remove it rather than littering the working tree. A git-mode
-      // envelope drops the whole worktree below, so this is the in-place-only path.
-      try {
-        rmSync(join(env.worktree_path, CLAUDEXOR_ARTIFACT_DIR), { recursive: true, force: true });
-      } catch {
-        /* best-effort: artifact-dir litter is harmless and re-sweepable */
-      }
-    }
+    if (inPlace) this.removeOwnedArtifactDirectory(env);
     if (!inPlace) {
       const privateClone = existsSync(
         join(this.envelopeBase(env.task_id, env.attempt_id), "private-clone-v1"),

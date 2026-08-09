@@ -556,8 +556,6 @@ authoritative for each exact disposition.
   reach every substantive harness/capability description.
 - Move durable secret-refusal WorkProduct, attempt, and event fields under one
   schema-owned receipt contract.
-- Exclude `.claudexor-artifacts` from non-Git in-place diff capture with the
-  same F4/noChanges semantics as Git-mode capture.
 - Consolidate the duplicated environment-scoped Git invocation helper shared
   by workspace capture and revert logic.
 - Distinguish a belt runner throw before daemon child creation from a response

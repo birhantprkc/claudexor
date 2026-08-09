@@ -1,12 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  CLAUDEXOR_ARTIFACT_DIR,
-  parseUnifiedDiff,
-  runCaptureRaw,
-  WorkspaceError,
-} from "@claudexor/core";
+import { parseUnifiedDiff, runCaptureRaw, WorkspaceError } from "@claudexor/core";
 import { containsSecretLikeToken, isClaudexorOwnedRuntimePath } from "@claudexor/util";
 import {
   initializeGitRepository,
@@ -233,8 +228,7 @@ export async function captureWorkingTreeTransient(
     if (read.code !== 0) {
       throw new WorkspaceError(`transient diff read-tree failed: ${read.stderr.trim()}`);
     }
-    const excludes = [`:(exclude,top)${CLAUDEXOR_ARTIFACT_DIR}`, ...pathExcludes];
-    const add = await gitEnv(repo, ["add", "-A", "--", ".", ...excludes], env);
+    const add = await gitEnv(repo, ["add", "-A", "--", ".", ...pathExcludes], env);
     if (add.code !== 0) {
       throw new WorkspaceError(`transient diff add failed: ${add.stderr.trim()}`);
     }

@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { browserMcpCommand, scrubBrowserEnvironment } from "./browser-mcp.js";
+import {
+  browserMcpCommand,
+  claudexorArtifactRunDirectory,
+  scrubBrowserEnvironment,
+} from "./browser-mcp.js";
 
 describe("pinned Browser MCP command", () => {
+  it("derives one safe envelope-owned artifact subtree", () => {
+    expect(claudexorArtifactRunDirectory("env_abc-123")).toBe(".claudexor-artifacts/env_abc-123");
+    expect(() => claudexorArtifactRunDirectory("../shared")).toThrow(/safe path segment/);
+  });
+
   it("uses the local launcher and never a package-manager alias", () => {
     const command = browserMcpCommand({ output_dir: "/tmp/browser-output", headless: true });
     expect(command.command).toBe(process.execPath);

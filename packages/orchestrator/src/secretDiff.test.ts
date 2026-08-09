@@ -31,6 +31,7 @@ describe("secret diff quarantine failure receipts", () => {
         captureDiff: async () => {
           throw new Error("sensitive capture sentinel");
         },
+        ownedArtifactRelativeDirectory: () => null,
       } as unknown as WorkspaceManager;
 
       const result = await quarantineCandidateWorkspace(wsm, envelope, inPlace);
@@ -54,6 +55,7 @@ describe("secret diff quarantine failure receipts", () => {
       captureDiff: async () => {
         throw error;
       },
+      ownedArtifactRelativeDirectory: () => null,
     } as unknown as WorkspaceManager;
 
     const result = await quarantineCandidateWorkspace(wsm, envelope, false);
@@ -120,6 +122,7 @@ describe("secret diff quarantine failure receipts", () => {
       "+safe\n";
     const wsm = {
       captureDiff: async () => ({ diff: patch, binarySecretLike: false }),
+      ownedArtifactRelativeDirectory: () => null,
     } as unknown as WorkspaceManager;
 
     const result = await quarantineCandidateWorkspace(
@@ -158,6 +161,7 @@ describe("secret diff quarantine failure receipts", () => {
       "\\ No newline at end of file\n";
     const wsm = {
       captureDiff: async () => ({ diff: patch, binarySecretLike: false }),
+      ownedArtifactRelativeDirectory: () => null,
     } as unknown as WorkspaceManager;
 
     const result = await quarantineCandidateWorkspace(

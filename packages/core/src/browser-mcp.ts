@@ -24,17 +24,24 @@ function launcherPath(): string {
 }
 
 /**
- * The ONE worktree-relative directory (F4) where Claudexor collects
- * media/artifacts a harness produces FOR THE USER (browser-MCP screenshots,
- * declared media). It is claudexor-OWNED: excluded from the candidate diff so a
- * screenshot-only run reads as `noChanges` (never review-blocked) and collected
- * into the run's Evidence gallery. Conservative by construction — only this
- * exact dir is excluded, never a file-type guess, so a real code change can
- * never be silently dropped from review.
+ * Shared project-level container for run-owned media children. The root itself
+ * is NOT Claudexor-owned: only a marker-bound `<envelope-id>` child may be
+ * excluded, collected, or cleaned, so pre-existing sibling files remain
+ * ordinary candidate/user state.
  */
 export const CLAUDEXOR_ARTIFACT_DIR = ".claudexor-artifacts";
 
-/** The browser-MCP screenshot output subdir under the owned artifact dir. */
+/** One envelope-owned subtree below the shared project-level artifact root.
+ * The envelope id is engine-generated; callers must never substitute user
+ * input or fall back to excluding the shared root. */
+export function claudexorArtifactRunDirectory(envelopeId: string): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(envelopeId) || envelopeId === "." || envelopeId === "..") {
+    throw new Error("artifact envelope id is not a safe path segment");
+  }
+  return join(CLAUDEXOR_ARTIFACT_DIR, envelopeId);
+}
+
+/** The browser-MCP screenshot output subdir under the run-owned child. */
 export const CLAUDEXOR_BROWSER_ARTIFACT_SUBDIR = "browser";
 
 /** Exact local command for the pinned Browser MCP. No npx, package download,
