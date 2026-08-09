@@ -509,7 +509,7 @@ frequency and volume are. The contracts:
     codex app-server device-code flow in-app with NO Terminal (D-17 AuthSheet
     story below); Claude/Cursor still run the official vendor CLI in an
     auto-opened Terminal window (the setup-job handoff below). Each popover row is one account (a
-    default vendor login labeled with the harness name, or a registered
+    default vendor login named for its harness and badged `CLI login`, or a registered
     credential profile): a readiness dot (ready means that exact source is
     `available + passed`, never aggregate harness health), its name, ONE compact
     quota line (worst window % + reset), one "Log in" / "Manage" action, an
@@ -547,17 +547,33 @@ frequency and volume are. The contracts:
     discloses "API key" when that route is next; an unpinned composer chip stays
     "Automatic" because next-up may rotate. Auth remains the key management surface.
 
-    Accounts open and explicit Refresh consume ONE location-scoped server
-    snapshot containing profiles, readiness, Workspace Git, quota, `next_up`,
-    and the exact quota-event cursor. A later quota marker or invalid/lost cursor
-    expires the quota line and `next_up` once, leaves identity/Enabled/readiness
-    intact, and visibly requires Refresh. It never starts an automatic
-    resnapshot loop, and a failed foreground refresh replaces stale Ready truth
-    with unavailable/unknown presentation instead of preserving it indefinitely.
-    One location-scoped foreground load state feeds the Accounts list, its
-    header action, Quota detail, and Harness Doctor. Every one of those surfaces
-    shows the same failure reason and Retry; none may reinterpret the discarded
-    snapshot as “No accounts yet”, “Quota unknown”, or ordinary defaults.
+    The implicit row is labelled **CLI login**, with help explaining that it is
+    the vendor sign-in already present on this host; named accounts are isolated
+    profiles used by an explicit pin or opt-in quota rotation. Do not globally
+    rename generic `Automatic`/`Default account`: the unprofiled route may use a
+    policy API-key fallback, which is not an account row.
+
+    The popover header is fixed. One screen-aware host-level vertical scroller,
+    with a visible indicator, contains the shared AccountsSurface, add flow, and
+    auto-switch control so the first row, last row, and all actions remain
+    reachable with 20–30 accounts. AccountsSurface itself never adds a nested
+    scroller because AuthSheet already supplies its own scrolling host.
+
+    Opening Accounts consumes the cacheable registry projection and performs an
+    initial display-only quota read; it never launches the expensive provider
+    snapshot. Explicit Refresh/Retry and exact login verification consume the
+    location-scoped atomic snapshot containing profiles, readiness, Workspace
+    Git, quota, `next_up`, and the exact quota-event cursor. A live quota marker
+    expires `next_up`, labels the last-known quota **Stale** with its observation
+    time, and coalesces a display-only quota read into one in-flight request plus
+    at most one trailing request. There is no app timer and no automatic vendor
+    resnapshot loop. Registry loading, quota-display loading, and foreground
+    refresh have separate states: refreshing never blanks existing rows or
+    figures; a failed foreground refresh replaces stale Ready truth with
+    unavailable/unknown presentation, keeps identity/Enabled and last-known
+    quota visible, and shows the same inline reason plus Retry across Accounts,
+    Quota detail, and Harness Doctor. Only a genuine initial load with no prior
+    data may use an empty/loading/error presentation.
   - **Conversation (a message feed; code solid):** each turn is a right-aligned
     accent USER BUBBLE over the assistant's frosted card (Chat-V2, F2.5). The
     user bubble and the assistant's answer bubble MUST differ by HUE, not just

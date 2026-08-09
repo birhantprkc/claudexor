@@ -553,6 +553,10 @@ profile and the default) never share chat/session state. No token is ever
 copied between stores, the profile env never receives the scoped-HOME
 login-Keychain bridge, and `CURSOR_API_KEY` is scrubbed from profiled native
 runs — the named identity is exactly its file store or a typed refusal.
+The Accounts-only Cursor probe receipt also carries an optional email parsed
+from the CLI's narrow typed status grammar. Default and named projections reuse
+the status invocation they already need; no credential file is read, no raw
+status output is persisted, and no extra subprocess is launched for identity.
 
 The orchestrator is the ONE resolve owner. There is no user-settable "Active"
 account — enabling/disabling a profile is the only routing control. The
@@ -618,18 +622,29 @@ no surface re-derives the symmetry. A profile's `enabled` toggle is `PATCH
 CLI-login toggle is a per-harness setting
 (`harness.<id>.native_credentials_enabled`).
 
-Opening Accounts or pressing Refresh requests the opt-in atomic form, `GET
-/v2/credential-profiles` with the `snapshot=true` query. One server-authored
-epoch contains the profiles, per-profile readiness, harness readiness, Workspace
-Git capability, quota, `next_up`, and an opaque quota-event cursor. The app
-begins a dedicated quota observer from exactly that cursor. A later quota
-projection marker, a rejected cursor, stream error, or premature EOF expires
-only quota-derived authority (`next_up` and quota) and stops the observer;
-profile identity, Enabled state, and readiness remain. Recovery is one explicit
-Accounts Refresh, not an automatic resnapshot loop. The foreground result is a
-location-scoped app-model state shared by Accounts, Quota, and Harness Doctor;
-overlapping refreshes settle it only through the newest request token, and a
-failure stays a visible reason plus Retry rather than an empty projection.
+Accounts has three location-scoped owners. Opening, connecting, and ordinary
+registry mutations use the cacheable plain `GET /v2/credential-profiles` to
+hydrate profiles plus stable native-login, identity, and status fields; it may
+probe on a cold server cache, but it never claims fenced quota or `next_up`
+authority. A display-only `GET /v2/quota` owns the quota values shown to the
+person. Explicit Refresh/Retry and exact post-login verification alone request
+the atomic `GET /v2/credential-profiles` form with `snapshot=true`: one server-authored
+epoch contains profiles, profile and harness readiness, Workspace Git
+capability, decorated quota, `next_up`, and an opaque quota-event cursor.
+
+The atomic response starts a dedicated observer at exactly that cursor. Its
+quota marker or a rejected/lost cursor expires `next_up` authority, but keeps
+last-known quota visible with a stale reason and observation time. Independently,
+the always-on per-location global stream lets a live Accounts/Quota subscriber
+coalesce a marker into one display-only quota read plus at most one trailing
+read. With no subscriber the trigger is dropped and the next subscriber performs
+its initial read. This is event-driven recovery, not a timer or an automatic
+vendor resnapshot loop. Registry hydration, display hydration, and foreground
+atomic refresh are separately single-flight and generation-fenced; a later
+mutation may update stable registry fields without reviving old `next_up`.
+A failed atomic refresh preserves rows, identity, Enabled, and last-known quota,
+marks readiness non-authoritative, and exposes the failure plus Retry instead of
+an empty projection.
 External thread create/PATCH calls with an explicit pool are rejected unless
 the profile id exists for every pool lane. Run preflight probes the selected profile for every lane even when the
 default harness doctor is already OK, before any adapter starts:
@@ -1855,6 +1870,24 @@ so a saturated Fable-only window cannot cool an explicit Opus run. Codex rollout
 constraint with usage, duration, reset, provenance, and freshness. The global
 journal is authority; an elapsed reset marks a snapshot stale and requests a
 refresh, never locally invents zero usage. Unknown usage remains `null`.
+One exhaustive schema-owned trait registry classifies every source along three
+independent axes: vendor-authenticated credential evidence, the primary harness
+whose missing observation creates refresh demand, and whether a top-level
+refresher produces it. Refresh demand is computed per enabled credential
+subject and only a fresh matching primary snapshot satisfies it. Typed absence
+is still a successful, displayable observation, but retains soft demand under
+exponential pacing; reactive rollout/retry and status-line evidence remains
+available to display and routing without triggering or satisfying primary
+demand. The poll lifecycle is single-flight, anchors its next eligibility to
+completion rather than start, advances backoff after partial/absence outcomes,
+and resets when credential or routability state changes. The three top-level
+refreshers run concurrently, validate every fulfilled snapshot and absence
+before the first write, then fold in declaration order so first-claim and marker
+semantics remain deterministic; each refresher's per-account vendor calls stay
+serial. Both `/v2/quota` and the atomic Accounts response decorate snapshots
+with the same server-owned model-aware availability projection. Raw journal
+records and projection signatures remain undecorated, and clients never promote
+a model-scoped exhausted window into an account-wide percentage or block.
 Runtime-update rollback remains backward-readable: a scoped snapshot is first
 prepared under a typed record that an older engine ignores, then committed by
 the established upsert using an explicit v3.2.0 field allowlist. The journal

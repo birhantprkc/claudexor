@@ -287,7 +287,7 @@ pnpm test
   the exact reviewer pair the Release review protocol section defines
   (2026-08-06: Cursor operator subagents), one
   adjudication, one batched correction commit, and one confirmation wave
-  focused on that delta (the fable lane always confirms in full context).
+  focused on that delta while both lanes retain the full candidate context.
 - Local unsigned app packages are smoke artifacts only. Final DMG/ZIP assets
   come from GitHub Actions `candidate` then `publish` mode; missing signing or
   notarization credentials block publication. Publish promotes the exact
