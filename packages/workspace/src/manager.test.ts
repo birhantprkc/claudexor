@@ -606,7 +606,9 @@ describe("WorkspaceManager", () => {
     mkdirSync(nestedUserSameBasename, { recursive: true });
     writeFileSync(join(nestedUserSameBasename, "keep-too.txt"), "keep this too\n");
     mkdirSync(join(ownedArtifactDir, "browser"));
-    writeFileSync(join(ownedArtifactDir, "browser", "shot.png"), Buffer.from([0x89, 0x50]));
+    // NUL forces GNU diff's standalone `Binary files … differ` form, which has
+    // no preceding `diff …` block and still must be excluded by exact path.
+    writeFileSync(join(ownedArtifactDir, "browser", "shot.png"), Buffer.from([0, 0x89, 0x50]));
     const diff = await mgr.diff(env);
     expect(diff).toContain("b.txt");
     expect(diff).toContain("after");
