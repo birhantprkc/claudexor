@@ -556,6 +556,9 @@ authoritative for each exact disposition.
   reach every substantive harness/capability description.
 - Move durable secret-refusal WorkProduct, attempt, and event fields under one
   schema-owned receipt contract.
+- Put the in-place secret-diff quarantine rollback under the repository
+  mutation lease while preserving its exact-postimage refusal; the path is now
+  inventoried and fenced, but lease serialization remains separate hardening.
 - Consolidate the duplicated environment-scoped Git invocation helper shared
   by workspace capture and revert logic.
 - Distinguish a belt runner throw before daemon child creation from a response

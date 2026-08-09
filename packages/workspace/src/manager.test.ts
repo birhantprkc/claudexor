@@ -448,7 +448,7 @@ describe("WorkspaceManager", () => {
 
     const diff = await mgr.diff(env);
     expect(diff).toContain("user edit after run start");
-    expect(diff).not.toContain(env.id);
+    expect(diff).not.toContain(`${env.id}/`);
     expect(diff).not.toContain("shot.png");
 
     await mgr.dispose(env);
@@ -559,6 +559,10 @@ describe("WorkspaceManager", () => {
     // A plain (non-git) directory stands in for a stateful external environment.
     const dir = reapMk(join(tmpdir(), "claudexor-inplace-"));
     writeFileSync(join(dir, "a.txt"), "one\n");
+    const artifactRoot = join(dir, ".claudexor-artifacts");
+    mkdirSync(artifactRoot);
+    const userArtifact = join(artifactRoot, "user-notes.txt");
+    writeFileSync(userArtifact, "before\n");
     const mgr = new WorkspaceManager(dir);
 
     const env = await mgr.create({ taskId: "t-ip", attemptId: "converge", inPlace: true });
@@ -569,6 +573,7 @@ describe("WorkspaceManager", () => {
     // In-place records the EFFECTIVE dirty policy (dirty state folds into the
     // per-turn base snapshot), never echoing an ignored request.
     expect(env.dirty_policy).toBe("snapshot");
+    const ownedArtifactDir = mgr.ensureArtifactDirectory(env);
 
     // Simulate the harness mutating the live tree in place (incl. a file
     // under a path that repo-relative protected globs like `test/**` watch).
@@ -576,8 +581,14 @@ describe("WorkspaceManager", () => {
     writeFileSync(join(dir, "b.txt"), "new file\n");
     mkdirSync(join(dir, "test"), { recursive: true });
     writeFileSync(join(dir, "test", "guard.spec.js"), "// protected\n");
+    writeFileSync(userArtifact, "after\n");
+    mkdirSync(join(ownedArtifactDir, "browser"));
+    writeFileSync(join(ownedArtifactDir, "browser", "shot.png"), Buffer.from([0x89, 0x50]));
     const diff = await mgr.diff(env);
     expect(diff).toContain("b.txt");
+    expect(diff).toContain("after");
+    expect(diff).not.toContain(`${env.id}/`);
+    expect(diff).not.toContain("shot.png");
     // Headers are RELATIVIZED to git-style a/<rel> b/<rel>: repo-relative
     // policy globs must see `test/guard.spec.js`, never an absolute
     // /tmp/.../test/... path they can never match (protected-path bypass).
@@ -591,6 +602,8 @@ describe("WorkspaceManager", () => {
     expect(existsSync(dir)).toBe(true);
     expect(existsSync(join(dir, "a.txt"))).toBe(true);
     expect(existsSync(join(dir, "b.txt"))).toBe(true);
+    expect(readFileSync(userArtifact, "utf8")).toBe("after\n");
+    expect(existsSync(ownedArtifactDir)).toBe(false);
     // ...but the scoped envelope base (home + baseline) is removed.
     expect(existsSync(env.home_dir)).toBe(false);
     expect(existsSync(join(projectRuntimeDir(dir), "workspaces", "t-ip", "converge"))).toBe(false);
