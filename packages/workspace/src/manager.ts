@@ -29,7 +29,11 @@ import {
   projectRuntimeDir,
 } from "@claudexor/util";
 import { ensureLaneHomeEnv, type LaneHomeEnv } from "./lanes.js";
-import { plainDiffBinarySecretLike, relativizePlainDiffHeaders } from "./plain-diff.js";
+import {
+  excludePlainDiffPathPrefix,
+  plainDiffBinarySecretLike,
+  relativizePlainDiffHeaders,
+} from "./plain-diff.js";
 import {
   CLAUDE_BRIDGE_BASENAME,
   bridgeCreatedMarkerMatches,
@@ -525,7 +529,6 @@ export class WorkspaceManager {
             ".venv",
             "-x",
             "venv",
-            ...(artifactRelative ? ["-x", env.id] : []),
             baseline,
             env.repo_root,
           ],
@@ -538,7 +541,10 @@ export class WorkspaceManager {
         // Downstream consumers (diffstat, protected-path/risk gating) match
         // REPO-RELATIVE globs like `test/**`; absolute `/…/repo/test/x`
         // headers would silently bypass every one of them.
-        const relativized = relativizePlainDiffHeaders(r.stdout, baseline, env.repo_root);
+        const fullDiff = relativizePlainDiffHeaders(r.stdout, baseline, env.repo_root);
+        const relativized = artifactRelative
+          ? excludePlainDiffPathPrefix(fullDiff, artifactRelative)
+          : fullDiff;
         const CAP = 200_000;
         return {
           diff:

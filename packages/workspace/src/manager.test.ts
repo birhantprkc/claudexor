@@ -597,13 +597,23 @@ describe("WorkspaceManager", () => {
     mkdirSync(join(dir, "test"), { recursive: true });
     writeFileSync(join(dir, "test", "guard.spec.js"), "// protected\n");
     writeFileSync(userArtifact, "after\n");
+    // A basename-only `diff -x <envelope-id>` would also hide these unrelated
+    // user paths. Only the exact root child below may disappear from capture.
+    const unrelatedSameBasename = join(dir, "notes", env.id);
+    mkdirSync(unrelatedSameBasename, { recursive: true });
+    writeFileSync(join(unrelatedSameBasename, "keep.txt"), "keep me\n");
+    const nestedUserSameBasename = join(artifactRoot, "user-space", env.id);
+    mkdirSync(nestedUserSameBasename, { recursive: true });
+    writeFileSync(join(nestedUserSameBasename, "keep-too.txt"), "keep this too\n");
     mkdirSync(join(ownedArtifactDir, "browser"));
     writeFileSync(join(ownedArtifactDir, "browser", "shot.png"), Buffer.from([0x89, 0x50]));
     const diff = await mgr.diff(env);
     expect(diff).toContain("b.txt");
     expect(diff).toContain("after");
-    expect(diff).not.toContain(`${env.id}/`);
+    expect(diff).not.toContain(`.claudexor-artifacts/${env.id}/browser`);
     expect(diff).not.toContain("shot.png");
+    expect(diff).toContain(`notes/${env.id}/keep.txt`);
+    expect(diff).toContain(`.claudexor-artifacts/user-space/${env.id}/keep-too.txt`);
     // Headers are RELATIVIZED to git-style a/<rel> b/<rel>: repo-relative
     // policy globs must see `test/guard.spec.js`, never an absolute
     // /tmp/.../test/... path they can never match (protected-path bypass).

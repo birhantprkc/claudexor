@@ -57,6 +57,37 @@ export function relativizePlainDiffHeaders(
   return lines.join("\n");
 }
 
+/** Remove only GNU/BSD diff file-blocks below one exact repo-relative prefix.
+ * `diff -x <basename>` is deliberately insufficient: its pattern matches at
+ * every depth and would hide unrelated user files that happen to share an
+ * engine-generated envelope basename. Ambiguous/unparsed blocks stay captured. */
+export function excludePlainDiffPathPrefix(text: string, relativeDir: string): string {
+  const normalized = relativeDir.split("\\").join("/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (
+    normalized === "" ||
+    normalized.startsWith("/") ||
+    normalized.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
+    return text;
+  }
+  const starts = [...text.matchAll(/^diff .+$/gm)]
+    .map((match) => match.index)
+    .filter((index): index is number => index !== undefined);
+  if (starts.length === 0) return text;
+  const ownedPrefix = `${normalized}/`;
+  let filtered = text.slice(0, starts[0]);
+  for (let index = 0; index < starts.length; index += 1) {
+    const block = text.slice(starts[index], starts[index + 1] ?? text.length);
+    const files = parseUnifiedDiff(block).files;
+    const paths = files.flatMap((file) => [file.oldPath, file.newPath]).filter(Boolean) as string[];
+    const owned =
+      paths.length > 0 &&
+      paths.every((path) => path === normalized || path.startsWith(ownedPrefix));
+    if (!owned) filtered += block;
+  }
+  return filtered;
+}
+
 /** `diff -ruN` carries no binary payload, so inspect each live binary
  * postimage directly. Oversized, non-regular, or unreadable bytes fail closed. */
 export function plainDiffBinarySecretLike(text: string, liveRoot: string): boolean {
