@@ -249,9 +249,9 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     });
     expect(noteCredentialChange).toHaveBeenCalledTimes(2);
 
-    // All settings mutations ride the same cache-bust/reset owner; a broader
-    // reset is harmless and keeps credential-affecting fields fail-safe.
-    await svc.updateSettings({ harnesses: { claude: { defaultModel: "fable" } } });
+    // All settings mutations ride the same cache-bust/reset owner; use a
+    // harness-independent field so this projection test never needs a vendor CLI.
+    await svc.updateSettings({ interactionTimeoutMs: 60_000 });
     expect(noteCredentialChange).toHaveBeenCalledTimes(3);
   });
 
