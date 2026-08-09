@@ -4,6 +4,82 @@ import type { HarnessAdapter } from "@claudexor/core";
 import { HarnessGateway } from "./gateway.js";
 
 describe("HarnessGateway auth readiness projection", () => {
+  it("projects Accounts identity from the rich doctor without a second doctor probe", async () => {
+    let genericDoctorCalls = 0;
+    let accountDoctorCalls = 0;
+    let plainDoctorCalls = 0;
+    let richDiscoverCalls = 0;
+    let plainDiscoverCalls = 0;
+    const report = ConformanceReport.parse({
+      harness_id: "fake-rich-account",
+      status: "ok",
+      enabled_intents: ["explain"],
+    });
+    const rich = {
+      id: "fake-rich-account",
+      discover: async () => {
+        richDiscoverCalls += 1;
+        return HarnessManifest.parse({
+          id: "fake-rich-account",
+          display_name: "Rich account",
+          kind: "fake",
+          provider_family: "unknown",
+          capabilities: { ask: true },
+        });
+      },
+      doctor: async () => {
+        genericDoctorCalls += 1;
+        return report;
+      },
+      doctorForAccounts: async () => {
+        accountDoctorCalls += 1;
+        return { report, identity: { email: "cursor@example.test" } };
+      },
+      run: async function* () {
+        /* not used */
+      },
+    } satisfies HarnessAdapter;
+    const plain = {
+      id: "fake-plain-account",
+      discover: async () => {
+        plainDiscoverCalls += 1;
+        return HarnessManifest.parse({
+          id: "fake-plain-account",
+          display_name: "Plain account",
+          kind: "fake",
+          provider_family: "unknown",
+          capabilities: { ask: true },
+        });
+      },
+      doctor: async () => {
+        plainDoctorCalls += 1;
+        return ConformanceReport.parse({
+          harness_id: "fake-plain-account",
+          status: "unavailable",
+        });
+      },
+      run: rich.run,
+    } satisfies HarnessAdapter;
+
+    const rows = await new HarnessGateway(
+      new Map([
+        [rich.id, rich],
+        [plain.id, plain],
+      ]),
+    ).statusAllForAccounts({ cwd: "/repo", fresh: true });
+
+    expect(genericDoctorCalls).toBe(0);
+    expect(accountDoctorCalls).toBe(1);
+    expect(plainDoctorCalls).toBe(1);
+    expect(richDiscoverCalls).toBe(1);
+    expect(plainDiscoverCalls).toBe(1);
+    expect(rows.find((row) => row.status.id === rich.id)?.identity).toEqual({
+      email: "cursor@example.test",
+    });
+    expect(rows.find((row) => row.status.id === plain.id)?.identity).toBeNull();
+    expect(rows[0]?.status).not.toHaveProperty("identity");
+  });
+
   it("projects doctor auth_sources without inferring readiness from the manifest", async () => {
     const adapter = {
       id: "fake-auth-projection",

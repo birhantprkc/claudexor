@@ -19,7 +19,12 @@ import {
 } from "./index.js";
 import { probeCursorNativeAuth } from "./auth.js";
 
-const nativeProbe = (authed: boolean, probeError: string | null = null) => ({ authed, probeError });
+const nativeProbe = (authed: boolean, probeError: string | null = null) =>
+  authed
+    ? ({ kind: "authenticated" } as const)
+    : probeError
+      ? ({ kind: "unknown", error: probeError } as const)
+      : ({ kind: "loggedOut" } as const);
 
 describe("cursor auth status parsing", () => {
   it("does not treat exit 0 Not logged in as authenticated", () => {
@@ -59,10 +64,59 @@ describe("cursor auth status parsing", () => {
       stderr: "",
     }));
     expect(result).toEqual({
-      authed: false,
-      probeError: "cursor-agent status returned unrecognized output (0)",
+      kind: "unknown",
+      error: "cursor-agent status returned unrecognized output (0)",
     });
-    expect(result.probeError).not.toContain("private@example.com");
+    expect(result.kind === "unknown" ? result.error : null).not.toContain("private@example.com");
+  });
+
+  it("extracts only an anchored bounded email while keeping plan absent", async () => {
+    for (const stdout of [
+      "Logged in as user@example.com\n",
+      "✓ Logged in as user@example.com\n",
+      "Account: user@example.com\n",
+    ]) {
+      const result = await probeCursorNativeAuth(undefined, undefined, async () => ({
+        code: 0,
+        signal: null,
+        stdout,
+        stderr: "unrelated diagnostics",
+      }));
+      expect(result).toEqual({ kind: "authenticated", email: "user@example.com" });
+      expect(result).not.toHaveProperty("plan");
+    }
+
+    const oversized = `${"a".repeat(321)}@example.com`;
+    const result = await probeCursorNativeAuth(undefined, undefined, async () => ({
+      code: 0,
+      signal: null,
+      stdout: `Logged in as ${oversized}\n`,
+      stderr: "",
+    }));
+    expect(result).toEqual({ kind: "authenticated" });
+    expect(JSON.stringify(result)).not.toContain(oversized);
+  });
+
+  it("treats a non-zero status as unknown even when stderr says logged out", async () => {
+    const result = await probeCursorNativeAuth(undefined, undefined, async () => ({
+      code: 1,
+      signal: null,
+      stdout: "",
+      stderr: "Not logged in for private@example.com",
+    }));
+    expect(result).toEqual({ kind: "unknown", error: "cursor-agent status failed (1)" });
+    expect(JSON.stringify(result)).not.toContain("private@example.com");
+  });
+
+  it("bounds and redacts thrown probe errors before returning typed unknown evidence", async () => {
+    const secret = `sk-${"x".repeat(80)}`;
+    const result = await probeCursorNativeAuth(undefined, undefined, async () => {
+      throw new Error(`${secret}${"y".repeat(800)}`);
+    });
+    expect(result.kind).toBe("unknown");
+    if (result.kind !== "unknown") throw new Error("expected unknown observation");
+    expect(result.error?.length).toBeLessThanOrEqual(500);
+    expect(result.error).not.toContain(secret);
   });
 });
 
@@ -698,6 +752,33 @@ describe("cursor adapter auth route wiring", () => {
     expect(probedEnvs.every((env) => env?.["CLAUDEXOR_CURSOR_API_KEY"] === null)).toBe(true);
   });
 
+  it("returns default Accounts identity from the same doctor status probe", async () => {
+    let nativeStatusCalls = 0;
+    const adapter = createCursorAdapter({
+      detectVersion: async () => "cursor-test",
+      nativeAuthOk: async () => {
+        nativeStatusCalls += 1;
+        return { kind: "authenticated", email: "default-cursor@example.test" };
+      },
+      cursorApiKey: () => null,
+      listCursorModels: async () => [],
+    });
+
+    // HarnessGateway statusAll already runs discover + doctor. The Accounts
+    // variant replaces doctor with this rich receipt; identity must not add a
+    // third native status process above that two-probe baseline.
+    await adapter.discover();
+    const receipt = await adapter.doctorForAccounts!({ cwd: "/repo", fresh: true });
+    expect(nativeStatusCalls).toBe(2);
+    expect(receipt.identity).toEqual({ email: "default-cursor@example.test" });
+    expect(receipt.identity).not.toHaveProperty("plan");
+    expect(receipt.report).not.toHaveProperty("identity");
+    expect(receipt.report).toMatchObject({ harness_id: "cursor", status: "ok" });
+    expect(
+      receipt.report.auth_sources.find((source) => source.source === "native_session"),
+    ).toMatchObject({ availability: "available", verification: "passed" });
+  });
+
   it("uses scoped doctor env for auth probing and Cursor API key readiness", async () => {
     const previousHostKey = process.env.CURSOR_API_KEY;
     process.env.CURSOR_API_KEY = "host-key-must-not-be-used";
@@ -1212,7 +1293,9 @@ describe("doctor remedies never name a bare vendor login (INV-067, v3.0.3 wave 3
     // The doctor reason strings are static: pin the INV-067 rule at the
     // source level so a future edit cannot reintroduce the bare vendor
     // command an agent would copy into the wrong store.
-    const source = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
+    const source = ["index.ts", "doctor.ts"]
+      .map((file) => readFileSync(join(import.meta.dirname, file), "utf8"))
+      .join("\n");
     const remedies = source
       .split("\n")
       .filter((line) => /not authenticated|not ready|not logged in/.test(line));

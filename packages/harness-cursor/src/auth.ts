@@ -7,17 +7,24 @@ const BIN = process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent";
 const CURSOR_LOGGED_OUT =
   /not logged in|not authenticated|unauthenticated|authentication required|no account|account\s*:\s*(?:none|unknown|not configured|-)(?:\s|$)|authenticated\s*:\s*(?:false|no|none|0)|logged in\s*:\s*(?:false|no|none|0)/i;
 
-export interface CursorNativeAuthProbe {
-  authed: boolean;
-  probeError: string | null;
-}
+const MAX_CURSOR_ACCOUNT_EMAIL_LENGTH = 320;
+
+/**
+ * Typed, allowlisted observation from `cursor-agent status`. Raw status output
+ * never leaves this parser. Only an anchored email principal may become an
+ * Accounts identity; every other successful-but-unknown shape fails closed.
+ */
+export type CursorStatusObservation =
+  | { kind: "authenticated"; email?: string }
+  | { kind: "loggedOut" }
+  | { kind: "unknown"; error?: string };
 
 /** Probe only Cursor's vendor-owned native session in the supplied run env. */
 export async function probeCursorNativeAuth(
   env?: Record<string, string | null | undefined>,
   abortSignal?: AbortSignal,
   capture: typeof runCapture = runCapture,
-): Promise<CursorNativeAuthProbe> {
+): Promise<CursorStatusObservation> {
   try {
     const result = await capture(BIN, ["status"], {
       env,
@@ -27,42 +34,80 @@ export async function probeCursorNativeAuth(
       cancelKillDelayMs: 0,
     });
     const text = `${result.stdout}\n${result.stderr}`;
-    if (cursorStatusAuthenticated(result.code, text)) return { authed: true, probeError: null };
-    if (cursorStatusLoggedOut(text)) return { authed: false, probeError: null };
+    if (result.code !== 0) {
+      return {
+        kind: "unknown",
+        error: `cursor-agent status failed (${result.code ?? result.signal ?? "unknown result"})`,
+      };
+    }
+    const authenticated = cursorAuthenticatedObservation(text);
+    if (authenticated) return authenticated;
+    if (cursorStatusLoggedOut(text)) return { kind: "loggedOut" };
     // Status output can contain the signed-in account principal. Unknown
     // output is not evidence and must not be copied into doctor/setup logs.
-    const verdict = result.code === 0 ? "returned unrecognized output" : "failed";
-    const detail = `cursor-agent status ${verdict} (${result.code ?? result.signal ?? "unknown result"})`;
-    return { authed: false, probeError: detail };
+    return {
+      kind: "unknown",
+      error: `cursor-agent status returned unrecognized output (${result.code})`,
+    };
   } catch (err) {
     return {
-      authed: false,
-      probeError: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 500),
+      kind: "unknown",
+      error: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 500),
     };
   }
 }
 
 export function cursorStatusAuthenticated(code: number | null, text: string): boolean {
-  if (code !== 0) return false;
-  if (cursorStatusLoggedOut(text)) return false;
+  return code === 0 && cursorAuthenticatedObservation(text) !== null;
+}
+
+function cursorAuthenticatedObservation(
+  text: string,
+): Extract<CursorStatusObservation, { kind: "authenticated" }> | null {
+  if (cursorStatusLoggedOut(text)) return null;
+  let authenticated = false;
+  let email: string | undefined;
   // Accepted grammar is intentionally narrow and vendor-facing: an explicit
   // "logged in" / "authenticated" verdict, or an Account field containing an
   // email-shaped principal. Bare "account" prose is never readiness proof.
-  return text
-    .replaceAll("\r", "")
-    .split("\n")
-    .some((rawLine) => {
-      const line = rawLine.trim().replace(/^✓\s+/, "");
-      return (
-        /^logged in(?:\s+as\s+\S+)?[.!]?$/i.test(line) ||
-        /^authenticated[.!]?$/i.test(line) ||
-        /^account\s*:\s*[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(line)
-      );
-    });
+  for (const rawLine of text.replaceAll("\r", "").split("\n")) {
+    const line = rawLine.trim().replace(/^✓\s+/, "");
+    const principal =
+      /^logged in\s+as\s+(\S+@\S+\.\S+?)[.!]?$/i.exec(line)?.[1] ??
+      /^account\s*:\s*(\S+@\S+\.\S+?)[.!]?$/i.exec(line)?.[1];
+    if (principal && principal.length <= MAX_CURSOR_ACCOUNT_EMAIL_LENGTH) {
+      authenticated = true;
+      email ??= principal;
+      continue;
+    }
+    if (/^logged in(?:\s+as\s+\S+)?[.!]?$/i.test(line) || /^authenticated[.!]?$/i.test(line)) {
+      authenticated = true;
+    }
+  }
+  if (!authenticated) return null;
+  return email ? { kind: "authenticated", email } : { kind: "authenticated" };
 }
 
 export function cursorStatusLoggedOut(text: string): boolean {
   return CURSOR_LOGGED_OUT.test(text);
+}
+
+export function cursorObservationAuthenticated(observation: CursorStatusObservation): boolean {
+  return observation.kind === "authenticated";
+}
+
+export function cursorObservationError(observation: CursorStatusObservation): string | null {
+  return observation.kind === "unknown"
+    ? (observation.error ?? "cursor-agent status probe returned unknown evidence")
+    : null;
+}
+
+export function cursorObservationIdentity(
+  observation: CursorStatusObservation,
+): { email: string } | null {
+  return observation.kind === "authenticated" && observation.email
+    ? { email: observation.email }
+    : null;
 }
 
 export type CursorAuthRoute = "api_key" | "local_session" | "unavailable";

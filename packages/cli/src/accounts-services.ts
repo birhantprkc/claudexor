@@ -12,11 +12,7 @@ import type {
   QuotaSnapshot,
 } from "@claudexor/schema";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
-import {
-  harnessAccountsProjection,
-  profileAccountIdentity,
-  profileDoctorStatus,
-} from "./accounts-projection.js";
+import { harnessAccountsProjection, profileAccountProjection } from "./accounts-projection.js";
 import { buildGateway, harnessModels } from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
 
@@ -64,13 +60,7 @@ export async function projectHarnessStatuses(statuses: readonly HarnessStatus[])
 export function createCredentialProfilesService(quotaRegistry: () => QuotaRegistry) {
   const projectProfiles = () => {
     const profiles = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
-    return Promise.all(
-      profiles.map(async (profile) => ({
-        profile,
-        status: await profileDoctorStatus(profile),
-        identity: profileAccountIdentity(profile),
-      })),
-    );
+    return Promise.all(profiles.map(profileAccountProjection));
   };
   // The plain (non-snapshot) form is the UI's poll target: without a cache it
   // ran a doctor probe per registered profile plus a full harness sweep
@@ -94,12 +84,19 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
   });
   return async (input?: { snapshot?: boolean }) => {
     if (input?.snapshot === true) {
-      const [probed, statuses, git, fencedQuota] = await Promise.all([
+      const [probed, accountStatuses, git, fencedQuota] = await Promise.all([
         projectProfiles(),
-        buildGateway({ includeFakes: false }).statusAll({ cwd: NO_PROJECT_ROOT, fresh: true }),
+        buildGateway({ includeFakes: false }).statusAllForAccounts({
+          cwd: NO_PROJECT_ROOT,
+          fresh: true,
+        }),
         probeGitCapability(),
         quotaRegistry().refreshWithCursor(),
       ]);
+      const statuses = accountStatuses.map((receipt) => receipt.status);
+      const accountIdentities = new Map(
+        accountStatuses.map((receipt) => [receipt.status.id, receipt.identity] as const),
+      );
       const quota = fencedQuota.response;
       const out = withVendorVerification(probed, quota);
       // The explicit refresh proved the live state — drop the stale poll
@@ -111,6 +108,7 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
         harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
           profiles: out,
           statuses,
+          accountIdentities,
         }),
         harnesses: await projectHarnessStatuses(statuses),
         git,

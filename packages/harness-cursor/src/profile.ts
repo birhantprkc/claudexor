@@ -1,13 +1,20 @@
 import { join } from "node:path";
-import { canonicalIsolationLocator, providerScrubEnv } from "@claudexor/core";
+import {
+  canonicalIsolationLocator,
+  providerScrubEnv,
+  type CredentialAccountProbeReceipt,
+} from "@claudexor/core";
 import type { AuthPreference, CredentialProfile, CredentialProfileStatus } from "@claudexor/schema";
 import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
 import {
+  cursorObservationAuthenticated,
+  cursorObservationError,
+  cursorObservationIdentity,
   cursorProfileKeyOrRefusal,
   probeCursorNativeAuth,
   type CursorAuthRoute,
-  type CursorNativeAuthProbe,
+  type CursorStatusObservation,
 } from "./auth.js";
 import type { CursorEventParser } from "./parse.js";
 
@@ -72,10 +79,11 @@ export async function resolveCursorProfileRoute(
     try {
       const env = cursorProfileRunEnv(profile.isolation_locator ?? "", specEnv);
       const probe = await runtime.nativeAuthOk(env, abortSignal);
-      if (probe.authed) return { kind: "native", env };
+      if (cursorObservationAuthenticated(probe)) return { kind: "native", env };
+      const probeError = cursorObservationError(probe);
       return {
-        refusal: probe.probeError
-          ? `credential profile "${profile.profile_id}": Cursor status probe failed — ${probe.probeError}`
+        refusal: probeError
+          ? `credential profile "${profile.profile_id}": Cursor status probe failed — ${probeError}`
           : `credential profile "${profile.profile_id}" has no Cursor login in its profile HOME (run the profile login first)`,
       };
     } catch (err) {
@@ -158,10 +166,10 @@ export function stampCursorProfileEvents(
 
 function cursorProfileNativeStatus(
   profile: CredentialProfile,
-  probe: CursorNativeAuthProbe,
+  probe: CursorStatusObservation,
 ): CredentialProfileStatus {
   const base = { profile_id: profile.profile_id, harness_id: "cursor" };
-  if (probe.authed)
+  if (cursorObservationAuthenticated(probe))
     return CredentialProfileStatusSchema.parse({
       ...base,
       availability: "available",
@@ -169,12 +177,13 @@ function cursorProfileNativeStatus(
       detail: "Cursor login verified in the profile HOME file store",
       last_verified_at: nowIso(),
     });
-  if (probe.probeError)
+  const probeError = cursorObservationError(probe);
+  if (probeError)
     return CredentialProfileStatusSchema.parse({
       ...base,
       availability: "unknown",
       verification: "not_run",
-      detail: probe.probeError,
+      detail: probeError,
     });
   return CredentialProfileStatusSchema.parse({
     ...base,
@@ -195,42 +204,67 @@ export async function probeCursorCredentialProfile(
   runtime: CursorProfileRuntimeDeps,
   abortSignal?: AbortSignal,
 ): Promise<CredentialProfileStatus> {
+  return (await probeCursorCredentialAccount(profile, runtime, abortSignal)).status;
+}
+
+/** Accounts-only rich probe: readiness and optional email share one status call. */
+export async function probeCursorCredentialAccount(
+  profile: CredentialProfile,
+  runtime: CursorProfileRuntimeDeps,
+  abortSignal?: AbortSignal,
+): Promise<CredentialAccountProbeReceipt> {
   if (profile.credential_kind !== "config_dir_login") {
     const base = { profile_id: profile.profile_id, harness_id: "cursor" };
     try {
       const gate = cursorProfileKeyOrRefusal(profile, runtime.resolveProfileSecret);
       if ("refusal" in gate)
-        return CredentialProfileStatusSchema.parse({
+        return {
+          status: CredentialProfileStatusSchema.parse({
+            ...base,
+            availability: "unavailable",
+            verification: gate.reason === "missing_secret" ? "not_run" : "failed",
+            detail: gate.refusal,
+          }),
+          identity: null,
+        };
+      return {
+        status: CredentialProfileStatusSchema.parse({
+          ...base,
+          availability: "available",
+          verification: "not_run",
+          detail: `secret "${profile.secret_ref}" is stored`,
+        }),
+        identity: null,
+      };
+    } catch (err) {
+      return {
+        status: CredentialProfileStatusSchema.parse({
           ...base,
           availability: "unavailable",
-          verification: gate.reason === "missing_secret" ? "not_run" : "failed",
-          detail: gate.refusal,
-        });
-      return CredentialProfileStatusSchema.parse({
-        ...base,
-        availability: "available",
-        verification: "not_run",
-        detail: `secret "${profile.secret_ref}" is stored`,
-      });
-    } catch (err) {
-      return CredentialProfileStatusSchema.parse({
-        ...base,
-        availability: "unavailable",
-        verification: "failed",
-        detail: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
-      });
+          verification: "failed",
+          detail: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
+        }),
+        identity: null,
+      };
     }
   }
   try {
     const env = cursorProfileRunEnv(profile.isolation_locator ?? "");
-    return cursorProfileNativeStatus(profile, await runtime.nativeAuthOk(env, abortSignal));
+    const observation = await runtime.nativeAuthOk(env, abortSignal);
+    return {
+      status: cursorProfileNativeStatus(profile, observation),
+      identity: cursorObservationIdentity(observation),
+    };
   } catch (err) {
-    return CredentialProfileStatusSchema.parse({
-      profile_id: profile.profile_id,
-      harness_id: "cursor",
-      availability: "unavailable",
-      verification: "failed",
-      detail: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
-    });
+    return {
+      status: CredentialProfileStatusSchema.parse({
+        profile_id: profile.profile_id,
+        harness_id: "cursor",
+        availability: "unavailable",
+        verification: "failed",
+        detail: redactSecrets(err instanceof Error ? err.message : String(err)).slice(0, 300),
+      }),
+      identity: null,
+    };
   }
 }

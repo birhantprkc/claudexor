@@ -15,6 +15,7 @@ import type {
   CredentialProfileStatus,
   QuotaSnapshot,
 } from "@claudexor/schema";
+import { AccountIdentity as AccountIdentitySchema } from "@claudexor/schema";
 import { loadConfig } from "@claudexor/config";
 import {
   defaultCredentialRoute,
@@ -30,9 +31,9 @@ import { buildGateway, buildRegistry } from "./registry.js";
 
 /**
  * Non-secret {email, plan} of a harness's NATIVE/CLI login, read daemon-side
- * from the Claudexor-owned native store (never the ordinary vendor home). Only
- * the config_dir_login families (codex, claude) have a readable native store;
- * every other harness projects no native identity.
+ * from the Claudexor-owned native store (never the ordinary vendor home).
+ * Cursor's CLI-reported identity arrives through the Accounts-only doctor
+ * receipt instead; this helper remains the static-store owner for codex/claude.
  */
 function nativeAccountIdentity(harnessId: string): AccountIdentity | null {
   if (harnessId === "codex") return codexAccountIdentity(defaultNativeCodexHome());
@@ -65,24 +66,67 @@ export async function profileDoctorStatus(
   return probeCredentialProfileStatus(profile, adapter?.probeCredentialProfile?.bind(adapter));
 }
 
+/**
+ * Accounts projection for one named profile. A rich adapter owns readiness and
+ * identity in ONE call; adapters without it keep the existing doctor + owned-
+ * store identity path. A malformed rich receipt loses identity and fails
+ * closed through the shared readiness wrapper.
+ */
+export async function profileAccountProjection(profile: CredentialProfile): Promise<{
+  profile: CredentialProfile;
+  status: CredentialProfileStatus;
+  identity: AccountIdentity | null;
+}> {
+  const adapter = buildRegistry().get(profile.harness_id);
+  if (!adapter?.probeCredentialAccount) {
+    return {
+      profile,
+      status: await probeCredentialProfileStatus(
+        profile,
+        adapter?.probeCredentialProfile?.bind(adapter),
+      ),
+      identity: profileAccountIdentity(profile),
+    };
+  }
+  let identity: AccountIdentity | null = null;
+  const status = await probeCredentialProfileStatus(profile, async (candidate) => {
+    const receipt = await adapter.probeCredentialAccount!(candidate);
+    if (
+      receipt.status.profile_id !== candidate.profile_id ||
+      receipt.status.harness_id !== candidate.harness_id
+    ) {
+      throw new Error("profile account probe returned a receipt for a different profile");
+    }
+    identity = receipt.identity === null ? null : AccountIdentitySchema.parse(receipt.identity);
+    return receipt.status;
+  });
+  return { profile, status, identity };
+}
+
 export async function harnessAccountsProjection(
   repoRoot: string,
   quotaSnapshots: readonly QuotaSnapshot[] = [],
   snapshot?: {
     statuses?: readonly HarnessStatus[];
     profiles?: readonly { profile: CredentialProfile; status: CredentialProfileStatus }[];
+    accountIdentities?: ReadonlyMap<string, AccountIdentity | null>;
   },
 ): Promise<ControlHarnessAccounts[]> {
   const cfg = loadConfig(repoRoot).global;
   const harnessIds = [...buildRegistry({ includeFakes: false }).keys()].sort();
   const nativeDetected = new Map<string, boolean>();
   let statuses: readonly HarnessStatus[] = snapshot?.statuses ?? [];
+  const accountIdentities = new Map(snapshot?.accountIdentities ?? []);
   if (!snapshot?.statuses) {
     try {
-      statuses = await buildGateway({ includeFakes: false }).statusAll(
+      const receipts = await buildGateway({ includeFakes: false }).statusAllForAccounts(
         { cwd: repoRoot, fresh: true },
         harnessIds,
       );
+      statuses = receipts.map((receipt) => receipt.status);
+      for (const receipt of receipts) {
+        accountIdentities.set(receipt.status.id, receipt.identity);
+      }
     } catch {
       statuses = [];
     }
@@ -115,7 +159,7 @@ export async function harnessAccountsProjection(
       harness_id: harnessId,
       native_credentials_enabled: nativeEnabled,
       native_login_detected: nativeDetected.get(harnessId) ?? false,
-      identity: nativeAccountIdentity(harnessId),
+      identity: accountIdentities.get(harnessId) ?? nativeAccountIdentity(harnessId),
       // The routing owner computes who an unpinned run routes to next — the
       // accounts projection never re-derives it (INV-135).
       next_up: nextUpIdentity({

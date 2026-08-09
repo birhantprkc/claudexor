@@ -47,7 +47,7 @@ describe("Cursor Plan validated transport composition", () => {
     let captured: CliRunLoopOptions | undefined;
     const adapter = createCursorAdapter({
       detectVersion: async () => "cursor-test",
-      nativeAuthOk: async () => ({ authed: true, probeError: null }),
+      nativeAuthOk: async () => ({ kind: "authenticated" }),
       cursorApiKey: () => null,
       listCursorModels: async () => [],
       smokeIsolatedApiKey: async () => ({ ok: false, detail: "not needed" }),

@@ -1,4 +1,5 @@
 import type {
+  AccountIdentity,
   AuthSourceKind,
   AuthSourceReadiness,
   ConformanceCheck,
@@ -24,6 +25,12 @@ export interface HarnessStatus {
   checks: ConformanceCheck[];
   reasons: string[];
   authSources: AuthSourceReadiness[];
+}
+
+/** Accounts-only status receipt; generic HarnessStatus deliberately stays identity-free. */
+export interface HarnessAccountStatus {
+  status: HarnessStatus;
+  identity: AccountIdentity | null;
 }
 
 /**
@@ -81,9 +88,38 @@ export class HarnessGateway {
    * registered adapter and post-filtering). Unknown ids in `only` are skipped.
    */
   async statusAll(spec: DoctorSpec, only?: string[]): Promise<HarnessStatus[]> {
+    return this.statusAllForAdapters(this.selectedAdapters(only), spec);
+  }
+
+  /**
+   * Accounts-specific variant of statusAll. An adapter with a rich Accounts
+   * doctor returns readiness and identity from the SAME native probe; adapters
+   * without that capability retain their exact generic status path and expose
+   * no identity. The identity is never added to HarnessStatus or its wire DTO.
+   */
+  async statusAllForAccounts(spec: DoctorSpec, only?: string[]): Promise<HarnessAccountStatus[]> {
+    const identities = new Map<string, AccountIdentity | null>();
+    const adapters = this.selectedAdapters(only).map((adapter): HarnessAdapter => {
+      if (!adapter.doctorForAccounts) return adapter;
+      return {
+        ...adapter,
+        doctor: async (doctorSpec) => {
+          const receipt = await adapter.doctorForAccounts!(doctorSpec);
+          identities.set(adapter.id, receipt.identity);
+          return receipt.report;
+        },
+      };
+    });
+    const statuses = await this.statusAllForAdapters(adapters, spec);
+    return statuses.map((status) => ({
+      status,
+      identity: identities.get(status.id) ?? null,
+    }));
+  }
+
+  private selectedAdapters(only?: string[]): HarnessAdapter[] {
     const all = [...this.registry.values()];
-    const adapters = only && only.length > 0 ? all.filter((a) => only.includes(a.id)) : all;
-    return this.statusAllForAdapters(adapters, spec);
+    return only && only.length > 0 ? all.filter((adapter) => only.includes(adapter.id)) : all;
   }
 
   private async statusAllForAdapters(

@@ -9,6 +9,7 @@ import {
   canonicalCursorProfileHome,
   cursorProfilePathEnv,
   cursorProfileRunEnv,
+  probeCursorCredentialAccount,
   probeCursorCredentialProfile,
   resolveCursorProfileRoute,
 } from "./profile.js";
@@ -76,7 +77,7 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
     const runtime = {
       nativeAuthOk: async (env: typeof observed) => {
         observed = env;
-        return { authed: true, probeError: null };
+        return { kind: "authenticated" } as const;
       },
       resolveProfileSecret: () => null,
     };
@@ -96,7 +97,7 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       profile(),
       {},
       {
-        nativeAuthOk: async () => ({ authed: false, probeError: null }),
+        nativeAuthOk: async () => ({ kind: "loggedOut" }),
         resolveProfileSecret: () => {
           secretReads += 1;
           return "default-must-not-be-used";
@@ -112,7 +113,7 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       profile(),
       {},
       {
-        nativeAuthOk: async () => ({ authed: false, probeError: "status transport failed" }),
+        nativeAuthOk: async () => ({ kind: "unknown", error: "status transport failed" }),
         resolveProfileSecret: () => null,
       },
     );
@@ -144,7 +145,7 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       }),
       {},
       {
-        nativeAuthOk: async () => ({ authed: false, probeError: null }),
+        nativeAuthOk: async () => ({ kind: "loggedOut" }),
         resolveProfileSecret: (ref) => (ref === "cursor:valentine" ? "cursor-key" : null),
       },
     );
@@ -153,17 +154,22 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
 
   it.each([
     {
-      probe: { authed: true, probeError: null },
+      probe: { kind: "authenticated" as const },
       availability: "available",
       verification: "passed",
     },
     {
-      probe: { authed: false, probeError: null },
+      probe: { kind: "loggedOut" as const },
       availability: "unavailable",
       verification: "not_run",
     },
     {
-      probe: { authed: false, probeError: "status transport failed" },
+      probe: { kind: "unknown" as const, error: "status transport failed" },
+      availability: "unknown",
+      verification: "not_run",
+    },
+    {
+      probe: { kind: "unknown" as const },
       availability: "unknown",
       verification: "not_run",
     },
@@ -179,6 +185,54 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       harness_id: "cursor",
       availability: expected.availability,
       verification: expected.verification,
+    });
+  });
+
+  it("returns a named profile email and readiness from one status observation", async () => {
+    let calls = 0;
+    const receipt = await probeCursorCredentialAccount(profile(), {
+      nativeAuthOk: async () => {
+        calls += 1;
+        return { kind: "authenticated", email: "valentine@example.test" };
+      },
+      resolveProfileSecret: () => {
+        throw new Error("must not read a default secret");
+      },
+    });
+    expect(calls).toBe(1);
+    expect(receipt).toMatchObject({
+      status: {
+        profile_id: "valentine",
+        harness_id: "cursor",
+        availability: "available",
+        verification: "passed",
+      },
+      identity: { email: "valentine@example.test" },
+    });
+    expect(receipt.identity).not.toHaveProperty("plan");
+  });
+
+  it("keeps API-key profiles identity-free and does not run a native status probe", async () => {
+    let nativeCalls = 0;
+    const receipt = await probeCursorCredentialAccount(
+      profile({
+        credential_kind: "api_key",
+        isolation_locator: null,
+        secret_ref: "cursor:valentine",
+      }),
+      {
+        nativeAuthOk: async () => {
+          nativeCalls += 1;
+          return { kind: "authenticated", email: "must-not-appear@example.test" };
+        },
+        resolveProfileSecret: () => "cursor-key",
+      },
+    );
+    expect(nativeCalls).toBe(0);
+    expect(receipt.identity).toBeNull();
+    expect(receipt.status).toMatchObject({
+      availability: "available",
+      verification: "not_run",
     });
   });
 
@@ -203,7 +257,7 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
         detectVersion: async () => "cursor-test",
         nativeAuthOk: async (env) => {
           probedEnv = env;
-          return { authed: true, probeError: null };
+          return { kind: "authenticated" };
         },
         cursorApiKey: () => {
           throw new Error("default key ladder must not run under a profile");
@@ -249,7 +303,7 @@ describe("Cursor config-dir credential profiles (INV-135)", () => {
       let launches = 0;
       const adapter = createCursorAdapter({
         detectVersion: async () => "cursor-test",
-        nativeAuthOk: async () => ({ authed: false, probeError: null }),
+        nativeAuthOk: async () => ({ kind: "loggedOut" }),
         cursorApiKey: () => {
           throw new Error("default key ladder must not run under a profile");
         },

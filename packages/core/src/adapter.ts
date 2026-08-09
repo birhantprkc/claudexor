@@ -1,4 +1,5 @@
 import type {
+  AccountIdentity,
   AuthPreference,
   AuthSourceKind,
   ConformanceReport,
@@ -11,6 +12,18 @@ import type {
   InteractionAnswerSet,
   InteractionRequest,
 } from "@claudexor/schema";
+
+/** Accounts-only doctor receipt. Identity never widens generic HarnessStatus. */
+export interface HarnessAccountDoctorReceipt {
+  report: ConformanceReport;
+  identity: AccountIdentity | null;
+}
+
+/** Accounts-only profile receipt: one probe owns readiness and identity. */
+export interface CredentialAccountProbeReceipt {
+  status: CredentialProfileStatus;
+  identity: AccountIdentity | null;
+}
 
 export interface DoctorSpec {
   cwd: string;
@@ -40,6 +53,13 @@ export interface HarnessAdapter {
   /** Probe capabilities and report which intents this adapter may play. */
   doctor(spec: DoctorSpec): Promise<ConformanceReport>;
 
+  /**
+   * Optional Accounts projection of the same doctor probe. Implementations
+   * return readiness plus a narrow non-secret identity in one receipt so an
+   * Accounts caller never launches a second native status process.
+   */
+  doctorForAccounts?(spec: DoctorSpec): Promise<HarnessAccountDoctorReceipt>;
+
   /** Run a task, streaming normalized events. */
   run(spec: HarnessRunSpec): AsyncIterable<HarnessEvent>;
 
@@ -67,6 +87,15 @@ export interface HarnessAdapter {
     profile: CredentialProfile,
     abortSignal?: AbortSignal,
   ): Promise<CredentialProfileStatus>;
+
+  /**
+   * Optional Accounts-only profile probe. This is the rich counterpart of
+   * `probeCredentialProfile`, not an additional probe: callers choose one.
+   */
+  probeCredentialAccount?(
+    profile: CredentialProfile,
+    abortSignal?: AbortSignal,
+  ): Promise<CredentialAccountProbeReceipt>;
 }
 
 /** A registry of available adapters keyed by harness id. */

@@ -17,6 +17,8 @@ import { registerConfigDirProfile } from "./profile-registration.js";
 const gatewayMock = vi.hoisted(() => ({
   statuses: [] as unknown[],
   calls: [] as Array<{ fresh?: boolean }>,
+  accountIdentities: {} as Record<string, { email?: string; plan?: string } | null>,
+  profileIdentities: {} as Record<string, { email?: string; plan?: string } | null>,
   profileReadiness: {
     availability: "unknown",
     verification: "not_run",
@@ -40,22 +42,33 @@ vi.mock("./registry.js", async (importOriginal) => {
     buildRegistry: (options?: Parameters<typeof original.buildRegistry>[0]) => {
       const registry = original.buildRegistry(options);
       for (const [id, adapter] of registry) {
-        if (!adapter.probeCredentialProfile) continue;
+        if (!adapter.probeCredentialProfile && !adapter.probeCredentialAccount) continue;
+        const statusFor = (profile: { profile_id: string; harness_id: string }) => {
+          const readiness =
+            gatewayMock.profileReadinessById[profile.profile_id] ?? gatewayMock.profileReadiness;
+          return {
+            profile_id: profile.profile_id,
+            harness_id: profile.harness_id,
+            availability: readiness.availability,
+            verification: readiness.verification,
+            verification_source: "local_store" as const,
+            detail: "live profile probe disabled in projection unit test",
+            last_verified_at: null,
+          };
+        };
         registry.set(id, {
           ...adapter,
-          probeCredentialProfile: async (profile) => {
-            const readiness =
-              gatewayMock.profileReadinessById[profile.profile_id] ?? gatewayMock.profileReadiness;
-            return {
-              profile_id: profile.profile_id,
-              harness_id: profile.harness_id,
-              availability: readiness.availability,
-              verification: readiness.verification,
-              verification_source: "local_store",
-              detail: "live profile probe disabled in projection unit test",
-              last_verified_at: null,
-            };
-          },
+          ...(adapter.probeCredentialProfile
+            ? { probeCredentialProfile: async (profile) => statusFor(profile) }
+            : {}),
+          ...(adapter.probeCredentialAccount
+            ? {
+                probeCredentialAccount: async (profile) => ({
+                  status: statusFor(profile),
+                  identity: gatewayMock.profileIdentities[profile.profile_id] ?? null,
+                }),
+              }
+            : {}),
         });
       }
       return registry;
@@ -64,6 +77,13 @@ vi.mock("./registry.js", async (importOriginal) => {
       statusAll: async (input: { fresh?: boolean }) => {
         gatewayMock.calls.push(input);
         return gatewayMock.statuses;
+      },
+      statusAllForAccounts: async (input: { fresh?: boolean }) => {
+        gatewayMock.calls.push(input);
+        return gatewayMock.statuses.map((status) => ({
+          status,
+          identity: gatewayMock.accountIdentities[(status as { id: string }).id] ?? null,
+        }));
       },
     }),
   };
@@ -170,6 +190,8 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     // them hermetic even when the developer machine has vendor CLIs installed.
     process.env.PATH = dir;
     gatewayMock.calls = [];
+    gatewayMock.accountIdentities = {};
+    gatewayMock.profileIdentities = {};
     gatewayMock.profileReadiness = { availability: "unknown", verification: "not_run" };
     gatewayMock.profileReadinessById = {};
     gatewayMock.statuses = [
@@ -485,6 +507,72 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     // A harness with no readable native store projects null, never an error.
     const codexAccounts = listing.harnessAccounts.find((h) => h.harness_id === "codex");
     expect(codexAccounts?.identity ?? null).toBeNull();
+  });
+
+  it("projects default and named Cursor emails from the Accounts-only probe receipts", async () => {
+    registerConfigDirProfile({ harnessId: "cursor", profileId: "work" });
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    gatewayMock.profileIdentities = { work: { email: "work-cursor@example.test" } };
+    gatewayMock.accountIdentities = { cursor: { email: "default-cursor@example.test" } };
+    gatewayMock.statuses = [
+      {
+        id: "cursor",
+        available: true,
+        status: "ok",
+        manifest: null,
+        authSources: [
+          { source: "native_session", availability: "available", verification: "passed" },
+        ],
+        enabledIntents: ["explain", "implement"],
+        routableIntents: ["explain", "implement"],
+        disabledIntents: [],
+        checks: [],
+        reasons: [],
+      },
+    ];
+
+    const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
+    expect(listing.profiles.find((entry) => entry.profile.profile_id === "work")?.identity).toEqual(
+      { email: "work-cursor@example.test" },
+    );
+    expect(
+      listing.harnessAccounts.find((entry) => entry.harness_id === "cursor")?.identity,
+    ).toEqual({ email: "default-cursor@example.test" });
+  });
+
+  it("keeps Cursor identity beside a vendor readiness error instead of hiding either", async () => {
+    registerConfigDirProfile({ harnessId: "cursor", profileId: "work" });
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    gatewayMock.profileIdentities = { work: { email: "work-cursor@example.test" } };
+    const refreshedQuota = ControlQuotaResponse.parse({
+      snapshots: [],
+      absences: [
+        {
+          subject: {
+            harness: "cursor",
+            credential_route: "vendor_native",
+            plan_label: null,
+            subject_id: "work",
+          },
+          reason: "auth_revoked",
+          detail: "vendor rejected the profile credential",
+          observed_at: "2026-08-09T00:00:00Z",
+        },
+      ],
+      refreshed_at: "2026-08-09T00:00:00Z",
+    });
+
+    const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
+      await services({ refreshedQuota }).credentialProfiles({ snapshot: true }),
+    );
+    const entry = snapshot.profiles.find((candidate) => candidate.profile.profile_id === "work");
+    expect(entry?.identity).toEqual({ email: "work-cursor@example.test" });
+    expect(entry?.status).toMatchObject({
+      availability: "available",
+      verification: "failed",
+      verification_source: "vendor",
+      detail: "vendor rejected the profile credential",
+    });
   });
 
   it("never lets a token-bearing native store leak beyond {email, plan}", async () => {

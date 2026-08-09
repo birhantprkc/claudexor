@@ -28,7 +28,7 @@ async function argsFor(runSpec: HarnessRunSpec): Promise<string[]> {
   let captured: string[] | undefined;
   const adapter = createCursorAdapter({
     detectVersion: async () => "cursor-test",
-    nativeAuthOk: async () => ({ authed: true, probeError: null }),
+    nativeAuthOk: async () => ({ kind: "authenticated" }),
     cursorApiKey: () => null,
     runCliHarness: async function* (opts: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
       captured = [...opts.args];
@@ -78,7 +78,7 @@ async function runCollecting(
   let captured: string[] | null = null;
   const adapter = createCursorAdapter({
     detectVersion: async () => "cursor-test",
-    nativeAuthOk: async () => ({ authed: true, probeError: null }),
+    nativeAuthOk: async () => ({ kind: "authenticated" }),
     cursorApiKey: () => null,
     runCliHarness: async function* (opts: CliRunLoopOptions): AsyncGenerator<HarnessEvent> {
       captured = [...opts.args];
@@ -121,7 +121,7 @@ describe("cursor external_sandbox_full stands its own sandbox down (the engine b
   it("declares external_sandbox_full (and not full) in the manifest", async () => {
     const adapter = createCursorAdapter({
       detectVersion: async () => "cursor-test",
-      nativeAuthOk: async () => ({ authed: true, probeError: null }),
+      nativeAuthOk: async () => ({ kind: "authenticated" }),
       cursorApiKey: () => null,
     });
     const manifest = await adapter.discover();
