@@ -457,6 +457,21 @@ describe("WorkspaceManager", () => {
     expect(existsSync(artifactRoot)).toBe(true);
   });
 
+  it("refuses an artifact-child collision without claiming or deleting its bytes", async () => {
+    const repo = await initRepo();
+    const runtimeRoot = reapMk(join(tmpdir(), "claudexor-artifact-collision-"));
+    const mgr = new WorkspaceManager(repo, { runtimeRoot });
+    const env = await mgr.create({ taskId: "task-art-collision", attemptId: "a01", inPlace: true });
+    const collision = join(repo, ".claudexor-artifacts", env.id);
+    mkdirSync(collision, { recursive: true });
+    const sentinel = join(collision, "user.txt");
+    writeFileSync(sentinel, "pre-existing user bytes\n");
+
+    expect(() => mgr.ensureArtifactDirectory(env)).toThrow(/unexpectedly already exists/);
+    await mgr.dispose(env);
+    expect(readFileSync(sentinel, "utf8")).toBe("pre-existing user bytes\n");
+  });
+
   it("capture/create/diff/dispose preserves the live index and arbitrary project .claudexor bytes", async () => {
     const repo = await initRepo();
     mkdirSync(join(repo, ".claudexor"), { recursive: true });
