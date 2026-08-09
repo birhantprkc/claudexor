@@ -43,9 +43,7 @@ import { invalidateStatusProjections } from "./status-projection-cache.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
-import { refreshCodexQuota } from "./codex-quota-source.js";
-import { refreshClaudeStatuslineQuota } from "./claude-statusline.js";
-import { refreshClaudeOauthUsageQuota } from "./claude-oauth-usage.js";
+import { quotaRefreshers } from "./quota-refreshers.js";
 import {
   resolveThreadExecutionWorkspace,
   threadRunStartRequiresGit,
@@ -122,10 +120,7 @@ export async function main(): Promise<void> {
     const runEventStoreSlot = journalManager.registerProjection(runEventProjection());
     const projectStoreSlot = journalManager.registerProjection(projectProjection());
     const quotaStoreSlot = journalManager.registerProjection(
-      quotaProjection(
-        [refreshCodexQuota, refreshClaudeStatuslineQuota, () => refreshClaudeOauthUsageQuota()],
-        quotaSubjectUniverse,
-      ),
+      quotaProjection(quotaRefreshers(), quotaSubjectUniverse),
     );
     // Sidebar invalidation ping (W12): a GLOBAL-partition emitter every
     // ThreadStore (global + per-project) writes through, so any thread

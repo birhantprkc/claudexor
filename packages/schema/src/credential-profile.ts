@@ -124,13 +124,13 @@ export type CredentialProfileStatus = z.infer<typeof CredentialProfileStatus>;
 
 /**
  * NON-SECRET account identity projection (INV-067/INV-135): the email and plan
- * label derived DAEMON-SIDE from the account's OWN Claudexor-owned store — the
- * codex `auth.json` id_token claims or the claude `.claude.json` oauthAccount,
- * never the ordinary vendor home (`~/.codex`, `~/.claude`). Only these two
- * allowlisted, non-token fields ever cross the wire; token material stays inside
- * the daemon. A macOS surface MUST render this projection, never re-read the
- * store (the removed app-side reader was the INV-067/INV-002 violation). Both
- * fields are optional so a store that discloses only one still projects.
+ * label derived DAEMON-SIDE from a sanctioned per-account source. Codex and
+ * Claude may use their scoped credential stores; Cursor may expose an
+ * allowlisted email from the harness CLI's anchored status observation. Only
+ * these two allowlisted, non-token fields ever cross the wire; raw status text
+ * and token material stay inside the daemon. A macOS surface MUST render this
+ * projection, never re-read a store or invoke a harness. Both fields are
+ * optional so a source that discloses only one still projects.
  */
 export const AccountIdentity = z
   .object({
@@ -139,7 +139,7 @@ export const AccountIdentity = z
       .min(1)
       .optional()
       .describe(
-        "Login email of the account (codex id_token `email` / claude oauthAccount `emailAddress`).",
+        "Login email of the account (codex id_token `email`, claude oauthAccount `emailAddress`, or an allowlisted harness CLI status observation).",
       ),
     plan: z
       .string()
@@ -151,7 +151,7 @@ export const AccountIdentity = z
   })
   .strict()
   .describe(
-    "Non-secret {email, plan} identity of one account, derived daemon-side from its OWN Claudexor-owned store; never carries token material.",
+    "Non-secret {email, plan} identity of one account, derived daemon-side from a sanctioned scoped credential source or an allowlisted harness CLI status observation; never carries raw status or token material.",
   );
 export type AccountIdentity = z.infer<typeof AccountIdentity>;
 
@@ -213,7 +213,7 @@ export const ControlHarnessAccounts = z
     identity: AccountIdentity.nullable()
       .default(null)
       .describe(
-        "Non-secret {email, plan} of the native/CLI login, derived daemon-side from the Claudexor-owned native store; null when absent/undisclosed.",
+        "Non-secret {email, plan} of the native/CLI login, derived daemon-side from a sanctioned credential source or allowlisted harness CLI status observation; null when absent/undisclosed.",
       ),
     next_up: ControlNextUpIdentity,
   })
@@ -236,7 +236,7 @@ export const ControlCredentialProfilesResponse = z
             identity: AccountIdentity.nullable()
               .default(null)
               .describe(
-                "Non-secret {email, plan} of this profile, derived daemon-side from its OWN isolation-locator store; null when absent/undisclosed.",
+                "Non-secret {email, plan} of this profile, derived daemon-side from its scoped credential source or allowlisted harness CLI status observation; null when absent/undisclosed.",
               ),
           })
           .strict(),

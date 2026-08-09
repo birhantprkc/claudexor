@@ -34,6 +34,7 @@ const gatewayMock = vi.hoisted(() => ({
     }
   >,
 }));
+const noteCredentialChange = vi.fn();
 
 vi.mock("./registry.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./registry.js")>();
@@ -157,6 +158,7 @@ function services(
   };
   const quota = {
     removeSubject: () => 0,
+    noteCredentialChange,
     read: () => emptyQuota,
     refresh: refreshQuota,
     refreshWithCursor: async () => ({
@@ -192,6 +194,7 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     gatewayMock.calls = [];
     gatewayMock.accountIdentities = {};
     gatewayMock.profileIdentities = {};
+    noteCredentialChange.mockClear();
     gatewayMock.profileReadiness = { availability: "unknown", verification: "not_run" };
     gatewayMock.profileReadinessById = {};
     gatewayMock.statuses = [
@@ -233,6 +236,23 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
       await svc.updateCredentialProfile({ harnessId: "claude", profileId: "work", enabled: true }),
     );
     expect(on.profile.enabled).toBe(true);
+    expect(noteCredentialChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-arms quota polling after profile creation and quota-relevant settings", async () => {
+    const svc = services();
+    await svc.createCredentialProfile({ harnessId: "claude", profileId: "new-account" });
+    expect(noteCredentialChange).toHaveBeenCalledOnce();
+
+    await svc.updateSettings({
+      harnesses: { claude: { nativeCredentialsEnabled: false } },
+    });
+    expect(noteCredentialChange).toHaveBeenCalledTimes(2);
+
+    // All settings mutations ride the same cache-bust/reset owner; a broader
+    // reset is harmless and keeps credential-affecting fields fail-safe.
+    await svc.updateSettings({ harnesses: { claude: { defaultModel: "fable" } } });
+    expect(noteCredentialChange).toHaveBeenCalledTimes(3);
   });
 
   it("refuses an unknown id with a typed 404 and a missing enabled with a 400", async () => {
@@ -376,7 +396,20 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
         snapshot: true,
       }),
     );
-    expect(snapshot.quota).toEqual(refreshedQuota);
+    expect(snapshot.quota.snapshots).toEqual(
+      refreshedQuota.snapshots.map((quota) => ({
+        ...quota,
+        availability: {
+          state: "available",
+          blocking_constraints: [],
+          resets_at: null,
+          model_scoped_exhaustions: [],
+        },
+      })),
+    );
+    expect(snapshot.quota.absences).toEqual(refreshedQuota.absences);
+    expect(snapshot.quota.refreshed_at).toBe(refreshedQuota.refreshed_at);
+    expect(refreshedQuota.snapshots.every((quota) => !("availability" in quota))).toBe(true);
     expect(snapshot.quotaEventCursor).toBe("quota-fence-exact");
     expect(
       snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,

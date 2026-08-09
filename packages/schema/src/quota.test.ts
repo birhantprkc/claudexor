@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  QUOTA_SOURCE_TRAITS,
+  QuotaSource,
+  quotaRefreshDemandHarnesses,
   quotaSnapshotAvailability,
+  quotaSourcesProducedByRefreshers,
   withQuotaAvailability,
   type ControlQuotaResponse,
   type QuotaConstraint,
@@ -23,13 +27,33 @@ function constraint(overrides: Partial<QuotaConstraint> & { id: string }): Quota
 }
 
 describe("quotaSnapshotAvailability", () => {
+  it("keeps one exhaustive source-trait registry with orthogonal capabilities", () => {
+    expect(Object.keys(QUOTA_SOURCE_TRAITS).sort()).toEqual([...QuotaSource.options].sort());
+    expect(quotaRefreshDemandHarnesses().sort()).toEqual(["claude", "codex"]);
+    expect(quotaSourcesProducedByRefreshers().sort()).toEqual([
+      "claude_oauth_usage",
+      "claude_statusline",
+      "codex_app_server",
+    ]);
+    expect(QUOTA_SOURCE_TRAITS.claude_statusline).toEqual({
+      vendorAuthenticated: false,
+      refreshDemandHarness: null,
+      producedByRefresher: true,
+    });
+    expect(QUOTA_SOURCE_TRAITS.claude_api_retry).toEqual({
+      vendorAuthenticated: false,
+      refreshDemandHarness: null,
+      producedByRefresher: false,
+    });
+  });
+
   it("a model-scoped exhaustion alone keeps state available and is disclosed", () => {
     // The exact live shape that made a consumer bury a whole claude route:
     // weekly_scoped:Fable spent while every other window is healthy.
     const availability = quotaSnapshotAvailability(
       {
         constraints: [
-          constraint({ id: "five_hour", used_ratio: 0.2, resets_at: FUTURE }),
+          constraint({ id: "five_hour", used_ratio: 0.4, resets_at: FUTURE }),
           constraint({
             id: "weekly_scoped:Fable",
             applies_to_models: ["fable", "claude-fable-5", "best"],
@@ -217,5 +241,55 @@ describe("quotaSnapshotAvailability", () => {
     expect(response.snapshots[0]).not.toHaveProperty("availability");
     const scoped = withQuotaAvailability(response, { now: NOW, model: "fable" });
     expect(scoped.snapshots[0]?.availability?.state).toBe("exhausted");
+  });
+
+  it("decorates every source independently without mutating the raw multi-source response", () => {
+    const response: ControlQuotaResponse = {
+      snapshots: [
+        {
+          subject: {
+            harness: "claude",
+            credential_route: "vendor_native",
+            plan_label: null,
+            subject_id: "work",
+          },
+          constraints: [constraint({ id: "global", used_ratio: 0.4, resets_at: FUTURE })],
+          source: "claude_oauth_usage",
+          observed_at: NOW.toISOString(),
+          freshness: "fresh",
+        },
+        {
+          subject: {
+            harness: "claude",
+            credential_route: "vendor_native",
+            plan_label: null,
+            subject_id: "work",
+          },
+          constraints: [
+            constraint({
+              id: "fable_only",
+              applies_to_models: ["fable"],
+              used_ratio: 1,
+              resets_at: FUTURE,
+            }),
+          ],
+          source: "claude_statusline",
+          observed_at: NOW.toISOString(),
+          freshness: "fresh",
+        },
+      ],
+      absences: [],
+      refreshed_at: null,
+    };
+    const raw = JSON.stringify(response);
+    const decorated = withQuotaAvailability(response, { now: NOW });
+    expect(decorated.snapshots.map((snapshot) => snapshot.availability)).toEqual([
+      expect.objectContaining({ state: "available", model_scoped_exhaustions: [] }),
+      expect.objectContaining({
+        state: "available",
+        model_scoped_exhaustions: [expect.objectContaining({ constraint_id: "fable_only" })],
+      }),
+    ]);
+    expect(JSON.stringify(response)).toBe(raw);
   });
 });

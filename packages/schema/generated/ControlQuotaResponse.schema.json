@@ -139,7 +139,7 @@
                   "claude_api_retry",
                   "claude_oauth_usage"
                 ],
-                "description": "Vendor-owned machine-readable source of a quota snapshot."
+                "description": "Machine-readable source of quota evidence, classified by schema-owned traits."
               },
               "observed_at": {
                 "type": "string",
@@ -230,7 +230,7 @@
                   "model_scoped_exhaustions"
                 ],
                 "additionalProperties": false,
-                "description": "Typed availability projection derived by the /v2/quota route; absent on surfaces that embed raw snapshots."
+                "description": "Typed server-owned availability projection derived at the /v2/quota and atomic Accounts response boundaries; absent from raw journal/projection storage."
               }
             },
             "required": [

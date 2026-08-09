@@ -8,6 +8,8 @@ import { ensureLaneHomeEnv } from "@claudexor/workspace";
 import { controlServices } from "./control-services.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
 
+const noteCredentialChange = vi.fn();
+
 // DELETE /credential-profiles/:harness/:id — the one branch of the accounts
 // scope that recursively deletes a directory. These tests pin the review-wave
 // findings: the 409 active-login guard, the delete-grade profiles-tree fence
@@ -26,7 +28,7 @@ function servicesWithJobs(
     },
     listThreads: () => [] as unknown[],
   };
-  const quota = { removeSubject: () => 0 };
+  const quota = { removeSubject: () => 0, noteCredentialChange };
   return controlServices(
     undefined as never,
     undefined as never,
@@ -49,6 +51,7 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     prev = process.env.CLAUDEXOR_CONFIG_DIR;
     process.env.CLAUDEXOR_CONFIG_DIR = dir;
     vi.spyOn(console, "log").mockImplementation(() => {});
+    noteCredentialChange.mockClear();
   });
   afterEach(() => {
     if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
@@ -70,6 +73,7 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     expect(receipt.cleanupWarning).toBeUndefined();
     expect(existsSync(locator)).toBe(false);
     expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
+    expect(noteCredentialChange).toHaveBeenCalledOnce();
   });
 
   it("reports 'none' when the login dir never existed (no fake removal claim)", async () => {
@@ -170,7 +174,7 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
       invalidateCredentialProfile: () => ({ clearedThreads: 0, invalidatedSessions: 0 }),
       listThreads: () => [{ id: "th-1", repo: { root: repo } }] as unknown[],
     };
-    const quota = { removeSubject: () => 0 };
+    const quota = { removeSubject: () => 0, noteCredentialChange };
     const svc = controlServices(
       undefined as never,
       undefined as never,

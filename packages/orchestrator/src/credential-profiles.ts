@@ -7,7 +7,10 @@ import type {
   QuotaAbsence,
   QuotaSnapshot,
 } from "@claudexor/schema";
-import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
+import {
+  CredentialProfileStatus as CredentialProfileStatusSchema,
+  quotaSourceTraits,
+} from "@claudexor/schema";
 import { redactSecrets } from "@claudexor/util";
 import { estimateEffectiveAuthRoute } from "@claudexor/schema";
 import {
@@ -75,20 +78,6 @@ export async function selectedProfileAvailability(input: {
     : (result.detail ?? `${result.availability}/${result.verification}`);
 }
 
-/**
- * Quota sources that are an AUTHENTICATED REQUEST TO THE VENDOR made with the
- * subject's own credential — the vendor answering is proof the credential is
- * still honored, and its 401/403 is proof it is not. Locally-read sources
- * (`claude_statusline`, `codex_rollout`) and mid-run stream evidence
- * (`claude_api_retry`) are deliberately excluded: they observe usage, not
- * credential liveness, and treating them as proof would restate the very
- * over-promise this overlay exists to remove.
- */
-const VENDOR_AUTHENTICATED_QUOTA_SOURCES: ReadonlySet<QuotaSnapshot["source"]> = new Set([
-  "claude_oauth_usage",
-  "codex_app_server",
-]);
-
 /** What the quota poller's last authenticated vendor contact says about ONE
  * credential subject's liveness. Null = the poller has no verdict to offer. */
 export type VendorCredentialObservation =
@@ -128,7 +117,7 @@ export function vendorCredentialObservation(
     };
   }
   const snapshot = quota.snapshots.find(
-    (item) => owns(item.subject) && VENDOR_AUTHENTICATED_QUOTA_SOURCES.has(item.source),
+    (item) => owns(item.subject) && quotaSourceTraits(item.source).vendorAuthenticated,
   );
   return snapshot ? { outcome: "honored", observed_at: snapshot.observed_at } : null;
 }

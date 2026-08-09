@@ -68,7 +68,6 @@ import {
 import { remoteFilesystemServices } from "./remote-filesystem.js";
 import { projectRunApplicability } from "./run-applicability.js";
 import { threadTurnServices } from "./thread-turn-services.js";
-
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 type SetupJobManager = ReturnType<typeof createSetupJobManager>;
 type SetupBinding = SetupLifecycleBinding<SetupJobStore, SetupJobManager>;
@@ -125,6 +124,7 @@ export function controlServices(
   const bustStatusCaches = () => {
     invalidateDoctorCache();
     invalidateStatusProjections();
+    quotaRegistry().noteCredentialChange();
   };
   const journalPartition = (partition: string): JournalManager =>
     partition === "global" ? journalManager : threads.journal(partition);

@@ -3,6 +3,7 @@ import { hashJson } from "@claudexor/util";
 import {
   ControlQuotaResponse,
   HarnessEvent,
+  QuotaAbsence as QuotaAbsenceSchema,
   QuotaSnapshot as QuotaSnapshotSchema,
   type CredentialRoute,
   type QuotaAbsence,
@@ -10,13 +11,13 @@ import {
   type QuotaSnapshot,
   type QuotaSubject,
 } from "@claudexor/schema";
+import { QuotaPollPacer } from "./quota-poll-pacer.js";
+import { quotaSubjectIdentity, remainingQuotaRefreshDemand } from "./quota-refresh-demand.js";
 
 const UPSERTED = "quota.snapshot.upserted";
 const SCOPED_PREPARED = "quota.snapshot.scoped_prepared";
 const REMOVED = "quota.subject.removed";
 const PROJECTION_UPDATED = "quota.projection.updated";
-const POLL_BACKOFF_MS = 60_000;
-const MAX_POLL_BACKOFF_MS = 15 * 60_000;
 /** Snapshots older than this are pruned from every projection read (W17):
  * a day-old observation is not quota truth, just footer clutter. */
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60_000;
@@ -43,19 +44,18 @@ export class QuotaRegistry {
    * journaled: an absence is a live derivation of "who reported nothing this
    * cycle", never a durable fact to replay. */
   private absences: QuotaAbsence[] = [];
-  private pollFailures = 0;
-  private pollNotBefore = 0;
   /** Signature carried by the last durable projection marker. Raw quota
    * evidence may span several records; this is the commit/recovery boundary
    * consumed by snapshot-then-SSE clients. */
   private lastPublishedProjectionSignature: string | null = null;
   private refreshInFlight: ReturnType<QuotaRegistry["performRefreshCycle"]> | null = null;
+  private readonly pollPacer: QuotaPollPacer;
 
   constructor(
     private readonly journal: DurableJournal,
     private readonly refreshers: readonly QuotaRefresher[] = [],
     private readonly now: () => Date = () => new Date(),
-    private readonly subjects: QuotaSubjectUniverse = () => [],
+    private readonly subjects?: QuotaSubjectUniverse,
   ) {
     let rawMutationAfterMarker = false;
     let pendingScoped: { baseHash: string; snapshot: QuotaSnapshot } | null = null;
@@ -126,6 +126,15 @@ export class QuotaRegistry {
     if (rawMutationAfterMarker) {
       this.appendProjectionMarker("recovery", this.now().toISOString());
     }
+    this.pollPacer = new QuotaPollPacer({
+      now: this.now,
+      publishClockTransition: () => this.publishClockTransitionIfNeeded(),
+      hasDemand: (now) =>
+        remainingQuotaRefreshDemand(this.activeSnapshots(now), this.subjects?.()).size > 0,
+      refresh: async () => {
+        await this.refreshCycle();
+      },
+    });
   }
 
   read() {
@@ -171,9 +180,8 @@ export class QuotaRegistry {
     return { response, quotaEventCursor };
   }
 
-  /** Cycle-local core: the produced-snapshot count belongs to THIS invocation
-   * (wave-2 finding: a shared mutable field let a concurrent user refresh
-   * overwrite the poller's view of its own cycle). */
+  /** One coalesced atomic refresh cycle shared by foreground and background
+   * callers; poll pacing derives from post-cycle demand, never shared counters. */
   private refreshCycle() {
     if (this.refreshInFlight) return this.refreshInFlight;
     const cycle = this.performRefreshCycle().finally(() => {
@@ -190,33 +198,46 @@ export class QuotaRegistry {
         status: 503,
       });
     }
-    let successfulSources = 0;
-    let producedSnapshots = 0;
+    const settled = await Promise.allSettled(this.refreshers.map(async (refresher) => refresher()));
+    const batches: Array<{ snapshots: QuotaSnapshot[]; absences: QuotaAbsence[] } | null> = [];
     const failures: string[] = [];
-    const claims: QuotaAbsence[] = [];
-    for (const refresher of this.refreshers) {
+    // Validate EVERY fulfilled source batch before the first durable write.
+    // Declaration order below, not completion order, remains the deterministic
+    // authority for both snapshot writes and first-claim absence precedence.
+    for (const result of settled) {
+      if (result.status === "rejected") {
+        failures.push(
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+        );
+        batches.push(null);
+        continue;
+      }
       try {
-        const result = await refresher();
-        // Validate the source batch before its first durable write. A malformed
-        // later item must not leave earlier items applied without the cycle's
-        // projection marker when this is the only nominally successful source.
-        const snapshots = result.snapshots.map((snapshot) => QuotaSnapshotSchema.parse(snapshot));
-        // One refresh can contain many vendor subjects. Persist every source
-        // event, but publish ONE projection-level marker after the full response
-        // is assembled so clients never see a marker-per-item burst.
-        for (const snapshot of snapshots) this.recordUpsert(snapshot);
-        producedSnapshots += snapshots.length;
-        if (result.absences) claims.push(...result.absences);
-        successfulSources += 1;
+        batches.push({
+          snapshots: result.value.snapshots.map((snapshot) => QuotaSnapshotSchema.parse(snapshot)),
+          absences: (result.value.absences ?? []).map((absence) =>
+            QuotaAbsenceSchema.parse(absence),
+          ),
+        });
       } catch (error) {
         failures.push(error instanceof Error ? error.message : String(error));
+        batches.push(null);
       }
     }
-    if (successfulSources === 0) {
+    if (batches.every((batch) => batch === null)) {
       throw Object.assign(new Error(`quota refresh failed: ${failures.join("; ")}`), {
         code: "quota_refresh_unavailable",
         status: 503,
       });
+    }
+    const claims: QuotaAbsence[] = [];
+    for (const batch of batches) {
+      if (batch === null) continue;
+      // One refresh can contain many vendor subjects. Persist every source
+      // event, but publish ONE projection-level marker after the full response
+      // is assembled so clients never see a marker-per-item burst.
+      for (const snapshot of batch.snapshots) this.recordUpsert(snapshot);
+      claims.push(...batch.absences);
     }
     const now = this.now().getTime();
     this.recomputeAbsences(claims, now);
@@ -230,7 +251,7 @@ export class QuotaRegistry {
     // The marker makes absence-only and identical refreshes observable; its own
     // cursor is the exact last event represented by this response.
     const quotaEventCursor = this.appendProjectionMarker("refresh", refreshedAt, response);
-    return { response, producedSnapshots, quotaEventCursor };
+    return { response, quotaEventCursor };
   }
 
   /** Aggregate one cycle's snapshots + absence claims against the subject
@@ -257,18 +278,18 @@ export class QuotaRegistry {
       this.remove(harness, subject_id);
     }
     const covered = new Set(
-      this.activeSnapshots(now).map((snapshot) => subjectIdentity(snapshot.subject)),
+      this.activeSnapshots(now).map((snapshot) => quotaSubjectIdentity(snapshot.subject)),
     );
     const result: QuotaAbsence[] = [];
     const claimed = new Set<string>();
     for (const claim of claims) {
-      const key = subjectIdentity(claim.subject);
+      const key = quotaSubjectIdentity(claim.subject);
       if (covered.has(key) || claimed.has(key)) continue;
       claimed.add(key);
       result.push(claim);
     }
-    for (const subject of this.subjects()) {
-      const key = subjectIdentity(subject);
+    for (const subject of this.subjects?.() ?? []) {
+      const key = quotaSubjectIdentity(subject);
       if (covered.has(key) || claimed.has(key)) continue;
       claimed.add(key);
       result.push({
@@ -286,52 +307,23 @@ export class QuotaRegistry {
    * so read() never shows a subject with both a snapshot and an absence. */
   private activeAbsences(now: number): QuotaAbsence[] {
     const covered = new Set(
-      this.activeSnapshots(now).map((snapshot) => subjectIdentity(snapshot.subject)),
+      this.activeSnapshots(now).map((snapshot) => quotaSubjectIdentity(snapshot.subject)),
     );
-    return this.absences.filter((absence) => !covered.has(subjectIdentity(absence.subject)));
+    return this.absences.filter((absence) => !covered.has(quotaSubjectIdentity(absence.subject)));
   }
 
-  /** A credential just changed (login/logout): drop the absence backoff so
-   * the next poll observes the new state immediately instead of waiting out
-   * up to 15 minutes of logged-out pacing (wave-1). */
+  /** Credential or routability state changed (login/profile/native/settings):
+   * drop absence backoff so the next poll observes the new subject universe
+   * instead of waiting out up to 15 minutes of old-state pacing. */
   noteCredentialChange(): void {
-    this.pollFailures = 0;
-    this.pollNotBefore = 0;
+    this.pollPacer.noteCredentialChange();
   }
 
-  /** Background official-source refresh for empty/stale projections with bounded backoff. */
-  async pollStale(): Promise<boolean> {
-    const now = this.now().getTime();
-    const snapshots = this.activeSnapshots(now);
-    // Freshness/pruning are clock-derived projection facts. Publish the change
-    // even when the official refresh attempted below fails, so subscribers do
-    // not retain a formerly-fresh quota/next_up pairing indefinitely.
-    this.publishClockTransitionIfNeeded();
-    if (snapshots.length > 0 && snapshots.every((snapshot) => snapshot.freshness === "fresh"))
-      return false;
-    if (now < this.pollNotBefore) return false;
-    try {
-      const { producedSnapshots } = await this.refreshCycle();
-      if (producedSnapshots > 0) {
-        this.pollFailures = 0;
-        this.pollNotBefore = now + POLL_BACKOFF_MS;
-        return true;
-      }
-      // An absence-only cycle (nobody logged in, endpoint returned nothing
-      // parseable) is a SOFT failure for pacing (v3.0.3 S8): the typed
-      // absences are recorded, but re-polling every minute forever would just
-      // re-spawn vendor probes for the same answer — back off exponentially
-      // until real state appears.
-      this.pollFailures += 1;
-      this.pollNotBefore =
-        now + Math.min(POLL_BACKOFF_MS * 2 ** (this.pollFailures - 1), MAX_POLL_BACKOFF_MS);
-      return true;
-    } catch {
-      this.pollFailures += 1;
-      this.pollNotBefore =
-        now + Math.min(POLL_BACKOFF_MS * 2 ** (this.pollFailures - 1), MAX_POLL_BACKOFF_MS);
-      return false;
-    }
+  /** Background official-source refresh for per-subject primary demand. The
+   * whole decision + refresh + pacing update is single-flight, independent of
+   * foreground refresh coalescing. */
+  pollStale(): Promise<boolean> {
+    return this.pollPacer.poll();
   }
 
   ingest(harnessId: string, value: unknown): void {
@@ -514,7 +506,7 @@ export class QuotaRegistry {
 
 export function quotaProjection(
   refreshers: readonly QuotaRefresher[] = [],
-  subjects: QuotaSubjectUniverse = () => [],
+  subjects?: QuotaSubjectUniverse,
   now: () => Date = () => new Date(),
 ) {
   return {
@@ -557,12 +549,6 @@ function legacyV320Snapshot(snapshot: QuotaSnapshot): QuotaSnapshot {
     observed_at: snapshot.observed_at,
     freshness: snapshot.freshness,
   };
-}
-
-/** Absence-matching identity: (harness, subject_id) only — one credential
- * subject is one subject regardless of which route or source observed it. */
-function subjectIdentity(subject: QuotaSubject): string {
-  return [subject.harness, subject.subject_id ?? ""].join("\0");
 }
 
 function staleAt(snapshot: QuotaSnapshot, now: number): QuotaSnapshot {

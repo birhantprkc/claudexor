@@ -11,6 +11,7 @@ import type {
   QuotaAbsence,
   QuotaSnapshot,
 } from "@claudexor/schema";
+import { withQuotaAvailability } from "@claudexor/schema";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { harnessAccountsProjection, profileAccountProjection } from "./accounts-projection.js";
 import { buildGateway, harnessModels } from "./registry.js";
@@ -97,22 +98,22 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
       const accountIdentities = new Map(
         accountStatuses.map((receipt) => [receipt.status.id, receipt.identity] as const),
       );
-      const quota = fencedQuota.response;
-      const out = withVendorVerification(probed, quota);
+      const rawQuota = fencedQuota.response;
+      const out = withVendorVerification(probed, rawQuota);
       // The explicit refresh proved the live state — drop the stale poll
       // cache so the next ordinary poll recomputes from it (re-priming with a
       // snapshot-derived projection was explicitly declined, wave-3 decision).
       pollCache.invalidate();
       return {
         profiles: out,
-        harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
+        harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, rawQuota.snapshots, {
           profiles: out,
           statuses,
           accountIdentities,
         }),
         harnesses: await projectHarnessStatuses(statuses),
         git,
-        quota,
+        quota: withQuotaAvailability(rawQuota),
         quotaEventCursor: fencedQuota.quotaEventCursor,
       };
     }

@@ -12,7 +12,7 @@ export const ControlCredentialProfilesSnapshotResponse = ControlCredentialProfil
     .describe("Fresh harness readiness used for the account next-up projection."),
   git: GitCapability.describe("Git readiness from the same Accounts refresh cycle."),
   quota: ControlQuotaResponse.describe(
-    "Fresh quota response used to compute next-up in this exact Accounts snapshot epoch.",
+    "Fresh quota response used to compute next-up in this exact Accounts snapshot epoch, decorated with the same server-owned availability projection as /v2/quota.",
   ),
   quotaEventCursor: z
     .string()

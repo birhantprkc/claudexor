@@ -9,8 +9,71 @@ export const QuotaSource = z
     "claude_api_retry",
     "claude_oauth_usage",
   ])
-  .describe("Vendor-owned machine-readable source of a quota snapshot.");
+  .describe("Machine-readable source of quota evidence, classified by schema-owned traits.");
 export type QuotaSource = z.infer<typeof QuotaSource>;
+
+/** Orthogonal capabilities of every quota evidence source. Keep this
+ * exhaustive registry beside the QuotaSource vocabulary so consumers cannot
+ * silently invent their own source classifications. */
+export interface QuotaSourceTraits {
+  /** The source is a vendor response authenticated with this subject's own
+   * credential, and therefore evidence of credential liveness. */
+  readonly vendorAuthenticated: boolean;
+  /** A missing/stale primary observation from this harness creates daemon
+   * refresh demand. Reactive and spool sources deliberately use null. */
+  readonly refreshDemandHarness: "claude" | "codex" | null;
+  /** At least one registered top-level quota refresher can produce this
+   * source. This is independent of whether it satisfies refresh demand. */
+  readonly producedByRefresher: boolean;
+}
+
+export const QUOTA_SOURCE_TRAITS = {
+  codex_app_server: {
+    vendorAuthenticated: true,
+    refreshDemandHarness: "codex",
+    producedByRefresher: true,
+  },
+  codex_rollout: {
+    vendorAuthenticated: false,
+    refreshDemandHarness: null,
+    producedByRefresher: false,
+  },
+  claude_statusline: {
+    vendorAuthenticated: false,
+    refreshDemandHarness: null,
+    producedByRefresher: true,
+  },
+  claude_api_retry: {
+    vendorAuthenticated: false,
+    refreshDemandHarness: null,
+    producedByRefresher: false,
+  },
+  claude_oauth_usage: {
+    vendorAuthenticated: true,
+    refreshDemandHarness: "claude",
+    producedByRefresher: true,
+  },
+} as const satisfies Record<QuotaSource, QuotaSourceTraits>;
+
+export function quotaSourceTraits(source: QuotaSource): QuotaSourceTraits {
+  return QUOTA_SOURCE_TRAITS[source];
+}
+
+export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex"> {
+  return [
+    ...new Set(
+      Object.values(QUOTA_SOURCE_TRAITS)
+        .map((traits) => traits.refreshDemandHarness)
+        .filter((harness): harness is "claude" | "codex" => harness !== null),
+    ),
+  ].sort();
+}
+
+export function quotaSourcesProducedByRefreshers(): QuotaSource[] {
+  return (Object.keys(QUOTA_SOURCE_TRAITS) as QuotaSource[]).filter(
+    (source) => QUOTA_SOURCE_TRAITS[source].producedByRefresher,
+  );
+}
 
 export const QuotaFreshness = z
   .enum(["fresh", "stale", "unknown"])
@@ -140,7 +203,7 @@ export type QuotaAvailability = z.infer<typeof QuotaAvailability>;
 
 export const ControlQuotaSnapshot = QuotaSnapshot.extend({
   availability: QuotaAvailability.optional().describe(
-    "Typed availability projection derived by the /v2/quota route; absent on surfaces that embed raw snapshots.",
+    "Typed server-owned availability projection derived at the /v2/quota and atomic Accounts response boundaries; absent from raw journal/projection storage.",
   ),
 }).describe("One vendor-owned quota snapshot plus its derived availability projection.");
 export type ControlQuotaSnapshot = z.infer<typeof ControlQuotaSnapshot>;
@@ -279,8 +342,8 @@ export function quotaSnapshotAvailability(
 }
 
 /** Decorate a quota response with per-snapshot availability projections —
- * applied at the /v2/quota boundary so journals, projection signatures, and
- * embedded raw snapshots stay byte-identical. */
+ * applied at the /v2/quota and atomic Accounts response boundaries so
+ * journals and raw projection signatures stay byte-identical. */
 export function withQuotaAvailability(
   response: ControlQuotaResponse,
   opts: { now?: Date; model?: string | null } = {},

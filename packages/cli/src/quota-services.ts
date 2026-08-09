@@ -5,8 +5,8 @@ import { ControlQuotaRefreshRequest, withQuotaAvailability } from "@claudexor/sc
 /** Bind GET/POST /v2/quota to the registry. Both routes decorate each snapshot
  * with the derived model-aware availability projection at the response
  * boundary; the registry's own read()/journal/projection-signature stay
- * byte-identical, and surfaces embedding raw snapshots (Accounts snapshot)
- * are untouched. POST accepts an optional model to compute state against. */
+ * byte-identical. The atomic Accounts response uses the same decorator at its
+ * own boundary. POST accepts an optional model to compute state against. */
 export function quotaControlServices(quotaRegistry: () => QuotaRegistry) {
   return {
     quota: async () => withQuotaAvailability(quotaRegistry().read()),

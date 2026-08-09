@@ -349,7 +349,7 @@
                 "claude_api_retry",
                 "claude_oauth_usage"
               ],
-              "description": "Vendor-owned machine-readable source of a quota snapshot."
+              "description": "Machine-readable source of quota evidence, classified by schema-owned traits."
             },
             "plan_label": {
               "type": [

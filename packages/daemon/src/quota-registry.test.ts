@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
+import { withQuotaAvailability } from "@claudexor/schema";
 import { hashJson } from "@claudexor/util";
 import { JournalManager } from "./journal-manager.js";
 import { QuotaRegistry, quotaProjection } from "./quota-registry.js";
@@ -68,6 +69,115 @@ describe("QuotaRegistry", () => {
         .filter((record) => (record.payload as { reason?: unknown }).reason === "refresh"),
     ).toHaveLength(1);
     expect(journal.cursorFor(journal.records().at(-1)!)).toBe(fenced.quotaEventCursor);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("starts top-level refreshers together but folds validated results in declaration order", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-parallel-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const started: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const missing = quotaSnapshot("claude", "missing", 0).subject;
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          started.push("first");
+          await firstGate;
+          return {
+            snapshots: [quotaSnapshot("claude", "first", 0.2)],
+            absences: [
+              {
+                subject: missing,
+                reason: "not_logged_in" as const,
+                detail: "first claim",
+                observed_at: "2026-07-28T00:00:01.000Z",
+              },
+            ],
+          };
+        },
+        async () => {
+          started.push("second");
+          await secondGate;
+          return {
+            snapshots: [
+              {
+                ...quotaSnapshot("codex", "second", 0.4),
+                source: "codex_app_server" as const,
+              },
+            ],
+            absences: [
+              {
+                subject: missing,
+                reason: "refresh_failed" as const,
+                detail: "second claim",
+                observed_at: "2026-07-28T00:00:01.000Z",
+              },
+            ],
+          };
+        },
+      ],
+      () => new Date("2026-07-28T00:00:01.000Z"),
+      () => [missing],
+    );
+
+    const refreshing = registry.refresh();
+    await Promise.resolve();
+    expect(started).toEqual(["first", "second"]);
+    releaseSecond();
+    await Promise.resolve();
+    expect(journal.records()).toEqual([]);
+    releaseFirst();
+    const response = await refreshing;
+
+    expect(response.snapshots.map((snapshot) => snapshot.source)).toEqual([
+      "claude_oauth_usage",
+      "codex_app_server",
+    ]);
+    expect(response.absences).toEqual([expect.objectContaining({ detail: "first claim" })]);
+    expect(journal.records().map((record) => record.type)).toEqual([
+      "quota.snapshot.upserted",
+      "quota.snapshot.upserted",
+      "quota.projection.updated",
+    ]);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("validates snapshots and absences from every source before its first write", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-validate-batch-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(journal, [
+      async () => ({
+        snapshots: [quotaSnapshot("claude", null, 0.2)],
+        absences: [
+          {
+            subject: quotaSnapshot("claude", "missing", 0).subject,
+            reason: "not_logged_in" as const,
+            detail: 42 as never,
+            observed_at: "2026-07-28T00:00:01.000Z",
+          },
+        ],
+      }),
+      async () => Promise.reject(new Error("second source unavailable")),
+    ]);
+
+    await expect(registry.refresh()).rejects.toMatchObject({
+      code: "quota_refresh_unavailable",
+      status: 503,
+    });
+    expect(journal.records()).toEqual([]);
+    expect(registry.read().snapshots).toEqual([]);
 
     journal.close();
     rmSync(root, { recursive: true, force: true });
@@ -447,6 +557,38 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("keeps server availability out of raw journal payloads and projection signatures", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-raw-availability-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(journal, [], () => new Date("2026-07-28T00:00:01.000Z"));
+    registry.upsert({
+      ...quotaSnapshot("claude", "work", 1),
+      constraints: [
+        {
+          ...quotaSnapshot("claude", "work", 1).constraints[0]!,
+          resets_at: "2026-07-28T01:00:00.000Z",
+        },
+      ],
+    });
+
+    const raw = registry.read();
+    const decorated = withQuotaAvailability(raw, {
+      now: new Date("2026-07-28T00:00:01.000Z"),
+    });
+    expect(decorated.snapshots[0]?.availability?.state).toBe("exhausted");
+    expect(raw.snapshots[0]).not.toHaveProperty("availability");
+    expect(journal.records()[0]?.payload).not.toHaveProperty("availability");
+    expect(journal.records().at(-1)?.payload).toMatchObject({
+      projection_signature: JSON.stringify({
+        snapshots: raw.snapshots,
+        absences: raw.absences,
+      }),
+    });
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("discards a scoped prepare when its atomic batch stops before the base commit", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-batch-stop-")));
     const interrupted = new DurableJournal({
@@ -724,6 +866,185 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("coalesces the whole poll and anchors absence backoff to a held cycle's completion", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-poll-held-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    let nowMs = Date.parse("2026-07-28T00:00:00.000Z");
+    let calls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const subject = quotaSnapshot("codex", null, 0).subject;
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          if (calls === 1) await held;
+          return {
+            snapshots: [],
+            absences: [
+              {
+                subject,
+                reason: "not_logged_in" as const,
+                detail: null,
+                observed_at: new Date(nowMs).toISOString(),
+              },
+            ],
+          };
+        },
+      ],
+      () => new Date(nowMs),
+      () => [subject],
+    );
+
+    const first = registry.pollStale();
+    const concurrent = registry.pollStale();
+    expect(concurrent).toBe(first);
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    nowMs += 70_000;
+    release();
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([true, true]);
+    const afterFirstCycle = journal.records().length;
+    expect(afterFirstCycle).toBe(2); // initial clock fence + one refresh fence
+    expect(
+      journal
+        .records()
+        .filter(
+          (record) =>
+            record.type === "quota.projection.updated" &&
+            (record.payload as { reason?: unknown }).reason === "refresh",
+        ),
+    ).toHaveLength(1);
+
+    // Backoff begins at completedAt (t+70s), not the stale t=0 start.
+    nowMs += 59_999;
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(calls).toBe(1);
+    expect(journal.records()).toHaveLength(afterFirstCycle);
+    nowMs += 1;
+    await expect(registry.pollStale()).resolves.toBe(true);
+    expect(calls).toBe(2);
+    expect(journal.records()).toHaveLength(afterFirstCycle + 1);
+    expect(
+      journal
+        .records()
+        .filter(
+          (record) =>
+            record.type === "quota.projection.updated" &&
+            (record.payload as { reason?: unknown }).reason === "refresh",
+        ),
+    ).toHaveLength(2);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("demands fresh matching primary evidence per subject and ignores reactive/spool freshness", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-primary-demand-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const now = () => new Date("2026-07-28T00:00:01.000Z");
+    const native = quotaSnapshot("codex", null, 0.2).subject;
+    const work = quotaSnapshot("codex", "work", 0.3).subject;
+    let calls = 0;
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          return {
+            snapshots: [
+              {
+                ...quotaSnapshot("codex", "work", 0.4),
+                source: "codex_app_server" as const,
+                observed_at: now().toISOString(),
+              },
+            ],
+          };
+        },
+      ],
+      now,
+      () => [native, work],
+    );
+    registry.upsert({
+      ...quotaSnapshot("codex", null, 0.2),
+      source: "codex_app_server",
+      observed_at: now().toISOString(),
+    });
+    registry.upsert({
+      ...quotaSnapshot("codex", "work", 0.3),
+      source: "codex_rollout",
+      observed_at: now().toISOString(),
+    });
+
+    await expect(registry.pollStale()).resolves.toBe(true);
+    expect(calls).toBe(1);
+    expect(registry.read().snapshots.map((snapshot) => snapshot.source)).toEqual([
+      "codex_app_server",
+      "codex_rollout",
+      "codex_app_server",
+    ]);
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(calls).toBe(1);
+
+    // A stale reactive sibling does not create demand after primary evidence
+    // for that same subject is fresh.
+    registry.upsert({
+      ...quotaSnapshot("codex", null, 0.5),
+      source: "codex_rollout",
+      observed_at: "2026-07-27T23:00:00.000Z",
+    });
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(calls).toBe(1);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps exponential pacing while any enabled subject remains unsatisfied", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-partial-backoff-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    let nowMs = Date.parse("2026-07-28T00:00:00.000Z");
+    let calls = 0;
+    const native = quotaSnapshot("codex", null, 0).subject;
+    const work = quotaSnapshot("codex", "work", 0).subject;
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          return {
+            snapshots: [
+              {
+                ...quotaSnapshot("codex", null, 0.2),
+                source: "codex_app_server" as const,
+                observed_at: new Date(nowMs).toISOString(),
+              },
+            ],
+          };
+        },
+      ],
+      () => new Date(nowMs),
+      () => [native, work],
+    );
+
+    await expect(registry.pollStale()).resolves.toBe(true);
+    nowMs += 60_000;
+    await expect(registry.pollStale()).resolves.toBe(true);
+    expect(calls).toBe(2);
+    nowMs += 60_000;
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(calls).toBe(2);
+    nowMs += 60_000;
+    await expect(registry.pollStale()).resolves.toBe(true);
+    expect(calls).toBe(3);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("publishes a clock-derived freshness transition even when refresh fails", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-clock-marker-")));
     const journal = new DurableJournal({ rootDir: root, partition: "global" });
@@ -756,7 +1077,7 @@ describe("QuotaRegistry", () => {
     const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
     let nowMs = Date.parse("2026-07-15T12:00:00.000Z");
     let calls = 0;
-    let mode: "absence" | "snapshot" = "absence";
+    let mode: "absence" | "fresh" | "stale" = "absence";
     const subject = {
       harness: "claude",
       credential_route: "vendor_native" as const,
@@ -768,17 +1089,16 @@ describe("QuotaRegistry", () => {
       [
         async () => {
           calls += 1;
-          if (mode === "snapshot") {
+          if (mode !== "absence") {
             return {
               snapshots: [
                 {
                   subject,
                   constraints: [],
                   source: "claude_oauth_usage" as const,
-                  // A deliberately stale observation (>5min): the projection
-                  // stays poll-eligible so the RESTORED 60s cadence is
-                  // observable rather than masked by a fresh short-circuit.
-                  observed_at: new Date(nowMs - 10 * 60_000).toISOString(),
+                  observed_at: new Date(
+                    mode === "fresh" ? nowMs : nowMs - 10 * 60_000,
+                  ).toISOString(),
                   freshness: "fresh" as const,
                 },
               ],
@@ -836,20 +1156,26 @@ describe("QuotaRegistry", () => {
     await expect(registry.pollStale()).resolves.toBe(true);
     expect(calls).toBe(atCeiling + 1);
 
-    // A cycle that RETURNS a snapshot resets the cadence to 60s.
-    mode = "snapshot";
+    // Only a cycle that satisfies ALL demand resets the exponential history.
+    mode = "fresh";
     nowMs += 15 * 60_000;
     await expect(registry.pollStale()).resolves.toBe(true);
     const afterReset = calls;
-    // 30s later the (stale) projection is still poll-eligible but inside the
-    // restored 60s window → skipped, NOT the former 15-min ceiling.
-    nowMs += 30_000;
     await expect(registry.pollStale()).resolves.toBe(false);
     expect(calls).toBe(afterReset);
-    // At the 60s boundary it polls again — the exponential backoff is gone.
+
+    // Once that primary evidence ages stale, the next partial cycle starts a
+    // fresh 60s backoff rather than inheriting the former 15-minute ceiling.
+    mode = "stale";
+    nowMs += 6 * 60_000;
+    await expect(registry.pollStale()).resolves.toBe(true);
+    const afterStale = calls;
+    nowMs += 30_000;
+    await expect(registry.pollStale()).resolves.toBe(false);
+    expect(calls).toBe(afterStale);
     nowMs += 30_000;
     await expect(registry.pollStale()).resolves.toBe(true);
-    expect(calls).toBe(afterReset + 1);
+    expect(calls).toBe(afterStale + 1);
 
     journal.close();
     rmSync(root, { recursive: true, force: true });
@@ -905,11 +1231,56 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("does not let an in-flight old-credential poll restore backoff after reset", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-note-inflight-")));
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const subject = quotaSnapshot("claude", null, 0).subject;
+    let calls = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const registry = new QuotaRegistry(
+      journal,
+      [
+        async () => {
+          calls += 1;
+          if (calls === 1) await held;
+          return {
+            snapshots: [],
+            absences: [
+              {
+                subject,
+                reason: "not_logged_in" as const,
+                detail: null,
+                observed_at: "2026-07-28T00:00:00.000Z",
+              },
+            ],
+          };
+        },
+      ],
+      () => new Date("2026-07-28T00:00:00.000Z"),
+      () => [subject],
+    );
+
+    const oldPoll = registry.pollStale();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    registry.noteCredentialChange();
+    release();
+    await expect(oldPoll).resolves.toBe(true);
+    await expect(registry.pollStale()).resolves.toBe(true);
+    expect(calls).toBe(2);
+
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("keeps official quota sources independent when one refresher is unavailable", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-sources-")));
     const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
     const registry = new QuotaRegistry(journal, [
-      async () => {
+      () => {
         throw new Error("Codex unavailable");
       },
       async () => ({

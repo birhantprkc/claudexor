@@ -722,11 +722,13 @@ describe("vendor credential observation (honest profile verification)", () => {
     ).toEqual({ outcome: "honored", observed_at: "2026-07-17T12:00:00Z" });
   });
 
-  it("ignores a snapshot from a locally-read source — usage is not credential liveness", () => {
-    const statusline = { ...snap("work", 0.1), source: "claude_statusline" as const };
-    expect(
-      vendorCredentialObservation({ snapshots: [statusline], absences: [] }, "claude", "work"),
-    ).toBeNull();
+  it("ignores every reactive/spool source — usage is not credential liveness", () => {
+    for (const source of ["claude_statusline", "claude_api_retry", "codex_rollout"] as const) {
+      const evidence = { ...snap("work", 0.1), source };
+      expect(
+        vendorCredentialObservation({ snapshots: [evidence], absences: [] }, "claude", "work"),
+      ).toBeNull();
+    }
   });
 
   it("has no verdict for another subject's evidence", () => {
