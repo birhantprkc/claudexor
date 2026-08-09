@@ -4366,6 +4366,49 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func profileToggleRefusalReturnsInlineReasonAndKeepsWireState() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41145), requestNotificationAuthorization: false)
+        let seed = try JSONDecoder().decode(
+            CredentialProfilesResponse.self,
+            from: appAccountsSnapshot(
+                profileID: "work", displayName: "Work",
+                observedAt: "2026-08-09T00:00:00Z"))
+        model.storeCredentialProfiles(
+            seed.profiles, harnessAccounts: seed.harnessAccounts, at: .local)
+        let patched = AppRefreshCallCounter()
+        let reloaded = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            if request.httpMethod == "PATCH",
+               request.url?.path == "/v2/credential-profiles/claude/work"
+            {
+                patched.increment()
+                return (appResponse(for: request, status: 409),
+                        Data(#"{"error":"account is busy logging in"}"#.utf8))
+            }
+            if request.httpMethod == "GET",
+               request.url?.path == "/v2/credential-profiles",
+               request.url?.query == nil
+            {
+                reloaded.increment()
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "work", displayName: "Work",
+                    observedAt: "2026-08-09T00:00:01Z"))
+            }
+            throw AppRefreshTestError.badRequest
+        }
+
+        let row = try #require(AccountsPresentation.rows(model: model).first)
+        let error = await AccountsSurface.setEnabled(row, to: false, model: model)
+
+        #expect(error == "Request failed (HTTP 409): account is busy logging in")
+        #expect(patched.count == 1)
+        #expect(reloaded.count == 1)
+        #expect(AccountsPresentation.rows(model: model).first?.enabled == true)
+    }
+
+    @MainActor
     @Test func setNativeCredentialsEnabledPatchesTheHarnessSettingsSurface() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral

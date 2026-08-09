@@ -6,6 +6,64 @@ import Testing
 /// Owner dogfood: the internal profile id is DERIVED, never typed. The
 /// generator must always emit a server-valid slug, unique per harness.
 @Suite struct AccountsPresentationTests {
+    @Test func accountActionNoticeClearsAndRejectsLateCompletions() {
+        var notice = AccountsActionNotice()
+        let first = notice.begin()
+        notice.settle("First refusal", generation: first)
+        #expect(notice.message == "First refusal")
+
+        let second = notice.begin()
+        #expect(notice.message == nil)
+        notice.settle("Late first refusal", generation: first)
+        #expect(notice.message == nil)
+        notice.settle("Current refusal", generation: second)
+        #expect(notice.message == "Current refusal")
+
+        let third = notice.begin()
+        notice.settle(nil, generation: third)
+        #expect(notice.message == nil)
+    }
+
+    @MainActor
+    @Test func enabledActionReturnsBothProfileAndCliLoginRefusals() async {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let profile = AccountRowModel(
+            id: "profile/claude/work", displayName: "Work", harnessId: "claude",
+            family: .claude, readiness: .unknown, verified: false, profileId: "work",
+            detail: nil, quotaGroups: [], enabled: true, nextUp: false)
+        let cliLogin = AccountRowModel(
+            id: "default/claude", displayName: "Claude", harnessId: "claude",
+            family: .claude, readiness: .unknown, verified: false, profileId: nil,
+            detail: nil, quotaGroups: [], enabled: true, nextUp: false)
+
+        #expect(await AccountsSurface.setEnabled(profile, to: false, model: model)
+            == "Engine offline — reconnect to change the account.")
+        #expect(await AccountsSurface.setEnabled(cliLogin, to: false, model: model)
+            == "Engine offline: reconnect before saving settings.")
+    }
+
+    @Test func crossGroupResetOrderingUsesAbsoluteInstantsAndStableFallbacks() {
+        let sameInstantZ = "2026-08-09T00:00:00Z"
+        let sameInstantOffset = "2026-08-09T01:00:00+01:00"
+        #expect(AccountsPresentation.earliestReset(
+            [sameInstantOffset, sameInstantZ]) == sameInstantZ)
+        #expect(AccountsPresentation.earliestReset(
+            [sameInstantZ, sameInstantOffset]) == sameInstantZ)
+
+        // Raw lexical order says 00:30 is earlier, but the offsets make it
+        // 02:30Z; the raw 03:00 value is actually the earlier 01:00Z instant.
+        let lexicallyFirstButLater = "2026-08-09T00:30:00-02:00"
+        let lexicallyLaterButEarlier = "2026-08-09T03:00:00+02:00"
+        #expect(AccountsPresentation.earliestReset(
+            [lexicallyFirstButLater, lexicallyLaterButEarlier])
+            == lexicallyLaterButEarlier)
+
+        #expect(AccountsPresentation.earliestReset(
+            ["unknown-z", sameInstantZ, "unknown-a"]) == sameInstantZ)
+        #expect(AccountsPresentation.earliestReset(
+            ["unknown-z", "unknown-a"]) == "unknown-a")
+    }
+
     @MainActor
     @Test func authSheetBoundaryPreservesTheOneActionLoginTarget() {
         let sheet = AuthSheet(target: AuthSheetTarget(

@@ -1,5 +1,6 @@
 import SwiftUI
 import ClaudexorKit
+import Foundation
 
 // MARK: - Accounts presentation models (INV-135)
 //
@@ -98,7 +99,8 @@ struct AccountRowModel: Identifiable {
     }
 
     var quotaAvailabilityResetAt: String? {
-        quotaGroups.compactMap(\.availability?.resetsAt).sorted().first
+        AccountsPresentation.earliestReset(
+            quotaGroups.compactMap(\.availability?.resetsAt))
     }
 
     var scopedQuotaLabel: String? {
@@ -120,6 +122,25 @@ enum AccountsPresentation {
     /// Harnesses whose native subscription login can be isolated as an
     /// additive config-dir/HOME profile.
     static let configDirLoginHarnessIds = ["claude", "codex", "cursor"]
+
+    /// Compare legal offset timestamps by their absolute instant. Equal
+    /// instants and malformed future values use raw lexical order so the
+    /// projection remains deterministic rather than depending on group order.
+    static func earliestReset(_ values: [String]) -> String? {
+        values.min { lhs, rhs in
+            switch (try? Date(lhs, strategy: .iso8601),
+                    try? Date(rhs, strategy: .iso8601)) {
+            case let (left?, right?):
+                return left == right ? lhs < rhs : left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs < rhs
+            }
+        }
+    }
 
     /// Account controls belong to the active execution location. Local daemon
     /// health is neither necessary nor sufficient while a remote host is active.

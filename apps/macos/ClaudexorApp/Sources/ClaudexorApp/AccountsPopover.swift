@@ -229,6 +229,24 @@ struct AccountsPopover: View {
     }
 }
 
+/// One inline owner for row-level account actions. A new action clears the old
+/// message immediately, and a late completion cannot replace a newer result.
+struct AccountsActionNotice: Equatable {
+    private(set) var generation: UInt64 = 0
+    private(set) var message: String?
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        message = nil
+        return generation
+    }
+
+    mutating func settle(_ message: String?, generation: UInt64) {
+        guard generation == self.generation else { return }
+        self.message = message
+    }
+}
+
 /// The ONE accounts control surface (SSOT, owner directive): account rows with
 /// in-app log in + remove, and the no-ids-to-invent add flow. Hosted by the
 /// bottom-left popover (all families) AND the AuthSheet the Settings doctor's
@@ -252,7 +270,7 @@ struct AccountsSurface: View {
     @State private var adding = false
     @State private var pendingDelete: AccountRowModel?
     @State private var deleting = false
-    @State private var deleteNotice: String?
+    @State private var actionNotice = AccountsActionNotice()
     @State private var quotaSubscription: AccountsQuotaSubscription?
     /// The add form registers config_dir_login profiles using the same
     /// harness set the daemon supports.
@@ -277,7 +295,7 @@ struct AccountsSurface: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             accountsList
-            if let notice = deleteNotice {
+            if let notice = actionNotice.message {
                 Text(notice).font(.caption2).foregroundStyle(Theme.status(.negative))
                     .textSelection(.enabled)
             }
@@ -296,6 +314,7 @@ struct AccountsSurface: View {
             quotaSubscription = nil
         }
         .onChange(of: model.activeExecutionLocation) { _, locationID in
+            _ = actionNotice.begin()
             if let quotaSubscription { model.endAccountsQuotaSubscription(quotaSubscription) }
             quotaSubscription = model.beginAccountsQuotaSubscription(locationID: locationID)
             Task { await model.ensureCredentialProfilesLoaded(locationID: locationID) }
@@ -323,16 +342,28 @@ struct AccountsSurface: View {
     /// projection after (the popover's reload-after-PATCH pattern).
     private func enabledAction(_ row: AccountRowModel) -> (Bool) -> Void {
         { enabled in
+            let generation = actionNotice.begin()
             Task {
-                if let profileId = row.profileId {
-                    await model.setProfileEnabled(
-                        harnessId: row.harnessId, profileId: profileId, enabled: enabled)
-                } else {
-                    await model.setNativeCredentialsEnabled(
-                        harnessId: row.harnessId, enabled: enabled)
-                }
+                let error = await Self.setEnabled(row, to: enabled, model: model)
+                actionNotice.settle(error, generation: generation)
             }
         }
+    }
+
+    /// One mapping for both symmetric Enabled rows. The caller owns presenting
+    /// the returned bounded user message instead of silently discarding it.
+    @MainActor
+    static func setEnabled(
+        _ row: AccountRowModel,
+        to enabled: Bool,
+        model: AppModel
+    ) async -> String? {
+        if let profileId = row.profileId {
+            return await model.setProfileEnabled(
+                harnessId: row.harnessId, profileId: profileId, enabled: enabled)
+        }
+        return await model.setNativeCredentialsEnabled(
+            harnessId: row.harnessId, enabled: enabled)
     }
 
     private var accountsList: some View {
@@ -498,11 +529,12 @@ struct AccountsSurface: View {
     private func deleteAccount(_ row: AccountRowModel) async {
         guard let profileId = row.profileId, !deleting else { return }
         deleting = true
-        deleteNotice = nil
+        let generation = actionNotice.begin()
         defer { deleting = false; pendingDelete = nil }
         // nil = removed cleanly; else the daemon's refusal (409 while a login
         // job is active) or a disclosed cleanup warning — shown verbatim.
-        deleteNotice = await model.deleteCredentialProfile(
+        let notice = await model.deleteCredentialProfile(
             harnessId: row.harnessId, profileId: profileId)
+        actionNotice.settle(notice, generation: generation)
     }
 }
