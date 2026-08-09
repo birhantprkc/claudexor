@@ -45,20 +45,33 @@ struct AccountRowModel: Identifiable {
     /// absent (older daemon) or another row is next up.
     let nextUp: Bool
     /// Non-secret {email, plan} of this account (INV-067), projected daemon-side
-    /// from the account's OWN Claudexor-owned store. When present it drives the
-    /// row's secondary line (`identityLine`); nil for hosts with no readable
-    /// store, an undisclosed identity, or an older daemon.
+    /// from the owning credential-profile probe or native CLI status receipt.
+    /// When present it drives the row's secondary line (`identityLine`); nil
+    /// when the source does not disclose identity or an older daemon omits it.
     var identity: AccountIdentity? = nil
     var isProfile: Bool { profileId != nil }
 
-    /// The row's secondary line derived from the identity projection:
-    /// "email · plan", or whichever single field is disclosed. nil when the
-    /// store disclosed neither — the row then falls back to `detail`.
+    /// The row's identity line: "email · plan", or whichever single field the
+    /// daemon disclosed. nil falls back to the readiness detail.
     var identityLine: String? {
         let parts = [identity?.email, identity?.plan]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+    var secondaryLines: [String] {
+        let visibleDetail = identityLine == nil || !verified ? detail : nil
+        return [identityLine, visibleDetail]
+            .compactMap { $0 }
+            .reduce(into: []) { lines, value in
+                if !value.isEmpty, !lines.contains(value) { lines.append(value) }
+            }
+    }
+    /// A healthy row with identity stays compact, while its independent
+    /// readiness fact remains reachable from the status marker's help text.
+    var hiddenReadinessDetail: String? {
+        guard verified, identityLine != nil, let detail, detail != identityLine else { return nil }
+        return detail
     }
     /// The native vendor login row (not one of Claudexor's credential profiles).
     var isCliLogin: Bool { profileId == nil }
@@ -66,16 +79,44 @@ struct AccountRowModel: Identifiable {
     /// The single worst usage window across the account's quota groups; drives
     /// the ONE compact quota line the popover shows per account.
     var worstWindow: QuotaPresentation.Window? {
-        quotaGroups.flatMap(\.windows).max { ($0.usedRatio ?? -1) < ($1.usedRatio ?? -1) }
+        quotaGroups
+            .flatMap(\.windows)
+            .filter { ($0.appliesToModels ?? []).isEmpty }
+            .max { ($0.usedRatio ?? -1) < ($1.usedRatio ?? -1) }
     }
     var worstPercent: Int? {
         worstWindow?.usedRatio.map { Int(($0 * 100).rounded()) }
+    }
+
+    /// Server-authored account-wide availability folded by QuotaPresentation.
+    /// Ratios never create this state.
+    var quotaAvailabilityState: String? {
+        let states = quotaGroups.compactMap(\.availability?.state)
+        if states.contains("exhausted") { return "exhausted" }
+        if states.contains("cooldown") { return "cooldown" }
+        return states.isEmpty ? nil : "available"
+    }
+
+    var quotaAvailabilityResetAt: String? {
+        quotaGroups.compactMap(\.availability?.resetsAt).sorted().first
+    }
+
+    var scopedQuotaLabel: String? {
+        let labels = Set(quotaGroups.flatMap(\.scopedExhaustions).map(\.scopeLabel))
+        if labels.count == 1 { return labels.first }
+        if !labels.isEmpty || quotaGroups.contains(where: \.hasOnlyScopedWindows) {
+            return "Scoped limits"
+        }
+        return nil
     }
 }
 
 /// Pure assembly of account rows from the model's profile + readiness + quota
 /// state, plus the trigger's worst-of aggregates.
 enum AccountsPresentation {
+    static let cliLoginLifecycleHelp =
+        "CLI login = existing vendor sign-in; named accounts = isolated profiles used by explicit pin or opt-in quota rotation."
+
     /// Harnesses whose native subscription login can be isolated as an
     /// additive config-dir/HOME profile.
     static let configDirLoginHarnessIds = ["claude", "codex", "cursor"]
@@ -90,7 +131,7 @@ enum AccountsPresentation {
     @MainActor
     static func rows(model: AppModel) -> [AccountRowModel] {
         let groups = QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
-        let readinessFresh = model.activeHarnessReadinessFresh
+        let accountsReadinessFresh = model.activeAccountsReadinessFresh
         var rows: [AccountRowModel] = []
 
         // Default logins: one per native-login family the doctor knows.
@@ -100,19 +141,38 @@ enum AccountsPresentation {
             let source = model.authSource(for: family, source: .nativeSession)
             // V11b per-harness accounts authority for the native/CLI-login row.
             let accounts = model.harnessAccounts(for: family.rawValue)
+            // Native doctor readiness has its own harness-projection owner. A
+            // failed full Accounts request must not stale a newer successful
+            // Harness Doctor refresh; the Accounts projection is only the
+            // fallback when no exact doctor snapshot is current.
+            let exactReadinessFresh = model.activeHarnessReadinessFresh
+            let nativeAvailability = exactReadinessFresh
+                ? source?.availability
+                : accountsReadinessFresh ? (accounts?.nativeLoginDetected == true
+                    ? "available" : "unavailable") : "unknown"
+            let nativeVerification = exactReadinessFresh
+                ? source?.verification
+                : accountsReadinessFresh && accounts != nil ? "passed" : "not_run"
+            let nativeDetail: String? = if exactReadinessFresh {
+                source?.detail
+            } else if accountsReadinessFresh, let accounts {
+                accounts.nativeLoginDetected
+                    ? "CLI login detected by the cached Accounts projection."
+                    : "No CLI login detected by the cached Accounts projection."
+            } else {
+                "Readiness is stale; refresh Accounts or Harness Doctor."
+            }
             rows.append(AccountRowModel(
                 id: "default/\(family.rawValue)",
                 displayName: family.label,
                 harnessId: family.rawValue,
                 family: family,
                 readiness: readiness(
-                    availability: readinessFresh ? source?.availability : "unknown",
-                    verification: readinessFresh ? source?.verification : "not_run"),
-                verified: readinessFresh && source?.isVerifiedNativeSession == true,
+                    availability: nativeAvailability,
+                    verification: nativeVerification),
+                verified: nativeAvailability == "available" && nativeVerification == "passed",
                 profileId: nil,
-                detail: readinessFresh
-                    ? source?.detail
-                    : "Readiness is stale; refresh Accounts or Harness Doctor.",
+                detail: nativeDetail,
                 quotaGroups: groups.filter { $0.subjectId == nil && $0.harness == family.rawValue },
                 // The native/CLI login's "Enabled" is the harness setting
                 // `native_credentials_enabled` (V11b) — LIVE via the settings
@@ -126,8 +186,8 @@ enum AccountsPresentation {
 
         // Registered profiles (additive; the default login is never touched).
         for entry in model.activeCredentialProfiles {
-            let availability = entry.status.availability
-            let verification = entry.status.verification
+            let availability = accountsReadinessFresh ? entry.status.availability : "unknown"
+            let verification = accountsReadinessFresh ? entry.status.verification : "not_run"
             rows.append(AccountRowModel(
                 id: "profile/\(entry.profile.harnessId)/\(entry.profile.profileId)",
                 displayName: entry.profile.displayName,
@@ -136,7 +196,9 @@ enum AccountsPresentation {
                 readiness: readiness(availability: availability, verification: verification),
                 verified: availability == "available" && verification == "passed",
                 profileId: entry.profile.profileId,
-                detail: entry.status.detail,
+                detail: accountsReadinessFresh
+                    ? entry.status.detail
+                    : "Readiness is stale; refresh Accounts.",
                 quotaGroups: groups.filter {
                     $0.subjectId == entry.profile.profileId && $0.harness == entry.profile.harnessId
                 },

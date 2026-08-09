@@ -11,6 +11,7 @@ import ClaudexorKit
 /// plus per-snapshot provenance the footer has no room for.
 struct QuotaDetailView: View {
     @Environment(AppModel.self) private var model
+    @State private var quotaSubscription: AccountsQuotaSubscription?
 
     private var groups: [QuotaPresentation.Group] {
         QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
@@ -26,23 +27,17 @@ struct QuotaDetailView: View {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
+                    .disabled(model.activeAccountsLoadState == .loading)
                 }
-                if model.gateway(for: model.activeExecutionLocation) == nil {
-                    ContentUnavailableView("Engine offline", systemImage: "wifi.slash")
-                } else if case .failed(let message) = model.activeAccountsLoadState {
-                    VStack(spacing: Theme.Spacing.sm) {
-                        ContentUnavailableView(
-                            "Could not refresh quota",
-                            systemImage: "exclamationmark.triangle.fill",
-                            description: Text(message)
-                        )
-                        Button("Retry") { Task { _ = await model.refreshAccounts() } }
-                            .buttonStyle(.borderedProminent)
-                    }
-                } else if !groups.isEmpty {
+                displayNotice
+                if !groups.isEmpty {
                     ForEach(groups) { group in
                         groupSection(group)
                     }
+                } else if model.gateway(for: model.activeExecutionLocation) == nil {
+                    ContentUnavailableView("Engine offline", systemImage: "wifi.slash")
+                } else if case .failed(let message) = model.activeAccountsLoadState {
+                    failedWithoutGroups(message)
                 } else {
                     ContentUnavailableView(
                         "Quota unknown",
@@ -52,6 +47,65 @@ struct QuotaDetailView: View {
                 }
             }
             .padding(Theme.Spacing.lg)
+        }
+        .onAppear {
+            guard quotaSubscription == nil else { return }
+            quotaSubscription = model.beginAccountsQuotaSubscription()
+        }
+        .onDisappear {
+            if let quotaSubscription { model.endAccountsQuotaSubscription(quotaSubscription) }
+            quotaSubscription = nil
+        }
+        .onChange(of: model.activeExecutionLocation) { _, locationID in
+            if let quotaSubscription { model.endAccountsQuotaSubscription(quotaSubscription) }
+            quotaSubscription = model.beginAccountsQuotaSubscription(locationID: locationID)
+        }
+    }
+
+    @ViewBuilder private var displayNotice: some View {
+        if model.activeAccountsLoadState == .loading, model.activeQuotaResponse != nil {
+            Label("Refreshing · last-known quota remains visible", systemImage: "arrow.clockwise")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        switch model.activeAccountsQuotaDisplayState {
+        case .idle:
+            EmptyView()
+        case .loading:
+            Label("Loading quota…", systemImage: "arrow.clockwise")
+                .font(.caption).foregroundStyle(.secondary)
+        case .current:
+            EmptyView()
+        case .stale(let reason, let observedAt):
+            Label(
+                "Stale\(observedAt.flatMap(formattedDate).map { " · observed \($0)" } ?? "") · \(reason)",
+                systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                .font(.caption).foregroundStyle(Theme.status(.caution))
+        case .failedWithoutData(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(Theme.status(.negative))
+        }
+        if case .failed(let message) = model.activeAccountsLoadState,
+           model.activeQuotaResponse != nil
+        {
+            HStack {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(Theme.status(.negative))
+                Spacer()
+                Button("Retry") { Task { _ = await model.refreshAccounts() } }
+                    .buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+    }
+
+    private func failedWithoutGroups(_ message: String) -> some View {
+        VStack(spacing: Theme.Spacing.sm) {
+            ContentUnavailableView(
+                "Could not refresh quota",
+                systemImage: "exclamationmark.triangle.fill",
+                description: Text(message)
+            )
+            Button("Retry") { Task { _ = await model.refreshAccounts() } }
+                .buttonStyle(.borderedProminent)
         }
     }
 
@@ -67,6 +121,18 @@ struct QuotaDetailView: View {
                     .font(.caption)
                     .foregroundStyle(freshnessColor(group.freshness))
             }
+            if let availability = group.availability, availability.state != "available" {
+                Label(
+                    availability.state == "exhausted" ? "Account quota exhausted" : "Account cooling down",
+                    systemImage: availability.state == "exhausted" ? "gauge.with.dots.needle.100percent" : "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(Theme.status(.caution))
+            }
+            ForEach(group.scopedExhaustions) { scoped in
+                Label("\(scoped.scopeLabel) exhausted", systemImage: "scope")
+                    .font(.caption)
+                    .foregroundStyle(Theme.status(.caution))
+            }
             if let cooldown = formattedDate(group.cooldownUntil) {
                 Label("Cooling down until \(cooldown)", systemImage: "hourglass")
                     .font(.caption)
@@ -75,7 +141,7 @@ struct QuotaDetailView: View {
             ForEach(group.windows) { window in
                 VStack(alignment: .leading, spacing: Theme.Spacing.xxs) {
                     HStack {
-                        Text(window.label)
+                        Text(windowLabel(window))
                         Spacer()
                         Text(usageText(window.usedRatio)).monospacedDigit()
                     }
@@ -100,6 +166,11 @@ struct QuotaDetailView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func windowLabel(_ window: QuotaPresentation.Window) -> String {
+        guard let models = window.appliesToModels, !models.isEmpty else { return window.label }
+        return "\(window.label) · \(QuotaPresentation.modelScopeLabel(models))"
     }
 }
 

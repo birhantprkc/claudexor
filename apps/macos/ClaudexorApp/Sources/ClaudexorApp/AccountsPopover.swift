@@ -183,7 +183,7 @@ struct AccountsTriggerRow: View {
                 .padding(.horizontal, Theme.Spacing.md)
                 .padding(.vertical, Theme.Spacing.sm)
         }
-        .task { await model.refreshCredentialProfiles() }
+        .task { await model.ensureCredentialProfilesLoaded() }
         .popover(isPresented: $showPopover, arrowEdge: .trailing) {
             AccountsPopover(isPresented: $showPopover).environment(model)
         }
@@ -225,37 +225,47 @@ struct AccountsPopover: View {
     @State private var showQuotaDetail = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+        VStack(alignment: .leading, spacing: 0) {
             header
-            if !AccountsPresentation.isAvailable(model: model) {
-                Label("Accounts and quota are unavailable while the engine is offline.",
-                      systemImage: "wifi.slash")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                AccountsSurface(family: nil) { row in
-                    if let connectionID = model.activeExecutionLocation.remoteConnectionID,
-                       let harness = SetupHarness(rawValue: row.family.setupHarnessId)
-                    {
-                        Task {
-                            await model.startRemoteLogin(
-                                connectionID: connectionID,
-                                harness: harness,
-                                profileID: row.profileId)
-                        }
+                .padding(.horizontal, Theme.Spacing.lg)
+                .padding(.top, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.md)
+            Divider().opacity(0.55)
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                    if !AccountsPresentation.isAvailable(model: model) {
+                        Label("Accounts and quota are unavailable while the engine is offline.",
+                              systemImage: "wifi.slash")
+                            .font(.caption).foregroundStyle(.secondary)
                     } else {
-                        // Routed model-level so the AuthSheet survives this
-                        // popover dismissing.
-                        model.authSheetTarget = AuthSheetTarget(
-                            family: row.family, profileId: row.profileId,
-                            autoStartLogin: true)
+                        AccountsSurface(family: nil) { row in
+                            if let connectionID = model.activeExecutionLocation.remoteConnectionID,
+                               let harness = SetupHarness(rawValue: row.family.setupHarnessId)
+                            {
+                                Task {
+                                    await model.startRemoteLogin(
+                                        connectionID: connectionID,
+                                        harness: harness,
+                                        profileID: row.profileId)
+                                }
+                            } else {
+                                // Routed model-level so the AuthSheet survives this
+                                // popover dismissing.
+                                model.authSheetTarget = AuthSheetTarget(
+                                    family: row.family, profileId: row.profileId,
+                                    autoStartLogin: true)
+                            }
+                            isPresented = false
+                        }
+                        autoBalanceToggle
                     }
-                    isPresented = false
                 }
-                autoBalanceToggle
+                .padding(Theme.Spacing.lg)
             }
+            .scrollIndicators(.visible)
         }
-        .padding(Theme.Spacing.lg)
         .frame(width: 400)
+        .frame(maxHeight: PopoverLayout.currentMaximumHeight)
         // Root-level text selection for the popover (batch-6 item c / §2.9).
         .textSelection(.enabled)
         .task { await model.refreshSettings() }   // profiles refresh lives in AccountsSurface
@@ -350,6 +360,7 @@ struct AccountsSurface: View {
     @State private var pendingDelete: AccountRowModel?
     @State private var deleting = false
     @State private var deleteNotice: String?
+    @State private var quotaSubscription: AccountsQuotaSubscription?
     /// The add form registers config_dir_login profiles using the same
     /// harness set the daemon supports.
     private var addHarness: String? {
@@ -366,7 +377,7 @@ struct AccountsSurface: View {
     }
 
     private var loadFailed: Bool {
-        if case .failed = model.activeAccountsLoadState { return true }
+        if case .failed = model.activeAccountsRegistryLoadState { return true }
         return false
     }
 
@@ -382,7 +393,20 @@ struct AccountsSurface: View {
                 addSection
             }
         }
-        .task { _ = await model.refreshAccounts() }
+        .task { await model.ensureCredentialProfilesLoaded() }
+        .onAppear {
+            guard quotaSubscription == nil else { return }
+            quotaSubscription = model.beginAccountsQuotaSubscription()
+        }
+        .onDisappear {
+            if let quotaSubscription { model.endAccountsQuotaSubscription(quotaSubscription) }
+            quotaSubscription = nil
+        }
+        .onChange(of: model.activeExecutionLocation) { _, locationID in
+            if let quotaSubscription { model.endAccountsQuotaSubscription(quotaSubscription) }
+            quotaSubscription = model.beginAccountsQuotaSubscription(locationID: locationID)
+            Task { await model.ensureCredentialProfilesLoaded(locationID: locationID) }
+        }
         .confirmationDialog(
             "Remove \(pendingDelete?.displayName ?? "account")?",
             isPresented: Binding(
@@ -428,17 +452,55 @@ struct AccountsSurface: View {
         // quota/detail line can never wrap into fragments that flow around the
         // trailing columns (the owner-round-3 bug).
         AlignedList {
-            if case .failed(let message) = model.activeAccountsLoadState {
-                // A foreground snapshot error remains visible even if identity
-                // rows survived a partial/legacy response. It is never folded
-                // into either an empty registry or an ordinary row list.
+            switch model.activeAccountsQuotaDisplayState {
+            case .stale(let reason, let observedAt):
+                GridRow {
+                    Label(
+                        "Quota stale\(formattedDate(observedAt).map { " · observed \($0)" } ?? "") · \(reason)",
+                        systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.status(.caution))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
+                }
+            case .failedWithoutData(let reason):
+                GridRow {
+                    Label(reason, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.status(.negative))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
+                }
+            case .idle, .loading, .current:
+                EmptyView()
+            }
+            if case .failed(let message) = model.activeAccountsRegistryLoadState {
                 GridRow {
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                         Label("Could not load accounts", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption.weight(.medium)).foregroundStyle(Theme.status(.negative))
                         Text(message).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                        Button("Retry") { Task { _ = await model.refreshAccounts() } }
+                        Button("Retry") { Task { _ = await model.loadCredentialProfiles() } }
                             .buttonStyle(.bordered).controlSize(.small)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
+                }
+            }
+            if case .failed(let message) = model.activeAccountsLoadState,
+               !loadFailed
+            {
+                GridRow {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                        Label("Could not refresh readiness and quota",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.status(.negative))
+                        Text(message).font(.caption2).foregroundStyle(.secondary)
+                        Button("Reload accounts") {
+                            Task { _ = await model.loadCredentialProfiles() }
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .gridCellColumns(AccountsPresentation.AccountRowColumn.allCases.count + 1)
@@ -446,7 +508,7 @@ struct AccountsSurface: View {
             }
             if rows.isEmpty, !loadFailed {
                 GridRow {
-                    Label(model.activeAccountsLoadState == .loading
+                    Label(model.activeAccountsRegistryLoadState == .loading
                           ? "Loading accounts…" : "No accounts yet — add one below.",
                           systemImage: "person.crop.circle.badge.plus")
                         .font(.caption).foregroundStyle(.secondary)

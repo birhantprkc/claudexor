@@ -49,7 +49,10 @@ struct AccountRowView: View {
             // A real native vendor login is the symmetric "CLI login" row; a
             // registered profile shows its harness id. API keys are routes, not
             // synthetic account rows.
-            AlignedRowBadge(row.isProfile ? row.harnessId : "CLI login", emphasis: .secondary)
+            AlignedRowBadge(
+                row.isProfile ? row.harnessId : "CLI login",
+                emphasis: .secondary,
+                help: row.isCliLogin ? AccountsPresentation.cliLoginLifecycleHelp : nil)
         ]
         if row.nextUp {
             // F1 informational hint: this is who an unpinned run routes to next.
@@ -57,32 +60,56 @@ struct AccountRowView: View {
         }
         var details: [AlignedRowDetail] = []
         details.append(quotaDetail)
-        // The SECONDARY line is the daemon-projected identity ("email · plan",
-        // INV-067) when disclosed; otherwise it falls back to the readiness
-        // detail. The component enforces single-line + tail truncation, with the
-        // full text reachable via .help.
-        if let identityLine = row.identityLine {
-            details.append(AlignedRowDetail(1, identityLine, emphasis: .secondary))
-        } else if let detail = row.detail {
-            details.append(AlignedRowDetail(1, detail, emphasis: .secondary))
+        // Identity and readiness are different facts. Failures stay inline;
+        // healthy rows with identity keep the detail in status-marker help so a
+        // long account list remains compact.
+        for (index, line) in row.secondaryLines.enumerated() {
+            details.append(AlignedRowDetail(index + 1, line, emphasis: .secondary))
         }
         return AlignedRowIdentity(
             dotColor: row.readiness.color,
-            dotHelp: row.verified ? "Verified" : "Not verified — log in",
+            dotHelp: readinessHelp,
             title: row.displayName,
             badges: badges,
             details: details)
     }
 
+    private var readinessHelp: String {
+        let summary = row.verified ? "Verified" : "Not verified — log in"
+        guard let detail = row.hiddenReadinessDetail else { return summary }
+        return "\(summary)\n\(detail)"
+    }
+
     /// ONE compact quota detail: the worst window's used-% and its reset, as a
     /// single-line string (the component enforces single-line + tail truncation).
     private var quotaDetail: AlignedRowDetail {
-        guard let window = row.worstWindow, let pct = row.worstPercent else {
-            return AlignedRowDetail(0, "Quota unknown", emphasis: .secondary)
+        if row.quotaAvailabilityState == "exhausted" {
+            var text = "Quota exhausted"
+            if let reset = formattedDate(row.quotaAvailabilityResetAt) {
+                text += " · resets \(reset)"
+            }
+            return AlignedRowDetail(0, text, emphasis: .warning)
         }
-        var text = "\(pct)% used"
-        if let reset = formattedDate(window.resetsAt) { text += " · resets \(reset)" }
-        return AlignedRowDetail(0, text, emphasis: pct >= 90 ? .warning : .secondary, monospacedDigit: true)
+        if row.quotaAvailabilityState == "cooldown" {
+            var text = "Quota cooling down"
+            if let reset = formattedDate(row.quotaAvailabilityResetAt) {
+                text += " · until \(reset)"
+            }
+            return AlignedRowDetail(0, text, emphasis: .warning)
+        }
+        if let window = row.worstWindow, let pct = row.worstPercent {
+            var text = "\(pct)% used"
+            if let reset = formattedDate(window.resetsAt) { text += " · resets \(reset)" }
+            if let scoped = row.scopedQuotaLabel { text += " · \(scoped)" }
+            return AlignedRowDetail(
+                0, text,
+                emphasis: pct >= 90 || row.scopedQuotaLabel != nil ? .warning : .secondary,
+                monospacedDigit: true)
+        }
+        if let scoped = row.scopedQuotaLabel {
+            return AlignedRowDetail(0, scoped, emphasis: .warning)
+        }
+        return AlignedRowDetail(0, "Quota unknown", emphasis: .secondary)
     }
 
     /// D25 Enabled: symmetric on every row and LIVE (V11b). A profile row PATCHes

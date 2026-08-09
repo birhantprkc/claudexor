@@ -75,6 +75,10 @@ public struct QuotaSubject: Codable, Sendable, Equatable, Hashable {
 public struct QuotaConstraint: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let label: String
+    /// nil/empty means the window applies to every model. A non-empty list is
+    /// the server-authored scope; clients render it but never infer account-wide
+    /// exhaustion from a scoped ratio.
+    public let appliesToModels: [String]?
     public let usedRatio: Double?
     public let windowSeconds: Double?
     public let resetsAt: String?
@@ -82,10 +86,40 @@ public struct QuotaConstraint: Codable, Sendable, Equatable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, label
+        case appliesToModels = "applies_to_models"
         case usedRatio = "used_ratio"
         case windowSeconds = "window_seconds"
         case resetsAt = "resets_at"
         case cooldownUntil = "cooldown_until"
+    }
+}
+
+public struct QuotaModelScopedExhaustion: Codable, Sendable, Equatable, Hashable {
+    public let constraintId: String
+    public let appliesToModels: [String]
+    public let resetsAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case constraintId = "constraint_id"
+        case appliesToModels = "applies_to_models"
+        case resetsAt = "resets_at"
+    }
+}
+
+/// Server-derived spendability for one quota snapshot. Optional on the wire so
+/// the app remains compatible with daemons that predate the projection; when it
+/// is absent the UI shows usage windows without inventing an availability state.
+public struct QuotaAvailability: Codable, Sendable, Equatable {
+    public let state: String
+    public let blockingConstraints: [String]
+    public let resetsAt: String?
+    public let modelScopedExhaustions: [QuotaModelScopedExhaustion]
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case blockingConstraints = "blocking_constraints"
+        case resetsAt = "resets_at"
+        case modelScopedExhaustions = "model_scoped_exhaustions"
     }
 }
 
@@ -95,9 +129,11 @@ public struct QuotaSnapshot: Codable, Sendable, Equatable, Identifiable {
     public let source: String
     public let observedAt: String
     public let freshness: String
+    /// Decorated by the control boundary. Raw journal snapshots may omit it.
+    public let availability: QuotaAvailability?
 
     private enum CodingKeys: String, CodingKey {
-        case subject, constraints, source, freshness
+        case subject, constraints, source, freshness, availability
         case observedAt = "observed_at"
     }
 

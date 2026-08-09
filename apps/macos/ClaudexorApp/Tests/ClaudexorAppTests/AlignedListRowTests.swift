@@ -24,4 +24,10 @@ import Testing
         #expect(detail.text == "line one\nline two")
         #expect(detail.emphasis == .warning)
     }
+
+    @Test func badgesCarryOptionalHelpAsTypedPresentationData() {
+        let badge = AlignedRowBadge("CLI login", help: "Existing vendor sign-in")
+        #expect(badge.help == "Existing vendor sign-in")
+        #expect(AlignedRowBadge("claude").help == nil)
+    }
 }

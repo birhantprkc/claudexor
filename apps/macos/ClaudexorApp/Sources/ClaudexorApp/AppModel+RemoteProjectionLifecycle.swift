@@ -9,11 +9,12 @@ extension AppModel {
 
         remoteCredentialProfiles.removeValue(forKey: locationID)
         remoteHarnessAccounts.removeValue(forKey: locationID)
-        accountsRefreshGenerations[locationID] =
-            (accountsRefreshGenerations[locationID] ?? 0) &+ 1
+        retireAccountsRequests(at: locationID)
+        accountsRegistryLoadStates.removeValue(forKey: locationID)
         accountsLoadTokens.removeValue(forKey: locationID)
         accountsLoadStates.removeValue(forKey: locationID)
         suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
+        accountsReadinessAuthorityFresh.removeValue(forKey: locationID)
         accountsNextUpAuthorityFresh.removeValue(forKey: locationID)
 
         retireHarnessProjection(at: locationID)
@@ -24,7 +25,7 @@ extension AppModel {
         remoteSettingsSnapshots.removeValue(forKey: locationID)
         settingsLoadTokens.removeValue(forKey: locationID)
         settingsLoadStates.removeValue(forKey: locationID)
-        remoteQuotaResponses.removeValue(forKey: locationID)
+        retireAccountsQuotaDisplayRequest(at: locationID, discardProjection: true)
         remoteExactAuthSources.removeValue(forKey: locationID)
         remoteSecretBackends.removeValue(forKey: locationID)
         remoteStoredSecrets.removeValue(forKey: locationID)

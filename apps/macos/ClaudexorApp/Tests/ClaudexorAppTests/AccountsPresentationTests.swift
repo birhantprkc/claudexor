@@ -281,7 +281,11 @@ import Testing
          {"profile":{"profile_id":"bare","harness_id":"claude","display_name":"Bare",
           "credential_kind":"config_dir_login","enabled":true},
           "status":{"availability":"available","verification":"passed","detail":"probe ok","last_verified_at":null},
-          "identity":null}]
+          "identity":null},
+         {"profile":{"profile_id":"failed","harness_id":"claude","display_name":"Failed",
+          "credential_kind":"config_dir_login","enabled":true},
+          "status":{"availability":"unavailable","verification":"failed","detail":"login expired","last_verified_at":null},
+          "identity":{"email":"old@example.test"}}]
         """
         model.credentialProfiles = try JSONDecoder().decode(
             [CredentialProfileEntry].self, from: Data(profilesJSON.utf8))
@@ -298,11 +302,91 @@ import Testing
         #expect(cli.identityLine == "native@example.test · claude_pro")
         let work = try #require(rows.first { $0.profileId == "work" })
         #expect(work.identityLine == "work@example.test · claude_max")
+        #expect(work.secondaryLines == ["work@example.test · claude_max"])
+        #expect(work.hiddenReadinessDetail == "probe ok")
         let planOnly = try #require(rows.first { $0.profileId == "plan-only" })
         #expect(planOnly.identityLine == "claude_pro")
         let bare = try #require(rows.first { $0.profileId == "bare" })
         #expect(bare.identityLine == nil)     // nothing disclosed → falls back to detail
         #expect(bare.detail == "probe ok")
+        #expect(bare.secondaryLines == ["probe ok"])
+        let failed = try #require(rows.first { $0.profileId == "failed" })
+        #expect(failed.secondaryLines == ["old@example.test", "login expired"])
+        #expect(failed.hiddenReadinessDetail == nil)
+    }
+
+    @MainActor
+    @Test func cursorIdentityKeepsVerifiedReadinessReachableWithoutAnExtraLine() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.liveHarnesses = [HarnessInfo(
+            family: .cursor, health: .ok, version: "1", auth: "session ready",
+            authSources: [HarnessAuthSource(
+                source: "native_session", availability: "available",
+                verification: "passed", detail: "Native Cursor session verified")],
+            intents: ["implement"])]
+        model.harnessAccounts = try JSONDecoder().decode(
+            [HarnessAccounts].self,
+            from: Data(#"[{"harness_id":"cursor","native_credentials_enabled":true,"native_login_detected":true,"identity":{"email":"cursor@example.test"},"next_up":{"kind":"native","route":"local_session"}}]"#.utf8))
+
+        let row = try #require(AccountsPresentation.rows(model: model).first)
+        #expect(row.identityLine == "cursor@example.test")
+        #expect(row.secondaryLines == ["cursor@example.test"])
+        #expect(row.hiddenReadinessDetail == "Native Cursor session verified")
+    }
+
+    @Test func cliLoginBadgeExplainsLifecycleAndRouting() {
+        #expect(AccountsPresentation.cliLoginLifecycleHelp ==
+            "CLI login = existing vendor sign-in; named accounts = isolated profiles used by explicit pin or opt-in quota rotation.")
+    }
+
+    @MainActor
+    @Test func compactPercentIgnoresScopedRatiosAndLabelsScopedExhaustion() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.credentialProfiles = try JSONDecoder().decode(
+            [CredentialProfileEntry].self,
+            from: Data(#"[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]"#.utf8))
+        model.quotaResponse = try JSONDecoder().decode(ControlQuotaResponse.self, from: Data(#"""
+        {"snapshots":[{"subject":{"harness":"claude","credential_route":"vendor_native",
+          "plan_label":"max","subject_id":"work"},"constraints":[
+          {"id":"five_hour","label":"5 hour","applies_to_models":null,"used_ratio":0.2,
+           "window_seconds":18000,"resets_at":"2026-08-09T05:00:00Z","cooldown_until":null},
+          {"id":"weekly_fable","label":"Week","applies_to_models":["fable"],"used_ratio":1,
+           "window_seconds":604800,"resets_at":"2026-08-10T00:00:00Z","cooldown_until":null}],
+          "source":"claude_oauth_usage","observed_at":"2026-08-09T00:00:00Z","freshness":"fresh",
+          "availability":{"state":"available","blocking_constraints":[],"resets_at":null,
+          "model_scoped_exhaustions":[{"constraint_id":"weekly_fable",
+          "applies_to_models":["fable"],"resets_at":"2026-08-10T00:00:00Z"}]}}],
+          "absences":[],"refreshed_at":"2026-08-09T00:00:00Z"}
+        """#.utf8))
+
+        let row = try #require(AccountsPresentation.rows(model: model).first)
+        #expect(row.worstPercent == 20)
+        #expect(row.quotaAvailabilityState == "available")
+        #expect(row.scopedQuotaLabel == "Fable only")
+        #expect(AccountsPresentation.worstPercent([row]) == 20)
+    }
+
+    @MainActor
+    @Test func scopedOnlyWindowsUseScopedLimitsInsteadOfAnAccountPercent() throws {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.credentialProfiles = try JSONDecoder().decode(
+            [CredentialProfileEntry].self,
+            from: Data(#"[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]"#.utf8))
+        model.quotaResponse = try JSONDecoder().decode(ControlQuotaResponse.self, from: Data(#"""
+        {"snapshots":[{"subject":{"harness":"claude","credential_route":"vendor_native",
+          "plan_label":"max","subject_id":"work"},"constraints":[{"id":"weekly_fable",
+          "label":"Week","applies_to_models":["fable"],"used_ratio":0.5,
+          "window_seconds":604800,"resets_at":"2026-08-10T00:00:00Z","cooldown_until":null}],
+          "source":"claude_oauth_usage","observed_at":"2026-08-09T00:00:00Z","freshness":"fresh",
+          "availability":{"state":"available","blocking_constraints":[],"resets_at":null,
+          "model_scoped_exhaustions":[]}}],"absences":[],
+          "refreshed_at":"2026-08-09T00:00:00Z"}
+        """#.utf8))
+
+        let row = try #require(AccountsPresentation.rows(model: model).first)
+        #expect(row.worstPercent == nil)
+        #expect(row.scopedQuotaLabel == "Scoped limits")
+        #expect(AccountsPresentation.worstPercent([row]) == nil)
     }
 
     @MainActor

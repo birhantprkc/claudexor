@@ -201,6 +201,9 @@ extension AppModel {
     /// Cancel every live stream (daemon/client about to be replaced).
     func cancelAllStreams() {
         suspendAccountsQuotaObserver(at: .local, discardCursor: true)
+        retireAccountsRequests(at: .local)
+        retireAccountsQuotaDisplayRequest(at: .local, discardProjection: false)
+        harnessReadinessFresh = false
         globalStreamTask?.cancel()
         globalStreamTask = nil
         globalEventCursor = nil
@@ -260,17 +263,33 @@ extension AppModel {
                         await self.handleGlobalEvent(event)
                     }
                 } catch let GatewayError.http(status, _) where status == 400 || status == 409 || status == 410 {
+                    self.noteAccountsQuotaStreamFailure(
+                        at: .local,
+                        reason: "Quota update cursor expired; showing last-known data.",
+                        invalidateNextUp: false)
                     // Stale opaque cursor: resnapshot, then restart the partition stream.
                     self.resetGlobalCursorState()
                     await self.refreshRuns()
                 } catch is DecodingError {
+                    self.noteAccountsQuotaStreamFailure(
+                        at: .local,
+                        reason: "Quota updates could not be decoded; showing last-known data.",
+                        invalidateNextUp: false)
                     self.resetGlobalCursorState()
                     await self.refreshRuns()
                 } catch GatewayError.decoding {
+                    self.noteAccountsQuotaStreamFailure(
+                        at: .local,
+                        reason: "Quota updates could not be decoded; showing last-known data.",
+                        invalidateNextUp: false)
                     self.resetGlobalCursorState()
                     await self.refreshRuns()
                 } catch {
                     if Task.isCancelled { break }
+                    self.noteAccountsQuotaStreamFailure(
+                        at: .local,
+                        reason: "Quota update stream was interrupted; showing last-known data.",
+                        invalidateNextUp: false)
                 }
                 guard !Task.isCancelled else { break }
                 try? await Task.sleep(for: .seconds(3))
@@ -279,6 +298,13 @@ extension AppModel {
     }
 
     func handleGlobalEvent(_ event: JournalEvent) async {
+        // The marker has no run_id, so display recovery must happen before the
+        // run/thread guards. No live Accounts/Quota subscriber means no work.
+        if event.type == Self.quotaProjectionMarker {
+            noteQuotaProjectionMarker(
+                at: .local, invalidateNextUp: false, cursor: event.cursor)
+            return
+        }
         // Sidebar staleness (W12+W16): the engine pings the GLOBAL partition on
         // every thread mutation (create/rename/archive/turn-add/run-terminal —
         // any surface, incl. the CLI). Handled BEFORE the run_id guard below

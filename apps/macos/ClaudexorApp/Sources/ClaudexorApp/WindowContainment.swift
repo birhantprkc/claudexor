@@ -65,7 +65,7 @@ enum ThreadWorkspaceLayout {
     }
 }
 
-enum ComposerOptionsLayout {
+enum PopoverLayout {
     static func maximumHeight(visibleFrameHeight: CGFloat) -> CGFloat {
         max(0, visibleFrameHeight - 128)
     }
@@ -73,5 +73,15 @@ enum ComposerOptionsLayout {
     @MainActor static var currentMaximumHeight: CGFloat {
         let screen = NSApp.keyWindow?.screen ?? NSScreen.main
         return maximumHeight(visibleFrameHeight: screen?.visibleFrame.height ?? 728)
+    }
+}
+
+enum ComposerOptionsLayout {
+    static func maximumHeight(visibleFrameHeight: CGFloat) -> CGFloat {
+        PopoverLayout.maximumHeight(visibleFrameHeight: visibleFrameHeight)
+    }
+
+    @MainActor static var currentMaximumHeight: CGFloat {
+        PopoverLayout.currentMaximumHeight
     }
 }

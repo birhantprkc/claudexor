@@ -291,28 +291,18 @@ extension AppModel {
             async let settings = activeClient.settings()
             async let projects = activeClient.listProjects()
             async let trust = activeClient.trustList()
-            async let credentials = activeClient.credentialProfilesSnapshot()
+            // Remote connect mirrors local connect: cached registry/readiness +
+            // harness status. Quota is subscriber-owned and the expensive
+            // atomic snapshot is explicit-only.
+            async let credentials = activeClient.credentialProfiles()
+            async let harnesses = activeClient.listHarnessStatus()
             async let secrets = activeClient.listSecrets()
             let settingsValue = try? await settings
             let projectValue = try? await projects
             let trustValue = try? await trust
             let credentialValue = try? await credentials
-            // Current runtimes return the quota used for next_up in the same
-            // Accounts snapshot. Only a legacy response may need a cached GET;
-            // its unfenced next_up is discarded below.
-            let quotaValue: ControlQuotaResponse?
-            if let snapshotQuota = credentialValue?.quota {
-                quotaValue = snapshotQuota
-            } else {
-                quotaValue = try? await activeClient.quota(refresh: false)
-            }
+            let harnessValue = try? await harnesses
             let secretValue = try? await secrets
-            let fallbackHarnessValue: HarnessListResponse?
-            if credentialValue?.harnesses == nil {
-                fallbackHarnessValue = try? await activeClient.listHarnessStatus(fresh: true)
-            } else {
-                fallbackHarnessValue = nil
-            }
             let finalProbe = try await remoteRuntimeInstaller.probe(on: connection)
             guard !Task.isCancelled,
                   remoteConnectionGenerations[id] == generation
@@ -327,18 +317,12 @@ extension AppModel {
                     "remote runtime changed before its client could be published")
             }
             adoptRemoteClientForReconnect(activeClient, at: connection.locationID)
-            let harnessSnapshotAccepted: Bool
-            if let harnesses = credentialValue?.harnesses,
-               let git = credentialValue?.git {
-                harnessSnapshotAccepted = acceptHarnessSnapshot(
-                    harnesses, git: git, lease: harnessLease)
-            } else if let fallbackHarnessValue {
-                harnessSnapshotAccepted = acceptHarnessSnapshot(
-                    fallbackHarnessValue.harnesses,
-                    git: fallbackHarnessValue.git,
+            if let harnessValue {
+                _ = acceptHarnessSnapshot(
+                    harnessValue.harnesses,
+                    git: harnessValue.git,
                     lease: harnessLease)
             } else {
-                harnessSnapshotAccepted = false
                 remoteHarnessReadinessFresh[connection.locationID] = false
                 remoteGitCapabilities.removeValue(forKey: connection.locationID)
             }
@@ -351,42 +335,19 @@ extension AppModel {
             if let trustValue {
                 remoteTrustEntries[connection.locationID] = trustValue.entries
             }
-            var installedQuotaEventCursor: String?
-            var completeAccountsTupleAccepted = false
-            if let credentialValue,
-               credentialValue.harnesses != nil,
-               credentialValue.git != nil,
-               credentialValue.quota != nil,
-               harnessSnapshotAccepted,
-               let quotaEventCursor = credentialValue.quotaEventCursor?.trimmingCharacters(
-                   in: .whitespacesAndNewlines),
-               !quotaEventCursor.isEmpty
-            {
-                remoteCredentialProfiles[connection.locationID] = credentialValue.profiles
-                remoteHarnessAccounts[connection.locationID] = credentialValue.harnessAccounts
-                installedQuotaEventCursor = quotaEventCursor
-                completeAccountsTupleAccepted = true
-            } else if let credentialValue {
-                // Legacy daemon: profiles remain useful, but it cannot bind
-                // next_up to an event boundary.
-                remoteCredentialProfiles[connection.locationID] = credentialValue.profiles
-                remoteHarnessAccounts[connection.locationID] = []
+            if let credentialValue {
+                storeCredentialProfiles(
+                    credentialValue.profiles,
+                    harnessAccounts: credentialValue.harnessAccounts,
+                    at: connection.locationID)
+                accountsRegistryLoadStates[connection.locationID] = .loaded
+                accountsReadinessAuthorityFresh[connection.locationID] = true
                 accountsNextUpAuthorityFresh[connection.locationID] = false
             }
-            if let quotaValue {
-                remoteQuotaResponses[connection.locationID] = quotaValue
-            }
-            if let installedQuotaEventCursor {
-                startAccountsQuotaObserver(
-                    at: connection.locationID,
-                    client: activeClient,
-                    after: installedQuotaEventCursor)
-            }
-            if completeAccountsTupleAccepted {
-                // Reassert only after profiles + harness + Git + quota + cursor
-                // have committed together under the pre-I/O projection lease.
-                accountsNextUpAuthorityFresh[connection.locationID] = true
-            }
+            // Existing remote Accounts/Quota views retain their subscription
+            // across tunnel recovery; resume their display-only read now that
+            // this exact client owns the location.
+            scheduleAccountsQuotaDisplayHydration(at: connection.locationID)
             if let secretValue {
                 remoteSecretBackends[connection.locationID] = secretValue.backend
                 remoteStoredSecrets[connection.locationID] = secretValue.secrets

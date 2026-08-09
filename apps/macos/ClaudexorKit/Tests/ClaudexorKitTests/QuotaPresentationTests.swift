@@ -34,16 +34,97 @@ import Testing
 
     private func window(
         _ id: String, label: String, used: Double? = 0.5,
-        resetsAt: String? = nil, cooldownUntil: String? = nil
+        resetsAt: String? = nil, cooldownUntil: String? = nil,
+        appliesToModels: [String]? = nil
     ) -> [String: Any] {
         [
             "id": id,
             "label": label,
+            "applies_to_models": appliesToModels as Any? ?? NSNull(),
             "used_ratio": used as Any,
             "window_seconds": 3600,
             "resets_at": resetsAt as Any,
             "cooldown_until": cooldownUntil as Any,
         ]
+    }
+
+    @Test func scopedExhaustionStaysScopedAndUsesServerAvailability() throws {
+        let object: [String: Any] = [
+            "subject": [
+                "harness": "claude", "credential_route": "vendor_native",
+                "plan_label": "max", "subject_id": "work",
+            ],
+            "constraints": [window(
+                "weekly_fable", label: "Week", used: 1,
+                resetsAt: "2026-08-10T00:00:00Z",
+                appliesToModels: ["fable", "claude-fable-5", "best"])],
+            "source": "claude_oauth_usage",
+            "observed_at": "2026-08-09T00:00:00Z",
+            "freshness": "fresh",
+            "availability": [
+                "state": "available",
+                "blocking_constraints": [],
+                "resets_at": NSNull(),
+                "model_scoped_exhaustions": [[
+                    "constraint_id": "weekly_fable",
+                    "applies_to_models": ["fable", "claude-fable-5", "best"],
+                    "resets_at": "2026-08-10T00:00:00Z",
+                ]],
+            ],
+        ]
+        let snapshot = try JSONDecoder().decode(
+            QuotaSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        let group = try #require(QuotaPresentation.groups(from: [snapshot]).first)
+
+        #expect(group.availability?.state == "available")
+        #expect(group.hasOnlyScopedWindows)
+        #expect(group.scopedExhaustions.map(\.scopeLabel) == ["Fable only"])
+        #expect(group.windows.first?.appliesToModels == ["fable", "claude-fable-5", "best"])
+    }
+
+    @Test func availabilityFoldUnionsScopedExhaustionsWithoutRatioInference() throws {
+        func decorated(_ source: String, availability: [String: Any]) throws -> QuotaSnapshot {
+            let object: [String: Any] = [
+                "subject": [
+                    "harness": "claude", "credential_route": "vendor_native",
+                    "plan_label": "max", "subject_id": "work",
+                ],
+                "constraints": [],
+                "source": source,
+                "observed_at": source == "claude_oauth_usage"
+                    ? "2026-08-09T00:00:02Z" : "2026-08-09T00:00:01Z",
+                "freshness": "fresh",
+                "availability": availability,
+            ]
+            return try JSONDecoder().decode(
+                QuotaSnapshot.self,
+                from: JSONSerialization.data(withJSONObject: object))
+        }
+        let primary = try decorated("claude_oauth_usage", availability: [
+            "state": "exhausted",
+            "blocking_constraints": ["five_hour"],
+            "resets_at": "2026-08-09T13:00:00Z",
+            "model_scoped_exhaustions": [[
+                "constraint_id": "weekly_fable", "applies_to_models": ["fable"],
+                "resets_at": "2026-08-10T00:00:00Z",
+            ]],
+        ])
+        let reactive = try decorated("claude_api_retry", availability: [
+            "state": "cooldown",
+            "blocking_constraints": ["cooldown"],
+            "resets_at": "2026-08-09T12:30:00Z",
+            "model_scoped_exhaustions": [[
+                "constraint_id": "weekly_fable", "applies_to_models": ["fable"],
+                "resets_at": "2026-08-10T00:00:00Z",
+            ]],
+        ])
+        let group = try #require(QuotaPresentation.groups(from: [reactive, primary]).first)
+
+        #expect(group.availability?.state == "exhausted")
+        #expect(group.availability?.blockingConstraints == ["cooldown", "five_hour"])
+        #expect(group.availability?.resetsAt == "2026-08-09T12:30:00Z")
+        #expect(group.scopedExhaustions.count == 1)
     }
 
     @Test func everyPrimaryWindowSurvivesGrouping() throws {

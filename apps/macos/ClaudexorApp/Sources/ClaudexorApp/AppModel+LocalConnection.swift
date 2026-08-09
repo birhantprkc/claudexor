@@ -83,8 +83,11 @@ extension AppModel {
         // presents the last daemon's registry as truth. Reconnect repopulates.
         credentialProfiles.removeAll()
         harnessAccounts.removeAll()
+        retireAccountsRequests(at: .local)
+        accountsRegistryLoadStates.removeValue(forKey: .local)
         accountsLoadTokens.removeValue(forKey: .local)
         accountsLoadStates.removeValue(forKey: .local)
+        accountsReadinessAuthorityFresh.removeValue(forKey: .local)
         accountsNextUpAuthorityFresh.removeValue(forKey: .local)
         suspendAccountsQuotaObserver(at: .local, discardCursor: true)
         exactAuthSources.removeAll()
@@ -92,7 +95,7 @@ extension AppModel {
         settingsLoadTokens.removeValue(forKey: .local)
         settingsLoadStates.removeValue(forKey: .local)
         settingsStatus = nil
-        quotaResponse = nil
+        retireAccountsQuotaDisplayRequest(at: .local, discardProjection: true)
         quotaStatus = nil
         secretBackend = "unknown"
         storedSecrets.removeAll()
@@ -190,10 +193,17 @@ extension AppModel {
                     await refreshSecrets()
                     await refreshThreads()
                     await refreshProjects()
+                    // The full Accounts snapshot is intentionally explicit-only.
+                    // Connect hydrates the cached harness + registry owners.
+                    _ = await refreshHarnesses()
                     // QA-065: resolve credential-profile DISPLAY NAMES on connect, not
                     // only when the accounts popover opens — otherwise the sessions
                     // footer shows raw profile ids by default until that popover loads.
                     await refreshCredentialProfiles()
+                    // A popover may survive a transient reconnect. Its existing
+                    // subscriber does not re-run onAppear, so resume exactly one
+                    // cheap display read against the replacement gateway.
+                    scheduleAccountsQuotaDisplayHydration(at: .local)
                     startGlobalStream()
                     return .connected
                 case .reconnect:

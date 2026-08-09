@@ -1,8 +1,11 @@
 import Foundation
 import ClaudexorKit
 
-private struct AccountsRefreshReceipt {
+struct AccountsRefreshReceipt: Sendable {
     let generation: UInt64
+    let registryGeneration: UInt64
+    let profiles: [CredentialProfileEntry]?
+    let registryCommitted: Bool
     let error: String?
 }
 
@@ -15,6 +18,15 @@ private struct AccountsRefreshReceipt {
 extension AppModel {
     var activeAccountsLoadState: ProjectionLoadState {
         accountsLoadStates[activeExecutionLocation] ?? .idle
+    }
+
+    var activeAccountsRegistryLoadState: ProjectionLoadState {
+        accountsRegistryLoadStates[activeExecutionLocation]
+            ?? (activeCredentialProfiles.isEmpty ? .idle : .loaded)
+    }
+
+    var activeAccountsReadinessFresh: Bool {
+        accountsReadinessAuthorityFresh[activeExecutionLocation] != false
     }
 
     /// Persist the thread's manual account choice (INV-135). nil restores the
@@ -48,9 +60,20 @@ extension AppModel {
         }
     }
 
-    /// Registered credential profiles + doctor readiness (INV-135). Drives the
-    /// accounts popover; a failing fetch leaves the last snapshot in place.
+    /// Cached registry hydration (INV-135). Opening Accounts, connect, and
+    /// mutations use this lighter endpoint; it never performs the expensive
+    /// quota/provider snapshot and never claims atomic `next_up` authority.
     func refreshCredentialProfiles(locationID: ExecutionLocationID? = nil) async {
+        _ = await loadCredentialProfiles(locationID: locationID)
+    }
+
+    /// Mount-time hydration is an ensure, not a refresh loop. A successfully
+    /// loaded empty registry is still loaded and will not refetch on every open.
+    func ensureCredentialProfilesLoaded(locationID: ExecutionLocationID? = nil) async {
+        let locationID = locationID ?? activeExecutionLocation
+        guard accountsRegistryLoadStates[locationID] == nil
+            || accountsRegistryLoadStates[locationID] == .idle
+        else { return }
         _ = await loadCredentialProfiles(locationID: locationID)
     }
 
@@ -65,11 +88,70 @@ extension AppModel {
     ) async
         -> String?
     {
+        _ = discardOnFailure // Stable rows are always retained on hydration failure.
         let locationID = requestedLocationID ?? activeExecutionLocation
-        let receipt = await loadCredentialProfilesReceipt(
-            at: locationID, discardOnFailure: discardOnFailure)
-        settleAccountsLoad(receipt, at: locationID)
-        return receipt.error
+        if let inFlight = accountsRegistryLoadTasks[locationID] {
+            return await inFlight.value
+        }
+        guard let requestClient = gateway(for: locationID) else {
+            let message = "Engine offline — reconnect to load accounts."
+            accountsRegistryLoadStates[locationID] = .failed(message)
+            return message
+        }
+        accountsNextUpAuthorityFresh[locationID] = false
+        let generation = (accountsRegistryGenerations[locationID] ?? 0) &+ 1
+        accountsRegistryGenerations[locationID] = generation
+        let token = UUID()
+        accountsRegistryLoadTokens[locationID] = token
+        accountsRegistryLoadStates[locationID] = .loading
+        let task: Task<String?, Never> = Task { @MainActor [weak self] in
+            guard let self else { return Optional("Accounts stopped loading.") }
+            return await self.performAccountsRegistryHydration(
+                at: locationID,
+                client: requestClient,
+                generation: generation)
+        }
+        accountsRegistryLoadTasks[locationID] = task
+        let error = await task.value
+        guard accountsRegistryLoadTokens[locationID] == token else { return error }
+        accountsRegistryLoadTokens.removeValue(forKey: locationID)
+        accountsRegistryLoadTasks.removeValue(forKey: locationID)
+        if accountsRegistryGenerations[locationID] == generation {
+            accountsRegistryLoadStates[locationID] =
+                error.map(ProjectionLoadState.failed) ?? .loaded
+        }
+        return error
+    }
+
+    private func performAccountsRegistryHydration(
+        at locationID: ExecutionLocationID,
+        client requestClient: GatewayClient,
+        generation: UInt64
+    ) async -> String? {
+        do {
+            let response = try await requestClient.credentialProfiles()
+            guard accountsRegistryGenerations[locationID] == generation,
+                  isCurrentGateway(requestClient, at: locationID)
+            else { return nil }
+            storeCredentialProfiles(
+                response.profiles, harnessAccounts: response.harnessAccounts,
+                at: locationID)
+            // Plain responses contain an unfenced next_up. Keep its stable row
+            // fields, but never authorize routing from it.
+            accountsNextUpAuthorityFresh[locationID] = false
+            accountsReadinessAuthorityFresh[locationID] = true
+            if quotaResponse(at: locationID) == nil,
+               hasAccountsQuotaSubscribers(at: locationID)
+            {
+                scheduleAccountsQuotaDisplayHydration(at: locationID)
+            }
+            return nil
+        } catch {
+            guard accountsRegistryGenerations[locationID] == generation,
+                  isCurrentGateway(requestClient, at: locationID)
+            else { return nil }
+            return userMessage(for: error)
+        }
     }
 
     /// Fetch and return one exact account only when this request remains the
@@ -83,16 +165,13 @@ extension AppModel {
         locationID requestedLocationID: ExecutionLocationID? = nil
     ) async -> CredentialProfileEntry? {
         let locationID = requestedLocationID ?? activeExecutionLocation
-        let receipt = await loadCredentialProfilesReceipt(
-            at: locationID, discardOnFailure: false)
-        settleAccountsLoad(receipt, at: locationID)
+        let receipt = await refreshAccountsReceipt(at: locationID)
         guard receipt.error == nil,
-              accountsRefreshGenerations[locationID] == receipt.generation
+              receipt.registryCommitted,
+              accountsRefreshGenerations[locationID] == receipt.generation,
+              accountsRegistryGenerations[locationID] == receipt.registryGeneration
         else { return nil }
-        let profiles = locationID == .local
-            ? credentialProfiles
-            : (remoteCredentialProfiles[locationID] ?? [])
-        return profiles.first {
+        return receipt.profiles?.first {
             $0.profile.harnessId == harnessID && $0.profile.profileId == profileID
         }
     }
@@ -101,37 +180,29 @@ extension AppModel {
     /// presentation settlement on one authority. In particular, a newer
     /// background refresh that supersedes an in-flight foreground Retry owns
     /// the visible success/failure once it settles.
-    private func loadCredentialProfilesReceipt(
+    private func performAccountsRefresh(
         at locationID: ExecutionLocationID,
-        discardOnFailure: Bool
+        client requestClient: GatewayClient,
+        harnessLease: HarnessProjectionLease,
+        generation: UInt64,
+        registryGeneration: UInt64,
+        quotaDisplayGenerationAtStart: UInt64,
+        previousQuotaCursor: String?
     ) async -> AccountsRefreshReceipt {
-        let previousQuotaCursor = suspendAccountsQuotaObserver(at: locationID)
-        accountsNextUpAuthorityFresh[locationID] = false
-        let generation = (accountsRefreshGenerations[locationID] ?? 0) &+ 1
-        accountsRefreshGenerations[locationID] = generation
-        let finish: (String?) -> AccountsRefreshReceipt = {
-            AccountsRefreshReceipt(generation: generation, error: $0)
-        }
-        guard let requestClient = gateway(for: locationID) else {
-            if discardOnFailure,
-               accountsRefreshGenerations[locationID] == generation,
-               gateway(for: locationID) == nil
-            {
-                discardCompleteAccountsSnapshot(at: locationID)
-            }
-            return finish("Engine offline — reconnect to load accounts.")
-        }
-        guard let harnessLease = claimHarnessProjection(
-            at: locationID, client: requestClient)
-        else {
-            return finish(
-                "The engine connection changed before Accounts could refresh. Retry Accounts.")
+        let finish: ([CredentialProfileEntry]?, Bool, String?) -> AccountsRefreshReceipt = {
+            AccountsRefreshReceipt(
+                generation: generation,
+                registryGeneration: registryGeneration,
+                profiles: $0,
+                registryCommitted: $1,
+                error: $2)
         }
         do {
             let response = try await requestClient.credentialProfilesSnapshot()
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
             else {
-                return finish(accountsRefreshRetirementMessage(requestClient, at: locationID))
+                return finish(nil, false, accountsRefreshRetirementMessage(
+                    requestClient, at: locationID))
             }
             if let harnesses = response.harnesses,
                let git = response.git,
@@ -140,68 +211,105 @@ extension AppModel {
                    in: .whitespacesAndNewlines),
                !quotaEventCursor.isEmpty
             {
+                let registryCommitted = commitAccountsRegistryIfCurrent(
+                    response, at: locationID, generation: registryGeneration)
                 guard acceptHarnessSnapshot(
                     harnesses, git: git, lease: harnessLease)
                 else {
-                    return finish(settleAccountsAfterSupersededHarnessProjection(
+                    let message = settleAccountsAfterSupersededHarnessProjection(
                         at: locationID,
                         client: requestClient,
+                        registryGeneration: registryGeneration,
                         previousQuotaCursor: previousQuotaCursor,
-                        discardOnFailure: discardOnFailure))
+                        quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+                        markHarnessReadinessStale: false)
+                    return finish(response.profiles, registryCommitted, message)
                 }
-                storeCredentialProfiles(
-                    response.profiles, harnessAccounts: response.harnessAccounts,
-                    at: locationID)
                 storeAccountsQuotaSnapshot(quota, at: locationID)
+                rememberAccountsQuotaDisplayMarker(quotaEventCursor, at: locationID)
                 startAccountsQuotaObserver(
                     at: locationID, client: requestClient, after: quotaEventCursor)
-                // Reassert only after the complete profiles + harness + Git +
-                // quota + cursor tuple has committed without an intervening await.
-                accountsNextUpAuthorityFresh[locationID] = true
-                return finish(nil)
+                accountsReadinessAuthorityFresh[locationID] = true
+                // A later plain hydration/mutation owns the stable registry and
+                // intentionally expires the tuple's next_up authority.
+                accountsNextUpAuthorityFresh[locationID] = registryCommitted
+                if registryCommitted {
+                    accountsRegistryLoadStates[locationID] = .loaded
+                    return finish(response.profiles, true, nil)
+                }
+                return finish(
+                    response.profiles,
+                    false,
+                    "Accounts changed while the full refresh was running. Refresh again for routing order.")
             }
-            // A daemon that ignored/omitted the complete opt-in response cannot
-            // prove that next_up, harness rows, and quota share one epoch. Keep
-            // profile readiness, drop that informational authority and quota,
-            // and fetch one fresh harness list for honest compatibility.
-            let fallbackRefreshed = await refreshHarnesses(
-                fresh: true,
-                locationID: locationID,
-                markStaleOnFailure: discardOnFailure)
-            guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
-            else {
-                return finish(accountsRefreshRetirementMessage(requestClient, at: locationID))
+            let registryCommitted = commitAccountsProfilesOnlyIfCurrent(
+                response.profiles, at: locationID, generation: registryGeneration)
+            if registryCommitted {
+                accountsRegistryLoadStates[locationID] = .loaded
             }
-            storeCredentialProfiles(response.profiles, harnessAccounts: [], at: locationID)
-            discardAccountsQuotaSnapshot(at: locationID)
-            accountsNextUpAuthorityFresh[locationID] = false
-            suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
-            if fallbackRefreshed {
-                return finish(nil)
-            }
-            return finish("Could not refresh account readiness. Retry Accounts.")
+            let message = "The engine returned an incomplete Accounts snapshot. Update the runtime and retry."
+            markAccountsRefreshFailure(
+                at: locationID,
+                client: requestClient,
+                registryGeneration: registryGeneration,
+                previousQuotaCursor: previousQuotaCursor,
+                quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+                reason: message)
+            return finish(response.profiles, registryCommitted, message)
         } catch {
-            // Background callers keep the last snapshot. Accounts' explicit
-            // fresh cycle discards it: stale profile readiness/next_up cannot
-            // remain presented as current after the authoritative fetch failed.
             guard accountsRefreshIsCurrent(generation, client: requestClient, at: locationID)
             else {
-                return finish(accountsRefreshRetirementMessage(requestClient, at: locationID))
+                return finish(nil, false, accountsRefreshRetirementMessage(
+                    requestClient, at: locationID))
             }
             guard harnessProjectionIsCurrent(harnessLease) else {
-                return finish(settleAccountsAfterSupersededHarnessProjection(
+                let message = settleAccountsAfterSupersededHarnessProjection(
                     at: locationID,
                     client: requestClient,
+                    registryGeneration: registryGeneration,
                     previousQuotaCursor: previousQuotaCursor,
-                    discardOnFailure: discardOnFailure))
+                    quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+                    markHarnessReadinessStale: false)
+                return finish(nil, false, message)
             }
-            if discardOnFailure { discardCompleteAccountsSnapshot(at: locationID) }
-            else if let previousQuotaCursor {
-                startAccountsQuotaObserver(
-                    at: locationID, client: requestClient, after: previousQuotaCursor)
-            }
-            return finish(userMessage(for: error))
+            let message = userMessage(for: error)
+            markAccountsRefreshFailure(
+                at: locationID,
+                client: requestClient,
+                registryGeneration: registryGeneration,
+                previousQuotaCursor: previousQuotaCursor,
+                quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+                reason: message)
+            return finish(nil, false, message)
         }
+    }
+
+    private func commitAccountsRegistryIfCurrent(
+        _ response: CredentialProfilesResponse,
+        at locationID: ExecutionLocationID,
+        generation: UInt64
+    ) -> Bool {
+        guard accountsRegistryGenerations[locationID] == generation else { return false }
+        storeCredentialProfiles(
+            response.profiles,
+            harnessAccounts: response.harnessAccounts,
+            at: locationID)
+        return true
+    }
+
+    /// A legacy/incomplete response cannot authoritatively replace the native
+    /// HarnessAccounts slice (older daemons omit it and decode as empty). Its
+    /// profile registry remains useful, so update that slice without erasing the
+    /// last stable native identities/Enabled values.
+    private func commitAccountsProfilesOnlyIfCurrent(
+        _ profiles: [CredentialProfileEntry],
+        at locationID: ExecutionLocationID,
+        generation: UInt64
+    ) -> Bool {
+        guard accountsRegistryGenerations[locationID] == generation else { return false }
+        if locationID == .local { credentialProfiles = profiles }
+        else { remoteCredentialProfiles[locationID] = profiles }
+        return true
     }
 
     private func accountsRefreshIsCurrent(
@@ -213,27 +321,6 @@ extension AppModel {
             && gateway(for: locationID) === requestClient
     }
 
-    /// Settle only the newest request generation. A background refresh may
-    /// inherit an in-flight foreground token: once it supersedes that request,
-    /// its receipt is the only request allowed to publish loaded or failed.
-    private func settleAccountsLoad(
-        _ receipt: AccountsRefreshReceipt,
-        at locationID: ExecutionLocationID,
-        foregroundToken: UUID? = nil
-    ) {
-        guard accountsRefreshGenerations[locationID] == receipt.generation else { return }
-        if let foregroundToken {
-            guard accountsLoadTokens[locationID] == foregroundToken else { return }
-        }
-        if accountsLoadTokens[locationID] != nil {
-            accountsLoadTokens.removeValue(forKey: locationID)
-            accountsLoadStates[locationID] =
-                receipt.error.map(ProjectionLoadState.failed) ?? .loaded
-        } else if receipt.error == nil {
-            accountsLoadStates[locationID] = .loaded
-        }
-    }
-
     /// A newer Accounts refresh supersedes an older one silently. Retiring the
     /// exact daemon client is different: an explicit foreground refresh must
     /// not report that an empty, discarded projection loaded successfully.
@@ -242,11 +329,11 @@ extension AppModel {
         at locationID: ExecutionLocationID
     ) -> String? {
         isCurrentGateway(requestClient, at: locationID)
-            ? nil
+            ? "A newer Accounts owner superseded this refresh. Retry Accounts."
             : "The engine connection changed while Accounts was refreshing. Retry Accounts."
     }
 
-    private func storeCredentialProfiles(
+    func storeCredentialProfiles(
         _ profiles: [CredentialProfileEntry],
         harnessAccounts accounts: [HarnessAccounts],
         at locationID: ExecutionLocationID
@@ -260,66 +347,67 @@ extension AppModel {
         }
     }
 
-    private func discardCredentialProfiles(at locationID: ExecutionLocationID) {
-        if locationID == .local {
-            credentialProfiles = []
-            harnessAccounts = []
-        } else {
-            remoteCredentialProfiles[locationID] = []
-            remoteHarnessAccounts[locationID] = []
-        }
-    }
-
-    func storeAccountsQuotaSnapshot(
-        _ response: ControlQuotaResponse, at locationID: ExecutionLocationID
-    ) {
-        if locationID == .local { quotaResponse = response }
-        else { remoteQuotaResponses[locationID] = response }
-        quotaStatus = nil
-    }
-
-    private func discardAccountsQuotaSnapshot(at locationID: ExecutionLocationID) {
-        if locationID == .local { quotaResponse = nil }
-        else { remoteQuotaResponses.removeValue(forKey: locationID) }
-    }
-
-    private func discardAccountsOwnedSnapshot(at locationID: ExecutionLocationID) {
-        discardCredentialProfiles(at: locationID)
-        discardAccountsQuotaSnapshot(at: locationID)
-        accountsNextUpAuthorityFresh[locationID] = false
-        suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
-    }
-
-    private func discardCompleteAccountsSnapshot(at locationID: ExecutionLocationID) {
-        discardAccountsOwnedSnapshot(at: locationID)
-        if locationID == .local {
-            harnessReadinessFresh = false
-            gitCapability = nil
-        } else {
-            remoteHarnessReadinessFresh[locationID] = false
-            remoteGitCapabilities.removeValue(forKey: locationID)
-        }
-    }
-
     /// A newer harness projection ticket superseded Accounts while it awaited
     /// its tuple. Settle only Accounts-owned slices; the newer harness/Git owner
     /// must remain untouched.
     private func settleAccountsAfterSupersededHarnessProjection(
         at locationID: ExecutionLocationID,
         client requestClient: GatewayClient,
+        registryGeneration: UInt64,
         previousQuotaCursor: String?,
-        discardOnFailure: Bool
+        quotaDisplayGenerationAtStart: UInt64,
+        markHarnessReadinessStale: Bool
     ) -> String {
+        let message = "A newer harness refresh superseded Accounts. Retry Accounts."
+        markAccountsRefreshFailure(
+            at: locationID,
+            client: requestClient,
+            registryGeneration: registryGeneration,
+            previousQuotaCursor: previousQuotaCursor,
+            quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+            reason: message,
+            markHarnessReadinessStale: markHarnessReadinessStale)
+        return message
+    }
+
+    private func markAccountsRefreshFailure(
+        at locationID: ExecutionLocationID,
+        client requestClient: GatewayClient?,
+        registryGeneration: UInt64,
+        previousQuotaCursor: String?,
+        quotaDisplayGenerationAtStart: UInt64,
+        reason: String,
+        markHarnessReadinessStale: Bool = true
+    ) {
         accountsNextUpAuthorityFresh[locationID] = false
-        if discardOnFailure {
-            discardAccountsOwnedSnapshot(at: locationID)
-        } else if let previousQuotaCursor,
-                  isCurrentGateway(requestClient, at: locationID)
+        // A plain hydration admitted after this full refresh owns newer
+        // profile/native-account readiness and must not be downgraded by the
+        // older failure settling late.
+        if (accountsRegistryGenerations[locationID] ?? 0) == registryGeneration {
+            accountsReadinessAuthorityFresh[locationID] = false
+        }
+        if markHarnessReadinessStale {
+            if locationID == .local { harnessReadinessFresh = false }
+            else { remoteHarnessReadinessFresh[locationID] = false }
+        }
+        let registryState = accountsRegistryLoadStates[locationID]
+        if (accountsRegistryGenerations[locationID] ?? 0) == registryGeneration,
+           registryState == nil || registryState == .idle || registryState == .loading
+        {
+            accountsRegistryLoadStates[locationID] = .failed(reason)
+        }
+        // A display-only GET that STARTED after this full refresh owns newer
+        // display data; do not downgrade it when the older full request fails.
+        if (accountsQuotaDisplayGenerations[locationID] ?? 0) == quotaDisplayGenerationAtStart {
+            markAccountsQuotaDisplayStale(at: locationID, reason: reason)
+        }
+        if let previousQuotaCursor,
+           let requestClient,
+           isCurrentGateway(requestClient, at: locationID)
         {
             startAccountsQuotaObserver(
                 at: locationID, client: requestClient, after: previousQuotaCursor)
         }
-        return "A newer harness refresh superseded Accounts. Retry Accounts."
     }
 
     /// One event-driven Accounts refresh, pinned to one execution location for
@@ -330,13 +418,124 @@ extension AppModel {
         -> String?
     {
         let locationID = requestedLocationID ?? activeExecutionLocation
+        return await refreshAccountsReceipt(at: locationID).error
+    }
+
+    private func refreshAccountsReceipt(at locationID: ExecutionLocationID) async
+        -> AccountsRefreshReceipt
+    {
+        if let inFlight = accountsRefreshTasks[locationID] {
+            return await inFlight.value
+        }
+        guard let requestClient = gateway(for: locationID) else {
+            let message = "Engine offline — reconnect to refresh Accounts."
+            let registryGeneration = accountsRegistryGenerations[locationID] ?? 0
+            markAccountsRefreshFailure(
+                at: locationID,
+                client: nil,
+                registryGeneration: registryGeneration,
+                previousQuotaCursor: nil,
+                quotaDisplayGenerationAtStart: accountsQuotaDisplayGenerations[locationID] ?? 0,
+                reason: message)
+            accountsLoadStates[locationID] = .failed(message)
+            return AccountsRefreshReceipt(
+                generation: accountsRefreshGenerations[locationID] ?? 0,
+                registryGeneration: registryGeneration,
+                profiles: nil,
+                registryCommitted: false,
+                error: message)
+        }
+
+        // A full refresh retires an older cached hydration. Its late response is
+        // fenced by registryGeneration even if URL loading ignores cancellation.
+        accountsRegistryLoadTokens.removeValue(forKey: locationID)
+        accountsRegistryLoadTasks.removeValue(forKey: locationID)?.cancel()
+        let registryGeneration = (accountsRegistryGenerations[locationID] ?? 0) &+ 1
+        accountsRegistryGenerations[locationID] = registryGeneration
+        let generation = (accountsRefreshGenerations[locationID] ?? 0) &+ 1
+        accountsRefreshGenerations[locationID] = generation
+        let quotaDisplayGenerationAtStart = accountsQuotaDisplayGenerations[locationID] ?? 0
+        let previousQuotaCursor = suspendAccountsQuotaObserver(at: locationID)
+        accountsNextUpAuthorityFresh[locationID] = false
+        if accountsRegistryLoadStates[locationID] == nil {
+            accountsRegistryLoadStates[locationID] = .loading
+        }
+        guard let harnessLease = claimHarnessProjection(
+            at: locationID, client: requestClient)
+        else {
+            let message = "The engine connection changed before Accounts could refresh. Retry Accounts."
+            markAccountsRefreshFailure(
+                at: locationID,
+                client: requestClient,
+                registryGeneration: registryGeneration,
+                previousQuotaCursor: previousQuotaCursor,
+                quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+                reason: message)
+            accountsLoadStates[locationID] = .failed(message)
+            return AccountsRefreshReceipt(
+                generation: generation,
+                registryGeneration: registryGeneration,
+                profiles: nil,
+                registryCommitted: false,
+                error: message)
+        }
+
         let token = UUID()
+        accountsRefreshTaskTokens[locationID] = token
         accountsLoadTokens[locationID] = token
         accountsLoadStates[locationID] = .loading
-        let receipt = await loadCredentialProfilesReceipt(
-            at: locationID, discardOnFailure: true)
-        settleAccountsLoad(receipt, at: locationID, foregroundToken: token)
-        return receipt.error
+        let task = Task { @MainActor [weak self] in
+            guard let self else {
+                return AccountsRefreshReceipt(
+                    generation: generation,
+                    registryGeneration: registryGeneration,
+                    profiles: nil,
+                    registryCommitted: false,
+                    error: "Accounts stopped refreshing.")
+            }
+            return await self.performAccountsRefresh(
+                at: locationID,
+                client: requestClient,
+                harnessLease: harnessLease,
+                generation: generation,
+                registryGeneration: registryGeneration,
+                quotaDisplayGenerationAtStart: quotaDisplayGenerationAtStart,
+                previousQuotaCursor: previousQuotaCursor)
+        }
+        accountsRefreshTasks[locationID] = task
+        let receipt = await task.value
+        guard accountsRefreshTaskTokens[locationID] == token else { return receipt }
+        accountsRefreshTaskTokens.removeValue(forKey: locationID)
+        accountsRefreshTasks.removeValue(forKey: locationID)
+        accountsLoadTokens.removeValue(forKey: locationID)
+        if accountsRefreshGenerations[locationID] == generation {
+            accountsLoadStates[locationID] =
+                receipt.error.map(ProjectionLoadState.failed) ?? .loaded
+        }
+        return receipt
+    }
+
+    func retireAccountsRequests(at locationID: ExecutionLocationID) {
+        accountsReadinessAuthorityFresh[locationID] = false
+        accountsNextUpAuthorityFresh[locationID] = false
+        accountsRegistryGenerations[locationID] =
+            (accountsRegistryGenerations[locationID] ?? 0) &+ 1
+        accountsRegistryLoadTokens.removeValue(forKey: locationID)
+        accountsRegistryLoadTasks.removeValue(forKey: locationID)?.cancel()
+        accountsRefreshGenerations[locationID] =
+            (accountsRefreshGenerations[locationID] ?? 0) &+ 1
+        accountsRefreshTaskTokens.removeValue(forKey: locationID)
+        accountsRefreshTasks.removeValue(forKey: locationID)?.cancel()
+        accountsLoadTokens.removeValue(forKey: locationID)
+        // A connection boundary cannot leave either independent UI lane in an
+        // orphaned spinner after its task/token has been retired. Stable loaded
+        // or failed states remain until their owner explicitly replaces them.
+        if accountsRegistryLoadStates[locationID] == .loading {
+            accountsRegistryLoadStates[locationID] = .idle
+        }
+        if accountsLoadStates[locationID] == .loading {
+            accountsLoadStates[locationID] = .idle
+        }
     }
 
     /// The V11b per-harness accounts authority for `harnessId` (native CLI-login
@@ -360,6 +559,7 @@ extension AppModel {
     @discardableResult
     func setProfileEnabled(harnessId: String, profileId: String, enabled: Bool) async -> String? {
         let locationID = activeExecutionLocation
+        accountsNextUpAuthorityFresh[locationID] = false
         guard let requestClient = gateway(for: locationID) else {
             return "Engine offline — reconnect to change the account."
         }
@@ -382,6 +582,7 @@ extension AppModel {
     @discardableResult
     func setNativeCredentialsEnabled(harnessId: String, enabled: Bool) async -> String? {
         let locationID = activeExecutionLocation
+        accountsNextUpAuthorityFresh[locationID] = false
         let ok = await saveSettings(SettingsUpdateRequest(
             harnesses: [harnessId: HarnessSettingsPatch(nativeCredentialsEnabled: enabled)]))
         await refreshCredentialProfiles(locationID: locationID)
@@ -395,6 +596,7 @@ extension AppModel {
     func createCredentialProfile(harnessId: String, profileId: String, displayName: String?) async
         -> (entry: CredentialProfileEntry?, error: String?) {
         let locationID = activeExecutionLocation
+        accountsNextUpAuthorityFresh[locationID] = false
         guard let requestClient = gateway(for: locationID) else {
             return (nil, "Engine offline — reconnect to add an account.")
         }
@@ -415,6 +617,7 @@ extension AppModel {
     /// cleanup warning verbatim for inline display.
     func deleteCredentialProfile(harnessId: String, profileId: String) async -> String? {
         let locationID = activeExecutionLocation
+        accountsNextUpAuthorityFresh[locationID] = false
         guard let requestClient = gateway(for: locationID) else {
             return "Engine offline — reconnect to remove an account."
         }
@@ -482,6 +685,7 @@ extension AppModel {
             return current == "rotate" ? (id, HarnessSettingsPatch(profileLimitAction: "fail")) : nil
         })
         guard !patch.isEmpty else { return }
+        accountsNextUpAuthorityFresh[activeExecutionLocation] = false
         autoBalanceOverride = on
         defer { autoBalanceOverride = nil }
         _ = await saveSettings(SettingsUpdateRequest(harnesses: patch))

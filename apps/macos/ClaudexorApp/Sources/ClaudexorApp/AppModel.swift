@@ -143,9 +143,20 @@ final class AppModel {
     /// surface reads Enabled/Active from HERE so nothing re-derives the symmetry.
     var harnessAccounts: [HarnessAccounts] = []
     var remoteHarnessAccounts: [ExecutionLocationID: [HarnessAccounts]] = [:]
+    /// Cached registry hydration is independent of an explicit atomic refresh:
+    /// opening Accounts, connect, and mutations use the lighter endpoint and do
+    /// not put the whole surface into a foreground Refreshing state.
+    var accountsRegistryLoadStates: [ExecutionLocationID: ProjectionLoadState] = [:]
+    @ObservationIgnored var accountsRegistryGenerations: [ExecutionLocationID: UInt64] = [:]
+    @ObservationIgnored var accountsRegistryLoadTasks:
+        [ExecutionLocationID: Task<String?, Never>] = [:]
+    @ObservationIgnored var accountsRegistryLoadTokens: [ExecutionLocationID: UUID] = [:]
     /// Monotonic per-location fence for overlapping complete Accounts loads.
     /// Internal request ordering is not UI state and stays off the observation graph.
     @ObservationIgnored var accountsRefreshGenerations: [ExecutionLocationID: UInt64] = [:]
+    @ObservationIgnored var accountsRefreshTasks:
+        [ExecutionLocationID: Task<AccountsRefreshReceipt, Never>] = [:]
+    @ObservationIgnored var accountsRefreshTaskTokens: [ExecutionLocationID: UUID] = [:]
     /// Foreground Accounts truth shared by list, quota, and Harness Doctor.
     /// Tokens keep a slower predecessor from settling a newer visible refresh.
     var accountsLoadStates: [ExecutionLocationID: ProjectionLoadState] = [:]
@@ -157,6 +168,11 @@ final class AppModel {
         [ExecutionLocationID: Task<Void, Never>] = [:]
     @ObservationIgnored var accountsQuotaStreamTokens: [ExecutionLocationID: UUID] = [:]
     @ObservationIgnored var accountsQuotaEventCursors: [ExecutionLocationID: String] = [:]
+    /// A failed explicit readiness refresh retires only the authority of the old
+    /// readiness verdicts. Stable profile rows, identities, and Enabled values
+    /// stay present; a later cached registry hydration can restore its own TTL-
+    /// backed readiness authority.
+    var accountsReadinessAuthorityFresh: [ExecutionLocationID: Bool] = [:]
     /// Presentation freshness for the server-computed `next_up` field only.
     /// Profiles, readiness, Enabled, and identity remain independently valid.
     var accountsNextUpAuthorityFresh: [ExecutionLocationID: Bool] = [:]
@@ -250,6 +266,20 @@ final class AppModel {
     @ObservationIgnored var settingsLoadTokens: [ExecutionLocationID: UUID] = [:]
     var quotaResponse: ControlQuotaResponse?
     var remoteQuotaResponses: [ExecutionLocationID: ControlQuotaResponse] = [:]
+    /// Display freshness is intentionally separate from routing authority.
+    /// Stale values may remain visible, but can never make `next_up` current.
+    var accountsQuotaDisplayStates: [ExecutionLocationID: AccountsQuotaDisplayState] = [:]
+    @ObservationIgnored var accountsQuotaDisplayGenerations: [ExecutionLocationID: UInt64] = [:]
+    @ObservationIgnored var accountsQuotaSubscribers:
+        [ExecutionLocationID: Set<UUID>] = [:]
+    @ObservationIgnored var accountsQuotaDisplayTasks:
+        [ExecutionLocationID: Task<Void, Never>] = [:]
+    @ObservationIgnored var accountsQuotaDisplayTaskTokens: [ExecutionLocationID: UUID] = [:]
+    @ObservationIgnored var accountsQuotaDisplayTrailing: Set<ExecutionLocationID> = []
+    /// Bounded recent-marker ring deduplicates the same event observed by both
+    /// global streams even when one stream is briefly ahead of the other.
+    @ObservationIgnored var accountsQuotaDisplayMarkerCursors:
+        [ExecutionLocationID: [String]] = [:]
     var quotaStatus: String?
     var secretBackend = "unknown"
     var storedSecrets: [SecretInfo] = []

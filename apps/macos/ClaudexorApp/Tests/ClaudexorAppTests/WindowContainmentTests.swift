@@ -63,6 +63,9 @@ import Testing
     }
 
     @Test func popoverMaximumHeightTracksTheActiveVisibleFrame() {
+        #expect(PopoverLayout.maximumHeight(visibleFrameHeight: 728) == 600)
+        #expect(PopoverLayout.maximumHeight(visibleFrameHeight: 1200) == 1072)
+        #expect(PopoverLayout.maximumHeight(visibleFrameHeight: 360) == 232)
         #expect(ComposerOptionsLayout.maximumHeight(visibleFrameHeight: 728) == 600)
         #expect(ComposerOptionsLayout.maximumHeight(visibleFrameHeight: 1200) == 1072)
         #expect(ComposerOptionsLayout.maximumHeight(visibleFrameHeight: 360) == 232)

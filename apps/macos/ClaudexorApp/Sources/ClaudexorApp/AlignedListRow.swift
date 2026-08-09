@@ -59,11 +59,18 @@ struct AlignedRowBadge: Equatable {
     var text: String
     var systemImage: String?
     var emphasis: AlignedRowEmphasis = .secondary
+    var help: String?
 
-    init(_ text: String, systemImage: String? = nil, emphasis: AlignedRowEmphasis = .secondary) {
+    init(
+        _ text: String,
+        systemImage: String? = nil,
+        emphasis: AlignedRowEmphasis = .secondary,
+        help: String? = nil
+    ) {
         self.text = text
         self.systemImage = systemImage
         self.emphasis = emphasis
+        self.help = help
     }
 }
 
@@ -158,6 +165,16 @@ struct AlignedBadgeView: View {
             Text(badge.text).font(.caption2)
         }
         .foregroundStyle(badge.emphasis.style)
+        .modifier(OptionalHelp(text: badge.help))
+    }
+}
+
+private struct OptionalHelp: ViewModifier {
+    let text: String?
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let text { content.help(text) }
+        else { content }
     }
 }
 

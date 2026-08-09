@@ -161,7 +161,7 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
-    @Test func generalGlobalStreamLeavesQuotaProjectionToDedicatedObserver() async throws {
+    @Test func generalGlobalStreamDropsQuotaMarkersWithoutALiveSubscriber() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -190,6 +190,332 @@ struct AppModelRefreshTests {
         #expect(quotaCalls.count == 0)
         #expect(model.quotaResponse == nil)
         #expect(model.quotaStatus == nil)
+        #expect(model.accountsQuotaDisplayMarkerCursors[.local] == nil)
+    }
+
+    @MainActor
+    @Test func connectionRetirementCannotLeaveAccountsLanesLoading() {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.accountsRegistryLoadStates[.local] = .loading
+        model.accountsLoadStates[.local] = .loading
+        model.accountsReadinessAuthorityFresh[.local] = true
+        model.accountsNextUpAuthorityFresh[.local] = true
+
+        model.retireAccountsRequests(at: .local)
+
+        #expect(model.accountsRegistryLoadStates[.local] == .idle)
+        #expect(model.accountsLoadStates[.local] == .idle)
+        #expect(model.accountsReadinessAuthorityFresh[.local] == false)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+    }
+
+    @MainActor
+    @Test func accountsSubscriberHydratesQuotaBeforeAnyFullRefreshAndMarkerReplacesIt() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41130), requestNotificationAuthorization: false)
+        let quotaCalls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/quota", request.httpMethod == "GET" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let call = quotaCalls.incrementAndGet()
+            return (appResponse(for: request), appQuotaResponse(
+                subjectID: "work",
+                observedAt: "2026-08-09T00:00:0\(call)Z"))
+        }
+
+        let subscription = model.beginAccountsQuotaSubscription()
+        defer { model.endAccountsQuotaSubscription(subscription) }
+        try await waitForAppTest(
+            { quotaCalls.count == 1 && model.quotaResponse != nil },
+            message: "initial subscriber quota GET never committed")
+        #expect(model.accountsRefreshGenerations[.local] == nil)
+
+        await model.handleGlobalEvent(JournalEvent(
+            cursor: "epoch:3",
+            partition: "global",
+            type: AppModel.quotaProjectionMarker,
+            observedAt: "2026-08-09T00:00:02Z",
+            payload: .object([:])))
+        try await waitForAppTest(
+            { quotaCalls.count == 2 && model.accountsQuotaDisplayTasks[.local] == nil },
+            message: "marker-triggered display quota GET never settled")
+        #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:02Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] != true)
+    }
+
+    @MainActor
+    @Test func remoteQuotaMarkersCoalesceToOneLeadAndOneTrailingDisplayRead() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let remote = ExecutionLocationID.remote(UUID())
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.remoteClients[remote] = appTestGateway(port: 41131)
+        let calls = AppRefreshCallCounter()
+        let firstArrived = AppRefreshCallCounter()
+        let secondArrived = AppRefreshCallCounter()
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let releaseSecond = DispatchSemaphore(value: 0)
+        defer { releaseFirst.signal(); releaseSecond.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/quota", request.url?.port == 41131 else {
+                throw AppRefreshTestError.badRequest
+            }
+            let call = calls.incrementAndGet()
+            if call == 1 {
+                firstArrived.increment()
+                _ = releaseFirst.wait(timeout: .now() + 5)
+            } else {
+                secondArrived.increment()
+                _ = releaseSecond.wait(timeout: .now() + 5)
+            }
+            return (appResponse(for: request), appQuotaResponse(
+                subjectID: "remote",
+                observedAt: "2026-08-09T00:00:0\(call)Z"))
+        }
+
+        let subscription = model.beginAccountsQuotaSubscription(locationID: remote)
+        defer { model.endAccountsQuotaSubscription(subscription) }
+        try await waitForAppTest(firstArrived, message: "remote lead quota GET never started")
+        for _ in 0..<4 {
+            model.noteQuotaProjectionMarker(at: remote, invalidateNextUp: false)
+        }
+        releaseFirst.signal()
+        try await waitForAppTest(secondArrived, message: "remote trailing quota GET never started")
+        for _ in 0..<4 {
+            model.noteQuotaProjectionMarker(at: remote, invalidateNextUp: false)
+        }
+        releaseSecond.signal()
+        try await waitForAppTest(
+            { model.accountsQuotaDisplayTasks[remote] == nil },
+            message: "remote display quota lane never settled")
+
+        #expect(calls.count == 2)
+        #expect(model.remoteQuotaResponses[remote]?.refreshedAt == "2026-08-09T00:00:02Z")
+    }
+
+    @MainActor
+    @Test func generalAndDedicatedStreamsDeduplicateTheSameQuotaMarker() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41136), requestNotificationAuthorization: false)
+        let calls = AppRefreshCallCounter()
+        let markerArrived = AppRefreshCallCounter()
+        let releaseMarker = DispatchSemaphore(value: 0)
+        defer { releaseMarker.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/quota", request.httpMethod == "GET" else {
+                throw AppRefreshTestError.badRequest
+            }
+            let call = calls.incrementAndGet()
+            if call == 2 {
+                markerArrived.increment()
+                _ = releaseMarker.wait(timeout: .now() + 5)
+            }
+            return (appResponse(for: request), appQuotaResponse(
+                subjectID: "work",
+                observedAt: "2026-08-09T00:00:0\(call)Z"))
+        }
+
+        let subscription = model.beginAccountsQuotaSubscription()
+        defer { model.endAccountsQuotaSubscription(subscription) }
+        try await waitForAppTest(
+            { calls.count == 1 && model.accountsQuotaDisplayTasks[.local] == nil },
+            message: "initial subscriber quota GET never settled")
+
+        let marker = JournalEvent(
+            cursor: "quota:shared",
+            partition: "global",
+            type: AppModel.quotaProjectionMarker,
+            observedAt: "2026-08-09T00:00:02Z",
+            payload: .object([:]))
+        await model.handleGlobalEvent(marker)
+        try await waitForAppTest(markerArrived, message: "marker quota GET never started")
+        model.accountsNextUpAuthorityFresh[.local] = true
+        model.noteQuotaProjectionMarker(
+            at: .local, invalidateNextUp: true, cursor: marker.cursor)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+
+        releaseMarker.signal()
+        try await waitForAppTest(
+            { model.accountsQuotaDisplayTasks[.local] == nil },
+            message: "deduplicated marker quota GET never settled")
+        #expect(calls.count == 2)
+        #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:02Z")
+
+        model.noteQuotaProjectionMarker(
+            at: .local, invalidateNextUp: false, cursor: "quota:newer")
+        try await waitForAppTest(
+            { calls.count == 3 && model.accountsQuotaDisplayTasks[.local] == nil },
+            message: "newer marker quota GET never settled")
+        model.noteQuotaProjectionMarker(
+            at: .local, invalidateNextUp: true, cursor: marker.cursor)
+        #expect(calls.count == 3)
+        #expect(model.accountsQuotaDisplayTasks[.local] == nil)
+    }
+
+    @MainActor
+    @Test func quotaMarkerDeduplicationMemoryIsBounded() {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        for index in 0..<40 {
+            model.noteQuotaProjectionMarker(
+                at: .local, invalidateNextUp: true, cursor: "quota:\(index)")
+        }
+
+        #expect(model.accountsQuotaDisplayMarkerCursors[.local]?.count == 32)
+        #expect(model.accountsQuotaDisplayMarkerCursors[.local]?.first == "quota:8")
+        #expect(model.accountsQuotaDisplayMarkerCursors[.local]?.last == "quota:39")
+        #expect(model.accountsQuotaDisplayTasks[.local] == nil)
+    }
+
+    @MainActor
+    @Test func successfulFullSnapshotSeedsItsMarkerBeforeGeneralStreamDelivery() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41138), requestNotificationAuthorization: false)
+        let quotaCalls = AppRefreshCallCounter()
+        let laterQuotaArrived = AppRefreshCallCounter()
+        let releaseLaterQuota = DispatchSemaphore(value: 0)
+        let releaseObserver = DispatchSemaphore(value: 0)
+        defer {
+            model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
+            releaseLaterQuota.signal()
+            releaseObserver.signal()
+        }
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.url?.path, request.url?.query) {
+            case ("/v2/quota", _):
+                let call = quotaCalls.incrementAndGet()
+                if call == 2 {
+                    laterQuotaArrived.increment()
+                    _ = releaseLaterQuota.wait(timeout: .now() + 5)
+                }
+                return (appResponse(for: request), appQuotaResponse(
+                    subjectID: "work",
+                    observedAt: call == 1
+                        ? "2026-08-09T00:00:01Z" : "2026-08-09T00:00:07Z"))
+            case ("/v2/credential-profiles", "snapshot=true"):
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "work", displayName: "Work",
+                    observedAt: "2026-08-09T00:00:05Z",
+                    quotaEventCursor: "quota:atomic"))
+            case ("/v2/global/events", _):
+                _ = releaseObserver.wait(timeout: .now() + 5)
+                return (appResponse(for: request), Data())
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let subscription = model.beginAccountsQuotaSubscription()
+        defer { model.endAccountsQuotaSubscription(subscription) }
+        try await waitForAppTest(
+            { quotaCalls.count == 1 && model.accountsQuotaDisplayTasks[.local] == nil },
+            message: "initial display quota GET never settled")
+        #expect(await model.refreshAccounts() == nil)
+        #expect(model.activeAccountsQuotaDisplayState == .current(
+            observedAt: "2026-08-09T00:00:05Z"))
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+
+        await model.handleGlobalEvent(JournalEvent(
+            cursor: "quota:atomic",
+            partition: "global",
+            type: AppModel.quotaProjectionMarker,
+            observedAt: "2026-08-09T00:00:05Z",
+            payload: .object([:])))
+        #expect(quotaCalls.count == 1)
+        #expect(model.accountsQuotaDisplayTasks[.local] == nil)
+        #expect(model.activeAccountsQuotaDisplayState == .current(
+            observedAt: "2026-08-09T00:00:05Z"))
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+
+        await model.handleGlobalEvent(JournalEvent(
+            cursor: "quota:later",
+            partition: "global",
+            type: AppModel.quotaProjectionMarker,
+            observedAt: "2026-08-09T00:00:06Z",
+            payload: .object([:])))
+        try await waitForAppTest(
+            laterQuotaArrived, message: "later marker display quota GET never started")
+        if case .stale = model.activeAccountsQuotaDisplayState {} else {
+            Issue.record("a later marker must stale display data while its cheap GET runs")
+        }
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
+
+        model.noteQuotaProjectionMarker(
+            at: .local, invalidateNextUp: true, cursor: "quota:later")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        releaseLaterQuota.signal()
+        try await waitForAppTest(
+            { quotaCalls.count == 2 && model.accountsQuotaDisplayTasks[.local] == nil },
+            message: "later marker display quota GET never settled")
+        #expect(model.activeAccountsQuotaDisplayState == .current(
+            observedAt: "2026-08-09T00:00:07Z"))
+    }
+
+    @MainActor
+    @Test func laterDisplayHydrationStaysCurrentWhenAnOlderFullRefreshFails() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41132), requestNotificationAuthorization: false)
+        let fullArrived = AppRefreshCallCounter()
+        let releaseFull = DispatchSemaphore(value: 0)
+        defer { releaseFull.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.url?.path, request.url?.query) {
+            case ("/v2/credential-profiles", "snapshot=true"):
+                fullArrived.increment()
+                _ = releaseFull.wait(timeout: .now() + 5)
+                return (appResponse(for: request, status: 503), Data(#"{"error":"full failed"}"#.utf8))
+            case ("/v2/quota", _):
+                return (appResponse(for: request), appQuotaResponse(
+                    subjectID: "display-new", observedAt: "2026-08-09T00:00:05Z"))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let full = Task { await model.refreshAccounts() }
+        try await waitForAppTest(fullArrived, message: "full refresh never started")
+        let subscription = model.beginAccountsQuotaSubscription()
+        defer { model.endAccountsQuotaSubscription(subscription) }
+        try await waitForAppTest(
+            { model.quotaResponse?.refreshedAt == "2026-08-09T00:00:05Z" },
+            message: "later display hydration never committed")
+
+        releaseFull.signal()
+        #expect(await full.value != nil)
+        #expect(model.activeAccountsQuotaDisplayState == .current(
+            observedAt: "2026-08-09T00:00:05Z"))
+        #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:05Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+    }
+
+    @MainActor
+    @Test func firstRegistryHydrationNeverPresentsColdFailureAsEmpty() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41133), requestNotificationAuthorization: false)
+        let arrived = AppRefreshCallCounter()
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == nil
+            else { throw AppRefreshTestError.badRequest }
+            arrived.increment()
+            _ = release.wait(timeout: .now() + 5)
+            return (appResponse(for: request, status: 503), Data(#"{"error":"registry unavailable"}"#.utf8))
+        }
+
+        let hydration = Task { await model.loadCredentialProfiles() }
+        try await waitForAppTest(arrived, message: "registry hydration never started")
+        #expect(model.activeCredentialProfiles.isEmpty)
+        #expect(model.activeAccountsRegistryLoadState == .loading)
+        release.signal()
+        let error = await hydration.value
+        #expect(error != nil)
+        #expect(model.activeAccountsRegistryLoadState == .failed(error!))
     }
 
     @MainActor
@@ -896,19 +1222,21 @@ struct AppModelRefreshTests {
 
         let accountsError = await accounts.value
         #expect(accountsError?.contains("Retry Accounts") == true)
-        #expect(model.credentialProfiles.isEmpty)
-        #expect(model.harnessAccounts.isEmpty)
-        #expect(model.quotaResponse == nil)
+        // The newer harness owner wins its slice; the full response may still
+        // update stable registry fields, and old display quota is retained.
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["incoming"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("incoming") == true)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:00Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
-        #expect(model.accountsQuotaEventCursors[.local] == nil)
-        #expect(model.accountsQuotaStreamTokens[.local] == nil)
+        #expect(model.accountsQuotaEventCursors[.local] == "seed-cursor")
         #expect(model.liveHarnesses.first?.version == "newer-harness")
         #expect(model.harnessReadinessFresh == true)
         #expect(model.gitCapability?.version == "git newer")
+        model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
     }
 
     @MainActor
-    @Test func backgroundAccountsSupersededByHarnessRefreshResumesPriorCursor()
+    @Test func cachedRegistryHydrationDoesNotOwnHarnessQuotaOrObserverCursor()
         async throws
     {
         defer { AppRequestStubURLProtocol.handler = nil }
@@ -916,10 +1244,8 @@ struct AppModelRefreshTests {
             client: appTestGateway(port: 41115), requestNotificationAuthorization: false)
         try seedAppAccounts(model, profileID: "seed", observedAt: "2026-07-29T00:00:02Z")
         let accountsArrived = AppRefreshCallCounter()
-        let observerArrived = AppRefreshCallCounter()
         let releaseAccounts = DispatchSemaphore(value: 0)
-        let releaseObserver = DispatchSemaphore(value: 0)
-        defer { releaseAccounts.signal(); releaseObserver.signal() }
+        defer { releaseAccounts.signal() }
         AppRequestStubURLProtocol.handler = { request in
             switch request.url?.path {
             case "/v2/credential-profiles":
@@ -931,13 +1257,6 @@ struct AppModelRefreshTests {
             case "/v2/harnesses":
                 return (appResponse(for: request), appHarnessSnapshot(
                     version: "newer-harness", status: "ok", gitVersion: "git newer"))
-            case "/v2/global/events":
-                guard request.value(forHTTPHeaderField: "Last-Event-ID") == "seed-cursor" else {
-                    throw AppRefreshTestError.badRequest
-                }
-                observerArrived.increment()
-                _ = releaseObserver.wait(timeout: .now() + 5)
-                return (appResponse(for: request), Data())
             default:
                 throw AppRefreshTestError.badRequest
             }
@@ -949,18 +1268,16 @@ struct AppModelRefreshTests {
         releaseAccounts.signal()
 
         let accountsError = await accounts.value
-        #expect(accountsError?.contains("Retry Accounts") == true)
-        try await waitForAppTest(observerArrived, message: "prior quota cursor was not resumed")
-        #expect(model.credentialProfiles.map(\.profile.profileId) == ["seed"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("seed") == true)
+        #expect(accountsError == nil)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["incoming"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("incoming") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:02Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.accountsQuotaEventCursors[.local] == "seed-cursor")
-        #expect(model.accountsQuotaStreamTokens[.local] != nil)
+        #expect(model.accountsQuotaStreamTokens[.local] == nil)
         #expect(model.liveHarnesses.first?.version == "newer-harness")
         #expect(model.harnessReadinessFresh == true)
         #expect(model.gitCapability?.version == "git newer")
-        model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
     }
 
     @MainActor
@@ -993,9 +1310,9 @@ struct AppModelRefreshTests {
 
         let accountsError = await accounts.value
         #expect(accountsError?.contains("Retry Accounts") == true)
-        #expect(model.credentialProfiles.isEmpty)
-        #expect(model.harnessAccounts.isEmpty)
-        #expect(model.quotaResponse == nil)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["seed"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("seed") == true)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:04Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.liveHarnesses.first?.version == "newer-harness")
         #expect(model.harnessReadinessFresh == true)
@@ -1349,7 +1666,7 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
-    @Test func legacyAccountsResponseFallsBackToOneFreshHarnessReadAndDropsUnfencedNextUp() async {
+    @Test func cachedRegistryHydrationUsesPlainEndpointAndDropsUnfencedNextUp() async {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -1360,23 +1677,49 @@ struct AppModelRefreshTests {
         let calls = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in
             switch (request.httpMethod, request.url?.path, request.url?.query) {
-            case ("GET", "/v2/credential-profiles", "snapshot=true"):
+            case ("GET", "/v2/credential-profiles", nil):
                 calls.increment()
                 return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}]}"#.utf8))
-            case ("GET", "/v2/harnesses", "fresh=true"):
-                calls.increment()
-                return (appResponse(for: request), Data(#"{"git":{"status":"available","version":"git version legacy","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"ok","manifest":null,"routableIntents":["implement"]}]}"#.utf8))
             default:
                 throw AppRefreshTestError.badRequest
             }
         }
 
+        model.accountsNextUpAuthorityFresh[.local] = true
         #expect(await model.loadCredentialProfiles(discardOnFailure: true) == nil)
-        #expect(calls.count == 2)
-        #expect(model.liveHarnesses.first?.routableIntents == ["implement"])
-        #expect(model.gitCapability?.version == "git version legacy")
-        // The old response's next_up is not atomically fenced to these rows.
-        #expect(model.harnessAccounts.isEmpty)
+        #expect(calls.count == 1)
+        #expect(model.harnessAccounts.first?.nextUp.isNative == true)
+        // The plain response's next_up is stored only with its stable row fields.
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.activeAccountsRegistryLoadState == .loaded)
+    }
+
+    @MainActor
+    @Test func incompleteFullResponseKeepsStableNativeAndQuotaSlices() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41134), requestNotificationAuthorization: false)
+        try seedAppAccounts(
+            model, profileID: "seed", observedAt: "2026-08-09T00:00:01Z")
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles",
+                  request.url?.query == "snapshot=true"
+            else { throw AppRefreshTestError.badRequest }
+            return (appResponse(for: request), Data(#"""
+            {"profiles":[{"profile":{"profile_id":"new-profile","harness_id":"claude",
+              "display_name":"New Profile","credential_kind":"config_dir_login","enabled":true},
+              "status":{"availability":"available","verification":"passed","detail":null,
+              "last_verified_at":null}}]}
+            """#.utf8))
+        }
+
+        let error = await model.refreshAccounts()
+        #expect(error?.contains("incomplete") == true)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["new-profile"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("seed") == true)
+        #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:01Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        #expect(model.activeAccountsRegistryLoadState == .loaded)
     }
 
     @MainActor
@@ -1408,7 +1751,7 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
-    @Test func failedAccountsRefreshExpiresReadyRowsAndDiscardsAccountProjection() async throws {
+    @Test func failedAccountsRefreshExpiresReadinessButPreservesStableRowsAndQuota() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -1430,6 +1773,9 @@ struct AppModelRefreshTests {
         model.harnessAccounts = [try JSONDecoder().decode(
             HarnessAccounts.self,
             from: Data(#"{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}"#.utf8))]
+        model.quotaResponse = try JSONDecoder().decode(
+            ControlQuotaResponse.self,
+            from: appQuotaResponse(subjectID: "work", observedAt: "2026-08-09T00:00:00Z"))
         AppRequestStubURLProtocol.handler = { request in
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
@@ -1449,22 +1795,30 @@ struct AppModelRefreshTests {
         let row = AccountsPresentation.rows(model: model).first
         #expect(row?.readiness == .unknown)
         #expect(row?.verified == false)
-        #expect(model.credentialProfiles.isEmpty)
-        #expect(model.harnessAccounts.isEmpty)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["work"])
+        #expect(model.harnessAccounts.first?.nextUp.isNative == true)
+        #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:00Z")
+        #expect(model.accountsReadinessAuthorityFresh[.local] == false)
+        if case .stale = model.activeAccountsQuotaDisplayState {} else {
+            Issue.record("failed full refresh must retain quota as stale display data")
+        }
     }
 
     @MainActor
-    @Test func successfulBackgroundAccountsReloadClearsAnOlderForegroundFailure() async throws {
+    @Test func successfulRegistryHydrationHasIndependentStateFromOlderFullFailure() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let model = AppModel(
             client: appTestGateway(port: 41112),
             requestNotificationAuthorization: false)
         let calls = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in
-            guard request.url?.path == "/v2/credential-profiles",
-                  request.url?.query == "snapshot=true"
-            else { throw AppRefreshTestError.badRequest }
+            guard request.url?.path == "/v2/credential-profiles" else {
+                throw AppRefreshTestError.badRequest
+            }
             if calls.incrementAndGet() == 1 {
+                guard request.url?.query == "snapshot=true" else {
+                    throw AppRefreshTestError.badRequest
+                }
                 return (
                     HTTPURLResponse(
                         url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
@@ -1473,6 +1827,7 @@ struct AppModelRefreshTests {
                     Data(#"{"error":"foreground failed"}"#.utf8)
                 )
             }
+            guard request.url?.query == nil else { throw AppRefreshTestError.badRequest }
             return (
                 appResponse(for: request),
                 appAccountsSnapshot(
@@ -1489,13 +1844,53 @@ struct AppModelRefreshTests {
 
         await model.refreshCredentialProfiles()
 
-        #expect(model.activeAccountsLoadState == .loaded)
+        if case .failed = model.activeAccountsLoadState {} else {
+            Issue.record("cached registry hydration must not settle the full-refresh state")
+        }
+        #expect(model.activeAccountsRegistryLoadState == .loaded)
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["recovered"])
         #expect(model.harnessAccounts.first?.nextUp.isProfile("recovered") == true)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
     }
 
     @MainActor
-    @Test func newerBackgroundFailureOwnsAnInFlightForegroundSettlement() async throws {
+    @Test func laterRegistryHydrationKeepsReadinessWhenOlderFullFailureSettles() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41137), requestNotificationAuthorization: false)
+        let fullArrived = AppRefreshCallCounter()
+        let releaseFull = DispatchSemaphore(value: 0)
+        defer { releaseFull.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            guard request.url?.path == "/v2/credential-profiles" else {
+                throw AppRefreshTestError.badRequest
+            }
+            if request.url?.query == "snapshot=true" {
+                fullArrived.increment()
+                _ = releaseFull.wait(timeout: .now() + 5)
+                return (appResponse(for: request, status: 503), Data(#"{"error":"old full failed"}"#.utf8))
+            }
+            guard request.url?.query == nil else { throw AppRefreshTestError.badRequest }
+            return (appResponse(for: request), appAccountsSnapshot(
+                profileID: "recovered", displayName: "Recovered",
+                observedAt: "2026-08-09T00:00:02Z"))
+        }
+
+        let full = Task { await model.refreshAccounts() }
+        try await waitForAppTest(fullArrived, message: "full Accounts request never started")
+        #expect(await model.loadCredentialProfiles() == nil)
+        #expect(model.accountsReadinessAuthorityFresh[.local] == true)
+
+        releaseFull.signal()
+        #expect(await full.value != nil)
+        #expect(model.accountsReadinessAuthorityFresh[.local] == true)
+        let recovered = try #require(
+            AccountsPresentation.rows(model: model).first { $0.profileId == "recovered" })
+        #expect(recovered.readiness == .ready)
+    }
+
+    @MainActor
+    @Test func laterRegistryHydrationWinsStableFieldsOverAnInFlightFullRefresh() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -1503,54 +1898,67 @@ struct AppModelRefreshTests {
             baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
             session: URLSession(configuration: config)
         ), requestNotificationAuthorization: false)
-        let calls = AppRefreshCallCounter()
-        let foregroundArrived = AppRefreshCallCounter()
-        let backgroundArrived = AppRefreshCallCounter()
-        let releaseForeground = DispatchSemaphore(value: 0)
-        let releaseBackground = DispatchSemaphore(value: 0)
+        let fullArrived = AppRefreshCallCounter()
+        let fullCalls = AppRefreshCallCounter()
+        let hydrationArrived = AppRefreshCallCounter()
+        let releaseFull = DispatchSemaphore(value: 0)
+        let releaseHydration = DispatchSemaphore(value: 0)
+        let releaseObserver = DispatchSemaphore(value: 0)
+        defer {
+            releaseFull.signal()
+            releaseHydration.signal()
+            releaseObserver.signal()
+            releaseObserver.signal()
+        }
         AppRequestStubURLProtocol.handler = { request in
-            guard request.url?.path == "/v2/credential-profiles",
-                  request.url?.query == "snapshot=true"
-            else { throw AppRefreshTestError.badRequest }
-            if calls.incrementAndGet() == 1 {
-                foregroundArrived.increment()
-                _ = releaseForeground.wait(timeout: .now() + 5)
-                return (appResponse(for: request), appAccountsSnapshot(
-                    profileID: "retired", displayName: "Retired",
-                    observedAt: "2026-07-29T00:00:01Z"))
+            guard request.url?.path == "/v2/credential-profiles" else {
+                if request.url?.path == "/v2/global/events" {
+                    _ = releaseObserver.wait(timeout: .now() + 5)
+                    return (appResponse(for: request), Data())
+                }
+                throw AppRefreshTestError.badRequest
             }
-            backgroundArrived.increment()
-            _ = releaseBackground.wait(timeout: .now() + 5)
-            return (
-                HTTPURLResponse(
-                    url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
-                    headerFields: ["Content-Type": "application/json"]
-                )!,
-                Data(#"{"error":"newer background failed"}"#.utf8)
-            )
+            if request.url?.query == "snapshot=true" {
+                fullArrived.increment()
+                let call = fullCalls.incrementAndGet()
+                if call == 1 { _ = releaseFull.wait(timeout: .now() + 5) }
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: call == 1 ? "full-old" : "full-final",
+                    displayName: call == 1 ? "Full Old" : "Full Final",
+                    observedAt: call == 1
+                        ? "2026-07-29T00:00:01Z" : "2026-07-29T00:00:03Z"))
+            }
+            guard request.url?.query == nil else { throw AppRefreshTestError.badRequest }
+            hydrationArrived.increment()
+            _ = releaseHydration.wait(timeout: .now() + 5)
+            return (appResponse(for: request), appAccountsSnapshot(
+                profileID: "hydrated-new", displayName: "Hydrated New",
+                observedAt: "2026-07-29T00:00:02Z"))
         }
 
         let foreground = Task { await model.refreshAccounts() }
         try await waitForAppTest(
-            foregroundArrived, message: "foreground Accounts request never started")
+            fullArrived, message: "full Accounts request never started")
         let background = Task { await model.refreshCredentialProfiles() }
         try await waitForAppTest(
-            backgroundArrived, message: "background Accounts request never started")
+            hydrationArrived, message: "registry hydration never started")
 
-        releaseForeground.signal()
-        #expect(await foreground.value == nil)
-        // The retired foreground receipt cannot claim success while the newer
-        // authority is still pending.
-        #expect(model.activeAccountsLoadState == .loading)
-
-        releaseBackground.signal()
+        releaseHydration.signal()
         await background.value
-        guard case let .failed(message) = model.activeAccountsLoadState else {
-            Issue.record("newer background failure must settle Accounts as failed")
-            return
-        }
-        #expect(message.contains("newer background failed"))
-        #expect(model.credentialProfiles.isEmpty)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["hydrated-new"])
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+
+        releaseFull.signal()
+        let fullError = await foreground.value
+        #expect(fullError?.contains("Accounts changed") == true)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["hydrated-new"])
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:01Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+
+        #expect(await model.refreshAccounts() == nil)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["full-final"])
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:03Z")
+        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
     }
 
     @MainActor
@@ -1566,22 +1974,25 @@ struct AppModelRefreshTests {
             [CredentialProfileEntry].self,
             from: Data(#"[{"profile":{"profile_id":"stale","harness_id":"codex","display_name":"Stale","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]"#.utf8))
 
-        let calls = AppRefreshCallCounter()
         let exactArrived = AppRefreshCallCounter()
         let newerArrived = AppRefreshCallCounter()
         let releaseExact = DispatchSemaphore(value: 0)
         let releaseNewer = DispatchSemaphore(value: 0)
         AppRequestStubURLProtocol.handler = { request in
-            guard request.url?.path == "/v2/credential-profiles",
-                  request.url?.query == "snapshot=true"
-            else { throw AppRefreshTestError.badRequest }
-            if calls.incrementAndGet() == 1 {
+            guard request.url?.path == "/v2/credential-profiles" else {
+                if request.url?.path == "/v2/global/events" {
+                    return (appResponse(for: request), Data())
+                }
+                throw AppRefreshTestError.badRequest
+            }
+            if request.url?.query == "snapshot=true" {
                 exactArrived.increment()
                 _ = releaseExact.wait(timeout: .now() + 5)
                 return (appResponse(for: request), appAccountsSnapshot(
                     profileID: "stale", displayName: "Retired stale",
                     observedAt: "2026-07-29T00:00:01Z"))
             }
+            guard request.url?.query == nil else { throw AppRefreshTestError.badRequest }
             newerArrived.increment()
             _ = releaseNewer.wait(timeout: .now() + 5)
             return (appResponse(for: request), appAccountsSnapshot(
@@ -1605,7 +2016,7 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
-    @Test func newerAccountsSuccessWinsWhenAnOlderSuccessCompletesLast() async throws {
+    @Test func concurrentFullAccountsRefreshesShareOneAtomicRequest() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -1632,14 +2043,11 @@ struct AppModelRefreshTests {
             guard request.url?.path == "/v2/credential-profiles",
                   request.url?.query == "snapshot=true"
             else { throw AppRefreshTestError.badRequest }
-            if calls.incrementAndGet() == 1 {
-                oldArrived.increment()
-                _ = releaseOld.wait(timeout: .now() + 5)
-                return (appResponse(for: request), appAccountsSnapshot(
-                    profileID: "old", displayName: "Old", observedAt: "2026-07-28T00:00:01Z"))
-            }
+            calls.increment()
+            oldArrived.increment()
+            _ = releaseOld.wait(timeout: .now() + 5)
             return (appResponse(for: request), appAccountsSnapshot(
-                profileID: "new", displayName: "New", observedAt: "2026-07-28T00:00:02Z"))
+                profileID: "shared", displayName: "Shared", observedAt: "2026-07-28T00:00:02Z"))
         }
 
         let older = Task { await model.refreshAccounts() }
@@ -1649,20 +2057,22 @@ struct AppModelRefreshTests {
             await Task.yield()
         }
         let newer = Task { await model.refreshAccounts() }
+        for _ in 0..<100 { await Task.yield() }
+        #expect(calls.count == 1)
+        releaseOld.signal()
         #expect(await newer.value == nil)
         try await waitForAppTest(observerArrived, message: "quota observer never started")
-        releaseOld.signal()
         #expect(await older.value == nil)
 
-        #expect(model.credentialProfiles.map(\.profile.profileId) == ["new"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("new") == true)
+        #expect(model.credentialProfiles.map(\.profile.profileId) == ["shared"])
+        #expect(model.harnessAccounts.first?.nextUp.isProfile("shared") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:02Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == true)
         #expect(model.activeAccountsLoadState == .loaded)
     }
 
     @MainActor
-    @Test func newerAccountsSuccessSurvivesAnOlderFailureCompletingLast() async throws {
+    @Test func concurrentFailedFullAccountsRefreshesShareOneFailure() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AppRequestStubURLProtocol.self]
@@ -1672,36 +2082,24 @@ struct AppModelRefreshTests {
         ), requestNotificationAuthorization: false)
         let calls = AppRefreshCallCounter()
         let oldArrived = AppRefreshCallCounter()
-        let observerArrived = AppRefreshCallCounter()
         let releaseOld = DispatchSemaphore(value: 0)
-        let releaseObserver = DispatchSemaphore(value: 0)
         defer {
             model.suspendAccountsQuotaObserver(at: .local, discardCursor: true)
             releaseOld.signal()
-            releaseObserver.signal()
         }
         AppRequestStubURLProtocol.handler = { request in
-            if request.url?.path == "/v2/global/events" {
-                observerArrived.increment()
-                _ = releaseObserver.wait(timeout: .now() + 5)
-                return (appResponse(for: request), Data())
-            }
             guard request.url?.path == "/v2/credential-profiles",
                   request.url?.query == "snapshot=true"
             else { throw AppRefreshTestError.badRequest }
-            if calls.incrementAndGet() == 1 {
-                oldArrived.increment()
-                _ = releaseOld.wait(timeout: .now() + 5)
-                return (
-                    HTTPURLResponse(
-                        url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
-                        headerFields: ["Content-Type": "application/json"]
-                    )!,
-                    Data(#"{"error":"old failed"}"#.utf8)
-                )
-            }
-            return (appResponse(for: request), appAccountsSnapshot(
-                profileID: "new", displayName: "New", observedAt: "2026-07-28T00:00:03Z"))
+            calls.increment()
+            oldArrived.increment()
+            _ = releaseOld.wait(timeout: .now() + 5)
+            return (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                Data(#"{"error":"shared failure"}"#.utf8))
         }
 
         let older = Task { await model.refreshAccounts() }
@@ -1711,16 +2109,18 @@ struct AppModelRefreshTests {
             await Task.yield()
         }
         let newer = Task { await model.refreshAccounts() }
-        #expect(await newer.value == nil)
-        try await waitForAppTest(observerArrived, message: "quota observer never started")
+        for _ in 0..<100 { await Task.yield() }
+        #expect(calls.count == 1)
         releaseOld.signal()
-        #expect(await older.value == nil)
+        let newerError = await newer.value
+        let olderError = await older.value
 
-        #expect(model.credentialProfiles.map(\.profile.profileId) == ["new"])
-        #expect(model.harnessReadinessFresh == true)
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("new") == true)
-        #expect(model.accountsNextUpAuthorityFresh[.local] == true)
-        #expect(model.activeAccountsLoadState == .loaded)
+        #expect(newerError == olderError)
+        #expect(newerError?.contains("shared failure") == true)
+        #expect(model.accountsNextUpAuthorityFresh[.local] == false)
+        if case .failed = model.activeAccountsLoadState {} else {
+            Issue.record("shared full failure must settle the foreground state")
+        }
     }
 
     @MainActor
@@ -1739,10 +2139,13 @@ struct AppModelRefreshTests {
 
         model.expireAccountsQuotaProjection(at: .local)
 
-        #expect(model.quotaResponse == nil)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:04Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.credentialProfiles.first?.identity?.email == "work@example.test")
         #expect(model.credentialProfiles.first?.status.verification == "passed")
+        if case .stale = model.activeAccountsQuotaDisplayState {} else {
+            Issue.record("quota invalidation must retain last-known values as stale")
+        }
     }
 
     @MainActor
@@ -1787,7 +2190,10 @@ struct AppModelRefreshTests {
 
         #expect(snapshotCalls.count == 0)
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
-        #expect(model.quotaResponse == nil)
+        #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:01Z")
+        if case .stale = model.activeAccountsQuotaDisplayState {} else {
+            Issue.record("lost dedicated cursor must keep last-known quota stale")
+        }
     }
 
     @MainActor
@@ -3050,27 +3456,33 @@ struct AppModelRefreshTests {
             routeProof: .unverified, attentionNote: nil, plan: [], activity: [],
             candidates: [], findings: [], diff: []
         )]
+        let snapshotArrived = AppRefreshCallCounter()
+        let releaseSnapshot = DispatchSemaphore(value: 0)
+        defer { releaseSnapshot.signal() }
         AppRequestStubURLProtocol.handler = { request in
             guard request.url?.path == "/v2/runs/run-delayed" else {
                 throw AppRefreshTestError.badRequest
             }
-            Thread.sleep(forTimeInterval: 0.18)
+            snapshotArrived.increment()
+            _ = releaseSnapshot.wait(timeout: .now() + 5)
             let json = #"{"summary":{"runId":"run-delayed","state":"running","mode":"agent","spendUsd":1},"lastSeq":10}"#
             return (appResponse(for: request), Data(json.utf8))
         }
 
         let load = Task { await model.loadRunDetail("run-delayed") }
-        try await Task.sleep(for: .milliseconds(20))
+        try await waitForAppTest(
+            snapshotArrived, message: "delayed detail snapshot never reached the stub")
         // The CASH disclosure (W4.3): cumulative, last-wins — the replayed
         // event is newer than the snapshot's spendUsd:1 and must overwrite it.
-        model.ingestStreamEnvelope(BusEnvelope(
+        model.apply(BusEnvelope(
             seq: 11, kind: "budget",
             event: .object([
                 "type": .string("budget.cash"),
                 "payload": .object(["cash_spend_usd": .number(2)])
             ])
         ), to: "run-delayed")
-        try await Task.sleep(for: .milliseconds(100))
+        #expect(model.deferredEnvelopes["run-delayed"]?.map(\.seq) == [11])
+        releaseSnapshot.signal()
         await load.value
 
         #expect(model.liveBoxes["run-delayed"]?.spendUsd == 2)

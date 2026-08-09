@@ -26,6 +26,27 @@ import Testing
         #expect(response.refreshedAt == "2026-07-15T10:00:01.000Z")
     }
 
+    @Test func quotaDecodesOptionalServerAvailabilityAndModelScopes() throws {
+        let response = try JSONDecoder().decode(ControlQuotaResponse.self, from: Data(#"""
+        {"snapshots":[{"subject":{"harness":"claude","credential_route":"vendor_native",
+          "plan_label":"max","subject_id":"work"},"constraints":[{"id":"weekly_fable",
+          "label":"Week","applies_to_models":["fable"],"used_ratio":1,
+          "window_seconds":604800,"resets_at":"2026-08-10T00:00:00Z","cooldown_until":null}],
+          "source":"claude_oauth_usage","observed_at":"2026-08-09T00:00:00Z","freshness":"fresh",
+          "availability":{"state":"available","blocking_constraints":[],"resets_at":null,
+          "model_scoped_exhaustions":[{"constraint_id":"weekly_fable",
+          "applies_to_models":["fable"],"resets_at":"2026-08-10T00:00:00Z"}]}}],
+          "absences":[],"refreshed_at":"2026-08-09T00:00:00Z"}
+        """#.utf8))
+
+        let snapshot = try #require(response.snapshots.first)
+        #expect(snapshot.constraints.first?.appliesToModels == ["fable"])
+        #expect(snapshot.availability?.state == "available")
+        #expect(snapshot.availability?.blockingConstraints.isEmpty == true)
+        #expect(snapshot.availability?.modelScopedExhaustions.first?.constraintId == "weekly_fable")
+        #expect(snapshot.availability?.modelScopedExhaustions.first?.appliesToModels == ["fable"])
+    }
+
     // Ф2 valuation fields (QA-023c): an UNKNOWN valuation stays absent and is
     // NEVER coerced to a fake $0; a KNOWN valuation surfaces.
     @Test func budgetSnapshotHonorsUnknownValuation() throws {

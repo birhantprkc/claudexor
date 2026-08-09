@@ -30,18 +30,30 @@ extension AppModel {
                 } catch let GatewayError.http(status, _)
                     where status == 400 || status == 409 || status == 410
                 {
+                    self.noteAccountsQuotaStreamFailure(
+                        at: locationID,
+                        reason: "Quota update cursor expired; showing last-known data.",
+                        invalidateNextUp: false)
                     guard self.isCurrentGateway(requestClient, at: locationID),
                           self.remoteGlobalStreamTokens[locationID] == token
                     else { break }
                     self.remoteGlobalEventCursors[locationID] = nil
                     await self.refreshRemoteThreads(locationID)
                 } catch is DecodingError {
+                    self.noteAccountsQuotaStreamFailure(
+                        at: locationID,
+                        reason: "Quota updates could not be decoded; showing last-known data.",
+                        invalidateNextUp: false)
                     guard self.isCurrentGateway(requestClient, at: locationID),
                           self.remoteGlobalStreamTokens[locationID] == token
                     else { break }
                     self.remoteGlobalEventCursors[locationID] = nil
                     await self.refreshRemoteThreads(locationID)
                 } catch GatewayError.decoding {
+                    self.noteAccountsQuotaStreamFailure(
+                        at: locationID,
+                        reason: "Quota updates could not be decoded; showing last-known data.",
+                        invalidateNextUp: false)
                     guard self.isCurrentGateway(requestClient, at: locationID),
                           self.remoteGlobalStreamTokens[locationID] == token
                     else { break }
@@ -49,6 +61,10 @@ extension AppModel {
                     await self.refreshRemoteThreads(locationID)
                 } catch {
                     if Task.isCancelled { break }
+                    self.noteAccountsQuotaStreamFailure(
+                        at: locationID,
+                        reason: "Quota update stream was interrupted; showing last-known data.",
+                        invalidateNextUp: false)
                 }
                 guard !Task.isCancelled,
                       self.isCurrentGateway(requestClient, at: locationID),
@@ -132,6 +148,11 @@ extension AppModel {
         requestClient: GatewayClient,
         streamToken: UUID
     ) async {
+        if event.type == Self.quotaProjectionMarker {
+            noteQuotaProjectionMarker(
+                at: locationID, invalidateNextUp: false, cursor: event.cursor)
+            return
+        }
         guard event.type == "thread.head.updated" else { return }
         await refreshRemoteThreads(locationID)
         guard isCurrentGateway(requestClient, at: locationID),
@@ -146,6 +167,8 @@ extension AppModel {
 
     func cancelRemoteStreams(_ locationID: ExecutionLocationID) {
         suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
+        retireAccountsRequests(at: locationID)
+        retireAccountsQuotaDisplayRequest(at: locationID, discardProjection: false)
         remoteGlobalStreamTokens.removeValue(forKey: locationID)
         remoteGlobalStreamTasks.removeValue(forKey: locationID)?.cancel()
         remoteGlobalEventCursors.removeValue(forKey: locationID)

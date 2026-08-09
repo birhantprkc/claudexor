@@ -19,8 +19,8 @@ extension AppModel {
     }
 
     /// Observe one complete Accounts snapshot from its server-authored cursor.
-    /// A quota marker or a lost/stale stream expires the derived quota + next_up
-    /// once. The explicit Accounts refresh is the only recovery owner.
+    /// This cursor is the sole owner of quota-derived `next_up` invalidation.
+    /// Display recovery is delegated to the subscriber-scoped cheap GET owner.
     func startAccountsQuotaObserver(
         at locationID: ExecutionLocationID,
         client requestClient: GatewayClient,
@@ -52,7 +52,6 @@ extension AppModel {
         client requestClient: GatewayClient,
         token: UUID
     ) async {
-        var expired = false
         do {
             for try await event in requestClient.globalEvents(
                 lastEventId: accountsQuotaEventCursors[locationID])
@@ -61,37 +60,34 @@ extension AppModel {
                     at: locationID, client: requestClient, token: token)
                 else { return }
                 accountsQuotaEventCursors[locationID] = event.cursor
-                if event.type == "quota.projection.updated" {
-                    expired = true
-                    break
+                if event.type == Self.quotaProjectionMarker {
+                    noteQuotaProjectionMarker(
+                        at: locationID,
+                        invalidateNextUp: true,
+                        cursor: event.cursor)
                 }
             }
-            // An unexpected EOF can hide a later marker just as surely as a
-            // stale cursor. Stop and require one explicit refresh.
             if accountsQuotaObserverIsCurrent(
                 at: locationID, client: requestClient, token: token)
             {
-                expired = true
+                noteAccountsQuotaStreamFailure(
+                    at: locationID,
+                    reason: "Quota update stream ended; showing last-known data.",
+                    invalidateNextUp: true)
             }
         } catch {
-            expired = accountsQuotaObserverIsCurrent(
+            if accountsQuotaObserverIsCurrent(
                 at: locationID, client: requestClient, token: token)
+            {
+                noteAccountsQuotaStreamFailure(
+                    at: locationID,
+                    reason: "Quota update stream was interrupted; showing last-known data.",
+                    invalidateNextUp: true)
+            }
         }
 
         guard accountsQuotaStreamTokens[locationID] == token else { return }
-        if expired { expireAccountsQuotaProjection(at: locationID) }
         accountsQuotaStreamTokens.removeValue(forKey: locationID)
         accountsQuotaStreamTasks.removeValue(forKey: locationID)
-    }
-
-    /// Profiles, Enabled, identity, and readiness remain valid. Only fields
-    /// derived from the quota epoch lose authority.
-    func expireAccountsQuotaProjection(at locationID: ExecutionLocationID) {
-        accountsNextUpAuthorityFresh[locationID] = false
-        if locationID == .local {
-            quotaResponse = nil
-        } else {
-            remoteQuotaResponses.removeValue(forKey: locationID)
-        }
     }
 }

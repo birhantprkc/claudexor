@@ -22,8 +22,33 @@ public enum QuotaPresentation {
         public let label: String
         public let usedRatio: Double?
         public let resetsAt: String?
+        /// Empty/nil is account-wide; a non-empty list is model-scoped.
+        public let appliesToModels: [String]?
         /// Freshness of the snapshot this window's FRESHEST copy came from.
         public let freshness: String
+    }
+
+    /// One server-declared model-scoped exhaustion. The renderer may label it,
+    /// but must not promote it to account-wide exhaustion.
+    public struct ScopedExhaustion: Identifiable, Equatable, Sendable {
+        public let constraintId: String
+        public let appliesToModels: [String]
+        public let resetsAt: String?
+        public var id: String {
+            "\(constraintId):\(appliesToModels.sorted().joined(separator: ","))"
+        }
+
+        public var scopeLabel: String {
+            QuotaPresentation.modelScopeLabel(appliesToModels)
+        }
+    }
+
+    /// A deterministic fold of every snapshot's server-authored availability.
+    /// No ratio is consulted to produce this value.
+    public struct Availability: Equatable, Sendable {
+        public let state: String
+        public let blockingConstraints: [String]
+        public let resetsAt: String?
     }
 
     /// Provenance line for the detail popover (one per contributing snapshot).
@@ -46,6 +71,8 @@ public enum QuotaPresentation {
         /// Freshness of the newest contributing snapshot (the chip's dot).
         public let freshness: String
         public let windows: [Window]
+        public let availability: Availability?
+        public let scopedExhaustions: [ScopedExhaustion]
         /// ACTIVE cooldown end (ISO), nil when none or already expired.
         public let cooldownUntil: String?
         public let sources: [Source]
@@ -63,6 +90,10 @@ public enum QuotaPresentation {
                 .compactMap { value in parseOffsetTimestamp(value).map { (value, $0) } }
                 .min { $0.1 < $1.1 }?.0
         }
+        /// True when every renderable usage window is model-scoped.
+        public var hasOnlyScopedWindows: Bool {
+            !windows.isEmpty && windows.allSatisfy { !($0.appliesToModels ?? []).isEmpty }
+        }
     }
 
     public static func groups(from snapshots: [QuotaSnapshot], now: Date = Date()) -> [Group] {
@@ -78,7 +109,29 @@ public enum QuotaPresentation {
             var seen = Set<String>()
             var cooldownEnd: Date?
             var cooldownRaw: String?
+            var availabilityStates: [String] = []
+            var blockingConstraints = Set<String>()
+            var availabilityResets: [(String, Date)] = []
+            var scopedByID: [String: ScopedExhaustion] = [:]
             for snapshot in ordered {
+                if let availability = snapshot.availability {
+                    availabilityStates.append(availability.state)
+                    blockingConstraints.formUnion(availability.blockingConstraints)
+                    if let reset = availability.resetsAt,
+                       let date = parseOffsetTimestamp(reset)
+                    {
+                        availabilityResets.append((reset, date))
+                    }
+                    for scoped in availability.modelScopedExhaustions {
+                        let value = ScopedExhaustion(
+                            constraintId: scoped.constraintId,
+                            appliesToModels: scoped.appliesToModels,
+                            resetsAt: scoped.resetsAt)
+                        // Newest snapshot wins an exact duplicate; distinct model
+                        // scopes remain visible and are sorted below.
+                        if scopedByID[value.id] == nil { scopedByID[value.id] = value }
+                    }
+                }
                 for constraint in snapshot.constraints {
                     if let until = constraint.cooldownUntil, let date = parseOffsetTimestamp(until) {
                         if date > now, date > (cooldownEnd ?? .distantPast) {
@@ -96,10 +149,17 @@ public enum QuotaPresentation {
                         label: constraint.label,
                         usedRatio: constraint.usedRatio,
                         resetsAt: constraint.resetsAt,
+                        appliesToModels: constraint.appliesToModels,
                         freshness: snapshot.freshness
                     ))
                 }
             }
+            let foldedAvailability: Availability? = availabilityStates.isEmpty ? nil : Availability(
+                state: availabilityStates.contains("exhausted")
+                    ? "exhausted"
+                    : availabilityStates.contains("cooldown") ? "cooldown" : "available",
+                blockingConstraints: blockingConstraints.sorted(),
+                resetsAt: availabilityResets.min { $0.1 < $1.1 }?.0)
             return Group(
                 harness: subject.harness,
                 credentialRoute: subject.credentialRoute,
@@ -107,6 +167,8 @@ public enum QuotaPresentation {
                 planLabel: ordered.compactMap(\.subject.planLabel).first,
                 freshness: ordered.first?.freshness ?? "unknown",
                 windows: windows,
+                availability: foldedAvailability,
+                scopedExhaustions: scopedByID.values.sorted { $0.id < $1.id },
                 cooldownUntil: cooldownRaw,
                 sources: ordered.map {
                     Source(source: $0.source, observedAt: $0.observedAt, freshness: $0.freshness)
@@ -121,6 +183,34 @@ public enum QuotaPresentation {
     private static func observedDate(_ snapshot: QuotaSnapshot) -> Date {
         parseOffsetTimestamp(snapshot.observedAt) ?? .distantPast
     }
+
+    public static func modelScopeLabel(_ models: [String]) -> String {
+        var labels = Array(Set(models.map(humanizeModelScope)))
+        // The server intentionally carries routing aliases together (for
+        // example fable + claude-fable-5 + best). Collapse a longer versioned
+        // alias when its shorter family label is present, and omit the generic
+        // `best` alias when a concrete family names the scope.
+        if labels.count > 1 {
+            labels.removeAll { $0.caseInsensitiveCompare("Best") == .orderedSame }
+        }
+        labels = labels.filter { candidate in
+            !labels.contains { other in
+                other != candidate
+                    && candidate.lowercased().hasPrefix(other.lowercased() + " ")
+            }
+        }.sorted()
+        if labels.count == 1, let label = labels.first { return "\(label) only" }
+        return labels.isEmpty ? "Scoped limits" : "\(labels.joined(separator: ", ")) only"
+    }
+}
+
+private func humanizeModelScope(_ raw: String) -> String {
+    let cleaned = raw
+        .replacingOccurrences(of: "claude-", with: "")
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return cleaned.isEmpty ? raw : cleaned.capitalized
 }
 
 /// One humanizer for every wire `credential_route` value (W17/W18 share it):
