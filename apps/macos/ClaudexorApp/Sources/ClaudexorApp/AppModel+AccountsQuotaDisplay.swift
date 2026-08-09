@@ -190,6 +190,19 @@ extension AppModel {
         quotaStatus = nil
     }
 
+    /// Commit an older composite request's display slice only while no newer
+    /// display owner has been admitted. Other slices from that composite
+    /// response have independent fences and may still commit.
+    func storeAccountsQuotaSnapshot(
+        _ response: ControlQuotaResponse,
+        at locationID: ExecutionLocationID,
+        ifDisplayGenerationIs expectedGeneration: UInt64
+    ) {
+        guard (accountsQuotaDisplayGenerations[locationID] ?? 0) == expectedGeneration
+        else { return }
+        storeAccountsQuotaSnapshot(response, at: locationID)
+    }
+
     func markAccountsQuotaDisplayStale(
         at locationID: ExecutionLocationID,
         reason: String

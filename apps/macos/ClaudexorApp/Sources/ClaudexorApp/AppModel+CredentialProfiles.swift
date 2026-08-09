@@ -20,11 +20,6 @@ extension AppModel {
         accountsLoadStates[activeExecutionLocation] ?? .idle
     }
 
-    var activeAccountsRegistryLoadState: ProjectionLoadState {
-        accountsRegistryLoadStates[activeExecutionLocation]
-            ?? (activeCredentialProfiles.isEmpty ? .idle : .loaded)
-    }
-
     var activeAccountsReadinessFresh: Bool {
         accountsReadinessAuthorityFresh[activeExecutionLocation] != false
     }
@@ -57,100 +52,6 @@ extension AppModel {
             if selectedExecutionLocation == locationID, selectedThreadId == id {
                 threadStatus = userMessage(for: error)
             }
-        }
-    }
-
-    /// Cached registry hydration (INV-135). Opening Accounts, connect, and
-    /// mutations use this lighter endpoint; it never performs the expensive
-    /// quota/provider snapshot and never claims atomic `next_up` authority.
-    func refreshCredentialProfiles(locationID: ExecutionLocationID? = nil) async {
-        _ = await loadCredentialProfiles(locationID: locationID)
-    }
-
-    /// Mount-time hydration is an ensure, not a refresh loop. A successfully
-    /// loaded empty registry is still loaded and will not refetch on every open.
-    func ensureCredentialProfilesLoaded(locationID: ExecutionLocationID? = nil) async {
-        let locationID = locationID ?? activeExecutionLocation
-        guard accountsRegistryLoadStates[locationID] == nil
-            || accountsRegistryLoadStates[locationID] == .idle
-        else { return }
-        _ = await loadCredentialProfiles(locationID: locationID)
-    }
-
-    /// Load credential profiles, returning the honest error on failure (batch-6
-    /// item h): the accounts surface distinguishes a config/load ERROR (typed
-    /// state + retry) from an EMPTY registry ("No accounts yet"). nil = loaded OK
-    /// (the arrays are updated); non-nil = the failure message (last snapshot kept).
-    @discardableResult
-    func loadCredentialProfiles(
-        locationID requestedLocationID: ExecutionLocationID? = nil,
-        discardOnFailure: Bool = false
-    ) async
-        -> String?
-    {
-        _ = discardOnFailure // Stable rows are always retained on hydration failure.
-        let locationID = requestedLocationID ?? activeExecutionLocation
-        if let inFlight = accountsRegistryLoadTasks[locationID] {
-            return await inFlight.value
-        }
-        guard let requestClient = gateway(for: locationID) else {
-            let message = "Engine offline — reconnect to load accounts."
-            accountsRegistryLoadStates[locationID] = .failed(message)
-            return message
-        }
-        accountsNextUpAuthorityFresh[locationID] = false
-        let generation = (accountsRegistryGenerations[locationID] ?? 0) &+ 1
-        accountsRegistryGenerations[locationID] = generation
-        let token = UUID()
-        accountsRegistryLoadTokens[locationID] = token
-        accountsRegistryLoadStates[locationID] = .loading
-        let task: Task<String?, Never> = Task { @MainActor [weak self] in
-            guard let self else { return Optional("Accounts stopped loading.") }
-            return await self.performAccountsRegistryHydration(
-                at: locationID,
-                client: requestClient,
-                generation: generation)
-        }
-        accountsRegistryLoadTasks[locationID] = task
-        let error = await task.value
-        guard accountsRegistryLoadTokens[locationID] == token else { return error }
-        accountsRegistryLoadTokens.removeValue(forKey: locationID)
-        accountsRegistryLoadTasks.removeValue(forKey: locationID)
-        if accountsRegistryGenerations[locationID] == generation {
-            accountsRegistryLoadStates[locationID] =
-                error.map(ProjectionLoadState.failed) ?? .loaded
-        }
-        return error
-    }
-
-    private func performAccountsRegistryHydration(
-        at locationID: ExecutionLocationID,
-        client requestClient: GatewayClient,
-        generation: UInt64
-    ) async -> String? {
-        do {
-            let response = try await requestClient.credentialProfiles()
-            guard accountsRegistryGenerations[locationID] == generation,
-                  isCurrentGateway(requestClient, at: locationID)
-            else { return nil }
-            storeCredentialProfiles(
-                response.profiles, harnessAccounts: response.harnessAccounts,
-                at: locationID)
-            // Plain responses contain an unfenced next_up. Keep its stable row
-            // fields, but never authorize routing from it.
-            accountsNextUpAuthorityFresh[locationID] = false
-            accountsReadinessAuthorityFresh[locationID] = true
-            if quotaResponse(at: locationID) == nil,
-               hasAccountsQuotaSubscribers(at: locationID)
-            {
-                scheduleAccountsQuotaDisplayHydration(at: locationID)
-            }
-            return nil
-        } catch {
-            guard accountsRegistryGenerations[locationID] == generation,
-                  isCurrentGateway(requestClient, at: locationID)
-            else { return nil }
-            return userMessage(for: error)
         }
     }
 
@@ -225,7 +126,13 @@ extension AppModel {
                         markHarnessReadinessStale: false)
                     return finish(response.profiles, registryCommitted, message)
                 }
-                storeAccountsQuotaSnapshot(quota, at: locationID)
+                // The atomic tuple still owns cursor/next_up/readiness, but a
+                // display-only GET admitted later owns the visible quota slice.
+                // Never regress that newer projection with this older request.
+                storeAccountsQuotaSnapshot(
+                    quota,
+                    at: locationID,
+                    ifDisplayGenerationIs: quotaDisplayGenerationAtStart)
                 rememberAccountsQuotaDisplayMarker(quotaEventCursor, at: locationID)
                 startAccountsQuotaObserver(
                     at: locationID, client: requestClient, after: quotaEventCursor)
@@ -448,6 +355,7 @@ extension AppModel {
 
         // A full refresh retires an older cached hydration. Its late response is
         // fenced by registryGeneration even if URL loading ignores cancellation.
+        accountsRegistryTrailingHydrations.remove(locationID)
         accountsRegistryLoadTokens.removeValue(forKey: locationID)
         accountsRegistryLoadTasks.removeValue(forKey: locationID)?.cancel()
         let registryGeneration = (accountsRegistryGenerations[locationID] ?? 0) &+ 1
@@ -522,6 +430,7 @@ extension AppModel {
             (accountsRegistryGenerations[locationID] ?? 0) &+ 1
         accountsRegistryLoadTokens.removeValue(forKey: locationID)
         accountsRegistryLoadTasks.removeValue(forKey: locationID)?.cancel()
+        accountsRegistryTrailingHydrations.remove(locationID)
         accountsRefreshGenerations[locationID] =
             (accountsRefreshGenerations[locationID] ?? 0) &+ 1
         accountsRefreshTaskTokens.removeValue(forKey: locationID)
@@ -553,141 +462,4 @@ extension AppModel {
         return harnessAccounts(for: harnessId)?.nextUp
     }
 
-    /// Toggle a credential profile's Enabled (V11b — the Enabled row of the
-    /// accounts symmetry). PATCHes the profile route, then reloads the projection
-    /// so Enabled/Active reflect wire truth. Returns a refusal string on failure.
-    @discardableResult
-    func setProfileEnabled(harnessId: String, profileId: String, enabled: Bool) async -> String? {
-        let locationID = activeExecutionLocation
-        accountsNextUpAuthorityFresh[locationID] = false
-        guard let requestClient = gateway(for: locationID) else {
-            return "Engine offline — reconnect to change the account."
-        }
-        do {
-            _ = try await requestClient.updateCredentialProfile(
-                harnessId: harnessId, profileId: profileId, enabled: enabled)
-            await refreshCredentialProfiles(locationID: locationID)
-            return nil
-        } catch {
-            await refreshCredentialProfiles(locationID: locationID)
-            return userMessage(for: error)
-        }
-    }
-
-    /// Toggle the native/CLI login's participation in a harness's credential
-    /// ladder (V11b — the CLI-login row's Enabled). Drives the per-harness
-    /// `native_credentials_enabled` via the settings PATCH surface; the save
-    /// answer IS the fresh snapshot (applied inside saveSettings, #20/D1), so
-    /// only the accounts projection reloads here. Returns nil on success.
-    @discardableResult
-    func setNativeCredentialsEnabled(harnessId: String, enabled: Bool) async -> String? {
-        let locationID = activeExecutionLocation
-        accountsNextUpAuthorityFresh[locationID] = false
-        let ok = await saveSettings(SettingsUpdateRequest(
-            harnesses: [harnessId: HarnessSettingsPatch(nativeCredentialsEnabled: enabled)]))
-        await refreshCredentialProfiles(locationID: locationID)
-        return ok ? nil : (settingsStatus ?? "Could not update the native login setting.")
-    }
-
-    /// Register a new credential profile (INV-135). On success the registry is
-    /// refreshed and the new entry returned so the accounts popover can offer its
-    /// login immediately. On failure the daemon's reason (409 duplicate id / 400
-    /// invalid slug or harness) is returned verbatim for inline display.
-    func createCredentialProfile(harnessId: String, profileId: String, displayName: String?) async
-        -> (entry: CredentialProfileEntry?, error: String?) {
-        let locationID = activeExecutionLocation
-        accountsNextUpAuthorityFresh[locationID] = false
-        guard let requestClient = gateway(for: locationID) else {
-            return (nil, "Engine offline — reconnect to add an account.")
-        }
-        do {
-            let entry = try await requestClient.createCredentialProfile(
-                CreateCredentialProfileRequest(harnessId: harnessId, profileId: profileId, displayName: displayName))
-            await refreshCredentialProfiles(locationID: locationID)
-            return (entry, nil)
-        } catch {
-            return (nil, userMessage(for: error))
-        }
-    }
-
-    /// Remove a credential profile (INV-135): the daemon deletes the registry
-    /// entry plus the profile's own credential material (scoped login dir /
-    /// namespaced secret; the default vendor store is untouchable). Returns the
-    /// daemon's reason on refusal (409 while a login job is active) and any
-    /// cleanup warning verbatim for inline display.
-    func deleteCredentialProfile(harnessId: String, profileId: String) async -> String? {
-        let locationID = activeExecutionLocation
-        accountsNextUpAuthorityFresh[locationID] = false
-        guard let requestClient = gateway(for: locationID) else {
-            return "Engine offline — reconnect to remove an account."
-        }
-        do {
-            let receipt = try await requestClient.deleteCredentialProfile(
-                harnessId: harnessId, profileId: profileId)
-            if draftCredentialProfileId == profileId {
-                draftCredentialProfileId = nil
-                if draftPrimaryHarness == harnessId { draftPrimaryHarness = nil }
-            }
-            await refreshCredentialProfiles(locationID: locationID)
-            if locationID == .local {
-                await refreshThreads()
-            } else {
-                await refreshRemoteThreads(locationID)
-            }
-            if let selectedThreadId {
-                await refreshOpenThread(
-                    locationID: locationID, id: selectedThreadId, mayReconnect: false)
-            }
-            return receipt.cleanupWarning
-        } catch {
-            return userMessage(for: error)
-        }
-    }
-
-
-    // MARK: Auto-switch-at-quota (batch-6 item b)
-
-    /// The harnesses the auto-switch toggle targets: config_dir_login families
-    /// with a SECOND account registered (native login + ≥1 profile = 2+ rotatable
-    /// identities). A single-account harness cannot rotate, so it is excluded —
-    /// the old hardcoded [claude, codex] set patched harnesses that had nothing to
-    /// switch to (owner: "renders but doesn't activate").
-    var autoBalanceHarnessIds: [String] {
-        AccountsAutoBalance.eligibleHarnessIds(
-            profileHarnessIds: activeCredentialProfiles.map(\.profile.harnessId))
-    }
-
-    /// Aggregated auto-switch state across the eligible harnesses. `mixed` (they
-    /// disagree) renders as "—"; `unavailable` (no 2nd account anywhere) disables
-    /// the toggle. Reads the per-harness `profile_limit_action` from settings.
-    var autoBalanceState: AccountsAutoBalance.State {
-        if let pending = autoBalanceOverride {
-            // While a save round-trips, reflect the optimistic choice — but only
-            // when there is actually an eligible harness to have set.
-            return autoBalanceHarnessIds.isEmpty ? .unavailable : (pending ? .on : .off)
-        }
-        let actions = autoBalanceHarnessIds.map {
-            activeSettingsSnapshot?.harnesses?[$0]?.profileLimitAction ?? "fail"
-        }
-        return AccountsAutoBalance.state(actions: actions)
-    }
-
-    /// Flip auto-switch for every eligible harness at once (on = rotate, off =
-    /// fail), so a mixed state resolves to a single consistent choice.
-    func setAutoBalance(_ on: Bool) async {
-        // ON sets rotate on every eligible harness. OFF only downgrades harnesses
-        // currently on "rotate" — a hand-configured "ask" is not auto-switch, so
-        // the toggle must not erase it.
-        let patch = Dictionary(uniqueKeysWithValues: autoBalanceHarnessIds.compactMap {
-            id -> (String, HarnessSettingsPatch)? in
-            let current = activeSettingsSnapshot?.harnesses?[id]?.profileLimitAction ?? "fail"
-            if on { return current == "rotate" ? nil : (id, HarnessSettingsPatch(profileLimitAction: "rotate")) }
-            return current == "rotate" ? (id, HarnessSettingsPatch(profileLimitAction: "fail")) : nil
-        })
-        guard !patch.isEmpty else { return }
-        accountsNextUpAuthorityFresh[activeExecutionLocation] = false
-        autoBalanceOverride = on
-        defer { autoBalanceOverride = nil }
-        _ = await saveSettings(SettingsUpdateRequest(harnesses: patch))
-    }
 }

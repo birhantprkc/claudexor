@@ -492,6 +492,104 @@ struct AppModelRefreshTests {
     }
 
     @MainActor
+    @Test func laterLocalDisplayHydrationWinsAnOlderSuccessfulFullRefresh() async throws {
+        try await assertLaterDisplayHydrationWinsSuccessfulFull(
+            at: .local, port: 41141)
+    }
+
+    @MainActor
+    @Test func laterRemoteDisplayHydrationWinsAnOlderSuccessfulFullRefresh() async throws {
+        try await assertLaterDisplayHydrationWinsSuccessfulFull(
+            at: .remote(UUID()), port: 41142)
+    }
+
+    @MainActor
+    private func assertLaterDisplayHydrationWinsSuccessfulFull(
+        at locationID: ExecutionLocationID,
+        port: Int
+    ) async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let requestClient = appTestGateway(port: port)
+        let model = AppModel(
+            client: locationID == .local ? requestClient : nil,
+            requestNotificationAuthorization: false)
+        if locationID != .local {
+            model.remoteClients[locationID] = requestClient
+            model.draftExecutionLocation = locationID
+        }
+        let quotaCalls = AppRefreshCallCounter()
+        let fullArrived = AppRefreshCallCounter()
+        let releaseFull = DispatchSemaphore(value: 0)
+        let releaseObserver = DispatchSemaphore(value: 0)
+        defer {
+            model.suspendAccountsQuotaObserver(at: locationID, discardCursor: true)
+            releaseFull.signal()
+            releaseObserver.signal()
+        }
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.url?.path, request.url?.query) {
+            case ("/v2/quota", _):
+                let call = quotaCalls.incrementAndGet()
+                return (appResponse(for: request), appQuotaResponse(
+                    subjectID: "display-\(call)",
+                    observedAt: call == 1
+                        ? "2026-08-09T00:00:01Z" : "2026-08-09T00:00:03Z"))
+            case ("/v2/credential-profiles", "snapshot=true"):
+                fullArrived.increment()
+                _ = releaseFull.wait(timeout: .now() + 5)
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "work", displayName: "Work",
+                    observedAt: "2026-08-09T00:00:02Z",
+                    quotaEventCursor: "quota:atomic-old"))
+            case ("/v2/global/events", _):
+                _ = releaseObserver.wait(timeout: .now() + 5)
+                return (appResponse(for: request), Data())
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let subscription = model.beginAccountsQuotaSubscription(locationID: locationID)
+        defer { model.endAccountsQuotaSubscription(subscription) }
+        try await waitForAppTest(
+            { quotaCalls.count == 1 && model.accountsQuotaDisplayTasks[locationID] == nil },
+            message: "initial display hydration never settled")
+
+        let full = Task { await model.refreshAccounts(locationID: locationID) }
+        try await waitForAppTest(fullArrived, message: "older full refresh never started")
+        model.noteQuotaProjectionMarker(
+            at: locationID, invalidateNextUp: false, cursor: "quota:newer")
+        try await waitForAppTest(
+            {
+                quotaCalls.count == 2
+                    && model.accountsQuotaDisplayTasks[locationID] == nil
+                    && model.quotaResponse(at: locationID)?.refreshedAt
+                        == "2026-08-09T00:00:03Z"
+            },
+            message: "newer display hydration never committed")
+
+        releaseFull.signal()
+        #expect(await full.value == nil)
+        #expect(model.quotaResponse(at: locationID)?.refreshedAt
+            == "2026-08-09T00:00:03Z")
+        #expect(model.accountsQuotaDisplayStates[locationID]
+            == .current(observedAt: "2026-08-09T00:00:03Z"))
+        #expect(model.accountsQuotaEventCursors[locationID] == "quota:atomic-old")
+        #expect(model.accountsNextUpAuthorityFresh[locationID] == true)
+        #expect(model.accountsReadinessAuthorityFresh[locationID] == true)
+
+        // The dedicated observer may replay the already-seen newer marker from
+        // the full snapshot's older cursor. Dedupe suppresses another display
+        // GET, but the dedicated owner still expires quota-derived next_up.
+        model.noteQuotaProjectionMarker(
+            at: locationID, invalidateNextUp: true, cursor: "quota:newer")
+        #expect(quotaCalls.count == 2)
+        #expect(model.quotaResponse(at: locationID)?.refreshedAt
+            == "2026-08-09T00:00:03Z")
+        #expect(model.accountsNextUpAuthorityFresh[locationID] == false)
+    }
+
+    @MainActor
     @Test func firstRegistryHydrationNeverPresentsColdFailureAsEmpty() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
         let model = AppModel(
@@ -516,6 +614,108 @@ struct AppModelRefreshTests {
         let error = await hydration.value
         #expect(error != nil)
         #expect(model.activeAccountsRegistryLoadState == .failed(error!))
+    }
+
+    @MainActor
+    @Test func successfulLocalMutationFencesAPreMutationRegistryRead() async throws {
+        try await assertSuccessfulMutationFencesRegistryRead(
+            at: .local, port: 41143)
+    }
+
+    @MainActor
+    @Test func successfulRemoteMutationFencesAPreMutationRegistryRead() async throws {
+        try await assertSuccessfulMutationFencesRegistryRead(
+            at: .remote(UUID()), port: 41144)
+    }
+
+    @MainActor
+    private func assertSuccessfulMutationFencesRegistryRead(
+        at locationID: ExecutionLocationID,
+        port: Int
+    ) async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let requestClient = appTestGateway(port: port)
+        let model = AppModel(
+            client: locationID == .local ? requestClient : nil,
+            requestNotificationAuthorization: false)
+        if locationID != .local {
+            model.remoteClients[locationID] = requestClient
+            model.draftExecutionLocation = locationID
+        }
+        let seed = try JSONDecoder().decode(
+            CredentialProfilesResponse.self,
+            from: appAccountsSnapshot(
+                profileID: "work", displayName: "Seed",
+                observedAt: "2026-08-09T00:00:00Z", profileEnabled: false))
+        model.storeCredentialProfiles(
+            seed.profiles, harnessAccounts: seed.harnessAccounts, at: locationID)
+
+        let registryCalls = AppRefreshCallCounter()
+        let firstArrived = AppRefreshCallCounter()
+        let secondArrived = AppRefreshCallCounter()
+        let patchArrived = AppRefreshCallCounter()
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let releaseSecond = DispatchSemaphore(value: 0)
+        defer { releaseFirst.signal(); releaseSecond.signal() }
+        AppRequestStubURLProtocol.handler = { request in
+            if request.httpMethod == "GET",
+               request.url?.path == "/v2/credential-profiles",
+               request.url?.query == nil
+            {
+                let call = registryCalls.incrementAndGet()
+                if call == 1 {
+                    firstArrived.increment()
+                    _ = releaseFirst.wait(timeout: .now() + 5)
+                } else {
+                    secondArrived.increment()
+                    _ = releaseSecond.wait(timeout: .now() + 5)
+                }
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "work",
+                    displayName: call == 1 ? "Pre-mutation" : "Post-mutation",
+                    observedAt: "2026-08-09T00:00:0\(call)Z",
+                    profileEnabled: call != 2))
+            }
+            if request.httpMethod == "PATCH",
+               request.url?.path == "/v2/credential-profiles/claude/work"
+            {
+                patchArrived.increment()
+                let json = #"{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":false},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}"#
+                return (appResponse(for: request), Data(json.utf8))
+            }
+            throw AppRefreshTestError.badRequest
+        }
+
+        let oldHydration = Task { await model.loadCredentialProfiles(locationID: locationID) }
+        try await waitForAppTest(firstArrived, message: "pre-mutation registry GET never started")
+        let mutation = Task {
+            await model.setProfileEnabled(
+                harnessId: "claude", profileId: "work", enabled: false)
+        }
+        try await waitForAppTest(
+            {
+                patchArrived.count == 1
+                    && model.accountsRegistryTrailingHydrations.contains(locationID)
+            },
+            message: "successful mutation did not request a trailing hydration")
+
+        releaseFirst.signal()
+        try await waitForAppTest(secondArrived, message: "post-mutation registry GET never started")
+        let profilesBeforePostMutationRead = locationID == .local
+            ? model.credentialProfiles
+            : (model.remoteCredentialProfiles[locationID] ?? [])
+        #expect(profilesBeforePostMutationRead.first?.profile.enabled == false)
+        releaseSecond.signal()
+
+        #expect(await oldHydration.value == nil)
+        #expect(await mutation.value == nil)
+        #expect(registryCalls.count == 2)
+        let profilesAfterPostMutationRead = locationID == .local
+            ? model.credentialProfiles
+            : (model.remoteCredentialProfiles[locationID] ?? [])
+        #expect(profilesAfterPostMutationRead.first?.profile.enabled == false)
+        #expect(model.accountsRegistryLoadStates[locationID] == .loaded)
+        #expect(model.accountsRegistryLoadTasks[locationID] == nil)
     }
 
     @MainActor
@@ -4480,13 +4680,14 @@ private func appAccountsSnapshot(
     profileID: String,
     displayName: String,
     observedAt: String,
+    profileEnabled: Bool = true,
     nativeEnabled: Bool = true,
     quotaEventCursor: String = "quota-snapshot-cursor"
 ) -> Data {
     Data("""
     {"profiles":[{"profile":{"profile_id":"\(profileID)","harness_id":"claude",
       "display_name":"\(displayName)","credential_kind":"config_dir_login",
-      "isolation_locator":null,"enabled":true},"status":{"availability":"available",
+      "isolation_locator":null,"enabled":\(profileEnabled)},"status":{"availability":"available",
       "verification":"passed","detail":null,"last_verified_at":null},
       "identity":{"email":"\(profileID)@example.test","plan":"max"}}],
       "harnessAccounts":[{"harness_id":"claude",
