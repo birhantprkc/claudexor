@@ -238,4 +238,36 @@ describe("DurableJournal", () => {
     expect(reopened.records()[100]?.payload).toMatchObject({ index: 100 });
     reopened.close();
   });
+
+  it("reopens a compacted grown history without spreading records over the call stack", () => {
+    const logicalRecordCount = 176_345;
+    const journal = openJournal();
+    const internals = journal as unknown as {
+      entries: Array<{ time: string; type: string; payload: unknown }>;
+      knownFileBytes: number;
+    };
+    for (let index = 0; index < logicalRecordCount; index += 1) {
+      internals.entries.push({
+        time: "2026-01-01T00:00:00.000Z",
+        type: "grown.history",
+        payload: { index },
+      });
+    }
+    // The production trigger is a physically grown journal. Setting only the
+    // size comparison avoids manufacturing 176k fsynced frames in this unit
+    // test while exercising the exact compact + replay logical-record paths.
+    internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
+
+    expect(journal.compact()).toMatchObject({ records: logicalRecordCount });
+    expect(journal.currentSequence()).toBe(logicalRecordCount);
+    journal.close();
+
+    const reopened = openJournal();
+    expect(reopened.state().status).toBe("ready");
+    expect(reopened.currentSequence()).toBe(logicalRecordCount);
+    expect(reopened.records(logicalRecordCount - 1)[0]?.payload).toEqual({
+      index: logicalRecordCount - 1,
+    });
+    reopened.close();
+  });
 });

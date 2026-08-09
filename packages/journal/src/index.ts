@@ -238,10 +238,9 @@ export class DurableJournal {
     closeSync(this.fd);
     this.fd = openSync(this.path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
     const frameHash = frame.subarray(frame.length - HASH_BYTES).toString("hex");
-    this.entries.splice(
-      0,
-      this.entries.length,
-      ...logical.map((record, index) => ({
+    this.entries.length = 0;
+    for (const [index, record] of logical.entries()) {
+      this.entries.push({
         partition: this.options.partition,
         epoch,
         seq: index + 1,
@@ -251,8 +250,8 @@ export class DurableJournal {
         type: record.type,
         payload: cloneJson(record.payload),
         byteOffset: 0,
-      })),
-    );
+      });
+    }
     this.epoch = epoch;
     this.nextSeq = logical.length + 1;
     this.previousFrameHash = frameHash;
@@ -335,7 +334,7 @@ export class DurableJournal {
       );
       throw new JournalAppendUncertainError(recovery, { cause: error });
     }
-    this.entries.push(...batch.records);
+    for (const record of batch.records) this.entries.push(record);
     this.nextSeq = batch.nextSeq;
     this.previousFrameHash = batch.previousFrameHash;
     this.knownFileBytes += batch.bytes.length;
@@ -379,7 +378,7 @@ export class DurableJournal {
       this.requireRecovery(decoded.error.offset, decoded.error.reason);
       return;
     }
-    this.entries.push(...decoded.records);
+    for (const record of decoded.records) this.entries.push(record);
     const last = this.entries.at(-1);
     if (last) {
       this.epoch = last.epoch;

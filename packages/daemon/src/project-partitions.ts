@@ -321,7 +321,7 @@ export class ProjectPartitions implements CommandAuthority {
         });
         continue;
       }
-      threads.push(...entry.threads.current().listThreads());
+      for (const thread of entry.threads.current().listThreads()) threads.push(thread);
     }
     threads.sort((a, b) =>
       a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
