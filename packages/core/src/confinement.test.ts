@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -22,16 +22,24 @@ const darwin = process.platform === "darwin";
  * holding the daemon token, a vendor-credential root beside it, a scoped harness
  * home inside it, an `.ssh` store, and a worktree.
  */
-function scaffold(): { base: string; input: ConfinementInput; token: string; sshKey: string } {
+function scaffold(): {
+  base: string;
+  input: ConfinementInput;
+  token: string;
+  sshKey: string;
+  codexHome: string;
+} {
   const base = mkdtempSync(join(tmpdir(), "cxi-confinement-"));
   const operatorHome = join(base, "home");
   const runtimeRoot = join(operatorHome, ".claudexor");
   const nativeStateRoot = join(runtimeRoot, "native");
+  // The production CODEX_HOME shape: a vendor directory INSIDE the native root.
+  const codexHome = join(nativeStateRoot, "codex");
   const scopedHome = join(runtimeRoot, "projects", "abc", "workspaces", "a01", "home");
   const worktree = join(operatorHome, "project");
   for (const dir of [
     join(runtimeRoot, "daemon"),
-    nativeStateRoot,
+    codexHome,
     scopedHome,
     worktree,
     join(operatorHome, ".ssh"),
@@ -50,6 +58,7 @@ function scaffold(): { base: string; input: ConfinementInput; token: string; ssh
     base,
     token,
     sshKey,
+    codexHome,
     input: { operatorHome, runtimeRoot, nativeStateRoot, scopedHome, worktree },
   };
 }
@@ -63,6 +72,20 @@ function readUnder(profile: string, path: string): number | null {
 
 function writeUnder(profile: string, path: string): number | null {
   return spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/usr/bin/touch", path], {
+    encoding: "utf8",
+  }).status;
+}
+
+/** Canonicalize a path INSIDE the profile — `realpath(3)`, the same libc walk as Rust `fs::canonicalize`. */
+function canonicalizeUnder(profile: string, path: string): number | null {
+  return spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/realpath", path], {
+    encoding: "utf8",
+  }).status;
+}
+
+/** List a directory INSIDE the profile: readdir is a DATA read on the directory. */
+function listUnder(profile: string, path: string): number | null {
+  return spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/ls", path], {
     encoding: "utf8",
   }).status;
 }
@@ -132,6 +155,75 @@ describe("confinement profile", () => {
   it.runIf(darwin)("denies writes into the operator home outside the run's own roots", () => {
     const profile = buildConfinementProfile(fixture.input);
     expect(writeUnder(profile, join(fixture.input.operatorHome, "planted"))).not.toBe(0);
+  });
+});
+
+/**
+ * The codex-startup regression (2026-08-10, live): codex canonicalizes its
+ * CODEX_HOME (`fs::canonicalize` = `realpath(3)`), which lstat/readlinks every
+ * INTERMEDIATE path component. The own-roots allow covers the native root's
+ * subtree, but the components between the runtime root and the native root
+ * matched the read deny — EPERM, `failed to canonicalize CODEX_HOME`, and every
+ * mutating delegated codex run crashed within seconds. The profile now carries
+ * a literal, metadata-only allowance for exactly that ancestor chain.
+ */
+describe("metadata traversal carve-out for the native state root", () => {
+  const fixture = scaffold();
+  afterAll(() => rmSync(fixture.base, { recursive: true, force: true }));
+  const res = (path: string): string => realpathSync.native(path);
+
+  it("emits literal metadata allows for the denied ancestors, between the read deny and the own-roots allow", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    const lines = profile.split("\n");
+    const deny = lines.findIndex((line) => line.startsWith("(deny file-read* "));
+    const meta = lines.findIndex((line) => line.startsWith("(allow file-read-metadata "));
+    const own = lines.findIndex((line) => line.startsWith("(allow file-read* file-write* "));
+    // SBPL is last-match-wins: the metadata allow must FOLLOW the deny it
+    // punches through, and the own-roots allow must stay last.
+    expect(deny).toBeGreaterThanOrEqual(0);
+    expect(meta).toBeGreaterThan(deny);
+    expect(own).toBeGreaterThan(meta);
+    expect(own).toBe(lines.length - 2);
+    // literal, never subpath: metadata of the directory entry itself, nothing under it.
+    expect(lines[meta]).toBe(
+      `(allow file-read-metadata (literal ${JSON.stringify(res(fixture.input.runtimeRoot))}))`,
+    );
+    expect(lines[meta]).not.toContain("subpath");
+  });
+
+  it("walks every intermediate directory for a deeper native root", () => {
+    const deepNative = join(fixture.input.runtimeRoot, "native", "vendors", "codex-deep");
+    mkdirSync(deepNative, { recursive: true });
+    const profile = buildConfinementProfile({ ...fixture.input, nativeStateRoot: deepNative });
+    const meta = profile.split("\n").find((line) => line.startsWith("(allow file-read-metadata "));
+    expect(meta).toBe(
+      "(allow file-read-metadata " +
+        `(literal ${JSON.stringify(res(join(fixture.input.runtimeRoot, "native", "vendors")))}) ` +
+        `(literal ${JSON.stringify(res(join(fixture.input.runtimeRoot, "native")))}) ` +
+        `(literal ${JSON.stringify(res(fixture.input.runtimeRoot))}))`,
+    );
+  });
+
+  it("emits no carve-out when the native root is not inside the runtime root", () => {
+    const outside = join(fixture.base, "native-outside");
+    mkdirSync(outside, { recursive: true });
+    const profile = buildConfinementProfile({ ...fixture.input, nativeStateRoot: outside });
+    expect(profile).not.toContain("file-read-metadata");
+  });
+
+  it.runIf(darwin)("lets a confined child canonicalize CODEX_HOME, the codex startup path", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    expect(canonicalizeUnder(profile, fixture.codexHome)).toBe(0);
+    expect(canonicalizeUnder(profile, fixture.input.nativeStateRoot)).toBe(0);
+  });
+
+  it.runIf(darwin)("does not re-open data reads or listings under the runtime root", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    // File DATA inside the daemon dir stays denied.
+    expect(readUnder(profile, fixture.token)).not.toBe(0);
+    // readdir is a data read on the DIRECTORY, not metadata: listing stays denied.
+    expect(listUnder(profile, fixture.input.runtimeRoot)).not.toBe(0);
+    expect(listUnder(profile, join(fixture.input.runtimeRoot, "daemon"))).not.toBe(0);
   });
 });
 

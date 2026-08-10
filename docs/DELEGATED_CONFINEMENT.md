@@ -133,6 +133,8 @@ matches resolved paths (`/tmp` is `/private/tmp`).
 (allow default)                       ; nothing is restricted that §3 does not name
 (deny file-read*  <claudexor runtime root + operator credential stores, from the
                    sensitive-resource owner — one directive, every subpath>)
+(allow file-read-metadata <the native root's intermediate directories, LITERAL each,
+                           dirname(native root) up to and including the runtime root>) ; §7.1
 (deny file-write* <system prefixes: /usr /opt /Library /Applications /System /bin /sbin /etc /var>)
 (allow file-write* <TMPDIR>, /private/tmp)
 (deny file-write* <operator real home>)
@@ -140,12 +142,34 @@ matches resolved paths (`/tmp` is `/private/tmp`).
                               <native vendor state root>)   ; see §8, one directive
 ```
 
-SBPL is last-match-wins, so this ORDER IS THE POLICY, not presentation. Two placements carry
+SBPL is last-match-wins, so this ORDER IS THE POLICY, not presentation. Three placements carry
 weight. The run's own roots come last because they must outrank every deny above them —
 including the case where the worktree lives inside the operator's home (`isolation: live`,
-which is exactly the delegated shape). And the scratch allow deliberately sits ABOVE the
+which is exactly the delegated shape). The scratch allow deliberately sits ABOVE the
 operator-home deny, not below it: a `TMPDIR` configured inside `$HOME` would otherwise re-open
-the whole home for writing.
+the whole home for writing. And the metadata allowance sits directly AFTER the read deny it
+punches through — see §7.1.
+
+### 7.1 The metadata traversal carve-out (canonicalize semantics)
+
+codex calls Rust `fs::canonicalize` — libc `realpath(3)` — on its `CODEX_HOME`
+(`<runtime root>/native/codex`) at startup, which lstat/readlinks every INTERMEDIATE path
+component. The own-roots allow re-opens the native root's SUBTREE, but the components between
+the runtime root and the native root (`<runtime root>` itself, and any directory between it and
+the native root) still matched the read deny. Result, measured live 2026-08-10: EPERM,
+`codex exited with code 1: failed to canonicalize CODEX_HOME`, within seconds, on 100% of
+mutating delegated codex runs. Readonly/ask runs survived only because they get no confinement
+at all, and claude survived because it never canonicalizes its home at startup.
+
+The carve-out is deliberately the narrowest thing that fixes this: `file-read-metadata` on the
+LITERAL resolved path of exactly those intermediate directories (`dirname(native root)` walking
+up to and including the runtime root — usually just the runtime root itself). Metadata means
+stat/readlink/getattrlist of the directory entry: enough for `realpath(3)` to walk through. It
+does NOT re-open file data anywhere under the runtime root, and it does NOT allow listing the
+runtime root's contents — readdir is a data read on the directory, not metadata — both of which
+the tests assert under a real `sandbox-exec`. The probe semantics are unchanged: the boundary is
+still verified by reading the first denied path (`<runtime root>/daemon`), whose data read and
+listing both stay denied.
 
 Stated plainly, because it is the consequence operators actually hit: **a `TMPDIR` inside
 `$HOME` is NOT writable under this policy** — the later home deny wins — unless that path also

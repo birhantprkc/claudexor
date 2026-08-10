@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import type { HarnessConfinement } from "@claudexor/schema";
 import { sensitiveResourcePolicy, sha256 } from "@claudexor/util";
 import { ConfinementUnavailableError } from "./errors.js";
@@ -127,6 +127,39 @@ function subpath(paths: readonly string[]): string {
   return paths.map((path) => `(subpath ${JSON.stringify(resolved(path))})`).join(" ");
 }
 
+function literal(paths: readonly string[]): string {
+  return paths.map((path) => `(literal ${JSON.stringify(resolved(path))})`).join(" ");
+}
+
+/**
+ * The strict ancestors of the native state root that lie INSIDE the denied
+ * runtime root: `dirname(nativeStateRoot)` walking up to and including
+ * `runtimeRoot` itself.
+ *
+ * WHY THESE NEED A METADATA CARVE-OUT. codex calls Rust `fs::canonicalize`
+ * (= `realpath(3)`) on its `CODEX_HOME` at startup, which lstat/readlinks every
+ * intermediate path component. The own-roots allow re-opens the native root's
+ * SUBTREE, but the components BETWEEN the runtime root and the native root
+ * still match the runtime-root read deny — so the child dies with EPERM
+ * (`failed to canonicalize CODEX_HOME`) before it runs a single turn. These
+ * directories get `file-read-metadata` on the LITERAL path only: stat/readlink
+ * of the directory entry itself, never the data of any file under the runtime
+ * root and never a directory listing (readdir is a data read on the directory).
+ */
+function nativeStateTraversalAncestors(input: ConfinementInput): string[] {
+  const root = resolved(input.runtimeRoot);
+  const chain: string[] = [];
+  let current = dirname(resolved(input.nativeStateRoot));
+  while (contains(root, current)) {
+    chain.push(current);
+    if (current === root) break;
+    const parent = dirname(current);
+    if (parent === current) break; // filesystem root; cannot ascend further
+    current = parent;
+  }
+  return chain;
+}
+
 /**
  * The paths this profile must make unreadable. Also the probe surface: the
  * boundary is verified by trying to read the FIRST of them.
@@ -154,16 +187,22 @@ const SEATBELT: ConfinementMechanism = {
   /** SBPL text. Last match wins, so the carve-outs follow the denies. */
   buildProfile(input) {
     const scratch = input.tmpDir ?? process.env.TMPDIR ?? "/tmp";
+    const traversal = nativeStateTraversalAncestors(input);
     // SBPL is last-match-wins, and the order below is the policy. The scratch
     // allow sits ABOVE the operator-home deny on purpose: a `TMPDIR` configured
     // inside `$HOME` would otherwise re-open the whole home for writing. The run's
     // own roots come last because they outrank every deny above them, including
     // the case where the worktree lives inside the operator's home (isolation:
-    // live, which is exactly the delegated shape).
+    // live, which is exactly the delegated shape). The metadata carve-out sits
+    // directly AFTER the read deny it punches through: literal-only stat/readlink
+    // on the native root's intermediate directories, so `realpath(CODEX_HOME)`
+    // works while file data and directory listings under the runtime root stay
+    // denied — see nativeStateTraversalAncestors.
     return [
       "(version 1)",
       "(allow default)",
       `(deny file-read* ${subpath(confinementDeniedReadPaths(input))})`,
+      ...(traversal.length ? [`(allow file-read-metadata ${literal(traversal)})`] : []),
       `(deny file-write* ${subpath([...SYSTEM_WRITE_DENY])})`,
       `(allow file-write* ${subpath([scratch, "/tmp"])})`,
       `(deny file-write* ${subpath([input.operatorHome])})`,
