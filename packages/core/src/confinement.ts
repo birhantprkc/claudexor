@@ -4,6 +4,7 @@ import { dirname, join, relative, sep } from "node:path";
 import type { HarnessConfinement } from "@claudexor/schema";
 import { sensitiveResourcePolicy, sha256 } from "@claudexor/util";
 import { ConfinementUnavailableError } from "./errors.js";
+import { managedNodeRoot } from "./runtime-env.js";
 
 /**
  * OS-enforced filesystem confinement for a delegated harness process.
@@ -161,6 +162,38 @@ function nativeStateTraversalAncestors(input: ConfinementInput): string[] {
 }
 
 /**
+ * The managed toolchain subtree (`<operator home>/.claudexor/node` — the Node
+ * distribution plus the pinned vendor CLI shims), WHEN it lies inside the
+ * denied runtime root. Null when it does not — nothing denies it there, so a
+ * carve-out would be a no-op, mirroring the native-root pattern above.
+ *
+ * WHY THIS NEEDS A READ+EXEC CARVE-OUT. In the DEFAULT layout the runtime
+ * root IS `~/.claudexor`, so the very binaries the spawn layer resolves for
+ * the child (`~/.claudexor/node/bin/codex`, the `node` that runs them, their
+ * `lib/node_modules` payloads) sit inside the read-denied tree — and exec IS
+ * a read: the kernel refuses execvp of a binary the profile makes unreadable.
+ * Measured live in the 3.3.15 VM battery (default config, phase 13):
+ * `sandbox-exec: execvp() of '<runtime root>/node/bin/codex' failed:
+ * Operation not permitted`, exit 71, before the harness ran an instruction.
+ * The development-host smoke missed it because scratch mode relocates the
+ * config root, putting the toolchain outside the denied tree.
+ *
+ * The subtree holds no secrets (a Node distribution and CLI shims), so it
+ * gets a full `file-read*` allow — data, metadata and listings — which is
+ * what execvp, `#!/usr/bin/env node` shim resolution and the CLI's own
+ * resource loads need. It does NOT re-open writes: the later operator-home
+ * write deny still covers the toolchain, so a confined child cannot trojan
+ * the shims the operator's own daemon executes. The path is derived from the
+ * same helper the launcher's PATH producer uses (`managedNodeRoot`), keyed on
+ * the operator home — the anchor `composeBaseEnv` resolves binaries against —
+ * so the profile and the spawn layer cannot drift apart.
+ */
+function managedToolchainSubtree(input: ConfinementInput): string | null {
+  const toolchain = managedNodeRoot(input.operatorHome);
+  return contains(input.runtimeRoot, toolchain) ? toolchain : null;
+}
+
+/**
  * The paths this profile must make unreadable. Also the probe surface: the
  * boundary is verified by trying to read the FIRST of them.
  */
@@ -188,21 +221,27 @@ const SEATBELT: ConfinementMechanism = {
   buildProfile(input) {
     const scratch = input.tmpDir ?? process.env.TMPDIR ?? "/tmp";
     const traversal = nativeStateTraversalAncestors(input);
+    const toolchain = managedToolchainSubtree(input);
     // SBPL is last-match-wins, and the order below is the policy. The scratch
     // allow sits ABOVE the operator-home deny on purpose: a `TMPDIR` configured
     // inside `$HOME` would otherwise re-open the whole home for writing. The run's
     // own roots come last because they outrank every deny above them, including
     // the case where the worktree lives inside the operator's home (isolation:
-    // live, which is exactly the delegated shape). The metadata carve-out sits
-    // directly AFTER the read deny it punches through: literal-only stat/readlink
+    // live, which is exactly the delegated shape). The two read carve-outs sit
+    // directly AFTER the read deny they punch through, and BEFORE the write
+    // section so neither can outrank a write deny: literal-only stat/readlink
     // on the native root's intermediate directories, so `realpath(CODEX_HOME)`
     // works while file data and directory listings under the runtime root stay
-    // denied — see nativeStateTraversalAncestors.
+    // denied (see nativeStateTraversalAncestors); then a full read allow on the
+    // managed toolchain subtree, so the child can exec the very binaries the
+    // spawn layer resolved for it (see managedToolchainSubtree). Writes to the
+    // toolchain stay denied by the operator-home deny below.
     return [
       "(version 1)",
       "(allow default)",
       `(deny file-read* ${subpath(confinementDeniedReadPaths(input))})`,
       ...(traversal.length ? [`(allow file-read-metadata ${literal(traversal)})`] : []),
+      ...(toolchain ? [`(allow file-read* ${subpath([toolchain])})`] : []),
       `(deny file-write* ${subpath([...SYSTEM_WRITE_DENY])})`,
       `(allow file-write* ${subpath([scratch, "/tmp"])})`,
       `(deny file-write* ${subpath([input.operatorHome])})`,

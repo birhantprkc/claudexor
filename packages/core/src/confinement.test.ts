@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -19,8 +27,9 @@ const darwin = process.platform === "darwin";
 
 /**
  * A fake operator home laid out like the real one: a Claudexor runtime tree
- * holding the daemon token, a vendor-credential root beside it, a scoped harness
- * home inside it, an `.ssh` store, and a worktree.
+ * holding the daemon token, a vendor-credential root beside it, the managed
+ * toolchain (`node/bin` shims + `node/lib` payloads), a scoped harness home
+ * inside it, an `.ssh` store, and a worktree.
  */
 function scaffold(): {
   base: string;
@@ -28,6 +37,7 @@ function scaffold(): {
   token: string;
   sshKey: string;
   codexHome: string;
+  toolchainBin: string;
 } {
   const base = mkdtempSync(join(tmpdir(), "cxi-confinement-"));
   const operatorHome = join(base, "home");
@@ -37,11 +47,13 @@ function scaffold(): {
   const codexHome = join(nativeStateRoot, "codex");
   const scopedHome = join(runtimeRoot, "projects", "abc", "workspaces", "a01", "home");
   const worktree = join(operatorHome, "project");
+  const toolchainBin = join(runtimeRoot, "node", "bin");
   for (const dir of [
     join(runtimeRoot, "daemon"),
     codexHome,
     scopedHome,
     worktree,
+    toolchainBin,
     join(operatorHome, ".ssh"),
     join(runtimeRoot, "projects", "other-project"),
   ]) {
@@ -59,6 +71,7 @@ function scaffold(): {
     token,
     sshKey,
     codexHome,
+    toolchainBin,
     input: { operatorHome, runtimeRoot, nativeStateRoot, scopedHome, worktree },
   };
 }
@@ -88,6 +101,19 @@ function listUnder(profile: string, path: string): number | null {
   return spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/ls", path], {
     encoding: "utf8",
   }).status;
+}
+
+/**
+ * Execute a binary INSIDE the profile, the way the spawn layer starts the
+ * harness child: sandbox-exec itself execvp's the target, so a read-denied
+ * executable fails before the program runs a single instruction.
+ */
+function execUnder(
+  profile: string,
+  path: string,
+): { status: number | null; stdout: string; stderr: string } {
+  const run = spawnSync("/usr/bin/sandbox-exec", ["-p", profile, path], { encoding: "utf8" });
+  return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
 }
 
 /**
@@ -224,6 +250,111 @@ describe("metadata traversal carve-out for the native state root", () => {
     // readdir is a data read on the DIRECTORY, not metadata: listing stays denied.
     expect(listUnder(profile, fixture.input.runtimeRoot)).not.toBe(0);
     expect(listUnder(profile, join(fixture.input.runtimeRoot, "daemon"))).not.toBe(0);
+  });
+});
+
+/**
+ * The codex-startup regression's SECOND half (2026-08-10, VM battery phase 13,
+ * default config): in the default layout the managed toolchain lives INSIDE the
+ * runtime root (`~/.claudexor/node`), and exec is a read — sandbox-exec's
+ * execvp of `<runtime root>/node/bin/codex` died with `Operation not
+ * permitted` (exit 71) before the harness ran an instruction. The metadata
+ * carve-out above fixed only realpath traversal, not binary exec. The profile
+ * now carries a full read allow on exactly that subtree; everything else under
+ * the runtime root stays denied.
+ */
+describe("managed toolchain exec carve-out", () => {
+  const fixture = scaffold();
+  afterAll(() => rmSync(fixture.base, { recursive: true, force: true }));
+  const res = (path: string): string => realpathSync.native(path);
+
+  // The production `bin/codex` shape: a relative symlink into
+  // `lib/node_modules/**` whose target is what execvp actually reads.
+  const libBin = join(fixture.input.runtimeRoot, "node", "lib", "node_modules", "probe", "bin");
+  mkdirSync(libBin, { recursive: true });
+  const shimTarget = join(libBin, "probe.js");
+  writeFileSync(shimTarget, "#!/bin/sh\necho shim-ok\n", { mode: 0o755 });
+  const shim = join(fixture.toolchainBin, "probe");
+  symlinkSync(join("..", "lib", "node_modules", "probe", "bin", "probe.js"), shim);
+
+  it("emits a subpath read allow on the node root, between the metadata carve-out and the write section", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    const lines = profile.split("\n");
+    const deny = lines.findIndex((line) => line.startsWith("(deny file-read* "));
+    const meta = lines.findIndex((line) => line.startsWith("(allow file-read-metadata "));
+    const tool = lines.findIndex((line) => line.startsWith("(allow file-read* (subpath"));
+    const firstWriteDeny = lines.findIndex((line) => line.startsWith("(deny file-write* "));
+    const own = lines.findIndex((line) => line.startsWith("(allow file-read* file-write* "));
+    // Placement is policy: the allow must FOLLOW the read deny it punches
+    // through (last-match-wins), sit with the other read carve-out, and stay
+    // BEFORE the write section so it can never outrank a write deny.
+    expect(deny).toBeGreaterThanOrEqual(0);
+    expect(tool).toBeGreaterThan(meta);
+    expect(meta).toBeGreaterThan(deny);
+    expect(firstWriteDeny).toBeGreaterThan(tool);
+    expect(own).toBe(lines.length - 2);
+    // subpath, never literal: exec needs the shims, the node binary AND the
+    // lib/ payloads they resolve to. Derived from the launcher's own helper.
+    expect(lines[tool]).toBe(
+      `(allow file-read* (subpath ${JSON.stringify(res(join(fixture.input.runtimeRoot, "node")))}))`,
+    );
+  });
+
+  it("emits no toolchain carve-out when the runtime root does not contain the toolchain", () => {
+    // The CLAUDEXOR_CONFIG_DIR shape: the override IS the runtime root while
+    // the toolchain stays HOME-anchored outside it. Nothing denies it there,
+    // so nothing is carved out — allow-default already covers it, mirroring
+    // the native-root traversal pattern.
+    const overrideRoot = join(fixture.base, "override-root");
+    mkdirSync(join(overrideRoot, "daemon"), { recursive: true });
+    const profile = buildConfinementProfile({
+      ...fixture.input,
+      runtimeRoot: overrideRoot,
+      nativeStateRoot: join(overrideRoot, "native"),
+    });
+    expect(profile.split("\n").some((line) => line.startsWith("(allow file-read* (subpath"))).toBe(
+      false,
+    );
+  });
+
+  it.runIf(darwin)(
+    "lets a confined child execute the managed toolchain (the phase-13 shape)",
+    () => {
+      const profile = buildConfinementProfile(fixture.input);
+      // Through the shim symlink — exactly how the spawn layer starts codex.
+      const viaShim = execUnder(profile, shim);
+      expect(viaShim.status).toBe(0);
+      expect(viaShim.stdout).toContain("shim-ok");
+      // And the resolved target directly: the lib/ payload is readable too.
+      const direct = execUnder(profile, shimTarget);
+      expect(direct.status).toBe(0);
+    },
+  );
+
+  it.runIf(darwin)("keeps exec denied everywhere else under the runtime root", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    // The same executable bytes planted OUTSIDE the toolchain subtree must
+    // stay unrunnable: the carve-out is the node root, not a general reopen.
+    const planted = join(fixture.input.runtimeRoot, "daemon", "planted");
+    writeFileSync(planted, "#!/bin/sh\necho must-not-print\n", { mode: 0o755 });
+    const denied = execUnder(profile, planted);
+    expect(denied.status).not.toBe(0);
+    expect(denied.stderr).toMatch(/Operation not permitted/);
+  });
+
+  it.runIf(darwin)("does not weaken the boundary around the toolchain grant", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    // The token's DATA stays denied, and the runtime root still cannot be listed.
+    expect(readUnder(profile, fixture.token)).not.toBe(0);
+    expect(listUnder(profile, fixture.input.runtimeRoot)).not.toBe(0);
+    expect(listUnder(profile, join(fixture.input.runtimeRoot, "daemon"))).not.toBe(0);
+    // The toolchain stays UNWRITABLE (the operator-home write deny outranks the
+    // read allow): a confined child cannot trojan the shims the operator's own
+    // daemon executes.
+    expect(writeUnder(profile, join(fixture.toolchainBin, "trojan"))).not.toBe(0);
+    // The disclosed grant, stated two-sidedly: the toolchain subtree itself is
+    // readable and listable — it holds a Node distribution, not secrets.
+    expect(listUnder(profile, fixture.toolchainBin)).toBe(0);
   });
 });
 

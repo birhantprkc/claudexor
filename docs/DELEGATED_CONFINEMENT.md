@@ -135,6 +135,8 @@ matches resolved paths (`/tmp` is `/private/tmp`).
                    sensitive-resource owner — one directive, every subpath>)
 (allow file-read-metadata <the native root's intermediate directories, LITERAL each,
                            dirname(native root) up to and including the runtime root>) ; §7.1
+(allow file-read* <managed toolchain root, SUBPATH — only when it lies inside the
+                   runtime root>)                                                      ; §7.2
 (deny file-write* <system prefixes: /usr /opt /Library /Applications /System /bin /sbin /etc /var>)
 (allow file-write* <TMPDIR>, /private/tmp)
 (deny file-write* <operator real home>)
@@ -147,8 +149,9 @@ weight. The run's own roots come last because they must outrank every deny above
 including the case where the worktree lives inside the operator's home (`isolation: live`,
 which is exactly the delegated shape). The scratch allow deliberately sits ABOVE the
 operator-home deny, not below it: a `TMPDIR` configured inside `$HOME` would otherwise re-open
-the whole home for writing. And the metadata allowance sits directly AFTER the read deny it
-punches through — see §7.1.
+the whole home for writing. And the two read carve-outs sit directly AFTER the read deny they
+punch through, BEFORE the write section, so neither can outrank a write deny — see §7.1 and
+§7.2.
 
 ### 7.1 The metadata traversal carve-out (canonicalize semantics)
 
@@ -177,6 +180,37 @@ Stated plainly, because it is the consequence operators actually hit: **a `TMPDI
 `$HOME` is NOT writable under this policy** — the later home deny wins — unless that path also
 falls inside one of the run's own roots. The macOS default (`/private/var/folders/…`) is
 outside `$HOME` and is unaffected.
+
+### 7.2 The managed-toolchain exec carve-out
+
+In the DEFAULT layout the managed toolchain — the Node distribution Claudexor installs plus
+the pinned vendor CLI shims — lives at `~/.claudexor/node`, INSIDE the runtime root the policy
+denies. Exec is a read: the kernel must read the binary to execvp it, so the read deny made the
+very binaries the spawn layer resolves for the child unrunnable. Measured live in the 3.3.15 VM
+battery (default config, phase 13): `sandbox-exec: execvp() of
+'<operator home>/.claudexor/node/bin/codex' failed: Operation not permitted`, exit 71, before
+the harness ran a single instruction. §7.1's metadata allowance did not cover this — stat of a
+path is not read of its bytes — and the development-host smoke missed it because scratch mode
+relocates the config root, putting the toolchain outside the denied tree.
+
+What is opened: `file-read*` on the SUBPATH of the managed toolchain root — data, metadata and
+listings for the whole subtree, because execvp reads the shim, the `#!/usr/bin/env node`
+interpreter line resolves the `node` binary beside it, and the shims are symlinks into
+`lib/node_modules/**` payloads the CLI then loads. The subtree holds a Node distribution and
+CLI shims; no secrets live there. The path is derived from the same helper the spawn layer's
+PATH producer uses (`managedNodeRoot` in `packages/core/src/runtime-env.ts`), anchored on the
+operator home, so the profile and the launcher cannot drift apart.
+
+What stays denied: everything else under the runtime root — the daemon directory and token
+data, directory listings of the runtime root itself, other projects' state — and WRITES to the
+toolchain: the later operator-home write deny still covers it, so a confined child cannot
+trojan the shims the operator's own daemon executes. An executable planted anywhere else under
+the runtime root stays unrunnable; the tests pin both directions under a real `sandbox-exec`.
+
+When the toolchain lies OUTSIDE the runtime root (the `CLAUDEXOR_CONFIG_DIR` override shape:
+the override relocates the runtime root, never the HOME-anchored toolchain), no carve-out is
+emitted — nothing denies the toolchain there, and `(allow default)` already covers it,
+mirroring the native-root traversal pattern of §7.1.
 
 There is no second policy. On every other platform `confinement_mechanism` is null,
 `confinement_verified_denied_path` is null, and `confinement_unavailable_reason` says why.

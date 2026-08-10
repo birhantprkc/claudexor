@@ -59,6 +59,22 @@ function dirIsGroupOrWorldWritable(dir: string): boolean {
 }
 
 /**
+ * The managed toolchain root under `home`: the notarized Node distribution
+ * Claudexor installs plus the pinned vendor CLI shims (`<home>/.claudexor/node`
+ * — `bin/codex`, `bin/claude`, the `node` that runs them, and their
+ * `lib/node_modules` payloads). ONE spelling, shared by the harness PATH
+ * producer below and the delegated confinement's exec carve-out
+ * (`packages/core/src/confinement.ts`): the launcher resolving a binary from
+ * here and the sandbox profile allowing its exec must never drift apart.
+ * Deliberately HOME-anchored, not config-dir-anchored — a
+ * `CLAUDEXOR_CONFIG_DIR` override relocates the runtime root, never the
+ * installed toolchain.
+ */
+export function managedNodeRoot(home: string): string {
+  return join(home, ".claudexor", "node");
+}
+
+/**
  * Single producer for the PATH every local harness discovery/run surface should
  * use. Surfaces may still inherit other env vars, but binary resolution must not
  * depend on whether the daemon was launched from a GUI app, login shell, or CLI.
@@ -82,7 +98,7 @@ export function normalizedHarnessPath(
     ...(source.CLAUDEXOR_REMOTE_RUNTIME === "1"
       ? [join(home, ".claudexor", "remote", "vendor", "bin")]
       : []),
-    join(home, ".claudexor", "node", "bin"),
+    join(managedNodeRoot(home), "bin"),
     join(home, ".local", "bin"),
     join(home, ".npm-global", "bin"),
     join(home, ".bun", "bin"),

@@ -14,6 +14,14 @@ Release history for Claudexor. The current version is declared in the root
   ancestor chain, placed after the deny it traverses. File data under the
   runtime root — including the daemon token — and directory listings (readdir
   is a data read) stay denied, and the boundary-probe semantics are unchanged.
+  The profile also grants read+exec on the managed toolchain subtree
+  (`~/.claudexor/node` — subpath, derived from the launcher's own
+  `managedNodeRoot` helper, emitted only when it lies inside the runtime
+  root): in the default layout the harness binaries live inside the denied
+  tree, and the VM battery's phase 13 proved exec of
+  `<runtime root>/node/bin/codex` died with `sandbox-exec: execvp() …
+  Operation not permitted` (exit 71); toolchain writes and everything else
+  under the runtime root stay denied.
   Two-sided `sandbox-exec` tests pin both directions, and the real-harness
   battery gains phase 13: a live delegated mutating codex run under the OS
   boundary with per-candidate confinement evidence.
