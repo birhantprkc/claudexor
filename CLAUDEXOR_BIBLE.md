@@ -710,6 +710,10 @@ invariant or owner decision before proceeding.
   Operator addendum 2026-08-07: the same-family `xhigh` Sol tier is admitted
   after the live subagent catalog exposed only that tier; it restores the
   original high-assurance Sol level without permitting another model family.
+  Operator addendum 2026-08-10, owner-ratified the same day: the same-family
+  `high` Fable tier is admitted after the live subagent catalog exposed only
+  that Fable tier; the ratification is recorded verbatim in the CHECKLISTS
+  protocol decision trail and the 3.3.15 release evidence.
   Slot artifacts are the reviewer's complete report plus exact-shape metadata
   — model slug, ISO start/finish intervals, verdict, the mandatory
   `review_scope: "full"`, report SHA-256 — sealed against the packet; real

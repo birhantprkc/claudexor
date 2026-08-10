@@ -502,9 +502,9 @@ repository context that small review packets lost.
 > after the live subagent catalog exposed only that tier; the 2026-08-10
 > operator addendum likewise admits the same-family `high` Fable tier after
 > the live catalog exposed only that Fable tier — ratified explicitly by the
-> owner the same day («согласен с рекомендацией», 2026-08-10 ~20:46 MSK,
-> after the constitutional gap was surfaced); no other family is
-> admitted. Each slot's sealed artifact is its markdown report plus metadata
+> owner the same day (verbatim «согласен с рекоментадцией. Продолжай»,
+> 2026-08-10 ~20:46 MSK, after the constitutional gap was surfaced); no other
+> family is admitted. Each slot's sealed artifact is its markdown report plus metadata
 > (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
 > mandatory `review_scope: "full"`, report SHA-256), and the two executions
 > must genuinely overlap. The slot metadata — model, intervals, verdict,

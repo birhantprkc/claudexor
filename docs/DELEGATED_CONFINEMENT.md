@@ -153,7 +153,7 @@ punches through — see §7.1.
 ### 7.1 The metadata traversal carve-out (canonicalize semantics)
 
 codex calls Rust `fs::canonicalize` — libc `realpath(3)` — on its `CODEX_HOME`
-(`<runtime root>/native/codex`) at startup, which lstat/readlinks every INTERMEDIATE path
+(`<runtime root>/v3/native/codex` in the default layout) at startup, which lstat/readlinks every INTERMEDIATE path
 component. The own-roots allow re-opens the native root's SUBTREE, but the components between
 the runtime root and the native root (`<runtime root>` itself, and any directory between it and
 the native root) still matched the read deny. Result, measured live 2026-08-10: EPERM,
@@ -163,7 +163,9 @@ at all, and claude survived because it never canonicalizes its home at startup.
 
 The carve-out is deliberately the narrowest thing that fixes this: `file-read-metadata` on the
 LITERAL resolved path of exactly those intermediate directories (`dirname(native root)` walking
-up to and including the runtime root — usually just the runtime root itself). Metadata means
+up to and including the runtime root — two literals in the default layout, `<runtime root>/v3`
+and `<runtime root>`; a `CLAUDEXOR_CONFIG_DIR` override collapses the chain to the runtime root
+itself). Metadata means
 stat/readlink/getattrlist of the directory entry: enough for `realpath(3)` to walk through. It
 does NOT re-open file data anywhere under the runtime root, and it does NOT allow listing the
 runtime root's contents — readdir is a data read on the directory, not metadata — both of which

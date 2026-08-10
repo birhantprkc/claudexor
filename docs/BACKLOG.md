@@ -593,3 +593,18 @@ authoritative for each exact disposition.
   previously crashed even earlier at codex startup) and no current consumer
   exercises the combination — battery phase 9 (belt, unconfined) and phase 13
   (confined, no belt) bracket it without covering it.
+
+## 3.3.15 formal-review advisories
+
+- A first traversal ancestor whose directory name itself begins with the two
+  characters `..` (e.g. `/runtime/..vendor/native`) is rejected by
+  `contains()` and therefore omitted from the metadata carve-out chain, so
+  canonicalization through such a layout would still fail. Unreachable through
+  the default roots; tighten `contains()` to reject only the parent forms
+  (`..`, `../…`) at the next confinement touch.
+- Scoped-home ancestors get no metadata carve-out: a future harness that
+  canonicalizes its scoped `$HOME` at startup would hit the same EPERM class
+  the CODEX_HOME fix closed. Unreachable today (codex canonicalizes only
+  CODEX_HOME; claude does not canonicalize at startup); the failure direction
+  is a loud crash, never a weakened boundary. Extend the ancestor chain to the
+  scoped home when a real harness pulls the requirement.
