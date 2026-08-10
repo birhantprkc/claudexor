@@ -681,7 +681,8 @@ invariant or owner decision before proceeding.
 - **INV-125** Release tags additionally pass the owner-review gate: ONE
   parallel full-context wave on the frozen candidate SHA with EXACTLY two
   required reviewers — the fable slot on one slug from the owner-approved
-  tier set {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`}
+  tier set {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`,
+  `claude-fable-5-thinking-high`}
   and the sol slot on one slug from {`gpt-5.6-sol-xhigh`,
   `gpt-5.6-sol-max`, `gpt-5.6-sol-medium`},
   both executed as the Cursor operator's

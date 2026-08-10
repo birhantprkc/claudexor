@@ -151,7 +151,11 @@ describe("operator owner-review publishing contract", () => {
     expect(OWNER_REVIEW_PANEL).toEqual([
       {
         slot: "fable",
-        allowedModels: ["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"],
+        allowedModels: [
+          "claude-fable-5-thinking-max",
+          "claude-fable-5-thinking-medium",
+          "claude-fable-5-thinking-high",
+        ],
       },
       {
         slot: "sol",

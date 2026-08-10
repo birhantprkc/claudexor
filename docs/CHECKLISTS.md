@@ -488,7 +488,8 @@ repository context that small review packets lost.
 > reviewer pair executes as **Cursor operator subagents**, not as native
 > Claude Code/Cursor CLI runs through Claudexor: slot `fable` = one slug from
 > the owner-approved tier set {`claude-fable-5-thinking-max`,
-> `claude-fable-5-thinking-medium`} with the full context, slot `sol` = one
+> `claude-fable-5-thinking-medium`, `claude-fable-5-thinking-high`} with the
+> full context, slot `sol` = one
 > slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
 > `gpt-5.6-sol-medium`}. The tier sets are an
 > operator decision of 2026-08-06 ~08:29 MSK under the owner authorization of
@@ -498,7 +499,9 @@ repository context that small review packets lost.
 > formal pair on a frozen SHA. The actually used slug is recorded in the
 > slot metadata and the signed entry; a slug outside the slot's set refuses
 > fail-closed. The 2026-08-07 operator addendum admits the same-family `xhigh` Sol tier
-> after the live subagent catalog exposed only that tier; no other family is
+> after the live subagent catalog exposed only that tier; the 2026-08-10
+> operator addendum likewise admits the same-family `high` Fable tier after
+> the live catalog exposed only that Fable tier; no other family is
 > admitted. Each slot's sealed artifact is its markdown report plus metadata
 > (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
 > mandatory `review_scope: "full"`, report SHA-256), and the two executions
@@ -526,7 +529,8 @@ repository context that small review packets lost.
   full-context reviewers, executed as Cursor operator subagents per the
   owner-approved panel (`OWNER_REVIEW_PANEL` in
   `scripts/lib/release-review-contract.mjs`): slot `fable` = one slug from
-  {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`}, slot
+  {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`,
+  `claude-fable-5-thinking-high`}, slot
   `sol` = one slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
   `gpt-5.6-sol-medium`}. Each
   reviewer receives the complete Git-visible candidate repository, complete

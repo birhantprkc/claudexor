@@ -54,7 +54,11 @@ export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS = 1_000;
 export const OWNER_REVIEW_PANEL = Object.freeze([
   Object.freeze({
     slot: "fable",
-    allowedModels: Object.freeze(["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"]),
+    allowedModels: Object.freeze([
+      "claude-fable-5-thinking-max",
+      "claude-fable-5-thinking-medium",
+      "claude-fable-5-thinking-high",
+    ]),
   }),
   Object.freeze({
     slot: "sol",

@@ -18,7 +18,11 @@ export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS: 1000;
 export const OWNER_REVIEW_PANEL: readonly [
   Readonly<{
     slot: "fable";
-    allowedModels: readonly ["claude-fable-5-thinking-max", "claude-fable-5-thinking-medium"];
+    allowedModels: readonly [
+      "claude-fable-5-thinking-max",
+      "claude-fable-5-thinking-medium",
+      "claude-fable-5-thinking-high",
+    ];
   }>,
   Readonly<{
     slot: "sol";

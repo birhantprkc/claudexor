@@ -118,11 +118,13 @@ SHA/tree/version, exact `pnpm release:verify` receipt, sealed evidence
 manifest/diff/wave, and exactly two operator reviewer reports (owner decision
 2026-08-06: the pair runs as Cursor operator subagents — slot `fable` = one
 slug from the owner-approved tier set {`claude-fable-5-thinking-max`,
-`claude-fable-5-thinking-medium`} with the full context, slot `sol` = one slug
+`claude-fable-5-thinking-medium`, `claude-fable-5-thinking-high`} with the
+full context, slot `sol` = one slug
 from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`, `gpt-5.6-sol-medium`};
 operator decision 2026-08-06 ~08:29 after two subagent-model catalog flaps
 within one hour, amended 2026-08-07 when the catalog exposed only the
-same-family `xhigh` Sol tier). The sealer
+same-family `xhigh` Sol tier and 2026-08-10 when it exposed only the
+same-family `high` Fable tier). The sealer
 recomputes every evidence and report digest,
 requires each slot's metadata to bind the exact packet identity, a model slug
 inside the slot's owner-approved tier set (the actually used slug is what gets
