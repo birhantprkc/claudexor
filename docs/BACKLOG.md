@@ -578,3 +578,18 @@ authoritative for each exact disposition.
   rather than excluding user work, and Claudexor-generated artifact filenames
   do not use this shape. Keep this as parser-hardening backlog rather than
   widening the 3.3.14 correction batch.
+
+## 3.3.15 pre-release immune scan
+
+- The legal `execution.delegated: true` + `delegate: true` combination injects
+  the delegation belt into a seatbelt-confined process tree whose profile
+  denies the belt's on-disk daemon-token read, so every belt tool call fails
+  loudly mid-run (`BELT_DAEMON_LOST`) instead of degrading at preflight. The
+  failure is statically knowable at request time: resolve a typed
+  `confinement_incompatible` degradation in the delegation preflight (continue
+  as ordinary Agent with durable requested/effective/reason facts, INV-030
+  shape) or hand the belt a non-filesystem token route. Loud typed failure,
+  honest terminal, no secret exposure; pre-existing before 3.3.15 (the shape
+  previously crashed even earlier at codex startup) and no current consumer
+  exercises the combination — battery phase 9 (belt, unconfined) and phase 13
+  (confined, no belt) bracket it without covering it.

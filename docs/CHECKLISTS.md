@@ -501,7 +501,9 @@ repository context that small review packets lost.
 > fail-closed. The 2026-08-07 operator addendum admits the same-family `xhigh` Sol tier
 > after the live subagent catalog exposed only that tier; the 2026-08-10
 > operator addendum likewise admits the same-family `high` Fable tier after
-> the live catalog exposed only that Fable tier; no other family is
+> the live catalog exposed only that Fable tier — ratified explicitly by the
+> owner the same day («согласен с рекомендацией», 2026-08-10 ~20:46 MSK,
+> after the constitutional gap was surfaced); no other family is
 > admitted. Each slot's sealed artifact is its markdown report plus metadata
 > (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
 > mandatory `review_scope: "full"`, report SHA-256), and the two executions
