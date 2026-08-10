@@ -1,5 +1,25 @@
 # @claudexor/orchestrator
 
+## 3.3.15
+
+### Patch Changes
+
+- @claudexor/arbitration@3.3.15
+- @claudexor/artifact-store@3.3.15
+- @claudexor/budget@3.3.15
+- @claudexor/config@3.3.15
+- @claudexor/context@3.3.15
+- @claudexor/core@3.3.15
+- @claudexor/delivery@3.3.15
+- @claudexor/event-log@3.3.15
+- @claudexor/gateway@3.3.15
+- @claudexor/policy@3.3.15
+- @claudexor/review@3.3.15
+- @claudexor/schema@3.3.15
+- @claudexor/synthesis@3.3.15
+- @claudexor/util@3.3.15
+- @claudexor/workspace@3.3.15
+
 ## 3.3.14
 
 ### Patch Changes

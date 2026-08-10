@@ -3,6 +3,21 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.15** (2026-08-10) — Mutating delegated codex runs work again on
+  macOS. Codex canonicalizes its `CODEX_HOME` at startup, and the Seatbelt
+  profile's runtime-root read deny covered the intermediate path components
+  between the runtime root and the allowed native state root, so every
+  confined `workspace_write` codex run died in seconds with `failed to
+  canonicalize CODEX_HOME … Operation not permitted`
+  (`route.transient.exhausted: process_crash`). The profile now grants a
+  literal, metadata-only (`file-read-metadata`) allowance for exactly that
+  ancestor chain, placed after the deny it traverses. File data under the
+  runtime root — including the daemon token — and directory listings (readdir
+  is a data read) stay denied, and the boundary-probe semantics are unchanged.
+  Two-sided `sandbox-exec` tests pin both directions, and the real-harness
+  battery gains phase 13: a live delegated mutating codex run under the OS
+  boundary with per-candidate confinement evidence.
+
 - **v3.3.14** (2026-08-09) — Accounts and quota reliability. The macOS
   Accounts popover now keeps its header fixed above a screen-bounded scroller,
   labels the implicit vendor identity `CLI login`, and carries Cursor emails
