@@ -4,16 +4,25 @@ import { readFileSync } from "node:fs";
 const productionUrl = "https://claudexor.ai/";
 const legacyUrl = "https://razzant.github.io/claudexor";
 const socialImageUrl = `${productionUrl}assets/social-preview-v2.png`;
+const ouroborosRepositoryUrl = "https://github.com/razzant/ouroboros";
+const ouroborosSiteUrl = "https://ouroboros-agent.ai/";
+const ouroborosRuntimePinUrl = `${ouroborosRepositoryUrl}/blob/ouroboros/ouroboros/claudexor_runtime_pin.json`;
 const failures = [];
 
 const index = readFileSync("site/index.html", "utf8");
 const sitemap = readFileSync("site/sitemap.xml", "utf8");
 const robots = readFileSync("site/robots.txt", "utf8");
+const llms = readFileSync("site/llms.txt", "utf8");
 const readme = readFileSync("README.md", "utf8");
+const integrations = readFileSync("docs/INTEGRATIONS.md", "utf8");
 const pagesWorkflow = readFileSync(".github/workflows/pages.yml", "utf8");
 
 function requireMatch(text, pattern, message) {
   if (!pattern.test(text)) failures.push(message);
+}
+
+function requireText(text, value, message) {
+  if (!text.includes(value)) failures.push(message);
 }
 
 for (const [name, text] of [
@@ -62,6 +71,26 @@ requireMatch(
   pagesWorkflow,
   /run: node scripts\/site-metadata-check\.mjs/,
   ".github/workflows/pages.yml: metadata verification step is missing",
+);
+requireMatch(
+  index,
+  /<div class="plane" id="ouroboros">/,
+  "site/index.html: Ouroboros production-use section is missing",
+);
+
+for (const [name, text] of [
+  ["README.md", readme],
+  ["site/index.html", index],
+  ["site/llms.txt", llms],
+]) {
+  requireText(text, ouroborosRepositoryUrl, `${name}: Ouroboros repository link is missing`);
+  requireText(text, ouroborosSiteUrl, `${name}: Ouroboros website link is missing`);
+}
+
+requireText(
+  integrations,
+  ouroborosRuntimePinUrl,
+  "docs/INTEGRATIONS.md: Ouroboros runtime pin example is missing",
 );
 
 const jsonLdMatch = index.match(/<script type="application\/ld\+json">\s*([\s\S]*?)\s*<\/script>/);

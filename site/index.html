@@ -660,6 +660,62 @@
         margin: 0;
       }
 
+      .ouroboros-flow {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 30px;
+        padding: 0;
+        margin: 34px 0 0;
+        list-style: none;
+      }
+      .ouroboros-flow li {
+        position: relative;
+        min-height: 126px;
+        padding: 22px;
+      }
+      .ouroboros-flow li:not(:last-child)::after {
+        content: "→";
+        position: absolute;
+        top: 50%;
+        right: -23px;
+        width: 16px;
+        color: var(--glint);
+        font-family: var(--data);
+        font-size: 18px;
+        line-height: 1;
+        text-align: center;
+        transform: translateY(-50%);
+      }
+      .ouroboros-flow strong {
+        display: block;
+        margin-bottom: 9px;
+        color: var(--ice);
+        font-size: 16px;
+      }
+      .ouroboros-flow span {
+        display: block;
+        color: var(--ice-3);
+        font-family: var(--data);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+      @media (max-width: 860px) {
+        .ouroboros-flow {
+          grid-template-columns: 1fr;
+          gap: 28px;
+        }
+        .ouroboros-flow li {
+          min-height: 0;
+        }
+        .ouroboros-flow li:not(:last-child)::after {
+          content: "↓";
+          top: auto;
+          right: 50%;
+          bottom: -23px;
+          transform: translateX(50%);
+        }
+      }
+
       dl.defs {
         margin: 0;
         display: grid;
@@ -1798,6 +1854,49 @@
                   </figcaption>
                 </figure>
               </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="plane" id="ouroboros">
+          <div class="z">
+            <section>
+              <p class="kick">running in production</p>
+              <div class="split" style="align-items: center; margin-top: 0">
+                <div>
+                  <h2>Claudexor powers delegated coding in Ouroboros.</h2>
+                  <p class="lead">
+                    Ouroboros owns its tasks, memory, review, and final integration. It runs an
+                    exact-pinned Claudexor build to execute work through connected coding harnesses
+                    and receive durable execution evidence.
+                  </p>
+                  <div class="acts">
+                    <a class="btn p" href="https://ouroboros-agent.ai/">Explore Ouroboros</a>
+                    <a class="btn s" href="https://github.com/razzant/ouroboros">View source</a>
+                  </div>
+                </div>
+                <div class="cell flat" style="padding: 26px">
+                  <h3>One clear ownership boundary</h3>
+                  <p>
+                    Ouroboros decides what to do and what to keep. Claudexor routes and runs the
+                    selected harness, then returns the evidence needed for review and integration.
+                  </p>
+                </div>
+              </div>
+              <ol class="ouroboros-flow" aria-label="Ouroboros delegated coding flow">
+                <li class="flat">
+                  <strong>Ouroboros</strong>
+                  <span>tasks · memory · review</span>
+                </li>
+                <li class="flat">
+                  <strong>Claudexor</strong>
+                  <span>routing · execution · evidence</span>
+                </li>
+                <li class="flat">
+                  <strong>Connected harnesses</strong>
+                  <span>Claude Code · Codex · Cursor · OpenCode</span>
+                </li>
+              </ol>
             </section>
           </div>
         </div>

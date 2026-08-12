@@ -18,3 +18,8 @@ Claudexor runs locally and keeps one coding thread across harness and account la
 
 - [GitHub repository](https://github.com/razzant/claudexor)
 - [npm package](https://www.npmjs.com/package/claudexor)
+
+## Production use
+
+- [Ouroboros](https://github.com/razzant/ouroboros): A persistent self-developing agent that uses an exact-pinned Claudexor runtime for delegated coding.
+- [Ouroboros website](https://ouroboros-agent.ai/)

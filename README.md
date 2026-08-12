@@ -33,6 +33,12 @@ Current status: **v3.3.7**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
+Claudexor also runs as the exact-pinned delegated execution layer inside
+[Ouroboros](https://github.com/razzant/ouroboros), a persistent self-developing
+agent. Ouroboros owns its tasks, memory, review, and final integration.
+Claudexor runs the connected coding harnesses and returns durable execution
+evidence. [See Ouroboros in action](https://ouroboros-agent.ai/).
+
 If you use Claudexor — or you are an agent whose human does — a
 [star](https://github.com/razzant/claudexor/stargazers) is the one-click way
 to say it works.

@@ -15,7 +15,7 @@ changing Claudexor.
 | MCP server | Exposes Claudexor tools to MCP clients. | Stable contract: the tool set with input/output schemas. Tool list follows the implementation, not old docs. |
 | ACP server | Lets compatible editors or agents talk to Claudexor as a local agent surface. | Experimental (may change in minors, disclosed in the CHANGELOG). |
 | Host plugins | User-global Claude Code, Codex, Cursor, and OpenCode integrations managed by `claudexor plugin`. | Experimental file layout (regenerate with `claudexor plugin repair all`). Installs owned local files/config only; host enablement can still require reload/manual action. |
-| Engine runtime closure | Node-free release artifact for a host that owns its daemon lifecycle, such as Ouroboros. | Exact-pin contract: one link-free archive and the existing signed runtime manifest; the host supplies the tested Node version and verifies archive plus `--probe` identity. |
+| Engine runtime closure | Node-free release artifact for a host that owns its daemon lifecycle, such as [Ouroboros](https://github.com/razzant/ouroboros). | Exact-pin contract: one link-free archive and the existing signed runtime manifest; the host supplies the tested Node version and verifies archive plus `--probe` identity. |
 
 ## Embedded Engine Runtime
 
@@ -27,6 +27,9 @@ extraction it requires `node claudexord.bundle.cjs --probe` to report the same
 version/build identity. The existing signed runtime manifest remains the
 publication authority, so an embedder does not create a second artifact or
 trust root.
+
+The public [Ouroboros runtime pin](https://github.com/razzant/ouroboros/blob/ouroboros/ouroboros/claudexor_runtime_pin.json)
+is a working example of that exact-version, exact-build, and checksum contract.
 
 The host owns install location, daemon config root, process lifecycle, and
 rollback. Start, handshake, and stop must address the same config root/socket.
