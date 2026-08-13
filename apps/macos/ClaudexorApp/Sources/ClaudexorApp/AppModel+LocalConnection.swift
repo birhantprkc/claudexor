@@ -7,6 +7,15 @@ extension AppModel {
     func connect() async {
         connectionGeneration += 1
         let generation = connectionGeneration
+        // Retire the previous exact client synchronously, before the new
+        // generation's first suspension. Every projection owner can now reject
+        // an old response by client identity even while discovery/handshake for
+        // the successor is still in flight.
+        client = nil
+        endpoint = ""
+        engineIdentity = nil
+        health = .connecting
+        cancelAllStreams()
         let recovery = LocalConnectionRecoveryLoop(
             generation: generation,
             currentGeneration: { self.connectionGeneration },
@@ -15,10 +24,10 @@ extension AppModel {
                 self.health = .connecting
                 self.cancelAllStreams()
             },
-            probe: { await self.tryConnect() },
+            probe: { await self.tryConnect(generation: generation) },
             pollConnected: {
-                guard self.client != nil else { return false }
-                return await self.pollEngineIdentity()
+                guard self.client != nil else { return .unavailable }
+                return await self.pollLocalConnection(generation: generation)
             },
             startDaemon: { DaemonLauncher.startIfNeeded() },
             enterOffline: { self.enterHardOffline() },
@@ -144,44 +153,99 @@ extension AppModel {
     /// unstampable identity is deliberately passed as nil and reduced to a safe,
     /// visible keep-compatible policy before any lifecycle work.
     func localDaemonPolicy(
-        for engine: EngineBuildIdentity?
+        for engine: EngineBuildIdentity?,
+        generation: Int? = nil
     ) async -> LocalDaemonReconciliationPolicy {
         let serving = engine.flatMap {
             AppRuntimeDaemonControl.runtimeIdentity(version: $0.version, buildSha: $0.sha)
         }
-        let result = await daemonReconciliationOwner().reconcile(serving: serving)
+        let result = await daemonReconciliationOwner().reconcile(
+            serving: serving,
+            isCurrent: { @MainActor [weak self] in
+                guard let generation else { return true }
+                guard let self else { return false }
+                return !Task.isCancelled && self.connectionGeneration == generation
+            })
+        if let generation, !localConnectionGenerationIsCurrent(generation) {
+            return .superseded
+        }
         return LocalDaemonReconciliationPolicy(result)
     }
 
-    private func tryConnect() async -> LocalConnectionProbeResult {
+    private func tryConnect(generation: Int) async -> LocalConnectionProbeResult {
         do {
             let discovery = try ControlApiDiscovery.load()
             let candidate = try discovery.makeClient()
-            endpoint = "\(discovery.host):\(discovery.port)"
-            adoptClientForReconnect(candidate)
+            return await tryConnect(
+                candidate: candidate,
+                endpoint: "\(discovery.host):\(discovery.port)",
+                generation: generation)
+        } catch {
+            return localConnectionGenerationIsCurrent(generation)
+                ? .unavailable : .superseded
+        }
+    }
+
+    /// Injected candidate seam for deterministic connection-generation tests.
+    /// Discovery and candidate construction remain side-effect-free; this method
+    /// owns the first handshake and the single generation-bound adoption point.
+    func tryConnect(
+        candidate: GatewayClient,
+        endpoint candidateEndpoint: String,
+        generation: Int
+    ) async -> LocalConnectionProbeResult {
+        do {
             // One handshake serves both the connectivity verdict AND the engine
             // build identity (QA-002): retain what the daemon discloses instead
             // of a bare Bool that drops version/sha on the floor.
             let outcome = try await candidate.handshake()
+            guard localConnectionGenerationIsCurrent(generation) else {
+                return .superseded
+            }
             if outcome.ok {
-                switch await localDaemonPolicy(for: outcome.engine) {
+                switch await localDaemonPolicy(for: outcome.engine, generation: generation) {
                 case let .useCompatible(notice):
-                    guard client === candidate else { return .unavailable }
+                    guard localConnectionGenerationIsCurrent(generation) else {
+                        return .superseded
+                    }
+                    endpoint = candidateEndpoint
+                    adoptClientForReconnect(candidate)
                     setLocalDaemonReconciliationNotice(notice)
                     engineIdentity = outcome.engine
                     health = .connected
                     await refreshRuns()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     await refreshSettings()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     await refreshSecrets()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     await refreshThreads()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     await refreshProjects()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     // The full Accounts snapshot is intentionally explicit-only.
                     // Connect hydrates the cached harness + registry owners.
                     _ = await refreshHarnesses()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     // QA-065: resolve credential-profile DISPLAY NAMES on connect, not
                     // only when the accounts popover opens — otherwise the sessions
                     // footer shows raw profile ids by default until that popover loads.
                     await refreshCredentialProfiles()
+                    guard localConnectionLeaseIsCurrent(generation, candidate) else {
+                        return .superseded
+                    }
                     // A popover may survive a transient reconnect. Its existing
                     // subscriber does not re-run onAppear, so resume exactly one
                     // cheap display read against the replacement gateway.
@@ -189,6 +253,9 @@ extension AppModel {
                     startGlobalStream()
                     return .connected
                 case .reconnect:
+                    guard localConnectionGenerationIsCurrent(generation) else {
+                        return .superseded
+                    }
                     setLocalDaemonReconciliationNotice(nil)
                     client = nil
                     endpoint = ""
@@ -196,16 +263,23 @@ extension AppModel {
                     health = .connecting
                     return .reconnect
                 case let .failOffline(notice):
+                    guard localConnectionGenerationIsCurrent(generation) else {
+                        return .superseded
+                    }
                     setLocalDaemonReconciliationNotice(notice)
                     client = nil
                     engineIdentity = nil
                     return .lifecycleFailed
+                case .superseded:
+                    return .superseded
+                case .retry:
+                    return .retryWithoutLaunch
                 }
             }
         } catch {
             // fall through to caller (offline / auto-start path)
         }
-        return .unavailable
+        return localConnectionGenerationIsCurrent(generation) ? .unavailable : .superseded
     }
 
     /// One steady-state connectivity poll (round-4 #5 / QA-002): re-HANDSHAKE
@@ -215,26 +289,71 @@ extension AppModel {
     /// false → the caller falls to the reconnect path.
     @discardableResult
     func pollEngineIdentity() async -> Bool {
+        await pollLocalConnection() == .connected
+    }
+
+    /// Typed steady-state poll. The recovery loop must distinguish an ordinary
+    /// transport loss (which earns one outage launch) from reconciliation that
+    /// already launched, or attempted to launch, the selected closure.
+    func pollLocalConnection(generation: Int? = nil) async -> LocalConnectionProbeResult {
         guard let current = client, let outcome = try? await current.handshake(), outcome.ok else {
-            return false
+            return requestedConnectionGenerationIsCurrent(generation)
+                ? .unavailable : .superseded
         }
-        switch await localDaemonPolicy(for: outcome.engine) {
+        guard requestedConnectionGenerationIsCurrent(generation) else {
+            return .superseded
+        }
+        switch await localDaemonPolicy(for: outcome.engine, generation: generation) {
         case let .useCompatible(notice):
-            guard client === current else { return false }
+            guard requestedConnectionGenerationIsCurrent(generation), client === current else {
+                return .superseded
+            }
             setLocalDaemonReconciliationNotice(notice)
             engineIdentity = outcome.engine
-            return true
+            return .connected
         case .reconnect:
+            guard requestedConnectionGenerationIsCurrent(generation) else {
+                return .superseded
+            }
             // The old handshake and the replacement's internal proof are both
             // deliberately unpublished. The connect owner reacquires discovery,
             // handshakes again, then hydrates the new daemon as one coherent unit.
             setLocalDaemonReconciliationNotice(nil)
+            client = nil
+            endpoint = ""
             engineIdentity = nil
-            return false
+            health = .connecting
+            cancelAllStreams()
+            return .reconnect
         case let .failOffline(notice):
+            guard requestedConnectionGenerationIsCurrent(generation) else {
+                return .superseded
+            }
             setLocalDaemonReconciliationNotice(notice)
+            client = nil
             engineIdentity = nil
-            return false
+            cancelAllStreams()
+            return .lifecycleFailed
+        case .superseded:
+            return .superseded
+        case .retry:
+            return .retryWithoutLaunch
         }
+    }
+
+    private func localConnectionGenerationIsCurrent(_ generation: Int) -> Bool {
+        !Task.isCancelled && connectionGeneration == generation
+    }
+
+    private func localConnectionLeaseIsCurrent(
+        _ generation: Int,
+        _ requestClient: GatewayClient
+    ) -> Bool {
+        localConnectionGenerationIsCurrent(generation) && client === requestClient
+    }
+
+    private func requestedConnectionGenerationIsCurrent(_ generation: Int?) -> Bool {
+        guard let generation else { return !Task.isCancelled }
+        return localConnectionGenerationIsCurrent(generation)
     }
 }

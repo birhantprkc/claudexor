@@ -4,7 +4,9 @@ enum LocalConnectionProbeResult: Equatable {
     case connected
     case reconnect
     case unavailable
+    case retryWithoutLaunch
     case lifecycleFailed
+    case superseded
 }
 
 /// Owns the bounded local-daemon start allowance for one connection generation.
@@ -18,7 +20,7 @@ struct LocalConnectionRecoveryLoop {
     private let lifecycleOwner: LocalRuntimeLifecycleOwner
     private let prepareProbe: @MainActor () -> Void
     private let probe: @MainActor () async -> LocalConnectionProbeResult
-    private let pollConnected: @MainActor () async -> Bool
+    private let pollConnected: @MainActor () async -> LocalConnectionProbeResult
     private let startDaemon: @MainActor () -> Bool
     private let enterOffline: @MainActor () -> Void
     private let pause: @MainActor () async -> Void
@@ -29,7 +31,7 @@ struct LocalConnectionRecoveryLoop {
         lifecycleOwner: LocalRuntimeLifecycleOwner,
         prepareProbe: @escaping @MainActor () -> Void,
         probe: @escaping @MainActor () async -> LocalConnectionProbeResult,
-        pollConnected: @escaping @MainActor () async -> Bool,
+        pollConnected: @escaping @MainActor () async -> LocalConnectionProbeResult,
         startDaemon: @escaping @MainActor () -> Bool,
         enterOffline: @escaping @MainActor () -> Void,
         pause: @escaping @MainActor () async -> Void
@@ -57,12 +59,35 @@ struct LocalConnectionRecoveryLoop {
             switch result {
             case .connected:
                 launchAvailable = true
-                while isCurrent {
+                connected: while isCurrent {
                     await pause()
                     guard isCurrent else { return }
-                    let stillConnected = await pollConnected()
+                    let pollResult = await pollConnected()
                     guard isCurrent else { return }
-                    if !stillConnected { break }
+                    switch pollResult {
+                    case .connected:
+                        continue
+                    case .unavailable:
+                        break connected
+                    case .retryWithoutLaunch:
+                        break connected
+                    case .reconnect:
+                        // The reconciler already launched and identity-proved a
+                        // successor. The next discovery pass must not launch it
+                        // again merely because the old client disconnected.
+                        launchAvailable = false
+                        break connected
+                    case .lifecycleFailed:
+                        // A stop/start lifecycle was admitted but did not reach
+                        // the exact target. Consume this outage's fallback and
+                        // keep polling for external/manual recovery.
+                        launchAvailable = false
+                        enterOffline()
+                        await pause()
+                        break connected
+                    case .superseded:
+                        return
+                    }
                 }
 
             case .reconnect:
@@ -89,9 +114,19 @@ struct LocalConnectionRecoveryLoop {
                 enterOffline()
                 await pause()
 
+            case .retryWithoutLaunch:
+                // A coalesced predecessor retired before destructive lifecycle
+                // admission. Retry discovery without inventing an outage start
+                // and without consuming the still-valid allowance.
+                await pause()
+
             case .lifecycleFailed:
+                launchAvailable = false
                 enterOffline()
                 await pause()
+
+            case .superseded:
+                return
             }
         }
     }

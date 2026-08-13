@@ -35,7 +35,7 @@ private final class LocalConnectionRecoveryHarness {
     let lifecycleOwner: LocalRuntimeLifecycleOwner
     var generation = 1
     var probeResults: [LocalConnectionProbeResult]
-    var pollResults: [Bool]
+    var pollResults: [LocalConnectionProbeResult]
     var startResults: [Bool]
     var probeOverride: (@MainActor () async -> LocalConnectionProbeResult)?
     var pauseActions: [Int: @MainActor () -> Void] = [:]
@@ -50,7 +50,7 @@ private final class LocalConnectionRecoveryHarness {
     init(
         lifecycleOwner: LocalRuntimeLifecycleOwner = LocalRuntimeLifecycleOwner(),
         probes: [LocalConnectionProbeResult],
-        polls: [Bool] = [],
+        polls: [LocalConnectionProbeResult] = [],
         starts: [Bool] = []
     ) {
         self.lifecycleOwner = lifecycleOwner
@@ -83,9 +83,9 @@ private final class LocalConnectionRecoveryHarness {
         return probeResults.removeFirst()
     }
 
-    private func nextPoll() async -> Bool {
+    private func nextPoll() async -> LocalConnectionProbeResult {
         pollCount += 1
-        return pollResults.isEmpty ? false : pollResults.removeFirst()
+        return pollResults.isEmpty ? .unavailable : pollResults.removeFirst()
     }
 
     private func nextStart() -> Bool {
@@ -127,7 +127,7 @@ private final class LocalConnectionRecoveryHarness {
     @Test func confirmedConnectionThenPollLossGetsOneSuccessorAttempt() async {
         let sut = LocalConnectionRecoveryHarness(
             probes: [.unavailable, .connected, .unavailable, .unavailable],
-            polls: [false])
+            polls: [.unavailable])
 
         await sut.run()
 
@@ -154,7 +154,7 @@ private final class LocalConnectionRecoveryHarness {
                 .connected, .unavailable,
                 .connected, .unavailable, .unavailable,
             ],
-            polls: [false, false])
+            polls: [.unavailable, .unavailable])
 
         await sut.run()
 
@@ -166,7 +166,7 @@ private final class LocalConnectionRecoveryHarness {
     @Test func reconciliationReconnectSuppressesFallbackUntilConfirmedConnection() async {
         let sut = LocalConnectionRecoveryHarness(
             probes: [.reconnect, .unavailable, .connected, .unavailable],
-            polls: [false])
+            polls: [.unavailable])
 
         await sut.run()
 
@@ -214,7 +214,7 @@ private final class LocalConnectionRecoveryHarness {
     @Test func exhaustedAllowanceKeepsPollingAndExternalRecoveryRearmsIt() async {
         let sut = LocalConnectionRecoveryHarness(
             probes: [.unavailable, .unavailable, .connected, .unavailable],
-            polls: [false], starts: [false, true])
+            polls: [.unavailable], starts: [false, true])
 
         await sut.run()
 
@@ -245,5 +245,67 @@ private final class LocalConnectionRecoveryHarness {
         await sut.run(generation: sut.generation)
 
         #expect(sut.startCount == 1)
+    }
+
+    @MainActor
+    @Test func steadyReplacementConsumesTheOutageFallback() async {
+        let sut = LocalConnectionRecoveryHarness(
+            probes: [.connected, .unavailable, .unavailable],
+            polls: [.reconnect])
+
+        await sut.run()
+
+        #expect(sut.pollCount == 1)
+        #expect(sut.startCount == 0)
+        #expect(sut.probeCount >= 3)
+    }
+
+    @MainActor
+    @Test func steadyPostStartFailureConsumesTheOutageFallback() async {
+        let sut = LocalConnectionRecoveryHarness(
+            probes: [.connected, .unavailable, .unavailable],
+            polls: [.lifecycleFailed])
+
+        await sut.run()
+
+        #expect(sut.pollCount == 1)
+        #expect(sut.startCount == 0)
+        #expect(sut.offlineCount >= 1)
+    }
+
+    @MainActor
+    @Test func supersededTypedPollTerminatesWithoutFallbackOrOfflinePublication() async {
+        let sut = LocalConnectionRecoveryHarness(
+            probes: [.connected], polls: [.superseded])
+
+        await sut.run()
+
+        #expect(sut.pollCount == 1)
+        #expect(sut.startCount == 0)
+        #expect(sut.offlineCount == 0)
+    }
+
+    @MainActor
+    @Test func preLifecycleRetryPreservesAllowanceForOneRealOutage() async {
+        let sut = LocalConnectionRecoveryHarness(
+            probes: [.connected, .unavailable, .unavailable],
+            polls: [.retryWithoutLaunch])
+
+        await sut.run()
+
+        #expect(sut.startCount == 1)
+        #expect(sut.offlineCount == 1)
+    }
+
+    @MainActor
+    @Test func confirmedRecoveryAfterLifecycleFailureRearmsOneLaterOutage() async {
+        let sut = LocalConnectionRecoveryHarness(
+            probes: [.connected, .connected, .unavailable, .unavailable],
+            polls: [.lifecycleFailed, .unavailable])
+
+        await sut.run()
+
+        #expect(sut.startCount == 1)
+        #expect(sut.pollCount == 2)
     }
 }

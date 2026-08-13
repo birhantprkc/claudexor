@@ -14,11 +14,16 @@ extension AppModel {
     /// Best-effort — the path MRU still drives selection; this never blocks.
     @discardableResult
     func refreshProjects() async -> Bool {
-        guard let client else { return false }
-        guard let list = try? await client.listProjects() else {
+        guard let requestClient = client else { return false }
+        let requestGeneration = connectionGeneration
+        guard let list = try? await requestClient.listProjects() else {
+            guard connectionGeneration == requestGeneration,
+                  client === requestClient else { return false }
             registeredProjects.removeAll()
             return false
         }
+        guard connectionGeneration == requestGeneration,
+              client === requestClient else { return false }
         registeredProjects = list.projects
         return true
     }
