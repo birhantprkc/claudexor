@@ -119,6 +119,11 @@ function buildPatchEnvelope(
 export interface RawApiConfig {
   id?: string;
   providerFamily?: ProviderFamily;
+  /**
+   * Declared unit for this endpoint's provider-reported `usage.cost`;
+   * absent leaves the extension untrusted.
+   */
+  providerUsageCostUnit?: "usd";
   baseUrl?: string;
   keyEnv?: string;
   defaultModel?: string;
@@ -132,6 +137,7 @@ export interface RawApiConfig {
 export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
   const id = config.id ?? "raw-api";
   const providerFamily = config.providerFamily ?? "openai";
+  const providerUsageCostUnit = config.providerUsageCostUnit;
   const baseUrl =
     config.baseUrl ?? process.env.CLAUDEXOR_RAWAPI_BASE_URL ?? "https://api.openai.com/v1";
   const keyEnv =
@@ -498,6 +504,9 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
           usage: {
             input_tokens: parsed.usage.input_tokens,
             output_tokens: parsed.usage.output_tokens,
+            ...(providerUsageCostUnit === "usd" && parsed.usage.provider_cost !== undefined
+              ? { cost_usd: parsed.usage.provider_cost }
+              : {}),
           },
           observed_model: parsed.model ?? undefined,
         };

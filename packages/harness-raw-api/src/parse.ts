@@ -1,7 +1,7 @@
 export interface ChatResult {
   text: string;
   model: string | null;
-  usage: { input_tokens?: number; output_tokens?: number };
+  usage: { input_tokens?: number; output_tokens?: number; provider_cost?: number };
 }
 
 export interface ParsedModel {
@@ -36,6 +36,10 @@ export function parseChatCompletion(json: any): ChatResult {
   const choice = json?.choices?.[0];
   const text = String(choice?.message?.content ?? "");
   const usage = json?.usage ?? {};
+  const providerCost =
+    typeof usage.cost === "number" && Number.isFinite(usage.cost) && usage.cost >= 0
+      ? usage.cost
+      : undefined;
   return {
     text,
     model: typeof json?.model === "string" ? json.model : null,
@@ -43,6 +47,7 @@ export function parseChatCompletion(json: any): ChatResult {
       input_tokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined,
       output_tokens:
         typeof usage.completion_tokens === "number" ? usage.completion_tokens : undefined,
+      ...(providerCost === undefined ? {} : { provider_cost: providerCost }),
     },
   };
 }
