@@ -1,11 +1,22 @@
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  type Stats,
+} from "node:fs";
 import { join } from "node:path";
 import {
+  compareProcessIdentity,
   defaultProcessIdentityService,
   isKnownProcessIdentity,
+  observeProcess,
   type KnownProcessIdentity,
-  type ProcessIdentityReader,
+  type ProcessObservation,
+  type ProcessObservationSource,
 } from "@claudexor/core";
 import { daemonDir, isWindowsPipePath } from "./token.js";
 
@@ -42,60 +53,268 @@ export interface DaemonLeaseOwner {
   identity?: KnownProcessIdentity;
 }
 
-/** Claim single-writer authority before any daemon journal is opened. */
-export function acquireDaemonWriterLease(
-  socketPath: string,
-  deps: { identity?: ProcessIdentityReader } = {},
-): DaemonWriterLease {
-  const path = writerLeasePath(socketPath);
-  const token = randomUUID();
-  const ownerPath = `${path}/owner.json`;
-  const self = (deps.identity ?? defaultProcessIdentityService).self();
-  const owner: DaemonLeaseOwner = {
-    pid: process.pid,
-    token,
-    ...(self.status === "known" ? { identity: self } : {}),
-  };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      mkdirSync(path, { mode: 0o700 });
-      writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`, {
-        mode: 0o600,
-        flag: "wx",
-      });
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const existing = readLeaseOwner(ownerPath);
-      if (!existing || processIsAlive(existing.pid)) throw writerBusy(path);
-      const stale = `${path}.stale-${process.pid}-${randomUUID()}`;
-      try {
-        renameSync(path, stale);
-        rmSync(stale, { recursive: true, force: true });
-      } catch (cleanupError) {
-        if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") throw cleanupError;
-      }
-      if (attempt === 1) throw new Error(`could not replace stale daemon writer lease ${path}`);
+export type DaemonLeaseOwnerCapability =
+  | {
+      status: "capable";
+      reason: "identity_match" | "legacy_process_present";
+      observation: ProcessObservation;
     }
+  | {
+      status: "proven_stale";
+      reason: "process_missing" | "identity_mismatch" | "linux_zombie";
+      observation: ProcessObservation;
+    }
+  | {
+      status: "unknown";
+      reason: "identity_unavailable" | "presence_unknown";
+      observation: ProcessObservation;
+    };
+
+export type DaemonWriterLeaseUnknownReason =
+  | "lease_unreadable"
+  | "invalid_lease_path"
+  | "owner_missing"
+  | "owner_unreadable"
+  | "owner_malformed";
+
+export type DaemonWriterLeaseStatus =
+  | { status: "absent"; path: string }
+  | {
+      status: "owned";
+      path: string;
+      owner: DaemonLeaseOwner;
+      capability: DaemonLeaseOwnerCapability;
+    }
+  | { status: "unknown"; path: string; reason: DaemonWriterLeaseUnknownReason };
+
+type RawDaemonWriterLeaseStatus =
+  | { status: "absent"; path: string }
+  | { status: "owned"; path: string; owner: DaemonLeaseOwner }
+  | { status: "unknown"; path: string; reason: DaemonWriterLeaseUnknownReason };
+
+/** Narrow synchronous seam used to deterministically exercise failure/race branches. */
+export interface DaemonWriterLeaseFilesystem {
+  lstat(path: string): Stats;
+  readText(path: string): string;
+  createLeaseDirectory(path: string): void;
+  writeOwner(path: string, data: string): void;
+  rename(from: string, to: string): void;
+  remove(path: string): void;
+}
+
+export interface DaemonWriterLeaseDependencies {
+  identity?: ProcessObservationSource;
+  /** Signal-zero probe: return for present, throw an errno-bearing error otherwise. */
+  probeProcess?: (pid: number) => void;
+  filesystem?: Partial<DaemonWriterLeaseFilesystem>;
+}
+
+const DEFAULT_FILESYSTEM: DaemonWriterLeaseFilesystem = {
+  lstat: (path) => lstatSync(path),
+  readText: (path) => readFileSync(path, "utf8"),
+  createLeaseDirectory: (path) => mkdirSync(path, { mode: 0o700 }),
+  writeOwner: (path, data) =>
+    writeFileSync(path, data, {
+      mode: 0o600,
+      flag: "wx",
+    }),
+  rename: (from, to) => renameSync(from, to),
+  remove: (path) => rmSync(path, { recursive: true, force: true }),
+};
+
+function filesystem(deps: DaemonWriterLeaseDependencies): DaemonWriterLeaseFilesystem {
+  return { ...DEFAULT_FILESYSTEM, ...deps.filesystem };
+}
+
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException)?.code;
+}
+
+function validPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function sameOwner(left: DaemonLeaseOwner, right: DaemonLeaseOwner): boolean {
+  return left.pid === right.pid && left.token === right.token;
+}
+
+function parseLeaseOwner(raw: string): DaemonLeaseOwner | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
   }
-  let released = false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!validPositiveInteger(record.pid) || typeof record.token !== "string" || !record.token) {
+    return null;
+  }
+  if (!Object.prototype.hasOwnProperty.call(record, "identity")) {
+    return { pid: record.pid, token: record.token };
+  }
+  if (!isKnownProcessIdentity(record.identity) || record.identity.pid !== record.pid) return null;
+  return { pid: record.pid, token: record.token, identity: record.identity };
+}
+
+function inspectLeaseAfterOwnerMissing(
+  path: string,
+  fs: DaemonWriterLeaseFilesystem,
+): RawDaemonWriterLeaseStatus {
+  try {
+    const lease = fs.lstat(path);
+    if (lease.isSymbolicLink() || !lease.isDirectory()) {
+      return { status: "unknown", path, reason: "invalid_lease_path" };
+    }
+    return { status: "unknown", path, reason: "owner_missing" };
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { status: "absent", path };
+    return { status: "unknown", path, reason: "lease_unreadable" };
+  }
+}
+
+function inspectWriterLeasePath(
+  path: string,
+  fs: DaemonWriterLeaseFilesystem,
+): RawDaemonWriterLeaseStatus {
+  let lease: Stats;
+  try {
+    lease = fs.lstat(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { status: "absent", path };
+    return { status: "unknown", path, reason: "lease_unreadable" };
+  }
+  if (lease.isSymbolicLink() || !lease.isDirectory()) {
+    return { status: "unknown", path, reason: "invalid_lease_path" };
+  }
+
+  const ownerPath = join(path, "owner.json");
+  let ownerStat: Stats;
+  try {
+    ownerStat = fs.lstat(ownerPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return inspectLeaseAfterOwnerMissing(path, fs);
+    return { status: "unknown", path, reason: "owner_unreadable" };
+  }
+  if (ownerStat.isSymbolicLink() || !ownerStat.isFile()) {
+    return { status: "unknown", path, reason: "owner_malformed" };
+  }
+
+  let raw: string;
+  try {
+    raw = fs.readText(ownerPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return inspectLeaseAfterOwnerMissing(path, fs);
+    return { status: "unknown", path, reason: "owner_unreadable" };
+  }
+  const owner = parseLeaseOwner(raw);
+  return owner
+    ? { status: "owned", path, owner }
+    : { status: "unknown", path, reason: "owner_malformed" };
+}
+
+type ProcessPresence = "present" | "missing" | "permission_denied" | "unknown";
+
+function probeProcessPresence(pid: number, probe: (pid: number) => void): ProcessPresence {
+  try {
+    probe(pid);
+    return "present";
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ESRCH") return "missing";
+    if (code === "EPERM") return "permission_denied";
+    return "unknown";
+  }
+}
+
+export function classifyDaemonLeaseOwner(
+  owner: DaemonLeaseOwner,
+  deps: DaemonWriterLeaseDependencies = {},
+): DaemonLeaseOwnerCapability {
+  const identity = deps.identity ?? defaultProcessIdentityService;
+  const observation = observeProcess(identity, owner.pid);
+  const probe = deps.probeProcess ?? ((pid: number) => process.kill(pid, 0));
+
+  if (observation.identity.status === "missing") {
+    return { status: "proven_stale", reason: "process_missing", observation };
+  }
+
+  if (owner.identity && observation.identity.status === "known") {
+    if (compareProcessIdentity(owner.identity, observation.identity) !== "same") {
+      return { status: "proven_stale", reason: "identity_mismatch", observation };
+    }
+    if (observation.linuxState === "Z") {
+      return { status: "proven_stale", reason: "linux_zombie", observation };
+    }
+    return { status: "capable", reason: "identity_match", observation };
+  }
+
+  if (!owner.identity && observation.identity.status === "known") {
+    if (observation.linuxState === "Z") {
+      return { status: "proven_stale", reason: "linux_zombie", observation };
+    }
+    return { status: "capable", reason: "legacy_process_present", observation };
+  }
+
+  const presence = probeProcessPresence(owner.pid, probe);
+  if (presence === "missing") {
+    return { status: "proven_stale", reason: "process_missing", observation };
+  }
+  if (!owner.identity && (presence === "present" || presence === "permission_denied")) {
+    return { status: "capable", reason: "legacy_process_present", observation };
+  }
+  if (presence === "present" || presence === "permission_denied") {
+    return { status: "unknown", reason: "identity_unavailable", observation };
+  }
+  return { status: "unknown", reason: "presence_unknown", observation };
+}
+
+/** Strict authority read: only a physically missing lease path is `absent`. */
+export function inspectDaemonWriterLease(
+  socketPath: string,
+  deps: DaemonWriterLeaseDependencies = {},
+): DaemonWriterLeaseStatus {
+  const raw = inspectWriterLeasePath(writerLeasePath(socketPath), filesystem(deps));
+  if (raw.status !== "owned") return raw;
   return {
-    path,
-    owner,
-    release: () => {
-      if (released) return;
-      released = true;
-      const current = readLeaseOwner(ownerPath);
-      if (current?.token === token && current.pid === process.pid) {
-        rmSync(path, { recursive: true, force: true });
-      }
-    },
+    ...raw,
+    capability: classifyDaemonLeaseOwner(raw.owner, deps),
   };
 }
 
-/** Read the current writer-lease owner for a socket path (null when free). */
-export function daemonLeaseOwner(socketPath: string): DaemonLeaseOwner | null {
-  return readLeaseOwner(join(writerLeasePath(socketPath), "owner.json"));
+export function writerLeaseTombstonePath(leasePath: string, owner: DaemonLeaseOwner): string {
+  const digest = createHash("sha256")
+    .update(String(owner.pid))
+    .update("\0")
+    .update(owner.token)
+    .digest("hex");
+  return `${leasePath}.stale-${owner.pid}-${digest}`;
+}
+
+export type DaemonWriterLeaseQuarantineResult =
+  { status: "quarantined"; path: string } | { status: "contended"; path: string };
+
+/** Move exactly one observed generation; the nonempty tombstone is preserved. */
+export function quarantineDaemonWriterLeaseGeneration(
+  lease: { path: string; owner: DaemonLeaseOwner },
+  deps: DaemonWriterLeaseDependencies = {},
+): DaemonWriterLeaseQuarantineResult {
+  const fs = filesystem(deps);
+  const tombstone = writerLeaseTombstonePath(lease.path, lease.owner);
+  try {
+    fs.rename(lease.path, tombstone);
+    return { status: "quarantined", path: tombstone };
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT" || code === "EEXIST" || code === "ENOTEMPTY") {
+      return { status: "contended", path: tombstone };
+    }
+    if (code === "EPERM") {
+      const occupied = inspectWriterLeasePath(tombstone, fs);
+      if (occupied.status === "owned") return { status: "contended", path: tombstone };
+    }
+    throw error;
+  }
 }
 
 function writerBusy(path: string): Error {
@@ -105,35 +324,95 @@ function writerBusy(path: string): Error {
   });
 }
 
-function readLeaseOwner(path: string): DaemonLeaseOwner | null {
-  try {
-    const value = JSON.parse(readFileSync(path, "utf8")) as {
-      pid?: unknown;
-      token?: unknown;
-      identity?: unknown;
-    };
-    if (
-      !Number.isSafeInteger(value.pid) ||
-      Number(value.pid) <= 0 ||
-      typeof value.token !== "string"
-    ) {
-      return null;
-    }
-    return {
-      pid: Number(value.pid),
-      token: value.token,
-      ...(isKnownProcessIdentity(value.identity) ? { identity: value.identity } : {}),
-    };
-  } catch {
-    return null;
-  }
+function staleReplacementFailed(path: string): Error {
+  return new Error(`could not replace stale daemon writer lease ${path}`);
 }
 
+/** Claim single-writer authority before any daemon journal is opened. */
+export function acquireDaemonWriterLease(
+  socketPath: string,
+  deps: DaemonWriterLeaseDependencies = {},
+): DaemonWriterLease {
+  const path = writerLeasePath(socketPath);
+  const token = randomUUID();
+  const ownerPath = join(path, "owner.json");
+  const fs = filesystem(deps);
+  const self = (deps.identity ?? defaultProcessIdentityService).self();
+  const owner: DaemonLeaseOwner = {
+    pid: process.pid,
+    token,
+    ...(self.status === "known" ? { identity: self } : {}),
+  };
+  let acquired = false;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.createLeaseDirectory(path);
+      fs.writeOwner(ownerPath, `${JSON.stringify(owner)}\n`);
+      acquired = true;
+      break;
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+      const existing = inspectWriterLeasePath(path, fs);
+      if (existing.status === "absent") continue;
+      if (existing.status === "unknown") throw writerBusy(path);
+
+      const capability = classifyDaemonLeaseOwner(existing.owner, deps);
+      if (capability.status !== "proven_stale") throw writerBusy(path);
+
+      // Classification may have spanned an orderly release. Re-read the main
+      // generation before mutation: once the observed owner is positively
+      // missing/recycled/Z it cannot itself release after this point, while a
+      // concurrent stale takeover leaves the occupied tombstone below as the
+      // generation fence.
+      const confirmed = inspectWriterLeasePath(path, fs);
+      if (confirmed.status === "absent") continue;
+      if (confirmed.status === "unknown") throw writerBusy(path);
+      if (!sameOwner(confirmed.owner, existing.owner)) continue;
+      if (attempt === 1) throw staleReplacementFailed(path);
+
+      const quarantine = quarantineDaemonWriterLeaseGeneration(confirmed, deps);
+      if (quarantine.status === "quarantined") continue;
+
+      const current = inspectWriterLeasePath(path, fs);
+      if (current.status === "unknown") throw writerBusy(path);
+      if (current.status === "owned" && sameOwner(current.owner, existing.owner)) {
+        throw staleReplacementFailed(path);
+      }
+      // Another contender changed or removed the main generation. The single
+      // remaining creation attempt re-observes it without another quarantine.
+    }
+  }
+  if (!acquired) throw staleReplacementFailed(path);
+
+  let released = false;
+  return {
+    path,
+    owner,
+    release: () => {
+      if (released) return;
+      released = true;
+      const current = inspectWriterLeasePath(path, fs);
+      if (current.status === "owned" && sameOwner(current.owner, owner)) fs.remove(path);
+    },
+  };
+}
+
+/**
+ * Lossy patch-compatible projection. `null` does not prove the lease path is
+ * physically absent; authority-sensitive callers must use strict inspection.
+ */
+export function daemonLeaseOwner(socketPath: string): DaemonLeaseOwner | null {
+  const lease = inspectWriterLeasePath(writerLeasePath(socketPath), DEFAULT_FILESYSTEM);
+  return lease.status === "owned" ? lease.owner : null;
+}
+
+/** Raw signal-zero presence helper; daemon serviceability uses the classifier. */
 export function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return errorCode(error) === "EPERM";
   }
 }
