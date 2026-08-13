@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureToken } from "@claudexor/daemon";
@@ -8,6 +8,7 @@ import { CliError } from "./cli-error.js";
 import * as daemonLaunch from "./daemon-launch.js";
 import * as daemonRun from "./daemon-run.js";
 import { daemonCommand } from "./ops-commands.js";
+import { projectCommand } from "./project-command.js";
 
 /** Capture the single JSON object printed on stdout across an async command. */
 async function captureJson(fn: () => Promise<number>): Promise<{
@@ -32,17 +33,21 @@ async function captureJson(fn: () => Promise<number>): Promise<{
 describe("ops-commands: ad-hoc failure envelopes route through the ONE projector (Ф2)", () => {
   let configDir: string;
   let prevConfigDir: string | undefined;
+  let prevDaemonEntry: string | undefined;
 
   beforeEach(() => {
     // Hermetic: an empty config dir means no daemon token on disk.
     configDir = realpathSync(mkdtempSync(join(tmpdir(), "clawdexor-ops-")));
     prevConfigDir = process.env["CLAUDEXOR_CONFIG_DIR"];
+    prevDaemonEntry = process.env["CLAUDEXOR_DAEMON_ENTRY"];
     process.env["CLAUDEXOR_CONFIG_DIR"] = configDir;
   });
 
   afterEach(() => {
     if (prevConfigDir === undefined) delete process.env["CLAUDEXOR_CONFIG_DIR"];
     else process.env["CLAUDEXOR_CONFIG_DIR"] = prevConfigDir;
+    if (prevDaemonEntry === undefined) delete process.env["CLAUDEXOR_DAEMON_ENTRY"];
+    else process.env["CLAUDEXOR_DAEMON_ENTRY"] = prevDaemonEntry;
     rmSync(configDir, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -85,6 +90,7 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
         kind: "preclaim_exit",
         exitCode: 0,
         signal: null,
+        stderr: { kind: "empty" },
       }),
       callerError: () => new CliError("operational", "unused"),
     });
@@ -106,4 +112,42 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
     );
     expect(markReady).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    {
+      label: "explicit daemon start",
+      run: () => daemonCommand(parseArgs(["daemon", "start"]), true),
+      source: daemonLaunch.CLI_DAEMON_LAUNCH_SOURCES.explicitStart,
+    },
+    {
+      label: "ensureDaemon project command",
+      run: () => projectCommand(parseArgs(["project", "list"]), true),
+      source: daemonLaunch.CLI_DAEMON_LAUNCH_SOURCES.ensureDaemon,
+    },
+  ])(
+    "projects real pre-claim stderr through the $label failure envelope",
+    async ({ run, source }) => {
+      const entry = join(configDir, `missing-import-${source}.mjs`);
+      writeFileSync(entry, 'await import("./projector-missing-module.mjs");\n');
+      process.env["CLAUDEXOR_DAEMON_ENTRY"] = entry;
+
+      const { code, env } = await captureJson(run);
+
+      expect(code).toBe(1);
+      expect(env).toMatchObject({
+        ok: false,
+        code: "daemon_start_failed",
+        context: {
+          launchSource: source,
+          failure: {
+            kind: "preclaim_exit",
+            stderr: { kind: "retained" },
+          },
+        },
+      });
+      expect(String(env["message"])).toMatch(/ERR_MODULE_NOT_FOUND|Cannot find module/);
+      expect(JSON.stringify(env)).toContain("projector-missing-module.mjs");
+      expect(existsSync(join(configDir, "daemon", "claudexord.log"))).toBe(false);
+    },
+  );
 });

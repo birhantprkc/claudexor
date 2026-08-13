@@ -1,6 +1,7 @@
 /** Caller-visible daemon launch evidence before root authority exists. */
 import { spawn, type ChildProcess } from "node:child_process";
 import { lstatSync } from "node:fs";
+import type { Readable } from "node:stream";
 import { logPath } from "@claudexor/daemon";
 import {
   safeProblemContext,
@@ -19,6 +20,23 @@ export const CLI_DAEMON_LAUNCH_SOURCES = {
 export type CliDaemonLaunchSource =
   (typeof CLI_DAEMON_LAUNCH_SOURCES)[keyof typeof CLI_DAEMON_LAUNCH_SOURCES];
 
+const DAEMON_LAUNCH_STDERR_RAW_LIMIT_BYTES = 64 * 1_024;
+
+export type DaemonLaunchStderrEvidence =
+  | {
+      kind: "empty";
+    }
+  | {
+      kind: "retained";
+      byteLength: number;
+      message: string;
+    }
+  | {
+      kind: "oversize_discarded";
+      observedBytes: number;
+      limitBytes: number;
+    };
+
 export type DaemonLaunchFailure =
   | {
       kind: "spawn_error";
@@ -29,6 +47,12 @@ export type DaemonLaunchFailure =
       kind: "preclaim_exit";
       exitCode: number | null;
       signal: NodeJS.Signals | null;
+      stderr: DaemonLaunchStderrEvidence;
+    }
+  | {
+      kind: "startup_timeout";
+      timeoutMs: number;
+      stderr: DaemonLaunchStderrEvidence;
     };
 
 export interface DetachedDaemonLaunch {
@@ -89,6 +113,84 @@ function canonicalLogRemedy(): string {
   }
 }
 
+interface PreAuthorityStderrCapture {
+  evidence(): DaemonLaunchStderrEvidence;
+  destroyAndDiscard(): void;
+}
+
+function capturePreAuthorityStderr(stream: Readable | null): PreAuthorityStderrCapture {
+  let chunks: Buffer[] = [];
+  let retainedBytes = 0;
+  let observedBytes = 0;
+  let oversize = false;
+  let discarded = false;
+
+  const onData = (chunk: Buffer | string): void => {
+    if (discarded) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    observedBytes += bytes.length;
+    if (oversize) return;
+    if (observedBytes > DAEMON_LAUNCH_STDERR_RAW_LIMIT_BYTES) {
+      oversize = true;
+      chunks = [];
+      retainedBytes = 0;
+      return;
+    }
+    chunks.push(Buffer.from(bytes));
+    retainedBytes += bytes.length;
+  };
+  stream?.on("data", onData);
+
+  return {
+    evidence: () => {
+      if (oversize) {
+        return {
+          kind: "oversize_discarded",
+          observedBytes,
+          limitBytes: DAEMON_LAUNCH_STDERR_RAW_LIMIT_BYTES,
+        };
+      }
+      if (retainedBytes === 0) return { kind: "empty" };
+      const raw = Buffer.concat(chunks, retainedBytes).toString("utf8");
+      return {
+        kind: "retained",
+        byteLength: retainedBytes,
+        message: safeProblemMessage(raw),
+      };
+    },
+    destroyAndDiscard: () => {
+      if (discarded) return;
+      discarded = true;
+      chunks = [];
+      retainedBytes = 0;
+      stream?.off("data", onData);
+      stream?.destroy();
+    },
+  };
+}
+
+function stderrMessage(evidence: DaemonLaunchStderrEvidence): string {
+  switch (evidence.kind) {
+    case "empty":
+      return "; pre-authority stderr: empty";
+    case "retained":
+      return `; pre-authority stderr (retained): ${evidence.message}`;
+    case "oversize_discarded":
+      return `; pre-authority stderr: oversize_discarded after ${evidence.observedBytes} bytes (limit ${evidence.limitBytes})`;
+  }
+}
+
+function failureMessage(failure: DaemonLaunchFailure): string {
+  switch (failure.kind) {
+    case "spawn_error":
+      return `daemon launch failed before root authority: ${failure.message}`;
+    case "preclaim_exit":
+      return `daemon exited before it became ready (exit ${failure.exitCode ?? "null"}${failure.signal ? `, signal ${failure.signal}` : ""})${stderrMessage(failure.stderr)}`;
+    case "startup_timeout":
+      return `daemon did not become ready within ${Math.round(failure.timeoutMs / 1_000)}s${stderrMessage(failure.stderr)}`;
+  }
+}
+
 /**
  * Spawn without an inherited canonical-log descriptor. Import, spawn and
  * pre-claim exits remain bounded caller evidence; the daemon may start its own
@@ -98,6 +200,7 @@ export function launchDetachedDaemon(options: LaunchDetachedDaemonOptions): Deta
   proveEntry(options.entryPath);
   let failure: DaemonLaunchFailure | null = null;
   let ready = false;
+  let stderrCapture: PreAuthorityStderrCapture | undefined;
   let resolveFailure: ((value: DaemonLaunchFailure) => void) | undefined;
   const failurePromise = new Promise<DaemonLaunchFailure>((resolve) => {
     resolveFailure = resolve;
@@ -107,22 +210,30 @@ export function launchDetachedDaemon(options: LaunchDetachedDaemonOptions): Deta
     failure = value;
     resolveFailure?.(value);
   };
+  const discardStderr = (): void => {
+    stderrCapture?.destroyAndDiscard();
+    stderrCapture = undefined;
+  };
   let child: ChildProcess | undefined;
   try {
     child = spawn(options.nodePath ?? process.execPath, [options.entryPath], {
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       env: daemonLaunchEnvironment(options.env ?? process.env, options.launchSource),
     });
+    stderrCapture = capturePreAuthorityStderr(child.stderr);
     child.once("error", (error) => {
       const code =
         typeof (error as NodeJS.ErrnoException).code === "string"
           ? (error as NodeJS.ErrnoException).code
           : undefined;
       settleFailure({ kind: "spawn_error", message: safeProblemMessage(error), code });
+      discardStderr();
     });
-    child.once("exit", (exitCode, signal) => {
-      settleFailure({ kind: "preclaim_exit", exitCode, signal });
+    child.once("close", (exitCode, signal) => {
+      const stderr = stderrCapture?.evidence() ?? { kind: "empty" };
+      discardStderr();
+      settleFailure({ kind: "preclaim_exit", exitCode, signal, stderr });
     });
     child.unref();
   } catch (error) {
@@ -134,13 +245,18 @@ export function launchDetachedDaemon(options: LaunchDetachedDaemonOptions): Deta
   }
 
   const callerError = (stage: string, timeoutMs: number): CliError => {
-    const observed = failure;
-    const message = observed
-      ? observed.kind === "spawn_error"
-        ? `daemon launch failed before root authority: ${observed.message}`
-        : `daemon exited before it became ready (exit ${observed.exitCode ?? "null"}${observed.signal ? `, signal ${observed.signal}` : ""})`
-      : `daemon did not become ready within ${Math.round(timeoutMs / 1000)}s`;
-    return new CliError("operational", message, {
+    let observed = failure;
+    if (!observed) {
+      const timeoutFailure: DaemonLaunchFailure = {
+        kind: "startup_timeout",
+        timeoutMs,
+        stderr: stderrCapture?.evidence() ?? { kind: "empty" },
+      };
+      settleFailure(timeoutFailure);
+      discardStderr();
+      observed = failure ?? timeoutFailure;
+    }
+    return new CliError("operational", safeProblemMessage(failureMessage(observed)), {
       code: "daemon_start_failed",
       retryable: true,
       requiredActions: safeProblemRequiredActions([
@@ -152,7 +268,7 @@ export function launchDetachedDaemon(options: LaunchDetachedDaemonOptions): Deta
         timeoutMs,
         entryPath: options.entryPath,
         launchSource: options.launchSource,
-        failure: observed ?? { kind: "startup_timeout" },
+        failure: observed,
       }),
     });
   };
@@ -163,6 +279,7 @@ export function launchDetachedDaemon(options: LaunchDetachedDaemonOptions): Deta
     waitForFailure: () => (failure ? Promise.resolve(failure) : failurePromise),
     markReady: () => {
       ready = true;
+      discardStderr();
     },
     callerError,
   };

@@ -1,6 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CLI_DAEMON_LAUNCH_SOURCES,
@@ -21,6 +22,23 @@ function root(): string {
   return value;
 }
 
+async function waitForFile(path: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await delay(20);
+  }
+}
+
+function killIfRunning(pid: number | null): void {
+  if (pid === null) return;
+  try {
+    process.kill(pid);
+  } catch {
+    // The exact test child already exited.
+  }
+}
+
 describe("bounded caller-side daemon launch adapter", () => {
   it("adds exact launch provenance without mutating or dropping the caller environment", () => {
     const base = { HOME: "/tmp/home", KEEP_ME: "yes" };
@@ -33,16 +51,16 @@ describe("bounded caller-side daemon launch adapter", () => {
     expect(base).toEqual({ HOME: "/tmp/home", KEEP_ME: "yes" });
   });
 
-  it("makes an import/pre-claim exit caller-visible without forging the daemon-owned log", async () => {
+  it("makes a real missing-module import failure visible without forging the daemon-owned log", async () => {
     const dataRoot = root();
-    const entry = join(dataRoot, "exit-before-claim.cjs");
+    const entry = join(dataRoot, "exit-before-claim.mjs");
     const sourceReceipt = join(dataRoot, "launch-source.txt");
     writeFileSync(
       entry,
       [
-        'const fs = require("node:fs");',
-        `fs.writeFileSync(${JSON.stringify(sourceReceipt)}, process.env.CLAUDEXOR_DAEMON_LAUNCH_SOURCE || "missing");`,
-        "process.exitCode = 7;",
+        'import { writeFileSync } from "node:fs";',
+        `writeFileSync(${JSON.stringify(sourceReceipt)}, process.env.CLAUDEXOR_DAEMON_LAUNCH_SOURCE || "missing");`,
+        'await import("./missing-preclaim-module.mjs");',
       ].join("\n"),
     );
 
@@ -53,7 +71,15 @@ describe("bounded caller-side daemon launch adapter", () => {
     });
     const failure = await launch.waitForFailure();
 
-    expect(failure).toMatchObject({ kind: "preclaim_exit", exitCode: 7 });
+    expect(failure).toMatchObject({
+      kind: "preclaim_exit",
+      exitCode: 1,
+      stderr: {
+        kind: "retained",
+        message: expect.stringMatching(/ERR_MODULE_NOT_FOUND|Cannot find module/),
+      },
+    });
+    expect(JSON.stringify(failure)).toContain("missing-preclaim-module.mjs");
     expect(readFileSync(sourceReceipt, "utf8")).toBe("cli_explicit_start");
     expect(() => readFileSync(join(dataRoot, "daemon", "claudexord.log"), "utf8")).toThrow();
     const error = launch.callerError("startup_wait", 15_000);
@@ -61,6 +87,127 @@ describe("bounded caller-side daemon launch adapter", () => {
     expect(error.requiredActions?.join(" ")).toContain("daemon logs");
     expect(error.requiredActions?.join(" ")).toMatch(/fixed runtime|eligible/i);
     expect(JSON.stringify(error.context)).toContain("preclaim_exit");
+    expect(error.message).toMatch(/ERR_MODULE_NOT_FOUND|Cannot find module/);
+  });
+
+  it("redacts a secret crossing the 2k projection boundary before bounding stderr", async () => {
+    const dataRoot = root();
+    const entry = join(dataRoot, "secret-stderr.cjs");
+    const token = `sk-${"a".repeat(40)}`;
+    const raw = `${"p".repeat(1_984)} ${token} TAIL`;
+    writeFileSync(entry, `process.stderr.write(${JSON.stringify(raw)}); process.exitCode = 9;\n`);
+
+    const launch = launchDetachedDaemon({
+      entryPath: entry,
+      launchSource: CLI_DAEMON_LAUNCH_SOURCES.ensureDaemon,
+      env: { ...process.env, CLAUDEXOR_CONFIG_DIR: dataRoot },
+    });
+    const failure = await launch.waitForFailure();
+    expect(failure).toMatchObject({
+      kind: "preclaim_exit",
+      stderr: { kind: "retained", message: expect.stringContaining("[redacted]") },
+    });
+    const projected = JSON.stringify(failure);
+    expect(projected).not.toContain(token);
+    expect(projected).not.toContain(token.slice(0, 15));
+    const error = launch.callerError("socket_wait", 30_000);
+    expect(error.message).not.toContain(token);
+    expect(JSON.stringify(error.context)).not.toContain(token);
+  });
+
+  it("discards every raw stderr byte on overflow and exposes only the typed marker", async () => {
+    const dataRoot = root();
+    const entry = join(dataRoot, "oversize-stderr.cjs");
+    const rawBytes = 64 * 1_024 + 1;
+    writeFileSync(
+      entry,
+      `process.stderr.write("RAW-BEGIN|" + "x".repeat(${rawBytes}) + "|RAW-END"); process.exitCode = 11;\n`,
+    );
+
+    const launch = launchDetachedDaemon({
+      entryPath: entry,
+      launchSource: CLI_DAEMON_LAUNCH_SOURCES.ensureDaemon,
+      env: { ...process.env, CLAUDEXOR_CONFIG_DIR: dataRoot },
+    });
+    const failure = await launch.waitForFailure();
+    expect(failure).toMatchObject({
+      kind: "preclaim_exit",
+      stderr: { kind: "oversize_discarded" },
+    });
+    const error = launch.callerError("socket_wait", 30_000);
+    const projected = JSON.stringify({ failure, message: error.message, context: error.context });
+    expect(projected).toContain("oversize_discarded");
+    expect(projected).not.toContain("RAW-BEGIN");
+    expect(projected).not.toContain("RAW-END");
+  });
+
+  it("markReady closes the transient stderr pipe and ignores the later child close", async () => {
+    const dataRoot = root();
+    const entry = join(dataRoot, "ready-stderr.cjs");
+    const started = join(dataRoot, "started.txt");
+    const pipeClosed = join(dataRoot, "pipe-closed.txt");
+    writeFileSync(
+      entry,
+      [
+        'const fs = require("node:fs");',
+        `fs.writeFileSync(${JSON.stringify(started)}, "started");`,
+        `process.stderr.on("error", (error) => { fs.writeFileSync(${JSON.stringify(pipeClosed)}, error.code || "error"); process.exit(0); });`,
+        'setInterval(() => process.stderr.write("pre-authority stderr\\n"), 10);',
+        "setTimeout(() => process.exit(2), 5000);",
+      ].join("\n"),
+    );
+    const launch = launchDetachedDaemon({
+      entryPath: entry,
+      launchSource: CLI_DAEMON_LAUNCH_SOURCES.explicitStart,
+      env: { ...process.env, CLAUDEXOR_CONFIG_DIR: dataRoot },
+    });
+    try {
+      await waitForFile(started);
+      await delay(30);
+      launch.markReady();
+      await waitForFile(pipeClosed);
+      expect(readFileSync(pipeClosed, "utf8")).toBe("EPIPE");
+      await delay(30);
+      expect(launch.failure()).toBeNull();
+    } finally {
+      killIfRunning(launch.pid);
+    }
+  });
+
+  it("a terminal caller timeout types its stderr evidence and closes the pipe", async () => {
+    const dataRoot = root();
+    const entry = join(dataRoot, "timeout-stderr.cjs");
+    const started = join(dataRoot, "started.txt");
+    const pipeClosed = join(dataRoot, "pipe-closed.txt");
+    writeFileSync(
+      entry,
+      [
+        'const fs = require("node:fs");',
+        `fs.writeFileSync(${JSON.stringify(started)}, "started");`,
+        `process.stderr.on("error", (error) => { fs.writeFileSync(${JSON.stringify(pipeClosed)}, error.code || "error"); process.exit(0); });`,
+        'setInterval(() => process.stderr.write("waiting for readiness\\n"), 10);',
+        "setTimeout(() => process.exit(2), 5000);",
+      ].join("\n"),
+    );
+    const launch = launchDetachedDaemon({
+      entryPath: entry,
+      launchSource: CLI_DAEMON_LAUNCH_SOURCES.ensureDaemon,
+      env: { ...process.env, CLAUDEXOR_CONFIG_DIR: dataRoot },
+    });
+    try {
+      await waitForFile(started);
+      await delay(30);
+      const error = launch.callerError("socket_wait", 1);
+      expect(launch.failure()).toMatchObject({
+        kind: "startup_timeout",
+        stderr: { kind: "retained", message: expect.stringContaining("waiting for readiness") },
+      });
+      expect(JSON.stringify(error.context)).toContain("startup_timeout");
+      await waitForFile(pipeClosed);
+      expect(readFileSync(pipeClosed, "utf8")).toBe("EPIPE");
+    } finally {
+      killIfRunning(launch.pid);
+    }
   });
 
   it("bounds and types a spawn refusal before any daemon authority exists", async () => {
