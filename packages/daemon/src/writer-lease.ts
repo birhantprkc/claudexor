@@ -172,6 +172,32 @@ function parseLeaseOwner(raw: string): DaemonLeaseOwner | null {
   return { pid: record.pid, token: record.token, identity: record.identity };
 }
 
+/** Preserve the pre-strict public projection exactly; never use for authority. */
+function parseLegacyLeaseOwner(raw: string): DaemonLeaseOwner | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!validPositiveInteger(record.pid) || typeof record.token !== "string") return null;
+  return {
+    pid: record.pid,
+    token: record.token,
+    ...(isKnownProcessIdentity(record.identity) ? { identity: record.identity } : {}),
+  };
+}
+
+function readLegacyLeaseOwner(path: string): DaemonLeaseOwner | null {
+  try {
+    return parseLegacyLeaseOwner(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function inspectLeaseAfterOwnerMissing(
   path: string,
   fs: DaemonWriterLeaseFilesystem,
@@ -362,13 +388,24 @@ function staleReplacementFailed(path: string): Error {
 /** Claim single-writer authority before any daemon journal is opened. */
 export function acquireDaemonWriterLease(
   socketPath: string,
-  deps: DaemonWriterLeaseDependencies = {},
+  deps: { identity?: ProcessIdentityReader } = {},
+  acquisitionDeps: Omit<DaemonWriterLeaseDependencies, "identity"> = {},
 ): DaemonWriterLease {
+  // The second argument is a published compatibility boundary. Read only its
+  // original `identity` field: downstream objects may already use any newer
+  // dependency name for unrelated private/runtime state.
+  const identity = deps.identity;
+  const effectiveDeps: DaemonWriterLeaseDependencies = {
+    identity,
+    observation: acquisitionDeps.observation,
+    probeProcess: acquisitionDeps.probeProcess,
+    filesystem: acquisitionDeps.filesystem,
+  };
   const path = writerLeasePath(socketPath);
   const token = randomUUID();
   const ownerPath = join(path, "owner.json");
-  const fs = filesystem(deps);
-  const self = (deps.identity ?? defaultProcessIdentityService).self();
+  const fs = filesystem(effectiveDeps);
+  const self = (identity ?? defaultProcessIdentityService).self();
   const owner: DaemonLeaseOwner = {
     pid: process.pid,
     token,
@@ -388,7 +425,7 @@ export function acquireDaemonWriterLease(
       if (existing.status === "absent") continue;
       if (existing.status === "unknown") throw writerBusy(path);
 
-      const capability = classifyDaemonLeaseOwner(existing.owner, deps);
+      const capability = classifyDaemonLeaseOwner(existing.owner, effectiveDeps);
       if (capability.status !== "proven_stale") throw writerBusy(path);
 
       // Classification may have spanned an orderly release. Re-read the main
@@ -405,7 +442,7 @@ export function acquireDaemonWriterLease(
       }
       if (attempt === 1) throw staleReplacementFailed(path);
 
-      const quarantine = quarantineDaemonWriterLeaseGeneration(confirmed, deps);
+      const quarantine = quarantineDaemonWriterLeaseGeneration(confirmed, effectiveDeps);
       if (quarantine.status === "quarantined") continue;
 
       const current = inspectWriterLeasePath(path, fs);
@@ -437,8 +474,7 @@ export function acquireDaemonWriterLease(
  * physically absent; authority-sensitive callers must use strict inspection.
  */
 export function daemonLeaseOwner(socketPath: string): DaemonLeaseOwner | null {
-  const lease = inspectWriterLeasePath(writerLeasePath(socketPath), DEFAULT_FILESYSTEM);
-  return lease.status === "owned" ? lease.owner : null;
+  return readLegacyLeaseOwner(join(writerLeasePath(socketPath), "owner.json"));
 }
 
 /** Raw signal-zero presence helper; daemon serviceability uses the classifier. */

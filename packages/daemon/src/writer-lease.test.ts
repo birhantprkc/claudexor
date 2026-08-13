@@ -115,6 +115,21 @@ function depsFor(
   return { ...extra, ...observationDependencies(observed) };
 }
 
+function acquireWithDependencies(
+  path: string,
+  deps: DaemonWriterLeaseDependencies,
+): ReturnType<typeof acquireDaemonWriterLease> {
+  return acquireDaemonWriterLease(
+    path,
+    { identity: deps.identity },
+    {
+      observation: deps.observation,
+      probeProcess: deps.probeProcess,
+      filesystem: deps.filesystem,
+    },
+  );
+}
+
 describe("strict writer-lease inspection", () => {
   it("distinguishes physical absence, the owner-write boot window, and invalid paths", () => {
     expect(inspectDaemonWriterLease(socketPath)).toEqual({ status: "absent", path: leasePath });
@@ -282,6 +297,128 @@ describe("strict writer-lease inspection", () => {
     expect(daemonLeaseOwner(socketPath)).toBeNull();
     writeFileSync(join(leasePath, "owner.json"), '{"pid":7,"token":"legacy"}\n');
     expect(daemonLeaseOwner(socketPath)).toEqual({ pid: 7, token: "legacy" });
+
+    replaceOwner({ pid: 7, token: "" });
+    expect(daemonLeaseOwner(socketPath)).toEqual({ pid: 7, token: "" });
+
+    replaceOwner({ pid: 7, token: "null-identity", identity: null });
+    expect(daemonLeaseOwner(socketPath)).toEqual({ pid: 7, token: "null-identity" });
+
+    replaceOwner({ pid: 7, token: "invalid-identity", identity: { status: "known" } });
+    expect(daemonLeaseOwner(socketPath)).toEqual({ pid: 7, token: "invalid-identity" });
+
+    const mismatchedIdentity = known(8, "linux:8");
+    replaceOwner({ pid: 7, token: "mismatched-identity", identity: mismatchedIdentity });
+    expect(daemonLeaseOwner(socketPath)).toEqual({
+      pid: 7,
+      token: "mismatched-identity",
+      identity: mismatchedIdentity,
+    });
+
+    rmSync(join(leasePath, "owner.json"));
+    writeFileSync(join(root, "legacy-owner-target"), '{"pid":7,"token":"symlink"}\n');
+    symlinkSync(join(root, "legacy-owner-target"), join(leasePath, "owner.json"));
+    expect(daemonLeaseOwner(socketPath)).toEqual({ pid: 7, token: "symlink" });
+    expect(inspectDaemonWriterLease(socketPath)).toMatchObject({
+      status: "unknown",
+      reason: "owner_malformed",
+    });
+  });
+});
+
+describe("legacy acquisition dependency compatibility", () => {
+  it("ignores unrelated members that collide with new dependency names", () => {
+    const stalePid = 999_999_999;
+    const identity: ProcessIdentityReader = {
+      read: (pid) => ({
+        status: "unknown",
+        pid,
+        platform: process.platform,
+        reason: "permission_denied",
+      }),
+      self: () => known(process.pid, "linux:999"),
+    };
+    let observationCalls = 0;
+    let probeCalls = 0;
+    let filesystemCalls = 0;
+
+    class ObservationCollision {
+      readonly identity = identity;
+      private readonly observation = () => {
+        observationCalls += 1;
+      };
+
+      constructor() {
+        void this.observation;
+      }
+    }
+
+    class ProbeCollision {
+      readonly identity = identity;
+      private readonly probeProcess = () => {
+        probeCalls += 1;
+      };
+
+      constructor() {
+        void this.probeProcess;
+      }
+    }
+
+    class FilesystemCollision {
+      readonly identity = identity;
+      private readonly filesystem = {
+        createLeaseDirectory: () => {
+          filesystemCalls += 1;
+          throw new Error("unrelated filesystem member was invoked");
+        },
+      };
+
+      constructor() {
+        void this.filesystem;
+      }
+    }
+
+    const observationSocket = join(root, "observation.sock");
+    const probeSocket = join(root, "probe.sock");
+    const filesystemSocket = join(root, "filesystem.sock");
+    seedOwner({ pid: stalePid, token: "observation" }, writerLeasePath(observationSocket));
+    seedOwner({ pid: stalePid, token: "probe" }, writerLeasePath(probeSocket));
+    seedOwner({ pid: stalePid, token: "filesystem" }, writerLeasePath(filesystemSocket));
+
+    const observationLease = acquireDaemonWriterLease(
+      observationSocket,
+      new ObservationCollision(),
+    );
+    const probeLease = acquireDaemonWriterLease(probeSocket, new ProbeCollision());
+    const filesystemLease = acquireDaemonWriterLease(filesystemSocket, new FilesystemCollision());
+
+    expect({ observationCalls, probeCalls, filesystemCalls }).toEqual({
+      observationCalls: 0,
+      probeCalls: 0,
+      filesystemCalls: 0,
+    });
+    observationLease.release();
+    probeLease.release();
+    filesystemLease.release();
+  });
+
+  it("reads the legacy identity dependency exactly once", () => {
+    const identity: ProcessIdentityReader = {
+      read: (pid) => ({ status: "missing", pid, platform: process.platform }),
+      self: () => known(process.pid, "linux:999"),
+    };
+    let reads = 0;
+    const deps = {
+      get identity(): ProcessIdentityReader {
+        reads += 1;
+        if (reads > 1) throw new Error("identity getter read twice");
+        return identity;
+      },
+    };
+
+    const lease = acquireDaemonWriterLease(join(root, "identity-getter.sock"), deps);
+    expect(reads).toBe(1);
+    lease.release();
   });
 });
 
@@ -461,7 +598,7 @@ describe("generation-bound writer-lease recovery", () => {
 
   it("recovers a matching zombie and preserves its exact nonempty tombstone", () => {
     const original = seedOwner(staleOwner);
-    const lease = acquireDaemonWriterLease(socketPath, recoveryDeps());
+    const lease = acquireWithDependencies(socketPath, recoveryDeps());
     const tombstone = writerLeaseTombstonePath(leasePath, staleOwner);
 
     expect(JSON.parse(readFileSync(join(leasePath, "owner.json"), "utf8"))).toMatchObject({
@@ -486,7 +623,7 @@ describe("generation-bound writer-lease recovery", () => {
         rename: (from, to) => {
           if (!interleaved) {
             interleaved = true;
-            successor = acquireDaemonWriterLease(socketPath, recoveryDeps());
+            successor = acquireWithDependencies(socketPath, recoveryDeps());
             successorBytes = readFileSync(join(leasePath, "owner.json"), "utf8");
           }
           renameSync(from, to);
@@ -494,7 +631,7 @@ describe("generation-bound writer-lease recovery", () => {
       },
     };
 
-    expect(() => acquireDaemonWriterLease(socketPath, delayedDeps)).toThrowError(
+    expect(() => acquireWithDependencies(socketPath, delayedDeps)).toThrowError(
       expect.objectContaining({ code: "daemon_writer_busy", status: 409 }),
     );
     expect(successor).toBeDefined();
@@ -526,7 +663,7 @@ describe("generation-bound writer-lease recovery", () => {
       }),
     };
 
-    expect(() => acquireDaemonWriterLease(socketPath, deps)).toThrowError(
+    expect(() => acquireWithDependencies(socketPath, deps)).toThrowError(
       expect.objectContaining({ code: "daemon_writer_busy", status: 409 }),
     );
     expect(JSON.parse(readFileSync(join(leasePath, "owner.json"), "utf8"))).toEqual(successor);
@@ -540,7 +677,7 @@ describe("generation-bound writer-lease recovery", () => {
     const tombstone = writerLeaseTombstonePath(leasePath, staleOwner);
     seedOwner(staleOwner, tombstone);
 
-    expect(() => acquireDaemonWriterLease(socketPath, recoveryDeps())).toThrow(
+    expect(() => acquireWithDependencies(socketPath, recoveryDeps())).toThrow(
       `could not replace stale daemon writer lease ${leasePath}`,
     );
     expect(readFileSync(join(leasePath, "owner.json"), "utf8")).toBe(original);
@@ -580,7 +717,7 @@ describe("generation-bound writer-lease recovery", () => {
       },
     };
 
-    expect(() => acquireDaemonWriterLease(socketPath, deps)).toThrowError(
+    expect(() => acquireWithDependencies(socketPath, deps)).toThrowError(
       expect.objectContaining({ code: "daemon_writer_busy", status: 409 }),
     );
     expect(JSON.parse(readFileSync(join(leasePath, "owner.json"), "utf8"))).toEqual(successor);
@@ -599,14 +736,14 @@ describe("generation-bound writer-lease recovery", () => {
       },
     };
 
-    expect(() => acquireDaemonWriterLease(socketPath, epermDeps)).toThrow(
+    expect(() => acquireWithDependencies(socketPath, epermDeps)).toThrow(
       `could not replace stale daemon writer lease ${leasePath}`,
     );
 
     rmSync(tombstone, { recursive: true });
     const foreignOwner: DaemonLeaseOwner = { pid: 5555, token: "foreign" };
     seedOwner(foreignOwner, tombstone);
-    expect(() => acquireDaemonWriterLease(socketPath, epermDeps)).toThrowError(
+    expect(() => acquireWithDependencies(socketPath, epermDeps)).toThrowError(
       expect.objectContaining({ code: "EPERM" }),
     );
     expect(JSON.parse(readFileSync(join(tombstone, "owner.json"), "utf8"))).toEqual(foreignOwner);
@@ -616,7 +753,7 @@ describe("generation-bound writer-lease recovery", () => {
     const raw = seedOwner(staleOwner);
     const liveDeps = depsFor(observation(staleOwner.identity!, "S"));
     try {
-      acquireDaemonWriterLease(socketPath, liveDeps);
+      acquireWithDependencies(socketPath, liveDeps);
       throw new Error("expected busy lease");
     } catch (error) {
       expect(error).toMatchObject({ code: "daemon_writer_busy", status: 409 });
@@ -625,13 +762,13 @@ describe("generation-bound writer-lease recovery", () => {
 
     rmSync(leasePath, { recursive: true });
     mkdirSync(leasePath);
-    expect(() => acquireDaemonWriterLease(socketPath, recoveryDeps())).toThrowError(
+    expect(() => acquireWithDependencies(socketPath, recoveryDeps())).toThrowError(
       expect.objectContaining({ code: "daemon_writer_busy", status: 409 }),
     );
   });
 
   it("fences release to the exact main owner and never removes a successor", () => {
-    const lease = acquireDaemonWriterLease(
+    const lease = acquireWithDependencies(
       socketPath,
       depsFor(observation(known(process.pid, "linux:999"), "S")),
     );
