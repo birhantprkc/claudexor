@@ -51,6 +51,10 @@ struct LocalConnectionRecoveryLoop {
         var launchAvailable = true
         while isCurrent {
             prepareProbe()
+            // A lifecycle can replace or install the successor while this
+            // handshake is suspended. Its completion must make a negative
+            // result stale rather than authorize a second fallback launch.
+            let lifecycleSnapshot = lifecycleOwner.completionSnapshot()
             let result = await probe()
             // Manual Reconnect advances the generation while discovery or a
             // handshake is suspended. Its predecessor may publish nothing.
@@ -97,9 +101,18 @@ struct LocalConnectionRecoveryLoop {
                 launchAvailable = false
 
             case .unavailable:
-                if launchAvailable,
-                    let lease = lifecycleOwner.claim(.outageRecovery)
-                {
+                if launchAvailable {
+                    guard let lease = lifecycleOwner.claim(
+                        .outageRecovery,
+                        ifNoCompletionSince: lifecycleSnapshot)
+                    else {
+                        // Busy and completed-since-snapshot are deliberately
+                        // the same recovery decision: preserve the allowance
+                        // and require a fresh probe before any launch.
+                        enterOffline()
+                        await pause()
+                        continue
+                    }
                     // Consume before start, including a synchronous false.
                     launchAvailable = false
                     let started = startDaemon()

@@ -210,6 +210,35 @@ private final class LocalConnectionRecoveryHarness {
         #expect(sut.probeCount >= 3)
     }
 
+    @Test func lifecycleCompletionSnapshotAndConditionalClaimAreAtomicAndTokenBound() throws {
+        let owner = LocalRuntimeLifecycleOwner()
+        let initial = owner.completionSnapshot()
+        let installation = try #require(owner.claim(.installation))
+
+        // Being busy refuses without fabricating a completion.
+        #expect(owner.claim(
+            .outageRecovery, ifNoCompletionSince: initial) == nil)
+        #expect(owner.completionSnapshot() == initial)
+
+        owner.release(installation)
+        let completed = owner.completionSnapshot()
+        #expect(completed != initial)
+        // The stale observation cannot claim even though the owner is idle.
+        #expect(owner.claim(
+            .outageRecovery, ifNoCompletionSince: initial) == nil)
+
+        let recovery = try #require(owner.claim(
+            .outageRecovery, ifNoCompletionSince: completed))
+        owner.release(installation)
+        // A stale token neither clears the current owner nor advances receipt.
+        #expect(owner.completionSnapshot() == completed)
+        #expect(owner.claim(.reconciliation) == nil)
+
+        owner.release(recovery)
+        #expect(owner.completionSnapshot() != completed)
+        #expect(owner.claim(.reconciliation) != nil)
+    }
+
     @MainActor
     @Test func exhaustedAllowanceKeepsPollingAndExternalRecoveryRearmsIt() async {
         let sut = LocalConnectionRecoveryHarness(

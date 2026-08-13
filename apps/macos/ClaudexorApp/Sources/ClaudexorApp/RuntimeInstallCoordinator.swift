@@ -56,18 +56,44 @@ public struct LocalRuntimeLifecycleLease: Sendable, Equatable {
     public let operation: LocalRuntimeLifecycleOperation
 }
 
+/// Opaque process-local receipt for lifecycle completions. A caller snapshots
+/// it before suspending work, then uses the owner to atomically prove that no
+/// lifecycle finished before it claims a follow-up action.
+struct LocalRuntimeLifecycleCompletionSnapshot: Sendable, Equatable {
+    fileprivate let sequence: UInt64
+}
+
 public final class LocalRuntimeLifecycleOwner: @unchecked Sendable {
     private let lock = NSLock()
     private var current: LocalRuntimeLifecycleLease?
+    private var completionSequence: UInt64 = 0
 
     public init() {}
 
     public func claim(_ operation: LocalRuntimeLifecycleOperation) -> LocalRuntimeLifecycleLease? {
         lock.withLock {
-            guard current == nil else { return nil }
-            let lease = LocalRuntimeLifecycleLease(id: UUID(), operation: operation)
-            current = lease
-            return lease
+            claimWhileLocked(operation)
+        }
+    }
+
+    /// Snapshot immediately before an awaited observation whose result could be
+    /// stale by the time it returns.
+    func completionSnapshot() -> LocalRuntimeLifecycleCompletionSnapshot {
+        lock.withLock {
+            LocalRuntimeLifecycleCompletionSnapshot(sequence: completionSequence)
+        }
+    }
+
+    /// Atomically claim only when the owner is idle and no lifecycle completed
+    /// since `snapshot`. Returning nil changes neither fact, so a recovery caller
+    /// can retain its launch allowance and obtain a fresh observation.
+    func claim(
+        _ operation: LocalRuntimeLifecycleOperation,
+        ifNoCompletionSince snapshot: LocalRuntimeLifecycleCompletionSnapshot
+    ) -> LocalRuntimeLifecycleLease? {
+        lock.withLock {
+            guard completionSequence == snapshot.sequence else { return nil }
+            return claimWhileLocked(operation)
         }
     }
 
@@ -75,7 +101,17 @@ public final class LocalRuntimeLifecycleOwner: @unchecked Sendable {
         lock.withLock {
             guard current == lease else { return }
             current = nil
+            completionSequence += 1
         }
+    }
+
+    private func claimWhileLocked(
+        _ operation: LocalRuntimeLifecycleOperation
+    ) -> LocalRuntimeLifecycleLease? {
+        guard current == nil else { return nil }
+        let lease = LocalRuntimeLifecycleLease(id: UUID(), operation: operation)
+        current = lease
+        return lease
     }
 }
 

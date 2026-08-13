@@ -71,6 +71,122 @@ private final class GenerationFenceURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class LostCompletionHandshakeGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var entered = false
+    private var released = false
+
+    var hasEntered: Bool { condition.withLock { entered } }
+
+    func block() {
+        condition.lock()
+        entered = true
+        condition.broadcast()
+        while !released { condition.wait() }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.withLock {
+            released = true
+            condition.broadcast()
+        }
+    }
+}
+
+/// Production-shaped unavailable handshake: the first `/v2/handshake` can be
+/// held across another lifecycle completion, then every attempt fails through
+/// the real `GatewayClient`/`AppModel.tryConnect` path.
+private final class LostCompletionURLProtocol: URLProtocol {
+    private static let stateLock = NSLock()
+    nonisolated(unsafe) private static var firstHandshakeGate:
+        LostCompletionHandshakeGate?
+    nonisolated(unsafe) private static var handshakeAttempts = 0
+
+    static func reset(gate: LostCompletionHandshakeGate?) {
+        stateLock.withLock {
+            firstHandshakeGate = gate
+            handshakeAttempts = 0
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        switch request.url?.path {
+        case "/healthz":
+            respond(status: 200, body: #"{"ok":true}"#)
+        case "/v2/handshake":
+            let (attempt, gate) = Self.stateLock.withLock {
+                Self.handshakeAttempts += 1
+                return (Self.handshakeAttempts, Self.firstHandshakeGate)
+            }
+            if attempt == 1 { gate?.block() }
+            respond(status: 503, body: #"{"error":"booting"}"#)
+        default:
+            client?.urlProtocol(self, didFailWithError: GenerationFenceTestError.unexpectedRequest)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private func respond(status: Int, body: String) {
+        let response = generationFenceResponse(request, status: status)
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+@MainActor
+private final class LostCompletionRecoveryHarness {
+    let model: AppModel
+    let candidate: GatewayClient
+    private(set) var probeCount = 0
+    private(set) var fallbackStartsAtProbe: [Int] = []
+    private(set) var pauseCount = 0
+
+    init() {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [LostCompletionURLProtocol.self]
+        candidate = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:41180")!, token: "test",
+            session: URLSession(configuration: config))
+        model = AppModel(client: nil, requestNotificationAuthorization: false)
+        model.connectionGeneration = 1
+    }
+
+    var owner: LocalRuntimeLifecycleOwner { model.localRuntimeLifecycleOwner }
+
+    func run() async {
+        let loop = LocalConnectionRecoveryLoop(
+            generation: 1,
+            currentGeneration: { self.model.connectionGeneration },
+            lifecycleOwner: owner,
+            prepareProbe: {},
+            probe: {
+                self.probeCount += 1
+                return await self.model.tryConnect(
+                    candidate: self.candidate,
+                    endpoint: "127.0.0.1:41180",
+                    generation: 1)
+            },
+            pollConnected: { .unavailable },
+            startDaemon: {
+                self.fallbackStartsAtProbe.append(self.probeCount)
+                return true
+            },
+            enterOffline: {},
+            pause: {
+                self.pauseCount += 1
+                if self.pauseCount == 2 { self.model.connectionGeneration = 2 }
+                await Task.yield()
+            })
+        await loop.run()
+    }
+}
+
 private func generationFenceGateway(port: Int) -> GatewayClient {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [GenerationFenceURLProtocol.self]
@@ -96,6 +212,15 @@ private func waitForGenerationFence(
     let deadline = ContinuousClock.now.advanced(by: .seconds(5))
     while counter.count == 0, ContinuousClock.now < deadline { await Task.yield() }
     try #require(counter.count > 0, Comment(rawValue: message))
+}
+
+@MainActor
+private func waitForLostCompletionHandshake(
+    _ gate: LostCompletionHandshakeGate
+) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !gate.hasEntered, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(gate.hasEntered, "unavailable handshake never suspended")
 }
 
 @MainActor
@@ -220,6 +345,74 @@ private func seedSuccessorProjections(_ model: AppModel) throws {
         #expect(await currentTask.value == .replaced(target))
         #expect(daemon.stops == 1)
         #expect(daemon.starts == 1)
+    }
+
+    @MainActor
+    @Test func unavailableHandshakeCannotDuplicateACompletedReconciliationLaunch() async throws {
+        let handshakeGate = LostCompletionHandshakeGate()
+        LostCompletionURLProtocol.reset(gate: handshakeGate)
+        defer {
+            handshakeGate.release()
+            LostCompletionURLProtocol.reset(gate: nil)
+        }
+        let recovery = LostCompletionRecoveryHarness()
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.runningIdentity = target
+        let stopGate = SuspendedReconciliationEffect()
+        daemon.stopGate = stopGate
+        let reconciler = LocalDaemonReconciler(
+            daemon: daemon,
+            lifecycleOwner: recovery.owner,
+            targetClosure: {
+                LocalRuntimeClosureSelection(
+                    scriptURL: self.script, authority: .bundledStampedProbe)
+            },
+            handshakePollInterval: 0.001,
+            handshakePollTimeout: 0.1)
+
+        let reconciliation = Task { await reconciler.reconcile(serving: old) }
+        await stopGate.waitUntilEntered()
+        let recoveryTask = Task { @MainActor in await recovery.run() }
+        try await waitForLostCompletionHandshake(handshakeGate)
+
+        await stopGate.release()
+        #expect(await reconciliation.value == .replaced(target))
+        #expect(daemon.starts == 1)
+        #expect(recovery.fallbackStartsAtProbe.isEmpty)
+
+        handshakeGate.release()
+        await recoveryTask.value
+
+        // The stale first handshake cannot launch. The still-live allowance is
+        // consumed only after the next independent unavailable handshake.
+        #expect(recovery.probeCount == 2)
+        #expect(recovery.fallbackStartsAtProbe == [2])
+        #expect(recovery.pauseCount == 2)
+        #expect(daemon.starts == 1)
+    }
+
+    @MainActor
+    @Test func unavailableHandshakeCannotDuplicateACompletedInstallationLifecycle() async throws {
+        let handshakeGate = LostCompletionHandshakeGate()
+        LostCompletionURLProtocol.reset(gate: handshakeGate)
+        defer {
+            handshakeGate.release()
+            LostCompletionURLProtocol.reset(gate: nil)
+        }
+        let recovery = LostCompletionRecoveryHarness()
+        let installation = try #require(recovery.owner.claim(.installation))
+        let recoveryTask = Task { @MainActor in await recovery.run() }
+        try await waitForLostCompletionHandshake(handshakeGate)
+
+        recovery.owner.release(installation)
+        #expect(recovery.fallbackStartsAtProbe.isEmpty)
+        handshakeGate.release()
+        await recoveryTask.value
+
+        #expect(recovery.probeCount == 2)
+        #expect(recovery.fallbackStartsAtProbe == [2])
+        #expect(recovery.pauseCount == 2)
     }
 
     @MainActor
