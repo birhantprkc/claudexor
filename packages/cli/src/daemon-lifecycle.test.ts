@@ -19,6 +19,44 @@ __afterAllReap(() => {
 });
 
 describe("armDaemonLifecycle", () => {
+  it("routes lifecycle messages through the post-authority diagnostic sink with exact stages", async () => {
+    const root = reapMk(join(tmpdir(), "claudexor-lifecycle-"));
+    const signals = new EventEmitter() as EventEmitter & Pick<NodeJS.Process, "on" | "off">;
+    const records: Array<{ stage: string; message: string }> = [];
+    const lifecycle = armDaemonLifecycle({
+      daemonDir: root,
+      diagnostics: {
+        record: (record) => {
+          records.push({ stage: record.stage, message: record.message });
+          return true;
+        },
+      },
+      signals,
+      snapshot: () => {
+        throw new Error("snapshot failed");
+      },
+      beginShutdown: async () => {},
+    });
+
+    signals.emit("SIGTERM");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    lifecycle.finalize();
+
+    expect(records).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: "shutdown_signal",
+          message: expect.stringContaining("SIGTERM"),
+        }),
+        expect.objectContaining({
+          stage: "pid_snapshot",
+          message: expect.stringContaining("snapshot failed"),
+        }),
+      ]),
+    );
+    expect(() => readFileSync(join(root, "daemon.log"), "utf8")).toThrow();
+  });
+
   it("coalesces SIGTERM and SIGINT into ONE state-machine entry and finalizes idempotently", async () => {
     const root = reapMk(join(tmpdir(), "claudexor-lifecycle-"));
     const signals = new EventEmitter() as EventEmitter & Pick<NodeJS.Process, "on" | "off">;

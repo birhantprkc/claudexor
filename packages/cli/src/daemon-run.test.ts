@@ -554,6 +554,7 @@ describe("absence vs refusal discrimination (#93)", () => {
     httpServer = api.server;
     writeDaemonFixture(api.port);
     const pidFile = join(dir, "fake-daemon.pid");
+    const sourceFile = join(dir, "fake-daemon.launch-source");
     const entry = join(dir, "fake-daemon-entry.cjs");
     writeFileSync(
       entry,
@@ -577,12 +578,14 @@ describe("absence vs refusal discrimination (#93)", () => {
         "});",
         "server.listen(process.env.CLAUDEXOR_DAEMON_SOCK, () => {",
         "  fs.writeFileSync(process.env.CLAUDEXOR_FAKE_DAEMON_PID_FILE, String(process.pid));",
+        '  fs.writeFileSync(process.env.CLAUDEXOR_FAKE_DAEMON_SOURCE_FILE, process.env.CLAUDEXOR_DAEMON_LAUNCH_SOURCE || "missing");',
         "});",
         "setTimeout(() => process.exit(0), 15000);",
       ].join("\n"),
     );
     process.env.CLAUDEXOR_DAEMON_ENTRY = entry;
     process.env.CLAUDEXOR_FAKE_DAEMON_PID_FILE = pidFile;
+    process.env.CLAUDEXOR_FAKE_DAEMON_SOURCE_FILE = sourceFile;
     try {
       const err: unknown = await ensureDaemon().then(
         () => null,
@@ -591,8 +594,10 @@ describe("absence vs refusal discrimination (#93)", () => {
       expect(err).toBeInstanceOf(CliError);
       expect((err as CliError).code).toBe("incompatible_protocol_major");
       expect((err as CliError).requiredActions).toContain(ENGINE_STOP_REMEDY);
+      expect(readFileSync(sourceFile, "utf8")).toBe("cli_ensure_daemon");
     } finally {
       delete process.env.CLAUDEXOR_FAKE_DAEMON_PID_FILE;
+      delete process.env.CLAUDEXOR_FAKE_DAEMON_SOURCE_FILE;
       // Exact-PID cleanup of OUR fake daemon (it also self-exits after 15s).
       try {
         const pid = Number(readFileSync(pidFile, "utf8"));

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureToken } from "@claudexor/daemon";
 import { parseArgs } from "./args.js";
+import * as daemonLaunch from "./daemon-launch.js";
+import * as daemonRun from "./daemon-run.js";
 import { daemonCommand } from "./ops-commands.js";
 
 /** Capture the single JSON object printed on stdout across an async command. */
@@ -70,5 +72,33 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
     expect(env["exitCode"]).toBe(2);
     expect(String(env["message"])).toContain("usage: claudexor daemon");
     expect(env["error"]).toBe(env["message"]);
+  });
+
+  it("`daemon start` uses the shared detached adapter with explicit-start provenance", async () => {
+    const markReady = vi.fn();
+    const launchSpy = vi.spyOn(daemonLaunch, "launchDetachedDaemon").mockReturnValue({
+      pid: 12345,
+      failure: () => null,
+      markReady,
+      waitForFailure: async () => null,
+      callerError: () => new Error("unused"),
+    });
+    vi.spyOn(daemonRun, "waitForDaemonReady").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://127.0.0.1:1", token: "token" },
+    });
+
+    const { code, env } = await captureJson(() =>
+      daemonCommand(parseArgs(["daemon", "start"]), true),
+    );
+
+    expect(code).toBe(0);
+    expect(env).toMatchObject({ pid: 12345, ready: true });
+    expect(launchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchSource: daemonLaunch.CLI_DAEMON_LAUNCH_SOURCES.explicitStart,
+      }),
+    );
+    expect(markReady).toHaveBeenCalledTimes(1);
   });
 });
