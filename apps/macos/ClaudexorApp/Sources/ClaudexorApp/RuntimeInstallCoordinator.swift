@@ -48,6 +48,7 @@ public struct RuntimeClosureIdentity: Sendable, Equatable {
 public enum LocalRuntimeLifecycleOperation: Sendable, Equatable {
     case reconciliation
     case installation
+    case outageRecovery
 }
 
 public struct LocalRuntimeLifecycleLease: Sendable, Equatable {

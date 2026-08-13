@@ -7,34 +7,23 @@ extension AppModel {
     func connect() async {
         connectionGeneration += 1
         let generation = connectionGeneration
-        var attemptedLaunch = false
-        while !Task.isCancelled, generation == connectionGeneration {
-            health = .connecting
-            cancelAllStreams()
-            let attempt = await tryConnect()
-            if attempt == .connected {
-                while !Task.isCancelled, generation == connectionGeneration {
-                    try? await Task.sleep(for: .seconds(3))
-                    guard generation == connectionGeneration, client != nil else { break }
-                    guard await pollEngineIdentity() else { break }
-                }
-            } else if attempt == .reconnect {
-                // Reconciliation already launched and identity-verified the exact
-                // selected closure. Re-read discovery/token/client state; never
-                // run the fallback launcher or hydrate through the old client.
-                attemptedLaunch = true
-                continue
-            } else if attempt == .unavailable,
-                !attemptedLaunch, DaemonLauncher.startIfNeeded()
-            {
-                attemptedLaunch = true
-                try? await Task.sleep(for: .seconds(3))
-                continue
-            }
-            guard generation == connectionGeneration else { return }
-            enterHardOffline()
-            try? await Task.sleep(for: .seconds(3))
-        }
+        let recovery = LocalConnectionRecoveryLoop(
+            generation: generation,
+            currentGeneration: { self.connectionGeneration },
+            lifecycleOwner: localRuntimeLifecycleOwner,
+            prepareProbe: {
+                self.health = .connecting
+                self.cancelAllStreams()
+            },
+            probe: { await self.tryConnect() },
+            pollConnected: {
+                guard self.client != nil else { return false }
+                return await self.pollEngineIdentity()
+            },
+            startDaemon: { DaemonLauncher.startIfNeeded() },
+            enterOffline: { self.enterHardOffline() },
+            pause: { try? await Task.sleep(for: .seconds(3)) })
+        await recovery.run()
     }
 
     /// Drop every daemon-owned projection when the engine is unreachable. The
@@ -136,13 +125,6 @@ extension AppModel {
         deferredOverflow.removeAll()
     }
 
-    private enum LocalConnectAttempt: Equatable {
-        case connected
-        case reconnect
-        case unavailable
-        case lifecycleFailed
-    }
-
     private func daemonReconciliationOwner() -> LocalDaemonReconciler {
         if let localDaemonReconciler { return localDaemonReconciler }
         let reconciler = LocalDaemonReconciler(
@@ -171,7 +153,7 @@ extension AppModel {
         return LocalDaemonReconciliationPolicy(result)
     }
 
-    private func tryConnect() async -> LocalConnectAttempt {
+    private func tryConnect() async -> LocalConnectionProbeResult {
         do {
             let discovery = try ControlApiDiscovery.load()
             let candidate = try discovery.makeClient()
