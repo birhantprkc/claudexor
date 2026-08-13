@@ -53,6 +53,7 @@ export class QuotaRegistry {
     Awaited<ReturnType<QuotaRegistry["performRefreshCycle"]>>
   >();
   private readonly pollPacer: QuotaPollPacer;
+  private recoveryMarkerPending = false;
 
   constructor(
     private readonly journal: DurableJournal,
@@ -126,9 +127,7 @@ export class QuotaRegistry {
     // projection marker. Replaying that state without a new marker would leave
     // already-subscribed clients permanently behind. Close the recovered
     // commit boundary synchronously before the projection becomes available.
-    if (rawMutationAfterMarker) {
-      this.appendProjectionMarker("recovery", this.now().toISOString());
-    }
+    this.recoveryMarkerPending = rawMutationAfterMarker;
     this.pollPacer = new QuotaPollPacer({
       now: this.now,
       publishClockTransition: () => this.publishClockTransitionIfNeeded(),
@@ -138,6 +137,13 @@ export class QuotaRegistry {
         await this.refreshCycle(false);
       },
     });
+  }
+
+  /** Publish the recovered projection boundary only after bootstrap activation. */
+  recoverAfterStartup(): void {
+    if (!this.recoveryMarkerPending) return;
+    this.appendProjectionMarker("recovery", this.now().toISOString());
+    this.recoveryMarkerPending = false;
   }
 
   read() {
@@ -515,18 +521,6 @@ export class QuotaRegistry {
     }
     return removed;
   }
-}
-
-export function quotaProjection(
-  refreshers: readonly QuotaRefresher[] = [],
-  subjects?: QuotaSubjectUniverse,
-  now: () => Date = () => new Date(),
-) {
-  return {
-    name: "quota",
-    create: (journal: DurableJournal) => new QuotaRegistry(journal, refreshers, now, subjects),
-    validate: (registry: QuotaRegistry) => registry.validateProjection(),
-  };
 }
 
 function snapshotKey(snapshot: QuotaSnapshot): string {

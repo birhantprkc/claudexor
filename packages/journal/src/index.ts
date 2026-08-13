@@ -1,19 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import {
   closeSync,
   constants,
-  existsSync,
   fchmodSync,
   fstatSync,
   ftruncateSync,
   fsyncSync,
-  lstatSync,
   openSync,
-  readFileSync,
   renameSync,
-  rmSync,
-  writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
@@ -30,7 +25,26 @@ import {
   type FrameHeader,
   type JournalRecord,
 } from "./frame-codec.js";
+import {
+  appendAndSync,
+  ensurePrivateFile,
+  readDescriptor,
+  readIntent,
+  removeFile,
+  writeIntent,
+} from "./journal-files.js";
+import { cursorError, encodeCursor, JournalCursorError } from "./journal-cursor.js";
+import { journalPartitionDirectory } from "./journal-partition.js";
+import {
+  fingerprintPreparedJournal,
+  inspectPreparedJournal,
+  type JournalPreparationReceipt,
+  type PreparedJournalInspection,
+} from "./read-only-preparation.js";
 export type { JournalRecord } from "./frame-codec.js";
+export type { JournalPreparationReceipt } from "./read-only-preparation.js";
+export { JournalCursorError } from "./journal-cursor.js";
+export { journalPartitionDirectory } from "./journal-partition.js";
 export type JournalRecoveryLocation =
   { kind: "byte"; byteOffset: number } | { kind: "cursor"; epoch: string; seq: number };
 
@@ -51,17 +65,7 @@ export interface DurableJournalOptions {
   compactionThresholdBytes?: number;
 }
 
-export function journalPartitionDirectory(rootDir: string, partition: string): string {
-  if (!partition.trim()) throw new Error("journal partition must not be empty");
-  const slug = partition.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 48) || "partition";
-  return join(rootDir, `${slug}-${sha256(Buffer.from(partition)).slice(0, 12)}`);
-}
-
-interface AppendIntent {
-  v: 1;
-  offset: number;
-  length: number;
-}
+const PREPARED_JOURNAL = Symbol("prepared-journal");
 
 export class JournalRecoveryRequiredError extends Error {
   readonly code: string = "journal_recovery_required";
@@ -97,13 +101,6 @@ export class JournalAppendUncertainError extends JournalRecoveryRequiredError {
   }
 }
 
-export class JournalCursorError extends Error {
-  readonly code = "journal_cursor_invalid";
-  readonly status = 409;
-  readonly retryable = true;
-  readonly requiredActions = ["resnapshot"];
-}
-
 /** Single-writer, checksummed journal. A returned append has reached fsync. */
 export class DurableJournal {
   readonly options: Readonly<DurableJournalOptions>;
@@ -111,33 +108,65 @@ export class DurableJournal {
   readonly path: string;
   private readonly now: () => Date;
   private readonly appendFrame: (fd: number, bytes: Buffer) => void;
-  private fd: number;
+  private fd = -1;
   private readonly entries: JournalRecord[] = [];
   private epoch: string;
   private nextSeq = 1;
   private previousFrameHash = ZERO_HASH;
   private knownFileBytes = 0;
   private recovery: JournalRecoveryState = { status: "ready", discardedTailBytes: 0 };
+  private preparationState: PreparedJournalInspection | null = null;
+  private writable = false;
   private closed = false;
 
-  constructor(options: DurableJournalOptions) {
+  static prepare(options: DurableJournalOptions): DurableJournal {
+    if (!options.partition.trim()) throw new Error("journal partition must not be empty");
+    const partitionDir = journalPartitionDirectory(options.rootDir, options.partition);
+    const prepared = inspectPreparedJournal({
+      rootDir: options.rootDir,
+      partitionDir,
+      journalPath: join(partitionDir, "journal.bin"),
+      intentPath: join(partitionDir, "append.pending.json"),
+      partition: options.partition,
+      initialEpoch: (options.epochFactory ?? randomUUID)(),
+    });
+    const InternalJournal = DurableJournal as unknown as {
+      new (
+        value: DurableJournalOptions,
+        token: typeof PREPARED_JOURNAL,
+        inspection: PreparedJournalInspection,
+      ): DurableJournal;
+    };
+    return new InternalJournal(options, PREPARED_JOURNAL, prepared);
+  }
+
+  constructor(options: DurableJournalOptions);
+  constructor(
+    options: DurableJournalOptions,
+    token?: typeof PREPARED_JOURNAL,
+    prepared?: PreparedJournalInspection,
+  ) {
     if (!options.partition.trim()) throw new Error("journal partition must not be empty");
     this.options = Object.freeze({ ...options });
     this.now = options.now ?? (() => new Date());
     this.appendFrame = options.appendAndSync ?? appendAndSync;
-    ensureCanonicalPrivateDirectory(options.rootDir);
     this.partitionDir = journalPartitionDirectory(options.rootDir, options.partition);
-    ensureCanonicalPrivateDirectory(this.partitionDir);
     this.path = join(this.partitionDir, "journal.bin");
-    ensurePrivateFile(this.path);
-    this.fd = openSync(this.path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
-    const stat = fstatSync(this.fd);
-    if (!stat.isFile() || stat.nlink !== 1) throw new Error("journal file is not privately owned");
-    if ((stat.mode & 0o777) !== 0o600) {
-      fchmodSync(this.fd, 0o600);
-      fsyncSync(this.fd);
+    if (token === PREPARED_JOURNAL && prepared) {
+      this.preparationState = prepared;
+      this.recovery = structuredClone(prepared.recovery);
+      for (const record of prepared.records) this.entries.push(cloneJson(record));
+      this.epoch = prepared.epoch;
+      this.nextSeq = prepared.nextSeq;
+      this.previousFrameHash = prepared.previousFrameHash;
+      this.knownFileBytes = prepared.knownFileBytes;
+      return;
     }
+    ensureCanonicalPrivateDirectory(options.rootDir);
     this.epoch = (options.epochFactory ?? randomUUID)();
+    ensureCanonicalPrivateDirectory(this.partitionDir);
+    ensurePrivateFile(this.path);
+    this.openWriter();
     this.recover();
     if (
       this.recovery.status === "ready" &&
@@ -152,6 +181,45 @@ export class DurableJournal {
     return structuredClone(this.recovery);
   }
 
+  preparation(): JournalPreparationReceipt {
+    this.assertOpen();
+    if (!this.preparationState) throw new Error("journal was not opened through preparation");
+    return structuredClone(this.preparationState.receipt);
+  }
+
+  revalidatePreparation(): void {
+    this.assertOpen();
+    if (!this.preparationState) throw new Error("journal was not opened through preparation");
+    const actual = fingerprintPreparedJournal(this.options.rootDir, this.partitionDir);
+    if (actual !== this.preparationState.receipt.fingerprint) {
+      throw new Error("journal changed since read-only preparation");
+    }
+  }
+
+  activatePrepared(): void {
+    this.assertOpen();
+    if (!this.preparationState) throw new Error("journal was not opened through preparation");
+    if (this.writable) return;
+    if (this.recovery.status === "recovery_required") {
+      throw new JournalRecoveryRequiredError(this.recovery);
+    }
+    this.revalidatePreparation();
+    ensureCanonicalPrivateDirectory(this.options.rootDir);
+    ensureCanonicalPrivateDirectory(this.partitionDir);
+    ensurePrivateFile(this.path);
+    this.entries.length = 0;
+    this.nextSeq = 1;
+    this.previousFrameHash = ZERO_HASH;
+    this.knownFileBytes = 0;
+    this.recovery = { status: "ready", discardedTailBytes: 0 };
+    this.openWriter();
+    this.recover();
+    const activatedRecovery = this.state();
+    if (activatedRecovery.status === "recovery_required") {
+      throw new JournalRecoveryRequiredError(activatedRecovery);
+    }
+  }
+
   records<T = unknown>(afterSeq = 0): JournalRecord<T>[] {
     this.assertReadable();
     return this.entries
@@ -162,7 +230,7 @@ export class DurableJournal {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    closeSync(this.fd);
+    if (this.fd >= 0) closeSync(this.fd);
   }
 
   currentCursor(): string {
@@ -196,6 +264,7 @@ export class DurableJournal {
   /** Atomically replace physical frames with one checksummed compressed frame. */
   compact(): { beforeBytes: number; afterBytes: number; records: number } | null {
     this.assertReadable();
+    this.assertWritable();
     if (this.entries.length === 0) return null;
     const logical: CompactedRecord[] = this.entries.map((record) => ({
       time: record.time,
@@ -300,6 +369,7 @@ export class DurableJournal {
    * no prefix can become durable on its own. */
   appendBatch(records: readonly { type: string; payload: unknown }[]): JournalRecord[] {
     this.assertReadable();
+    this.assertWritable();
     if (records.length === 0) throw new Error("journal append batch must not be empty");
     for (const record of records) {
       if (!record.type.trim()) throw new Error("journal record type must not be empty");
@@ -402,6 +472,17 @@ export class DurableJournal {
     return join(this.partitionDir, "append.pending.json");
   }
 
+  private openWriter(): void {
+    this.fd = openSync(this.path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
+    const stat = fstatSync(this.fd);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("journal file is not privately owned");
+    if ((stat.mode & 0o777) !== 0o600) {
+      fchmodSync(this.fd, 0o600);
+      fsyncSync(this.fd);
+    }
+    this.writable = true;
+  }
+
   private requireRecovery(
     byteOffset: number,
     reason: string,
@@ -423,96 +504,13 @@ export class DurableJournal {
     }
   }
 
+  private assertWritable(): void {
+    if (!this.writable) throw new Error("journal preparation is not activated");
+  }
+
   private assertOpen(): void {
     if (this.closed) throw new Error("journal writer is closed");
   }
-}
-
-function appendAndSync(fd: number, bytes: Buffer): void {
-  let offset = 0;
-  while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
-  fsyncSync(fd);
-}
-
-function ensurePrivateFile(path: string): void {
-  if (!existsSync(path)) {
-    const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    fsyncDirectory(dirname(path));
-  }
-  const stat = lstatSync(path);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
-    throw new Error("journal path is not a private regular file");
-  }
-}
-
-function readDescriptor(fd: number): Buffer {
-  const size = Number(fstatSync(fd, { bigint: true }).size);
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error("journal file size is invalid");
-  const bytes = readFileSync(fd);
-  if (bytes.length !== size) throw new Error("journal changed while being read");
-  return bytes;
-}
-
-function readIntent(path: string): AppendIntent | null {
-  if (!existsSync(path)) return null;
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1024) throw new Error("unsafe file");
-    const value = JSON.parse(readFileSync(fd, "utf8")) as unknown;
-    if (
-      !isRecord(value) ||
-      value.v !== 1 ||
-      !Number.isSafeInteger(value.offset) ||
-      Number(value.offset) < 0 ||
-      !Number.isSafeInteger(value.length) ||
-      Number(value.length) <= 0
-    )
-      throw new Error("invalid shape");
-    return value as unknown as AppendIntent;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function writeIntent(path: string, value: AppendIntent): void {
-  const temp = `${path}.${randomUUID()}.tmp`;
-  const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
-  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-  try {
-    let offset = 0;
-    while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temp, path);
-  fsyncDirectory(dirname(path));
-}
-
-function removeFile(path: string): void {
-  if (!existsSync(path)) return;
-  rmSync(path);
-  fsyncDirectory(dirname(path));
-}
-
-function encodeCursor(partition: string, epoch: string, seq: number): string {
-  return Buffer.from(JSON.stringify({ v: 1, p: partition, e: epoch, s: seq })).toString(
-    "base64url",
-  );
-}
-
-function cursorError(detail: string): JournalCursorError {
-  return new JournalCursorError(`journal cursor is ${detail}; resnapshot is required`);
-}
-
-function sha256(bytes: Buffer): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function cloneJson<T>(value: T): T {

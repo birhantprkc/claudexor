@@ -72,6 +72,7 @@ describe("InteractionRegistry disabled expiry", () => {
 
     const secondJournal = new DurableJournal({ rootDir: journalRoot, partition: "global" });
     const second = new InteractionStore(secondJournal);
+    second.recoverAfterStartup();
     expect(second.pendingForRun("run-1")).toEqual([]);
     expect(second.status("run-1", "int-1")).toBe("resolved");
     secondJournal.close();

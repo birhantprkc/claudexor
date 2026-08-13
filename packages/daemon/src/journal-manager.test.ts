@@ -267,7 +267,14 @@ describe("JournalManager", () => {
 
     const resumed = new JournalManager(root);
     const slot = registerProbe(resumed);
-    expect(resumed.start().status).toBe("ready");
+    expect(resumed.prepare()).toMatchObject({
+      inspection: { status: "ready" },
+      virtual: true,
+    });
+    expect(storedOperation().status).toBe("prepared");
+    resumed.revalidatePreparation();
+    expect(storedOperation().status).toBe("prepared");
+    resumed.activatePrepared();
     expect(
       slot
         .current()
@@ -300,7 +307,10 @@ describe("JournalManager", () => {
 
     const resumed = new JournalManager(root);
     const slot = registerProbe(resumed);
-    expect(resumed.start().status).toBe("ready");
+    expect(resumed.prepare().inspection.status).toBe("ready");
+    expect(storedOperation().status).toBe("prepared");
+    resumed.revalidatePreparation();
+    resumed.activatePrepared();
     expect(slot.current().journal.records()).toHaveLength(1);
     expect(storedOperation().status).toBe("completed");
     resumed.close();
@@ -331,7 +341,7 @@ describe("JournalManager", () => {
     rogue.close();
     const restarted = new JournalManager(root);
     const slot = registerProbe(restarted);
-    expect(restarted.start().status).toBe("recovery_required");
+    expect(restarted.prepare().inspection.status).toBe("recovery_required");
     expect(() => slot.current()).toThrow(/requires recovery/);
     restarted.close();
   });

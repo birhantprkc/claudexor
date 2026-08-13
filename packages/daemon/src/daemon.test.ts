@@ -64,6 +64,7 @@ function commandAuthority(
 } {
   const journal = new DurableJournal({ rootDir: join(dir, "journal"), partition });
   const store = new CommandStore(journal);
+  store.recoverAfterStartup();
   return { journal, store, slot: { current: () => store } };
 }
 
@@ -2028,6 +2029,7 @@ describe("InteractionRegistry", () => {
 
     const secondJournal = new DurableJournal({ rootDir, partition: "global" });
     const second = new InteractionStore(secondJournal);
+    second.recoverAfterStartup();
     expect(second.pendingForRun("run-restart")).toEqual([]);
     expect(second.status("run-restart", "question")).toBe("resolved");
     secondJournal.close();

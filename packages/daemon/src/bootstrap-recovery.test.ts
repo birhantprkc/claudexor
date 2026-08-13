@@ -19,10 +19,6 @@ function journalRoot(name: string): string {
   return join(root, "journal");
 }
 
-function recoverAfterStartup(value: unknown): void {
-  (value as { recoverAfterStartup(): void }).recoverAfterStartup();
-}
-
 function pendingInteraction(): InteractionContext {
   return {
     runId: "run-restart",
@@ -82,10 +78,10 @@ describe("bootstrap replay and deferred recovery", () => {
     expect(prepared.get("job-queued")?.state).toBe("queued");
     expect(replay.records()).toHaveLength(before);
 
-    recoverAfterStartup(prepared);
+    prepared.recoverAfterStartup();
     expect(prepared.get("job-queued")?.state).toBe("interrupted");
     expect(replay.records()).toHaveLength(before + 1);
-    recoverAfterStartup(prepared);
+    prepared.recoverAfterStartup();
     expect(replay.records()).toHaveLength(before + 1);
     replay.close();
   });
@@ -103,11 +99,11 @@ describe("bootstrap replay and deferred recovery", () => {
     expect(prepared.pendingForRun("run-restart")).toHaveLength(1);
     expect(replay.records()).toHaveLength(before);
 
-    recoverAfterStartup(prepared);
+    prepared.recoverAfterStartup();
     expect(prepared.pendingForRun("run-restart")).toEqual([]);
     expect(prepared.status("run-restart", "question")).toBe("resolved");
     expect(replay.records()).toHaveLength(before + 1);
-    recoverAfterStartup(prepared);
+    prepared.recoverAfterStartup();
     expect(replay.records()).toHaveLength(before + 1);
     replay.close();
   });
@@ -124,13 +120,13 @@ describe("bootstrap replay and deferred recovery", () => {
     expect(prepared.read().snapshots).toHaveLength(1);
     expect(replay.records()).toHaveLength(before);
 
-    recoverAfterStartup(prepared);
+    prepared.recoverAfterStartup();
     expect(replay.records().map((record) => record.type)).toEqual([
       "quota.snapshot.upserted",
       "quota.projection.updated",
     ]);
     expect(replay.records().at(-1)?.payload).toMatchObject({ reason: "recovery" });
-    recoverAfterStartup(prepared);
+    prepared.recoverAfterStartup();
     expect(replay.records()).toHaveLength(before + 1);
     replay.close();
   });

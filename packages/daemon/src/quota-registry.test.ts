@@ -6,7 +6,8 @@ import { DurableJournal } from "@claudexor/journal";
 import { withQuotaAvailability } from "@claudexor/schema";
 import { hashJson } from "@claudexor/util";
 import { JournalManager } from "./journal-manager.js";
-import { QuotaRegistry, quotaProjection } from "./quota-registry.js";
+import { quotaProjection } from "./quota-projection.js";
+import { QuotaRegistry } from "./quota-registry.js";
 
 function quotaSnapshot(harness: string, subjectId: string | null, usedRatio: number) {
   return {
@@ -496,6 +497,8 @@ describe("QuotaRegistry", () => {
     const now = () => new Date("2026-07-28T00:00:01.000Z");
     const recovered = new QuotaRegistry(afterUpsert, [], now);
     expect(recovered.read().snapshots).toHaveLength(1);
+    expect(afterUpsert.records().map((record) => record.type)).toEqual(["quota.snapshot.upserted"]);
+    recovered.recoverAfterStartup();
     expect(afterUpsert.records().map((record) => record.type)).toEqual([
       "quota.snapshot.upserted",
       "quota.projection.updated",
@@ -510,6 +513,7 @@ describe("QuotaRegistry", () => {
     const afterRemove = new DurableJournal({ rootDir: root, partition: "global" });
     const recoveredRemoval = new QuotaRegistry(afterRemove, [], now);
     expect(recoveredRemoval.read().snapshots).toEqual([]);
+    recoveredRemoval.recoverAfterStartup();
     expect(afterRemove.records().at(-1)?.payload).toMatchObject({ reason: "recovery" });
     afterRemove.close();
     rmSync(root, { recursive: true, force: true });

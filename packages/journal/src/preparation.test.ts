@@ -147,7 +147,7 @@ describe("DurableJournal read-only preparation", () => {
     expect(existsSync(join(partitionDir, "append.pending.json"))).toBe(false);
     expect(prepared.records().map((record) => record.type)).toEqual([
       "accepted",
-      "journal.recovery_discarded_append",
+      "journal.recovery_tail_discarded",
     ]);
     prepared.close();
   });

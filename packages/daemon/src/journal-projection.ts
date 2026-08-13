@@ -4,9 +4,11 @@ export interface JournalProjectionDescriptor<T> {
   name: string;
   create(journal: DurableJournal): T;
   validate(projection: T): void;
+  recover?(projection: T): void;
 }
 
 export interface JournalProjectionSlot<T> {
   current(): T;
+  prepared(): T;
   generation(): number;
 }

@@ -13,9 +13,13 @@ import { DurableJournal, journalPartitionDirectory } from "@claudexor/journal";
 import { afterEach, describe, expect, it } from "vitest";
 import { commandProjection, type CommandStore } from "./command-store.js";
 import { interactionProjection, type InteractionStore } from "./interactions.js";
-import { JournalManager, type JournalProjectionSlot } from "./journal-manager.js";
+import {
+  JournalManager,
+  type JournalManagerPreparation,
+  type JournalProjectionSlot,
+} from "./journal-manager.js";
 import { operatorDecisionProjection, type OperatorDecisionStore } from "./operator-decisions.js";
-import { ProjectPartitions } from "./project-partitions.js";
+import { ProjectPartitions, type ProjectPartitionsPreparation } from "./project-partitions.js";
 import { projectProjection, type ProjectStore } from "./projects.js";
 import { runEventProjection, type RunEventStore } from "./run-events.js";
 import { threadProjection, type ThreadStore } from "./threads.js";
@@ -41,26 +45,6 @@ interface GlobalSlots {
   threads: JournalProjectionSlot<ThreadStore>;
 }
 
-interface JournalManagerPreparation {
-  partition: string;
-  coverage: "complete";
-  inspection: { status: "ready" | "recovery_required" };
-  virtual: boolean;
-}
-
-interface ProjectPartitionsPreparation {
-  coverage: "complete" | "global_registry_unavailable";
-  registeredProjectIds: string[];
-  trustedProjectRoots: string[];
-  partitions: Array<{
-    partition: string;
-    status: "ready" | "recovery_required";
-    virtual: boolean;
-  }>;
-  readyPartitions: string[];
-  recoveryRequiredPartitions: string[];
-}
-
 function registerGlobal(manager: JournalManager): GlobalSlots {
   return {
     commands: manager.registerProjection(commandProjection()),
@@ -73,11 +57,11 @@ function registerGlobal(manager: JournalManager): GlobalSlots {
 }
 
 function prepare(manager: JournalManager): JournalManagerPreparation {
-  return (manager as unknown as { prepare(): JournalManagerPreparation }).prepare();
+  return manager.prepare();
 }
 
 function preparedProjectStore(slot: JournalProjectionSlot<ProjectStore>): ProjectStore {
-  return (slot as unknown as { prepared(): ProjectStore }).prepared();
+  return slot.prepared();
 }
 
 function createPartitions(root: string, slots: GlobalSlots): ProjectPartitions {
@@ -93,7 +77,7 @@ function createPartitions(root: string, slots: GlobalSlots): ProjectPartitions {
 }
 
 function preparePartitions(value: ProjectPartitions): ProjectPartitionsPreparation {
-  return (value as unknown as { prepare(): ProjectPartitionsPreparation }).prepare();
+  return value.prepare();
 }
 
 function seedProjects(root: string): Array<{ id: string; root: string }> {
@@ -147,9 +131,9 @@ describe("journal bootstrap preparation", () => {
     ).toBeDefined();
     expect(existsSync(join(root, "journal"))).toBe(false);
 
-    (manager as unknown as { revalidatePreparation(): void }).revalidatePreparation();
+    manager.revalidatePreparation();
     expect(existsSync(join(root, "journal"))).toBe(false);
-    (manager as unknown as { activatePrepared(): void }).activatePrepared();
+    manager.activatePrepared();
     expect(slot.current().journal.state().status).toBe("ready");
     expect(existsSync(join(root, "journal"))).toBe(true);
     manager.close();
@@ -193,6 +177,13 @@ describe("journal bootstrap preparation", () => {
         existsSync(journalPartitionDirectory(join(root, "journal"), `project:${project.id}`)),
       ).toBe(false);
     }
+    partitions.revalidatePreparation();
+    partitions.activatePrepared();
+    for (const project of projects) {
+      expect(
+        existsSync(journalPartitionDirectory(join(root, "journal"), `project:${project.id}`)),
+      ).toBe(true);
+    }
     partitions.close();
     manager.close();
   });
@@ -226,6 +217,7 @@ describe("journal bootstrap preparation", () => {
     expect(
       result.partitions.find((entry) => entry.partition === `project:${projects[1]!.id}`),
     ).toMatchObject({ virtual: true, status: "ready" });
+    expect(() => partitions.activatePrepared()).toThrow(/require recovery/);
     partitions.close();
     manager.close();
   });
@@ -245,7 +237,16 @@ describe("journal bootstrap preparation", () => {
 
     const manager = new JournalManager(root);
     const slots = registerGlobal(manager);
-    expect(prepare(manager).inspection.status).toBe("recovery_required");
+    const global = prepare(manager);
+    expect(global.inspection.status).toBe("recovery_required");
+    expect(manager.inspect().fingerprint).toBe(global.inspection.fingerprint);
+    expect(
+      manager.preflightQuarantine({
+        idempotencyKey: "inspect-global-recovery",
+        expectedFingerprint: global.inspection.fingerprint,
+        confirmation: "quarantine_and_start_fresh",
+      }),
+    ).toMatchObject({ disposition: "new" });
     const partitions = createPartitions(root, slots);
     const result = preparePartitions(partitions);
 

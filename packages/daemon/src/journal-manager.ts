@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { existsSync, realpathSync, renameSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   DurableJournal,
@@ -8,49 +8,50 @@ import {
   type JournalRecoveryState,
 } from "@claudexor/journal";
 import {
-  ControlJournalQuarantineReceipt as QuarantineReceiptSchema,
   type ControlJournalExportReceipt,
   type ControlJournalInspection,
   type ControlJournalQuarantineReceipt,
-  type ControlJournalQuarantineRequest,
   type ControlJournalValidation,
 } from "@claudexor/schema";
 import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 import {
-  exportPartitionEntries,
+  exportJournalRecovery,
   fingerprintPartition,
   cloneRecovery,
-  readOwnedFile,
   recoveryAt,
   recoveryFrom,
   safeMessage,
   sha256,
-  sha256File,
   writeAtomicPrivateJson,
-  writeExclusiveFile,
 } from "./journal-recovery-files.js";
+import {
+  conflict,
+  matchingReceipt,
+  quarantineRequestDigest,
+  readOperation,
+  typedError,
+  validateRequest,
+  type JournalQuarantineRequest,
+  type QuarantineOperation,
+} from "./journal-recovery-operation.js";
 import { journalEvents } from "./journal-events.js";
+import {
+  applyPreparedOperation,
+  completePreparedReceipt,
+  inspectPreparedOperation,
+  preparationFingerprint,
+  reconcilePreparedOperationOnStart,
+  revalidatePreparedState,
+  type PreparedOperationPlan,
+} from "./journal-prepared-operation.js";
 import type { JournalProjectionDescriptor, JournalProjectionSlot } from "./journal-projection.js";
 export type { JournalProjectionDescriptor, JournalProjectionSlot } from "./journal-projection.js";
 
-export type JournalQuarantineRequest = ControlJournalQuarantineRequest & {
-  idempotencyKey: string;
-};
+export type { JournalQuarantineRequest } from "./journal-recovery-operation.js";
 
 interface ProjectionRegistration<T = unknown> {
   descriptor: JournalProjectionDescriptor<T>;
   slot: ProjectionSlot<T>;
-}
-
-interface QuarantineOperation {
-  schemaVersion: 1;
-  operationId: string;
-  keyDigest: string;
-  requestDigest: string;
-  expectedFingerprint: string;
-  quarantinePath: string;
-  status: "prepared" | "completed";
-  receipt: ControlJournalQuarantineReceipt | null;
 }
 
 type JournalManagerFault =
@@ -62,7 +63,17 @@ export interface JournalManagerOptions {
   faults?: Partial<Record<JournalManagerFault, () => void>>;
 }
 
+export interface JournalManagerPreparation {
+  partition: string;
+  coverage: "complete";
+  inspection: ControlJournalInspection;
+  validation: ControlJournalValidation;
+  preparationFingerprint: string;
+  virtual: boolean;
+}
+
 export class JournalManager {
+  readonly rootDir: string;
   readonly partition: string;
   readonly journalRoot: string;
   readonly partitionDir: string;
@@ -75,19 +86,17 @@ export class JournalManager {
   private journal: DurableJournal | null = null;
   private recovery: JournalRecoveryState = { status: "ready", discardedTailBytes: 0 };
   private generationValue = 0;
+  private preparedOperation: PreparedOperationPlan | null = null;
+  private preparationResult: JournalManagerPreparation | null = null;
   private started = false;
   private closed = false;
 
-  constructor(
-    readonly rootDir: string,
-    options: JournalManagerOptions = {},
-  ) {
+  constructor(rootDir: string, options: JournalManagerOptions = {}) {
     this.partition = options.partition?.trim() || "global";
     this.now = options.now ?? (() => new Date());
     this.faults = options.faults ?? {};
-    ensureCanonicalPrivateDirectory(rootDir);
-    this.journalRoot = join(realpathSync(rootDir), "journal");
-    ensureCanonicalPrivateDirectory(this.journalRoot);
+    this.rootDir = realpathSync(rootDir);
+    this.journalRoot = join(this.rootDir, "journal");
     this.partitionDir = journalPartitionDirectory(this.journalRoot, this.partition);
     this.artifactPrefix = basename(this.partitionDir);
     this.operationsDir = join(this.rootDir, "recovery-operations", basename(this.partitionDir));
@@ -109,9 +118,132 @@ export class JournalManager {
     this.assertOpen();
     if (this.started) return this.inspect();
     if (this.registrations.size === 0) throw new Error("journal partition requires a projection");
+    ensureCanonicalPrivateDirectory(this.rootDir);
+    ensureCanonicalPrivateDirectory(this.journalRoot);
     this.started = true;
     if (!this.reconcilePrepared()) this.openGeneration();
     return this.inspect();
+  }
+
+  prepare(): JournalManagerPreparation {
+    this.assertOpen();
+    if (this.preparationResult) return structuredClone(this.preparationResult);
+    if (this.started) throw new Error("journal manager is already running");
+    if (this.registrations.size === 0) throw new Error("journal partition requires a projection");
+    this.started = true;
+    this.generationValue += 1;
+    const projectionStatus: ControlJournalValidation["projectionStatus"] = [];
+    try {
+      this.journal = DurableJournal.prepare({
+        rootDir: this.journalRoot,
+        partition: this.partition,
+        now: this.now,
+      });
+      this.recovery = this.journal.state();
+      this.preparedOperation = inspectPreparedOperation({
+        operationsDir: this.operationsDir,
+        quarantineDir: this.quarantineDir,
+        partitionDir: this.partitionDir,
+        partition: this.partition,
+        artifactPrefix: this.artifactPrefix,
+        journal: this.journal,
+      });
+      if (this.recovery.status === "ready") {
+        for (const registration of this.registrations.values()) {
+          try {
+            const projection = registration.descriptor.create(this.journal);
+            registration.descriptor.validate(projection);
+            registration.slot.bindPrepared(projection);
+            projectionStatus.push({
+              name: registration.descriptor.name,
+              status: "valid",
+              detail: null,
+            });
+          } catch (error) {
+            this.enterRecovery(
+              recoveryFrom(error, `projection '${registration.descriptor.name}' failed`),
+            );
+            projectionStatus.push({
+              name: registration.descriptor.name,
+              status: "invalid",
+              detail: safeMessage(error),
+            });
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      this.enterRecovery(recoveryFrom(error, `${this.partition} journal could not be prepared`));
+    }
+    const journalFingerprint =
+      this.journal?.preparation().fingerprint ?? fingerprintPartition(this.partitionDir);
+    const preparedFingerprint = preparationFingerprint(
+      journalFingerprint,
+      this.preparedOperation?.fingerprint ?? fingerprintPartition(this.operationsDir),
+    );
+    const inspection = this.inspection(fingerprintPartition(this.partitionDir));
+    this.preparationResult = {
+      partition: this.partition,
+      coverage: "complete",
+      inspection,
+      validation: { ...inspection, projectionStatus },
+      preparationFingerprint: preparedFingerprint,
+      virtual: this.journal?.preparation().virtual ?? !existsSync(this.partitionDir),
+    };
+    return structuredClone(this.preparationResult);
+  }
+
+  revalidatePreparation(): void {
+    this.assertStarted();
+    if (!this.preparationResult || !this.journal) throw new Error("journal is not prepared");
+    this.preparedOperation = revalidatePreparedState({
+      operationsDir: this.operationsDir,
+      quarantineDir: this.quarantineDir,
+      partitionDir: this.partitionDir,
+      partition: this.partition,
+      artifactPrefix: this.artifactPrefix,
+      journal: this.journal,
+      expectedFingerprint: this.preparationResult.preparationFingerprint,
+    });
+  }
+
+  activatePrepared(): void {
+    this.assertStarted();
+    if (!this.preparationResult || !this.journal) throw new Error("journal is not prepared");
+    this.revalidatePreparation();
+    this.journal.activatePrepared();
+    if (!this.preparedOperation) throw new Error("journal recovery operation is not prepared");
+    try {
+      applyPreparedOperation({
+        plan: this.preparedOperation,
+        journal: this.journal,
+        partition: this.partition,
+        artifactPrefix: this.artifactPrefix,
+        now: this.now,
+        afterReceipt: this.faults.afterQuarantineReceipt,
+      });
+    } catch (error) {
+      const recovery = recoveryFrom(error, `${this.partition} prepared operation failed`);
+      this.enterRecovery(recovery);
+      throw new JournalRecoveryRequiredError(recovery);
+    }
+    this.recovery = this.journal.state();
+    for (const registration of this.registrations.values()) {
+      registration.slot.activate(this.generationValue);
+    }
+  }
+
+  recoverAfterStartup(): void {
+    this.assertStarted();
+    try {
+      for (const registration of this.registrations.values()) {
+        registration.descriptor.recover?.(registration.slot.current());
+      }
+    } catch (error) {
+      const recovery = recoveryFrom(error, `${this.partition} projection recovery failed`);
+      this.enterRecovery(recovery);
+      throw new JournalRecoveryRequiredError(recovery);
+    }
   }
 
   inspect(): ControlJournalInspection {
@@ -168,53 +300,13 @@ export class JournalManager {
 
   exportRecovery(): ControlJournalExportReceipt {
     this.assertStarted();
-    const fingerprint = fingerprintPartition(this.partitionDir);
-    const exportId = `journal-export-${this.now().getTime().toString(36)}-${randomUUID()}`;
-    const exportsRoot = join(this.rootDir, "recovery-exports");
-    ensureCanonicalPrivateDirectory(exportsRoot);
-    const bundlePath = join(exportsRoot, exportId);
-    ensureCanonicalPrivateDirectory(bundlePath);
-    try {
-      const entries = exportPartitionEntries(this.partitionDir, bundlePath);
-      const createdAt = this.now().toISOString();
-      const manifestPath = join(bundlePath, "manifest.json");
-      writeExclusiveFile(
-        manifestPath,
-        Buffer.from(
-          `${JSON.stringify(
-            {
-              schemaVersion: 1,
-              exportId,
-              partition: this.partition,
-              fingerprint,
-              recovery: this.recovery,
-              createdAt,
-              entries,
-            },
-            null,
-            2,
-          )}\n`,
-        ),
-        0o400,
-      );
-      fsyncDirectory(bundlePath);
-      if (fingerprintPartition(this.partitionDir) !== fingerprint) {
-        throw new Error("journal changed during recovery export");
-      }
-      return {
-        schemaVersion: 1,
-        exportId,
-        partition: this.partition,
-        fingerprint,
-        bundlePath,
-        manifestSha256: sha256File(manifestPath),
-        createdAt,
-      };
-    } catch (error) {
-      rmSync(bundlePath, { recursive: true, force: true });
-      fsyncDirectory(exportsRoot);
-      throw error;
-    }
+    return exportJournalRecovery({
+      rootDir: this.rootDir,
+      partitionDir: this.partitionDir,
+      partition: this.partition,
+      recovery: this.recovery,
+      now: this.now,
+    });
   }
 
   preflightQuarantine(input: JournalQuarantineRequest) {
@@ -372,6 +464,7 @@ export class JournalManager {
         registration.descriptor.validate(projection);
         registration.slot.bind(projection, this.generationValue);
       }
+      this.recoverAfterStartup();
     } catch (error) {
       const failed = this.journal;
       this.journal = null;
@@ -443,55 +536,31 @@ export class JournalManager {
     operation: QuarantineOperation,
     operationPath: string,
   ): ControlJournalQuarantineReceipt {
-    if (fingerprintPartition(operation.quarantinePath) !== operation.expectedFingerprint) {
-      throw typedError("recovery_quarantine_mismatch", 503, "quarantined bytes changed");
-    }
     if (!this.journal) this.openGeneration();
     if (!this.journal || this.recovery.status === "recovery_required") {
       throw typedError("recovery_operation_ambiguous", 503, "fresh journal is unreadable");
     }
-    const records = this.journal.records();
-    if (records.length !== 1 || records[0]?.type !== "journal.partition_quarantined") {
-      throw typedError("recovery_operation_ambiguous", 503, "fresh receipt is missing");
-    }
-    const receipt = matchingReceipt(
+    return completePreparedReceipt({
       operation,
-      records[0].payload,
-      this.partition,
-      this.artifactPrefix,
-    );
-    writeAtomicPrivateJson(operationPath, { ...operation, status: "completed", receipt }, false);
-    return receipt;
+      operationPath,
+      journal: this.journal,
+      partition: this.partition,
+      artifactPrefix: this.artifactPrefix,
+    });
   }
 
   private reconcilePrepared(): boolean {
-    if (!existsSync(this.operationsDir)) return false;
-    try {
-      const prepared = readdirSync(this.operationsDir)
-        .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
-        .map((name) => {
-          const path = join(this.operationsDir, name);
-          return {
-            path,
-            operation: readOperation(path, this.quarantineDir, this.partition, this.artifactPrefix),
-          };
-        })
-        .filter(
-          (entry): entry is { path: string; operation: QuarantineOperation } =>
-            entry.operation?.status === "prepared",
-        );
-      if (prepared.length === 0) return false;
-      if (prepared.length !== 1) throw new Error("multiple prepared recovery operations");
-      const pending = prepared[0]!;
-      if (existsSync(this.partitionDir) && !existsSync(pending.operation.quarantinePath)) {
-        this.openGeneration();
-      } else {
-        this.resume(pending.operation, pending.path);
-      }
-    } catch (error) {
-      this.enterRecovery(recoveryFrom(error, "prepared quarantine reconciliation failed"));
-    }
-    return true;
+    return reconcilePreparedOperationOnStart({
+      operationsDir: this.operationsDir,
+      quarantineDir: this.quarantineDir,
+      partitionDir: this.partitionDir,
+      partition: this.partition,
+      artifactPrefix: this.artifactPrefix,
+      openGeneration: () => this.openGeneration(),
+      resume: (operation, path) => void this.resume(operation, path),
+      failed: (error) =>
+        this.enterRecovery(recoveryFrom(error, "prepared quarantine reconciliation failed")),
+    });
   }
 
   private inspection(fingerprint: string): ControlJournalInspection {
@@ -528,6 +597,7 @@ export class JournalManager {
 
 class ProjectionSlot<T> implements JournalProjectionSlot<T> {
   private value: T | null = null;
+  private preparedValue: T | null = null;
   private generationValue = 0;
 
   constructor(private readonly recovery: () => JournalRecoveryState) {}
@@ -542,6 +612,11 @@ class ProjectionSlot<T> implements JournalProjectionSlot<T> {
     );
   }
 
+  prepared(): T {
+    if (this.preparedValue !== null) return this.preparedValue;
+    return this.current();
+  }
+
   generation(): number {
     return this.generationValue;
   }
@@ -551,98 +626,21 @@ class ProjectionSlot<T> implements JournalProjectionSlot<T> {
     this.generationValue = generation;
   }
 
+  bindPrepared(value: T): void {
+    this.preparedValue = value;
+  }
+
+  activate(generation: number): void {
+    if (this.preparedValue === null) {
+      if (this.value !== null) return;
+      throw new Error("journal projection is not prepared");
+    }
+    this.bind(this.preparedValue, generation);
+    this.preparedValue = null;
+  }
+
   clear(): void {
     this.value = null;
+    this.preparedValue = null;
   }
-}
-
-function readOperation(
-  path: string,
-  quarantineDir: string,
-  partition: string,
-  artifactPrefix: string,
-): QuarantineOperation | null {
-  if (!existsSync(path)) return null;
-  const value = JSON.parse(readOwnedFile(path).toString("utf8")) as unknown;
-  if (
-    !isRecord(value) ||
-    value.schemaVersion !== 1 ||
-    typeof value.operationId !== "string" ||
-    typeof value.keyDigest !== "string" ||
-    basename(path) !== `${value.keyDigest}.json` ||
-    typeof value.requestDigest !== "string" ||
-    typeof value.expectedFingerprint !== "string" ||
-    typeof value.quarantinePath !== "string" ||
-    value.quarantinePath !== join(quarantineDir, `${artifactPrefix}-${value.operationId}`) ||
-    (value.status !== "prepared" && value.status !== "completed")
-  ) {
-    throw new Error("recovery operation is malformed");
-  }
-  const operation = value as unknown as QuarantineOperation;
-  if (operation.status === "prepared" && operation.receipt !== null) {
-    throw new Error("prepared recovery operation contains a receipt");
-  }
-  if (operation.status === "completed") {
-    matchingReceipt(operation, undefined, partition, artifactPrefix);
-  }
-  return operation;
-}
-
-function matchingReceipt(
-  operation: QuarantineOperation,
-  value: unknown,
-  partition: string,
-  artifactPrefix: string,
-): ControlJournalQuarantineReceipt {
-  const receipt = QuarantineReceiptSchema.parse(value ?? operation.receipt);
-  if (
-    receipt.operationId !== operation.operationId ||
-    receipt.partition !== partition ||
-    receipt.previousFingerprint !== operation.expectedFingerprint ||
-    receipt.quarantinePath !== operation.quarantinePath ||
-    receipt.quarantineArtifactId !== `${artifactPrefix}-${operation.operationId}`
-  ) {
-    throw typedError("recovery_receipt_mismatch", 503, "quarantine receipt does not match intent");
-  }
-  return receipt;
-}
-
-function validateRequest(input: JournalQuarantineRequest): void {
-  if (!input.idempotencyKey || input.idempotencyKey.length > 256) {
-    throw typedError(
-      "invalid_idempotency_key",
-      400,
-      "Idempotency-Key must contain 1-256 characters",
-    );
-  }
-  if (input.confirmation !== "quarantine_and_start_fresh") {
-    throw typedError("quarantine_confirmation_required", 400, "explicit confirmation is required");
-  }
-  if (!/^[a-f0-9]{64}$/.test(input.expectedFingerprint)) {
-    throw typedError("invalid_recovery_fingerprint", 400, "expectedFingerprint must be SHA-256");
-  }
-}
-
-function quarantineRequestDigest(partition: string, input: JournalQuarantineRequest): string {
-  return sha256(
-    Buffer.from(
-      JSON.stringify({
-        partition,
-        expectedFingerprint: input.expectedFingerprint,
-        confirmation: input.confirmation,
-      }),
-    ),
-  );
-}
-
-function conflict(code: string): Error & { code: string; status: number } {
-  return typedError(code, 409, code.replaceAll("_", " "));
-}
-
-function typedError(code: string, status: number, message: string) {
-  return Object.assign(new Error(message), { code, status });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

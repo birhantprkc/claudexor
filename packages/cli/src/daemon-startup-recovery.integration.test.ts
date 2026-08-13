@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   cpSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -46,6 +49,10 @@ interface PartitionPreparation {
   recoveryRequiredPartitions: string[];
 }
 
+interface ManagerPreparation {
+  inspection: { status: "ready" | "recovery_required"; recovery: unknown };
+}
+
 const cleanup: string[] = [];
 
 afterEach(() => {
@@ -81,8 +88,8 @@ function partitions(root: string, slots: GlobalSlots): ProjectPartitions {
   );
 }
 
-function prepareManager(manager: JournalManager): void {
-  (manager as unknown as { prepare(): void }).prepare();
+function prepareManager(manager: JournalManager): ManagerPreparation {
+  return (manager as unknown as { prepare(): ManagerPreparation }).prepare();
 }
 
 function preparePartitions(value: ProjectPartitions): PartitionPreparation {
@@ -118,8 +125,21 @@ function seedCopiedRoot(): {
   global.close();
 
   const copy = tempRoot("startup-copy");
-  cpSync(source, copy, { recursive: true, force: true });
+  copyRootPreservingModes(source, copy);
   return { root: copy, projectIds };
+}
+
+function copyRootPreservingModes(source: string, destination: string): void {
+  cpSync(source, destination, { recursive: true, force: true });
+  const restore = (sourcePath: string, destinationPath: string): void => {
+    const stat = lstatSync(sourcePath);
+    chmodSync(destinationPath, stat.mode & 0o777);
+    if (!stat.isDirectory()) return;
+    for (const name of readdirSync(sourcePath)) {
+      restore(join(sourcePath, name), join(destinationPath, name));
+    }
+  };
+  restore(source, destination);
 }
 
 function corruptFirstByte(path: string): void {
@@ -157,7 +177,10 @@ describe("daemon startup recovery preparation", () => {
 
     const global = new JournalManager(root);
     const slots = registerGlobal(global);
-    prepareManager(global);
+    const globalPreparation = prepareManager(global);
+    expect(globalPreparation.inspection.status, JSON.stringify(globalPreparation.inspection)).toBe(
+      "ready",
+    );
     const projectPartitions = partitions(root, slots);
     const result = preparePartitions(projectPartitions);
 
@@ -183,7 +206,7 @@ describe("daemon startup recovery preparation", () => {
 
     const global = new JournalManager(root);
     const slots = registerGlobal(global);
-    prepareManager(global);
+    expect(prepareManager(global).inspection).toMatchObject({ status: "recovery_required" });
     const projectPartitions = partitions(root, slots);
     const result = preparePartitions(projectPartitions);
 

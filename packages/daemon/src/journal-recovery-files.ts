@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { JournalRecoveryRequiredError, type JournalRecoveryState } from "@claudexor/journal";
+import type { ControlJournalExportReceipt } from "@claudexor/schema";
 import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 
 export function recoveryFrom(
@@ -122,6 +123,62 @@ export function exportPartitionEntries(source: string, destination: string) {
         ...(stat.isSymbolicLink() ? { linkTarget: readlinkSync(path) } : {}),
       };
     });
+}
+
+export function exportJournalRecovery(input: {
+  rootDir: string;
+  partitionDir: string;
+  partition: string;
+  recovery: JournalRecoveryState;
+  now: () => Date;
+}): ControlJournalExportReceipt {
+  const fingerprint = fingerprintPartition(input.partitionDir);
+  const exportId = `journal-export-${input.now().getTime().toString(36)}-${randomUUID()}`;
+  const exportsRoot = join(input.rootDir, "recovery-exports");
+  ensureCanonicalPrivateDirectory(exportsRoot);
+  const bundlePath = join(exportsRoot, exportId);
+  ensureCanonicalPrivateDirectory(bundlePath);
+  try {
+    const entries = exportPartitionEntries(input.partitionDir, bundlePath);
+    const createdAt = input.now().toISOString();
+    const manifestPath = join(bundlePath, "manifest.json");
+    writeExclusiveFile(
+      manifestPath,
+      Buffer.from(
+        `${JSON.stringify(
+          {
+            schemaVersion: 1,
+            exportId,
+            partition: input.partition,
+            fingerprint,
+            recovery: input.recovery,
+            createdAt,
+            entries,
+          },
+          null,
+          2,
+        )}\n`,
+      ),
+      0o400,
+    );
+    fsyncDirectory(bundlePath);
+    if (fingerprintPartition(input.partitionDir) !== fingerprint) {
+      throw new Error("journal changed during recovery export");
+    }
+    return {
+      schemaVersion: 1,
+      exportId,
+      partition: input.partition,
+      fingerprint,
+      bundlePath,
+      manifestSha256: sha256File(manifestPath),
+      createdAt,
+    };
+  } catch (error) {
+    rmSync(bundlePath, { recursive: true, force: true });
+    fsyncDirectory(exportsRoot);
+    throw error;
+  }
 }
 
 export function readOwnedFile(path: string): Buffer {
