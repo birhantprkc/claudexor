@@ -14,6 +14,35 @@ describe("parseChatCompletion", () => {
     expect(r.usage.output_tokens).toBe(34);
   });
 
+  it.each([
+    ["a positive fractional receipt", 0.000_123, 0.000_123],
+    ["an exact zero receipt", 0, 0],
+  ])("preserves %s as a neutral provider cost", (_label, cost, expected) => {
+    const r = parseChatCompletion({
+      model: "openrouter/model",
+      choices: [{ message: { content: "done" } }],
+      usage: { prompt_tokens: 2, completion_tokens: 3, cost },
+    });
+
+    expect(r).toMatchObject({
+      text: "done",
+      model: "openrouter/model",
+      usage: { input_tokens: 2, output_tokens: 3, provider_cost: expected },
+    });
+  });
+
+  it.each([undefined, "0.12", -1, Number.NaN, Number.POSITIVE_INFINITY, null])(
+    "does not preserve an invalid provider cost (%s)",
+    (cost) => {
+      const r = parseChatCompletion({
+        choices: [{ message: { content: "done" } }],
+        usage: { prompt_tokens: 2, completion_tokens: 3, cost },
+      });
+
+      expect(r.usage).toEqual({ input_tokens: 2, output_tokens: 3 });
+    },
+  );
+
   it("handles empty/malformed responses gracefully", () => {
     expect(parseChatCompletion({}).text).toBe("");
     expect(parseChatCompletion({ choices: [] }).model).toBeNull();

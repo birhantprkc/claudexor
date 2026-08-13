@@ -30,6 +30,7 @@ export function buildRegistry(opts: RegistryOptions = {}): AdapterRegistry {
     createRawApiAdapter({
       id: "openrouter",
       providerFamily: "unknown",
+      providerUsageCostUnit: "usd",
       baseUrl: process.env.CLAUDEXOR_OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
       keyEnv: "OPENROUTER_API_KEY",
       defaultModel: process.env.CLAUDEXOR_OPENROUTER_MODEL ?? "openai/gpt-5.5",

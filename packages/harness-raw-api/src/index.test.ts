@@ -169,6 +169,123 @@ describe("raw-api models() — enumeration producer", () => {
   });
 });
 
+describe("raw-api provider cost receipts", () => {
+  const ORIGINAL_ENV = { ...process.env };
+
+  beforeEach(() => {
+    process.env.OPENAI_API_KEY = "sk-test";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  async function runWithProviderCost(
+    cost: unknown,
+    providerUsageCostUnit?: "usd",
+  ): Promise<HarnessEvent[]> {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              model: "openrouter/model",
+              choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+              usage: { prompt_tokens: 2, completion_tokens: 3, cost },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const events = await collect(
+      createRawApiAdapter({ providerUsageCostUnit }).run(
+        HarnessRunSpec.parse({
+          session_id: "provider-cost",
+          intent: "review",
+          prompt: "x",
+          cwd: process.cwd(),
+          access: "readonly",
+          external_context_policy: "auto",
+          tool_permission_policy: { web: "auto", allow: [], deny: [] },
+        }),
+      ),
+    );
+    return events.map((event) => HarnessEvent.parse(event));
+  }
+
+  it.each([
+    ["a positive fractional receipt", 0.000_123],
+    ["an exact zero receipt", 0],
+  ])("emits %s as exact USD only for a trusted instance", async (_label, cost) => {
+    const events = await runWithProviderCost(cost, "usd");
+    const usageEvent = events.find((event) => event.type === "usage");
+
+    expect(events.map((event) => event.type)).toEqual(["started", "message", "usage", "completed"]);
+    expect(usageEvent).toMatchObject({
+      usage: { input_tokens: 2, output_tokens: 3, cost_usd: cost },
+      observed_model: "openrouter/model",
+    });
+    expect(usageEvent?.usage).not.toHaveProperty("estimated");
+  });
+
+  it("keeps the same provider extension untrusted on a generic instance", async () => {
+    const events = await runWithProviderCost(0.25);
+    const usageEvent = events.find((event) => event.type === "usage");
+
+    expect(usageEvent).toMatchObject({
+      usage: { input_tokens: 2, output_tokens: 3 },
+      observed_model: "openrouter/model",
+    });
+    expect(usageEvent?.usage).not.toHaveProperty("cost_usd");
+    expect(usageEvent?.usage).not.toHaveProperty("estimated");
+  });
+
+  it("still emits usage without fabricating zero when a trusted receipt is absent", async () => {
+    const events = await runWithProviderCost(undefined, "usd");
+    const usageEvent = events.find((event) => event.type === "usage");
+
+    expect(usageEvent).toMatchObject({
+      usage: { input_tokens: 2, output_tokens: 3 },
+      observed_model: "openrouter/model",
+    });
+    expect(usageEvent?.usage).not.toHaveProperty("cost_usd");
+  });
+
+  it("emits a cost-only usage receipt even when token counts are absent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              model: "openrouter/model",
+              choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+              usage: { cost: 0.75 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      ),
+    );
+    const events = await collect(
+      createRawApiAdapter({ providerUsageCostUnit: "usd" }).run(
+        HarnessRunSpec.parse({
+          session_id: "provider-cost-only",
+          intent: "review",
+          prompt: "x",
+          cwd: process.cwd(),
+        }),
+      ),
+    );
+    const usageEvent = HarnessEvent.parse(events.find((event) => event.type === "usage"));
+
+    expect(usageEvent).toMatchObject({ usage: { cost_usd: 0.75 } });
+    expect(usageEvent?.usage?.input_tokens).toBeUndefined();
+    expect(usageEvent?.usage?.output_tokens).toBeUndefined();
+  });
+});
+
 // Release wave round-15 #5: the instance secret fence accepts only NAMESPACED
 // refs whose base belongs to the instance — a foreign provider's namespaced
 // slot must refuse typed before any secret read or network call.
