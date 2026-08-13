@@ -575,6 +575,14 @@ search as `cached`, `live`, or `disabled`, with live search controlled by
 maps its typed policy onto those native surfaces and records observed tool
 evidence rather than relying on final-answer claims.
 
+Raw API, including the built-in OpenRouter instance, uses non-streaming Chat
+Completions HTTP JSON rather than a native CLI stream. Its terminal semantics
+are pinned by adapter unit tests, not a recorded stream fixture: an explicit
+terminal provider error yields a bounded, redacted typed `error`, followed by
+`usage` and `completed` events, and never yields a message or patch. Ordinary
+`finish_reason: "stop"` and `finish_reason: "length"` remain successful
+completions.
+
 ### Harness Stream Reference
 
 The per-harness wire truth every parser change must be checked against. Each
@@ -729,10 +737,13 @@ Deliberate limits of the external/host surfaces. Each is a designed boundary
   synthetic until real transcripts are captured.
 - opencode sources any configured provider key — opencode/openai/anthropic
   order — because the vendor CLI consumes provider keys directly.
-- Raw-api routes report token usage but no dollar cost — chat-completions
-  responses carry no price and Claudexor maintains no vendor price tables.
-  Under a finite paid budget that missing cash cost remains `unknown` and can
-  end `cost_unverifiable`; Claudexor never fabricates `$0`.
+- The built-in OpenRouter raw-api instance carries a documented finite
+  non-negative response `usage.cost`, including zero, as an exact USD account
+  charge receipt. Generic raw-api routes, untrusted provider cost, and missing
+  cost remain `unknown` under a finite paid budget and can end
+  `cost_unverifiable`. `cost_details.upstream_inference_cost` is not the account
+  charge receipt and is not lifted into canonical cost; Claudexor neither
+  estimates raw-api spend nor maintains vendor price tables.
 - Cursor native auth lives in the macOS Keychain, so scoped envelopes bridge
   the host keychain (declared `scoped_home_keychain_bridge` containment)
   rather than fully isolating HOME; the cursor doctor's paid smoke result is

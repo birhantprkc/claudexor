@@ -5,6 +5,8 @@ import {
   AttemptPostStreamError,
   attemptFailureCost,
   attemptFailureRecord,
+  newAttemptUsageCost,
+  observeAttemptUsageEvent,
   settleGrantedAttemptLease,
   withAttemptFailureCost,
 } from "./attemptUsageCost.js";
@@ -210,6 +212,58 @@ describe("processAttemptUsage", () => {
       ),
     );
     expect(ledger.spend()).toBe(0.37);
+    expect(ledger.terminal()).toBeNull();
+  });
+
+  it("settles an explicit zero-cost managed API receipt with exact cash knowledge", () => {
+    const usageCost = newAttemptUsageCost();
+    const ts = new Date().toISOString();
+    let authMode: "local_session" | "api_key" | null = null;
+
+    authMode = observeAttemptUsageEvent(
+      usageCost,
+      {
+        type: "started",
+        session_id: "s",
+        ts,
+        credential_route: "managed_api_key",
+      },
+      authMode,
+    );
+    authMode = observeAttemptUsageEvent(
+      usageCost,
+      {
+        type: "usage",
+        session_id: "s",
+        ts,
+        credential_route: "managed_api_key",
+        usage: { cost_usd: 0 },
+      },
+      authMode,
+    );
+    authMode = observeAttemptUsageEvent(
+      usageCost,
+      { type: "completed", session_id: "s", ts },
+      authMode,
+    );
+
+    expect(usageCost.cashUsd).toBe(0);
+    expect(usageCost.cashEstimated).toBe(false);
+    expect(usageCost.cashKnowledge).toBe("exact");
+
+    const settlement = attemptUsageCostSettlement(0, false, "a01", "raw-api", authMode, usageCost);
+    expect(settlement.cashUsd).toBe(0);
+    expect(settlement.cashKnowledge).toBe("exact");
+
+    const ledger = new BudgetLedger({ kind: "finite", maxUsd: 1 });
+    const lease = ledger.reserve({
+      taskId: "exact-zero-api-receipt",
+      intent: "explain",
+      harnessId: "raw-api",
+    }).lease!;
+    ledger.settle(lease.lease_id, settlement);
+
+    expect(ledger.spend()).toBe(0);
     expect(ledger.terminal()).toBeNull();
   });
 

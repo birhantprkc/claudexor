@@ -112,7 +112,14 @@ describe("parseChatCompletion", () => {
       },
     });
 
-    for (const error of [null, "failed", [], { code: "502", message: "failed" }, { code: 502 }]) {
+    for (const error of [
+      null,
+      "failed",
+      [],
+      { code: "502", message: "failed" },
+      { code: 502 },
+      { code: 502, message: 42 },
+    ]) {
       expect(parseChatCompletion({ choices: [{ error }] }).provider_error).toBeNull();
     }
 
@@ -142,6 +149,12 @@ describe("parseChatCompletion", () => {
     expect(
       parseChatCompletion({ choices: [{ message: { content: "done" }, finish_reason: "stop" }] }),
     ).toMatchObject({ finish_reason: "stop", diagnostic_text: "done" });
+    expect(
+      parseChatCompletion({ choices: [{ message: { content: "" }, finish_reason: "error" }] }),
+    ).toMatchObject({ finish_reason: "error", diagnostic_text: "" });
+    expect(
+      parseChatCompletion({ choices: [{ message: { content: "done" }, finish_reason: 42 }] }),
+    ).toMatchObject({ finish_reason: null, diagnostic_text: "done" });
   });
 
   it.each([

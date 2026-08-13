@@ -176,6 +176,8 @@ describe("raw-api provider cost receipts", () => {
   const ORIGINAL_ENV = { ...process.env };
 
   beforeEach(() => {
+    delete process.env.CLAUDEXOR_RAWAPI_KEY;
+    delete process.env.CLAUDEXOR_RAWAPI_BASE_URL;
     process.env.OPENAI_API_KEY = "sk-test";
   });
 
@@ -264,8 +266,8 @@ describe("raw-api provider cost receipts", () => {
     expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
   });
 
-  it("still emits usage without fabricating zero when a trusted receipt is absent", async () => {
-    const events = await runWithProviderCost(undefined, "usd");
+  it("ignores upstream inference cost when the trusted account receipt is absent", async () => {
+    const events = await runWithProviderCost(undefined, "usd", 99);
     const usageEvent = events.find((event) => event.type === "usage");
 
     expect(usageEvent).toStrictEqual({
@@ -781,6 +783,8 @@ describe("raw-api terminal provider completions", () => {
   };
 
   beforeEach(() => {
+    delete process.env.CLAUDEXOR_RAWAPI_KEY;
+    delete process.env.CLAUDEXOR_RAWAPI_BASE_URL;
     process.env.OPENAI_API_KEY = "sk-test";
   });
 
@@ -791,11 +795,14 @@ describe("raw-api terminal provider completions", () => {
 
   function responseFor(options: {
     content?: unknown;
-    finishReason?: string | null;
+    finishReason?: unknown;
     error?: unknown;
     model?: string;
     omitModel?: boolean;
     omitUsage?: boolean;
+    omitTokenCounts?: boolean;
+    cost?: unknown;
+    upstreamInferenceCost?: unknown;
   }): Response {
     return new Response(
       JSON.stringify({
@@ -807,7 +814,21 @@ describe("raw-api terminal provider completions", () => {
             ...(options.error === undefined ? {} : { error: options.error }),
           },
         ],
-        ...(options.omitUsage ? {} : { usage: { prompt_tokens: 7, completion_tokens: 3 } }),
+        ...(options.omitUsage
+          ? {}
+          : {
+              usage: {
+                ...(options.omitTokenCounts ? {} : { prompt_tokens: 7, completion_tokens: 3 }),
+                ...(options.cost === undefined ? {} : { cost: options.cost }),
+                ...(options.upstreamInferenceCost === undefined
+                  ? {}
+                  : {
+                      cost_details: {
+                        upstream_inference_cost: options.upstreamInferenceCost,
+                      },
+                    }),
+              },
+            }),
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
@@ -886,6 +907,75 @@ describe("raw-api terminal provider completions", () => {
     expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
   });
 
+  it.each([
+    ["a positive receipt with tokens", 0.25, false],
+    ["an exact zero receipt with tokens", 0, false],
+    ["a positive cost-only receipt", 0.5, true],
+  ] as const)("preserves trusted terminal cost for %s", async (_label, cost, omitTokenCounts) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responseFor({ finishReason: "error", cost, omitTokenCounts })),
+    );
+
+    const events = await collect(
+      createRawApiAdapter({ providerUsageCostUnit: "usd" }).run(
+        runSpec("review", `trusted-terminal-${cost}-${omitTokenCounts}`),
+      ),
+    );
+    const usage = events.find((event) => event.type === "usage");
+
+    expect(events.map((event) => event.type)).toEqual(["started", "error", "usage", "completed"]);
+    expect(events.some((event) => event.type === "message")).toBe(false);
+    expect(usage).toStrictEqual({
+      type: "usage",
+      session_id: `trusted-terminal-${cost}-${omitTokenCounts}`,
+      ts: expect.any(String),
+      usage: {
+        input_tokens: omitTokenCounts ? undefined : 7,
+        output_tokens: omitTokenCounts ? undefined : 3,
+        cost_usd: cost,
+      },
+      observed_model: "provider-model",
+    });
+    expect(usage?.usage).not.toHaveProperty("provider_cost");
+    expect(usage?.usage).not.toHaveProperty("estimated");
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
+  });
+
+  it("keeps terminal provider cost untrusted for a generic instance", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responseFor({ finishReason: "error", cost: 0.25 })),
+    );
+
+    const events = await collect(createRawApiAdapter().run(runSpec("review", "generic-terminal")));
+    const usage = events.find((event) => event.type === "usage");
+
+    expect(events.map((event) => event.type)).toEqual(["started", "error", "usage", "completed"]);
+    expect(usage?.usage).toStrictEqual({ input_tokens: 7, output_tokens: 3 });
+    expect(usage?.usage).not.toHaveProperty("cost_usd");
+    expect(usage?.usage).not.toHaveProperty("provider_cost");
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
+  });
+
+  it("does not promote an upstream-only terminal cost to an account receipt", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responseFor({ finishReason: "error", upstreamInferenceCost: 99 })),
+    );
+
+    const events = await collect(
+      createRawApiAdapter({ providerUsageCostUnit: "usd" }).run(
+        runSpec("review", "upstream-only-terminal"),
+      ),
+    );
+    const usage = events.find((event) => event.type === "usage");
+
+    expect(usage?.usage).toStrictEqual({ input_tokens: 7, output_tokens: 3 });
+    expect(usage?.usage).not.toHaveProperty("cost_usd");
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
+  });
+
   it.each(["implement", "synthesize"] as const)(
     "suppresses a valid partial patch on a terminal %s completion",
     async (intent) => {
@@ -895,6 +985,7 @@ describe("raw-api terminal provider completions", () => {
           responseFor({
             content: JSON.stringify({ patch }),
             finishReason: "error",
+            cost: 0.25,
             error: {
               code: 502,
               message: "Provider unavailable",
@@ -904,9 +995,16 @@ describe("raw-api terminal provider completions", () => {
         ),
       );
 
-      const events = await collect(createRawApiAdapter().run(runSpec(intent, `patch-${intent}`)));
+      const events = await collect(
+        createRawApiAdapter({ providerUsageCostUnit: "usd" }).run(
+          runSpec(intent, `patch-${intent}`),
+        ),
+      );
       expect(events.map((event) => event.type)).toEqual(["started", "error", "usage", "completed"]);
       expect(events.some((event) => event.type === "patch_produced")).toBe(false);
+      expect(events.find((event) => event.type === "usage")?.usage).toMatchObject({
+        cost_usd: 0.25,
+      });
       expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
     },
   );
@@ -1139,17 +1237,42 @@ describe("raw-api terminal provider completions", () => {
     },
   );
 
-  it("omits partial-output diagnostics when message content is not a string", async () => {
+  it("keeps finish_reason:length successful while preserving trusted cost", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => responseFor({ content: "done", finishReason: "length", cost: 0 })),
+    );
+
+    const events = await collect(
+      createRawApiAdapter({ providerUsageCostUnit: "usd" }).run(
+        runSpec("explain", "length-with-cost"),
+      ),
+    );
+
+    expect(events.map((event) => event.type)).toEqual(["started", "message", "usage", "completed"]);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.find((event) => event.type === "usage")?.usage).toStrictEqual({
+      input_tokens: 7,
+      output_tokens: 3,
+      cost_usd: 0,
+    });
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["rich", [{ type: "text", text: "rich content" }]],
+  ] as const)("omits partial-output diagnostics for %s message content", async (label, content) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
         responseFor({
-          content: [{ type: "text", text: "rich content" }],
+          content,
           finishReason: "error",
         }),
       ),
     );
-    const events = await collect(createRawApiAdapter().run(runSpec("review", "rich-content")));
+    const events = await collect(createRawApiAdapter().run(runSpec("review", `${label}-content`)));
     const error = events.find((event) => event.type === "error");
     expect(error?.payload).not.toHaveProperty("partial_output");
     expect(error?.payload).not.toHaveProperty("partial_output_truncated");
