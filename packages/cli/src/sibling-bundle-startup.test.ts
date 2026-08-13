@@ -26,7 +26,7 @@ function sha256(path: string): string {
 
 describe("self-contained sibling CLI/daemon bundle startup", () => {
   it.skipIf(process.platform === "win32")(
-    "starts, handshakes, and stops from an isolated root without writing outside config/repo",
+    "starts, handshakes, tails logs, and stops from an isolated sibling bundle",
     async () => {
       // Keep the default daemon socket below macOS' short AF_UNIX path limit.
       const root = mkdtempSync(join(realpathSync("/tmp"), "cx165-"));
