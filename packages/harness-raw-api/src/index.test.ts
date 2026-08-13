@@ -1150,6 +1150,36 @@ describe("raw-api terminal provider completions", () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
+  it.each([
+    [499, 499, false],
+    [500, 500, false],
+    [501, 500, true],
+  ] as const)(
+    "marks a %i-character partial output as length %i with truncated=%s",
+    async (sourceLength, storedLength, truncated) => {
+      const partialOutput = "p".repeat(sourceLength);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          responseFor({
+            content: partialOutput,
+            finishReason: "error",
+          }),
+        ),
+      );
+
+      const events = await collect(
+        createRawApiAdapter().run(runSpec("review", `diagnostic-boundary-${sourceLength}`)),
+      );
+      const payload = events.find((event) => event.type === "error")?.payload as {
+        partial_output?: string;
+        partial_output_truncated?: boolean;
+      };
+      expect(payload.partial_output).toBe("p".repeat(storedLength));
+      expect(payload.partial_output_truncated).toBe(truncated);
+    },
+  );
+
   it("accepts either terminal signal, but not a malformed choice error by itself", async () => {
     for (const [sessionId, options] of [
       ["finish-only", { finishReason: "error", error: undefined }],
