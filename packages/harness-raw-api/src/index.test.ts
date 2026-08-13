@@ -645,10 +645,12 @@ describe("raw-api terminal provider completions", () => {
     finishReason?: string | null;
     error?: unknown;
     model?: string;
+    omitModel?: boolean;
+    omitUsage?: boolean;
   }): Response {
     return new Response(
       JSON.stringify({
-        model: options.model ?? "provider-model",
+        ...(options.omitModel ? {} : { model: options.model ?? "provider-model" }),
         choices: [
           {
             message: { role: "assistant", content: options.content ?? "partial output" },
@@ -656,7 +658,7 @@ describe("raw-api terminal provider completions", () => {
             ...(options.error === undefined ? {} : { error: options.error }),
           },
         ],
-        usage: { prompt_tokens: 7, completion_tokens: 3 },
+        ...(options.omitUsage ? {} : { usage: { prompt_tokens: 7, completion_tokens: 3 } }),
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
@@ -714,6 +716,26 @@ describe("raw-api terminal provider completions", () => {
       });
     },
   );
+
+  it("preserves terminal order and schema validity when model and usage are absent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        responseFor({
+          finishReason: "error",
+          omitModel: true,
+          omitUsage: true,
+        }),
+      ),
+    );
+
+    const events = await collect(createRawApiAdapter().run(runSpec("review", "terminal-empty")));
+    expect(events.map((event) => event.type)).toEqual(["started", "error", "usage", "completed"]);
+    expect(events.find((event) => event.type === "usage")?.usage).toEqual({});
+    expect(events.find((event) => event.type === "usage")?.observed_model).toBeUndefined();
+    expect(events.at(-1)?.observed_model).toBeUndefined();
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
+  });
 
   it.each(["implement", "synthesize"] as const)(
     "suppresses a valid partial patch on a terminal %s completion",
@@ -871,8 +893,13 @@ describe("raw-api terminal provider completions", () => {
 
     const events = await collect(createRawApiAdapter().run(runSpec("review", "straddling-secret")));
     const error = events.find((event) => event.type === "error");
-    const partialOutput = (error?.payload as { partial_output?: string }).partial_output;
+    const payload = error?.payload as {
+      partial_output?: string;
+      partial_output_truncated?: boolean;
+    };
+    const partialOutput = payload.partial_output;
     expect(partialOutput).toBe(`${"p".repeat(480)} [redacted]`);
+    expect(payload.partial_output_truncated).toBe(false);
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 
@@ -907,6 +934,31 @@ describe("raw-api terminal provider completions", () => {
       "completed",
     ]);
   });
+
+  it.each(["stop", "length"] as const)(
+    "gives a structurally valid choice error precedence over finish_reason:%s",
+    async (finishReason) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          responseFor({
+            finishReason,
+            error: {
+              code: 502,
+              message: "Provider unavailable",
+              metadata: { error_type: "provider_unavailable" },
+            },
+          }),
+        ),
+      );
+
+      const events = await collect(
+        createRawApiAdapter().run(runSpec("review", `${finishReason}-with-choice-error`)),
+      );
+      expect(events.map((event) => event.type)).toEqual(["started", "error", "usage", "completed"]);
+      expect(events.some((event) => event.type === "message")).toBe(false);
+    },
+  );
 
   it.each(["stop", "length"] as const)(
     "keeps finish_reason:%s successful for both messages and patch envelopes",

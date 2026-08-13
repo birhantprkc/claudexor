@@ -83,15 +83,7 @@ describe("parseChatCompletion", () => {
       },
     });
 
-    for (const error of [
-      null,
-      "failed",
-      [],
-      { code: "502", message: "failed" },
-      { code: 502 },
-      { code: Number.NaN, message: "failed" },
-      { code: Number.POSITIVE_INFINITY, message: "failed" },
-    ]) {
+    for (const error of [null, "failed", [], { code: "502", message: "failed" }, { code: 502 }]) {
       expect(parseChatCompletion({ choices: [{ error }] }).provider_error).toBeNull();
     }
 
@@ -121,6 +113,37 @@ describe("parseChatCompletion", () => {
     expect(
       parseChatCompletion({ choices: [{ message: { content: "done" }, finish_reason: "stop" }] }),
     ).toMatchObject({ finish_reason: "stop", diagnostic_text: "done" });
+  });
+
+  it.each([
+    ["-Number.MAX_VALUE", -Number.MAX_VALUE],
+    ["-1", -1],
+    ["-0", -0],
+    ["0", 0],
+    ["Number.MIN_VALUE", Number.MIN_VALUE],
+    ["0.5", 0.5],
+    ["Number.MAX_VALUE", Number.MAX_VALUE],
+  ] as const)("accepts finite provider error code %s with an empty message", (_label, code) => {
+    const providerError = parseChatCompletion({
+      choices: [{ error: { code, message: "" } }],
+    }).provider_error;
+
+    expect(providerError?.code).toBe(code);
+    expect(providerError).toMatchObject({
+      message: "",
+      error_type: null,
+      provider_code: null,
+    });
+  });
+
+  it.each([
+    ["Number.NEGATIVE_INFINITY", Number.NEGATIVE_INFINITY],
+    ["Number.NaN", Number.NaN],
+    ["Number.POSITIVE_INFINITY", Number.POSITIVE_INFINITY],
+  ] as const)("rejects non-finite provider error code %s", (_label, code) => {
+    expect(
+      parseChatCompletion({ choices: [{ error: { code, message: "" } }] }).provider_error,
+    ).toBeNull();
   });
 });
 
