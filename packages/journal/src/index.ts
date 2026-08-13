@@ -115,7 +115,7 @@ export class DurableJournal {
   private previousFrameHash = ZERO_HASH;
   private knownFileBytes = 0;
   private recovery: JournalRecoveryState = { status: "ready", discardedTailBytes: 0 };
-  private preparationState: PreparedJournalInspection | null = null;
+  private preparationState: JournalPreparationReceipt | null = null;
   private writable = false;
   private closed = false;
 
@@ -153,9 +153,9 @@ export class DurableJournal {
     this.partitionDir = journalPartitionDirectory(options.rootDir, options.partition);
     this.path = join(this.partitionDir, "journal.bin");
     if (token === PREPARED_JOURNAL && prepared) {
-      this.preparationState = prepared;
+      this.preparationState = prepared.receipt;
       this.recovery = structuredClone(prepared.recovery);
-      for (const record of prepared.records) this.entries.push(cloneJson(record));
+      for (const record of prepared.records) this.entries.push(record);
       this.epoch = prepared.epoch;
       this.nextSeq = prepared.nextSeq;
       this.previousFrameHash = prepared.previousFrameHash;
@@ -168,12 +168,7 @@ export class DurableJournal {
     ensurePrivateFile(this.path);
     this.openWriter();
     this.recover();
-    if (
-      this.recovery.status === "ready" &&
-      this.knownFileBytes >= (options.compactionThresholdBytes ?? 8 * 1024 * 1024)
-    ) {
-      this.compact();
-    }
+    this.compactAtThreshold();
   }
 
   state(): JournalRecoveryState {
@@ -184,14 +179,14 @@ export class DurableJournal {
   preparation(): JournalPreparationReceipt {
     this.assertOpen();
     if (!this.preparationState) throw new Error("journal was not opened through preparation");
-    return structuredClone(this.preparationState.receipt);
+    return structuredClone(this.preparationState);
   }
 
   revalidatePreparation(): void {
     this.assertOpen();
     if (!this.preparationState) throw new Error("journal was not opened through preparation");
     const actual = fingerprintPreparedJournal(this.options.rootDir, this.partitionDir);
-    if (actual !== this.preparationState.receipt.fingerprint) {
+    if (actual !== this.preparationState.fingerprint) {
       throw new Error("journal changed since read-only preparation");
     }
   }
@@ -218,6 +213,7 @@ export class DurableJournal {
     if (activatedRecovery.status === "recovery_required") {
       throw new JournalRecoveryRequiredError(activatedRecovery);
     }
+    this.compactAtThreshold();
   }
 
   records<T = unknown>(afterSeq = 0): JournalRecord<T>[] {
@@ -481,6 +477,11 @@ export class DurableJournal {
       fsyncSync(this.fd);
     }
     this.writable = true;
+  }
+
+  private compactAtThreshold(): void {
+    const threshold = this.options.compactionThresholdBytes ?? 8 * 1024 * 1024;
+    if (this.recovery.status === "ready" && this.knownFileBytes >= threshold) this.compact();
   }
 
   private requireRecovery(

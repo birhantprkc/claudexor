@@ -3,7 +3,11 @@ import { existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DurableJournal } from "@claudexor/journal";
 import type { ControlJournalQuarantineReceipt } from "@claudexor/schema";
-import { fingerprintPartition, writeAtomicPrivateJson } from "./journal-recovery-files.js";
+import {
+  fingerprintPartition,
+  requireStableFingerprint,
+  writeAtomicPrivateJson,
+} from "./journal-recovery-files.js";
 import {
   matchingReceipt,
   readOperation,
@@ -28,8 +32,12 @@ export function inspectPreparedOperation(input: {
   artifactPrefix: string;
   journal: DurableJournal | null;
 }): PreparedOperationPlan {
-  const operationsFingerprint = fingerprintPartition(input.operationsDir);
-  if (!existsSync(input.operationsDir)) {
+  const operations = fingerprintPartition(input.operationsDir);
+  const operationsFingerprint = requireStableFingerprint(
+    operations,
+    "journal recovery operations are unavailable",
+  );
+  if (!operations.exists) {
     return { kind: "none", fingerprint: operationFingerprint(operationsFingerprint, null) };
   }
   const prepared = readdirSync(input.operationsDir)
@@ -50,13 +58,20 @@ export function inspectPreparedOperation(input: {
   }
   if (prepared.length !== 1) throw new Error("multiple prepared recovery operations");
   const pending = prepared[0]!;
-  const sourceExists = existsSync(input.partitionDir);
-  const targetExists = existsSync(pending.operation.quarantinePath);
-  const targetFingerprint = targetExists
-    ? fingerprintPartition(pending.operation.quarantinePath)
-    : null;
-  const fingerprint = operationFingerprint(operationsFingerprint, targetFingerprint);
-  if (targetExists && targetFingerprint !== pending.operation.expectedFingerprint) {
+  const source = fingerprintPartition(input.partitionDir);
+  const target = fingerprintPartition(pending.operation.quarantinePath);
+  requireStableFingerprint(source, "journal recovery source is unavailable");
+  const stableTargetFingerprint = requireStableFingerprint(
+    target,
+    "journal recovery quarantine is unavailable",
+  );
+  const sourceExists = source.exists;
+  const targetExists = target.exists;
+  const fingerprint = operationFingerprint(
+    operationsFingerprint,
+    targetExists ? stableTargetFingerprint : null,
+  );
+  if (targetExists && stableTargetFingerprint !== pending.operation.expectedFingerprint) {
     throw typedError("recovery_quarantine_mismatch", 503, "quarantined bytes changed");
   }
   if (sourceExists && !targetExists) {
@@ -109,15 +124,23 @@ export function applyPreparedOperation(input: {
 }): void {
   if (input.plan.kind === "none" || input.plan.kind === "source_intact") return;
   const currentFingerprint = operationFingerprint(
-    fingerprintPartition(dirname(input.plan.path)),
-    fingerprintPartition(input.plan.operation.quarantinePath),
+    requireStableFingerprint(
+      fingerprintPartition(dirname(input.plan.path)),
+      "journal recovery operations changed",
+    ),
+    requireStableFingerprint(
+      fingerprintPartition(input.plan.operation.quarantinePath),
+      "journal recovery quarantine changed",
+    ),
   );
   if (currentFingerprint !== input.plan.fingerprint) {
     throw typedError("recovery_fingerprint_mismatch", 409, "prepared recovery input changed");
   }
   if (
-    fingerprintPartition(input.plan.operation.quarantinePath) !==
-    input.plan.operation.expectedFingerprint
+    requireStableFingerprint(
+      fingerprintPartition(input.plan.operation.quarantinePath),
+      "journal recovery quarantine changed",
+    ) !== input.plan.operation.expectedFingerprint
   ) {
     throw typedError("recovery_quarantine_mismatch", 503, "quarantined bytes changed");
   }
@@ -161,7 +184,10 @@ export function completePreparedReceipt(input: {
   artifactPrefix: string;
 }): ControlJournalQuarantineReceipt {
   if (
-    fingerprintPartition(input.operation.quarantinePath) !== input.operation.expectedFingerprint
+    requireStableFingerprint(
+      fingerprintPartition(input.operation.quarantinePath),
+      "journal recovery quarantine changed",
+    ) !== input.operation.expectedFingerprint
   ) {
     throw typedError("recovery_quarantine_mismatch", 503, "quarantined bytes changed");
   }

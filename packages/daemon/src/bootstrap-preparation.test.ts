@@ -5,6 +5,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -130,12 +131,51 @@ describe("journal bootstrap preparation", () => {
       (slot as unknown as { prepared(): { journal: DurableJournal } }).prepared().journal,
     ).toBeDefined();
     expect(existsSync(join(root, "journal"))).toBe(false);
+    expect(manager.ready()).toBe(false);
+    expect(manager.validate()).toMatchObject({
+      status: "ready",
+      projectionStatus: [{ name: "probe", status: "valid", detail: null }],
+    });
+    expect(slot.prepared().journal.records()).toEqual([]);
+    expect(existsSync(join(root, "journal"))).toBe(false);
 
     manager.revalidatePreparation();
     expect(existsSync(join(root, "journal"))).toBe(false);
     manager.activatePrepared();
     expect(slot.current().journal.state().status).toBe("ready");
     expect(existsSync(join(root, "journal"))).toBe(true);
+    manager.close();
+  });
+
+  it("never activates or writes after semantic preparation enters recovery", () => {
+    const root = tempRoot("manager-semantic-recovery");
+    const sentinel = join(root, "activation-sentinel");
+    writeFileSync(sentinel, "must-stay-byte-identical", { mode: 0o640 });
+    const before = readFileSync(sentinel);
+    const mode = statSync(sentinel).mode & 0o777;
+    const manager = new JournalManager(root);
+    const slot = manager.registerProjection({
+      name: "invalid-projection",
+      create: (journal) => ({ journal }),
+      validate: () => {
+        throw new Error("semantic projection rejection");
+      },
+    });
+
+    expect(manager.prepare()).toMatchObject({
+      inspection: { status: "recovery_required" },
+      validation: {
+        projectionStatus: [
+          expect.objectContaining({ name: "invalid-projection", status: "invalid" }),
+        ],
+      },
+    });
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(() => slot.current()).toThrow(/requires recovery/);
+    expect(existsSync(join(root, "journal"))).toBe(false);
+    expect(readFileSync(sentinel)).toEqual(before);
+    expect(statSync(sentinel).mode & 0o777).toBe(mode);
     manager.close();
   });
 

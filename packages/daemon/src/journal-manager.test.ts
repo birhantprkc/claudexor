@@ -1,10 +1,13 @@
 import {
+  chmodSync,
   existsSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -129,6 +132,95 @@ describe("JournalManager", () => {
     expect(() => registerProbe(manager, "late")).toThrow(/registration is closed/);
     manager.close();
   });
+
+  it("fails closed and revokes the writer when prepared projection activation throws", () => {
+    const manager = new JournalManager(root, {
+      faults: {
+        beforeProjectionActivation: () => {
+          throw new Error("simulated projection activation failure");
+        },
+      },
+    });
+    const slot = registerProbe(manager);
+    expect(manager.prepare().inspection.status).toBe("ready");
+    const preparedProjection = slot.prepared();
+
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(manager.ready()).toBe(false);
+    expect(() => slot.current()).toThrow(/requires recovery/);
+    expect(() => preparedProjection.journal.append("probe", {})).toThrow(/closed/);
+    manager.close();
+  });
+
+  it("turns a disappeared prepared partition into recovery without recreating it", () => {
+    const seeded = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    seeded.append("probe.saved", { value: 1 });
+    const original = seeded.partitionDir;
+    const bytes = readFileSync(seeded.path);
+    seeded.close();
+    const manager = new JournalManager(root);
+    registerProbe(manager);
+    expect(manager.prepare().inspection.status).toBe("ready");
+    const moved = `${original}.moved`;
+    renameSync(original, moved);
+
+    expect(() => manager.revalidatePreparation()).toThrow(/requires recovery/);
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(existsSync(original)).toBe(false);
+    expect(readFileSync(join(moved, "journal.bin"))).toEqual(bytes);
+    manager.close();
+  });
+
+  it("turns a pathname replacement race into recovery without touching replacement bytes", () => {
+    const seeded = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    seeded.append("probe.saved", { value: 1 });
+    const original = seeded.partitionDir;
+    const originalBytes = readFileSync(seeded.path);
+    seeded.close();
+    const manager = new JournalManager(root);
+    registerProbe(manager);
+    expect(manager.prepare().inspection.status).toBe("ready");
+    renameSync(original, `${original}.original`);
+    mkdirSync(original, { mode: 0o700 });
+    writeFileSync(join(original, "journal.bin"), originalBytes, { mode: 0o600 });
+
+    expect(manager.validate()).toMatchObject({
+      status: "recovery_required",
+      projectionStatus: [expect.objectContaining({ name: "probe", status: "invalid" })],
+    });
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(readFileSync(join(original, "journal.bin"))).toEqual(originalBytes);
+    manager.close();
+  });
+
+  it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
+    "reports an unreadable partition as recovery instead of throwing from fingerprinting",
+    () => {
+      const seeded = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+      seeded.append("probe.saved", { value: 1 });
+      const path = seeded.path;
+      const partitionDir = seeded.partitionDir;
+      const bytes = readFileSync(path);
+      seeded.close();
+      chmodSync(partitionDir, 0o000);
+      const manager = new JournalManager(root);
+      registerProbe(manager);
+      try {
+        expect(manager.prepare()).toMatchObject({
+          inspection: { status: "recovery_required" },
+        });
+        expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+      } finally {
+        chmodSync(partitionDir, 0o700);
+      }
+      expect(readFileSync(path)).toEqual(bytes);
+      expect(manager.inspect().status).toBe("recovery_required");
+      manager.close();
+    },
+  );
 
   it("keeps inspect, validate and secret-safe export online without mutating corrupt bytes", () => {
     const { journalPath, corruptBytes } = seedCorruptPartition();

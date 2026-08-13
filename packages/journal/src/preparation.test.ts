@@ -113,6 +113,75 @@ describe("DurableJournal read-only preparation", () => {
     prepared.close();
   });
 
+  it("matches normal reopen compaction when a prepared journal is promoted", () => {
+    const seed = (journalRoot: string): number => {
+      const journal = new DurableJournal({
+        rootDir: journalRoot,
+        partition: "global",
+        now: () => new Date("2026-08-13T00:00:00.000Z"),
+        epochFactory: () => "seed-epoch",
+      });
+      for (let index = 0; index < 100; index += 1) {
+        journal.append("probe.saved", { index, repeated: "same-value".repeat(20) });
+      }
+      const bytes = journal.physicalBytes();
+      journal.close();
+      return bytes;
+    };
+    const normalRoot = join(root, "normal");
+    const preparedRoot = join(root, "prepared");
+    const normalBefore = seed(normalRoot);
+    const preparedBefore = seed(preparedRoot);
+
+    const normal = new DurableJournal({
+      rootDir: normalRoot,
+      partition: "global",
+      compactionThresholdBytes: 1,
+      now: () => new Date("2026-08-13T00:00:00.000Z"),
+    });
+    const promoted = prepareJournal({
+      rootDir: preparedRoot,
+      partition: "global",
+      compactionThresholdBytes: 1,
+      now: () => new Date("2026-08-13T00:00:00.000Z"),
+    });
+    expect(promoted.physicalBytes()).toBe(preparedBefore);
+    promoted.activatePrepared();
+
+    expect(normal.physicalBytes()).toBeLessThan(normalBefore);
+    expect(promoted.physicalBytes()).toBeLessThan(preparedBefore);
+    expect(promoted.physicalBytes()).toBe(normal.physicalBytes());
+    expect(promoted.records().map(({ type, payload }) => ({ type, payload }))).toEqual(
+      normal.records().map(({ type, payload }) => ({ type, payload })),
+    );
+    normal.close();
+    promoted.close();
+  });
+
+  it("keeps only a compact receipt alongside a prepared large logical history", () => {
+    const journalRoot = join(root, "large-history");
+    const logicalRecordCount = 20_000;
+    const seeded = new DurableJournal({ rootDir: journalRoot, partition: "global" });
+    seeded.appendBatch(
+      Array.from({ length: logicalRecordCount }, (_, index) => ({
+        type: "grown.history",
+        payload: { index, repeated: "same-value" },
+      })),
+    );
+    expect(seeded.compact()).toMatchObject({ records: logicalRecordCount });
+    seeded.close();
+
+    const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+    const receiptBefore = prepared.preparation();
+    expect(prepared.records()).toHaveLength(logicalRecordCount);
+    expect(Object.keys(receiptBefore).sort()).toEqual(["deferredRepair", "fingerprint", "virtual"]);
+    expect(JSON.stringify(receiptBefore).length).toBeLessThan(256);
+    prepared.activatePrepared();
+    expect(prepared.records()).toHaveLength(logicalRecordCount);
+    expect(prepared.preparation()).toEqual(receiptBefore);
+    prepared.close();
+  });
+
   it("defers an uncertain append repair without truncating, deleting intent, or appending a receipt", () => {
     const journalRoot = join(root, "journal");
     const seeded = new DurableJournal({ rootDir: journalRoot, partition: "global" });
