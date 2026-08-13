@@ -74,6 +74,7 @@ export type DaemonLeaseOwnerCapability =
 
 export type DaemonWriterLeaseUnknownReason =
   | "lease_unreadable"
+  | "lease_unstable"
   | "invalid_lease_path"
   | "owner_missing"
   | "owner_unreadable"
@@ -291,12 +292,23 @@ export function inspectDaemonWriterLease(
   socketPath: string,
   deps: DaemonWriterLeaseDependencies = {},
 ): DaemonWriterLeaseStatus {
-  const raw = inspectWriterLeasePath(writerLeasePath(socketPath), filesystem(deps));
-  if (raw.status !== "owned") return raw;
-  return {
-    ...raw,
-    capability: classifyDaemonLeaseOwner(raw.owner, deps),
-  };
+  const path = writerLeasePath(socketPath);
+  const fs = filesystem(deps);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const raw = inspectWriterLeasePath(path, fs);
+    if (raw.status !== "owned") return raw;
+    const capability = classifyDaemonLeaseOwner(raw.owner, deps);
+    const confirmed = inspectWriterLeasePath(path, fs);
+    if (confirmed.status === "owned" && sameOwner(confirmed.owner, raw.owner)) {
+      return { ...confirmed, capability };
+    }
+    if (attempt === 1) {
+      return confirmed.status === "owned"
+        ? { status: "unknown", path, reason: "lease_unstable" }
+        : confirmed;
+    }
+  }
+  return { status: "unknown", path, reason: "lease_unstable" };
 }
 
 export function writerLeaseTombstonePath(leasePath: string, owner: DaemonLeaseOwner): string {

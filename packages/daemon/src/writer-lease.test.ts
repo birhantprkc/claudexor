@@ -104,6 +104,10 @@ function seedOwner(owner: unknown, path = leasePath): string {
   return raw;
 }
 
+function replaceOwner(owner: unknown, path = leasePath): void {
+  writeFileSync(join(path, "owner.json"), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+}
+
 function depsFor(
   observed: ProcessObservation | ((pid: number) => ProcessObservation),
   extra: Omit<DaemonWriterLeaseDependencies, "identity" | "observation"> = {},
@@ -200,6 +204,74 @@ describe("strict writer-lease inspection", () => {
         },
       }),
     ).toMatchObject({ status: "unknown", reason: "owner_unreadable" });
+  });
+
+  it("retries when classification observes a superseded owner generation", () => {
+    const original: DaemonLeaseOwner = {
+      pid: 44,
+      token: "original",
+      identity: known(44, "linux:1"),
+    };
+    const successor: DaemonLeaseOwner = {
+      pid: 55,
+      token: "successor",
+      identity: known(55, "linux:2"),
+    };
+    seedOwner(original);
+    let swapped = false;
+    const observed: number[] = [];
+
+    expect(
+      inspectDaemonWriterLease(
+        socketPath,
+        depsFor(
+          (pid) => {
+            observed.push(pid);
+            if (pid === original.pid && !swapped) {
+              swapped = true;
+              replaceOwner(successor);
+              return observation({ status: "missing", pid, platform: "linux" });
+            }
+            return observation(successor.identity!, "S");
+          },
+          { probeProcess: () => expect.fail("known observations must not probe or signal") },
+        ),
+      ),
+    ).toMatchObject({
+      status: "owned",
+      owner: successor,
+      capability: { status: "capable", reason: "identity_match" },
+    });
+    expect(observed).toEqual([original.pid, successor.pid]);
+    expect(JSON.parse(readFileSync(join(leasePath, "owner.json"), "utf8"))).toEqual(successor);
+  });
+
+  it("fails closed when the owner generation changes on both inspection attempts", () => {
+    const owners: DaemonLeaseOwner[] = [
+      { pid: 44, token: "first", identity: known(44, "linux:1") },
+      { pid: 55, token: "second", identity: known(55, "linux:2") },
+      { pid: 66, token: "third", identity: known(66, "linux:3") },
+    ];
+    seedOwner(owners[0]);
+    let generation = 0;
+    const observed: number[] = [];
+
+    expect(
+      inspectDaemonWriterLease(
+        socketPath,
+        depsFor(
+          (pid) => {
+            observed.push(pid);
+            generation += 1;
+            replaceOwner(owners[generation]);
+            return observation({ status: "missing", pid, platform: "linux" });
+          },
+          { probeProcess: () => expect.fail("missing observations must not probe or signal") },
+        ),
+      ),
+    ).toEqual({ status: "unknown", path: leasePath, reason: "lease_unstable" });
+    expect(observed).toEqual([owners[0]!.pid, owners[1]!.pid]);
+    expect(JSON.parse(readFileSync(join(leasePath, "owner.json"), "utf8"))).toEqual(owners[2]);
   });
 
   it("keeps the nullable compatibility projection deliberately lossy", () => {
