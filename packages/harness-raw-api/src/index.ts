@@ -29,6 +29,7 @@ import {
   sha256,
 } from "@claudexor/util";
 import { parseChatCompletion, parseModelsList } from "./parse.js";
+import { isTerminalProviderCompletion, providerCompletionErrorEvent } from "./providerError.js";
 
 /** A stalled remote endpoint must not hang a run forever. */
 const RAW_API_TIMEOUT_MS = 180_000;
@@ -452,6 +453,30 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
         }
         const json = await res.json();
         const parsed = parseChatCompletion(json);
+        const usage = {
+          input_tokens: parsed.usage.input_tokens,
+          output_tokens: parsed.usage.output_tokens,
+          ...(providerUsageCostUnit === "usd" && parsed.usage.provider_cost !== undefined
+            ? { cost_usd: parsed.usage.provider_cost }
+            : {}),
+        };
+        if (isTerminalProviderCompletion(parsed)) {
+          yield providerCompletionErrorEvent(id, spec.session_id, nowIso(), parsed);
+          yield {
+            type: "usage",
+            session_id: spec.session_id,
+            ts: nowIso(),
+            usage,
+            observed_model: parsed.model ?? undefined,
+          };
+          yield {
+            type: "completed",
+            session_id: spec.session_id,
+            ts: nowIso(),
+            observed_model: parsed.model ?? undefined,
+          };
+          return;
+        }
         if (spec.intent === "implement" || spec.intent === "synthesize") {
           if (!spec.raw_context_packet) {
             yield {
@@ -501,13 +526,7 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
           type: "usage",
           session_id: spec.session_id,
           ts: nowIso(),
-          usage: {
-            input_tokens: parsed.usage.input_tokens,
-            output_tokens: parsed.usage.output_tokens,
-            ...(providerUsageCostUnit === "usd" && parsed.usage.provider_cost !== undefined
-              ? { cost_usd: parsed.usage.provider_cost }
-              : {}),
-          },
+          usage,
           observed_model: parsed.model ?? undefined,
         };
         yield {

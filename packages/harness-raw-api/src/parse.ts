@@ -1,7 +1,17 @@
 export interface ChatResult {
   text: string;
+  diagnostic_text: string | null;
+  finish_reason: string | null;
+  provider_error: ParsedProviderError | null;
   model: string | null;
   usage: { input_tokens?: number; output_tokens?: number; provider_cost?: number };
+}
+
+export interface ParsedProviderError {
+  code: number;
+  message: string;
+  error_type: string | null;
+  provider_code: string | null;
 }
 
 export interface ParsedModel {
@@ -34,7 +44,8 @@ export function parseModelsList(json: any): ParsedModel[] {
 /** Parse an OpenAI-compatible /chat/completions response. */
 export function parseChatCompletion(json: any): ChatResult {
   const choice = json?.choices?.[0];
-  const text = String(choice?.message?.content ?? "");
+  const content = choice?.message?.content;
+  const text = String(content ?? "");
   const usage = json?.usage ?? {};
   const providerCost =
     typeof usage.cost === "number" && Number.isFinite(usage.cost) && usage.cost >= 0
@@ -42,6 +53,9 @@ export function parseChatCompletion(json: any): ChatResult {
       : undefined;
   return {
     text,
+    diagnostic_text: typeof content === "string" ? content : null,
+    finish_reason: typeof choice?.finish_reason === "string" ? choice.finish_reason : null,
+    provider_error: parseProviderError(choice?.error),
     model: typeof json?.model === "string" ? json.model : null,
     usage: {
       input_tokens: typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : undefined,
@@ -49,5 +63,24 @@ export function parseChatCompletion(json: any): ChatResult {
         typeof usage.completion_tokens === "number" ? usage.completion_tokens : undefined,
       ...(providerCost === undefined ? {} : { provider_cost: providerCost }),
     },
+  };
+}
+
+function parseProviderError(value: unknown): ParsedProviderError | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const error = value as Record<string, unknown>;
+  if (typeof error["code"] !== "number" || !Number.isFinite(error["code"])) return null;
+  if (typeof error["message"] !== "string") return null;
+
+  const metadata =
+    error["metadata"] && typeof error["metadata"] === "object" && !Array.isArray(error["metadata"])
+      ? (error["metadata"] as Record<string, unknown>)
+      : null;
+  return {
+    code: error["code"],
+    message: error["message"],
+    error_type: typeof metadata?.["error_type"] === "string" ? metadata["error_type"] : null,
+    provider_code:
+      typeof metadata?.["provider_code"] === "string" ? metadata["provider_code"] : null,
   };
 }
