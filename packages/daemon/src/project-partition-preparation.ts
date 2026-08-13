@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { JournalRecoveryRequiredError } from "@claudexor/journal";
 import { commandProjection, type CommandStore } from "./command-store.js";
 import { interactionProjection, type InteractionStore } from "./interactions.js";
 import { JournalManager, type JournalProjectionSlot } from "./journal-manager.js";
+import { recoveryFrom } from "./journal-recovery-files.js";
 import { operatorDecisionProjection, type OperatorDecisionStore } from "./operator-decisions.js";
 import type { ProjectStore } from "./projects.js";
 import { runEventProjection, type RunEventStore } from "./run-events.js";
@@ -152,6 +154,34 @@ export function prepareProjectPartitions(input: {
     },
     entries,
   };
+}
+
+export function activatePreparedProjectPartitions(input: {
+  rootDir: string;
+  projects: JournalProjectionSlot<ProjectStore>;
+  headPing?: ThreadHeadPingSink;
+  receipt: ProjectPartitionsPreparation;
+  entries: ProjectPartitionCollection;
+  resetReceipt(receipt: ProjectPartitionsPreparation): void;
+}): void {
+  if (
+    input.receipt.coverage !== "complete" ||
+    input.receipt.recoveryRequiredPartitions.length > 0
+  ) {
+    throw new Error("project partitions require recovery before activation");
+  }
+  try {
+    for (const entry of input.entries.values()) entry.manager.revalidatePreparation();
+    for (const entry of input.entries.values()) entry.manager.activatePrepared();
+  } catch (error) {
+    const recovery = recoveryFrom(error, "project partition activation failed");
+    for (const entry of input.entries.values()) entry.manager.close();
+    input.entries.clear();
+    const rebuilt = prepareProjectPartitions(input);
+    for (const [id, entry] of rebuilt.entries) input.entries.set(id, entry);
+    input.resetReceipt(rebuilt.receipt);
+    throw new JournalRecoveryRequiredError(recovery);
+  }
 }
 
 function createProjectPartition(

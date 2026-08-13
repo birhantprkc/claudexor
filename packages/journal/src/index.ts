@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { gzipSync } from "node:zlib";
 import {
   closeSync,
   constants,
@@ -8,23 +7,12 @@ import {
   ftruncateSync,
   fsyncSync,
   openSync,
-  renameSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
-import { encodeJournalPayload, prepareAppendBatch } from "./append-batch.js";
-import {
-  COMPACTED_SNAPSHOT,
-  HASH_BYTES,
-  MAX_PAYLOAD_BYTES,
-  ZERO_HASH,
-  encodeFrame,
-  replayFrames,
-  type CompactedRecord,
-  type CompactedSnapshotPayload,
-  type FrameHeader,
-  type JournalRecord,
-} from "./frame-codec.js";
+import { join } from "node:path";
+import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { prepareAppendBatch } from "./append-batch.js";
+import { ZERO_HASH, replayFrames, type JournalRecord } from "./frame-codec.js";
+import { compactJournalFile } from "./journal-compaction.js";
 import {
   appendAndSync,
   ensurePrivateFile,
@@ -186,7 +174,10 @@ export class DurableJournal {
     this.assertOpen();
     if (!this.preparationState) throw new Error("journal was not opened through preparation");
     const actual = fingerprintPreparedJournal(this.options.rootDir, this.partitionDir);
-    if (actual !== this.preparationState.fingerprint) {
+    if (
+      actual.fingerprint !== this.preparationState.fingerprint ||
+      actual.preparationIdentity !== this.preparationState.preparationIdentity
+    ) {
       throw new Error("journal changed since read-only preparation");
     }
   }
@@ -194,26 +185,31 @@ export class DurableJournal {
   activatePrepared(): void {
     this.assertOpen();
     if (!this.preparationState) throw new Error("journal was not opened through preparation");
-    if (this.writable) return;
     if (this.recovery.status === "recovery_required") {
+      this.closeWriter();
       throw new JournalRecoveryRequiredError(this.recovery);
     }
-    this.revalidatePreparation();
-    ensureCanonicalPrivateDirectory(this.options.rootDir);
-    ensureCanonicalPrivateDirectory(this.partitionDir);
-    ensurePrivateFile(this.path);
-    this.entries.length = 0;
-    this.nextSeq = 1;
-    this.previousFrameHash = ZERO_HASH;
-    this.knownFileBytes = 0;
-    this.recovery = { status: "ready", discardedTailBytes: 0 };
-    this.openWriter();
-    this.recover();
-    const activatedRecovery = this.state();
-    if (activatedRecovery.status === "recovery_required") {
-      throw new JournalRecoveryRequiredError(activatedRecovery);
+    if (this.writable) return;
+    try {
+      this.revalidatePreparation();
+      ensureCanonicalPrivateDirectory(this.options.rootDir);
+      ensureCanonicalPrivateDirectory(this.partitionDir);
+      ensurePrivateFile(this.path);
+      this.entries.length = 0;
+      this.nextSeq = 1;
+      this.previousFrameHash = ZERO_HASH;
+      this.knownFileBytes = 0;
+      this.recovery = { status: "ready", discardedTailBytes: 0 };
+      this.openWriter();
+      this.recover();
+      const activatedRecovery = this.state();
+      if (activatedRecovery.status === "recovery_required") {
+        throw new JournalRecoveryRequiredError(activatedRecovery);
+      }
+      this.compactAtThreshold();
+    } catch (error) {
+      this.failPreparedActivation(error);
     }
-    this.compactAtThreshold();
   }
 
   records<T = unknown>(afterSeq = 0): JournalRecord<T>[] {
@@ -226,7 +222,7 @@ export class DurableJournal {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.fd >= 0) closeSync(this.fd);
+    this.closeWriter();
   }
 
   currentCursor(): string {
@@ -261,67 +257,26 @@ export class DurableJournal {
   compact(): { beforeBytes: number; afterBytes: number; records: number } | null {
     this.assertReadable();
     this.assertWritable();
-    if (this.entries.length === 0) return null;
-    const logical: CompactedRecord[] = this.entries.map((record) => ({
-      time: record.time,
-      type: record.type,
-      payload: cloneJson(record.payload),
-    }));
-    const compressed = gzipSync(Buffer.from(JSON.stringify(logical)));
-    const payload: CompactedSnapshotPayload = {
-      version: 1,
-      count: logical.length,
-      encoding: "gzip-base64",
-      data: compressed.toString("base64"),
-    };
-    const payloadBytes = encodeJournalPayload(payload);
-    // Oversized history stays readable in its existing frames; compaction is
-    // an optimization, not a corruption or recovery boundary.
-    if (payloadBytes.length > MAX_PAYLOAD_BYTES) return null;
-    const epoch = randomUUID();
-    const header: FrameHeader = {
+    const result = compactJournalFile({
+      path: this.path,
       partition: this.options.partition,
-      epoch,
-      seq: 1,
-      previousFrameHash: ZERO_HASH,
-      time: this.now().toISOString(),
-      type: COMPACTED_SNAPSHOT,
-      logicalSpan: logical.length,
-    };
-    const frame = encodeFrame(header, payloadBytes);
-    if (frame.length >= this.knownFileBytes) return null;
-    const temp = `${this.path}.${randomUUID()}.compact`;
-    const tempFd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    try {
-      appendAndSync(tempFd, frame);
-    } finally {
-      closeSync(tempFd);
-    }
-    const beforeBytes = this.knownFileBytes;
-    renameSync(temp, this.path);
-    fsyncDirectory(dirname(this.path));
+      entries: this.entries,
+      knownFileBytes: this.knownFileBytes,
+      now: this.now,
+    });
+    if (!result) return null;
     closeSync(this.fd);
+    this.fd = -1;
+    this.writable = false;
     this.fd = openSync(this.path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
-    const frameHash = frame.subarray(frame.length - HASH_BYTES).toString("hex");
+    this.writable = true;
     this.entries.length = 0;
-    for (const [index, record] of logical.entries()) {
-      this.entries.push({
-        partition: this.options.partition,
-        epoch,
-        seq: index + 1,
-        previousFrameHash: index === 0 ? ZERO_HASH : frameHash,
-        frameHash,
-        time: record.time,
-        type: record.type,
-        payload: cloneJson(record.payload),
-        byteOffset: 0,
-      });
-    }
-    this.epoch = epoch;
-    this.nextSeq = logical.length + 1;
-    this.previousFrameHash = frameHash;
-    this.knownFileBytes = frame.length;
-    return { beforeBytes, afterBytes: frame.length, records: logical.length };
+    for (const record of result.records) this.entries.push(record);
+    this.epoch = result.epoch;
+    this.nextSeq = result.nextSeq;
+    this.previousFrameHash = result.previousFrameHash;
+    this.knownFileBytes = result.knownFileBytes;
+    return result.receipt;
   }
 
   sequenceAfter(cursor: string | null | undefined): number {
@@ -482,6 +437,35 @@ export class DurableJournal {
   private compactAtThreshold(): void {
     const threshold = this.options.compactionThresholdBytes ?? 8 * 1024 * 1024;
     if (this.recovery.status === "ready" && this.knownFileBytes >= threshold) this.compact();
+  }
+
+  private closeWriter(): void {
+    const fd = this.fd;
+    this.fd = -1;
+    this.writable = false;
+    if (fd < 0) return;
+    try {
+      closeSync(fd);
+    } catch {
+      /* best-effort revocation: the handle number is never reused by this writer */
+    }
+  }
+
+  private failPreparedActivation(error: unknown): never {
+    this.closeWriter();
+    this.entries.length = 0;
+    this.nextSeq = 1;
+    this.previousFrameHash = ZERO_HASH;
+    this.knownFileBytes = 0;
+    const recovery =
+      error instanceof JournalRecoveryRequiredError
+        ? error.recovery
+        : this.requireRecovery(
+            0,
+            `prepared activation failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+    this.recovery = structuredClone(recovery);
+    throw new JournalRecoveryRequiredError(recovery);
   }
 
   private requireRecovery(

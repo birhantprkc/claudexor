@@ -87,7 +87,6 @@ export class JournalManager {
   private preparedOperation: PreparedOperationPlan | null = null;
   private preparationResult: JournalManagerPreparation | null = null;
   private lifecycle: JournalManagerLifecycle = "idle";
-
   constructor(rootDir: string, options: JournalManagerOptions = {}) {
     this.partition = options.partition?.trim() || "global";
     this.now = options.now ?? (() => new Date());
@@ -141,6 +140,7 @@ export class JournalManager {
       });
       this.recovery = this.journal.state();
       this.preparedOperation = inspectPreparedOperation({
+        rootDir: this.rootDir,
         operationsDir: this.operationsDir,
         quarantineDir: this.quarantineDir,
         partitionDir: this.partitionDir,
@@ -161,11 +161,9 @@ export class JournalManager {
       this.operationsDir,
       "journal recovery operations",
     );
-    const journalFingerprint =
-      this.journal?.preparation().fingerprint ?? partitionFingerprint.fingerprint;
     const preparedFingerprint = preparationFingerprint(
-      journalFingerprint,
-      this.preparedOperation?.fingerprint ?? operationsFingerprint.fingerprint,
+      this.journal?.preparation().preparationIdentity ?? partitionFingerprint.preparationIdentity,
+      this.preparedOperation?.fingerprint ?? operationsFingerprint.preparationIdentity,
     );
     const inspection = this.inspection(partitionFingerprint.fingerprint);
     this.preparationResult = {
@@ -190,6 +188,7 @@ export class JournalManager {
     if (!this.preparationResult || !this.journal) throw new Error("journal is not prepared");
     try {
       this.preparedOperation = revalidatePreparedState({
+        rootDir: this.rootDir,
         operationsDir: this.operationsDir,
         quarantineDir: this.quarantineDir,
         partitionDir: this.partitionDir,
@@ -218,6 +217,7 @@ export class JournalManager {
       this.journal.activatePrepared();
       if (!this.preparedOperation) throw new Error("journal recovery operation is not prepared");
       applyPreparedOperation({
+        rootDir: this.rootDir,
         plan: this.preparedOperation,
         journal: this.journal,
         partition: this.partition,
@@ -574,6 +574,7 @@ export class JournalManager {
       throw typedError("recovery_operation_ambiguous", 503, "fresh journal is unreadable");
     }
     return completePreparedReceipt({
+      rootDir: this.rootDir,
       operation,
       operationPath,
       journal: this.journal,
@@ -621,7 +622,7 @@ export class JournalManager {
   }
 
   private observeFingerprint(path: string, context: string): PartitionFingerprint {
-    const observed = fingerprintPartition(path);
+    const observed = fingerprintPartition(path, this.rootDir);
     if (observed.problem) this.enterRecovery(recoveryAt(0, `${context}: ${observed.problem}`));
     return observed;
   }

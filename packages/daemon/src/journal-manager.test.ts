@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -14,10 +15,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DurableJournal, JournalCursorError } from "@claudexor/journal";
 import { JournalManager } from "./journal-manager.js";
+import { fingerprintPartition } from "./journal-recovery-files.js";
 
 let root: string;
 
@@ -54,6 +56,14 @@ function seedCorruptPartition(partition = "global") {
   const journalPath = slot.current().journal.path;
   first.close();
   return { journalPath, corruptBytes: corruptFirstByte(journalPath) };
+}
+
+function recoveryOperationsDir(manager: JournalManager): string {
+  return join(manager.rootDir, "recovery-operations", basename(manager.partitionDir));
+}
+
+function treeReceipt(path: string): { bytes: Buffer; mode: number } {
+  return { bytes: readFileSync(path), mode: statSync(path).mode & 0o777 };
 }
 
 interface StoredOperation {
@@ -193,6 +203,101 @@ describe("JournalManager", () => {
     expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
     expect(manager.inspect().status).toBe("recovery_required");
     expect(readFileSync(join(original, "journal.bin"))).toEqual(originalBytes);
+    manager.close();
+  });
+
+  it("rejects unsafe recovery-operation roots and ancestors without following or mutating them", () => {
+    for (const kind of [
+      "regular",
+      "symlink",
+      "public",
+      "public-ancestor",
+      "symlink-ancestor",
+    ] as const) {
+      const caseRoot = join(root, `unsafe-operations-${kind}`);
+      mkdirSync(caseRoot, { mode: 0o700 });
+      const manager = new JournalManager(caseRoot);
+      registerProbe(manager);
+      const sentinel = join(caseRoot, "no-write-sentinel");
+      writeFileSync(sentinel, "must-stay-byte-identical", { mode: 0o640 });
+      const sentinelBefore = treeReceipt(sentinel);
+      const operationsDir = recoveryOperationsDir(manager);
+      const operationsParent = join(caseRoot, "recovery-operations");
+      const outside = join(root, `unsafe-operations-outside-${kind}`);
+      mkdirSync(outside, { mode: 0o700 });
+      writeFileSync(join(outside, "sentinel"), "outside-sentinel", { mode: 0o600 });
+      if (kind === "symlink-ancestor") {
+        symlinkSync(outside, operationsParent);
+        mkdirSync(join(outside, basename(operationsDir)), { mode: 0o700 });
+      } else {
+        mkdirSync(operationsParent, { mode: 0o700 });
+        if (kind === "regular") writeFileSync(operationsDir, "not-a-directory", { mode: 0o600 });
+        if (kind === "symlink") symlinkSync(outside, operationsDir);
+        if (kind === "public") {
+          mkdirSync(operationsDir, { mode: 0o700 });
+          chmodSync(operationsDir, 0o755);
+        }
+        if (kind === "public-ancestor") chmodSync(operationsParent, 0o755);
+      }
+      const outsideBefore = readFileSync(join(outside, "sentinel"));
+
+      expect(manager.prepare()).toMatchObject({
+        inspection: { status: "recovery_required" },
+      });
+      expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+      expect(readFileSync(join(outside, "sentinel"))).toEqual(outsideBefore);
+      expect(treeReceipt(sentinel)).toEqual(sentinelBefore);
+      if (kind === "regular") expect(readFileSync(operationsDir, "utf8")).toBe("not-a-directory");
+      if (kind === "public") expect(statSync(operationsDir).mode & 0o777).toBe(0o755);
+      if (kind === "public-ancestor") {
+        expect(statSync(operationsParent).mode & 0o777).toBe(0o755);
+      }
+      manager.close();
+    }
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a FIFO recovery-operation root without opening or replacing it",
+    () => {
+      const caseRoot = join(root, "unsafe-operations-fifo");
+      mkdirSync(caseRoot, { mode: 0o700 });
+      const manager = new JournalManager(caseRoot);
+      registerProbe(manager);
+      const sentinel = join(caseRoot, "no-write-sentinel");
+      writeFileSync(sentinel, "must-stay-byte-identical", { mode: 0o640 });
+      const sentinelBefore = treeReceipt(sentinel);
+      const operationsDir = recoveryOperationsDir(manager);
+      mkdirSync(join(caseRoot, "recovery-operations"), { mode: 0o700 });
+      execFileSync("mkfifo", [operationsDir]);
+
+      expect(manager.prepare()).toMatchObject({
+        inspection: { status: "recovery_required" },
+      });
+      expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+      expect(statSync(operationsDir).isFIFO()).toBe(true);
+      expect(treeReceipt(sentinel)).toEqual(sentinelBefore);
+      manager.close();
+    },
+  );
+
+  it("binds prepared recovery-operation input to its pathname identity", () => {
+    const caseRoot = join(root, "operations-identity-replacement");
+    mkdirSync(caseRoot, { mode: 0o700 });
+    const manager = new JournalManager(caseRoot);
+    registerProbe(manager);
+    const operationsDir = recoveryOperationsDir(manager);
+    mkdirSync(join(caseRoot, "recovery-operations"), { mode: 0o700 });
+    mkdirSync(operationsDir, { mode: 0o700 });
+    expect(manager.prepare()).toMatchObject({ inspection: { status: "ready" } });
+    const contentFingerprint = fingerprintPartition(operationsDir, caseRoot).fingerprint;
+    renameSync(operationsDir, `${operationsDir}.original`);
+    mkdirSync(operationsDir, { mode: 0o700 });
+
+    expect(fingerprintPartition(operationsDir, caseRoot).fingerprint).toBe(contentFingerprint);
+    expect(() => manager.revalidatePreparation()).toThrow(/requires recovery/);
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(readdirSync(operationsDir)).toEqual([]);
     manager.close();
   });
 

@@ -262,6 +262,49 @@ describe("journal bootstrap preparation", () => {
     manager.close();
   });
 
+  it("rolls back every sibling writer and reconstructs preparation when one partition activation fails", () => {
+    const root = tempRoot("partition-activation-rollback");
+    seedProjects(root);
+    const manager = new JournalManager(root);
+    const slots = registerGlobal(manager);
+    prepare(manager);
+    const partitions = createPartitions(root, slots);
+    expect(preparePartitions(partitions)).toMatchObject({
+      coverage: "complete",
+      recoveryRequiredPartitions: [],
+    });
+    type Entry = {
+      manager: JournalManager;
+    };
+    const collection = (partitions as unknown as { partitions: Map<string, Entry> }).partitions;
+    const [first, second] = [...collection.values()];
+    if (!first || !second) throw new Error("expected two prepared project partitions");
+    const firstPreparedJournal = (first.manager as unknown as { journal: DurableJournal | null })
+      .journal;
+    if (!firstPreparedJournal) throw new Error("expected a prepared first journal");
+    const activateFirst = first.manager.activatePrepared.bind(first.manager);
+    first.manager.activatePrepared = () => {
+      activateFirst();
+      mkdirSync(second.manager.partitionDir, { mode: 0o700 });
+    };
+
+    let activationError: unknown;
+    try {
+      partitions.activatePrepared();
+    } catch (error) {
+      activationError = error;
+    }
+    expect(activationError).toMatchObject({ code: "journal_recovery_required", status: 503 });
+    expect(() => firstPreparedJournal.append("must-not-write", {})).toThrow(/closed/);
+    expect(() => first.manager.ready()).toThrow(/closed/);
+    expect(() => second.manager.ready()).toThrow(/closed/);
+    expect([...collection.values()]).toHaveLength(2);
+    expect([...collection.values()].every((entry) => entry.manager.ready() === false)).toBe(true);
+
+    partitions.close();
+    manager.close();
+  });
+
   it("exposes global-only recovery with unknown coverage when the registry is unavailable", () => {
     const root = tempRoot("global-unavailable");
     seedProjects(root);

@@ -32,6 +32,7 @@ import {
   failDeliveryCommand,
 } from "./delivery-command.js";
 import {
+  activatePreparedProjectPartitions,
   prepareProjectPartitions,
   ProjectPartitionCollection,
   type ProjectPartitionsPreparation,
@@ -76,16 +77,15 @@ export class ProjectPartitions implements CommandAuthority {
 
   activatePrepared(): void {
     if (!this.preparationResult) throw new Error("project partitions are not prepared");
-    if (
-      this.preparationResult.coverage !== "complete" ||
-      this.preparationResult.recoveryRequiredPartitions.length > 0
-    ) {
-      throw new Error("project partitions require recovery before activation");
-    }
-    this.revalidatePreparation();
-    for (const entry of this.partitions.values()) entry.manager.activatePrepared();
+    activatePreparedProjectPartitions({
+      rootDir: this.rootDir,
+      projects: this.projects,
+      headPing: this.headPing,
+      receipt: this.preparationResult,
+      entries: this.partitions,
+      resetReceipt: (receipt) => (this.preparationResult = receipt),
+    });
   }
-
   recoverAfterStartup(): void {
     for (const entry of this.partitions.values()) entry.manager.recoverAfterStartup();
   }

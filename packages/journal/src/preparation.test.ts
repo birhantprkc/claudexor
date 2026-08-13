@@ -1,22 +1,26 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DurableJournal,
   journalPartitionDirectory,
@@ -27,6 +31,7 @@ import {
 
 interface JournalPreparationReceipt {
   fingerprint: string;
+  preparationIdentity: string;
   virtual: boolean;
   deferredRepair: null | {
     kind: "discard_unacknowledged_append";
@@ -174,8 +179,13 @@ describe("DurableJournal read-only preparation", () => {
     const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
     const receiptBefore = prepared.preparation();
     expect(prepared.records()).toHaveLength(logicalRecordCount);
-    expect(Object.keys(receiptBefore).sort()).toEqual(["deferredRepair", "fingerprint", "virtual"]);
-    expect(JSON.stringify(receiptBefore).length).toBeLessThan(256);
+    expect(Object.keys(receiptBefore).sort()).toEqual([
+      "deferredRepair",
+      "fingerprint",
+      "preparationIdentity",
+      "virtual",
+    ]);
+    expect(JSON.stringify(receiptBefore).length).toBeLessThan(384);
     prepared.activatePrepared();
     expect(prepared.records()).toHaveLength(logicalRecordCount);
     expect(prepared.preparation()).toEqual(receiptBefore);
@@ -261,6 +271,169 @@ describe("DurableJournal read-only preparation", () => {
     expect(() => prepared.revalidatePreparation()).toThrow(/changed since read-only preparation/);
     expect(() => prepared.activatePrepared()).toThrow(/changed since read-only preparation/);
     expect(treeReceipt(prepared.partitionDir)).toBe(changed);
+    prepared.close();
+  });
+
+  it("treats an existing non-directory partition path as recovery-required without writes", () => {
+    for (const kind of ["regular", "symlink"] as const) {
+      const journalRoot = join(root, `non-directory-${kind}`);
+      const partitionDir = journalPartitionDirectory(journalRoot, "global");
+      mkdirSync(journalRoot, { mode: 0o700 });
+      if (kind === "regular") {
+        writeFileSync(partitionDir, "partition-sentinel", { mode: 0o600 });
+      } else {
+        const outside = join(root, `outside-${kind}`);
+        mkdirSync(outside, { mode: 0o700 });
+        writeFileSync(join(outside, "sentinel"), "outside-sentinel", { mode: 0o600 });
+        symlinkSync(outside, partitionDir);
+      }
+      const before = treeReceipt(root);
+
+      const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+      expect(prepared.state()).toMatchObject({ status: "recovery_required" });
+      expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+      expect(treeReceipt(root)).toBe(before);
+      prepared.close();
+    }
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "treats a FIFO partition path as recovery-required without opening it",
+    () => {
+      const journalRoot = join(root, "fifo-partition");
+      const partitionDir = journalPartitionDirectory(journalRoot, "global");
+      mkdirSync(journalRoot, { mode: 0o700 });
+      execFileSync("mkfifo", [partitionDir]);
+      const before = treeReceipt(root);
+
+      const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+      expect(prepared.state()).toMatchObject({ status: "recovery_required" });
+      expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+      expect(treeReceipt(root)).toBe(before);
+      prepared.close();
+    },
+  );
+
+  it("rejects non-private trusted roots, journal roots, and partitions without tightening modes", () => {
+    for (const target of ["trusted-root", "root", "partition"] as const) {
+      const daemonRoot = join(root, `public-${target}`);
+      let journalRoot = daemonRoot;
+      mkdirSync(daemonRoot, { mode: 0o700 });
+      if (target === "trusted-root") journalRoot = join(daemonRoot, "journal");
+      const partitionDir = journalPartitionDirectory(journalRoot, "global");
+      if (target === "partition") mkdirSync(partitionDir, { mode: 0o700 });
+      const unsafePath =
+        target === "trusted-root" ? daemonRoot : target === "root" ? journalRoot : partitionDir;
+      chmodSync(unsafePath, 0o755);
+      const before = treeReceipt(root);
+
+      const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+      expect(prepared.state()).toMatchObject({ status: "recovery_required" });
+      expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+      expect(treeReceipt(root)).toBe(before);
+      expect(statSync(unsafePath).mode & 0o777).toBe(0o755);
+      prepared.close();
+    }
+  });
+
+  it.runIf(typeof process.getuid === "function")(
+    "reports a foreign-owned root through a privilege-free uid observation",
+    () => {
+      const journalRoot = join(root, "foreign-owner");
+      mkdirSync(journalRoot, { mode: 0o700 });
+      const actualUid = process.getuid!();
+      const uid = vi.spyOn(process, "getuid").mockReturnValue(actualUid + 1);
+      try {
+        const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+        expect(prepared.state()).toMatchObject({ status: "recovery_required" });
+        expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+        prepared.close();
+      } finally {
+        uid.mockRestore();
+      }
+      expect(statSync(journalRoot).uid).toBe(actualUid);
+    },
+  );
+
+  it("rejects a symlinked root ancestor without reading or writing the outside tree", () => {
+    for (const kind of ["root", "ancestor"] as const) {
+      const outside = join(root, `outside-journal-${kind}`);
+      mkdirSync(outside, { mode: 0o700 });
+      writeFileSync(join(outside, "sentinel"), "outside-sentinel", { mode: 0o600 });
+      const link = join(root, `journal-${kind}-link`);
+      let journalRoot = link;
+      if (kind === "ancestor") {
+        mkdirSync(join(outside, "journal"), { mode: 0o700 });
+        journalRoot = join(link, "journal");
+      }
+      symlinkSync(outside, link);
+      const before = treeReceipt(root);
+
+      const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+      expect(prepared.state()).toMatchObject({ status: "recovery_required" });
+      expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+      expect(treeReceipt(root)).toBe(before);
+      expect(readFileSync(join(outside, "sentinel"), "utf8")).toBe("outside-sentinel");
+      prepared.close();
+    }
+  });
+
+  it("detects a byte-identical partition-root replacement by path identity", () => {
+    const journalRoot = join(root, "identity-replacement");
+    const seeded = new DurableJournal({ rootDir: journalRoot, partition: "global" });
+    seeded.append("accepted", { value: 1 });
+    const partitionDir = seeded.partitionDir;
+    const journalBytes = readFileSync(seeded.path);
+    seeded.close();
+    const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+    renameSync(partitionDir, `${partitionDir}.original`);
+    mkdirSync(partitionDir, { mode: 0o700 });
+    writeFileSync(join(partitionDir, "journal.bin"), journalBytes, { mode: 0o600 });
+    const replacement = treeReceipt(partitionDir);
+
+    expect(() => prepared.revalidatePreparation()).toThrow(/changed since read-only preparation/);
+    expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+    expect(treeReceipt(partitionDir)).toBe(replacement);
+    prepared.close();
+  });
+
+  it("contains traversal-like partition ids inside the journal root", () => {
+    const journalRoot = join(root, "traversal-journal");
+    const outside = join(root, "outside-partition");
+    const prepared = prepareJournal({ rootDir: journalRoot, partition: "../../outside-partition" });
+
+    expect(prepared.partitionDir.startsWith(`${journalRoot}/`)).toBe(true);
+    expect(existsSync(outside)).toBe(false);
+    prepared.activatePrepared();
+    expect(existsSync(prepared.partitionDir)).toBe(true);
+    expect(existsSync(outside)).toBe(false);
+    prepared.close();
+  });
+
+  it("closes and poisons a direct prepared writer when post-open replay fails", () => {
+    const journalRoot = join(root, "direct-writer-cleanup");
+    const seeded = new DurableJournal({ rootDir: journalRoot, partition: "global" });
+    seeded.append("accepted", { value: 1 });
+    seeded.close();
+    const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+    const originalRevalidate = prepared.revalidatePreparation.bind(prepared);
+    prepared.revalidatePreparation = () => {
+      originalRevalidate();
+      const fd = openSync(prepared.path, "a");
+      try {
+        writeSync(fd, Buffer.from([0]));
+      } finally {
+        closeSync(fd);
+      }
+    };
+
+    expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+    const internals = prepared as unknown as { fd: number; writable: boolean };
+    expect(internals.fd).toBe(-1);
+    expect(internals.writable).toBe(false);
+    expect(prepared.state()).toMatchObject({ status: "recovery_required" });
+    expect(() => prepared.activatePrepared()).toThrow(/requires recovery/);
+    expect(() => prepared.append("must-not-write", {})).toThrow(/requires recovery/);
     prepared.close();
   });
 });

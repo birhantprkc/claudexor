@@ -6,6 +6,7 @@ import type { ControlJournalQuarantineReceipt } from "@claudexor/schema";
 import {
   fingerprintPartition,
   requireStableFingerprint,
+  requireStablePreparationIdentity,
   writeAtomicPrivateJson,
 } from "./journal-recovery-files.js";
 import {
@@ -25,6 +26,7 @@ export type PreparedOperationPlan =
     };
 
 export function inspectPreparedOperation(input: {
+  rootDir: string;
   operationsDir: string;
   quarantineDir: string;
   partitionDir: string;
@@ -32,13 +34,13 @@ export function inspectPreparedOperation(input: {
   artifactPrefix: string;
   journal: DurableJournal | null;
 }): PreparedOperationPlan {
-  const operations = fingerprintPartition(input.operationsDir);
-  const operationsFingerprint = requireStableFingerprint(
+  const operations = fingerprintPartition(input.operationsDir, input.rootDir);
+  const operationsIdentity = requireStablePreparationIdentity(
     operations,
     "journal recovery operations are unavailable",
   );
   if (!operations.exists) {
-    return { kind: "none", fingerprint: operationFingerprint(operationsFingerprint, null) };
+    return { kind: "none", fingerprint: operationFingerprint(operationsIdentity, null) };
   }
   const prepared = readdirSync(input.operationsDir)
     .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
@@ -54,12 +56,12 @@ export function inspectPreparedOperation(input: {
         entry.operation?.status === "prepared",
     );
   if (prepared.length === 0) {
-    return { kind: "none", fingerprint: operationFingerprint(operationsFingerprint, null) };
+    return { kind: "none", fingerprint: operationFingerprint(operationsIdentity, null) };
   }
   if (prepared.length !== 1) throw new Error("multiple prepared recovery operations");
   const pending = prepared[0]!;
-  const source = fingerprintPartition(input.partitionDir);
-  const target = fingerprintPartition(pending.operation.quarantinePath);
+  const source = fingerprintPartition(input.partitionDir, input.rootDir);
+  const target = fingerprintPartition(pending.operation.quarantinePath, input.rootDir);
   requireStableFingerprint(source, "journal recovery source is unavailable");
   const stableTargetFingerprint = requireStableFingerprint(
     target,
@@ -68,8 +70,8 @@ export function inspectPreparedOperation(input: {
   const sourceExists = source.exists;
   const targetExists = target.exists;
   const fingerprint = operationFingerprint(
-    operationsFingerprint,
-    targetExists ? stableTargetFingerprint : null,
+    operationsIdentity,
+    requireStablePreparationIdentity(target, "journal recovery quarantine is unavailable"),
   );
   if (targetExists && stableTargetFingerprint !== pending.operation.expectedFingerprint) {
     throw typedError("recovery_quarantine_mismatch", 503, "quarantined bytes changed");
@@ -105,7 +107,7 @@ export function revalidatePreparedState(
   input.journal.revalidatePreparation();
   const operation = inspectPreparedOperation(input);
   const actual = preparationFingerprint(
-    input.journal.preparation().fingerprint,
+    input.journal.preparation().preparationIdentity,
     operation.fingerprint,
   );
   if (actual !== input.expectedFingerprint) {
@@ -115,6 +117,7 @@ export function revalidatePreparedState(
 }
 
 export function applyPreparedOperation(input: {
+  rootDir: string;
   plan: PreparedOperationPlan;
   journal: DurableJournal;
   partition: string;
@@ -124,12 +127,12 @@ export function applyPreparedOperation(input: {
 }): void {
   if (input.plan.kind === "none" || input.plan.kind === "source_intact") return;
   const currentFingerprint = operationFingerprint(
-    requireStableFingerprint(
-      fingerprintPartition(dirname(input.plan.path)),
+    requireStablePreparationIdentity(
+      fingerprintPartition(dirname(input.plan.path), input.rootDir),
       "journal recovery operations changed",
     ),
-    requireStableFingerprint(
-      fingerprintPartition(input.plan.operation.quarantinePath),
+    requireStablePreparationIdentity(
+      fingerprintPartition(input.plan.operation.quarantinePath, input.rootDir),
       "journal recovery quarantine changed",
     ),
   );
@@ -138,7 +141,7 @@ export function applyPreparedOperation(input: {
   }
   if (
     requireStableFingerprint(
-      fingerprintPartition(input.plan.operation.quarantinePath),
+      fingerprintPartition(input.plan.operation.quarantinePath, input.rootDir),
       "journal recovery quarantine changed",
     ) !== input.plan.operation.expectedFingerprint
   ) {
@@ -177,6 +180,7 @@ export function applyPreparedOperation(input: {
 }
 
 export function completePreparedReceipt(input: {
+  rootDir: string;
   operation: QuarantineOperation;
   operationPath: string;
   journal: DurableJournal;
@@ -185,7 +189,7 @@ export function completePreparedReceipt(input: {
 }): ControlJournalQuarantineReceipt {
   if (
     requireStableFingerprint(
-      fingerprintPartition(input.operation.quarantinePath),
+      fingerprintPartition(input.operation.quarantinePath, input.rootDir),
       "journal recovery quarantine changed",
     ) !== input.operation.expectedFingerprint
   ) {
