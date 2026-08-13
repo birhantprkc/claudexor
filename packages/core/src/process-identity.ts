@@ -59,9 +59,6 @@ export interface ProcessObservationReader {
   observe(pid: number): ProcessObservation;
 }
 
-/** Additive observation support without widening every existing identity reader. */
-export type ProcessObservationSource = ProcessIdentityReader & Partial<ProcessObservationReader>;
-
 export interface DarwinHelperExecution {
   status: number | null;
   stdout: string;
@@ -168,9 +165,13 @@ export function parseLinuxProcStat(raw: string, expectedPid: number): ProcessIde
   return parseLinuxProcStatObservation(raw, expectedPid).identity;
 }
 
-export function observeProcess(reader: ProcessObservationSource, pid: number): ProcessObservation {
-  if (typeof reader.observe === "function") return reader.observe(pid);
-  return { identity: reader.read(pid), linuxState: null };
+export function observeProcess(
+  identity: ProcessIdentityReader,
+  pid: number,
+  observation?: ProcessObservationReader,
+): ProcessObservation {
+  if (observation) return observation.observe(pid);
+  return { identity: identity.read(pid), linuxState: null };
 }
 
 /** Strict parser for the bundled Darwin helper's locale-independent protocol. */

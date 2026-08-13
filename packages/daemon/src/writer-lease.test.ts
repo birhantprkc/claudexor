@@ -15,8 +15,9 @@ import {
   type KnownProcessIdentity,
   type LinuxProcessState,
   type ProcessIdentity,
+  type ProcessIdentityReader,
   type ProcessObservation,
-  type ProcessObservationSource,
+  type ProcessObservationReader,
 } from "@claudexor/core";
 import {
   acquireDaemonWriterLease,
@@ -61,13 +62,21 @@ function observation(
 function sourceFor(
   observed: ProcessObservation | ((pid: number) => ProcessObservation),
   selfIdentity: ProcessIdentity = known(process.pid, "linux:999"),
-): ProcessObservationSource {
+): ProcessIdentityReader & ProcessObservationReader {
   const observe = typeof observed === "function" ? observed : () => observed;
   return {
     read: (pid) => observe(pid).identity,
     observe,
     self: () => selfIdentity,
   };
+}
+
+function observationDependencies(
+  observed: ProcessObservation | ((pid: number) => ProcessObservation),
+  selfIdentity?: ProcessIdentity,
+): Pick<DaemonWriterLeaseDependencies, "identity" | "observation"> {
+  const source = sourceFor(observed, selfIdentity);
+  return { identity: source, observation: source };
 }
 
 function errno(code: string): NodeJS.ErrnoException {
@@ -97,9 +106,9 @@ function seedOwner(owner: unknown, path = leasePath): string {
 
 function depsFor(
   observed: ProcessObservation | ((pid: number) => ProcessObservation),
-  extra: Omit<DaemonWriterLeaseDependencies, "identity"> = {},
+  extra: Omit<DaemonWriterLeaseDependencies, "identity" | "observation"> = {},
 ): DaemonWriterLeaseDependencies {
-  return { ...extra, identity: sourceFor(observed) };
+  return { ...extra, ...observationDependencies(observed) };
 }
 
 describe("strict writer-lease inspection", () => {
@@ -312,6 +321,42 @@ describe("daemon lease-owner capability", () => {
       ),
     ).toMatchObject({ status: "unknown", reason: "presence_unknown" });
   });
+
+  it("keeps legacy identity readers with unrelated observe members source-compatible", () => {
+    let reads = 0;
+    let collidingObserveCalls = 0;
+    class LegacyReaderWithUnrelatedObserve implements ProcessIdentityReader {
+      constructor() {
+        void this.observe;
+      }
+
+      private observe(_pid: number): void {
+        collidingObserveCalls += 1;
+      }
+
+      read(pid: number): ProcessIdentity {
+        reads += 1;
+        return { status: "missing", pid, platform: "linux" };
+      }
+
+      self(): ProcessIdentity {
+        return known(process.pid, "linux:999");
+      }
+    }
+
+    const reader = new LegacyReaderWithUnrelatedObserve();
+    const dependencies: NonNullable<Parameters<typeof acquireDaemonWriterLease>[1]> = {
+      identity: reader,
+    };
+    expect(
+      classifyDaemonLeaseOwner(
+        { pid: 44, token: "legacy-reader", identity: known(44) },
+        dependencies,
+      ),
+    ).toMatchObject({ status: "proven_stale", reason: "process_missing" });
+    expect(reads).toBe(1);
+    expect(collidingObserveCalls).toBe(0);
+  });
 });
 
 describe("generation-bound writer-lease recovery", () => {
@@ -323,7 +368,7 @@ describe("generation-bound writer-lease recovery", () => {
 
   function recoveryDeps(): DaemonWriterLeaseDependencies {
     return {
-      identity: sourceFor((pid) =>
+      ...observationDependencies((pid) =>
         pid === staleOwner.pid
           ? observation(staleOwner.identity!, "Z")
           : observation(known(pid, "linux:999"), "S"),
@@ -396,7 +441,7 @@ describe("generation-bound writer-lease recovery", () => {
     };
     let transitioned = false;
     const deps: DaemonWriterLeaseDependencies = {
-      identity: sourceFor((pid) => {
+      ...observationDependencies((pid) => {
         if (pid === staleOwner.pid) {
           if (!transitioned) {
             transitioned = true;
@@ -439,7 +484,7 @@ describe("generation-bound writer-lease recovery", () => {
     let createAttempts = 0;
     let transitioned = false;
     const deps: DaemonWriterLeaseDependencies = {
-      identity: sourceFor((pid) => {
+      ...observationDependencies((pid) => {
         if (pid === staleOwner.pid) {
           if (!transitioned) {
             transitioned = true;

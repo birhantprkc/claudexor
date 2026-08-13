@@ -8,6 +8,9 @@ import {
   parseLinuxProcStatObservation,
   type KnownProcessIdentity,
   type LinuxProcessState,
+  type ProcessIdentity,
+  type ProcessIdentityReader,
+  type ProcessObservationReader,
 } from "./process-identity.js";
 import { ProcessGroupService, parseProcessGroupHandle } from "./process-group.js";
 
@@ -93,25 +96,44 @@ describe("locale-independent process identity", () => {
     expect(reads).toBe(3);
   });
 
-  it("uses only an injected reader's optional observation capability", () => {
+  it("uses only an explicitly supplied observation capability", () => {
     const identity = knownLinux(55, 55, "linux:1");
     let reads = 0;
-    const legacyReader = {
-      read: () => {
+    let collidingObserveCalls = 0;
+    class LegacyReaderWithUnrelatedObserve implements ProcessIdentityReader {
+      constructor() {
+        void this.observe;
+      }
+
+      private observe(_pid: number): void {
+        collidingObserveCalls += 1;
+      }
+
+      read(): ProcessIdentity {
         reads += 1;
         return identity;
-      },
-      self: () => identity,
-    };
+      }
+
+      self(): ProcessIdentity {
+        return identity;
+      }
+    }
+    const legacyReader = new LegacyReaderWithUnrelatedObserve();
     expect(observeProcess(legacyReader, 55)).toEqual({ identity, linuxState: null });
     expect(reads).toBe(1);
+    expect(collidingObserveCalls).toBe(0);
 
-    const observationReader = {
-      ...legacyReader,
+    let observations = 0;
+    const observationReader: ProcessObservationReader = {
       observe: () => ({ identity, linuxState: "Z" as const }),
     };
-    expect(observeProcess(observationReader, 55).linuxState).toBe("Z");
+    observationReader.observe = () => {
+      observations += 1;
+      return { identity, linuxState: "Z" };
+    };
+    expect(observeProcess(legacyReader, 55, observationReader).linuxState).toBe("Z");
     expect(reads).toBe(1);
+    expect(observations).toBe(1);
   });
 
   it("strictly parses Darwin PID/PGID/start and rejects localized prose", () => {

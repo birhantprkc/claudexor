@@ -15,8 +15,9 @@ import {
   isKnownProcessIdentity,
   observeProcess,
   type KnownProcessIdentity,
+  type ProcessIdentityReader,
   type ProcessObservation,
-  type ProcessObservationSource,
+  type ProcessObservationReader,
 } from "@claudexor/core";
 import { daemonDir, isWindowsPipePath } from "./token.js";
 
@@ -103,7 +104,9 @@ export interface DaemonWriterLeaseFilesystem {
 }
 
 export interface DaemonWriterLeaseDependencies {
-  identity?: ProcessObservationSource;
+  identity?: ProcessIdentityReader;
+  /** Explicit observation capability; never inferred from an identity reader by property name. */
+  observation?: ProcessObservationReader;
   /** Signal-zero probe: return for present, throw an errno-bearing error otherwise. */
   probeProcess?: (pid: number) => void;
   filesystem?: Partial<DaemonWriterLeaseFilesystem>;
@@ -242,7 +245,10 @@ export function classifyDaemonLeaseOwner(
   deps: DaemonWriterLeaseDependencies = {},
 ): DaemonLeaseOwnerCapability {
   const identity = deps.identity ?? defaultProcessIdentityService;
-  const observation = observeProcess(identity, owner.pid);
+  const observationReader =
+    deps.observation ??
+    (identity === defaultProcessIdentityService ? defaultProcessIdentityService : undefined);
+  const observation = observeProcess(identity, owner.pid, observationReader);
   const probe = deps.probeProcess ?? ((pid: number) => process.kill(pid, 0));
 
   if (observation.identity.status === "missing") {
