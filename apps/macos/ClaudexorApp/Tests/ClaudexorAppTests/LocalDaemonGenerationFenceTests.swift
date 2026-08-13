@@ -47,7 +47,7 @@ private final class GenerationFenceCallCounter: @unchecked Sendable {
     var count: Int { lock.withLock { value } }
 }
 
-private final class GenerationFenceURLProtocol: URLProtocol, @unchecked Sendable {
+private final class GenerationFenceURLProtocol: URLProtocol {
     nonisolated(unsafe) static var handler:
         ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
@@ -55,18 +55,16 @@ private final class GenerationFenceURLProtocol: URLProtocol, @unchecked Sendable
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        DispatchQueue.global().async { [self] in
-            do {
-                guard let handler = Self.handler else {
-                    throw GenerationFenceTestError.unexpectedRequest
-                }
-                let (response, data) = try handler(request)
-                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                client?.urlProtocol(self, didLoad: data)
-                client?.urlProtocolDidFinishLoading(self)
-            } catch {
-                client?.urlProtocol(self, didFailWithError: error)
+        do {
+            guard let handler = Self.handler else {
+                throw GenerationFenceTestError.unexpectedRequest
             }
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
         }
     }
 
