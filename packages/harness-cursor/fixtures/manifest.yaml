@@ -36,14 +36,14 @@ fixtures:
     source: synthetic
   plan/plan-ask-workreport-recorded.jsonl:
     source: recorded
-    cli_version: "2026.07.23-e383d2b"
-    recorded_at: "2026-07-26"
+    cli_version: "2026.08.11-e8db854"
+    recorded_at: "2026-08-13"
     sanitized: "ids, timestamps, paths, narration, tool payload contents"
     expectations:
       final_messages: 1
       final_source: "assistant_message"
       final_is_last_message: true
-      thinking_events: 27
+      thinking_events: 9
       delta_messages: 0
       tool_error_results: 0
       typed_rate_limit: false

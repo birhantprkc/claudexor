@@ -1,36 +1,18 @@
 {"type":"system","subtype":"init","apiKeySource":"native_session","cwd":"/repo","session_id":"ses-recorded-ask-plan","model":"Auto","permissionMode":"default"}
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Return the read-only plan fixture WorkReport."}]},"session_id":"ses-recorded-ask-plan"}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1002}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1003}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1004}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1005}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1006}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1007}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1008}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1009}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1010}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1011}
+{"type":"thinking","subtype":"completed","session_id":"ses-recorded-ask-plan","timestamp_ms":1008}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Checking the read-only fixture context."}]},"session_id":"ses-recorded-ask-plan","model_call_id":"model-call-recorded-1","timestamp_ms":1009}
+{"type":"tool_call","subtype":"started","call_id":"tool-call-recorded-1","tool_call":{"grepToolCall":{"args":{"pattern":"fixture","path":"README.md","caseInsensitive":false,"multiline":false,"toolCallId":"tool-call-recorded-1","offset":0}},"hookAdditionalContexts":[],"toolCallId":"tool-call-recorded-1","startedAtMs":"1010"},"model_call_id":"model-call-recorded-1","session_id":"ses-recorded-ask-plan","timestamp_ms":1010}
+{"type":"tool_call","subtype":"completed","call_id":"tool-call-recorded-1","tool_call":{"grepToolCall":{"args":{"pattern":"fixture","path":"README.md","caseInsensitive":false,"multiline":false,"toolCallId":"tool-call-recorded-1","offset":0},"result":{"success":{"pattern":"fixture","path":"README.md","outputMode":"content","workspaceResults":{"/repo":{"content":{"matches":[{"file":"README.md","matches":[{"lineNumber":1,"content":"fixture marker","contentTruncated":false,"isContextLine":false}]}],"totalLines":1,"totalMatchedLines":1,"clientTruncated":false,"ripgrepTruncated":false}}}}}},"hookAdditionalContexts":[],"toolCallId":"tool-call-recorded-1","startedAtMs":"1010","completedAtMs":"1011"},"model_call_id":"model-call-recorded-1","session_id":"ses-recorded-ask-plan","timestamp_ms":1011}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1012}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1013}
 {"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1014}
-{"type":"thinking","subtype":"completed","session_id":"ses-recorded-ask-plan","timestamp_ms":1015}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Checking the read-only fixture context."}]},"session_id":"ses-recorded-ask-plan","model_call_id":"model-call-recorded-1","timestamp_ms":1016}
-{"type":"tool_call","subtype":"started","call_id":"tool-call-recorded-1","tool_call":{"grepToolCall":{"args":{"pattern":"fixture","path":"README.md","caseInsensitive":false,"multiline":false,"toolCallId":"tool-call-recorded-1","offset":0}},"hookAdditionalContexts":[],"toolCallId":"tool-call-recorded-1","startedAtMs":1017},"model_call_id":"model-call-recorded-1","session_id":"ses-recorded-ask-plan","timestamp_ms":1017}
-{"type":"tool_call","subtype":"completed","call_id":"tool-call-recorded-1","tool_call":{"grepToolCall":{"args":{"pattern":"fixture","path":"README.md","caseInsensitive":false,"multiline":false,"toolCallId":"tool-call-recorded-1","offset":0},"result":{"success":{"pattern":"fixture","path":"README.md","outputMode":"content","workspaceResults":{}}}},"hookAdditionalContexts":[],"toolCallId":"tool-call-recorded-1","startedAtMs":1017,"completedAtMs":1018},"model_call_id":"model-call-recorded-1","session_id":"ses-recorded-ask-plan","timestamp_ms":1018}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1019}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1020}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1021}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1022}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1023}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1024}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1025}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1026}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1027}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1028}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1029}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1030}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1031}
-{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1032}
-{"type":"thinking","subtype":"completed","session_id":"ses-recorded-ask-plan","timestamp_ms":1033}
+{"type":"thinking","subtype":"delta","text":"sanitized thinking delta","session_id":"ses-recorded-ask-plan","timestamp_ms":1015}
+{"type":"thinking","subtype":"completed","session_id":"ses-recorded-ask-plan","timestamp_ms":1016}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"```json\n{\"work_report\":{\"state\":\"completed\",\"required_inputs\":[]},\"output\":\"PLAN_FIXTURE_OK\"}\n```"}]},"session_id":"ses-recorded-ask-plan"}
-{"type":"result","subtype":"success","duration_ms":1000,"duration_api_ms":900,"is_error":false,"result":"```json\n{\"work_report\":{\"state\":\"completed\",\"required_inputs\":[]},\"output\":\"PLAN_FIXTURE_OK\"}\n```","session_id":"ses-recorded-ask-plan","request_id":"request-recorded-ask-plan","usage":{"inputTokens":100,"outputTokens":20,"cacheReadTokens":0,"cacheWriteTokens":0},"total_cost_usd":0.01}
+{"type":"result","subtype":"success","duration_ms":1000,"duration_api_ms":900,"is_error":false,"result":"```json\n{\"work_report\":{\"state\":\"completed\",\"required_inputs\":[]},\"output\":\"PLAN_FIXTURE_OK\"}\n```","session_id":"ses-recorded-ask-plan","request_id":"request-recorded-ask-plan","usage":{"inputTokens":23654,"outputTokens":223,"cacheReadTokens":3712,"cacheWriteTokens":0}}

@@ -292,7 +292,7 @@
             "cached_input_tokens": {
               "type": "integer",
               "minimum": 0,
-              "description": "Input tokens served from cache."
+              "description": "Reported cache token count; relation to input_tokens is harness-specific."
             },
             "cost_usd": {
               "type": "number",

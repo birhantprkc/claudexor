@@ -851,7 +851,7 @@ export const HarnessEvent = z
           .int()
           .nonnegative()
           .optional()
-          .describe("Input tokens served from cache."),
+          .describe("Reported cache token count; relation to input_tokens is harness-specific."),
         cost_usd: z.number().nonnegative().optional().describe("Cost in USD."),
         /** True when cost_usd is derived from token pricing (not natively reported). */
         estimated: z

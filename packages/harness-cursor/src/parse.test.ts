@@ -171,6 +171,117 @@ describe("parseCursorEvent", () => {
     expect(out[0]?.type).toBe("error");
   });
 
+  it("skips only strict user prompt echoes", () => {
+    expect(
+      parseCursorEvent(
+        {
+          type: "user",
+          message: { role: "user", content: [{ type: "text", text: "Build the fixture" }] },
+          extra: { vendor: true },
+        },
+        "s1",
+      ),
+    ).toEqual([]);
+    expect(
+      parseCursorEvent(
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "text", text: "Build " },
+              { type: "text", text: "the fixture" },
+            ],
+          },
+        },
+        "s1",
+      ),
+    ).toEqual([]);
+
+    const malformed = [
+      { type: "user", message: { role: "user", content: [] } },
+      { type: "user", message: { role: "user", content: [{ type: "text", text: "" }] } },
+      { type: "user", message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
+      { type: "user", message: { role: "user", content: "x" } },
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            { type: "text", text: "x" },
+            { type: "image", url: "fixture.png" },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1" }] },
+      },
+      { type: "user", message: { role: "user", content: [{ type: "future", text: "x" }] } },
+    ];
+    for (const event of malformed) expect(parseCursorEvent(event, "s1")).toBeNull();
+  });
+
+  it("maps current token-only result usage without inventing cost", () => {
+    const out = parseCursorEvent(
+      {
+        type: "result",
+        subtype: "success",
+        result: "Done",
+        usage: {
+          inputTokens: 23_654,
+          outputTokens: 223,
+          cacheReadTokens: 3_712,
+          cacheWriteTokens: 0,
+        },
+      },
+      "s1",
+    ) as HarnessEvent[];
+
+    const usage = out.find((event) => event.type === "usage");
+    expect(usage?.usage).toEqual({
+      input_tokens: 23_654,
+      output_tokens: 223,
+      cached_input_tokens: 3_712,
+    });
+    expect(usage?.usage?.cost_usd).toBeUndefined();
+    expect(() => HarnessEvent.parse(usage)).not.toThrow();
+
+    const mixed = parseCursorEvent(
+      {
+        type: "result",
+        subtype: "success",
+        result: "Done",
+        total_cost_usd: 0,
+        usage: {
+          inputTokens: 0,
+          outputTokens: "not-a-number",
+          cacheReadTokens: 2,
+          cacheWriteTokens: 3,
+        },
+      },
+      "s1",
+    ) as HarnessEvent[];
+    expect(mixed.filter((event) => event.type === "usage")).toHaveLength(1);
+    expect(mixed.find((event) => event.type === "usage")?.usage).toEqual({
+      input_tokens: 0,
+      cached_input_tokens: 5,
+      cost_usd: 0,
+    });
+
+    const absent = parseCursorEvent(
+      {
+        type: "result",
+        subtype: "success",
+        result: "Done",
+        total_cost_usd: "not-a-number",
+        usage: { inputTokens: null, outputTokens: "not-a-number" },
+      },
+      "s1",
+    ) as HarnessEvent[];
+    expect(absent.some((event) => event.type === "usage")).toBe(false);
+  });
+
   it("an is_error result is never a typed final (sol #1)", () => {
     const failed = parseCursorEvent(
       { type: "result", subtype: "error", is_error: true, result: "partial" },
