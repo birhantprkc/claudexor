@@ -29,6 +29,7 @@ import {
   sha256,
 } from "@claudexor/util";
 import { parseChatCompletion, parseModelsList } from "./parse.js";
+import { isTerminalProviderCompletion, providerCompletionErrorEvent } from "./providerError.js";
 
 /** A stalled remote endpoint must not hang a run forever. */
 const RAW_API_TIMEOUT_MS = 180_000;
@@ -446,6 +447,26 @@ export function createRawApiAdapter(config: RawApiConfig = {}): HarnessAdapter {
         }
         const json = await res.json();
         const parsed = parseChatCompletion(json);
+        if (isTerminalProviderCompletion(parsed)) {
+          yield providerCompletionErrorEvent(id, spec.session_id, nowIso(), parsed);
+          yield {
+            type: "usage",
+            session_id: spec.session_id,
+            ts: nowIso(),
+            usage: {
+              input_tokens: parsed.usage.input_tokens,
+              output_tokens: parsed.usage.output_tokens,
+            },
+            observed_model: parsed.model ?? undefined,
+          };
+          yield {
+            type: "completed",
+            session_id: spec.session_id,
+            ts: nowIso(),
+            observed_model: parsed.model ?? undefined,
+          };
+          return;
+        }
         if (spec.intent === "implement" || spec.intent === "synthesize") {
           if (!spec.raw_context_packet) {
             yield {
