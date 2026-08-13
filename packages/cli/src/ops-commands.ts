@@ -3,15 +3,11 @@
  * managed secret store. Thin surfaces — every action delegates to the daemon
  * client, gateway, or SecretStore; --json purity via cli-io.
  */
-import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DaemonClient,
   awaitDaemonTermination,
   defaultSocketPath,
-  ensureDaemonRuntimeRoot,
   inspectDaemonWriterLease,
   logPath,
   readToken,
@@ -35,6 +31,7 @@ import {
 import { type ParsedArgs, flagBool, flagStr } from "./args.js";
 import { CliError, controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
 import { profilesCommand, secretsCommand } from "./credential-commands.js";
+import { CLI_DAEMON_LAUNCH_SOURCES, launchDetachedDaemon } from "./daemon-launch.js";
 import {
   authSourceAvailability,
   checksSummary,
@@ -46,6 +43,7 @@ import {
 import { DAEMON_START_READY_TIMEOUT_MS, ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
+import { readDaemonDiagnosticTail } from "./startup-diagnostics.js";
 
 interface OperatorDaemonStopDeps {
   inspectLease: typeof inspectDaemonWriterLease;
@@ -138,38 +136,52 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
     const daemonScript =
       process.env["CLAUDEXOR_DAEMON_ENTRY"] ??
       fileURLToPath(new URL("./claudexord.js", import.meta.url));
-    // Startup stderr goes to the daemon log (append), not the void — a crash
-    // before the daemon's own logging starts must leave evidence for
-    // `claudexor daemon logs`.
-    ensureDaemonRuntimeRoot();
-    mkdirSync(dirname(logPath()), { recursive: true });
-    const stderrFd = openSync(logPath(), "a");
-    const child = spawn(process.execPath, [daemonScript], {
-      detached: true,
-      stdio: ["ignore", "ignore", stderrFd],
-      env: harnessRuntimeEnv(),
-    });
-    child.unref();
-    closeSync(stderrFd);
+    let launch;
+    try {
+      launch = launchDetachedDaemon({
+        entryPath: daemonScript,
+        launchSource: CLI_DAEMON_LAUNCH_SOURCES.explicitStart,
+        env: harnessRuntimeEnv(),
+      });
+    } catch (error) {
+      return renderCliFailure(json, error);
+    }
     // Block until the daemon (socket + control API) is actually ready, so a
     // follow-up `status`/run can't race the spawn. Fail loudly (exit 1) if it
     // never comes up.
-    const ready = await waitForDaemonReady(DAEMON_START_READY_TIMEOUT_MS);
-    if (json) {
-      printJson({ pid: child.pid ?? null, socket: defaultSocketPath(), ready: ready !== null });
-    } else if (ready) {
-      print(`claudexord ready (pid ${child.pid}); socket ${defaultSocketPath()}`);
-    } else {
-      print(
-        `claudexord started (pid ${child.pid}) but did not become ready within ${Math.round(DAEMON_START_READY_TIMEOUT_MS / 1000)}s; check \`claudexor daemon logs\``,
+    let ready;
+    try {
+      ready = await waitForDaemonReady(DAEMON_START_READY_TIMEOUT_MS, () =>
+        launch.failure()
+          ? launch.callerError("readiness_wait", DAEMON_START_READY_TIMEOUT_MS)
+          : null,
+      );
+    } catch (error) {
+      return renderCliFailure(json, error, {
+        extras: { pid: launch.pid, socket: defaultSocketPath(), ready: false },
+      });
+    }
+    if (!ready) {
+      return renderCliFailure(
+        json,
+        launch.callerError("readiness_wait", DAEMON_START_READY_TIMEOUT_MS),
+        {
+          extras: { pid: launch.pid, socket: defaultSocketPath(), ready: false },
+        },
       );
     }
-    return ready ? 0 : 1;
+    launch.markReady();
+    if (json) {
+      printJson({ pid: launch.pid, socket: defaultSocketPath(), ready: true });
+    } else {
+      print(`claudexord ready (pid ${launch.pid}); socket ${defaultSocketPath()}`);
+    }
+    return 0;
   }
   if (sub === "logs") {
     let tail: string;
     try {
-      tail = readFileSync(logPath(), "utf8").split("\n").slice(-40).join("\n");
+      tail = readDaemonDiagnosticTail({ path: logPath(), lines: 40 });
     } catch (err) {
       const message = `no daemon log at ${logPath()} (${err instanceof Error ? err.message : String(err)}); the daemon may not have started on this machine yet`;
       return renderCliFailure(json, new Error(message));

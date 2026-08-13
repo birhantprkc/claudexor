@@ -1,6 +1,4 @@
 import process from "node:process";
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   DaemonClient,
@@ -13,6 +11,11 @@ import {
 import { harnessRuntimeEnv } from "@claudexor/core";
 import { hashJson } from "@claudexor/util";
 import { CliError, controlProblemError } from "./cli-error.js";
+import {
+  CLI_DAEMON_LAUNCH_SOURCES,
+  launchDetachedDaemon,
+  type DetachedDaemonLaunch,
+} from "./daemon-launch.js";
 import { recordEngineSkew, type EngineIdentity } from "./engine-skew.js";
 import {
   controlApiAddress,
@@ -85,6 +88,7 @@ export async function ensureDaemon(
   const token = ensureToken();
   const socketPath = defaultSocketPath();
   let client = new DaemonClient(socketPath, token);
+  let launch: DetachedDaemonLaunch | null = null;
 
   const ok = await daemonReachable(client);
   if (!ok) {
@@ -92,17 +96,11 @@ export async function ensureDaemon(
     const daemonScript =
       process.env["CLAUDEXOR_DAEMON_ENTRY"] ??
       fileURLToPath(new URL("./claudexord.js", import.meta.url));
-    if (!existsSync(daemonScript)) {
-      throw new Error(
-        `cannot auto-start the daemon: entry not found at ${daemonScript} (run \`pnpm build\`)`,
-      );
-    }
-    const child = spawn(process.execPath, [daemonScript], {
-      detached: true,
-      stdio: "ignore",
+    launch = launchDetachedDaemon({
+      entryPath: daemonScript,
+      launchSource: CLI_DAEMON_LAUNCH_SOURCES.ensureDaemon,
       env: harnessRuntimeEnv(),
     });
-    child.unref();
     // Wait for the socket to accept connections (health round-trip).
     const deadline = Date.now() + timeoutMs;
     let started = false;
@@ -115,12 +113,9 @@ export async function ensureDaemon(
         started = true;
         break;
       }
+      if (launch.failure()) throw launch.callerError("socket_wait", timeoutMs);
     }
-    if (!started) {
-      throw new Error(
-        `daemon did not come up within ${Math.round(timeoutMs / 1000)}s after auto-start (socket ${socketPath}); check \`claudexor daemon logs\``,
-      );
-    }
+    if (!started) throw launch.callerError("socket_wait", timeoutMs);
   }
 
   // The control API (HTTP/SSE viewport over the daemon) is what streams events
@@ -131,13 +126,16 @@ export async function ensureDaemon(
     while (Date.now() < deadline && !reached) {
       await sleep(150);
       reached = await controlApiReachable();
+      if (!reached && launch?.failure()) throw launch.callerError("control_api_wait", 10_000);
     }
   }
   if (!reached) {
+    if (launch) throw launch.callerError("control_api_wait", 10_000);
     throw new Error(
       `daemon is up but its control API is not reachable (no ${daemonDir()}/control-api.json); it may be disabled by CLAUDEXOR_NO_CONTROL_API=1`,
     );
   }
+  launch?.markReady();
   return { client, addr: reached.addr, engine: reached.engine };
 }
 
@@ -171,11 +169,14 @@ export async function connectDaemonIfRunning(): Promise<{
  */
 export async function waitForDaemonReady(
   timeoutMs = DAEMON_START_READY_TIMEOUT_MS,
+  abort?: () => Error | null,
 ): Promise<{ client: DaemonClientType; addr: ControlApiAddress } | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const conn = await connectDaemonIfRunning();
     if (conn) return conn;
+    const failure = abort?.();
+    if (failure) throw failure;
     if (Date.now() >= deadline) return null;
     await sleep(150);
   }

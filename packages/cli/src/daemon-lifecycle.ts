@@ -8,12 +8,20 @@
  */
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { safeProblemMessage } from "@claudexor/util";
 import { reapRecordedOrphans, writePidsSnapshot } from "./orphan-reaper.js";
 import { sweepOrphanWorkspaces } from "./orphan-sweeper.js";
+import type {
+  DaemonStartupDiagnosticRecord,
+  DaemonStartupDiagnostics,
+} from "./startup-diagnostics.js";
 
 interface LifecycleDeps {
   daemonDir: string;
-  logPath: string;
+  /** Compatibility fallback until the shared composition root wires the sink. */
+  logPath?: string;
+  /** Narrow post-authority diagnostic port; it never controls lifecycle. */
+  diagnostics?: Pick<DaemonStartupDiagnostics, "record">;
   /** Enter the shutdown state machine (DaemonRuntimeShutdown.beginShutdown). */
   beginShutdown: (reason: string) => Promise<void>;
   signals?: Pick<NodeJS.Process, "on" | "off">;
@@ -22,30 +30,49 @@ interface LifecycleDeps {
 
 export const logLine = (path: string, message: string): void => {
   try {
-    appendFileSync(path, `[${new Date().toISOString()}] ${message}\n`);
+    appendFileSync(path, `[${new Date().toISOString()}] ${safeProblemMessage(message)}\n`);
   } catch {
     /* lifecycle safety must not depend on diagnostic I/O */
   }
 };
 
+function lifecycleDiagnostic(
+  deps: Pick<LifecycleDeps, "diagnostics" | "logPath">,
+  record: DaemonStartupDiagnosticRecord,
+): void {
+  if (deps.diagnostics) {
+    try {
+      void deps.diagnostics.record(record);
+    } catch {
+      /* lifecycle safety must not depend on diagnostic I/O */
+    }
+    return;
+  }
+  if (deps.logPath) logLine(deps.logPath, record.message);
+}
+
 /** Pre-start: kill surviving children of a previous daemon life, then GC
  * envelopes/branches/tmp-homes nothing owns anymore. */
 export async function runStartupCrashGc(
-  deps: Pick<LifecycleDeps, "daemonDir" | "logPath">,
+  deps: Pick<LifecycleDeps, "daemonDir" | "diagnostics" | "logPath">,
 ): Promise<void> {
   const pidsPath = join(deps.daemonDir, "pids.json");
   for (const action of reapRecordedOrphans(pidsPath)) {
-    logLine(deps.logPath, `reaper: ${action}`);
+    lifecycleDiagnostic(deps, { stage: "crash_gc_reaper", message: `reaper: ${action}` });
   }
   try {
     const sweepActions = await sweepOrphanWorkspaces({
       journalRoot: join(deps.daemonDir, "journal"),
     });
     for (const action of sweepActions) {
-      logLine(deps.logPath, `sweep: ${action}`);
+      lifecycleDiagnostic(deps, { stage: "crash_gc_sweep", message: `sweep: ${action}` });
     }
   } catch (err) {
-    logLine(deps.logPath, `sweep FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    lifecycleDiagnostic(deps, {
+      stage: "crash_gc_sweep",
+      message: `sweep FAILED: ${err instanceof Error ? err.message : String(err)}`,
+      error: err,
+    });
   }
 }
 
@@ -62,10 +89,11 @@ export function armDaemonLifecycle(deps: LifecycleDeps): { finalize: () => void 
     try {
       snapshot(pidsPath);
     } catch (error) {
-      logLine(
-        deps.logPath,
-        `pid snapshot FAILED: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      lifecycleDiagnostic(deps, {
+        stage: "pid_snapshot",
+        message: `pid snapshot FAILED: ${error instanceof Error ? error.message : String(error)}`,
+        error,
+      });
     }
   };
   const pidsTimer = setInterval(writeSnapshot, 2_000);
@@ -78,7 +106,10 @@ export function armDaemonLifecycle(deps: LifecycleDeps): { finalize: () => void 
     // machine's deadline timer guarantees termination.
     if (stopping) return;
     stopping = true;
-    logLine(deps.logPath, `${sig} received; stopping daemon`);
+    lifecycleDiagnostic(deps, {
+      stage: "shutdown_signal",
+      message: `${sig} received; stopping daemon`,
+    });
     void deps.beginShutdown(sig).catch(() => {
       // The machine logged the failure and keeps its deadline armed.
     });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureToken } from "@claudexor/daemon";
 import { parseArgs } from "./args.js";
+import { CliError } from "./cli-error.js";
 import * as daemonLaunch from "./daemon-launch.js";
 import * as daemonRun from "./daemon-run.js";
 import { daemonCommand } from "./ops-commands.js";
@@ -80,8 +81,12 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
       pid: 12345,
       failure: () => null,
       markReady,
-      waitForFailure: async () => null,
-      callerError: () => new Error("unused"),
+      waitForFailure: async () => ({
+        kind: "preclaim_exit",
+        exitCode: 0,
+        signal: null,
+      }),
+      callerError: () => new CliError("operational", "unused"),
     });
     vi.spyOn(daemonRun, "waitForDaemonReady").mockResolvedValue({
       client: {} as never,

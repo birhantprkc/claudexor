@@ -99,6 +99,10 @@ describe("self-contained sibling CLI/daemon bundle startup", () => {
         const status = run(["daemon", "status", "--json"]);
         expect(status.status, `${status.stdout}\n${status.stderr}`).toBe(0);
         expect(JSON.parse(status.stdout)).toMatchObject({ ok: true });
+        const logs = run(["daemon", "logs", "--json"]);
+        expect(logs.status, `${logs.stdout}\n${logs.stderr}`).toBe(0);
+        expect(JSON.parse(logs.stdout)).toMatchObject({ ok: true });
+        expect(JSON.parse(logs.stdout).log_tail).toContain("claudexor");
       } finally {
         const stopped = run(["daemon", "stop", "--json"]);
         if (started?.status === 0)
