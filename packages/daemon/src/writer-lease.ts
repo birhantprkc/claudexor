@@ -138,6 +138,16 @@ function sameOwner(left: DaemonLeaseOwner, right: DaemonLeaseOwner): boolean {
   return left.pid === right.pid && left.token === right.token;
 }
 
+function isLinuxZombieObservation(observation: ProcessObservation, pid: number): boolean {
+  return (
+    observation.linuxState === "Z" &&
+    observation.identity.status === "known" &&
+    observation.identity.pid === pid &&
+    observation.identity.platform === "linux" &&
+    observation.identity.source === "procfs_stat"
+  );
+}
+
 function parseLeaseOwner(raw: string): DaemonLeaseOwner | null {
   let value: unknown;
   try {
@@ -243,14 +253,14 @@ export function classifyDaemonLeaseOwner(
     if (compareProcessIdentity(owner.identity, observation.identity) !== "same") {
       return { status: "proven_stale", reason: "identity_mismatch", observation };
     }
-    if (observation.linuxState === "Z") {
+    if (isLinuxZombieObservation(observation, owner.pid)) {
       return { status: "proven_stale", reason: "linux_zombie", observation };
     }
     return { status: "capable", reason: "identity_match", observation };
   }
 
   if (!owner.identity && observation.identity.status === "known") {
-    if (observation.linuxState === "Z") {
+    if (isLinuxZombieObservation(observation, owner.pid)) {
       return { status: "proven_stale", reason: "linux_zombie", observation };
     }
     return { status: "capable", reason: "legacy_process_present", observation };
@@ -291,11 +301,11 @@ export function writerLeaseTombstonePath(leasePath: string, owner: DaemonLeaseOw
   return `${leasePath}.stale-${owner.pid}-${digest}`;
 }
 
-export type DaemonWriterLeaseQuarantineResult =
+type DaemonWriterLeaseQuarantineResult =
   { status: "quarantined"; path: string } | { status: "contended"; path: string };
 
 /** Move exactly one observed generation; the nonempty tombstone is preserved. */
-export function quarantineDaemonWriterLeaseGeneration(
+function quarantineDaemonWriterLeaseGeneration(
   lease: { path: string; owner: DaemonLeaseOwner },
   deps: DaemonWriterLeaseDependencies = {},
 ): DaemonWriterLeaseQuarantineResult {
@@ -311,7 +321,9 @@ export function quarantineDaemonWriterLeaseGeneration(
     }
     if (code === "EPERM") {
       const occupied = inspectWriterLeasePath(tombstone, fs);
-      if (occupied.status === "owned") return { status: "contended", path: tombstone };
+      if (occupied.status === "owned" && sameOwner(occupied.owner, lease.owner)) {
+        return { status: "contended", path: tombstone };
+      }
     }
     throw error;
   }
@@ -368,7 +380,10 @@ export function acquireDaemonWriterLease(
       const confirmed = inspectWriterLeasePath(path, fs);
       if (confirmed.status === "absent") continue;
       if (confirmed.status === "unknown") throw writerBusy(path);
-      if (!sameOwner(confirmed.owner, existing.owner)) continue;
+      if (!sameOwner(confirmed.owner, existing.owner)) {
+        if (attempt === 1) throw writerBusy(path);
+        continue;
+      }
       if (attempt === 1) throw staleReplacementFailed(path);
 
       const quarantine = quarantineDaemonWriterLeaseGeneration(confirmed, deps);

@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -22,7 +23,6 @@ import {
   classifyDaemonLeaseOwner,
   daemonLeaseOwner,
   inspectDaemonWriterLease,
-  quarantineDaemonWriterLeaseGeneration,
   writerLeasePath,
   writerLeaseTombstonePath,
   type DaemonLeaseOwner,
@@ -35,6 +35,17 @@ function known(pid: number, start = `linux:${pid}`): KnownProcessIdentity {
     pid,
     platform: "linux",
     source: "procfs_stat",
+    startToken: start,
+    processGroupId: pid,
+  };
+}
+
+function knownDarwin(pid: number, start = `darwin:${pid}:1`): KnownProcessIdentity {
+  return {
+    status: "known",
+    pid,
+    platform: "darwin",
+    source: "proc_pidinfo",
     startToken: start,
     processGroupId: pid,
   };
@@ -247,6 +258,19 @@ describe("daemon lease-owner capability", () => {
     ).toMatchObject({ status: "capable", reason: "legacy_process_present" });
   });
 
+  it("requires a same-pid Linux procfs observation before treating Z as a zombie", () => {
+    const darwin = knownDarwin(44);
+    const injectedState = depsFor(observation(darwin, "Z"));
+
+    expect(
+      classifyDaemonLeaseOwner({ pid: 44, token: "current", identity: darwin }, injectedState),
+    ).toMatchObject({ status: "capable", reason: "identity_match" });
+    expect(classifyDaemonLeaseOwner({ pid: 44, token: "legacy" }, injectedState)).toMatchObject({
+      status: "capable",
+      reason: "legacy_process_present",
+    });
+  });
+
   it("fails closed when an identity-bearing owner cannot be observed", () => {
     const unavailable = observation({
       status: "unknown",
@@ -335,19 +359,31 @@ describe("generation-bound writer-lease recovery", () => {
 
   it("prevents a delayed contender from moving a fresh successor", () => {
     const original = seedOwner(staleOwner);
-    const cached = inspectDaemonWriterLease(socketPath, recoveryDeps());
-    expect(cached.status).toBe("owned");
-    if (cached.status !== "owned") throw new Error("expected owned lease");
+    const tombstone = writerLeaseTombstonePath(leasePath, staleOwner);
+    let successor: ReturnType<typeof acquireDaemonWriterLease> | undefined;
+    let successorBytes = "";
+    let interleaved = false;
+    const delayedDeps: DaemonWriterLeaseDependencies = {
+      ...recoveryDeps(),
+      filesystem: {
+        rename: (from, to) => {
+          if (!interleaved) {
+            interleaved = true;
+            successor = acquireDaemonWriterLease(socketPath, recoveryDeps());
+            successorBytes = readFileSync(join(leasePath, "owner.json"), "utf8");
+          }
+          renameSync(from, to);
+        },
+      },
+    };
 
-    const first = quarantineDaemonWriterLeaseGeneration(cached, recoveryDeps());
-    expect(first.status).toBe("quarantined");
-    const successor = acquireDaemonWriterLease(socketPath, recoveryDeps());
-    const successorBytes = readFileSync(join(leasePath, "owner.json"), "utf8");
-
-    const delayed = quarantineDaemonWriterLeaseGeneration(cached, recoveryDeps());
-    expect(delayed.status).toBe("contended");
+    expect(() => acquireDaemonWriterLease(socketPath, delayedDeps)).toThrowError(
+      expect.objectContaining({ code: "daemon_writer_busy", status: 409 }),
+    );
+    expect(successor).toBeDefined();
     expect(readFileSync(join(leasePath, "owner.json"), "utf8")).toBe(successorBytes);
-    expect(readFileSync(join(first.path, "owner.json"), "utf8")).toBe(original);
+    expect(readFileSync(join(tombstone, "owner.json"), "utf8")).toBe(original);
+    if (!successor) throw new Error("expected interleaved successor");
     successor.release();
   });
 
@@ -394,33 +430,69 @@ describe("generation-bound writer-lease recovery", () => {
     expect(readFileSync(join(tombstone, "owner.json"), "utf8")).toBe(original);
   });
 
+  it("returns typed busy when the main owner changes during the final attempt", () => {
+    const successor: DaemonLeaseOwner = {
+      pid: 5555,
+      token: "final-attempt-successor",
+      identity: known(5555, "linux:2"),
+    };
+    let createAttempts = 0;
+    let transitioned = false;
+    const deps: DaemonWriterLeaseDependencies = {
+      identity: sourceFor((pid) => {
+        if (pid === staleOwner.pid) {
+          if (!transitioned) {
+            transitioned = true;
+            rmSync(leasePath, { recursive: true });
+            seedOwner(successor);
+          }
+          return observation({ status: "missing", pid, platform: "linux" });
+        }
+        return observation(successor.identity!, "S");
+      }),
+      filesystem: {
+        createLeaseDirectory: (path) => {
+          createAttempts += 1;
+          if (createAttempts === 1) throw errno("EEXIST");
+          if (createAttempts === 2) {
+            seedOwner(staleOwner, path);
+            throw errno("EEXIST");
+          }
+          mkdirSync(path, { mode: 0o700 });
+        },
+      },
+    };
+
+    expect(() => acquireDaemonWriterLease(socketPath, deps)).toThrowError(
+      expect.objectContaining({ code: "daemon_writer_busy", status: 409 }),
+    );
+    expect(JSON.parse(readFileSync(join(leasePath, "owner.json"), "utf8"))).toEqual(successor);
+  });
+
   it("normalizes only a proven occupied Windows-style EPERM destination", () => {
     seedOwner(staleOwner);
-    const cached = inspectDaemonWriterLease(socketPath, recoveryDeps());
-    if (cached.status !== "owned") throw new Error("expected owned lease");
     const tombstone = writerLeaseTombstonePath(leasePath, staleOwner);
     seedOwner(staleOwner, tombstone);
-
-    expect(
-      quarantineDaemonWriterLeaseGeneration(cached, {
-        filesystem: {
-          rename: () => {
-            throw errno("EPERM");
-          },
+    const epermDeps: DaemonWriterLeaseDependencies = {
+      ...recoveryDeps(),
+      filesystem: {
+        rename: () => {
+          throw errno("EPERM");
         },
-      }),
-    ).toMatchObject({ status: "contended", path: tombstone });
+      },
+    };
+
+    expect(() => acquireDaemonWriterLease(socketPath, epermDeps)).toThrow(
+      `could not replace stale daemon writer lease ${leasePath}`,
+    );
 
     rmSync(tombstone, { recursive: true });
-    expect(() =>
-      quarantineDaemonWriterLeaseGeneration(cached, {
-        filesystem: {
-          rename: () => {
-            throw errno("EPERM");
-          },
-        },
-      }),
-    ).toThrowError(expect.objectContaining({ code: "EPERM" }));
+    const foreignOwner: DaemonLeaseOwner = { pid: 5555, token: "foreign" };
+    seedOwner(foreignOwner, tombstone);
+    expect(() => acquireDaemonWriterLease(socketPath, epermDeps)).toThrowError(
+      expect.objectContaining({ code: "EPERM" }),
+    );
+    expect(JSON.parse(readFileSync(join(tombstone, "owner.json"), "utf8"))).toEqual(foreignOwner);
   });
 
   it("blocks live, unknown, and malformed owners without mutating them", () => {
