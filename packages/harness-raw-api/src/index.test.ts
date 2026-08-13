@@ -184,6 +184,7 @@ describe("raw-api provider cost receipts", () => {
   async function runWithProviderCost(
     cost: unknown,
     providerUsageCostUnit?: "usd",
+    upstreamInferenceCost?: unknown,
   ): Promise<HarnessEvent[]> {
     vi.stubGlobal(
       "fetch",
@@ -193,7 +194,14 @@ describe("raw-api provider cost receipts", () => {
             JSON.stringify({
               model: "openrouter/model",
               choices: [{ message: { content: "done" }, finish_reason: "stop" }],
-              usage: { prompt_tokens: 2, completion_tokens: 3, cost },
+              usage: {
+                prompt_tokens: 2,
+                completion_tokens: 3,
+                cost,
+                ...(upstreamInferenceCost === undefined
+                  ? {}
+                  : { cost_details: { upstream_inference_cost: upstreamInferenceCost } }),
+              },
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),
@@ -212,45 +220,61 @@ describe("raw-api provider cost receipts", () => {
         }),
       ),
     );
-    return events.map((event) => HarnessEvent.parse(event));
+    return events;
   }
 
   it.each([
-    ["a positive fractional receipt", 0.000_123],
-    ["an exact zero receipt", 0],
-  ])("emits %s as exact USD only for a trusted instance", async (_label, cost) => {
-    const events = await runWithProviderCost(cost, "usd");
+    ["the account-charge receipt instead of upstream inference cost", 0.01, 99],
+    ["an exact zero receipt", 0, undefined],
+  ])("emits %s as exact USD only for a trusted instance", async (_label, cost, upstreamCost) => {
+    const events = await runWithProviderCost(cost, "usd", upstreamCost);
     const usageEvent = events.find((event) => event.type === "usage");
 
     expect(events.map((event) => event.type)).toEqual(["started", "message", "usage", "completed"]);
-    expect(usageEvent).toMatchObject({
+    expect(usageEvent).toStrictEqual({
+      type: "usage",
+      session_id: "provider-cost",
+      ts: expect.any(String),
       usage: { input_tokens: 2, output_tokens: 3, cost_usd: cost },
       observed_model: "openrouter/model",
     });
+    expect(usageEvent?.usage).not.toHaveProperty("provider_cost");
+    expect(usageEvent?.usage?.cost_usd).not.toBe(99);
     expect(usageEvent?.usage).not.toHaveProperty("estimated");
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
   });
 
   it("keeps the same provider extension untrusted on a generic instance", async () => {
     const events = await runWithProviderCost(0.25);
     const usageEvent = events.find((event) => event.type === "usage");
 
-    expect(usageEvent).toMatchObject({
+    expect(usageEvent).toStrictEqual({
+      type: "usage",
+      session_id: "provider-cost",
+      ts: expect.any(String),
       usage: { input_tokens: 2, output_tokens: 3 },
       observed_model: "openrouter/model",
     });
     expect(usageEvent?.usage).not.toHaveProperty("cost_usd");
+    expect(usageEvent?.usage).not.toHaveProperty("provider_cost");
     expect(usageEvent?.usage).not.toHaveProperty("estimated");
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
   });
 
   it("still emits usage without fabricating zero when a trusted receipt is absent", async () => {
     const events = await runWithProviderCost(undefined, "usd");
     const usageEvent = events.find((event) => event.type === "usage");
 
-    expect(usageEvent).toMatchObject({
+    expect(usageEvent).toStrictEqual({
+      type: "usage",
+      session_id: "provider-cost",
+      ts: expect.any(String),
       usage: { input_tokens: 2, output_tokens: 3 },
       observed_model: "openrouter/model",
     });
     expect(usageEvent?.usage).not.toHaveProperty("cost_usd");
+    expect(usageEvent?.usage).not.toHaveProperty("provider_cost");
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
   });
 
   it("emits a cost-only usage receipt even when token counts are absent", async () => {
@@ -278,11 +302,19 @@ describe("raw-api provider cost receipts", () => {
         }),
       ),
     );
-    const usageEvent = HarnessEvent.parse(events.find((event) => event.type === "usage"));
+    const usageEvent = events.find((event) => event.type === "usage");
 
-    expect(usageEvent).toMatchObject({ usage: { cost_usd: 0.75 } });
+    expect(usageEvent).toStrictEqual({
+      type: "usage",
+      session_id: "provider-cost-only",
+      ts: expect.any(String),
+      usage: { input_tokens: undefined, output_tokens: undefined, cost_usd: 0.75 },
+      observed_model: "openrouter/model",
+    });
+    expect(usageEvent?.usage).not.toHaveProperty("provider_cost");
     expect(usageEvent?.usage?.input_tokens).toBeUndefined();
     expect(usageEvent?.usage?.output_tokens).toBeUndefined();
+    expect(events.every((event) => HarnessEvent.safeParse(event).success)).toBe(true);
   });
 });
 
