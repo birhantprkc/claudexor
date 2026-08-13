@@ -284,7 +284,28 @@ function executeDarwinHelper(path: string, pid: number): DarwinHelperExecution {
   };
 }
 
-export class ProcessIdentityService implements ProcessIdentityReader, ProcessObservationReader {
+function readLinuxProcessObservation(
+  readTextFile: (path: string) => string,
+  pid: number,
+): ProcessObservation {
+  try {
+    return parseLinuxProcStatObservation(readTextFile(`/proc/${pid}/stat`), pid);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ESRCH") {
+      return { identity: { status: "missing", pid, platform: "linux" }, linuxState: null };
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      return {
+        identity: unknown(pid, "linux", "permission_denied"),
+        linuxState: null,
+      };
+    }
+    return { identity: unknown(pid, "linux", "io_error"), linuxState: null };
+  }
+}
+
+export class ProcessIdentityService implements ProcessIdentityReader {
   private readonly platform: string;
   private readonly selfPid: number;
   private readonly readTextFile: (path: string) => string;
@@ -302,24 +323,10 @@ export class ProcessIdentityService implements ProcessIdentityReader, ProcessObs
   }
 
   read(pid: number): ProcessIdentity {
-    return this.observe(pid).identity;
-  }
-
-  observe(pid: number): ProcessObservation {
-    if (!validPositiveInteger(pid)) {
-      return {
-        identity: unknown(pid, this.platform, "invalid_pid"),
-        linuxState: null,
-      };
-    }
-    if (this.platform === "linux") return this.readLinuxObservation(pid);
-    if (this.platform === "darwin") {
-      return { identity: this.readDarwin(pid), linuxState: null };
-    }
-    return {
-      identity: unknown(pid, this.platform, "unsupported_platform"),
-      linuxState: null,
-    };
+    if (!validPositiveInteger(pid)) return unknown(pid, this.platform, "invalid_pid");
+    if (this.platform === "linux") return this.readLinux(pid);
+    if (this.platform === "darwin") return this.readDarwin(pid);
+    return unknown(pid, this.platform, "unsupported_platform");
   }
 
   self(): ProcessIdentity {
@@ -327,22 +334,8 @@ export class ProcessIdentityService implements ProcessIdentityReader, ProcessObs
     return this.cachedSelf;
   }
 
-  private readLinuxObservation(pid: number): ProcessObservation {
-    try {
-      return parseLinuxProcStatObservation(this.readTextFile(`/proc/${pid}/stat`), pid);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ENOENT" || code === "ESRCH") {
-        return { identity: { status: "missing", pid, platform: "linux" }, linuxState: null };
-      }
-      if (code === "EACCES" || code === "EPERM") {
-        return {
-          identity: unknown(pid, "linux", "permission_denied"),
-          linuxState: null,
-        };
-      }
-      return { identity: unknown(pid, "linux", "io_error"), linuxState: null };
-    }
+  private readLinux(pid: number): ProcessIdentity {
+    return readLinuxProcessObservation(this.readTextFile, pid).identity;
   }
 
   private readDarwin(pid: number): ProcessIdentity {
@@ -364,3 +357,24 @@ export class ProcessIdentityService implements ProcessIdentityReader, ProcessObs
 }
 
 export const defaultProcessIdentityService = new ProcessIdentityService();
+
+export function createProcessObservationReader(
+  options: ProcessIdentityServiceOptions = {},
+): ProcessObservationReader {
+  const platform = options.platform ?? process.platform;
+  const identity = new ProcessIdentityService(options);
+  const readTextFile = options.readTextFile ?? ((path: string) => readFileSync(path, "utf8"));
+  return {
+    observe(pid: number): ProcessObservation {
+      if (platform === "linux") {
+        if (!validPositiveInteger(pid)) {
+          return { identity: unknown(pid, platform, "invalid_pid"), linuxState: null };
+        }
+        return readLinuxProcessObservation(readTextFile, pid);
+      }
+      return { identity: identity.read(pid), linuxState: null };
+    },
+  };
+}
+
+export const defaultProcessObservationReader = createProcessObservationReader();

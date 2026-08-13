@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   compareProcessIdentity,
   defaultProcessIdentityService,
+  defaultProcessObservationReader,
   isKnownProcessIdentity,
   observeProcess,
   type KnownProcessIdentity,
@@ -247,7 +248,7 @@ export function classifyDaemonLeaseOwner(
   const identity = deps.identity ?? defaultProcessIdentityService;
   const observationReader =
     deps.observation ??
-    (identity === defaultProcessIdentityService ? defaultProcessIdentityService : undefined);
+    (identity === defaultProcessIdentityService ? defaultProcessObservationReader : undefined);
   const observation = observeProcess(identity, owner.pid, observationReader);
   const probe = deps.probeProcess ?? ((pid: number) => process.kill(pid, 0));
 

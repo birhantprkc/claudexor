@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ProcessIdentityService,
   compareProcessIdentity,
+  createProcessObservationReader,
   observeProcess,
   parseDarwinHelperOutput,
   parseLinuxProcStat,
@@ -76,24 +77,96 @@ describe("locale-independent process identity", () => {
   it("reads identity and Linux state atomically while caching self identity only", () => {
     let reads = 0;
     let state: LinuxProcessState = "S";
-    const service = new ProcessIdentityService({
+    const options = {
       platform: "linux",
       selfPid: 55,
       readTextFile: () => {
         reads += 1;
         return linuxStat(55, 55, "900", "self", state);
       },
-    });
+    };
+    const service = new ProcessIdentityService(options);
+    const observation = createProcessObservationReader(options);
 
-    expect(service.observe(55)).toMatchObject({ linuxState: "S", identity: { status: "known" } });
+    expect(observation.observe(55)).toMatchObject({
+      linuxState: "S",
+      identity: { status: "known" },
+    });
     expect(reads).toBe(1);
     expect(service.self()).toMatchObject({ status: "known", startToken: "linux:900" });
     expect(reads).toBe(2);
     state = "Z";
     expect(service.self()).toMatchObject({ status: "known", startToken: "linux:900" });
     expect(reads).toBe(2);
-    expect(service.observe(55).linuxState).toBe("Z");
+    expect(observation.observe(55).linuxState).toBe("Z");
     expect(reads).toBe(3);
+  });
+
+  it("preserves legacy ProcessIdentityService subclass member names", () => {
+    expect("observe" in new ProcessIdentityService({ platform: "win32" })).toBe(false);
+    let reads = 0;
+    let privateObserveCalls = 0;
+    class LegacyPrivateObserveService extends ProcessIdentityService {
+      constructor() {
+        super({
+          platform: "linux",
+          readTextFile: () => {
+            reads += 1;
+            return linuxStat(55, 55, "900");
+          },
+        });
+        void this.observe;
+      }
+
+      private observe(_pid: number): void {
+        privateObserveCalls += 1;
+      }
+    }
+
+    let publicObserveCalls = 0;
+    class LegacyPublicObserveService extends ProcessIdentityService {
+      observe(_pid: number): string {
+        publicObserveCalls += 1;
+        return "legacy-observation";
+      }
+    }
+
+    let linuxObservationCalls = 0;
+    class LegacyLinuxObservationService extends ProcessIdentityService {
+      constructor() {
+        super({
+          platform: "linux",
+          readTextFile: () => {
+            reads += 1;
+            return linuxStat(55, 55, "901");
+          },
+        });
+        void this.readLinuxObservation;
+      }
+
+      private readLinuxObservation(_pid: number): void {
+        linuxObservationCalls += 1;
+      }
+    }
+
+    const privateObserve = new LegacyPrivateObserveService();
+    expect(privateObserve.read(55)).toEqual(knownLinux(55, 55, "linux:900"));
+    expect(privateObserveCalls).toBe(0);
+    expect("observe" in privateObserve).toBe(true);
+
+    const publicObserve = new LegacyPublicObserveService({
+      platform: "linux",
+      readTextFile: () => linuxStat(55, 55, "902"),
+    });
+    expect(publicObserve.read(55)).toEqual(knownLinux(55, 55, "linux:902"));
+    expect(publicObserveCalls).toBe(0);
+    expect(publicObserve.observe(55)).toBe("legacy-observation");
+    expect(publicObserveCalls).toBe(1);
+
+    const linuxObservation = new LegacyLinuxObservationService();
+    expect(linuxObservation.read(55)).toEqual(knownLinux(55, 55, "linux:901"));
+    expect(linuxObservationCalls).toBe(0);
+    expect(reads).toBe(2);
   });
 
   it("uses only an explicitly supplied observation capability", () => {
@@ -165,7 +238,7 @@ describe("locale-independent process identity", () => {
     });
     expect(missing.read(90).status).toBe("missing");
 
-    const denied = new ProcessIdentityService({
+    const denied = createProcessObservationReader({
       platform: "linux",
       readTextFile: () => {
         throw Object.assign(new Error("denied"), { code: "EACCES" });
@@ -181,7 +254,7 @@ describe("locale-independent process identity", () => {
       linuxState: null,
     });
 
-    const unsupported = new ProcessIdentityService({ platform: "win32" });
+    const unsupported = createProcessObservationReader({ platform: "win32" });
     expect(unsupported.observe(90)).toEqual({
       identity: {
         status: "unknown",
@@ -194,7 +267,7 @@ describe("locale-independent process identity", () => {
   });
 
   it("keeps Darwin identity observation state-free", () => {
-    const service = new ProcessIdentityService({
+    const service = createProcessObservationReader({
       platform: "darwin",
       darwinHelperPath: "/private/helper",
       runDarwinHelper: () => ({
