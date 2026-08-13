@@ -19,6 +19,7 @@ import {
   type DaemonStartupDiagnostics,
 } from "./startup-diagnostics.js";
 
+const DIAGNOSTIC_TAIL_LIMIT_BYTES = 256 * 1024;
 const roots: string[] = [];
 const writers: DaemonStartupDiagnostics[] = [];
 
@@ -70,6 +71,34 @@ function open(
 function records(path: string): Record<string, unknown>[] {
   const text = readFileSync(path, "utf8").trim();
   return text ? text.split("\n").map((line) => JSON.parse(line) as Record<string, unknown>) : [];
+}
+
+function maximumBoundarySecrets(): Array<{ label: string; value: string }> {
+  const budget = DIAGNOSTIC_TAIL_LIMIT_BYTES - 192;
+  const dashes = "-----";
+  const pemHeader = `${dashes}BEGIN OPENSSH PRIVATE KEY${dashes}\n`;
+  const pemFooter = `\n${dashes}END OPENSSH PRIVATE KEY${dashes}`;
+  const jwtSegment = Math.floor((budget - 5) / 3);
+  return [
+    { label: "GitHub", value: `${"gh"}p_${"g".repeat(budget - 4)}` },
+    { label: "Anthropic", value: `${"sk"}-ant-${"a".repeat(budget - 7)}` },
+    { label: "Cursor", value: `${"key"}_${"c".repeat(budget - 4)}` },
+    { label: "Bearer", value: `${"Bear"}er ${"r".repeat(budget - 7)}` },
+    {
+      label: "Authorization Bearer",
+      value: `Authorization: ${"Bear"}er ${"b".repeat(budget - 22)}`,
+    },
+    {
+      label: "JWT",
+      value: `${"ey"}J${"j".repeat(jwtSegment - 3)}.${"k".repeat(jwtSegment)}.${"l".repeat(
+        jwtSegment,
+      )}`,
+    },
+    {
+      label: "multiline private key",
+      value: `${pemHeader}${"m".repeat(budget - pemHeader.length - pemFooter.length)}${pemFooter}`,
+    },
+  ];
 }
 
 describe("post-authority daemon startup diagnostics", () => {
@@ -234,8 +263,9 @@ describe("post-authority daemon startup diagnostics", () => {
       writer.record({ stage: "tail", message: `line-${index}` });
     }
 
-    const tail = readDaemonDiagnosticTail({ path, lines: 40 });
-    const parsed = tail
+    const result = readDaemonDiagnosticTail({ path, lines: 40 });
+    expect(result.kind).toBe("retained");
+    const parsed = result.text
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
@@ -243,6 +273,60 @@ describe("post-authority daemon startup diagnostics", () => {
     expect(parsed[0].message).toBe("line-5");
     expect(parsed.at(-1).message).toBe("line-44");
   });
+
+  it.each([DIAGNOSTIC_TAIL_LIMIT_BYTES - 1, DIAGNOSTIC_TAIL_LIMIT_BYTES])(
+    "keeps normal tail behavior unchanged for a safe file of %i bytes",
+    (size) => {
+      const dataRoot = root();
+      const path = join(dataRoot, "claudexord.log");
+      const finalLines = Array.from({ length: 41 }, (_, index) => `safe-line-${index}`).join("\n");
+      const suffix = `\n${finalLines}\n`;
+      const raw = `${"x".repeat(size - Buffer.byteLength(suffix))}${suffix}`;
+      expect(Buffer.byteLength(raw)).toBe(size);
+      writeFileSync(path, raw, { mode: 0o600 });
+
+      const result = readDaemonDiagnosticTail({ path, lines: 40 });
+
+      expect(result).toMatchObject({ kind: "retained" });
+      expect(result.text.split("\n").filter(Boolean)).toEqual(
+        Array.from({ length: 40 }, (_, index) => `safe-line-${index + 1}`),
+      );
+    },
+  );
+
+  it.each(
+    maximumBoundarySecrets().flatMap(({ label, value }) =>
+      (["just_before", "at"] as const).map((position) => ({ label, value, position })),
+    ),
+  )(
+    "omits an oversized legacy log when a maximum-length $label secret starts $position the read window",
+    ({ value, position }) => {
+      const dataRoot = root();
+      const path = join(dataRoot, "claudexord.log");
+      // The historical implementation selected the last 256 KiB. At cap+1,
+      // that window starts at byte 1, so these cases place the secret exactly
+      // one byte before that boundary or exactly on it.
+      const prefix = position === "just_before" ? "" : "x";
+      const suffixBytes = DIAGNOSTIC_TAIL_LIMIT_BYTES + 1 - prefix.length - value.length;
+      expect(suffixBytes).toBeGreaterThan(0);
+      const raw = `${prefix}${value}${"z".repeat(suffixBytes)}`;
+      expect(Buffer.byteLength(raw)).toBe(DIAGNOSTIC_TAIL_LIMIT_BYTES + 1);
+      writeFileSync(path, raw, { mode: 0o600 });
+
+      const result = readDaemonDiagnosticTail({ path, lines: 40 });
+
+      expect(result).toEqual({
+        kind: "oversize_omitted",
+        observedBytes: DIAGNOSTIC_TAIL_LIMIT_BYTES + 1,
+        limitBytes: DIAGNOSTIC_TAIL_LIMIT_BYTES,
+        text: `[daemon diagnostic tail omitted: oversize_omitted; ${DIAGNOSTIC_TAIL_LIMIT_BYTES + 1} bytes exceeds the ${DIAGNOSTIC_TAIL_LIMIT_BYTES}-byte safe read limit]\n`,
+      });
+      expect(result.text).not.toContain(value.slice(0, 64));
+      expect(result.text).not.toContain(value.slice(-64));
+      expect(readFileSync(path, "utf8")).toBe(raw);
+      if (process.getuid) expect(lstatSync(path).mode & 0o777).toBe(0o600);
+    },
+  );
 
   it("keeps lifecycle safety independent from a diagnostic write after close", () => {
     const dataRoot = root();

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureToken } from "@claudexor/daemon";
+import { ensureToken, logPath } from "@claudexor/daemon";
 import { parseArgs } from "./args.js";
 import { CliError } from "./cli-error.js";
 import * as daemonLaunch from "./daemon-launch.js";
@@ -78,6 +78,22 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
     expect(env["exitCode"]).toBe(2);
     expect(String(env["message"])).toContain("usage: claudexor daemon");
     expect(env["error"]).toBe(env["message"]);
+  });
+
+  it("`daemon logs` projects typed omission instead of bytes from an oversized legacy log", async () => {
+    mkdirSync(join(configDir, "daemon"), { recursive: true, mode: 0o700 });
+    writeFileSync(logPath(), "x".repeat(256 * 1024 + 1), { mode: 0o600 });
+
+    const { code, env } = await captureJson(() =>
+      daemonCommand(parseArgs(["daemon", "logs"]), true),
+    );
+
+    expect(code).toBe(0);
+    expect(env).toEqual({
+      ok: true,
+      log_tail:
+        "[daemon diagnostic tail omitted: oversize_omitted; 262145 bytes exceeds the 262144-byte safe read limit]\n",
+    });
   });
 
   it("`daemon start` uses the shared detached adapter with explicit-start provenance", async () => {

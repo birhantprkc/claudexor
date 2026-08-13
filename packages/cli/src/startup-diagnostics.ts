@@ -442,8 +442,31 @@ export interface ReadDaemonDiagnosticTailOptions {
   uid?: number;
 }
 
-/** Read only a bounded current-generation tail through the same inode proof. */
-export function readDaemonDiagnosticTail(options: ReadDaemonDiagnosticTailOptions = {}): string {
+export type DaemonDiagnosticTailRead =
+  | {
+      kind: "retained";
+      text: string;
+    }
+  | {
+      kind: "oversize_omitted";
+      observedBytes: number;
+      limitBytes: number;
+      text: string;
+    };
+
+/**
+ * Read a current-generation tail through the same inode proof.
+ *
+ * A file larger than the writer's current-generation cap is legacy or otherwise
+ * outside the bounded writer contract. Do not select a byte window from it:
+ * that boundary can remove the prefix/header required to redact any token family
+ * or multiline private-key block. Return typed omission evidence without reading
+ * file content instead. Files within the cap are read in full, redacted, and only
+ * then reduced to the requested line tail.
+ */
+export function readDaemonDiagnosticTail(
+  options: ReadDaemonDiagnosticTailOptions = {},
+): DaemonDiagnosticTailRead {
   const path = resolve(options.path ?? canonicalLogPath());
   const lines = boundedPositiveInt(options.lines ?? 40, "lines", 1);
   if (lines > MAX_TAIL_LINES) throw new Error(`lines must not exceed ${MAX_TAIL_LINES}`);
@@ -458,11 +481,18 @@ export function readDaemonDiagnosticTail(options: ReadDaemonDiagnosticTailOption
   });
   try {
     const size = fstatSync(fd).size;
-    const length = Math.min(size, MAX_TAIL_BYTES);
-    const bytes = Buffer.alloc(length);
+    if (size > MAX_TAIL_BYTES) {
+      return {
+        kind: "oversize_omitted",
+        observedBytes: size,
+        limitBytes: MAX_TAIL_BYTES,
+        text: `[daemon diagnostic tail omitted: oversize_omitted; ${size} bytes exceeds the ${MAX_TAIL_BYTES}-byte safe read limit]\n`,
+      };
+    }
+    const bytes = Buffer.alloc(size);
     let offset = 0;
-    while (offset < length) {
-      const read = readSync(fd, bytes, offset, length - offset, size - length + offset);
+    while (offset < size) {
+      const read = readSync(fd, bytes, offset, size - offset, offset);
       if (read === 0) break;
       offset += read;
     }
@@ -471,7 +501,7 @@ export function readDaemonDiagnosticTail(options: ReadDaemonDiagnosticTailOption
     const terminated = split.at(-1) === "";
     if (terminated) split.pop();
     const tail = split.slice(-lines).join("\n");
-    return terminated && tail ? `${tail}\n` : tail;
+    return { kind: "retained", text: terminated && tail ? `${tail}\n` : tail };
   } finally {
     closeSync(fd);
   }

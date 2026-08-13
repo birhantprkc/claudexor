@@ -181,7 +181,7 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
   if (sub === "logs") {
     let tail: string;
     try {
-      tail = readDaemonDiagnosticTail({ path: logPath(), lines: 40 });
+      tail = readDaemonDiagnosticTail({ path: logPath(), lines: 40 }).text;
     } catch (err) {
       const message = `no daemon log at ${logPath()} (${err instanceof Error ? err.message : String(err)}); the daemon may not have started on this machine yet`;
       return renderCliFailure(json, new Error(message));
