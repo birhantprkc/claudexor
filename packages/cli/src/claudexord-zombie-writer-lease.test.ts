@@ -398,11 +398,16 @@ it.runIf(process.platform === "linux")(
       expect(holderExit).toEqual({ code: 0, signal: null });
       const finalIdentity = await waitForValue(
         () => defaultProcessIdentityService.read(victimPid!),
-        (identity) => compareProcessIdentity(victimIdentity!, identity) !== "same",
+        (identity) => {
+          const comparison = compareProcessIdentity(victimIdentity!, identity);
+          return comparison === "missing" || comparison === "different";
+        },
         3_000,
         "zombie reap",
       );
-      expect(compareProcessIdentity(victimIdentity, finalIdentity)).not.toBe("same");
+      expect(["missing", "different"]).toContain(
+        compareProcessIdentity(victimIdentity, finalIdentity),
+      );
     } catch (error) {
       failure = error;
     } finally {
