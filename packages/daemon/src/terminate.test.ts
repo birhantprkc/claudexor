@@ -184,6 +184,10 @@ function physicalLeaseFor(owner: DaemonLeaseOwner): string {
 }
 
 describe("awaitDaemonTermination", () => {
+  it("preserves its public runtime arity", () => {
+    expect(awaitDaemonTermination.length).toBe(1);
+  });
+
   it("uses strict production inspection for physical absence", async () => {
     await expect(awaitDaemonTermination(physicallyAbsentSocketPath())).resolves.toMatchObject({
       outcome: "exited",
@@ -195,14 +199,35 @@ describe("awaitDaemonTermination", () => {
   });
 
   it("preserves the supplied legacy isAlive runtime seam without a fourth authority", async () => {
-    const socketPath = physicalLeaseFor({ pid: process.pid, token: "legacy-is-alive" });
-    let getterReads = 0;
-    let calls = 0;
+    const recordedIdentity: KnownProcessIdentity = {
+      ...IDENTITY,
+      pid: process.pid,
+      processGroupId: process.pid,
+    };
+    const socketPath = physicalLeaseFor({
+      pid: process.pid,
+      token: "legacy-is-alive",
+      identity: recordedIdentity,
+    });
+    let identityGetterReads = 0;
+    let identityReads = 0;
+    let isAliveGetterReads = 0;
+    let isAliveCalls = 0;
     const deps: DaemonTerminationDeps = {
+      get identity() {
+        identityGetterReads += 1;
+        return {
+          read: () => {
+            identityReads += 1;
+            return recordedIdentity;
+          },
+          self: () => recordedIdentity,
+        };
+      },
       get isAlive() {
-        getterReads += 1;
+        isAliveGetterReads += 1;
         return () => {
-          calls += 1;
+          isAliveCalls += 1;
           return false;
         };
       },
@@ -211,7 +236,12 @@ describe("awaitDaemonTermination", () => {
     const result = await awaitDaemonTermination(socketPath, {}, deps);
     expect(result).toMatchObject({ outcome: "exited" });
     expect(result.detail).toContain(String(process.pid));
-    expect({ getterReads, calls }).toEqual({ getterReads: 1, calls: 1 });
+    expect({ identityGetterReads, identityReads, isAliveGetterReads, isAliveCalls }).toEqual({
+      identityGetterReads: 1,
+      identityReads: 0,
+      isAliveGetterReads: 1,
+      isAliveCalls: 1,
+    });
   });
 
   it("preserves the supplied legacy identity runtime seam without a fourth authority", async () => {
@@ -299,6 +329,159 @@ describe("awaitDaemonTermination", () => {
     });
   });
 
+  it("reclassifies the pinned owner after time advances and before SIGKILL", async () => {
+    let recycled = false;
+    let nowCalls = 0;
+    const classified: DaemonLeaseOwner[] = [];
+    const kills: Array<[number, NodeJS.Signals]> = [];
+    const authority: DaemonTerminationLeaseAuthority = {
+      inspect: () => owned(OWNER, identityMatch()),
+      classify: (owner) => {
+        classified.push(owner);
+        return recycled ? stale("identity_mismatch", owner) : identityMatch(owner);
+      },
+    };
+    const result = await awaitDaemonTermination(
+      SOCKET_PATH,
+      {
+        expectedOwner: OWNER,
+        deadlineMs: 500,
+        killAfterMs: 0,
+        pollMs: 100,
+        allowSigkill: true,
+      },
+      {
+        kill: (pid, signal) => kills.push([pid, signal]),
+        sleep: async () => undefined,
+        now: () => {
+          nowCalls += 1;
+          if (nowCalls === 2) recycled = true;
+          return nowCalls === 1 ? 0 : 100;
+        },
+      },
+      authority,
+    );
+    expect(result).toMatchObject({ outcome: "exited" });
+    expect(result.detail).toContain("recycled");
+    expect({ nowCalls, classified, kills }).toEqual({
+      nowCalls: 2,
+      classified: [OWNER, OWNER],
+      kills: [],
+    });
+  });
+
+  it("preserves legacy match-to-mismatch pre-signal call counts", async () => {
+    const socketPath = physicalLeaseFor(OWNER);
+    const recycledIdentity: KnownProcessIdentity = {
+      ...IDENTITY,
+      startToken: "linux:999888",
+    };
+    let identityGetterReads = 0;
+    let identityReads = 0;
+    let isAliveGetterReads = 0;
+    let isAliveCalls = 0;
+    const kills: Array<[number, NodeJS.Signals]> = [];
+    const result = await awaitDaemonTermination(
+      socketPath,
+      {
+        expectedOwner: OWNER,
+        deadlineMs: 500,
+        killAfterMs: 0,
+        pollMs: 100,
+        allowSigkill: true,
+      },
+      {
+        get identity() {
+          identityGetterReads += 1;
+          return {
+            read: () => {
+              identityReads += 1;
+              return identityReads === 1 ? IDENTITY : recycledIdentity;
+            },
+            self: () => IDENTITY,
+          };
+        },
+        get isAlive() {
+          isAliveGetterReads += 1;
+          return () => {
+            isAliveCalls += 1;
+            return true;
+          };
+        },
+        kill: (pid, signal) => kills.push([pid, signal]),
+        sleep: async () => undefined,
+        now: () => 0,
+      },
+    );
+    expect(result).toMatchObject({ outcome: "exited" });
+    expect(result.detail).toContain("recycled");
+    expect({ identityGetterReads, identityReads, isAliveGetterReads, isAliveCalls, kills }).toEqual(
+      {
+        identityGetterReads: 1,
+        identityReads: 2,
+        isAliveGetterReads: 1,
+        isAliveCalls: 1,
+        kills: [],
+      },
+    );
+  });
+
+  it("preserves legacy unknown-to-match pre-signal authority", async () => {
+    const socketPath = physicalLeaseFor(OWNER);
+    let identityGetterReads = 0;
+    let identityReads = 0;
+    let isAliveGetterReads = 0;
+    let isAliveCalls = 0;
+    const kills: Array<[number, NodeJS.Signals]> = [];
+    const result = await awaitDaemonTermination(
+      socketPath,
+      {
+        expectedOwner: OWNER,
+        deadlineMs: 500,
+        killAfterMs: 0,
+        pollMs: 100,
+        allowSigkill: true,
+      },
+      {
+        get identity() {
+          identityGetterReads += 1;
+          return {
+            read: (pid: number): ProcessIdentity => {
+              identityReads += 1;
+              return identityReads === 1
+                ? { status: "unknown", pid, platform: "linux", reason: "permission_denied" }
+                : IDENTITY;
+            },
+            self: () => IDENTITY,
+          };
+        },
+        get isAlive() {
+          isAliveGetterReads += 1;
+          return () => {
+            isAliveCalls += 1;
+            return true;
+          };
+        },
+        kill: (pid, signal) => {
+          kills.push([pid, signal]);
+          rmSync(writerLeasePath(socketPath), { recursive: true, force: true });
+        },
+        sleep: async () => undefined,
+        now: () => 0,
+      },
+    );
+    expect(result).toMatchObject({ outcome: "killed" });
+    expect({ identityGetterReads, identityReads, isAliveGetterReads, isAliveCalls, kills }).toEqual(
+      {
+        identityGetterReads: 1,
+        identityReads: 2,
+        isAliveGetterReads: 1,
+        isAliveCalls: 1,
+        kills: [[OWNER.pid, "SIGKILL"]],
+      },
+    );
+  });
+
   it("fails closed when the initial lease authority is unknown", async () => {
     const fixture = sequenceAuthority([unknownLease("owner_unreadable")]);
     const result = await awaitDaemonTermination(
@@ -357,17 +540,21 @@ describe("awaitDaemonTermination", () => {
 
   it("escalates only an explicit same-generation identity match", async () => {
     let signalled = false;
+    const classified: DaemonLeaseOwner[] = [];
     const kills: Array<[number, NodeJS.Signals]> = [];
     const authority: DaemonTerminationLeaseAuthority = {
       inspect: () => (signalled ? absent() : owned(OWNER, identityMatch())),
-      classify: () => identityMatch(),
+      classify: (owner) => {
+        classified.push(owner);
+        return identityMatch(owner);
+      },
     };
     const result = await awaitDaemonTermination(
       SOCKET_PATH,
       {
         expectedOwner: OWNER,
         deadlineMs: 500,
-        killAfterMs: 100,
+        killAfterMs: 0,
         pollMs: 100,
         allowSigkill: true,
       },
@@ -378,6 +565,7 @@ describe("awaitDaemonTermination", () => {
       authority,
     );
     expect(kills).toEqual([[OWNER.pid, "SIGKILL"]]);
+    expect(classified).toEqual([OWNER, OWNER]);
     expect(result).toMatchObject({ outcome: "killed" });
   });
 
@@ -574,10 +762,14 @@ describe("awaitDaemonTermination", () => {
 
   it("signals only the pinned old target when a successor already owns the lease", async () => {
     let oldKilled = false;
+    const classified: DaemonLeaseOwner[] = [];
     const kills: Array<[number, NodeJS.Signals]> = [];
     const authority: DaemonTerminationLeaseAuthority = {
       inspect: () => owned(SUCCESSOR, identityMatch(SUCCESSOR)),
-      classify: (owner) => (oldKilled ? stale("process_missing", owner) : identityMatch(owner)),
+      classify: (owner) => {
+        classified.push(owner);
+        return oldKilled ? stale("process_missing", owner) : identityMatch(owner);
+      },
     };
     const result = await awaitDaemonTermination(
       SOCKET_PATH,
@@ -596,6 +788,7 @@ describe("awaitDaemonTermination", () => {
     );
     expect(kills).toEqual([[OWNER.pid, "SIGKILL"]]);
     expect(kills.some(([pid]) => pid === SUCCESSOR.pid)).toBe(false);
+    expect(classified.every((owner) => owner === OWNER)).toBe(true);
     expect(result).toMatchObject({ outcome: "killed" });
   });
 
