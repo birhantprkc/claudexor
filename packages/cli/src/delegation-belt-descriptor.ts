@@ -13,7 +13,7 @@ import type { ExtraMcpServer, PaidBudget } from "@claudexor/schema";
  * for credential isolation. Left to default, the belt's `defaultSocketPath()`
  * and token lookup both re-derive under that scoped HOME → a socket/token that
  * does not exist → the belt tries to AUTO-START a fresh daemon there, fails
- * ("daemon did not come up within 30s"), and every belt run tool errors. Pin
+ * after its bounded readiness wait, and every belt run tool errors. Pin
  * the belt to the real daemon by injecting the ACTUAL config root (so the token
  * and daemon dir resolve to this daemon's) and the exact socket path — both
  * captured from the live daemon env at descriptor-build time, so this is correct
