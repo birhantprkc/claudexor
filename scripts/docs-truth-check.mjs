@@ -10,7 +10,8 @@
  *     other docs may mention endpoints but every mention must be real.
  *  2. Canonical mode ids in the schema vs README.md / CLI help.
  *  3. CLI flags accepted by cli.ts (KNOWN_FLAGS) vs flags shown in its help.
- *  4. Version parity across the generated constant and every manifest.
+ *  4. Version parity across the README status, generated constant, and every
+ *     manifest.
  *  5. macOS debug-route parity (AppModel.swift vs apps/macos/README.md).
  *  6. Deleted-screen guard (chat-first collapse must not silently revert).
  *  7. Retired-contract guard for small, owner-approved phrases whose return
@@ -238,7 +239,8 @@ if (!modeMatch) {
 }
 
 // --------------------------------------------------------------------------
-// 4. Version parity: generated constant, root package.json, every manifest.
+// 4. Version parity: README status, generated constant, root package.json,
+//    every manifest.
 // --------------------------------------------------------------------------
 
 const versionTs = readFileSync("packages/util/src/version.ts", "utf8");
@@ -250,6 +252,16 @@ if (!constMatch) {
 } else {
   const constant = constMatch[1];
   const rootVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
+  const readmeStatus = /^Current status: \*\*v(\d+\.\d+\.\d+)\*\*\./m.exec(
+    readFileSync("README.md", "utf8"),
+  )?.[1];
+  if (!readmeStatus) {
+    failures.push("README.md is missing the canonical 'Current status: **vX.Y.Z**.' claim");
+  } else if (readmeStatus !== rootVersion) {
+    failures.push(
+      `README.md current status (${readmeStatus}) != root package.json version (${rootVersion})`,
+    );
+  }
   if (constant !== rootVersion) {
     failures.push(
       `CLAUDEXOR_VERSION (${constant}) != root package.json version (${rootVersion}); run \`pnpm gen:version\``,
