@@ -109,9 +109,30 @@ function canonicalFuturePath(path) {
   return canonical;
 }
 
-export function assertNoPreexistingDaemon({ statusCode, socketIsAlive, leaseIsAlive }) {
+/** Project the strict daemon writer-lease status into the battery's three
+ * authority facts. A stale owner is healable by the normal start path, but
+ * only physical absence proves cleanup and only a capable owner can be bound
+ * as this battery's shutdown target. */
+export function projectBatteryDaemonLease(status) {
+  if (status?.status === "absent") {
+    return { startAllowed: true, capableOwner: null, physicallyAbsent: true };
+  }
+  if (status?.status === "owned" && status.capability?.status === "proven_stale") {
+    return { startAllowed: true, capableOwner: null, physicallyAbsent: false };
+  }
+  if (status?.status === "owned" && status.capability?.status === "capable") {
+    return {
+      startAllowed: false,
+      capableOwner: status.owner ?? null,
+      physicallyAbsent: false,
+    };
+  }
+  return { startAllowed: false, capableOwner: null, physicallyAbsent: false };
+}
+
+export function assertNoPreexistingDaemon({ statusCode, socketIsAlive, lease }) {
   if (statusCode === 0) throw new Error("refusing a pre-existing Claudexor daemon");
-  if (socketIsAlive || leaseIsAlive) {
+  if (socketIsAlive || !lease.startAllowed) {
     throw new Error("daemon preflight found a live socket or writer-lease owner");
   }
 }

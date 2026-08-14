@@ -31,6 +31,7 @@ import {
   evaluateRequiredNativeRoutes,
   isBatteryRepoRoot,
   isCrossFamilyConvergenceRefusal,
+  projectBatteryDaemonLease,
   relevantRunAttemptKeys,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
@@ -81,9 +82,8 @@ const { ArtifactStore } = artifactStoreModule;
 const {
   awaitDaemonTermination,
   DaemonClient,
-  daemonLeaseOwner,
   defaultSocketPath,
-  processIsAlive,
+  inspectDaemonWriterLease,
   readToken,
   socketAlive,
 } = daemonModule;
@@ -331,12 +331,12 @@ async function startBatteryDaemon() {
     name: "daemon-preflight",
     envRetry: false,
   });
-  const preflightLease = daemonLeaseOwner(socketPath);
+  const preflightLease = projectBatteryDaemonLease(inspectDaemonWriterLease(socketPath));
   const preflightSocketAlive = await socketAlive(socketPath);
   assertNoPreexistingDaemon({
     statusCode: preflight.code,
     socketIsAlive: preflightSocketAlive,
-    leaseIsAlive: Boolean(preflightLease && processIsAlive(preflightLease.pid)),
+    lease: preflightLease,
   });
 
   const started = runCliJson(["daemon", "start"], {
@@ -344,20 +344,21 @@ async function startBatteryDaemon() {
     envRetry: false,
   });
   const startedPid = started.json?.pid;
-  const lease = daemonLeaseOwner(socketPath);
-  if (Number.isSafeInteger(startedPid) && startedPid > 0 && lease?.pid === startedPid) {
+  const lease = projectBatteryDaemonLease(inspectDaemonWriterLease(socketPath));
+  const capableOwner = lease.capableOwner;
+  if (Number.isSafeInteger(startedPid) && startedPid > 0 && capableOwner?.pid === startedPid) {
     const token = readToken();
     if (token) {
       // Capture cleanup authority as soon as the detached child proves writer
       // ownership. A later readiness/handshake failure must not leak it.
       runtimeState.daemonOwned = true;
-      runtimeState.daemonLease = lease;
+      runtimeState.daemonLease = capableOwner;
       runtimeState.daemonClient = new DaemonClient(socketPath, token);
       evidence.daemon.start = {
         pid: startedPid,
         ready: started.json?.ready === true,
         alreadyRunning: started.json?.alreadyRunning === true,
-        processIdentity: lease.identity?.status ?? null,
+        processIdentity: capableOwner.identity?.status ?? null,
       };
     }
   }
@@ -370,7 +371,7 @@ async function startBatteryDaemon() {
   ) {
     throw new Error(`battery could not prove a fresh daemon start; inspect ${started.log}`);
   }
-  if (!runtimeState.daemonOwned || !lease || lease.pid !== startedPid) {
+  if (!runtimeState.daemonOwned || !capableOwner || capableOwner.pid !== startedPid) {
     throw new Error("fresh daemon pid does not own the writer lease; refusing cleanup authority");
   }
 
@@ -413,7 +414,7 @@ async function stopBatteryDaemon() {
   const socketPath = defaultSocketPath();
   const expectedOwner = runtimeState.daemonLease;
   const client = runtimeState.daemonClient;
-  const currentOwner = daemonLeaseOwner(socketPath);
+  const currentOwner = projectBatteryDaemonLease(inspectDaemonWriterLease(socketPath)).capableOwner;
   if (!client || !sameDaemonLease(expectedOwner, currentOwner)) {
     evidence.daemon.stop = {
       stopped: false,
@@ -433,7 +434,9 @@ async function stopBatteryDaemon() {
       (options) => awaitDaemonTermination(socketPath, options),
       expectedOwner,
     );
-    const leaseReleased = daemonLeaseOwner(socketPath) === null;
+    const leaseReleased = projectBatteryDaemonLease(
+      inspectDaemonWriterLease(socketPath),
+    ).physicallyAbsent;
     const valid = termination.outcome !== "still_alive" && leaseReleased;
     evidence.daemon.stop = {
       stopped: valid,

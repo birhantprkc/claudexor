@@ -24,6 +24,7 @@ import {
   evaluateRequiredNativeRoutes,
   isBatteryRepoRoot,
   isCrossFamilyConvergenceRefusal,
+  projectBatteryDaemonLease,
   relevantRunAttemptKeys,
   resolveRealHarnessBatteryLayout,
   runtimeReplacementIdentityFromHandshake,
@@ -140,12 +141,57 @@ test("daemon preflight fails closed on each live ownership surface", () => {
   const clear = {
     statusCode: 1,
     socketIsAlive: false,
-    leaseIsAlive: false,
+    lease: { startAllowed: true, capableOwner: null, physicallyAbsent: true },
   };
   expect(() => assertNoPreexistingDaemon(clear)).not.toThrow();
   expect(() => assertNoPreexistingDaemon({ ...clear, statusCode: 0 })).toThrow(/pre-existing/);
   expect(() => assertNoPreexistingDaemon({ ...clear, socketIsAlive: true })).toThrow(/live socket/);
-  expect(() => assertNoPreexistingDaemon({ ...clear, leaseIsAlive: true })).toThrow(/writer-lease/);
+  expect(() =>
+    assertNoPreexistingDaemon({
+      ...clear,
+      lease: { startAllowed: false, capableOwner: null, physicallyAbsent: false },
+    }),
+  ).toThrow(/writer-lease/);
+});
+
+test("battery writer authority distinguishes start, cleanup owner, and physical release", () => {
+  const owner = { pid: 41, token: "owner" };
+  expect(projectBatteryDaemonLease({ status: "absent", path: "/tmp/d.writer" })).toEqual({
+    startAllowed: true,
+    capableOwner: null,
+    physicallyAbsent: true,
+  });
+  expect(
+    projectBatteryDaemonLease({
+      status: "owned",
+      path: "/tmp/d.writer",
+      owner,
+      capability: { status: "proven_stale", reason: "linux_zombie" },
+    }),
+  ).toEqual({ startAllowed: true, capableOwner: null, physicallyAbsent: false });
+  expect(
+    projectBatteryDaemonLease({
+      status: "owned",
+      path: "/tmp/d.writer",
+      owner,
+      capability: { status: "capable", reason: "identity_match" },
+    }),
+  ).toEqual({ startAllowed: false, capableOwner: owner, physicallyAbsent: false });
+  expect(
+    projectBatteryDaemonLease({
+      status: "owned",
+      path: "/tmp/d.writer",
+      owner,
+      capability: { status: "unknown", reason: "identity_unavailable" },
+    }),
+  ).toEqual({ startAllowed: false, capableOwner: null, physicallyAbsent: false });
+  expect(
+    projectBatteryDaemonLease({
+      status: "unknown",
+      path: "/tmp/d.writer",
+      reason: "owner_malformed",
+    }),
+  ).toEqual({ startAllowed: false, capableOwner: null, physicallyAbsent: false });
 });
 
 test("daemon cleanup authority is bound to the exact writer lease", () => {
