@@ -2,11 +2,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SCHEMA_VERSION, makeOutcomeFacts, validateRunFactsInvariants } from "@claudexor/schema";
+import {
+  SCHEMA_VERSION,
+  makeOutcomeFacts,
+  requiredActionsFor,
+  validateRunFactsInvariants,
+} from "@claudexor/schema";
 import {
   ACP_MAX_REPLAY_TURNS,
   acpTerminalRecordMode,
   acpTerminalSummary,
+  acpSessionQuery,
   projectAcpRunControls,
   projectTerminalTurnDetail,
   selectReplayTurns,
@@ -89,6 +95,14 @@ const terminalRunFacts = validateRunFactsInvariants({
   apply: { eligibility: null, operator_decision_present: false },
   required_actions: [],
   generated_at: "2026-08-14T00:00:00.000Z",
+});
+
+const failedOutcomeFacts = makeOutcomeFacts("failed", { reason: "harness_failed" });
+const failedRunFacts = validateRunFactsInvariants({
+  ...terminalRunFacts,
+  run_id: "run-failed",
+  outcome: failedOutcomeFacts,
+  required_actions: requiredActionsFor(failedOutcomeFacts, false),
 });
 
 // The post-terminal detail read DEGRADES: a finished ACP turn must never become
@@ -322,6 +336,67 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
       expect(detailSpy).toHaveBeenCalledTimes(1);
     } finally {
       detailSpy.mockRestore();
+    }
+  });
+});
+
+describe("acpSessionQuery terminal RunFacts binding", () => {
+  it("uses the exact terminal status runId and failed lifecycle at the detail boundary", async () => {
+    const daemonRun = await import("./daemon-run.js");
+    const live = await import("./live.js");
+    const terminalStatus = vi.fn().mockResolvedValue({
+      state: "failed",
+      runId: "run-failed",
+      runDir: "/runs/run-failed",
+      error: "harness failed",
+      params: { mode: "plan" },
+    });
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: { status: terminalStatus },
+      addr,
+    } as never);
+    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      summary: {
+        runId: "run-failed",
+        taskId: "task-1",
+        outcomeFacts: failedOutcomeFacts,
+      },
+      runFacts: failedRunFacts,
+      outcomeBanner: "Run failed",
+    });
+    const controlSpy = vi
+      .spyOn(live, "controlApiFetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ thread: { id: "thread-1", repoRoot: "/repo" } }),
+      } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ jobId: "job-failed" }) } as Response);
+    try {
+      const result = (await acpSessionQuery(
+        {
+          mode: "__acp_session_prompt",
+          sessionId: "thread-1",
+          prompt: "run it",
+          runMode: "plan",
+        },
+        undefined,
+        {} as never,
+      )) as Record<string, unknown>;
+
+      expect(terminalStatus).toHaveBeenCalledWith("job-failed");
+      expect(detailSpy).toHaveBeenCalledTimes(1);
+      expect(detailSpy).toHaveBeenCalledWith(addr, "run-failed");
+      expect(result).toMatchObject({
+        runId: "run-failed",
+        status: "failed",
+        outcomeFacts: failedOutcomeFacts,
+      });
+      expect(JSON.stringify(result["runFacts"])).toBe(JSON.stringify(failedRunFacts));
+      expect(result).not.toHaveProperty("detailProblem");
+    } finally {
+      ensureSpy.mockRestore();
+      detailSpy.mockRestore();
+      controlSpy.mockRestore();
     }
   });
 });
