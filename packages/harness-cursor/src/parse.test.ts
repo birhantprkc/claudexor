@@ -166,6 +166,60 @@ describe("parseCursorEvent", () => {
     expect(out[0]?.tool?.content_summary).toContain("User Rejected");
   });
 
+  it("maps current permissionDenied tool results to denied diagnostics, never ok or error", () => {
+    const variants = [
+      {
+        command: "printf DENIED_FIXTURE_COMMAND",
+        workingDirectory: "/repo",
+        error: "Shell access is unavailable in Ask mode",
+        isReadonly: true,
+      },
+      true,
+    ];
+
+    for (const permissionDenied of variants) {
+      const parse = createCursorParser();
+      parse(
+        {
+          type: "tool_call",
+          subtype: "started",
+          call_id: "permission-denied",
+          tool_call: {
+            shellToolCall: {
+              args: { command: "printf DENIED_FIXTURE_COMMAND", workingDirectory: "/repo" },
+            },
+          },
+        },
+        "s1",
+      );
+      const out = parse(
+        {
+          type: "tool_call",
+          subtype: "completed",
+          call_id: "permission-denied",
+          tool_call: {
+            shellToolCall: {
+              result: { permissionDenied },
+            },
+          },
+        },
+        "s1",
+      ) as HarnessEvent[];
+
+      expect(out).toHaveLength(1);
+      expect(out[0]?.type).toBe("tool_result");
+      expect(out[0]?.tool?.status).toBe("denied");
+      expect(out[0]?.tool?.kind).toBe("command");
+      expect(out[0]?.tool?.error_summary).toBeUndefined();
+      expect(out[0]?.tool?.content_summary).toContain("permissionDenied");
+      if (typeof permissionDenied === "object") {
+        expect(out[0]?.tool?.content_summary).toContain("Ask mode");
+      }
+      expect(out[0]?.tool?.content_summary?.length).toBeLessThanOrEqual(300);
+      expect(out.some((event) => event.type === "file_change")).toBe(false);
+    }
+  });
+
   it("maps error events and counts unknown shapes as null", () => {
     const out = parseCursorEvent({ type: "error", message: "boom" }, "s1") as HarnessEvent[];
     expect(out[0]?.type).toBe("error");

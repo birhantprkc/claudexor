@@ -47,6 +47,21 @@ fixtures:
       delta_messages: 0
       tool_error_results: 0
       typed_rate_limit: false
+  plan/plan-ask-permission-denied-recorded.jsonl:
+    source: recorded
+    cli_version: "2026.08.11-e8db854"
+    recorded_at: "2026-08-14"
+    capture: "direct Cursor Ask stream; one harmless Shell request denied before execution"
+    sanitized: "ids, timestamps, paths, command/error/narration values, tool payload contents"
+    expectations:
+      final_messages: 1
+      final_source: "assistant_message"
+      final_is_last_message: true
+      thinking_events: 10
+      started_events: 1
+      delta_messages: 0
+      tool_error_results: 0
+      typed_rate_limit: false
   # Defensive shape: Ask does not normally emit createPlan, but a stale/vendor
   # frame must never outrank the final model-authored WorkReport.
   plan/plan-ask-createplan-precedence.jsonl:

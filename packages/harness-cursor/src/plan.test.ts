@@ -16,13 +16,22 @@ const fixtureManifest = parseYaml(
   readFileSync(fileURLToPath(new URL("../fixtures/manifest.yaml", import.meta.url)), "utf8"),
 ) as { fixtures: Record<string, { expectations?: FixtureStreamExpectations }> };
 
-/** Replay a plan-mode fixture through the stateful cursor parser. */
-function replayPlan(fixture: string, nativePlanMode = true): HarnessEvent[] {
-  const parse = createCursorParser("vendor_native", "native_session", true, nativePlanMode);
+/** Replay a fixture through an explicit pair of parser modes. */
+function replayFixture(
+  fixture: string,
+  planMode: boolean,
+  nativePlanMode = planMode,
+): HarnessEvent[] {
+  const parse = createCursorParser("vendor_native", "native_session", planMode, nativePlanMode);
   return readFileSync(join(PLAN_FIXTURES, fixture), "utf8")
     .split("\n")
     .filter(Boolean)
     .flatMap((line) => parse(JSON.parse(line), "ses-plan") ?? []);
+}
+
+/** Replay the createPlan fixtures through the plan-mode parser. */
+function replayPlan(fixture: string, nativePlanMode = true): HarnessEvent[] {
+  return replayFixture(fixture, true, nativePlanMode);
 }
 
 const isErrorResult = (e: HarnessEvent) => e.type === "tool_result" && e.tool?.status === "error";
@@ -140,5 +149,45 @@ describe("cursor plan-mode createPlan recovery (Defect 1)", () => {
     expect(final?.text).toContain('"output":"PLAN_FIXTURE_OK"');
     expect(final?.payload?.["final_source"]).toBe("assistant_message");
     expect(events.some((event) => event.payload?.["plan_uri_fallback"] === true)).toBe(false);
+  });
+
+  it("replays the recorded Ask permission denial honestly in plan and non-plan modes", () => {
+    const fixture = "plan-ask-permission-denied-recorded.jsonl";
+    const expectations = fixtureManifest.fixtures[`plan/${fixture}`]?.expectations;
+    expect(expectations).toBeTruthy();
+
+    for (const planMode of [true, false]) {
+      const events = replayFixture(fixture, planMode, false);
+      for (const event of events) expect(() => HarnessEvent.parse(event)).not.toThrow();
+      expect(streamExpectationViolations(events, expectations!)).toEqual([]);
+
+      const stats = validateTypedStream(events);
+      expect(stats.started).toBe(1);
+      expect(stats.toolCalls).toBe(1);
+      expect(stats.toolResults).toBe(1);
+      expect(stats.deniedToolResults).toBe(1);
+      expect(stats.errorToolResults).toBe(0);
+      expect(stats.statuslessToolResults).toBe(0);
+      expect(stats.fileChanges).toBe(0);
+      expect(stats.usageEvents).toBe(1);
+
+      const denied = events.find(
+        (event) => event.type === "tool_result" && event.tool?.status === "denied",
+      );
+      expect(denied?.tool?.kind).toBe("command");
+      expect(denied?.tool?.error_summary).toBeUndefined();
+      expect(denied?.tool?.content_summary).toContain("permissionDenied");
+      expect(denied?.tool?.content_summary).toContain("Ask mode");
+      expect(denied?.tool?.content_summary?.length).toBeLessThanOrEqual(300);
+
+      const final = finalMessage(events);
+      expect(final?.text).toContain('"output":"PERMISSION_DENIAL_FIXTURE_OK"');
+      expect(final?.payload?.["final_source"]).toBe("assistant_message");
+      expect(events.find((event) => event.type === "usage")?.usage).toEqual({
+        input_tokens: 18_240,
+        output_tokens: 237,
+        cached_input_tokens: 9_216,
+      });
+    }
   });
 });

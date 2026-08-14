@@ -259,6 +259,12 @@ function parseCursorEventStateful(
     const rejected = Boolean(
       result && typeof result === "object" && "rejected" in result && result.rejected,
     );
+    const permissionDenied = Boolean(
+      result &&
+      typeof result === "object" &&
+      "permissionDenied" in result &&
+      result.permissionDenied,
+    );
     const nativeFailure =
       result &&
       typeof result === "object" &&
@@ -271,7 +277,8 @@ function parseCursorEventStateful(
       nativeFailure ||
       (result && typeof result === "object" && "error" in result && result.error);
     const detail = resultSummary(result);
-    const status: ToolRef["status"] = rejected ? "denied" : failed ? "error" : "ok";
+    const status: ToolRef["status"] =
+      rejected || permissionDenied ? "denied" : failed ? "error" : "ok";
     const kind = origin?.kind ?? toolKindFor(variant);
     // Plan mode is READ-ONLY exploration: a read/search that misses (a probed
     // path that does not exist) is speculative negative information, never a
