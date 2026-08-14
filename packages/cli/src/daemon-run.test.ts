@@ -9,12 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "./cli-error.js";
 import { ENGINE_STOP_REMEDY, observedEngineSkew, recordEngineSkew } from "./engine-skew.js";
 import {
+  DAEMON_START_READY_TIMEOUT_MS,
   connectDaemonIfRunning,
   daemonOutcomeSummary,
   ensureDaemon,
   enqueueAndAwait,
   exitCodeForState,
   mergeDaemonRunOutcome,
+  waitForDaemonReady,
 } from "./daemon-run.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -403,6 +405,7 @@ describe("absence vs refusal discrimination (#93)", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (socketServer) await new Promise<void>((r) => socketServer!.close(() => r()));
     if (httpServer) await new Promise<void>((r) => httpServer!.close(() => r()));
     socketServer = null;
@@ -430,6 +433,20 @@ describe("absence vs refusal discrimination (#93)", () => {
 
   it("connectDaemonIfRunning: absence (no daemon at all) is null, never a spawn", async () => {
     expect(await connectDaemonIfRunning()).toBeNull();
+  });
+
+  it("waitForDaemonReady: the default budget covers a journal-heavy cold start", async () => {
+    vi.useFakeTimers();
+    let settled = false;
+    const pending = waitForDaemonReady().finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(DAEMON_START_READY_TIMEOUT_MS - 15_000);
+    expect(await pending).toBeNull();
   });
 
   it("connectDaemonIfRunning: healthz connect-refused is null and clears the skew record", async () => {

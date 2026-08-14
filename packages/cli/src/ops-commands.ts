@@ -42,7 +42,7 @@ import {
   printUsageError,
   statusGlyph,
 } from "./cli-io.js";
-import { ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
+import { DAEMON_START_READY_TIMEOUT_MS, ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
 
@@ -131,14 +131,14 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
     // Block until the daemon (socket + control API) is actually ready, so a
     // follow-up `status`/run can't race the spawn. Fail loudly (exit 1) if it
     // never comes up.
-    const ready = await waitForDaemonReady(15_000);
+    const ready = await waitForDaemonReady(DAEMON_START_READY_TIMEOUT_MS);
     if (json) {
       printJson({ pid: child.pid ?? null, socket: defaultSocketPath(), ready: ready !== null });
     } else if (ready) {
       print(`claudexord ready (pid ${child.pid}); socket ${defaultSocketPath()}`);
     } else {
       print(
-        `claudexord started (pid ${child.pid}) but did not become ready within 15s; check \`claudexor daemon logs\``,
+        `claudexord started (pid ${child.pid}) but did not become ready within ${Math.round(DAEMON_START_READY_TIMEOUT_MS / 1000)}s; check \`claudexor daemon logs\``,
       );
     }
     return ready ? 0 : 1;

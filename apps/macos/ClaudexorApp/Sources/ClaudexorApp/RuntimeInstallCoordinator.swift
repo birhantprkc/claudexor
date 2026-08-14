@@ -149,7 +149,7 @@ public actor RuntimeInstallCoordinator {
         lifecycleOwner: LocalRuntimeLifecycleOwner,
         rollbackSelection: @escaping @Sendable () -> LocalRuntimeClosureSelection? = { nil },
         handshakePollInterval: TimeInterval = 0.5,
-        handshakePollTimeout: TimeInterval = 30,
+        handshakePollTimeout: TimeInterval = LocalDaemonBootPolicy.handshakeTimeout,
         onPhase: @escaping @Sendable (RuntimeInstallPhase) -> Void = { _ in }
     ) {
         self.installer = installer

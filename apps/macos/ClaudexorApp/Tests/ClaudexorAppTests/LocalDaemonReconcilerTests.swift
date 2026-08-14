@@ -100,6 +100,10 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
     private let old = RuntimeClosureIdentity(version: "3.1.2", buildSha: String(repeating: "a", count: 40))
     private let target = RuntimeClosureIdentity(version: "3.2.0", buildSha: String(repeating: "b", count: 40))
 
+    @Test func bootPolicyCoversJournalHeavyColdStarts() {
+        #expect(LocalDaemonBootPolicy.handshakeTimeout == 90)
+    }
+
     private func reconciler(
         _ daemon: ReconciliationDaemonStub,
         lifecycleOwner: LocalRuntimeLifecycleOwner = LocalRuntimeLifecycleOwner(),
