@@ -30,9 +30,7 @@ import { RunFacts } from "./run-facts.js";
 
 export const WebEvidenceStatus = z
   .enum(["none", "attempted", "satisfied", "failed", "unverified"])
-  .describe(
-    "Observed web activity for an attempt/run: none, attempted, satisfied (a successful retrieval was observed), failed, or unverified.",
-  );
+  .describe("Observed web activity: none, attempted, satisfied, failed, or unverified.");
 export type WebEvidenceStatus = z.infer<typeof WebEvidenceStatus>;
 
 export const WebEvidenceRecord = z
@@ -45,11 +43,16 @@ export const WebEvidenceRecord = z
       "Policy actually executed by the harness route (disclosed upgrades, e.g. cached to live).",
     ),
     attempted: z.boolean().default(false).describe("Whether any web activity was attempted."),
-    satisfied: z.boolean().default(false).describe("Whether successful web activity was observed."),
+    satisfied: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Completed without a typed failure; verification records retrieval-proof strength.",
+      ),
     status: WebEvidenceStatus.default("none"),
     /**
-     * QA-042: retrieval STRENGTH of satisfied/attempted web activity,
-     * orthogonal to `status`. `verified` = at least one web result carried a
+     * QA-042: retrieval STRENGTH of satisfied/attempted web activity, orthogonal
+     * to `status`. `verified` = at least one web result carried a
      * typed successful retrieval (e.g. claude WebFetch content, a browser
      * navigation); `dispatched` = web activity completed but the route exposes
      * no typed fetch outcome (codex `web_search`/`open_page`), so the gate is
@@ -61,7 +64,7 @@ export const WebEvidenceRecord = z
       .enum(["verified", "dispatched", "none"])
       .default("none")
       .describe(
-        "Retrieval strength of observed web activity: verified (typed retrieval), dispatched (completed but no typed outcome), or none.",
+        "Retrieval-proof strength of observed web activity: verified (typed successful retrieval; content proven), dispatched (operation completed but no typed retrieval outcome; content not proven), or none.",
       ),
     tool: z
       .string()

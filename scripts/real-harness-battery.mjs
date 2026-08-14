@@ -1950,30 +1950,52 @@ function runWebPhase() {
   const phase = "phase7";
   const prompt =
     "Use live web/search evidence to fetch https://example.com and answer with the page heading/domain in one sentence.";
-  const journalEvents = (runDir) => {
-    if (typeof runDir !== "string") return [];
+  const validatedJournal = (runDir, expectedRunId) => {
+    if (typeof runDir !== "string" || typeof expectedRunId !== "string") {
+      return { valid: false, reason: "run_events_missing_or_malformed", events: [] };
+    }
     try {
-      return readFileSync(join(runDir, "events.jsonl"), "utf8")
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line));
+      const task = FrozenTaskContractArtifact.safeParse(
+        new ArtifactStore(root).readYaml(join(runDir, "context", "task.yaml")),
+      );
+      if (!task.success) {
+        return { valid: false, reason: "task_contract_missing_or_malformed", events: [] };
+      }
+      return validateBatteryRunArtifacts({
+        job: { runId: expectedRunId, taskId: task.data.task_id },
+        task: task.data,
+        eventText: readFileSync(join(runDir, "events.jsonl"), "utf8"),
+        telemetry: null,
+        telemetryPresent: false,
+        runEventSchema: RunEvent,
+        harnessEventSchema: HarnessEvent,
+        telemetrySchema: RunTelemetry,
+      });
     } catch {
-      return [];
+      return { valid: false, reason: "run_events_missing_or_malformed", events: [] };
     }
   };
   const assertOptionalWebOutput = (name, out) => {
+    if (out.envFailure) {
+      assertRunStatus(phase, name, out, ["succeeded"]);
+      return null;
+    }
     const detail = assertPrimaryOutput(phase, name, out, "answer.md");
-    const events = journalEvents(detail?.runDir ?? out.json?.runDir);
-    const started = events.some((event) => event?.type === "harness.started");
+    if (detail?.lifecycle !== "succeeded" || detail?.outputReadyState !== "ready") return detail;
+    const journal = validatedJournal(detail?.runDir ?? out.json?.runDir, out.json?.runId);
+    const started =
+      journal.valid && journal.events.some((event) => event?.type === "harness.started");
     const observation = {
       runId: out.json?.runId ?? null,
       started,
+      journalValid: journal.valid,
+      journalReason: journal.reason,
       webStatus: detail?.telemetry?.web?.status ?? null,
       webAttempted: detail?.telemetry?.web?.attempted ?? null,
       webSatisfied: detail?.telemetry?.web?.satisfied ?? null,
     };
     (started ? pass : fail)(phase, `${name} harness started`, observation);
-    pass(phase, `${name} web observation`, observation);
+    if (journal.valid) pass(phase, `${name} web observation`, observation);
     return detail;
   };
   const webHarnesses = available(["codex", "claude"]);
@@ -2042,17 +2064,23 @@ function runWebPhase() {
         : null;
     const expectedMessage =
       "cursor cannot guarantee web is disabled (manifest web_policy=uncontrolled); rerun with --web auto, --web cached, or --web live, or select a harness that can enforce --web off";
+    const offJournal = validatedJournal(offRunDir, off.json?.runId);
     const offEvidence = {
       runId: off.json?.runId ?? null,
       exit: off.code,
       category: failure?.category ?? null,
       safeMessage: failure?.safeMessage ?? null,
-      harnessStarted: journalEvents(offRunDir).some((event) => event?.type === "harness.started"),
+      journalValid: offJournal.valid,
+      journalReason: offJournal.reason,
+      harnessStarted: offJournal.valid
+        ? offJournal.events.some((event) => event?.type === "harness.started")
+        : null,
     };
     if (
       off.code !== 0 &&
       offEvidence.category === "harness_unavailable" &&
       offEvidence.safeMessage === expectedMessage &&
+      offEvidence.journalValid === true &&
       offEvidence.harnessStarted === false
     ) {
       pass(phase, "cursor off typed refusal", offEvidence);

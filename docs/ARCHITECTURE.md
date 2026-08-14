@@ -458,12 +458,13 @@ removes the same child before deleting recovery evidence. An artifact marker
 without valid recovery identity refuses cleanup rather than orphaning the child
 by deleting its only proof.
 
-`auto` is evidence-driven: it permits web tools where the harness supports them
-and records whether the harness actually attempted web. If a web tool is
-attempted and its `tool_result` errors, the attempt is `web-unsatisfied` until a
-later successful web result proves recovery. Read-only Ask/Audit can route
-fallback to another eligible harness and emits `route.fallback.started`,
-`route.fallback.completed`, or `route.fallback.exhausted`.
+`auto`, `cached`, and `live` permit web tools where the harness supports them
+and record whether web was attempted and at what verification strength. For
+ordinary contracts, web is optional: unused, denied, unavailable, or errored
+activity remains warning/evidence telemetry and neither decides terminal
+success nor starts route fallback. Only an explicitly persisted
+`web_required=true` compatibility contract can become `web-unsatisfied` and
+use the existing read-only fallback path.
 
 ## 5. Auth And Secrets
 

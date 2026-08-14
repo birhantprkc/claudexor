@@ -401,11 +401,14 @@ export const ControlWebEvidence = z
       "Policy the selected route actually executed (disclosed upgrades, e.g. cached to live).",
     ),
     attempted: z.boolean().default(false).describe("Whether any web activity was attempted."),
-    satisfied: z.boolean().default(false).describe("Whether successful web activity was observed."),
+    satisfied: z
+      .boolean()
+      .default(false)
+      .describe("Completed without a typed failure; retrieved content is not necessarily proven."),
     status: z
       .enum(["none", "attempted", "satisfied", "failed", "unverified"])
       .default("none")
-      .describe("Web-evidence verdict for the run."),
+      .describe("Observed web status; satisfied does not prove retrieved content was verified."),
     tool: z
       .string()
       .nullable()

@@ -1094,11 +1094,14 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
           ...(runFacts?.presentation ? { presentation: runFacts.presentation } : {}),
         },
       );
-      const toolErrors = telemetry
+      const inspectToolRecords = telemetry
         ? telemetry.attempts.flatMap((a) =>
             a.tool_errors
-              .filter((e) => !e.recovered && e.kind === "web")
+              .filter((e) => !e.recovered)
               .map((e) => ({
+                blocking:
+                  (a.outcome.status === "blocked" || a.outcome.status === "failed") &&
+                  !(e.kind === "web" && !a.web.required),
                 attemptId: a.attempt_id,
                 tool: e.tool,
                 target: e.target ?? undefined,
@@ -1106,18 +1109,12 @@ async function dispatch(args: ParsedArgs, outputMode: CliOutputMode): Promise<nu
               })),
           )
         : [];
-      const toolWarnings = telemetry
-        ? telemetry.attempts.flatMap((a) =>
-            a.tool_errors
-              .filter((e) => !e.recovered && e.kind !== "web")
-              .map((e) => ({
-                attemptId: a.attempt_id,
-                tool: e.tool,
-                target: e.target ?? undefined,
-                summary: e.summary,
-              })),
-          )
-        : [];
+      const toolErrors = inspectToolRecords
+        .filter((record) => record.blocking)
+        .map(({ attemptId, tool, target, summary }) => ({ attemptId, tool, target, summary }));
+      const toolWarnings = inspectToolRecords
+        .filter((record) => !record.blocking)
+        .map(({ attemptId, tool, target, summary }) => ({ attemptId, tool, target, summary }));
       const artifacts = listCliArtifacts(paths.root).filter((p) => !p.endsWith("/"));
       const outputReadyState =
         runFacts?.presentation?.state ??
