@@ -387,7 +387,7 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
     }
     // QA-040: an armed browser MCP call is trusted live-web ACTIVITY even though
     // its kind is "mcp" — mark the browser attempted and count it as web
-    // attempted (a successful result below satisfies the generic web gate).
+    // attempted (a successful result below records satisfied web activity).
     if (matchesBrowser(t, tool)) {
       t.browser.attempted = true;
       t.web.attempted = true;
@@ -417,9 +417,22 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
         `required delegation belt tool result marked ${tool.status}`,
       );
     if (tool.kind === "web") {
+      const summary = redactSecrets(
+        tool.error_summary ?? tool.content_summary ?? `web tool result marked ${tool.status}`,
+      ).slice(0, 1000);
+      t.toolErrors.push({
+        tool: tool.name,
+        kind: tool.kind,
+        target: tool.target ?? null,
+        summary,
+        toolUseId: tool.use_id ?? null,
+        recovered: false,
+      });
       t.web.attempted = true;
+      t.web.failed = true;
       t.web.tool = tool.name;
       t.web.target = tool.target ?? t.web.target;
+      t.web.errorSummary = summary;
     }
     if (matchesBrowser(t, tool)) {
       t.browser.attempted = true;
@@ -450,7 +463,7 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
     // QA-040: a failed armed-browser call is browser activity that did not
     // satisfy. It contributes web `attempted` (a call was made) and, since the
     // browser is a live-egress channel, a web failure — but a later successful
-    // web/browser call still recovers the generic gate (the ok branch below).
+    // web/browser call still records satisfied activity (the ok branch below).
     if (matchesBrowser(t, tool)) {
       t.browser.attempted = true;
       t.browser.failed = true;
@@ -481,14 +494,8 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
   }
   if (tool.kind === "web") {
     t.web.attempted = true;
-    // DECIDED SEMANTICS (round-19/20 reviews): the web-evidence gate asks
-    // "was web evidence OBTAINED", so ANY successful web call satisfies it —
-    // reformulating a failed query and succeeding on the new one is
-    // legitimate alternative-route recovery, not laundering (blocking it
-    // would false-block the most common web workflow). What must NOT vanish
-    // is the DISCLOSURE: `failed` clears only when the success matches the
-    // failed invocation (INV-043 keying), so telemetry.yaml keeps the
-    // unrecovered failure + errorSummary visible even on satisfied runs.
+    // Any success marks web activity satisfied; invocation-keyed failures stay
+    // disclosed until that same tool/target recovers (INV-043).
     t.web.satisfied = true;
     // Derived rollup, single source of truth: the invocation-keyed
     // toolErrors store (the recovery loop above already marked matching
@@ -502,18 +509,12 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
       : null;
     t.web.tool = tool.name;
     t.web.target = tool.target ?? t.web.target;
-    // QA-042: the retrieval STRENGTH. A typed `verified` retrieval (claude
-    // WebFetch content) proves content; codex `web_search`/`open_page` stamp
-    // `dispatched` (completed, no typed fetch outcome — a hidden 502 is
-    // indistinguishable), so the gate is satisfied at DISPATCH strength only.
-    // Absent stamp is treated as dispatch (never claim verified without proof).
+    // QA-042: typed retrieval is verified; dispatch-only completion stays
+    // dispatched. An absent stamp never claims verification.
     bumpWebVerification(t, tool.web_retrieval);
   }
-  // QA-040: a successful armed-browser call is trusted live-web evidence. It
-  // satisfies the generic web gate AND records browser runtime evidence — a
-  // real navigation/screenshot is a typed success, so it is `verified` strength
-  // (unlike a dispatch-only codex web_search). A user MCP server cannot reach
-  // here: matchesBrowser only accepts the engine-injected server namespace.
+  // QA-040: a successful engine-injected browser call is verified web activity;
+  // user MCP servers cannot match this namespace.
   if (matchesBrowser(t, tool)) {
     t.browser.attempted = true;
     t.browser.satisfied = true;
@@ -542,13 +543,11 @@ export function unrecoveredToolErrors(t: AttemptTelemetry): ToolErrorRecord[] {
 }
 
 export function toolWarnings(t: AttemptTelemetry): ToolErrorRecord[] {
-  // Non-web tool errors are warnings once the attempt produced its contracted
-  // deliverable. Unrecovered WEB errors count as warnings too WHEN the
-  // evidence gate is satisfied by an alternative route (INV-043: the failure
-  // stays attributable and disclosed; a green claim becomes
-  // success_with_warnings, never a silent clean success). Unsatisfied web
-  // errors flow through the hard gate (webUnsatisfied) instead.
-  return unrecoveredToolErrors(t).filter((e) => e.kind !== "web" || t.web.satisfied);
+  // Every unrecovered tool error remains warning evidence. Optional web
+  // denial/error is never hidden merely because no later retrieval succeeded;
+  // an explicitly persisted required-web contract is gated separately by
+  // webUnsatisfied.
+  return unrecoveredToolErrors(t);
 }
 
 export function setAttemptOutcome(
@@ -816,13 +815,12 @@ export function aggregateRunWebEvidence(
 }
 
 /**
- * Web evidence gating (locked v0.7 semantics):
- * - web_required && !satisfied  -> blocked, INCLUDING the never-attempted case;
- * - attempted && failed && !satisfied -> blocked (a later successful web call
- *   is the verified recovery that clears it).
+ * Web evidence gating for explicitly persisted required-web contracts.
+ * Ordinary off/auto/cached/live run construction stores required=false, so
+ * unused, denied, errored, or unavailable optional web never decides terminal
+ * success. The compatibility field remains enforceable when it is explicitly
+ * true in an existing contract.
  */
 export function webUnsatisfied(t: AttemptTelemetry): boolean {
-  if (t.web.satisfied) return false;
-  if (t.web.required) return true;
-  return t.web.attempted && t.web.failed;
+  return t.web.required && !t.web.satisfied;
 }

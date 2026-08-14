@@ -434,7 +434,7 @@
             "web_required": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the task requires live web evidence."
+              "description": "Whether a persisted task contract explicitly requires web evidence; ordinary run policies keep this false."
             },
             "effective_mode": {
               "$ref": "#/definitions/TaskContract/properties/external_context/properties/policy",

@@ -391,7 +391,7 @@ export type ControlProjectMetadata = z.infer<typeof ControlProjectMetadata>;
 
 export const ControlWebEvidence = z
   .object({
-    required: z.boolean().default(false).describe("Whether the run required web evidence."),
+    required: z.boolean().default(false).describe("Explicit stored web requirement."),
     /** Requested external-context policy for the run. */
     mode: ExternalContextPolicy.default("auto").describe(
       "Requested external-context policy for the run.",
@@ -401,10 +401,7 @@ export const ControlWebEvidence = z
       "Policy the selected route actually executed (disclosed upgrades, e.g. cached to live).",
     ),
     attempted: z.boolean().default(false).describe("Whether any web activity was attempted."),
-    satisfied: z
-      .boolean()
-      .default(false)
-      .describe("Whether the web-evidence requirement was satisfied."),
+    satisfied: z.boolean().default(false).describe("Whether successful web activity was observed."),
     status: z
       .enum(["none", "attempted", "satisfied", "failed", "unverified"])
       .default("none")
@@ -690,7 +687,7 @@ export const ControlRunSummary = z
     externalContextPolicy: ExternalContextPolicy.optional().describe(
       "Requested web policy for the run.",
     ),
-    webRequired: z.boolean().optional().describe("Whether the run required web evidence."),
+    webRequired: z.boolean().optional().describe("Explicit stored web requirement."),
     webMode: ExternalContextPolicy.optional().describe(
       "Web policy actually executed by the selected route.",
     ),

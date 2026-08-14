@@ -674,7 +674,7 @@
               },
               "webRequired": {
                 "type": "boolean",
-                "description": "Whether the run required web evidence."
+                "description": "Explicit stored web requirement."
               },
               "webMode": {
                 "$ref": "#/definitions/ControlRunListResponse/properties/runs/items/properties/externalContextPolicy",
@@ -686,7 +686,7 @@
                   "required": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Whether the run required web evidence."
+                    "description": "Explicit stored web requirement."
                   },
                   "mode": {
                     "$ref": "#/definitions/ControlRunListResponse/properties/runs/items/properties/externalContextPolicy",
@@ -706,7 +706,7 @@
                   "satisfied": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Whether the web-evidence requirement was satisfied."
+                    "description": "Whether successful web activity was observed."
                   },
                   "status": {
                     "type": "string",

@@ -186,6 +186,13 @@ fresh-tree verify, and the protected live apply — a refused delivery rides
 the checks axis even when the task configured no gates — and a zero-byte
 deliverable is never a deliverable.
 
+External web context follows the same proportionality rule. `off` is a strict
+request that must be enforceable by the selected harness. `auto`, `cached`, and
+`live` are optional preferences: successful, failed, denied, and unused web are
+typed observations, but absence of web never blocks an otherwise useful result.
+This keeps evidence honest without making an optional retrieval aid a hidden
+completion gate.
+
 No regex governance: risk, permissions, winners, web evidence, and
 tests-passed come from typed contracts and events, never from string-matching
 model output. Unknown cost is unknown — subscription valuation, metered cash,

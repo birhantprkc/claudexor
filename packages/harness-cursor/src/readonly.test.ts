@@ -48,11 +48,28 @@ const modesOf = (args: string[]): string[] =>
   args.flatMap((arg, i) => (arg === "--mode" ? [args[i + 1] ?? ""] : []));
 
 describe("cursor readonly access dispatches onto Ask mode", () => {
-  it("readonly rides --mode ask (sandbox stays on as a command belt)", async () => {
-    const args = await argsFor(spec({ access: "readonly" }));
+  it.each(["auto", "cached", "live"] as const)(
+    "readonly %s enables optional native web while keeping Ask + sandbox",
+    async (externalContextPolicy) => {
+      const args = await argsFor(
+        spec({ access: "readonly", external_context_policy: externalContextPolicy }),
+      );
+      expect(modesOf(args)).toEqual(["ask"]);
+      expect(args).toContain("--force");
+      expect(args).toContain("--sandbox");
+      expect(args[args.indexOf("--sandbox") + 1]).toBe("enabled");
+    },
+  );
+
+  it("readonly off keeps web disabled and does not inject force", async () => {
+    const args = await argsFor(spec({ access: "readonly", external_context_policy: "off" }));
     expect(modesOf(args)).toEqual(["ask"]);
     expect(args).toContain("--sandbox");
-    // The write-enabling force flag must never appear on a readonly run.
+    expect(args).not.toContain("--force");
+  });
+
+  it("inherit_native never injects force", async () => {
+    const args = await argsFor(spec({ access: "inherit_native", external_context_policy: "live" }));
     expect(args).not.toContain("--force");
   });
 

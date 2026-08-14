@@ -141,7 +141,10 @@ export function buildTaskContract(
     },
     external_context: {
       policy: externalContextPolicy,
-      web_required: externalContextPolicy === "cached" || externalContextPolicy === "live",
+      // Web is optional for every non-off policy. The field remains in the
+      // frozen contract for compatibility with persisted explicit-required
+      // contracts, but ordinary run construction never turns it on.
+      web_required: false,
       // Per-route upgrades (e.g. claude cached->live) are disclosed in events
       // and telemetry.yaml; the immutable contract records the requested policy.
       effective_mode: externalContextPolicy,

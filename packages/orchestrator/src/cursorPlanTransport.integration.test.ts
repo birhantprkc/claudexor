@@ -116,7 +116,7 @@ describe("Cursor Plan validated transport composition", () => {
     expect(args).toContain("--sandbox");
     expect(args[args.indexOf("--sandbox") + 1]).toBe("enabled");
     expect(args).toContain("--trust");
-    expect(args).not.toContain("--force");
+    expect(args).toContain("--force");
     expect(args.at(-1)).toContain("complete final answer as normal Markdown");
     expect(args.at(-1)).not.toContain('"output"');
 

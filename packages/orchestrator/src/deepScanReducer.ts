@@ -324,7 +324,7 @@ export async function runDeepScanReducer(
     : reducerAbort.signal;
   const telemetry = createAttemptTelemetry(
     built.webPolicy,
-    deps.webRequired || built.webPolicy === "cached" || built.webPolicy === "live",
+    deps.webRequired,
     built.effectiveWeb,
     [],
     built.model,

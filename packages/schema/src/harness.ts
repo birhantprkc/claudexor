@@ -45,10 +45,9 @@ export type HarnessKind = z.infer<typeof HarnessKind>;
  * - `native`: web modes are a native config surface (codex web_search).
  * - `tools`: web runs through permissioned tools the adapter can allow/deny (claude).
  * - `uncontrolled`: the harness CAN reach the web but exposes no enforceable
- *   switch — incompatible with `off` (cannot be enforced) AND with
- *   `cached`/`live` (cannot produce required evidence). cursor/opencode today.
+ *   switch — incompatible only with strict `off`. cursor/opencode today.
  * - `none`: the harness has NO web access at all — trivially satisfies `off`,
- *   incompatible with web-required policies. raw-api/fake.
+ *   while non-off policies remain optional preferences. raw-api/fake.
  */
 export const WebPolicySupport = z
   .enum(["native", "tools", "uncontrolled", "none"])

@@ -265,8 +265,10 @@ invariant or owner decision before proceeding.
   the tuple remains the compatibility fallback for legacy adapter evidence.
   verify: attemptTelemetry recovery-keying tests.
 - **INV-044** The engine separates terminal state from tool hygiene: a
-  completed answer/report/patch may succeed with warnings, while failed web
-  evidence, terminal harness errors, failed apply/verify steps, or required
+  completed answer/report/patch may succeed with warnings. Optional web that
+  is unused, denied, unavailable, or errors remains evidence/warning telemetry
+  and never decides terminal success; terminal harness errors, failed
+  apply/verify steps, explicitly persisted required-web contracts, and required
   gates still block. verify: outcome-dimension telemetry tests.
 - **INV-045** Web answers are web-backed only when `WebSearch`/`WebFetch` or
   equivalent evidence was observed; a memory answer after a failed web tool
