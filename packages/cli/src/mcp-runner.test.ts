@@ -6,6 +6,8 @@ import { makeOutcomeFacts, SCHEMA_VERSION, validateRunFactsInvariants } from "@c
 import { makeInteractionBridge } from "./mcp-runner.js";
 
 const addr = { baseUrl: "http://127.0.0.1:1", token: "t" } as never;
+const PUBLIC_RECOVERY_MODES = ["__run_inspect", "__run_status", "__run_result"] as const;
+const BELT_RECOVERY_MODES = ["__run_status", "__run_result"] as const;
 
 function validPlanRunFacts(runId: string) {
   return validateRunFactsInvariants({
@@ -812,6 +814,15 @@ describe("mcp daemon body mapping", () => {
         state: "succeeded",
         spendUsd: 0.75,
         outcomeFacts: makeOutcomeFacts("succeeded"),
+        parentRunId: "run-parent",
+        delegatedFromRunId: "run-parent",
+        delegation: {
+          requested: true,
+          effective: true,
+          used: true,
+          reason: null,
+          remediation: null,
+        },
       },
       runFacts: {
         ...valid,
@@ -826,6 +837,40 @@ describe("mcp daemon body mapping", () => {
       },
       outcomeBanner: "must be discarded",
       planReadiness: { state: "ready", questionCount: 0 },
+      council: {
+        requested: 2,
+        drafted: 2,
+        degraded: false,
+        mergedBy: "codex",
+        members: [
+          { harnessId: "codex", role: "primary", status: "merged", error: null },
+          { harnessId: "cursor", role: "member", status: "drafted", error: null },
+        ],
+      },
+      budget: {
+        paidBudget: { kind: "finite", maxUsd: 2 },
+        spendUsd: 0.75,
+        valuationUsd: 1.25,
+        valuationKnowledge: "estimated",
+        remainingUsd: 1.25,
+        estimated: false,
+        source: "events",
+        evidence: "complete",
+      },
+      failure: {
+        phase: "execute",
+        category: "auth",
+        code: null,
+        harnessId: "codex",
+        attemptId: "p01",
+        safeMessage: "must be discarded",
+        rawDetailRef: null,
+        resetsAt: null,
+        logRefs: [],
+        eventRefs: [],
+        runDir: "/tmp/run-invalid",
+        nextActions: ["must be discarded"],
+      },
     });
     try {
       const result = (await mcpSurfaceRunner()({ mode: "plan", prompt: "go" })) as Record<
@@ -842,9 +887,15 @@ describe("mcp daemon body mapping", () => {
         spendUsd: null,
         outcomeBanner: null,
         planReadiness: null,
+        council: null,
         failure: null,
+        parentRunId: null,
+        delegatedFromRunId: null,
+        delegation: null,
         detailProblem: { code: "run_facts_invalid", retryable: false },
       });
+      expect(result).not.toHaveProperty("budget");
+      expect(result).not.toHaveProperty("primaryOutput");
       expect(fetchSpy).toHaveBeenCalledOnce();
     } finally {
       ensureSpy.mockRestore();
@@ -974,7 +1025,67 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
-  it("degrades only typed public recovery integrity failures to a minimal handle", async () => {
+  it.each(
+    PUBLIC_RECOVERY_MODES.flatMap((mode) =>
+      (["run_facts_invalid", "invalid_service_response"] as const).map(
+        (problemCode) => [mode, problemCode] as const,
+      ),
+    ),
+  )("degrades public %s typed %s to a minimal handle", async (mode, problemCode) => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    const retryable = problemCode === "invalid_service_response";
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        code: problemCode,
+        message: `typed ${problemCode}`,
+        retryable,
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = (await mcpSurfaceRunner()({
+        mode,
+        runId: "run-degraded",
+      })) as Record<string, unknown>;
+      expect(result).toEqual({
+        summary: "run run-degraded: detail unavailable",
+        runId: "run-degraded",
+        runDir: null,
+        status: null,
+        runFacts: null,
+        decisionStatus: null,
+        pendingInteractions: null,
+        outcomeFacts: null,
+        failure: null,
+        outcomeBanner: null,
+        applyEligibility: null,
+        planReadiness: null,
+        council: null,
+        budget: null,
+        parentRunId: null,
+        delegatedFromRunId: null,
+        delegation: null,
+        detailProblem: {
+          code: problemCode,
+          message: `typed ${problemCode}`,
+          retryable,
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("also degrades malformed success and wrong receipt identity without partial authority", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
@@ -982,15 +1093,6 @@ describe("mcp daemon body mapping", () => {
       addr: { baseUrl: "http://x", token: "t" } as never,
     });
     const responses = [
-      {
-        ok: false,
-        status: 500,
-        json: async () => ({
-          code: "run_facts_invalid",
-          message: "canonical receipt is invalid",
-          retryable: false,
-        }),
-      },
       {
         ok: true,
         status: 200,
@@ -1014,11 +1116,7 @@ describe("mcp daemon body mapping", () => {
     vi.stubGlobal("fetch", fetchSpy);
     try {
       const runner = mcpSurfaceRunner();
-      for (const expectedCode of [
-        "run_facts_invalid",
-        "invalid_service_response",
-        "run_facts_invalid",
-      ]) {
+      for (const expectedCode of ["invalid_service_response", "run_facts_invalid"]) {
         const result = (await runner({
           mode: "__run_result",
           runId: "run-degraded",
@@ -1031,37 +1129,27 @@ describe("mcp daemon body mapping", () => {
           outcomeFacts: null,
           failure: null,
           applyEligibility: null,
+          council: null,
+          budget: null,
           parentRunId: null,
           delegatedFromRunId: null,
           detailProblem: { code: expectedCode },
         });
       }
-      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     } finally {
       connectSpy.mockRestore();
       vi.unstubAllGlobals();
     }
   });
 
-  it.each([
-    ["404", { ok: false, status: 404, json: async () => ({ error: "missing" }) }],
-    [
-      "auth",
-      {
-        ok: false,
-        status: 401,
-        json: async () => ({ code: "unauthorized", message: "denied", retryable: false }),
-      },
-    ],
-    [
-      "untyped integrity-looking 500",
-      {
-        ok: false,
-        status: 500,
-        json: async () => ({ code: "run_facts_invalid", message: "missing typed fields" }),
-      },
-    ],
-  ])("keeps public recovery %s as a tool error", async (_name, response) => {
+  it.each(
+    PUBLIC_RECOVERY_MODES.flatMap((mode) =>
+      (["404", "auth", "untyped integrity-looking 500", "transport"] as const).map(
+        (failureKind) => [mode, failureKind] as const,
+      ),
+    ),
+  )("keeps public %s %s as a tool error", async (mode, failureKind) => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
@@ -1070,49 +1158,50 @@ describe("mcp daemon body mapping", () => {
     });
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => response as never),
+      vi.fn(async () => {
+        if (failureKind === "transport") throw new Error("socket lost");
+        if (failureKind === "404") {
+          return { ok: false, status: 404, json: async () => ({ error: "missing" }) } as never;
+        }
+        if (failureKind === "auth") {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({ code: "unauthorized", message: "denied", retryable: false }),
+          } as never;
+        }
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ code: "run_facts_invalid", message: "missing typed fields" }),
+        } as never;
+      }),
     );
     try {
-      await expect(
-        mcpSurfaceRunner()({ mode: "__run_result", runId: "run-error" }),
-      ).rejects.toBeInstanceOf(Error);
+      const run = mcpSurfaceRunner()({ mode, runId: "run-error" });
+      if (failureKind === "transport") await expect(run).rejects.toThrow("socket lost");
+      else if (failureKind === "404") await expect(run).rejects.toThrow("missing");
+      else if (failureKind === "auth") {
+        await expect(run).rejects.toMatchObject({ code: "unauthorized" });
+      } else {
+        await expect(run).rejects.toMatchObject({ code: "run_facts_invalid" });
+      }
     } finally {
       connectSpy.mockRestore();
       vi.unstubAllGlobals();
     }
   });
 
-  it("keeps public recovery transport failure as a tool error", async () => {
-    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
-    const daemonRun = await import("./daemon-run.js");
-    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
-      client: {} as never,
-      addr: { baseUrl: "http://x", token: "t" } as never,
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => Promise.reject(new Error("socket lost"))),
-    );
-    try {
-      await expect(
-        mcpSurfaceRunner()({ mode: "__run_result", runId: "run-error" }),
-      ).rejects.toThrow("socket lost");
-    } finally {
-      connectSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("keeps delegation-belt recovery fail-closed when detail integrity hides lineage", async () => {
-    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
-    const daemonRun = await import("./daemon-run.js");
-    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
-      client: {} as never,
-      addr: { baseUrl: "http://x", token: "t" } as never,
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
+  it.each(BELT_RECOVERY_MODES)(
+    "keeps delegation-belt %s fail-closed when detail integrity hides lineage",
+    async (mode) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
+      });
+      const fetchSpy = vi.fn(async () => ({
         ok: false,
         status: 500,
         json: async () => ({
@@ -1120,20 +1209,22 @@ describe("mcp daemon body mapping", () => {
           message: "canonical receipt is invalid",
           retryable: false,
         }),
-      })) as never,
-    );
-    try {
-      await expect(
-        mcpSurfaceRunner({
-          requireExistingDaemon: true,
-          delegationParentRunId: "run-parent",
-        })({ mode: "__run_result", runId: "run-child" }),
-      ).rejects.toMatchObject({ code: "run_facts_invalid" });
-    } finally {
-      connectSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
+      }));
+      vi.stubGlobal("fetch", fetchSpy);
+      try {
+        await expect(
+          mcpSurfaceRunner({
+            requireExistingDaemon: true,
+            delegationParentRunId: "run-parent",
+          })({ mode, runId: "run-child" }),
+        ).rejects.toMatchObject({ code: "run_facts_invalid" });
+        expect(fetchSpy).toHaveBeenCalledOnce();
+      } finally {
+        connectSpy.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("preserves typed RunFailure in recovery projections", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
