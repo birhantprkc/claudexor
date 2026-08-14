@@ -1,5 +1,12 @@
 import Foundation
 
+@usableFromInline
+enum LocalDaemonBootPolicy {
+    /// A large recovered journal can keep the daemon below handshake readiness
+    /// for more than 30 seconds even though startup is making healthy progress.
+    @usableFromInline static let handshakeTimeout: TimeInterval = 90
+}
+
 enum LocalDaemonReconciliationDeferral: Sendable, Equatable {
     case busy
     case activityUnknown
@@ -106,7 +113,7 @@ actor LocalDaemonReconciler {
             DaemonLauncher.resolvedRuntime()
         },
         handshakePollInterval: TimeInterval = 0.5,
-        handshakePollTimeout: TimeInterval = 30
+        handshakePollTimeout: TimeInterval = LocalDaemonBootPolicy.handshakeTimeout
     ) {
         self.daemon = daemon
         self.lifecycleOwner = lifecycleOwner

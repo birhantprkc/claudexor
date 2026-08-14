@@ -3,7 +3,7 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
-- **v3.3.16** (2026-08-14) — The macOS packager now removes the exact
+- **v3.3.16** (2026-08-15) — The macOS packager now removes the exact
   pre-3.3.13 `dist/Claudexor.app` only after a successful Swift build produces
   the release executable; failed or incomplete builds preserve both app paths,
   and unrelated `dist` content survives. Data-root ownership is now explicit by
@@ -17,7 +17,9 @@ Release history for Claudexor. The current version is declared in the root
   results as denied. The built-in OpenRouter route now preserves finite
   non-negative `usage.cost`, including zero, as an exact USD receipt; explicit
   terminal provider-error completions fail with safe typed evidence, while
-  ordinary stop and length completions remain successful.
+  ordinary stop and length completions remain successful. Cold daemon starts
+  now wait up to 90 seconds for large journals instead of reporting failure
+  after 15 seconds while initialization continues in the background.
 
 - **v3.3.15** (2026-08-10) — Mutating delegated codex runs work again on
   macOS. Codex canonicalizes its `CODEX_HOME` at startup, and the Seatbelt

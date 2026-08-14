@@ -26,6 +26,12 @@ export { projectRunOutcomeFacts, mergeDaemonRunOutcome } from "./daemon-outcome.
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// A real journal-heavy default data root can spend tens of seconds replaying
+// and recovering before the socket and control API are ready. Both explicit
+// `daemon start` and acting-command auto-start use this one bounded budget so
+// neither reports a false failure while the detached daemon is still starting.
+export const DAEMON_START_READY_TIMEOUT_MS = 90_000;
+
 /** Is something accepting on the daemon socket right now? (cheap reachability probe). */
 async function daemonReachable(client: DaemonClientType): Promise<boolean> {
   return client.health().then(
@@ -74,7 +80,7 @@ async function controlApiReachable(): Promise<{
  * race to a foreign daemon (macOS app relaunch) this CLI then handshakes (#93).
  */
 export async function ensureDaemon(
-  timeoutMs = 30_000,
+  timeoutMs = DAEMON_START_READY_TIMEOUT_MS,
 ): Promise<{ client: DaemonClientType; addr: ControlApiAddress; engine: EngineIdentity }> {
   const token = ensureToken();
   const socketPath = defaultSocketPath();
@@ -164,7 +170,7 @@ export async function connectDaemonIfRunning(): Promise<{
  * propagates — waiting cannot fix an incompatible daemon (#93).
  */
 export async function waitForDaemonReady(
-  timeoutMs = 15_000,
+  timeoutMs = DAEMON_START_READY_TIMEOUT_MS,
 ): Promise<{ client: DaemonClientType; addr: ControlApiAddress } | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
