@@ -291,7 +291,7 @@ export const TokenUsage = z
     cached_input_tokens: z.number().int().nonnegative().nullable().default(null),
   })
   .describe(
-    "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it (cursor reports cost only; raw-api has no cached), so unreported never reads as 0. Do NOT sum into a grand total: codex cached is a subset of input while claude cached is disjoint from input.",
+    "Token usage summed from harness usage events; money is tracked separately in the budget ledger, not here. Each field is null until a harness reports it, so unreported never reads as 0. The relation between cached_input_tokens and input_tokens is harness-specific; do not derive a grand total.",
   );
 export type TokenUsage = z.infer<typeof TokenUsage>;
 

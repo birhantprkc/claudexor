@@ -41,6 +41,8 @@ export interface RetentionRunRecord {
   finishedAt?: string;
 }
 
+type DataRootMode = "default" | "override";
+
 export interface RetentionDeps {
   projects: () => RetentionProject[];
   /** The daemon's journal-projected command records (terminality truth). */
@@ -67,21 +69,20 @@ export interface RetentionDeps {
    * plugins, quota, and workspaces directly at its top level). Injected from
    * composition beside dataRoot; absent defaults to "default".
    */
-  dataRootMode?: "default" | "override";
+  dataRootMode?: DataRootMode;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOMBSTONE = "tombstone.yaml";
 /**
  * Exact top-level names the engine (or its documented operator surface) owns
- * inside the DEFAULT `~/.claudexor` data root. Everything else at the top
- * level is a foreign entry the engine will never touch: the receipt names it
- * so the operator can see their own debris. Dotfiles are treated as
- * config/service files and never reported.
+ * in BOTH data-root modes. The default root retains these legacy top-level
+ * names from pre-generation layouts; an explicit override is itself the
+ * complete active root and owns the same direct names. Everything else is
+ * foreign debris. Dotfiles are treated as config/service files and omitted.
  */
-const DEFAULT_ROOT_OWNED_ENTRIES = new Set([
+const COMMON_ROOT_OWNED_ENTRIES = new Set([
   // current engine + documented operator dirs
-  "v3",
   "node",
   "profiles",
   "runtime",
@@ -102,19 +103,22 @@ const DEFAULT_ROOT_OWNED_ENTRIES = new Set([
   "config.yaml",
 ]);
 /**
- * Owned names under an explicit CLAUDEXOR_CONFIG_DIR override root, where the
- * override IS the complete relocatable tree: the engine also writes
- * `secrets.json`, `plugins`, `quota`, and `workspaces` directly at the top
- * level (in the default mode those live under the v3 generation subtree, so
- * a top-level copy there is foreign debris and IS reported).
+ * Mode-specific owned names. The default root owns the archived v2 generation
+ * and active v3 generation. An explicit CLAUDEXOR_CONFIG_DIR override is the
+ * complete active tree: it owns direct secrets/plugins/quota/workspaces but no
+ * generation children. v1-era data was unversioned directly under the default
+ * root, so neither mode owns a `v1` child.
  */
-const OVERRIDE_ROOT_OWNED_ENTRIES = new Set([
-  ...DEFAULT_ROOT_OWNED_ENTRIES,
-  "secrets.json",
-  "plugins",
-  "quota",
-  "workspaces",
-]);
+const ROOT_OWNED_ENTRIES_BY_MODE: Record<DataRootMode, ReadonlySet<string>> = {
+  default: new Set([...COMMON_ROOT_OWNED_ENTRIES, "v2", "v3"]),
+  override: new Set([
+    ...COMMON_ROOT_OWNED_ENTRIES,
+    "secrets.json",
+    "plugins",
+    "quota",
+    "workspaces",
+  ]),
+};
 /** Owned names the engine expects as plain FILES; every other owned name is a directory. */
 const ENGINE_OWNED_FILE_ENTRIES = new Set(["config.yaml", "secrets.json"]);
 
@@ -129,8 +133,8 @@ const ENGINE_OWNED_FILE_ENTRIES = new Set(["config.yaml", "secrets.json"]);
  * the caller degrades that to an errors[] entry and an ABSENT field, never a
  * misleading empty list and never a failed pass.
  */
-function scanDataRootUnrecognized(dataRoot: string, mode: "default" | "override"): string[] {
-  const owned = mode === "override" ? OVERRIDE_ROOT_OWNED_ENTRIES : DEFAULT_ROOT_OWNED_ENTRIES;
+function scanDataRootUnrecognized(dataRoot: string, mode: DataRootMode): string[] {
+  const owned = ROOT_OWNED_ENTRIES_BY_MODE[mode];
   const report: string[] = [];
   for (const entry of readdirSync(dataRoot, { withFileTypes: true })) {
     const name = entry.name;

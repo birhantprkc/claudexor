@@ -270,8 +270,9 @@ export function userConfigDir(): string {
 /**
  * This build's generation-versioned default root, INDEPENDENT of the
  * CLAUDEXOR_CONFIG_DIR override. v3 is an intentionally empty, non-migrating
- * namespace: the untouched older roots (v2, v1) ARE the archive (owner
- * decision, v3.0.0 plan). Keeping the version boundary in the default root
+ * namespace: the untouched v2 generation is the archive, while v1-era data
+ * remains unversioned directly under `~/.claudexor` (owner decision, v3.0.0
+ * plan). Keeping the version boundary in the default root
  * prevents the daemon from even probing older config, trust, secret, token,
  * or journal bytes whose contracts this generation deleted. An explicit
  * CLAUDEXOR_CONFIG_DIR remains the hermetic test/operator override and is

@@ -8,11 +8,13 @@ import { createRetentionRunner } from "./retention-service.js";
 
 const roots: string[] = [];
 let previousConfigDir: string | undefined;
+let previousHome: string | undefined;
 
 beforeEach(() => {
   // Run trees live in the per-project RUNTIME dir under the user config dir,
   // not inside the repo — scope it so fixtures never touch the real one.
   previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+  previousHome = process.env.HOME;
   const configDir = mkdtempSync(join(tmpdir(), "claudexor-retention-cfg-"));
   roots.push(configDir);
   process.env.CLAUDEXOR_CONFIG_DIR = configDir;
@@ -25,6 +27,8 @@ beforeEach(() => {
 afterEach(() => {
   if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
   else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -62,6 +66,40 @@ function deps(input: {
 const ancient = new Date(Date.now() - 400 * 24 * 3600 * 1000).toISOString();
 
 describe("retention service composition", () => {
+  it("selects generation ownership from the real default and override roots", async () => {
+    const home = mkdtempSync(join(tmpdir(), "claudexor-retention-home-"));
+    roots.push(home);
+    process.env.HOME = home;
+    delete process.env.CLAUDEXOR_CONFIG_DIR;
+    const defaultRoot = join(home, ".claudexor");
+    for (const name of ["v1", "v2", "v3"]) mkdirSync(join(defaultRoot, name), { recursive: true });
+    writeFileSync(
+      join(defaultRoot, "v3", "config.yaml"),
+      "retention:\n  keep_last_runs_per_project: 0\n",
+    );
+
+    const defaultReceipt = await createRetentionRunner(
+      deps({ projectRoots: [], healthyRoots: [], records: [] }),
+    )({ dry_run: true, data_root_report: true });
+    expect(defaultReceipt.data_root_unrecognized).toEqual(["v1"]);
+
+    const overrideRoot = mkdtempSync(join(tmpdir(), "claudexor-retention-override-"));
+    roots.push(overrideRoot);
+    process.env.CLAUDEXOR_CONFIG_DIR = overrideRoot;
+    for (const name of ["v1", "v2", "v3"]) {
+      mkdirSync(join(overrideRoot, name), { recursive: true });
+    }
+    writeFileSync(
+      join(overrideRoot, "config.yaml"),
+      "retention:\n  keep_last_runs_per_project: 0\n",
+    );
+
+    const overrideReceipt = await createRetentionRunner(
+      deps({ projectRoots: [], healthyRoots: [], records: [] }),
+    )({ dry_run: true, data_root_report: true });
+    expect(overrideReceipt.data_root_unrecognized).toEqual(["v1", "v2", "v3"]);
+  });
+
   it("fails CLOSED for a project whose partition journal is quarantined (W3.6)", async () => {
     // The reference set (listThreads/turnsFor) only spans READY partitions. If
     // a quarantined project's runs were still swept, they would be judged

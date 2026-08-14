@@ -38,6 +38,7 @@ DIST="$MACOS_DIR/dist"
 # apps. Final artifacts (DMG/ZIP/sha256/SBOM) stay directly in $DIST.
 BUNDLES="$DIST/bundle.noindex"
 APP="$BUNDLES/Claudexor.app"
+LEGACY_APP="$DIST/Claudexor.app"
 
 # Version SSOT is the generated CLAUDEXOR_VERSION constant (scripts/gen-version.mjs
 # from the root package.json). Read it so the bundle / DMG version can't silently
@@ -81,7 +82,7 @@ BIN="$APP_PKG/.build/release/ClaudexorApp"
 
 echo "==> Assembling $APP"
 mkdir -p "$BUNDLES"
-rm -rf "$APP"
+rm -rf "$LEGACY_APP" "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ClaudexorApp"
 

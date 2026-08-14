@@ -155,9 +155,9 @@ export interface AttemptTelemetry {
   outcome: AttemptOutcomeState | null;
   /** Token usage summed across this attempt's usage events (money stays in the
    * ledger, not here). Each field is null until at least one usage event
-   * reports it — cursor reports cost only (all null), raw-api has no cached —
-   * so "not reported" is never conflated with a real 0. Cross-harness caution:
-   * codex `cached ⊆ input`, claude `cached ∩ input = ∅` — never derive a total. */
+   * reports it, so "not reported" is never conflated with a real 0. The
+   * relation between cached and input tokens is harness-specific; never derive
+   * a cross-harness grand total. */
   usage: {
     inputTokens: number | null;
     outputTokens: number | null;

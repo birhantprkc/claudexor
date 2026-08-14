@@ -181,6 +181,17 @@ function parseCursorEventStateful(
     ];
   }
 
+  if (type === "user") {
+    const content = obj.message?.content;
+    const isPromptEcho =
+      obj.message?.role === "user" &&
+      Array.isArray(content) &&
+      content.length > 0 &&
+      content.every((block: Json) => block?.type === "text" && typeof block.text === "string") &&
+      content.some((block: Json) => block.text.length > 0);
+    if (isPromptEcho) return [];
+  }
+
   if (type === "assistant") {
     // --stream-partial-output taxonomy (official docs, F2.5 W-C4): a new-text
     // DELTA has timestamp_ms and no model_call_id; a buffered duplicate has
@@ -248,6 +259,12 @@ function parseCursorEventStateful(
     const rejected = Boolean(
       result && typeof result === "object" && "rejected" in result && result.rejected,
     );
+    const permissionDenied = Boolean(
+      result &&
+      typeof result === "object" &&
+      "permissionDenied" in result &&
+      result.permissionDenied,
+    );
     const nativeFailure =
       result &&
       typeof result === "object" &&
@@ -260,7 +277,8 @@ function parseCursorEventStateful(
       nativeFailure ||
       (result && typeof result === "object" && "error" in result && result.error);
     const detail = resultSummary(result);
-    const status: ToolRef["status"] = rejected ? "denied" : failed ? "error" : "ok";
+    const status: ToolRef["status"] =
+      rejected || permissionDenied ? "denied" : failed ? "error" : "ok";
     const kind = origin?.kind ?? toolKindFor(variant);
     // Plan mode is READ-ONLY exploration: a read/search that misses (a probed
     // path that does not exist) is speculative negative information, never a
@@ -354,12 +372,30 @@ function parseCursorEventStateful(
 
   if (type === "result") {
     const out: HarnessEvent[] = [];
+    const nativeUsage =
+      obj.usage && typeof obj.usage === "object" ? (obj.usage as Record<string, unknown>) : {};
+    const usage: NonNullable<HarnessEvent["usage"]> = {};
+    if (typeof nativeUsage.inputTokens === "number") {
+      usage.input_tokens = nativeUsage.inputTokens;
+    }
+    if (typeof nativeUsage.outputTokens === "number") {
+      usage.output_tokens = nativeUsage.outputTokens;
+    }
+    const cachedTokens = [nativeUsage.cacheReadTokens, nativeUsage.cacheWriteTokens].filter(
+      (value): value is number => typeof value === "number",
+    );
+    if (cachedTokens.length > 0) {
+      usage.cached_input_tokens = cachedTokens.reduce((sum, value) => sum + value, 0);
+    }
     if (typeof obj.total_cost_usd === "number") {
+      usage.cost_usd = obj.total_cost_usd;
+    }
+    if (Object.keys(usage).length > 0) {
       out.push({
         type: "usage",
         session_id: sessionId,
         ts,
-        usage: { cost_usd: obj.total_cost_usd },
+        usage,
       });
     }
     // Finality only for a SUCCESS result (review sol #1): an is_error / non-
