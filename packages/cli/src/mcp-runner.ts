@@ -1,4 +1,9 @@
-import { isTerminalLifecycle, ModeKind, type RunOutcomeFacts } from "@claudexor/schema";
+import {
+  ControlProblem,
+  isTerminalLifecycle,
+  ModeKind,
+  type RunOutcomeFacts,
+} from "@claudexor/schema";
 import {
   connectDaemonIfRunning,
   daemonOutcomeSummary,
@@ -13,9 +18,16 @@ import {
   projectRunPrimaryOutput,
 } from "./run-detail-projections.js";
 import { primaryOutputForCli } from "./primary-output.js";
+import { controlProblemError } from "./cli-error.js";
 import { controlApiFetch, type ControlApiAddress } from "./live.js";
 import { absentDaemonRecovery, BELT_DAEMON_LOST } from "./mcp-daemon-unavailable.js";
-import { projectImmediateRunDetail, projectRecoveryRunDetail } from "./mcp-run-projections.js";
+import {
+  isRecoverableRunDetailIntegrityProblem,
+  projectDegradedRecoveryRunDetail,
+  projectImmediateRunDetail,
+  projectRecoveryRunDetail,
+} from "./mcp-run-projections.js";
+import { readRunDetailResponse } from "./run-detail-response.js";
 
 export interface SurfaceRunnerHooks {
   onEvent?: (event: any) => void;
@@ -160,29 +172,27 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
       ...(onPollTick ? { onPollTick } : {}),
     });
     try {
-      // The derived apply verdict rides the result (single producer: the run
-      // detail endpoint). The post-terminal detail read DEGRADES: a missing/
-      // legacy detail projects null fields, and a raised typed problem —
-      // especially 500 run_facts_invalid, the server's verdict that the run's
-      // receipt cannot be trusted — rides the result as `detailProblem` with
-      // the runId preserved instead of erasing the finished run's outcome.
-      // A deferred MCP call normally returns while the run is still live, but
-      // the bind/status race may already observe a terminal. Project detail
-      // from ACTUAL lifecycle truth; never delay an ordinary running handle.
       let detail: Record<string, unknown> | null = null;
+      let canonicalPrimary: ReturnType<typeof projectRunPrimaryOutput> = null;
+      let detailProjection = projectImmediateRunDetail(null, { runId: out.runId });
       let detailProblem: ReturnType<typeof describeRunDetailProblem> | null = null;
       if (p?.deferred !== true || isTerminalLifecycle(out.status)) {
         try {
           detail = await fetchRunDetail(addr, out.runId);
+          detailProjection = projectImmediateRunDetail(detail, {
+            runId: out.runId,
+            ...(isTerminalLifecycle(out.status)
+              ? { lifecycle: out.status as RunOutcomeFacts["lifecycle"] }
+              : {}),
+          });
+          canonicalPrimary = projectRunPrimaryOutput(detail);
         } catch (error) {
+          detail = null;
           detailProblem = describeRunDetailProblem(error);
+          detailProjection = projectImmediateRunDetail(null, { runId: out.runId });
         }
       }
-      // Canonical output comes from that same detail read (bounded, redacted,
-      // mode-aware). Read local artifacts only when detail was attempted but
-      // unavailable; this preserves a useful terminal result without creating a
-      // second normal-path artifact owner.
-      const canonicalPrimary = projectRunPrimaryOutput(detail);
+      // Local artifacts remain only the established soft-absence fallback.
       const localFallback =
         (p?.deferred !== true || isTerminalLifecycle(out.status)) &&
         !detail &&
@@ -197,7 +207,6 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
           : null;
       const primary = canonicalPrimary ?? localFallback;
       const presented = presentRunPrimaryOutput(primary);
-      const detailProjection = projectImmediateRunDetail(detail);
       const reason = daemonOutcomeSummary({
         ...out,
         outcomeFacts: detailProjection.outcomeFacts ?? undefined,
@@ -207,14 +216,6 @@ export function mcpSurfaceRunner(options: McpSurfaceRunnerOptions = {}) {
         detailProjection.outcomeBanner ??
         reason ??
         (primary?.kind === "patch" ? "patch produced (see artifacts)" : `run ${out.status}`);
-      // The sub-run's real settled spend rides the result so the delegation belt
-      // can reconcile its budget reservation against the actual drawn amount
-      // (single producer: the run-detail budget projection). Deferred calls return
-      // before terminal, so spend is not yet settled — null (the belt then keeps
-      // its reservation committed fail-closed rather than seeing spend 0).
-      // Council membership + merge disclosure (QA-023b) rides the result so an MCP
-      // host that asked for `--council` can machine-verify it was really N/N and
-      // who merged. Terminal projection — null on a deferred (still-live) handle.
       return {
         runId: out.runId,
         runDir: out.runDir,
@@ -271,20 +272,21 @@ async function recoveryQuery(
   const conn = await connectDaemonIfRunning();
   if (!conn) return absentDaemonRecovery(mode, context.beltContext);
   const { addr } = conn;
-  const get = async (path: string): Promise<Record<string, unknown>> => {
+  const get = async (path: string, runDetail = false): Promise<Record<string, unknown>> => {
     const res = await controlApiFetch(addr, path, {
       headers: { authorization: `Bearer ${addr.token}` },
     });
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok)
-      throw new Error(
-        typeof body["message"] === "string"
-          ? (body["message"] as string)
-          : typeof body["error"] === "string"
-            ? (body["error"] as string)
-            : `HTTP ${res.status} for ${path}`,
-      );
-    return body;
+    if (res.ok) {
+      return runDetail
+        ? readRunDetailResponse(res)
+        : ((await res.json()) as Record<string, unknown>);
+    }
+    const body: unknown = await res.json().catch(() => ({}));
+    const error = controlProblemError(res.status, body, `HTTP ${res.status} for ${path}`);
+    Object.assign(error, {
+      mcpRecoveryTypedControlProblem: ControlProblem.safeParse(body).success,
+    });
+    throw error;
   };
   if (mode === "__runs_list") {
     // GET /runs is a BOUNDED keyset page (QA-052): a single read undercounts the
@@ -334,15 +336,20 @@ async function recoveryQuery(
   }
   if (!runId) throw new Error("runId is required");
   if (mode === "__run_inspect" || mode === "__run_status" || mode === "__run_result") {
-    const detail = await get(`/runs/${encodeURIComponent(runId)}`);
-    return projectRecoveryRunDetail(
-      mode,
-      runId,
-      detail,
+    const parent =
       typeof input["delegatedFromRunId"] === "string"
         ? (input["delegatedFromRunId"] as string)
-        : undefined,
-    );
+        : undefined;
+    const scopedRecovery = context.beltContext || parent !== undefined;
+    try {
+      const detail = await get(`/runs/${encodeURIComponent(runId)}`, true);
+      return projectRecoveryRunDetail(mode, runId, detail, parent);
+    } catch (error) {
+      if (scopedRecovery || !isRecoverableRunDetailIntegrityProblem(error)) {
+        throw error;
+      }
+      return projectDegradedRecoveryRunDetail(runId, error);
+    }
   }
   if (mode === "__run_cancel") {
     const res = await controlApiFetch(addr, `/runs/${encodeURIComponent(runId)}/control`, {
