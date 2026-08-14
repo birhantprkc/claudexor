@@ -14,12 +14,13 @@ import { arch, homedir, platform } from "node:os";
 import { join } from "node:path";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import {
+  type DaemonWriterLeaseStatus,
   type RuntimeReplacementIdentity,
   type RuntimeReplacementTarget,
   awaitDaemonTermination,
-  daemonLeaseOwner,
   daemonDir,
   defaultSocketPath,
+  inspectDaemonWriterLease,
   socketAlive,
 } from "@claudexor/daemon";
 import { type ParsedArgs } from "./args.js";
@@ -27,7 +28,11 @@ import { ensureDaemon, connectDaemonIfRunning } from "./daemon-run.js";
 import { controlApiFetch, CONTROL_PROTOCOL_MAJOR, handshakeControlApi } from "./live.js";
 import { printJson, printUsageError } from "./cli-io.js";
 import { resolveSetupLoginRunnerPath } from "./setup-job-support.js";
-import { admitAndAwaitRuntimeReplacementStop } from "./runtime-replacement-stop.js";
+import {
+  admitAndAwaitRuntimeReplacementStop,
+  decideRuntimeReplacementWithoutControl,
+  runtimeReplacementCapableOwner,
+} from "./runtime-replacement-stop.js";
 
 function runtimeTarget(): string {
   return `${platform()}-${arch()}`;
@@ -92,20 +97,57 @@ export function assertRemoteEngineIdentity(
   return { version: expectedVersion, buildSha: expectedBuildSha };
 }
 
-async function stop(expectedVersion: string, expectedBuildSha: string): Promise<number> {
-  const daemon = await connectDaemonIfRunning();
+interface RemoteRuntimeStopDeps {
+  connect(): ReturnType<typeof connectDaemonIfRunning>;
+  socketPath(): string;
+  socketReachable(path: string): Promise<boolean>;
+  inspectLease(path: string): DaemonWriterLeaseStatus;
+}
+
+const productionRemoteRuntimeStopDeps: RemoteRuntimeStopDeps = {
+  connect: connectDaemonIfRunning,
+  socketPath: defaultSocketPath,
+  socketReachable: socketAlive,
+  inspectLease: inspectDaemonWriterLease,
+};
+
+function runtimeActivityUnknown(message: string): Error {
+  return Object.assign(new Error(message), {
+    code: "runtime_activity_unknown",
+    status: 503,
+    retryable: true,
+  });
+}
+
+export async function stopRemoteDaemonForRuntimeReplacement(
+  expectedVersion: string,
+  expectedBuildSha: string,
+  deps: RemoteRuntimeStopDeps = productionRemoteRuntimeStopDeps,
+): Promise<number> {
+  const socketPath = deps.socketPath();
+  const daemon = await deps.connect();
   if (!daemon) {
-    if (daemonLeaseOwner(defaultSocketPath()) || (await socketAlive(defaultSocketPath()))) {
-      throw new Error("remote daemon is running but its Control API identity cannot be verified");
+    const decision = decideRuntimeReplacementWithoutControl(
+      await deps.socketReachable(socketPath),
+      deps.inspectLease(socketPath),
+    );
+    if (decision.status === "activity_unknown") {
+      throw runtimeActivityUnknown(decision.detail);
     }
     printJson({ ok: true, stopped: true, alreadyStopped: true });
     return 0;
   }
   const identity = await handshakeControlApi(daemon.addr, "claudexor-macos-remote-stop");
   const expectedIdentity = assertRemoteEngineIdentity(identity, expectedVersion, expectedBuildSha);
-  const expectedOwner = daemonLeaseOwner(defaultSocketPath());
+  // Bind the target from a fresh strict inspection immediately before the
+  // target-bound admission RPC. Control reachability cannot upgrade an
+  // absent, stale, or unknown lease into signal authority.
+  const lease = deps.inspectLease(socketPath);
+  const expectedOwner = runtimeReplacementCapableOwner(lease);
   if (!expectedOwner) {
-    throw new Error("remote daemon is live but its writer-lease identity cannot be verified");
+    throw runtimeActivityUnknown(
+      "remote daemon is live but its writer-lease activity cannot be verified",
+    );
   }
   const expectedTarget: RuntimeReplacementTarget = {
     ...expectedIdentity,
@@ -113,7 +155,7 @@ async function stop(expectedVersion: string, expectedBuildSha: string): Promise<
   };
   const termination = await admitAndAwaitRuntimeReplacementStop(
     () => daemon.client.shutdownForRuntimeReplacement(expectedTarget),
-    (options) => awaitDaemonTermination(defaultSocketPath(), options),
+    (options) => awaitDaemonTermination(socketPath, options),
     expectedOwner,
   );
   if (termination.outcome === "still_alive") {
@@ -216,7 +258,7 @@ export async function remoteCommand(args: ParsedArgs, json: boolean): Promise<nu
         "usage: claudexor remote stop <expectedVersion> <expectedBuildSha> --json",
       );
     }
-    return stop(expectedVersion, expectedBuildSha);
+    return stopRemoteDaemonForRuntimeReplacement(expectedVersion, expectedBuildSha);
   }
   if (sub === "activate" || sub === "rollback") {
     const expected = args._[2];

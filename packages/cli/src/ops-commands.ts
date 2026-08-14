@@ -12,6 +12,7 @@ import {
   awaitDaemonTermination,
   defaultSocketPath,
   ensureDaemonRuntimeRoot,
+  inspectDaemonWriterLease,
   logPath,
   readToken,
   rotateToken,
@@ -45,6 +46,28 @@ import {
 import { DAEMON_START_READY_TIMEOUT_MS, ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
+
+interface OperatorDaemonStopDeps {
+  inspectLease: typeof inspectDaemonWriterLease;
+  shutdown(): Promise<unknown>;
+  awaitTermination: typeof awaitDaemonTermination;
+}
+
+/** Pin strict signal authority before the asynchronous operator-stop RPC. */
+export async function stopDaemonForOperator(
+  socketPath: string,
+  deps: OperatorDaemonStopDeps,
+): ReturnType<typeof awaitDaemonTermination> {
+  const lease = deps.inspectLease(socketPath);
+  const expectedOwner =
+    lease.status === "owned" && lease.capability.status === "capable" ? lease.owner : null;
+  await deps.shutdown();
+  return deps.awaitTermination(socketPath, {
+    allowSigkill: expectedOwner !== null,
+    ...(expectedOwner === null ? {} : { expectedOwner }),
+    requireNoSuccessor: false,
+  });
+}
 
 export function dispatchOpsCommand(
   command: string,
@@ -172,14 +195,13 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
       return 0;
     }
     if (sub === "stop") {
-      await client.shutdown();
       // "stop requested" is not "stopped" (W3.5): confirm the daemon's death
       // before reporting success, so scripts and test disposers can trust the
       // exit code instead of racing a still-live process.
-      const termination = await awaitDaemonTermination(defaultSocketPath(), {
-        // This command is the user's explicit forceful operator stop. Runtime
-        // replacement never inherits this signal authority implicitly.
-        allowSigkill: true,
+      const termination = await stopDaemonForOperator(defaultSocketPath(), {
+        inspectLease: inspectDaemonWriterLease,
+        shutdown: () => client.shutdown(),
+        awaitTermination: awaitDaemonTermination,
       });
       if (termination.outcome === "still_alive") {
         // D-7 projector: one failure envelope; the stop-state facts ride as

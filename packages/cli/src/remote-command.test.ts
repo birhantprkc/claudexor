@@ -9,12 +9,28 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { type DaemonWriterLeaseStatus } from "@claudexor/daemon";
 import {
   assertRemoteEngineIdentity,
   claimSetupAttachment,
+  stopRemoteDaemonForRuntimeReplacement,
   switchRemoteRuntimePointer,
 } from "./remote-command.js";
+
+const STALE_LEASE = {
+  status: "owned",
+  path: "/tmp/claudexord.sock.writer",
+  owner: { pid: 4242, token: "stale-owner" },
+  capability: {
+    status: "proven_stale",
+    reason: "process_missing",
+    observation: {
+      identity: { status: "missing", pid: 4242, platform: "linux" },
+      linuxState: null,
+    },
+  },
+} satisfies DaemonWriterLeaseStatus;
 
 describe("remote setup attach", () => {
   it("claims a sealed client PTY job exactly once with a private marker", () => {
@@ -45,6 +61,40 @@ describe("remote runtime lifecycle", () => {
     expect(() =>
       assertRemoteEngineIdentity({ engineVersion: null, engineBuildSha: null }, "3.4.0", sha),
     ).toThrow(/identity mismatch/);
+  });
+
+  it("wires the shared no-Control policy for an unreachable proven-stale lease", async () => {
+    const output: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((value: unknown) => {
+      output.push(String(value));
+      return true;
+    });
+    let inspections = 0;
+    try {
+      await expect(
+        stopRemoteDaemonForRuntimeReplacement("3.4.0", "a".repeat(40), {
+          connect: async () => null,
+          socketPath: () => "/tmp/claudexord.sock",
+          socketReachable: async (path) => {
+            expect(path).toBe("/tmp/claudexord.sock");
+            return false;
+          },
+          inspectLease: (path) => {
+            expect(path).toBe("/tmp/claudexord.sock");
+            inspections += 1;
+            return STALE_LEASE;
+          },
+        }),
+      ).resolves.toBe(0);
+      expect(inspections).toBe(1);
+      expect(JSON.parse(output.join(""))).toEqual({
+        ok: true,
+        stopped: true,
+        alreadyStopped: true,
+      });
+    } finally {
+      stdout.mockRestore();
+    }
   });
 
   it("atomically CAS-switches immutable activation and rollback pointers", () => {

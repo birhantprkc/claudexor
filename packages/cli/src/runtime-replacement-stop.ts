@@ -2,11 +2,12 @@ import {
   type AwaitDaemonTerminationOptions,
   type DaemonTerminationOutcome,
   type DaemonLeaseOwner,
+  type DaemonWriterLeaseStatus,
   DaemonClient,
-  daemonLeaseOwner,
   type RuntimeReplacementTarget,
   awaitDaemonTermination,
   defaultSocketPath,
+  inspectDaemonWriterLease,
   readToken,
   socketAlive,
 } from "@claudexor/daemon";
@@ -15,7 +16,7 @@ interface RuntimeReplacementStopDeps {
   socketPath(): string;
   readToken(): string | null;
   socketAlive(path: string): Promise<boolean>;
-  leaseOwner(path: string): DaemonLeaseOwner | null;
+  inspectLease(path: string): DaemonWriterLeaseStatus;
   client(path: string, token: string): Pick<DaemonClient, "shutdownForRuntimeReplacement">;
   awaitTermination(
     path: string,
@@ -28,7 +29,7 @@ const productionDeps: RuntimeReplacementStopDeps = {
   socketPath: defaultSocketPath,
   readToken,
   socketAlive,
-  leaseOwner: daemonLeaseOwner,
+  inspectLease: inspectDaemonWriterLease,
   client: (path, token) => new DaemonClient(path, token),
   awaitTermination: awaitDaemonTermination,
   write: (line) => process.stdout.write(line),
@@ -88,6 +89,47 @@ function writeRefusal(
 ): void {
   deps.write(`${JSON.stringify({ stopped: false, code, retryable: true, detail })}\n`);
   process.exitCode = 1;
+}
+
+/** Shared no-Control decision for local and remote runtime replacement.
+ * This policy never selects a target: only a physically absent or positively
+ * stale lease alongside an unreachable socket proves idempotent stop. */
+export function decideRuntimeReplacementWithoutControl(
+  socketReachable: boolean,
+  lease: DaemonWriterLeaseStatus,
+): { status: "already_stopped" } | { status: "activity_unknown"; detail: string } {
+  if (socketReachable) {
+    return {
+      status: "activity_unknown",
+      detail: "runtime replacement found a reachable daemon socket without verified Control",
+    };
+  }
+  if (
+    lease.status === "absent" ||
+    (lease.status === "owned" && lease.capability.status === "proven_stale")
+  ) {
+    return { status: "already_stopped" };
+  }
+  if (lease.status === "unknown") {
+    return {
+      status: "activity_unknown",
+      detail: `runtime replacement cannot verify writer-lease authority (${lease.reason})`,
+    };
+  }
+  return {
+    status: "activity_unknown",
+    detail:
+      lease.capability.status === "capable"
+        ? "runtime replacement found a capable writer lease but no reachable daemon socket"
+        : "runtime replacement cannot verify writer-lease activity",
+  };
+}
+
+/** Package-private projection for the authenticated local and remote paths. */
+export function runtimeReplacementCapableOwner(
+  lease: DaemonWriterLeaseStatus,
+): DaemonLeaseOwner | null {
+  return lease.status === "owned" && lease.capability.status === "capable" ? lease.owner : null;
 }
 
 /** One owner for the admission/termination uncertainty boundary used by both
@@ -156,16 +198,9 @@ export async function runStopIfRequested(
   const socketPath = deps.socketPath();
   const alive = await deps.socketAlive(socketPath);
   if (!alive) {
-    // A daemon claims the writer lease before it binds the socket. Treating the
-    // boot window as absence would let the installer move the runtime pointer
-    // beneath that live process. Idempotent success therefore requires both
-    // surfaces to prove absence, matching the remote replacement path.
-    if (deps.leaseOwner(socketPath)) {
-      writeRefusal(
-        deps,
-        "runtime_activity_unknown",
-        "runtime replacement found a writer lease but no reachable daemon socket",
-      );
+    const decision = decideRuntimeReplacementWithoutControl(false, deps.inspectLease(socketPath));
+    if (decision.status === "activity_unknown") {
+      writeRefusal(deps, "runtime_activity_unknown", decision.detail);
       return true;
     }
     deps.write(`${JSON.stringify({ stopped: true, alreadyStopped: true })}\n`);
@@ -173,14 +208,17 @@ export async function runStopIfRequested(
   }
   const token = deps.readToken();
   if (!token) {
-    writeRefusal(
-      deps,
-      "runtime_activity_unknown",
-      "runtime replacement cannot authenticate to the live daemon",
-    );
-    return true;
+    const decision = decideRuntimeReplacementWithoutControl(true, deps.inspectLease(socketPath));
+    if (decision.status === "activity_unknown") {
+      writeRefusal(deps, "runtime_activity_unknown", decision.detail);
+      return true;
+    }
+    throw new Error("reachable socket unexpectedly classified as already stopped");
   }
-  const expectedOwner = deps.leaseOwner(socketPath);
+  // Select the target from a fresh strict inspection immediately before the
+  // target-bound admission RPC. Stale, absent, or unknown authority cannot be
+  // turned into a signal target even when the socket itself is reachable.
+  const expectedOwner = runtimeReplacementCapableOwner(deps.inspectLease(socketPath));
   if (!expectedOwner) {
     writeRefusal(
       deps,
