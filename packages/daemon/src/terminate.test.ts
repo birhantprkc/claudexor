@@ -370,6 +370,129 @@ describe("awaitDaemonTermination", () => {
     });
   });
 
+  it.each([
+    {
+      name: "capable successor",
+      freshLease: owned(SUCCESSOR, identityMatch(SUCCESSOR)),
+      outcome: "still_alive",
+      detail: "successor pid 5151",
+    },
+    {
+      name: "unknown-capability successor",
+      freshLease: owned(SUCCESSOR, unknownCapability(SUCCESSOR)),
+      outcome: "still_alive",
+      detail: "successor pid 5151",
+    },
+    {
+      name: "unknown lease",
+      freshLease: unknownLease("owner_unreadable"),
+      outcome: "still_alive",
+      detail: "writer-lease activity is unknown (owner_unreadable)",
+    },
+    {
+      name: "proven-stale successor",
+      freshLease: owned(SUCCESSOR, stale("linux_zombie", SUCCESSOR)),
+      outcome: "exited",
+      detail: "stale pid 5151",
+    },
+  ] as const)(
+    "rechecks a $name after the pre-signal target becomes stale",
+    async ({ freshLease, outcome, detail }) => {
+      let transitioned = false;
+      let nowCalls = 0;
+      let sleepCalls = 0;
+      let requireNoSuccessorReads = 0;
+      const kills: Array<[number, NodeJS.Signals]> = [];
+      const fixture = sequenceAuthority([owned(OWNER, identityMatch()), freshLease], (owner) =>
+        transitioned ? stale("identity_mismatch", owner) : identityMatch(owner),
+      );
+
+      const result = await awaitDaemonTermination(
+        SOCKET_PATH,
+        {
+          expectedOwner: OWNER,
+          deadlineMs: 500,
+          killAfterMs: 0,
+          pollMs: 100,
+          allowSigkill: true,
+          get requireNoSuccessor() {
+            requireNoSuccessorReads += 1;
+            return requireNoSuccessorReads === 1;
+          },
+        },
+        {
+          kill: (pid, signal) => kills.push([pid, signal]),
+          sleep: async () => {
+            sleepCalls += 1;
+          },
+          now: () => {
+            nowCalls += 1;
+            if (nowCalls === 2) transitioned = true;
+            return nowCalls === 1 ? 0 : 100;
+          },
+        },
+        fixture.authority,
+      );
+
+      expect(result).toMatchObject({ outcome });
+      expect(result.detail).toContain(detail);
+      expect({
+        nowCalls,
+        sleepCalls,
+        requireNoSuccessorReads,
+        inspectCalls: fixture.inspectCalls(),
+        kills,
+      }).toEqual({
+        nowCalls: 2,
+        sleepCalls: 0,
+        requireNoSuccessorReads: 1,
+        inspectCalls: 2,
+        kills: [],
+      });
+      expect(fixture.classified).toEqual([OWNER, OWNER]);
+    },
+  );
+
+  it("does not add a successor inspection when the caller permits takeover", async () => {
+    let transitioned = false;
+    let nowCalls = 0;
+    const kills: Array<[number, NodeJS.Signals]> = [];
+    const fixture = sequenceAuthority(
+      [owned(OWNER, identityMatch()), owned(SUCCESSOR, identityMatch(SUCCESSOR))],
+      (owner) => (transitioned ? stale("identity_mismatch", owner) : identityMatch(owner)),
+    );
+
+    const result = await awaitDaemonTermination(
+      SOCKET_PATH,
+      {
+        expectedOwner: OWNER,
+        deadlineMs: 500,
+        killAfterMs: 0,
+        pollMs: 100,
+        allowSigkill: true,
+        requireNoSuccessor: false,
+      },
+      {
+        kill: (pid, signal) => kills.push([pid, signal]),
+        sleep: async () => undefined,
+        now: () => {
+          nowCalls += 1;
+          if (nowCalls === 2) transitioned = true;
+          return nowCalls === 1 ? 0 : 100;
+        },
+      },
+      fixture.authority,
+    );
+
+    expect(result).toMatchObject({ outcome: "exited" });
+    expect({ nowCalls, inspectCalls: fixture.inspectCalls(), kills }).toEqual({
+      nowCalls: 2,
+      inspectCalls: 1,
+      kills: [],
+    });
+    expect(fixture.classified).toEqual([OWNER, OWNER]);
+  });
+
   it("preserves legacy match-to-mismatch pre-signal call counts", async () => {
     const socketPath = physicalLeaseFor(OWNER);
     const recycledIdentity: KnownProcessIdentity = {
@@ -389,6 +512,7 @@ describe("awaitDaemonTermination", () => {
         killAfterMs: 0,
         pollMs: 100,
         allowSigkill: true,
+        requireNoSuccessor: true,
       },
       {
         get identity() {

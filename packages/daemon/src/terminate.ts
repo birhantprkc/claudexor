@@ -333,11 +333,18 @@ export async function awaitDaemonTermination(
         // immediately before delivery can authorize a signal.
         const signalCapability = classifySignalTarget(owner);
         if (signalCapability.status === "proven_stale") {
+          // Runtime replacement must also refuse a successor that appeared
+          // during the pre-signal identity recheck. The loop's `current`
+          // snapshot predates `now()` and this second classification, so it
+          // cannot prove the no-successor condition at this return boundary.
+          // Other callers preserve their existing inspection/call counts.
+          const requireNoSuccessor = options.requireNoSuccessor;
+          const exitCurrent = requireNoSuccessor ? authority.inspect(socketPath) : current;
           return staleOwnerOutcome(
             owner,
             signalCapability,
-            current,
-            options.requireNoSuccessor,
+            exitCurrent,
+            requireNoSuccessor,
             killed,
           );
         }
