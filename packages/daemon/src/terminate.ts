@@ -1,7 +1,14 @@
-import type { ProcessIdentityReader } from "@claudexor/core";
+import {
+  compareProcessIdentity,
+  defaultProcessIdentityService,
+  type ProcessIdentity,
+  type ProcessIdentityReader,
+  type ProcessObservation,
+} from "@claudexor/core";
 import {
   classifyDaemonLeaseOwner,
   inspectDaemonWriterLease,
+  processIsAlive,
   type DaemonLeaseOwner,
   type DaemonLeaseOwnerCapability,
   type DaemonWriterLeaseStatus,
@@ -61,6 +68,85 @@ const DEFAULT_LEASE_AUTHORITY: DaemonTerminationLeaseAuthority = {
   classify: (owner) => classifyDaemonLeaseOwner(owner),
 };
 
+function compatibilityObservation(identity: ProcessIdentity): ProcessObservation {
+  return { identity, linuxState: null };
+}
+
+function compatibilityUnknownObservation(owner: DaemonLeaseOwner): ProcessObservation {
+  return compatibilityObservation({
+    status: "unknown",
+    pid: owner.pid,
+    platform: process.platform,
+    reason: "unsupported_platform",
+  });
+}
+
+/**
+ * Patch-compatible dependency adapter for callers that supplied the old
+ * identity/isAlive test seams. It is unreachable from normal production and
+ * from the explicit strict fourth-argument authority. Filesystem inspection
+ * remains strict; only a valid owner's injected process capability follows the
+ * old isAlive-before-identity order. The shared termination loop still owns
+ * target pinning, successor refusal, and explicit-owner-only signal authority.
+ */
+function createCompatibilityLeaseAuthority(
+  identity: ProcessIdentityReader,
+  isAlive: (pid: number) => boolean,
+): DaemonTerminationLeaseAuthority {
+  const classify = (owner: DaemonLeaseOwner): DaemonLeaseOwnerCapability => {
+    if (!isAlive(owner.pid)) {
+      return {
+        status: "proven_stale",
+        reason: "process_missing",
+        observation: compatibilityObservation({
+          status: "missing",
+          pid: owner.pid,
+          platform: process.platform,
+        }),
+      };
+    }
+    if (!owner.identity) {
+      return {
+        status: "capable",
+        reason: "legacy_process_present",
+        observation: compatibilityUnknownObservation(owner),
+      };
+    }
+
+    const observed = identity.read(owner.pid);
+    const observation = compatibilityObservation(observed);
+    if (observed.status === "missing") {
+      return { status: "proven_stale", reason: "process_missing", observation };
+    }
+    if (observed.status === "known") {
+      return compareProcessIdentity(owner.identity, observed) === "same"
+        ? { status: "capable", reason: "identity_match", observation }
+        : { status: "proven_stale", reason: "identity_mismatch", observation };
+    }
+    return { status: "unknown", reason: "identity_unavailable", observation };
+  };
+
+  return {
+    inspect: (socketPath) => {
+      const current = inspectDaemonWriterLease(socketPath);
+      return current.status === "owned"
+        ? {
+            ...current,
+            // Inspection proves only that a valid record is present. The
+            // shared loop classifies the pinned target exactly once; this
+            // placeholder also preserves old successor refusal semantics.
+            capability: {
+              status: "capable",
+              reason: "legacy_process_present",
+              observation: compatibilityUnknownObservation(current.owner),
+            },
+          }
+        : current;
+    },
+    classify,
+  };
+}
+
 function sameOwner(left: DaemonLeaseOwner, right: DaemonLeaseOwner): boolean {
   return left.pid === right.pid && left.token === right.token;
 }
@@ -100,20 +186,40 @@ export async function awaitDaemonTermination(
   socketPath: string,
   options: AwaitDaemonTerminationOptions = {},
   deps: DaemonTerminationDeps = {},
-  leaseAuthority: DaemonTerminationLeaseAuthority = DEFAULT_LEASE_AUTHORITY,
+  leaseAuthority?: DaemonTerminationLeaseAuthority,
 ): Promise<DaemonTerminationOutcome> {
   const deadlineMs = options.deadlineMs ?? 20_000;
   const killAfterMs = options.killAfterMs ?? 17_000;
   const allowSigkill = options.allowSigkill ?? false;
   const pollMs = options.pollMs ?? 150;
-  const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
-  const sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const now = deps.now ?? Date.now;
+  // Legacy execution dependencies retain their one-read accessor behavior.
+  const configuredKill = deps.kill;
+  const configuredSleep = deps.sleep;
+  const configuredNow = deps.now;
+  const kill = configuredKill ?? ((pid, signal) => process.kill(pid, signal));
+  const sleep =
+    configuredSleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = configuredNow ?? Date.now;
+  let authority = leaseAuthority;
+  if (!authority) {
+    // Do not even inspect the old policy getters when an explicit fourth
+    // authority is present. Without one, capture each exactly once and enable
+    // compatibility only when the caller actually supplied that seam.
+    const configuredIdentity = deps.identity;
+    const configuredIsAlive = deps.isAlive;
+    authority =
+      configuredIdentity !== undefined || configuredIsAlive !== undefined
+        ? createCompatibilityLeaseAuthority(
+            configuredIdentity ?? defaultProcessIdentityService,
+            configuredIsAlive ?? processIsAlive,
+          )
+        : DEFAULT_LEASE_AUTHORITY;
+  }
 
   const start = now();
   let killed = false;
   let noKillReason: string | null = null;
-  let current = leaseAuthority.inspect(socketPath);
+  let current = authority.inspect(socketPath);
   // The ONE owner this call is about. Everything below judges the world
   // against this snapshot — never against whoever holds the lease later.
   let owner = options.expectedOwner;
@@ -148,7 +254,7 @@ export async function awaitDaemonTermination(
     // identity bytes. Classify the immutable pinned target itself every time;
     // a current record's capability may describe only a successor/current
     // generation and can never lend signal authority to the target.
-    const targetCapability = leaseAuthority.classify(owner);
+    const targetCapability = authority.classify(owner);
 
     if (targetCapability.status === "proven_stale") {
       if (options.requireNoSuccessor) {
@@ -212,6 +318,6 @@ export async function awaitDaemonTermination(
       }
     }
     await sleep(pollMs);
-    current = leaseAuthority.inspect(socketPath);
+    current = authority.inspect(socketPath);
   }
 }

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
 } from "./terminate.js";
 import {
   processIsAlive,
+  writerLeasePath,
   type DaemonLeaseOwner,
   type DaemonLeaseOwnerCapability,
   type DaemonWriterLeaseStatus,
@@ -174,6 +175,14 @@ function physicallyAbsentSocketPath(): string {
   return join(root, "daemon.sock");
 }
 
+function physicalLeaseFor(owner: DaemonLeaseOwner): string {
+  const socketPath = physicallyAbsentSocketPath();
+  const leasePath = writerLeasePath(socketPath);
+  mkdirSync(leasePath);
+  writeFileSync(join(leasePath, "owner.json"), `${JSON.stringify(owner)}\n`);
+  return socketPath;
+}
+
 describe("awaitDaemonTermination", () => {
   it("uses strict production inspection for physical absence", async () => {
     await expect(awaitDaemonTermination(physicallyAbsentSocketPath())).resolves.toMatchObject({
@@ -183,6 +192,111 @@ describe("awaitDaemonTermination", () => {
 
   it("preserves processIsAlive as the raw signal-zero compatibility helper", () => {
     expect(processIsAlive(process.pid)).toBe(true);
+  });
+
+  it("preserves the supplied legacy isAlive runtime seam without a fourth authority", async () => {
+    const socketPath = physicalLeaseFor({ pid: process.pid, token: "legacy-is-alive" });
+    let getterReads = 0;
+    let calls = 0;
+    const deps: DaemonTerminationDeps = {
+      get isAlive() {
+        getterReads += 1;
+        return () => {
+          calls += 1;
+          return false;
+        };
+      },
+    };
+
+    const result = await awaitDaemonTermination(socketPath, {}, deps);
+    expect(result).toMatchObject({ outcome: "exited" });
+    expect(result.detail).toContain(String(process.pid));
+    expect({ getterReads, calls }).toEqual({ getterReads: 1, calls: 1 });
+  });
+
+  it("preserves the supplied legacy identity runtime seam without a fourth authority", async () => {
+    const recordedIdentity: KnownProcessIdentity = {
+      ...IDENTITY,
+      pid: process.pid,
+      processGroupId: process.pid,
+    };
+    const socketPath = physicalLeaseFor({
+      pid: process.pid,
+      token: "legacy-identity",
+      identity: recordedIdentity,
+    });
+    let getterReads = 0;
+    let reads = 0;
+    const deps: DaemonTerminationDeps = {
+      get identity() {
+        getterReads += 1;
+        return {
+          read: (pid: number): ProcessIdentity => {
+            reads += 1;
+            return { status: "missing", pid, platform: process.platform };
+          },
+          self: () => recordedIdentity,
+        };
+      },
+    };
+
+    const result = await awaitDaemonTermination(socketPath, {}, deps);
+    expect(result).toMatchObject({ outcome: "exited" });
+    expect(result.detail).toContain(String(process.pid));
+    expect({ getterReads, reads }).toEqual({ getterReads: 1, reads: 1 });
+  });
+
+  it("keeps strict malformed-lease handling when a legacy process seam is supplied", async () => {
+    const socketPath = physicallyAbsentSocketPath();
+    const leasePath = writerLeasePath(socketPath);
+    mkdirSync(leasePath);
+    writeFileSync(join(leasePath, "owner.json"), "{not-json\n");
+    let calls = 0;
+
+    const result = await awaitDaemonTermination(
+      socketPath,
+      {},
+      {
+        isAlive: () => {
+          calls += 1;
+          return false;
+        },
+      },
+    );
+    expect(result).toMatchObject({ outcome: "still_alive" });
+    expect(result.detail).toContain("activity is unknown");
+    expect(calls).toBe(0);
+  });
+
+  it("does not inspect legacy policy getters when a fourth authority is explicit", async () => {
+    let identityGetterReads = 0;
+    let isAliveGetterReads = 0;
+    const deps: DaemonTerminationDeps = {
+      get identity() {
+        identityGetterReads += 1;
+        return {
+          read: () => {
+            throw new Error("explicit authority must own classification");
+          },
+          self: () => IDENTITY,
+        };
+      },
+      get isAlive() {
+        isAliveGetterReads += 1;
+        return () => {
+          throw new Error("explicit authority must own classification");
+        };
+      },
+    };
+    const fixture = sequenceAuthority([absent()]);
+
+    await expect(
+      awaitDaemonTermination(SOCKET_PATH, {}, deps, fixture.authority),
+    ).resolves.toMatchObject({ outcome: "exited" });
+    expect({ identityGetterReads, isAliveGetterReads }).toEqual({
+      identityGetterReads: 0,
+      isAliveGetterReads: 0,
+    });
   });
 
   it("fails closed when the initial lease authority is unknown", async () => {
