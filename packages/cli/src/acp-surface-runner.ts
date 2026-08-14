@@ -4,6 +4,7 @@ import {
   TERMINAL_LIFECYCLES,
   type ControlPrimaryOutput,
   type ModeKind,
+  type RunFacts,
   type RunFailure,
   type RunOutcomeFacts,
 } from "@claudexor/schema";
@@ -21,6 +22,7 @@ import {
   type RunDetailProblem,
 } from "./run-detail-projections.js";
 import { projectRunOutcomeFacts } from "./daemon-outcome.js";
+import { projectRunFacts } from "./run-facts-projection.js";
 
 // Daemon job state IS the run lifecycle (D8): terminal set = the ONE
 // projection-owned TERMINAL_LIFECYCLES, never a local re-derivation.
@@ -54,6 +56,7 @@ export function selectReplayTurns<T>(rawTurns: readonly T[]): {
 export async function projectTerminalTurnDetail(
   addr: ControlApiAddress,
   runId: string,
+  lifecycle: RunOutcomeFacts["lifecycle"],
 ): Promise<{
   applyEligibility: unknown;
   planReadiness: unknown;
@@ -62,6 +65,7 @@ export async function projectTerminalTurnDetail(
   primaryOutput: ControlPrimaryOutput | null;
   outcomeFacts: RunOutcomeFacts | null;
   outcomeBanner: string | null;
+  runFacts: RunFacts | null;
   detailProblem?: RunDetailProblem;
 }> {
   const empty = {
@@ -72,28 +76,30 @@ export async function projectTerminalTurnDetail(
     primaryOutput: null,
     outcomeFacts: null,
     outcomeBanner: null,
+    runFacts: null,
   };
   if (!runId) return empty;
-  let detail: Record<string, unknown> | null = null;
   try {
-    detail = await fetchRunDetail(addr, runId);
+    const detail = await fetchRunDetail(addr, runId);
+    const runFacts = projectRunFacts(detail, { runId, lifecycle });
+    return {
+      applyEligibility: projectApplyEligibility(detail),
+      planReadiness:
+        detail?.["planReadiness"] && typeof detail["planReadiness"] === "object"
+          ? detail["planReadiness"]
+          : null,
+      planQuestions: Array.isArray(detail?.["planQuestions"])
+        ? (detail["planQuestions"] as unknown[])
+        : [],
+      failure: projectRunFailure(detail),
+      primaryOutput: projectRunPrimaryOutput(detail),
+      outcomeFacts: projectRunOutcomeFacts(detail),
+      outcomeBanner: projectOutcomeBanner(detail),
+      runFacts,
+    };
   } catch (error) {
     return { ...empty, detailProblem: describeRunDetailProblem(error) };
   }
-  return {
-    applyEligibility: projectApplyEligibility(detail),
-    planReadiness:
-      detail?.["planReadiness"] && typeof detail["planReadiness"] === "object"
-        ? detail["planReadiness"]
-        : null,
-    planQuestions: Array.isArray(detail?.["planQuestions"])
-      ? (detail["planQuestions"] as unknown[])
-      : [],
-    failure: projectRunFailure(detail),
-    primaryOutput: projectRunPrimaryOutput(detail),
-    outcomeFacts: projectRunOutcomeFacts(detail),
-    outcomeBanner: projectOutcomeBanner(detail),
-  };
 }
 
 type AcpTerminalRecord = {
@@ -358,7 +364,11 @@ export async function acpSessionQuery(
       if (interactions) await interactions({ runId });
     }
     if (TERMINALS.has(record.state)) {
-      const detail = await projectTerminalTurnDetail(addr, runId);
+      const detail = await projectTerminalTurnDetail(
+        addr,
+        runId,
+        record.state as RunOutcomeFacts["lifecycle"],
+      );
       const summary = acpTerminalSummary({ runId, runDir, record, detail });
       const { primaryOutput: _primaryOutput, ...terminalProjection } = detail;
       // Plan lifecycle (D17): a plan turn that ends needs_answers carries its
