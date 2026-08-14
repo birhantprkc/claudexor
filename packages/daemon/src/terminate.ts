@@ -144,10 +144,11 @@ export async function awaitDaemonTermination(
 
     const successor =
       current.status === "owned" && !sameOwner(current.owner, owner) ? current : null;
-    const targetCapability =
-      current.status === "owned" && sameOwner(current.owner, owner)
-        ? current.capability
-        : leaseAuthority.classify(owner);
+    // The current lease record may have the same pid/token but different
+    // identity bytes. Classify the immutable pinned target itself every time;
+    // a current record's capability may describe only a successor/current
+    // generation and can never lend signal authority to the target.
+    const targetCapability = leaseAuthority.classify(owner);
 
     if (targetCapability.status === "proven_stale") {
       if (options.requireNoSuccessor) {
@@ -189,6 +190,8 @@ export async function awaitDaemonTermination(
         noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (caller has no signal authority)`;
       } else if (!explicitOwner) {
         noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (no explicit expected owner)`;
+      } else if (current.status === "unknown") {
+        noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (writer-lease authority unknown)`;
       } else if (
         owner.identity &&
         targetCapability.status === "capable" &&

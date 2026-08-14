@@ -8,10 +8,11 @@ import {
   type DaemonTerminationDeps,
   type DaemonTerminationLeaseAuthority,
 } from "./terminate.js";
-import type {
-  DaemonLeaseOwner,
-  DaemonLeaseOwnerCapability,
-  DaemonWriterLeaseStatus,
+import {
+  processIsAlive,
+  type DaemonLeaseOwner,
+  type DaemonLeaseOwnerCapability,
+  type DaemonWriterLeaseStatus,
 } from "./writer-lease.js";
 
 const roots: string[] = [];
@@ -180,6 +181,10 @@ describe("awaitDaemonTermination", () => {
     });
   });
 
+  it("preserves processIsAlive as the raw signal-zero compatibility helper", () => {
+    expect(processIsAlive(process.pid)).toBe(true);
+  });
+
   it("fails closed when the initial lease authority is unknown", async () => {
     const fixture = sequenceAuthority([unknownLease("owner_unreadable")]);
     const result = await awaitDaemonTermination(
@@ -225,7 +230,7 @@ describe("awaitDaemonTermination", () => {
     ["process_missing", "is gone"],
     ["identity_mismatch", "recycled"],
   ] as const)("treats a %s pinned owner as exited", async (reason, detail) => {
-    const fixture = sequenceAuthority([owned(OWNER, stale(reason))]);
+    const fixture = sequenceAuthority([owned(OWNER, stale(reason))], () => stale(reason));
     const result = await awaitDaemonTermination(
       SOCKET_PATH,
       { expectedOwner: OWNER, allowSigkill: true },
@@ -297,7 +302,9 @@ describe("awaitDaemonTermination", () => {
   });
 
   it("never signals a capable legacy owner without birth identity", async () => {
-    const fixture = sequenceAuthority([owned(LEGACY_OWNER, legacyCapable())]);
+    const fixture = sequenceAuthority([owned(LEGACY_OWNER, legacyCapable())], () =>
+      legacyCapable(),
+    );
     const kills: Array<[number, NodeJS.Signals]> = [];
     const result = await awaitDaemonTermination(
       SOCKET_PATH,
@@ -318,7 +325,9 @@ describe("awaitDaemonTermination", () => {
 
   it("does not borrow signal authority from a same-generation record changed after pinning", async () => {
     const rewrittenOwner: DaemonLeaseOwner = { ...LEGACY_OWNER, identity: IDENTITY };
-    const fixture = sequenceAuthority([owned(rewrittenOwner, identityMatch(rewrittenOwner))]);
+    const fixture = sequenceAuthority([owned(rewrittenOwner, identityMatch(rewrittenOwner))], () =>
+      legacyCapable(),
+    );
     const kills: Array<[number, NodeJS.Signals]> = [];
     const result = await awaitDaemonTermination(
       SOCKET_PATH,
@@ -337,8 +346,38 @@ describe("awaitDaemonTermination", () => {
     expect(kills).toEqual([]);
   });
 
+  it("classifies the pinned birth identity instead of a same pid/token record's identity", async () => {
+    const recycledIdentity: KnownProcessIdentity = {
+      ...IDENTITY,
+      startToken: "linux:999888",
+    };
+    const rewrittenOwner: DaemonLeaseOwner = { ...OWNER, identity: recycledIdentity };
+    const fixture = sequenceAuthority([owned(rewrittenOwner, identityMatch(rewrittenOwner))], () =>
+      stale("identity_mismatch", OWNER),
+    );
+    const kills: Array<[number, NodeJS.Signals]> = [];
+    const result = await awaitDaemonTermination(
+      SOCKET_PATH,
+      {
+        expectedOwner: OWNER,
+        deadlineMs: 300,
+        killAfterMs: 0,
+        pollMs: 100,
+        allowSigkill: true,
+      },
+      deterministicDeps((pid, signal) => kills.push([pid, signal])),
+      fixture.authority,
+    );
+    expect(result).toMatchObject({ outcome: "exited" });
+    expect(result.detail).toContain("recycled");
+    expect(fixture.classified).toEqual([OWNER]);
+    expect(kills).toEqual([]);
+  });
+
   it("never signals an owner whose current identity is unknown", async () => {
-    const fixture = sequenceAuthority([owned(OWNER, unknownCapability())]);
+    const fixture = sequenceAuthority([owned(OWNER, unknownCapability())], () =>
+      unknownCapability(),
+    );
     const kills: Array<[number, NodeJS.Signals]> = [];
     const result = await awaitDaemonTermination(
       SOCKET_PATH,
@@ -354,6 +393,26 @@ describe("awaitDaemonTermination", () => {
     );
     expect(result).toMatchObject({ outcome: "still_alive" });
     expect(result.detail).toContain("identity unverifiable");
+    expect(kills).toEqual([]);
+  });
+
+  it("withholds signal authority while the physical lease is unknown", async () => {
+    const fixture = sequenceAuthority([unknownLease()], () => identityMatch());
+    const kills: Array<[number, NodeJS.Signals]> = [];
+    const result = await awaitDaemonTermination(
+      SOCKET_PATH,
+      {
+        expectedOwner: OWNER,
+        deadlineMs: 300,
+        killAfterMs: 0,
+        pollMs: 100,
+        allowSigkill: true,
+      },
+      deterministicDeps((pid, signal) => kills.push([pid, signal])),
+      fixture.authority,
+    );
+    expect(result).toMatchObject({ outcome: "still_alive" });
+    expect(result.detail).toContain("writer-lease authority unknown");
     expect(kills).toEqual([]);
   });
 
