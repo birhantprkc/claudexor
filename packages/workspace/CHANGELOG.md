@@ -1,5 +1,13 @@
 # @claudexor/workspace
 
+## 3.3.16
+
+### Patch Changes
+
+- @claudexor/core@3.3.16
+- @claudexor/schema@3.3.16
+- @claudexor/util@3.3.16
+
 ## 3.3.15
 
 ### Patch Changes

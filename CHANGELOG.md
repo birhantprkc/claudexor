@@ -3,6 +3,22 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.3.16** (2026-08-14) — The macOS packager now removes the exact
+  pre-3.3.13 `dist/Claudexor.app` only after a successful Swift build produces
+  the release executable; failed or incomplete builds preserve both app paths,
+  and unrelated `dist` content survives. Data-root ownership is now explicit by
+  mode: the default root recognizes archived `v2` and active `v3`, while `v1`
+  remains unrecognized because v1-era bytes lived directly under
+  `~/.claudexor`; an explicit `CLAUDEXOR_CONFIG_DIR` treats `v1`, `v2`, and
+  `v3` children as ordinary unrecognized entries. Reporting remains advisory
+  and never deletes these paths. The Cursor adapter follows the current stream
+  contract by dropping strict user prompt echoes, preserving nested token usage
+  without inventing a dollar cost, and classifying permission-denied tool
+  results as denied. The built-in OpenRouter route now preserves finite
+  non-negative `usage.cost`, including zero, as an exact USD receipt; explicit
+  terminal provider-error completions fail with safe typed evidence, while
+  ordinary stop and length completions remain successful.
+
 - **v3.3.15** (2026-08-10) — Mutating delegated codex runs work again on
   macOS. Codex canonicalizes its `CODEX_HOME` at startup, and the Seatbelt
   profile's runtime-root read deny covered the intermediate path components
