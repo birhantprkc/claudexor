@@ -1364,7 +1364,28 @@ Explicit operator shutdown keeps its forceful semantics. The daemon records its
 birth identity in the writer lease at startup; `claudexor daemon stop` then CONFIRMS death
 (released lease, gone pid, or identity-verified SIGKILL escalation — a
 recycled pid is never signalled) before reporting success, so scripts and
-test disposers can trust its exit code. Stdio bridges (`mcp serve`/`acp
+test disposers can trust its exit code. The lease is acquired before the
+daemon publishes its socket or Control descriptor, so a present lease without
+a reachable socket remains a protected startup window unless its owner is
+proven stale. That proof is deliberately narrow: a missing pid, a birth-identity
+mismatch, or exact Linux `/proc` state `Z` is stale; a matching non-zombie
+owner, malformed or unreadable authority, and any unavailable identity/state
+proof remain fail-closed. Recovery never signals the stale owner. Acquisition
+moves the exact stale generation to a deterministic, nonempty tombstone keyed
+by pid and a digest of its token, then preserves that tombstone so a delayed
+contender cannot quarantine a live successor. Acquisition is the only
+quarantine mutator and tombstones have no automatic GC.
+
+Termination, local and remote runtime replacement, and the real-harness
+battery consume the same strict owner classification. They recheck the exact
+generation at the action boundary; classification alone never grants signal
+authority, and only an explicitly pinned, identity-matching capable owner may
+be escalated. Socket-unreachable plus an absent or proven-stale lease may prove
+an idempotent stopped state, while capable or uncertain ownership blocks. The
+battery may start through a stale lease because normal acquisition heals it,
+but cleanup succeeds only after the main lease is physically absent.
+
+Stdio bridges (`mcp serve`/`acp
 serve`) bound their life to their host's with a reparent watchdog — a dead
 host whose pipe stays open (inherited fds) no longer leaves an idle bridge.
 No-project command state, setup, and the project registry
