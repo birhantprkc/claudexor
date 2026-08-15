@@ -11,7 +11,7 @@ import {
   readlinkSync,
   realpathSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ZERO_HASH, replayFrames, type JournalRecord } from "./frame-codec.js";
 
 export interface JournalPreparationReceipt {
@@ -244,8 +244,8 @@ function walkPartition(
     return;
   }
   for (const name of names) {
-    const child = `${path}/${name}`;
-    const relative = child.slice(partitionDir.length + 1);
+    const child = join(path, name);
+    const relative = child.slice(partitionDir.length + 1).replace(/\\/g, "/");
     entries.add(child);
     const inspected = inspectEntry(
       child,
