@@ -152,13 +152,22 @@ export async function main(): Promise<void> {
     // D5 stage 2: read-only prepare + validate; zero recovery writes.
     const globalPreparation = journalManager.prepare();
     const admission = new DaemonStartupAdmission();
+    // Armed only on NORMAL admission (C1a): polling against unactivated
+    // projections is a swallowed throw, and the recovery plane must stay
+    // byte-for-byte non-mutating. The immediate poll on arming also removes
+    // the one-minute stale window the swallowed stage-2 poll used to leave
+    // (G-QUOTA-01).
     const pollQuota = () => {
       try {
         void quotaStoreSlot.current().pollStale();
       } catch {}
     };
-    quotaPollTimer = setInterval(pollQuota, 60_000).unref();
-    pollQuota();
+    const armQuotaPolling = () => {
+      if (quotaPollTimer) return;
+      quotaPollTimer = setInterval(pollQuota, 60_000);
+      quotaPollTimer.unref();
+      pollQuota();
+    };
     const threads = new ProjectPartitions(
       daemonDir(),
       projectStoreSlot,
@@ -549,6 +558,7 @@ export async function main(): Promise<void> {
         log: (message) => logLine(logPath(), message),
       });
       if (servingMode === "normal" && !shutdownRuntime.requested()) {
+        armQuotaPolling();
         await setupBinding.start();
         quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
         scheduleStartupRetention(services.runRetention, {

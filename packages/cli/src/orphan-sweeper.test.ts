@@ -139,6 +139,24 @@ describe("crash-GC live-owner guard", () => {
     }
   });
 
+  it("is strictly read-only on a clean root: no journal file is created and nothing is swept (C1b)", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "claudexor-sweep-state-"));
+    try {
+      // A FRESH root has no journal tree at all. The sweep runs between the
+      // startup's read-only preparation and its prepared activation, so any
+      // file it creates here fails activation's revalidation and traps the
+      // root on the recovery plane.
+      const journalRoot = join(realpathSync(stateDir), "journal");
+      const actions = await sweepOrphanWorkspaces({ journalRoot });
+      // No project root is known on a clean root, so no envelope/branch action
+      // may appear (the shared tmpdir ro-home sweep is environment-owned).
+      expect(actions.filter((action) => !action.includes("stale tmp dir"))).toEqual([]);
+      expect(existsSync(journalRoot)).toBe(false);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("startup sweep removes a dead in-place run's marked artifact child and preserves siblings", async () => {
     const root = initRepo();
     const stateDir = mkdtempSync(join(tmpdir(), "claudexor-sweep-state-"));

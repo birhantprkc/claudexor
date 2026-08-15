@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceManager, git, processStartTime } from "@claudexor/workspace";
 import { projectRuntimeDir } from "@claudexor/util";
-import { DurableJournal } from "@claudexor/journal";
+import { DurableJournal, journalPartitionDirectory } from "@claudexor/journal";
 
 const RO_HOME_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -46,12 +46,22 @@ export async function sweepOrphanWorkspaces(input: SweepInput): Promise<string[]
   return actions;
 }
 
-/** Project roots this daemon has ever run against (command journal scope roots). */
+/** Project roots this daemon has ever run against (command journal scope roots).
+ *
+ * STRICTLY READ-ONLY: crash-GC runs inside the two-stage startup BETWEEN the
+ * read-only preparation and the prepared activation, so this scan must never
+ * create or open-for-write anything under the journal tree. (Opening a writer
+ * here used to create journal.bin on a clean root, which failed activation's
+ * revalidation and trapped every FRESH root on the recovery plane.) An absent
+ * global journal means no known roots; an unreadable one means no sweep. */
 function knownProjectRoots(journalRoot: string): string[] {
   const roots = new Set<string>();
+  if (!existsSync(join(journalPartitionDirectory(journalRoot, "global"), "journal.bin"))) {
+    return [];
+  }
   let journal: DurableJournal | null = null;
   try {
-    journal = new DurableJournal({ rootDir: journalRoot, partition: "global" });
+    journal = DurableJournal.prepare({ rootDir: journalRoot, partition: "global" });
     for (const entry of journal.records()) {
       if (entry.type !== "command.accepted") continue;
       const payload = entry.payload as { record?: { params?: unknown } };
