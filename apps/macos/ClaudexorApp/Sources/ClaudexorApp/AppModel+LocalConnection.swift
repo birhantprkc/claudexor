@@ -203,6 +203,12 @@ extension AppModel {
                 return .superseded
             }
             if outcome.ok {
+                // Issue #165 D5: a recovery-only daemon owns the endpoint but
+                // keeps product admission closed. Stay in the existing
+                // Connecting behavior — no adoption, no hydration, no
+                // reconciliation lifecycle, no fallback launch — and keep
+                // polling the handshake until normal admission opens.
+                if outcome.recoveryOnly { return .retryWithoutLaunch }
                 switch await localDaemonPolicy(for: outcome.engine, generation: generation) {
                 case let .useCompatible(notice):
                     guard localConnectionGenerationIsCurrent(generation) else {
@@ -303,6 +309,10 @@ extension AppModel {
         guard requestedConnectionGenerationIsCurrent(generation) else {
             return .superseded
         }
+        // A connected daemon that re-enters recovery (restart into a
+        // recovery-needed root) closes product admission: fall back to the
+        // Connecting discovery loop without inventing an outage launch.
+        if outcome.recoveryOnly { return .retryWithoutLaunch }
         switch await localDaemonPolicy(for: outcome.engine, generation: generation) {
         case let .useCompatible(notice):
             guard requestedConnectionGenerationIsCurrent(generation), client === current else {

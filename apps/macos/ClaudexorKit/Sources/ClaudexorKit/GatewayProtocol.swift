@@ -12,10 +12,18 @@ import FoundationNetworking
 public struct GatewayHandshakeOutcome: Sendable, Equatable {
     public let ok: Bool
     public let engine: EngineBuildIdentity?
+    /// Serving/admission fact from the handshake (issue #165 D5). Decoded
+    /// leniently: absent (older daemons) means normal product admission.
+    public let servingMode: String?
 
-    public init(ok: Bool, engine: EngineBuildIdentity?) {
+    /// True when the daemon serves ONLY the recovery plane: transport is up
+    /// but product routes are typed-refused until journal recovery completes.
+    public var recoveryOnly: Bool { servingMode == "recovery_only" }
+
+    public init(ok: Bool, engine: EngineBuildIdentity?, servingMode: String? = nil) {
         self.ok = ok
         self.engine = engine
+        self.servingMode = servingMode
     }
 }
 
@@ -47,7 +55,8 @@ func gatewayHandshake(baseURL: URL, token: String, session: URLSession) async th
     // Retain the typed build identity for the About panel. Decoded leniently so a
     // missing/older `engine` object never demotes a healthy connection.
     let engine = (try? JSONDecoder().decode(ControlHandshakeResponse.self, from: data))?.engine
-    return GatewayHandshakeOutcome(ok: true, engine: engine)
+    return GatewayHandshakeOutcome(
+        ok: true, engine: engine, servingMode: json["servingMode"] as? String)
 }
 
 func gatewayHealth(baseURL: URL, token: String, session: URLSession) async throws -> Bool {

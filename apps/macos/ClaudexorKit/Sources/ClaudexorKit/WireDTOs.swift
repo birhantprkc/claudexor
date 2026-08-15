@@ -34,12 +34,23 @@ public struct ControlHandshakeResponse: Codable, Sendable, Equatable {
     public let compatible: Bool
     public let operationsPath: String
     public let engine: EngineBuildIdentity
+    /// Product admission (issue #165 D5): "recovery_only" keeps product routes
+    /// closed while recovery control stays reachable. Absent (older daemons)
+    /// means "normal" — decode stays lenient, never a dropped connection.
+    public let servingMode: String?
 
-    public init(protocolMajor: Int, compatible: Bool, operationsPath: String, engine: EngineBuildIdentity) {
+    public init(
+        protocolMajor: Int,
+        compatible: Bool,
+        operationsPath: String,
+        engine: EngineBuildIdentity,
+        servingMode: String? = nil
+    ) {
         self.protocolMajor = protocolMajor
         self.compatible = compatible
         self.operationsPath = operationsPath
         self.engine = engine
+        self.servingMode = servingMode
     }
 }
 
