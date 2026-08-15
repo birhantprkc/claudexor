@@ -3,6 +3,7 @@ export * from "./server.js";
 export * from "./delegation-admission.js";
 export * from "./writer-lease.js";
 export * from "./root-authority.js";
+export * from "./serving-admission.js";
 export * from "./terminate.js";
 export * from "./client.js";
 export * from "./daemon-shutdown-rpc.js";
