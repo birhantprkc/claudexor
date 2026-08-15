@@ -2210,9 +2210,9 @@ actions that disagree with the terminal outcome. The orchestrator sanitizes
 and validates this object once, embeds that exact value at
 `RunTelemetry.run_facts` as a compatibility copy, then writes the standalone
 file last as the canonical commit marker. `GET /v2/runs/:id` (`runFacts`),
-terminal CLI JSON/JSON-stream output, and artifact-only `inspect --json`
-expose the same parsed object without a second redaction or independent
-projection. A missing receipt retains legacy-run compatibility; a receipt that
+terminal CLI JSON/JSON-stream output, artifact-only `inspect --json`, MCP
+structured results, and ACP `_meta.claudexor` expose the same parsed object
+without a second redaction or independent projection. A missing receipt retains legacy-run compatibility; a receipt that
 is present but fails parsing or invariant validation is a typed
 `run_facts_invalid` server error and never falls back to legacy outcome or apply
 authority. Readers also bind the receipt's run/task identity (and terminal

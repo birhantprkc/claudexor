@@ -304,9 +304,21 @@ thread parity.
 Tools declare MCP behavior annotations (readOnlyHint for every non-agent
 route — ask/plan are read-only) and, for run tools and
 the capability catalog, an outputSchema with a structuredContent mirror of
-the text result: `{summary, runId, runDir, status, applyEligibility}` —
-`applyEligibility` is the derived apply-gate verdict `{eligible, state,
-reason, requiredAction}` the control API serves on `GET /v2/runs/:id`.
+the text result: `{summary, runId, runDir, status, applyEligibility,
+runFacts}` — `applyEligibility` is the derived apply-gate verdict `{eligible,
+state, reason, requiredAction}` the control API serves on `GET /v2/runs/:id`,
+and `runFacts` is the exact validated canonical RunFacts receipt from the
+same control detail, or `null` while the run is active and for legacy runs
+without a receipt. A genuinely missing/404 or transport-unavailable detail
+keeps `runFacts: null` without fabricating a `detailProblem`; a raised typed
+detail error, a malformed success body, or a receipt that fails validation
+clears every detail-derived field and reports the existing typed
+`detailProblem` instead. The public inspect/status/result read tools degrade
+exactly `run_facts_invalid` and `invalid_service_response` to a schema-valid
+minimal handle that keeps the caller's runId, nulls the receipt and sibling
+authority fields, and carries a typed secret-redacted `detailProblem`, while
+404, auth, daemon-loss, untyped 500, and transport failures remain ordinary
+tool errors.
 
 Current operational behavior:
 
@@ -484,6 +496,13 @@ authority; no second in-memory session catalog exists. Images and embedded
 resources are uploaded/finalized into immutable daemon resource IDs before the
 turn enqueues. Blocked/failed daemon outcomes return ACP `refusal` plus typed
 `_meta.claudexor` run/status/apply evidence rather than a false `end_turn`.
+Terminal turns also carry the exact validated RunFacts receipt at
+`_meta.claudexor.runFacts` (`null` for active runs and legacy runs without a
+receipt). A missing/404 or transport-unavailable detail keeps the receipt
+`null` without fabricating a `detailProblem`; a typed detail error, malformed
+success body, or receipt-validation failure preserves the run id and terminal
+answer, clears the detail-derived projections, and explains itself through
+the typed `detailProblem`.
 The same projection distinguishes deadline exhaustion from user cancellation:
 a terminal `cancelled` lifecycle with `wall_clock_exceeded` returns ACP
 `refusal`, while an explicit ACP/session Stop returns `cancelled`.

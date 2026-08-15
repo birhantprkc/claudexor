@@ -157,7 +157,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
     });
     try {
       const projected = await projectTerminalTurnDetail(addr, "run-1", "succeeded");
-      expect(JSON.stringify(projected.runFacts)).toBe(JSON.stringify(terminalRunFacts));
+      expect(projected.runFacts).toEqual(terminalRunFacts);
       expect(detailSpy).toHaveBeenCalledTimes(1);
     } finally {
       detailSpy.mockRestore();
@@ -391,7 +391,7 @@ describe("acpSessionQuery terminal RunFacts binding", () => {
         status: "failed",
         outcomeFacts: failedOutcomeFacts,
       });
-      expect(JSON.stringify(result["runFacts"])).toBe(JSON.stringify(failedRunFacts));
+      expect(result["runFacts"]).toEqual(failedRunFacts);
       expect(result).not.toHaveProperty("detailProblem");
     } finally {
       ensureSpy.mockRestore();
