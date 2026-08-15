@@ -24,7 +24,11 @@ Release history for Claudexor. The current version is declared in the root
   recovers automatically from Linux zombie writer leases while keeping live
   or uncertain owners fail-closed, survives disconnected RPC followers
   instead of crashing, and treats web access as optional for every non-off
-  policy with native Cursor web approvals for managed read-only runs.
+  policy with native Cursor web approvals for managed read-only runs. CLI
+  readiness waits through the transient recovery-only startup window: acting
+  commands and `daemon start` keep re-handshaking until normal admission
+  opens or the start budget expires, so a healthy journal-heavy startup is
+  never misreported as a recovery-blocked daemon.
 
 - **v3.3.16** (2026-08-15) — The macOS packager now removes the exact
   pre-3.3.13 `dist/Claudexor.app` only after a successful Swift build produces
