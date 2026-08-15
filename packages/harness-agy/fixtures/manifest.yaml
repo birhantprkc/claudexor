@@ -1,0 +1,49 @@
+# Fixture provenance manifest. basic-run.jsonl and error-auth.jsonl are
+# RECORDED from a live authenticated agy 1.1.13 session on macOS
+# (2026-08-16, PLAN §1.2e / §1.2 F6): a real `-p --output-format stream-json`
+# run with a WorkReport-shaped --json-schema envelope, and the real
+# auth-timeout terminal envelope. session-resume.jsonl is synthesized from
+# those exact recorded shapes (a resumed conversation was not captured yet).
+#
+# `expectations` (W3.8) are the STREAM SEMANTICS the conformance test asserts
+# through core streamExpectationViolations. agy HAS a typed final: the
+# terminal `result` event (finality never comes from mid-run narration);
+# with a schema envelope the final is serialized from `structured_output`
+# (Л-20), otherwise from `result.response`.
+cli: agy
+fixtures:
+  basic-run.jsonl:
+    source: recorded
+    cli_version: 1.1.13
+    recorded_at: "2026-08-16"
+    sanitized: true
+    expectations:
+      final_messages: 1
+      final_source: structured_output
+      final_is_last_message: true
+      started_events: 1
+      thinking_events: 0
+      delta_messages: 0
+      typed_rate_limit: false
+  error-auth.jsonl:
+    source: recorded
+    cli_version: 1.1.13
+    recorded_at: "2026-08-16"
+    sanitized: true
+    expectations:
+      final_messages: 0
+      final_is_last_message: false
+      started_events: 0
+      thinking_events: 0
+      delta_messages: 0
+      typed_rate_limit: false
+  session-resume.jsonl:
+    source: synthetic
+    expectations:
+      final_messages: 1
+      final_source: result
+      final_is_last_message: true
+      started_events: 1
+      thinking_events: 0
+      delta_messages: 0
+      typed_rate_limit: false
