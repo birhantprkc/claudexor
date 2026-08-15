@@ -1,5 +1,16 @@
 # @claudexor/delivery
 
+## 3.4.1
+
+### Patch Changes
+
+- @claudexor/core@3.4.1
+- @claudexor/policy@3.4.1
+- @claudexor/review@3.4.1
+- @claudexor/schema@3.4.1
+- @claudexor/util@3.4.1
+- @claudexor/workspace@3.4.1
+
 ## 3.4.0
 
 ### Patch Changes

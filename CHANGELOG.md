@@ -3,6 +3,48 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.4.1** (2026-08-15): the Windows native-login groundwork, grown from
+  community PR #189 (Renat, @dead9111) and reworked with the contributor's
+  three commits preserved. Windows could not reach the login lane at all: the
+  sealed manifest rejected `C:\...` paths and process identity answered
+  `unsupported_platform`, so no execution permit was ever issued. The
+  absolute-path contract is now a REGEX covering POSIX, drive-rooted, and UNC
+  spellings — chosen over a `node:path` refinement because only a regex
+  survives `schema:gen` as a JSON Schema `pattern` (the refinement silently
+  relaxed the generated wire contract to `minLength: 1`) — with drive-relative
+  `C:x` and root-relative `\x` refused and the Swift decoder mirroring the
+  same rule. Process identity gains an OPT-IN win32 reader that takes the
+  kernel's own process creation time (`GetProcessTimes` via the absolute
+  System32 PowerShell) as the birth token, so a recycled PID compares
+  DIFFERENT exactly as on POSIX; the default service still answers
+  `unsupported_platform`, so run capture, the orphan reaper, and the daemon
+  writer lease keep their fail-closed Windows behavior. Windows has no process
+  groups and no cooperative TERM, so on the login lane both escalation steps
+  are one identity-gated `taskkill /T /F` of the recorded leader's tree — the
+  terminator this repo already owns — and emptiness is the leader's identity
+  being gone, disclosed in ARCHITECTURE as a leader-death proof rather than
+  the POSIX group-ESRCH proof. The vendor binary is still executed without a
+  shell: on win32 the harness resolver offers only executable images
+  (`.exe`/`.com`, the v3.3.9 `git.exe` rule), and an npm `.cmd`/shell shim is
+  refused with an advisory naming the real cause (issue #191 tracks spawning
+  shims through their JS entry). Login env allowlists forward the Windows
+  process-environment keys and match them case-insensitively on win32 only
+  (`SystemRoot` vs `SYSTEMROOT`; on POSIX `http_proxy` and `HTTP_PROXY` stay
+  distinct) through one shared picker that also repairs the pre-existing
+  `SYSTEMROOT` hole in clean-env spawns. The journal partition walker now
+  addresses entries with `join`, fixing a real 3.4.0 Windows regression where
+  the second daemon start read its own journal as missing and demanded
+  recovery (the contributor's own find). The detached login runner passes
+  `windowsHide` so "no Terminal" also means no console window, and a failed
+  codex login no longer recommends the macOS-only `--browser-redirect`
+  Terminal handoff off macOS. A `windows-latest` CI lane is REQUIRED through
+  the `build-test` aggregate and earned its place on its first run: it caught
+  8.3-short-path temp fixtures, live-proved the PowerShell identity reader,
+  and surfaced that journal compaction cannot rename over its own open handle
+  on Windows (issue #190; those four cases are skipped there with the cause
+  named). Ordinary codex runs on Windows with an npm install remain
+  non-functional (the shim class, issue #191) — this release makes the
+  refusal typed and honest rather than ENOENT.
 - **v3.4.0** (2026-08-15) — Shared data roots are now protected by a
   persistent root-authority barrier: the daemon records a writer epoch and a
   proven serving-version floor, refuses grants from released or foreign

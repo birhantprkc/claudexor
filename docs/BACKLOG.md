@@ -609,6 +609,23 @@ authoritative for each exact disposition.
   is a loud crash, never a weakened boundary. Extend the ancestor chain to the
   scoped home when a real harness pulls the requirement.
 
+## 3.4.1 Windows-lane residuals (2026-08-15)
+
+From the PR #189 review waves and the first required windows-latest CI runs
+(ledger rows in `docs/reference/review-ledger.md` 3.4.1 block). Neither is a
+default-reachable regression on a supported platform.
+
+- Journal atomic replace on Windows (issue #190): compaction and the
+  crash-repair rewrite `rename` over the journal's own open handle, which
+  Windows refuses (`EPERM`). Fix must keep the fsync-before-ACK discipline and
+  un-skip the four `itPosixReplace` cases on the Windows lane as its proof.
+- npm shim spawning on Windows (issue #191): default npm installs ship
+  `codex.cmd`/sh shims with no `.exe`, so ordinary runs and login refuse with
+  the typed shim advisory. Candidate fix: resolve the shim to its JS entry and
+  spawn `process.execPath <entry>` without a shell at the single resolver
+  owner (manifest evidence then binds an interpreter — schema-first), or
+  prefer the vendor's native archive in `claudexor harness install`.
+
 ## 3.4.0 operator-subagent panel advisories (2026-08-15)
 
 Adjudicated backlog rows from the 3.4.0 release wave (owner-excepted
