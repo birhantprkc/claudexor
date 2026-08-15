@@ -68,7 +68,9 @@ export interface RootAuthorityRecord {
 export type RootAuthorityRefusalCode =
   | "root_authority_unreadable"
   | "root_authority_epoch_unsupported"
-  | "root_authority_floor_regression";
+  | "root_authority_floor_regression"
+  | "root_authority_candidate_invalid"
+  | "root_authority_grant_stale";
 
 function rootAuthorityRefusal(
   code: RootAuthorityRefusalCode,
@@ -113,7 +115,10 @@ function parseRootAuthorityRecord(raw: string): RootAuthorityRecord | string {
   };
 }
 
-/** Fail-closed barrier read: only a physically missing marker is `absent`. */
+/** Fail-closed barrier read: only a physically missing marker is `absent`.
+ * C9c: the marker is validated like the startup-diagnostics target — a
+ * symlink, a multi-linked file, a foreign uid, or group/other-accessible
+ * permissions cannot carry root authority. */
 export function readRootAuthority(anchorPath: string): RootAuthorityStatus {
   const markerPath = join(anchorPath, ROOT_AUTHORITY_MARKER_FILE);
   let raw: string;
@@ -121,6 +126,18 @@ export function readRootAuthority(anchorPath: string): RootAuthorityStatus {
     const stat = lstatSync(markerPath);
     if (stat.isSymbolicLink() || !stat.isFile()) {
       return { status: "invalid", markerPath, reason: "marker is not a regular file" };
+    }
+    if (stat.nlink !== 1) {
+      return { status: "invalid", markerPath, reason: "marker is not singly linked" };
+    }
+    if (process.platform !== "win32") {
+      const uid = process.getuid?.();
+      if (uid !== undefined && stat.uid !== uid) {
+        return { status: "invalid", markerPath, reason: "marker has a foreign uid" };
+      }
+      if ((stat.mode & 0o077) !== 0) {
+        return { status: "invalid", markerPath, reason: "marker permissions are not private" };
+      }
     }
     raw = readFileSync(markerPath, "utf8");
   } catch (error) {
@@ -327,8 +344,21 @@ function migrateStaleFlatGenerationInPlace(
  * published, sentinel retired, claim reacquired in the nested slot.
  */
 export function acquireRootAuthority(input: AcquireRootAuthorityInput): RootAuthorityGrant {
+  // C9b: a candidate that cannot be ORDERED against serving floors must not
+  // serve — even on a fresh floorless root, where it would otherwise be
+  // admitted and then leave the root floorless forever.
+  if (!isRuntimeSemver(input.version)) {
+    throw rootAuthorityRefusal(
+      "root_authority_candidate_invalid",
+      `candidate version '${input.version}' is not an x.y.z semantic version; refusing to serve this data root`,
+    );
+  }
   const canonical = input.canonicalSocketPath ?? canonicalDefaultSocketPath();
   const anchorPath = writerLeaseAnchorPath(canonical);
+  const effectiveDeps: DaemonWriterLeaseDependencies = {
+    identity: input.identity,
+    ...(input.deps ?? {}),
+  };
   const acquireClaim = (socketPath: string): DaemonWriterLease =>
     acquireDaemonWriterLease(socketPath, { identity: input.identity }, input.deps ?? {});
 
@@ -352,10 +382,7 @@ export function acquireRootAuthority(input: AcquireRootAuthorityInput): RootAuth
     // C4: a PROVEN-STALE flat generation migrates in place BEFORE any claim,
     // so the shared quarantine's rename-away/recreate absence window never
     // opens on the legacy-visible address.
-    migrateStaleFlatGenerationInPlace(anchorPath, canonical, {
-      identity: input.identity,
-      ...(input.deps ?? {}),
-    });
+    migrateStaleFlatGenerationInPlace(anchorPath, canonical, effectiveDeps);
   }
 
   // Claim the canonical root address. With a barrier installed the lease
@@ -410,21 +437,51 @@ export function acquireRootAuthority(input: AcquireRootAuthorityInput): RootAuth
     record,
     anchorPath,
     advanceFloor: () => {
+      // C9a generation fence: only the LIVE writer of the root address may
+      // promote the floor. A released grant, or one superseded by a newer
+      // generation, refuses instead of clobbering the successor's authority.
+      if (released) {
+        throw rootAuthorityRefusal(
+          "root_authority_grant_stale",
+          "root authority grant was released; refusing to advance the serving floor",
+        );
+      }
+      // C9a: missing/corrupt current state is a typed refusal, never a
+      // silent rewrite — the barrier record is authority evidence. Checked
+      // BEFORE the lease fence: a vanished marker also breaks the nested
+      // address resolution, and the honest cause is the marker itself.
       const current = readRootAuthority(anchorPath);
+      if (current.status !== "valid") {
+        throw rootAuthorityRefusal(
+          "root_authority_unreadable",
+          current.status === "absent"
+            ? `root authority marker at ${current.markerPath} disappeared; refusing to recreate it during floor advancement`
+            : `root authority marker at ${current.markerPath} is unusable (${current.reason}); refusing to overwrite it during floor advancement`,
+        );
+      }
+      const claim = inspectDaemonWriterLease(canonical, effectiveDeps);
+      if (
+        claim.status !== "owned" ||
+        claim.path !== rootClaim.path ||
+        claim.owner.pid !== rootClaim.owner.pid ||
+        claim.owner.token !== rootClaim.owner.token
+      ) {
+        throw rootAuthorityRefusal(
+          "root_authority_grant_stale",
+          `root authority grant is no longer the live writer of ${rootClaim.path}; refusing to advance the serving floor`,
+        );
+      }
+      // Monotonic floor: input.version is a proven semver (C9b admission).
       const floor =
-        current.status === "valid" &&
         current.record.floor !== undefined &&
-        (!isRuntimeSemver(input.version) ||
-          compareRuntimeSemver(current.record.floor, input.version) >= 0)
+        compareRuntimeSemver(current.record.floor, input.version) >= 0
           ? current.record.floor
-          : isRuntimeSemver(input.version)
-            ? input.version
-            : undefined;
+          : input.version;
       const next: RootAuthorityRecord = {
         schemaVersion: ROOT_AUTHORITY_SCHEMA_VERSION,
         epoch: ROOT_AUTHORITY_EPOCH,
         state: "served",
-        ...(floor !== undefined ? { floor } : {}),
+        floor,
       };
       writeRootAuthorityRecord(anchorPath, next);
       return next;
