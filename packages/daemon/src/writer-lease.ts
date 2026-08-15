@@ -22,19 +22,49 @@ import {
 } from "@claudexor/core";
 import { daemonDir, isWindowsPipePath } from "./token.js";
 
+/** Marker file whose presence turns a lease directory into the permanent
+ * root-authority barrier (issue #165 D1). The barrier directory deliberately
+ * carries NO top-level owner.json: a pre-fix claimant's lease parse fails
+ * closed on it forever, so it can never quarantine the barrier and take over
+ * a data root last served by a fixed runtime. */
+export const ROOT_AUTHORITY_MARKER_FILE = "root-authority-v2.json";
+/** Nested slot the fixed daemon's ACTIVE writer claim occupies under a barrier. */
+const ROOT_AUTHORITY_ACTIVE_SLOT = "active";
+
 /**
- * Filesystem home of the single-writer lease for a control endpoint. A Unix
+ * Filesystem anchor of the single-writer lease for a control endpoint. A Unix
  * socket FILE anchors its lease right next to itself; a named pipe is not a
  * filesystem entry (nothing can be created in `\\.\pipe\`), so its lease lives
  * in the daemon dir under the pipe's own final segment — which already carries
  * the config-dir digest, keeping concurrent daemons' leases distinct.
  */
-export function writerLeasePath(socketPath: string): string {
+export function writerLeaseAnchorPath(socketPath: string): string {
   if (isWindowsPipePath(socketPath)) {
     const pipeName = socketPath.split(/[\\/]/).pop() || "claudexord-pipe";
     return join(daemonDir(), `${pipeName}.writer`);
   }
   return `${socketPath}.writer`;
+}
+
+/**
+ * Effective single-writer lease address. Once the anchor directory carries the
+ * permanent root-authority barrier marker (issue #165 D1/D4), the live claim
+ * for every FIXED runtime moves to the nested `active.writer` slot inside the
+ * barrier, so inspection, acquisition, termination and operator stop all keep
+ * following one canonical address. Pre-fix runtimes never resolve the nested
+ * slot — they contend on the anchor itself, where the opaque barrier refuses
+ * them. Without a marker the anchor stays the (legacy-compatible) address.
+ */
+export function writerLeasePath(socketPath: string): string {
+  const anchor = writerLeaseAnchorPath(socketPath);
+  try {
+    if (lstatSync(join(anchor, ROOT_AUTHORITY_MARKER_FILE)).isFile()) {
+      return join(anchor, `${ROOT_AUTHORITY_ACTIVE_SLOT}.writer`);
+    }
+  } catch {
+    /* no readable barrier marker -> the anchor is the lease address */
+  }
+  return anchor;
 }
 
 export interface DaemonWriterLease {

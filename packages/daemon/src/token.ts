@@ -53,6 +53,17 @@ export function ensureDaemonRuntimeRoot(): string {
 export function defaultSocketPath(platform: NodeJS.Platform = process.platform): string {
   const override = process.env.CLAUDEXOR_DAEMON_SOCK;
   if (override) return override;
+  return canonicalDefaultSocketPath(platform);
+}
+
+/** The data root's canonical default endpoint, ignoring any socket-spelling
+ * override. The issue #165 root-authority barrier anchors HERE (D4): authority
+ * follows the data root, so runtimes with custom socket spellings still share
+ * one root authority, and the legacy barrier stays at the address pre-fix
+ * runtimes contend on. */
+export function canonicalDefaultSocketPath(
+  platform: NodeJS.Platform = process.platform,
+): string {
   if (platform === "win32") {
     const digest = sha256(resolve(daemonDir()))
       .replace(/^sha256:/, "")
