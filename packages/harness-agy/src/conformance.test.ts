@@ -31,7 +31,7 @@ describe("agy adapter conformance fixtures", () => {
       // Every DONE tool result carries a status (never statusless: the
       // conformance stat the engine's tool-hygiene fold depends on).
       expect(stats.statuslessToolResults).toBe(0);
-      if (name === "basic-run.jsonl") {
+      if (name === "basic-run.jsonl" || name === "schema-envelope-run.jsonl") {
         expect(stats.started).toBe(1);
         expect(stats.toolCalls).toBeGreaterThan(0);
         expect(stats.toolResults).toBeGreaterThan(0);
@@ -47,8 +47,7 @@ describe("agy adapter conformance fixtures", () => {
       if (name.startsWith("session-resume")) {
         // The vendor conversation id is surfaced for INV-137 lane resume.
         const started = events.find((e) => (e as { type?: string }).type === "started") as
-          | { payload?: Record<string, unknown> }
-          | undefined;
+          { payload?: Record<string, unknown> } | undefined;
         expect(started?.payload?.["native_session_id"]).toBeTruthy();
       }
     });

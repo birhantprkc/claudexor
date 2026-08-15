@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalIsolationLocator, providerScrubEnv, runCapture } from "@claudexor/core";
 import type { CredentialProfile, CredentialProfileStatus } from "@claudexor/schema";
@@ -25,6 +25,16 @@ export function canonicalAgyProfileHome(locator: string): string {
  */
 export function agyTokenPath(profileHome: string): string {
   return join(profileHome, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+}
+
+/** The token must be a regular FILE: a directory at that path is a malformed
+ * profile, not a login, and must refuse rather than route (Ф0 review #11). */
+export function agyTokenFilePresent(profileHome: string): boolean {
+  try {
+    return statSync(agyTokenPath(profileHome)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -65,7 +75,7 @@ export function resolveAgyProfileRoute(
     };
   try {
     const home = canonicalAgyProfileHome(profile.isolation_locator ?? "");
-    if (!existsSync(agyTokenPath(home)))
+    if (!agyTokenFilePresent(home))
       return {
         refusal: `credential profile "${profile.profile_id}" has no Antigravity login in its profile HOME (run \`claudexor profiles login agy ${profile.profile_id}\` first)`,
       };

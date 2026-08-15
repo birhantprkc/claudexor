@@ -42,12 +42,12 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
       const name = String(info.name ?? step.tool_name ?? "tool");
       const target = boundedTarget(primaryToolTarget(info.parameters));
       const tool: ToolRef = { name, kind: toolKindFor(name), target };
-      const active = String(step.state ?? "") === "ACTIVE";
-      if (active) {
+      const state = String(step.state ?? "");
+      if (state === "ACTIVE") {
         // ACTIVE/DONE arrive as a pair per call (fixture-pinned): ACTIVE is
         // the call, DONE the result.
         events.push({ type: "tool_call", session_id: sessionId, ts, text: name, tool });
-      } else {
+      } else if (state === "DONE") {
         const errorDetail = summarize(info.error);
         if (errorDetail) {
           events.push({
@@ -66,17 +66,21 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
             text: "tool_result",
             tool: { ...tool, status: "ok", content_summary: output || undefined },
           });
-          if (WRITE_TOOLS.test(name)) {
+          if (isWriteTool(name)) {
             events.push({
               type: "file_change",
               session_id: sessionId,
               ts,
               tool: { name, kind: "file" },
-              payload: { path: primaryToolTarget(info.parameters), tool: name },
+              payload: { path: boundedTarget(primaryToolTarget(info.parameters)), tool: name },
             });
           }
         }
       }
+      // Any OTHER state (PENDING/CANCELLED/ERROR/absent, or a future value) is
+      // a recognized lifecycle no-op: claiming success for it would fabricate
+      // a completed tool call — and, for a write-named tool, a file change
+      // that never happened (Ф0 review #1).
     } else if (typeof step.text_delta === "string" && step.text_delta) {
       // agent_response chunks: completed narration segments (not display
       // deltas — no payload.delta). The typed final comes from `result`.
@@ -101,9 +105,14 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
       // `structured_output` while `response` concatenates prose AND the JSON;
       // serialize the parsed object as the typed final (codex model) instead
       // of parsing mixed text. Without a schema the final is `response`.
-      const structured = r.structured_output;
+      // Only an OBJECT envelope is a structured final: `false`/`0`/`""` are
+      // not envelopes and must fall through to the prose response (review #7).
+      const structured =
+        r.structured_output !== null && typeof r.structured_output === "object"
+          ? r.structured_output
+          : null;
       const finalText =
-        structured !== undefined && structured !== null
+        structured !== null
           ? JSON.stringify(structured)
           : typeof r.response === "string"
             ? r.response
@@ -116,7 +125,7 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
           text: finalText,
           final: true,
           payload: {
-            final_source: structured !== undefined && structured !== null ? "structured_output" : "result",
+            final_source: structured !== null ? "structured_output" : "result",
           },
         });
       } else {
@@ -128,7 +137,7 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
           session_id: sessionId,
           ts,
           error:
-            "agy reported SUCCESS with an empty response (vendor soft-deny: a required tool permission was auto-denied)",
+            "agy reported SUCCESS with an empty response (no output produced; commonly a vendor soft-deny of a required tool permission)",
         });
       }
     } else {
@@ -146,7 +155,16 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
   return null;
 }
 
-const WRITE_TOOLS = /write|edit|replace|apply|patch/i;
+/** Tools that MUTATE the workspace. The regex catches the vendor's naming
+ * convention; the allowlist covers proven writers whose names do not match
+ * (`generate_image` writes an image file — Ф0 review #5). `sed_file` is
+ * deliberately absent: whether it mutates on 1.1.13 is unverified, and
+ * claiming a file change we cannot prove is the same defect class as #1. */
+const WRITE_TOOL_NAMES = new Set(["generate_image"]);
+const WRITE_TOOLS_RE = /write|edit|replace|apply|patch/i;
+function isWriteTool(name: string): boolean {
+  return WRITE_TOOL_NAMES.has(name) || WRITE_TOOLS_RE.test(name);
+}
 
 function toolKindFor(name: string): ToolKind {
   const n = name.toLowerCase();
@@ -154,7 +172,7 @@ function toolKindFor(name: string): ToolKind {
   if (n.includes("search") || n.includes("grep") || n.includes("glob") || n.includes("list_dir"))
     return "search";
   if (n.includes("browser") || n.includes("url") || n.includes("web")) return "web";
-  if (WRITE_TOOLS.test(n) || n.includes("read") || n.includes("file") || n.includes("view"))
+  if (isWriteTool(n) || n.includes("read") || n.includes("file") || n.includes("view"))
     return "file";
   if (n.includes("mcp")) return "mcp";
   return "other";
@@ -164,7 +182,14 @@ function toolKindFor(name: string): ToolKind {
 function primaryToolTarget(parameters: unknown): string | undefined {
   if (!parameters || typeof parameters !== "object") return undefined;
   const p = parameters as Record<string, unknown>;
-  for (const key of ["TargetFile", "AbsolutePath", "DirectoryPath", "CommandLine", "Query", "Url"]) {
+  for (const key of [
+    "TargetFile",
+    "AbsolutePath",
+    "DirectoryPath",
+    "CommandLine",
+    "Query",
+    "Url",
+  ]) {
     const v = p[key];
     if (typeof v === "string" && v) return v;
   }
@@ -187,8 +212,16 @@ function stepUsage(raw: unknown): HarnessEvent["usage"] | null {
 }
 
 function summarize(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) return "";
-  return redactSecrets(value).trim().replace(/\s+/g, " ").slice(0, 1000);
+  if (typeof value === "string")
+    return value.trim() ? redactSecrets(value).trim().replace(/\s+/g, " ").slice(0, 1000) : "";
+  // A non-string detail (the vendor sometimes nests an object) must not be
+  // silently dropped into a generic message (Ф0 review #7).
+  if (value === null || value === undefined) return "";
+  try {
+    return redactSecrets(JSON.stringify(value)).trim().slice(0, 1000);
+  } catch {
+    return "";
+  }
 }
 
 function boundedTarget(value: unknown): string | undefined {

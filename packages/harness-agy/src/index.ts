@@ -10,13 +10,19 @@ import {
   HarnessManifest as HarnessManifestSchema,
 } from "@claudexor/schema";
 import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
-import { promptWithInstructions, runCapture, runCliHarness } from "@claudexor/core";
+import {
+  HarnessUnavailableError,
+  promptWithInstructions,
+  runCapture,
+  runCliHarness,
+} from "@claudexor/core";
 import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
 import { parseAgyEvent } from "./parse.js";
 import { AGY_BIN, probeAgyCredentialProfile, resolveAgyProfileRoute } from "./profile.js";
 import { AGY_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 export { AGY_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 export {
+  AGY_BIN,
   agyProfileRunEnv,
   agyTokenPath,
   canonicalAgyProfileHome,
@@ -55,8 +61,9 @@ async function detectVersion(): Promise<string | null> {
 }
 
 /**
- * Manifest model truth (INV-104): the vendor's own list, captured from
- * `agy models` on the pinned version (fixtures/agy-models-plain.tsv). Slugs
+ * Manifest model truth (INV-104): the vendor's own list, captured live from
+ * `agy models` on the pinned version (evidence: PLAN §1.2 F9 and the sprint
+ * evidence dir; the vendor emits TSV, not JSON, in 1.1.13). Slugs
  * carry the reasoning effort (`-high`/`-medium`/`-low`) exactly like Cursor's
  * inventory, so the effort ladder is deliberately empty and an effort hint is
  * disclosed as ignored rather than mapped (Л-21). No live `models()`:
@@ -101,7 +108,7 @@ export function createAgyAdapter(): HarnessAdapter {
     async discover(): Promise<HarnessManifest> {
       const version = await detectVersion();
       if (version === null) {
-        throw new Error(
+        throw new HarnessUnavailableError(
           "agy not found on PATH (install Antigravity CLI or set CLAUDEXOR_AGY_BIN)",
         );
       }
@@ -165,8 +172,10 @@ export function createAgyAdapter(): HarnessAdapter {
 
     async doctor(spec: DoctorSpec): Promise<ConformanceReport> {
       const version = await detectVersion();
+      const installedSemver =
+        version === null ? null : (/\d+\.\d+\.\d+/.exec(version)?.[0] ?? null);
       const versionDrift =
-        version !== null && !version.includes(AGY_VENDOR_CLI_VERSION)
+        version !== null && installedSemver !== AGY_VENDOR_CLI_VERSION
           ? `installed agy "${version}" differs from the verified ${AGY_VENDOR_CLI_VERSION}; the file-token profile mechanism is re-proven per version (R-2')`
           : null;
       const requestedSource = spec.authSource;
@@ -228,8 +237,7 @@ export function createAgyAdapter(): HarnessAdapter {
           {
             id: "default_credential",
             status: "fail",
-            detail:
-              "agy has no engine-default credential by design; accounts are named profiles",
+            detail: "agy has no engine-default credential by design; accounts are named profiles",
           },
           ...(versionDrift
             ? [{ id: "version_pin", status: "fail" as const, detail: versionDrift }]

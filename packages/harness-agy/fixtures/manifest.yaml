@@ -1,18 +1,38 @@
-# Fixture provenance manifest. basic-run.jsonl and error-auth.jsonl are
-# RECORDED from a live authenticated agy 1.1.13 session on macOS
-# (2026-08-16, PLAN §1.2e / §1.2 F6): a real `-p --output-format stream-json`
-# run with a WorkReport-shaped --json-schema envelope, and the real
-# auth-timeout terminal envelope. session-resume.jsonl is synthesized from
-# those exact recorded shapes (a resumed conversation was not captured yet).
+# Fixture provenance manifest. All four streams were RECORDED from live
+# authenticated agy 1.1.13 sessions on macOS (2026-08-16) except
+# session-resume.jsonl, which is synthesized from those exact recorded shapes
+# (a resumed conversation was not captured). Host paths are scrubbed to a
+# neutral /workspace/demo root and the init tool inventory is trimmed to the
+# fields the parser reads — the event SHAPES are verbatim.
+#
+# basic-run.jsonl is the PRODUCTION path: no --json-schema (the adapter never
+# passes one and declares json_schema_output false), so its typed final comes
+# from `result.response` with final_source "result".
+# schema-envelope-run.jsonl is a SECOND capture taken WITH a WorkReport-shaped
+# --json-schema. It is not reachable through the shipped adapter today; it
+# pins the structured_output branch for the day the owner enables the
+# constrained transport (PLAN Л-31 / §1.2e, which also records that the
+# envelope costs an extra vendor turn).
 #
 # `expectations` (W3.8) are the STREAM SEMANTICS the conformance test asserts
-# through core streamExpectationViolations. agy HAS a typed final: the
-# terminal `result` event (finality never comes from mid-run narration);
-# with a schema envelope the final is serialized from `structured_output`
-# (Л-20), otherwise from `result.response`.
+# through core streamExpectationViolations. agy HAS a typed final: the terminal
+# `result` event — finality never comes from mid-run narration.
 cli: agy
 fixtures:
   basic-run.jsonl:
+    source: recorded
+    cli_version: 1.1.13
+    recorded_at: "2026-08-16"
+    sanitized: true
+    expectations:
+      final_messages: 1
+      final_source: result
+      final_is_last_message: true
+      started_events: 1
+      thinking_events: 0
+      delta_messages: 0
+      typed_rate_limit: false
+  schema-envelope-run.jsonl:
     source: recorded
     cli_version: 1.1.13
     recorded_at: "2026-08-16"

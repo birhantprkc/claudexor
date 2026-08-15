@@ -60,7 +60,10 @@ describe("parseAgyEvent", () => {
   });
 
   it("maps SUCCESS with an empty response to a typed soft-deny error (#794)", () => {
-    const out = parseAgyEvent({ event: "result", result: { status: "SUCCESS", response: "" } }, SID);
+    const out = parseAgyEvent(
+      { event: "result", result: { status: "SUCCESS", response: "" } },
+      SID,
+    );
     expect(out).toHaveLength(1);
     expect(out![0].type).toBe("error");
     expect((out![0] as { error?: string }).error).toMatch(/soft-deny/);
@@ -96,7 +99,11 @@ describe("parseAgyEvent", () => {
         step_update: {
           state: "DONE",
           step_type: "tool",
-          tool_info: { name: "write_to_file", parameters: { TargetFile: "/w/a.txt" }, output: "ok" },
+          tool_info: {
+            name: "write_to_file",
+            parameters: { TargetFile: "/w/a.txt" },
+            output: "ok",
+          },
         },
       },
       SID,
@@ -150,6 +157,84 @@ describe("parseAgyEvent", () => {
         SID,
       ),
     ).toEqual([]);
+  });
+
+  it("never claims success for a non-DONE tool state (Ф0 review #1)", () => {
+    for (const state of ["CANCELLED", "ERROR", "PENDING", ""]) {
+      const out = parseAgyEvent(
+        {
+          event: "step_update",
+          step_update: {
+            state,
+            step_type: "tool",
+            tool_info: { name: "write_to_file", parameters: { TargetFile: "/w/a.txt" } },
+          },
+        },
+        SID,
+      )!;
+      // No fabricated tool_result and — critically — no fabricated file_change.
+      expect(out).toEqual([]);
+    }
+  });
+
+  it("flags a proven writer whose name does not match the convention (#5)", () => {
+    const out = parseAgyEvent(
+      {
+        event: "step_update",
+        step_update: {
+          state: "DONE",
+          step_type: "tool",
+          tool_info: {
+            name: "generate_image",
+            parameters: { TargetFile: "/w/x.png" },
+            output: "ok",
+          },
+        },
+      },
+      SID,
+    )!;
+    expect(out.some((e) => e.type === "file_change")).toBe(true);
+  });
+
+  it("keeps a non-string vendor error detail instead of a generic message (#7)", () => {
+    const out = parseAgyEvent(
+      { event: "result", result: { status: "ERROR", error: { message: "boom" } } },
+      SID,
+    )!;
+    expect((out[0] as { error?: string }).error).toContain("boom");
+  });
+
+  it("does not treat a falsy structured_output as an envelope (#7)", () => {
+    for (const structured of [false, 0, ""]) {
+      const out = parseAgyEvent(
+        {
+          event: "result",
+          result: { status: "SUCCESS", response: "prose", structured_output: structured },
+        },
+        SID,
+      )!;
+      expect(out[0]).toMatchObject({ text: "prose", payload: { final_source: "result" } });
+    }
+  });
+
+  it("bounds and redacts the file_change payload path (#8)", () => {
+    const out = parseAgyEvent(
+      {
+        event: "step_update",
+        step_update: {
+          state: "DONE",
+          step_type: "tool",
+          tool_info: {
+            name: "write_to_file",
+            parameters: { TargetFile: "/w/sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH.txt" },
+            output: "ok",
+          },
+        },
+      },
+      SID,
+    )!;
+    const change = out.find((e) => e.type === "file_change") as { payload?: { path?: string } };
+    expect(change.payload?.path).not.toContain("sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH");
   });
 
   it("returns null for unknown top-level events so the run loop counts drops", () => {
