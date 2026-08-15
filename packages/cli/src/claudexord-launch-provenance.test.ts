@@ -12,15 +12,20 @@ import { afterEach, describe, expect, it } from "vitest";
  */
 
 const daemonEntry = resolve(import.meta.dirname, "../dist/claudexord.js");
-const cleanups: Array<() => void> = [];
+const cleanups: Array<() => void | Promise<void>> = [];
 
-afterEach(() => {
-  for (const dispose of cleanups.splice(0)) dispose();
+// Dispose in REVERSE registration order so a spawned daemon is killed and
+// REAPED before its root is removed: a SIGTERMed daemon still writes during
+// shutdown, and a recursive rm racing those writes fails ENOTEMPTY on Linux.
+afterEach(async () => {
+  for (const dispose of cleanups.splice(0).reverse()) await dispose();
 });
 
 function freshRoot(): string {
   const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "cx-prov-")));
-  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  cleanups.push(() =>
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+  );
   return join(root, "config");
 }
 
@@ -34,8 +39,13 @@ function spawnDaemon(config: string, extraEnv: Record<string, string> = {}): Chi
       ...extraEnv,
     },
   });
-  cleanups.push(() => {
-    if (child.exitCode === null) child.kill("SIGKILL");
+  cleanups.push(async () => {
+    if (child.exitCode !== null) return;
+    child.kill("SIGKILL");
+    await waitFor(
+      () => (child.exitCode === null && child.signalCode === null ? null : true),
+      "the daemon to be reaped",
+    );
   });
   return child;
 }
