@@ -137,6 +137,54 @@ export const CLEAN_ENV_ALLOWLIST: readonly string[] = [
 ];
 
 /**
+ * Windows process-environment keys a spawned native CLI needs to start at all:
+ * the system root and shell that Windows itself resolves against, the temp and
+ * profile roots every vendor CLI writes to, and PATHEXT. Read case-insensitively
+ * on Windows, so the canonical uppercase spelling here matches any casing the OS
+ * used. Kept as one named set so every scrubbed spawn env forwards the same
+ * keys instead of each caller guessing.
+ */
+export const WINDOWS_RUNTIME_ENV_KEYS: readonly string[] = [
+  "SYSTEMROOT",
+  "SYSTEMDRIVE",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+];
+
+/**
+ * Copy allowlisted keys out of `source`. Windows spells its own variables
+ * `SystemRoot`, `ComSpec`, `windir`, and a plain object copy of `process.env`
+ * loses the case-insensitive lookup the live object has, so there the match is
+ * case-insensitive and the value lands under the canonical spelling (Windows
+ * is case-insensitive at CreateProcess). On POSIX, where `http_proxy` and
+ * `HTTP_PROXY` are genuinely different variables, the match stays exact.
+ */
+export function pickAllowlistedEnv(
+  source: NodeJS.ProcessEnv,
+  keys: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const insensitive =
+    platform === "win32"
+      ? new Map(Object.entries(source).map(([key, value]) => [key.toUpperCase(), value]))
+      : null;
+  const out: NodeJS.ProcessEnv = {};
+  for (const key of keys) {
+    const value = source[key] ?? insensitive?.get(key.toUpperCase());
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/**
  * Build the base child env for a given inheritance mode. `mirror_native` copies
  * the parent env (the native CLIs' default); `clean` copies only the minimal
  * allowlist (agent isolation). The adapter's `spec.env` overrides + the
@@ -150,10 +198,5 @@ export function composeBaseEnv(
 ): NodeJS.ProcessEnv {
   const normalizedSource = harnessRuntimeEnv(source, execPath, platform);
   if (inheritance !== "clean") return normalizedSource;
-  const out: NodeJS.ProcessEnv = {};
-  for (const key of CLEAN_ENV_ALLOWLIST) {
-    const value = normalizedSource[key];
-    if (value !== undefined) out[key] = value;
-  }
-  return out;
+  return pickAllowlistedEnv(normalizedSource, CLEAN_ENV_ALLOWLIST, platform);
 }

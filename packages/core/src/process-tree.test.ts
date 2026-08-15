@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   descendantProcessGroupIds,
   killWindowsProcessTree,
+  processGroupServiceWithWindowsSupport,
   readProcessTable,
   reapProcessTree,
   resolveKillTreeStrategy,
@@ -129,7 +130,10 @@ describe("readProcessTable", () => {
   });
 });
 
-describe("reapProcessTree", () => {
+// The POSIX ladder is exercised against a simulated POSIX world; on a real
+// win32 host `reapProcessTree` dispatches to the taskkill leg below instead,
+// which has its own suite.
+describe.runIf(process.platform !== "win32")("reapProcessTree", () => {
   it("confirms death after the direct group exits on the cooperative signal", async () => {
     const world = fakeWorld({ alive: [100], coopLethal: true });
     const outcome = await reapProcessTree({
@@ -566,5 +570,34 @@ describe("reapProcessTree on win32 (taskkill leg)", () => {
     });
     expect(windowsKills).toBe(0);
     expect(outcome.state).toBe("confirmed");
+  });
+});
+
+describe("processGroupServiceWithWindowsSupport", () => {
+  it("is the ordinary process-group service off win32", () => {
+    expect(processGroupServiceWithWindowsSupport("linux").captureLeader(process.pid)).toEqual(
+      new ProcessGroupService({ platform: "linux" }).captureLeader(process.pid),
+    );
+  });
+
+  it("captures a real win32 leader on Windows and stays unprovable elsewhere", () => {
+    // The live proof of the birth-time reader: on Windows it must resolve this
+    // very process; on any other host the reader cannot run, so identity stays
+    // unprovable and nothing is ever signalled.
+    const capture = processGroupServiceWithWindowsSupport("win32").captureLeader(process.pid);
+    if (process.platform !== "win32") {
+      expect(capture.status).toBe("unknown");
+      return;
+    }
+    expect(capture).toMatchObject({
+      status: "known",
+      handle: {
+        pgid: process.pid,
+        leader: { platform: "win32", source: "win32_process_times", pid: process.pid },
+      },
+    });
+    if (capture.status !== "known") throw new Error("unreachable");
+    // A birth token, not the pid dressed up as one.
+    expect(capture.handle.leader.startToken).not.toBe(`win32:${process.pid}`);
   });
 });

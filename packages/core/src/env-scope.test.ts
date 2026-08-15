@@ -4,6 +4,8 @@ import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CLEAN_ENV_ALLOWLIST,
+  WINDOWS_RUNTIME_ENV_KEYS,
+  pickAllowlistedEnv,
   composeBaseEnv,
   PROVIDER_SECRET_ENV,
   providerScrubEnv,
@@ -159,5 +161,24 @@ describe("composeBaseEnv managed-runner Node prepend rides every lane class (QA-
     // Prepending a killable Node's dir would poison the very shell we protect.
     expect((base.PATH ?? "").split(delimiter)[0]).not.toBe(dirname(brewNode));
     expect((base.PATH ?? "").split(delimiter)[0]).toBe("/parent/.claudexor/node/bin");
+  });
+});
+
+describe("pickAllowlistedEnv", () => {
+  it("matches Windows spellings case-insensitively and POSIX ones exactly", () => {
+    // Windows stores `SystemRoot`/`ComSpec`; a plain copy of process.env loses
+    // the live object's case-insensitive lookup, so the canonical uppercase
+    // allowlist would silently drop them.
+    const windows = { SystemRoot: "C:\\Windows", ComSpec: "C:\\Windows\\system32\\cmd.exe" };
+    expect(pickAllowlistedEnv(windows, WINDOWS_RUNTIME_ENV_KEYS, "win32")).toMatchObject({
+      SYSTEMROOT: "C:\\Windows",
+      COMSPEC: "C:\\Windows\\system32\\cmd.exe",
+    });
+    // On POSIX `http_proxy` and `HTTP_PROXY` are different variables, so the
+    // match must stay exact and never invent one from the other.
+    const posix = { HTTP_PROXY: "http://proxy:8080" };
+    expect(pickAllowlistedEnv(posix, ["http_proxy", "HTTP_PROXY"], "linux")).toEqual({
+      HTTP_PROXY: "http://proxy:8080",
+    });
   });
 });

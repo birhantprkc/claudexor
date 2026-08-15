@@ -164,7 +164,7 @@ jobs:
   # matrix fails or is cancelled, and a skipped required check never reports.
   build-test-gate:
     name: build-test
-    needs: build-test
+    needs: [build-test, windows-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -173,6 +173,7 @@ jobs:
         # when every leg succeeded (fail-fast: false means all of them ran).
         env:
           MATRIX_RESULT: ${{ needs.build-test.result }}
+          WINDOWS_RESULT: ${{ needs.windows-test.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -180,6 +181,46 @@ jobs:
             echo "::error::Node matrix result is '$MATRIX_RESULT' (expected 'success')."
             exit 1
           fi
+          if [ "$WINDOWS_RESULT" != "success" ]; then
+            echo "::error::Windows lane result is '$WINDOWS_RESULT' (expected 'success')."
+            exit 1
+          fi
+
+  windows-test:
+    name: Windows (Node 20)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20.19.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # The Windows-shaped surfaces, and only suites whose fixtures are
+      # portable: the absolute-path contract, win32 process identity and
+      # termination, and the journal walker whose separator bug reproduces
+      # ONLY here. Suites built on POSIX mode bits, symlinks or `#!/bin/sh`
+      # fixtures stay on the Linux/macOS legs; their win32 branches are
+      # proven by injected-platform unit tests instead.
+      - name: Test (paths, process identity, journal)
+        run: >
+          pnpm vitest run packages/schema/src/schema.test.ts
+          packages/core/src/process-identity.test.ts
+          packages/core/src/process-tree.test.ts
+          packages/journal/src/index.test.ts
 
   swift:
     runs-on: macos-26

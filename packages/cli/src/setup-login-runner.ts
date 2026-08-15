@@ -2,9 +2,13 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { dirname, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProcessGroupService, defaultProcessGroupService } from "@claudexor/core";
+import {
+  WINDOWS_RUNTIME_ENV_KEYS,
+  pickAllowlistedEnv,
+  processGroupServiceWithWindowsSupport,
+} from "@claudexor/core";
 import {
   startCodexDeviceLogin,
   type CodexAppServerConnection,
@@ -36,7 +40,7 @@ export interface SetupLoginRunnerOptions {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   spawnProcess?: typeof spawn;
-  processGroupService?: ProcessGroupService;
+  processGroupService?: ReturnType<typeof processGroupServiceWithWindowsSupport>;
   selfPid?: number;
   runnerPath?: string;
 }
@@ -50,12 +54,14 @@ export async function runSetupLogin(
   manifestPath: string,
   options: SetupLoginRunnerOptions = {},
 ): Promise<number> {
-  const manifest = validateManifest(manifestPath);
+  const manifest = readLoginManifest(manifestPath);
   const spawnProcess = options.spawnProcess ?? spawn;
   const runnerPath = options.runnerPath ?? fileURLToPath(import.meta.url);
   const worker = spawnProcess(process.execPath, [runnerPath, "--worker", resolve(manifestPath)], {
     cwd: manifest.cwd,
     env: runnerBootstrapEnv(),
+    // A detached child opens its own console on Windows unless hidden.
+    windowsHide: true,
     detached: true,
     stdio: "inherit",
   });
@@ -68,11 +74,11 @@ export async function runSetupLoginWorker(
   manifestPath: string,
   options: SetupLoginRunnerOptions = {},
 ): Promise<number> {
-  const manifest = validateManifest(manifestPath);
+  const manifest = readLoginManifest(manifestPath);
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
   const spawnProcess = options.spawnProcess ?? spawn;
-  const processGroups = options.processGroupService ?? defaultProcessGroupService;
+  const processGroups = options.processGroupService ?? processGroupServiceWithWindowsSupport();
   const captured = processGroups.captureLeader(options.selfPid ?? process.pid);
   if (captured.status !== "known") {
     throw new Error(
@@ -467,17 +473,6 @@ function probeLoginHelp(
   });
 }
 
-function validateManifest(manifestPath: string): SetupLoginManifest {
-  const manifest = readLoginManifest(manifestPath);
-  const base = resolve(dirname(manifestPath));
-  for (const output of [manifest.statePath, manifest.resultPath, manifest.permitPath]) {
-    const absolute = resolve(output);
-    if (!absolute.startsWith(base + sep))
-      throw new Error("setup-login sidecar escapes its job directory");
-  }
-  return manifest;
-}
-
 function persistResult(
   manifest: SetupLoginManifest,
   result: Omit<
@@ -529,8 +524,7 @@ function waitForExit(
 
 /** The bootstrap itself never needs model/provider credentials. */
 function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of [
+  return pickAllowlistedEnv(source, [
     "PATH",
     "HOME",
     "TMPDIR",
@@ -554,10 +548,8 @@ function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
-  ] as const) {
-    if (source[key] !== undefined) env[key] = source[key];
-  }
-  return env;
+    ...WINDOWS_RUNTIME_ENV_KEYS,
+  ]);
 }
 
 function isDirectEntrypoint(): boolean {

@@ -35,6 +35,9 @@ export type ProcessGroupEmptyProbe =
       reason: "unsupported_platform" | "permission_denied" | "probe_failed";
     };
 
+/** Outcome of the injected win32 tree kill (`taskkill /T /F` in production). */
+export type ProcessTreeKillOutcome = "killed" | "not_found" | "failed";
+
 export type ProcessGroupSignalResult =
   | { status: "sent"; pgid: number; signal: NodeJS.Signals }
   | { status: "empty"; pgid: number; signal: NodeJS.Signals }
@@ -47,7 +50,8 @@ export type ProcessGroupSignalResult =
         | "missing_leader"
         | "identity_unknown"
         | "permission_denied"
-        | "signal_failed";
+        | "signal_failed"
+        | "unsupported_platform";
     };
 
 export interface ProcessGroupServiceOptions {
@@ -55,6 +59,15 @@ export interface ProcessGroupServiceOptions {
   identity?: ProcessIdentityReader;
   probeProcessGroup?: (negativePgid: number) => void;
   signalProcessGroup?: (negativePgid: number, signal: NodeJS.Signals) => void;
+  /**
+   * OPT-IN win32 terminator (`killWindowsProcessTree` in production). Windows
+   * has no process groups and no cooperative signal, so a win32 `signal` is a
+   * whole-tree kill of the recorded leader. Absent (the default) keeps win32
+   * signalling refused, so no consumer inherits Windows termination it did not
+   * ask for. The caller injects it from the tree owner, which keeps this
+   * module a leaf.
+   */
+  killProcessTree?: (pid: number) => ProcessTreeKillOutcome;
 }
 
 function handleFromKnownLeader(identity: KnownProcessIdentity): ProcessGroupCapture {
@@ -102,6 +115,7 @@ export class ProcessGroupService {
   private readonly identity: ProcessIdentityReader;
   private readonly probeProcessGroup: (negativePgid: number) => void;
   private readonly signalProcessGroup: (negativePgid: number, signal: NodeJS.Signals) => void;
+  private readonly killProcessTree?: (pid: number) => ProcessTreeKillOutcome;
 
   constructor(options: ProcessGroupServiceOptions = {}) {
     this.platform = options.platform ?? process.platform;
@@ -110,6 +124,7 @@ export class ProcessGroupService {
       options.probeProcessGroup ?? ((negativePgid) => process.kill(negativePgid, 0));
     this.signalProcessGroup =
       options.signalProcessGroup ?? ((negativePgid, signal) => process.kill(negativePgid, signal));
+    this.killProcessTree = options.killProcessTree;
   }
 
   captureLeader(pid: number): ProcessGroupCapture {
@@ -124,8 +139,22 @@ export class ProcessGroupService {
     return compareProcessIdentity(handle.leader, this.identity.read(handle.leader.pid));
   }
 
-  /** Only ESRCH proves the complete group empty; every other error is unknown. */
+  /**
+   * Only ESRCH proves the complete group empty; every other error is unknown.
+   * On win32 there is no group probe: emptiness is the recorded LEADER's
+   * kernel identity being gone (missing, or a different process on a recycled
+   * pid) after the tree kill that `signal` performs — a leader-death proof,
+   * weaker than the POSIX group proof and disclosed as such by its own owner.
+   */
   probeEmpty(handle: ProcessGroupHandle): ProcessGroupEmptyProbe {
+    if (this.platform === "win32") {
+      const comparison = this.compareLeader(handle);
+      if (comparison === "same") return { status: "nonempty", pgid: handle.pgid };
+      if (comparison === "missing" || comparison === "different") {
+        return { status: "empty", pgid: handle.pgid };
+      }
+      return { status: "unknown", pgid: handle.pgid, reason: "probe_failed" };
+    }
     if (this.platform !== "linux" && this.platform !== "darwin") {
       return { status: "unknown", pgid: handle.pgid, reason: "unsupported_platform" };
     }
@@ -152,6 +181,19 @@ export class ProcessGroupService {
             ? "missing_leader"
             : "identity_unknown";
       return { status: "unknown", pgid: handle.pgid, signal, reason };
+    }
+    if (this.platform === "win32") {
+      if (!this.killProcessTree) {
+        return { status: "unknown", pgid: handle.pgid, signal, reason: "unsupported_platform" };
+      }
+      // Windows cannot deliver TERM; both escalation steps are the same tree
+      // kill, issued only while the recorded identity still owns the pid.
+      const outcome = this.killProcessTree(handle.pgid);
+      if (outcome === "not_found") return { status: "empty", pgid: handle.pgid, signal };
+      if (outcome === "failed") {
+        return { status: "unknown", pgid: handle.pgid, signal, reason: "signal_failed" };
+      }
+      return { status: "sent", pgid: handle.pgid, signal };
     }
     try {
       this.signalProcessGroup(-handle.pgid, signal);

@@ -68,6 +68,16 @@ func isSetupExecutionID(_ value: String) -> Bool {
     value.range(of: #"^[A-Za-z0-9-]+$"#, options: .regularExpression) != nil
 }
 
+/// Rooted path in either family: POSIX, drive-rooted Windows, or UNC. Mirrors
+/// `ABSOLUTE_PATH_PATTERN` in `@claudexor/schema`; drive- and root-relative
+/// spellings are refused there too.
+func isAbsolutePath(_ value: String) -> Bool {
+    value.range(
+        of: #"^(?:/[^\0]*|[A-Za-z]:[\\/][^\0]*|\\\\[^\\/\0]+[\\/][^\\/\0]+(?:[\\/][^\0]*)?)$"#,
+        options: .regularExpression
+    ) != nil
+}
+
 func isUnsignedDecimal(_ value: String) -> Bool {
     value.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil
 }

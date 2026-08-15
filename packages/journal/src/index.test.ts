@@ -20,7 +20,10 @@ import {
 let root: string;
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-journal-")));
+  // `.native` matters on Windows: the plain resolver keeps the 8.3 short
+  // form of %TEMP% (`RUNNER~1`), which the daemon's canonical-directory
+  // guard rightly refuses.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "claudexor-journal-")));
 });
 
 afterEach(() => {
@@ -107,51 +110,86 @@ describe("DurableJournal", () => {
     reopened.close();
   });
 
-  it("discards a complete first frame when a batch stops before its second frame", () => {
-    const crashed = openJournal((fd, batch) => {
-      const secondFrameOffset = batch.indexOf(batch.subarray(0, 8), 8);
-      expect(secondFrameOffset).toBeGreaterThan(0);
-      writeSync(fd, batch, 0, secondFrameOffset);
-      fsyncSync(fd);
-      throw new Error("simulated stop between batch frames");
-    });
-    expect(() =>
-      crashed.appendBatch([
-        { type: "quota.snapshot.scoped_prepared", payload: { id: "scope" } },
-        { type: "quota.snapshot.upserted", payload: { id: "base" } },
-      ]),
-    ).toThrow(JournalAppendUncertainError);
-    crashed.close();
+  // Windows refuses `rename` over a path whose target is held open (the live
+  // journal handle lacks FILE_SHARE_DELETE), so the POSIX atomic-replace
+  // rewrite these cases depend on cannot run there. That gap is the journal
+  // writer's own, older than this lane, and is tracked separately.
+  it("addresses partition entries with the platform separator, not a literal slash", () => {
+    // Read-only preparation walks the partition and keys its file map by path.
+    // A `${dir}/${name}` key never matched the `join()`-built path the caller
+    // looks up on Windows, so a reopened daemon read its own journal as
+    // missing and demanded recovery. This suite runs on the Windows lane,
+    // which is the only place the two spellings differ.
+    // Its own root: preparation refuses a journal root whose parent is
+    // world-writable, and the system temp dir is exactly that on Linux.
+    const rootDir = join(root, "separator");
+    const seeded = new DurableJournal({ rootDir, partition: "global" });
+    seeded.append("accepted", { value: 1 });
+    seeded.close();
 
-    const recovered = openJournal();
-    expect(recovered.state()).toMatchObject({ status: "ready" });
-    expect(recovered.records().map((record) => record.type)).toEqual([
-      "journal.recovery_tail_discarded",
-    ]);
-    recovered.close();
+    const prepared = (
+      DurableJournal as unknown as {
+        prepare(options: { rootDir: string; partition: string }): DurableJournal;
+      }
+    ).prepare({ rootDir, partition: "global" });
+    expect(prepared.state().status).toBe("ready");
+    expect(prepared.records().map((record) => record.type)).toEqual(["accepted"]);
+    prepared.close();
   });
 
-  it("discards an incomplete EOF frame, fsyncs an audit record, and stays replayable", () => {
-    const crashed = openJournal((fd, frame) => {
-      writeSync(fd, frame, 0, 3);
-      fsyncSync(fd);
-      throw new Error("simulated partial append");
-    });
-    expect(() => crashed.append("setup.job.saved", { id: "one" })).toThrow(
-      JournalAppendUncertainError,
-    );
-    crashed.close();
+  const itPosixReplace = it.runIf(process.platform !== "win32");
 
-    const recovered = openJournal();
-    expect(recovered.state()).toEqual({ status: "ready", discardedTailBytes: 3 });
-    expect(recovered.records().map((record) => record.type)).toEqual([
-      "journal.recovery_tail_discarded",
-    ]);
-    recovered.close();
-    const restarted = openJournal();
-    expect(restarted.records()[0]?.type).toBe("journal.recovery_tail_discarded");
-    restarted.close();
-  });
+  itPosixReplace(
+    "discards a complete first frame when a batch stops before its second frame",
+    () => {
+      const crashed = openJournal((fd, batch) => {
+        const secondFrameOffset = batch.indexOf(batch.subarray(0, 8), 8);
+        expect(secondFrameOffset).toBeGreaterThan(0);
+        writeSync(fd, batch, 0, secondFrameOffset);
+        fsyncSync(fd);
+        throw new Error("simulated stop between batch frames");
+      });
+      expect(() =>
+        crashed.appendBatch([
+          { type: "quota.snapshot.scoped_prepared", payload: { id: "scope" } },
+          { type: "quota.snapshot.upserted", payload: { id: "base" } },
+        ]),
+      ).toThrow(JournalAppendUncertainError);
+      crashed.close();
+
+      const recovered = openJournal();
+      expect(recovered.state()).toMatchObject({ status: "ready" });
+      expect(recovered.records().map((record) => record.type)).toEqual([
+        "journal.recovery_tail_discarded",
+      ]);
+      recovered.close();
+    },
+  );
+
+  itPosixReplace(
+    "discards an incomplete EOF frame, fsyncs an audit record, and stays replayable",
+    () => {
+      const crashed = openJournal((fd, frame) => {
+        writeSync(fd, frame, 0, 3);
+        fsyncSync(fd);
+        throw new Error("simulated partial append");
+      });
+      expect(() => crashed.append("setup.job.saved", { id: "one" })).toThrow(
+        JournalAppendUncertainError,
+      );
+      crashed.close();
+
+      const recovered = openJournal();
+      expect(recovered.state()).toEqual({ status: "ready", discardedTailBytes: 3 });
+      expect(recovered.records().map((record) => record.type)).toEqual([
+        "journal.recovery_tail_discarded",
+      ]);
+      recovered.close();
+      const restarted = openJournal();
+      expect(restarted.records()[0]?.type).toBe("journal.recovery_tail_discarded");
+      restarted.close();
+    },
+  );
 
   it.each([
     ["complete frame checksum", (bytes: Buffer) => (bytes[Math.floor(bytes.length / 2)] ^= 1)],
@@ -218,56 +256,62 @@ describe("DurableJournal", () => {
     journal.close();
   });
 
-  it("atomically compacts frames, invalidates the old epoch cursor, and remains appendable", () => {
-    const journal = openJournal();
-    for (let index = 0; index < 100; index += 1) {
-      journal.append("probe.saved", { index, repeated: "same-value".repeat(20) });
-    }
-    const cursor = journal.currentCursor();
-    const before = journal.physicalBytes();
-    const compacted = journal.compact();
-    expect(compacted).toMatchObject({ beforeBytes: before, records: 100 });
-    expect(compacted!.afterBytes).toBeLessThan(before);
-    expect(() => journal.sequenceAfter(cursor)).toThrow(/stale epoch/);
-    expect(journal.append("probe.saved", { index: 100 }).seq).toBe(101);
-    journal.close();
+  itPosixReplace(
+    "atomically compacts frames, invalidates the old epoch cursor, and remains appendable",
+    () => {
+      const journal = openJournal();
+      for (let index = 0; index < 100; index += 1) {
+        journal.append("probe.saved", { index, repeated: "same-value".repeat(20) });
+      }
+      const cursor = journal.currentCursor();
+      const before = journal.physicalBytes();
+      const compacted = journal.compact();
+      expect(compacted).toMatchObject({ beforeBytes: before, records: 100 });
+      expect(compacted!.afterBytes).toBeLessThan(before);
+      expect(() => journal.sequenceAfter(cursor)).toThrow(/stale epoch/);
+      expect(journal.append("probe.saved", { index: 100 }).seq).toBe(101);
+      journal.close();
 
-    const reopened = openJournal();
-    expect(reopened.records()).toHaveLength(101);
-    expect(reopened.records()[0]?.payload).toMatchObject({ index: 0 });
-    expect(reopened.records()[100]?.payload).toMatchObject({ index: 100 });
-    reopened.close();
-  });
+      const reopened = openJournal();
+      expect(reopened.records()).toHaveLength(101);
+      expect(reopened.records()[0]?.payload).toMatchObject({ index: 0 });
+      expect(reopened.records()[100]?.payload).toMatchObject({ index: 100 });
+      reopened.close();
+    },
+  );
 
-  it("reopens a compacted grown history without spreading records over the call stack", () => {
-    const logicalRecordCount = 176_345;
-    const journal = openJournal();
-    const internals = journal as unknown as {
-      entries: Array<{ time: string; type: string; payload: unknown }>;
-      knownFileBytes: number;
-    };
-    for (let index = 0; index < logicalRecordCount; index += 1) {
-      internals.entries.push({
-        time: "2026-01-01T00:00:00.000Z",
-        type: "grown.history",
-        payload: { index },
+  itPosixReplace(
+    "reopens a compacted grown history without spreading records over the call stack",
+    () => {
+      const logicalRecordCount = 176_345;
+      const journal = openJournal();
+      const internals = journal as unknown as {
+        entries: Array<{ time: string; type: string; payload: unknown }>;
+        knownFileBytes: number;
+      };
+      for (let index = 0; index < logicalRecordCount; index += 1) {
+        internals.entries.push({
+          time: "2026-01-01T00:00:00.000Z",
+          type: "grown.history",
+          payload: { index },
+        });
+      }
+      // The production trigger is a physically grown journal. Setting only the
+      // size comparison avoids manufacturing 176k fsynced frames in this unit
+      // test while exercising the exact compact + replay logical-record paths.
+      internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
+
+      expect(journal.compact()).toMatchObject({ records: logicalRecordCount });
+      expect(journal.currentSequence()).toBe(logicalRecordCount);
+      journal.close();
+
+      const reopened = openJournal();
+      expect(reopened.state().status).toBe("ready");
+      expect(reopened.currentSequence()).toBe(logicalRecordCount);
+      expect(reopened.records(logicalRecordCount - 1)[0]?.payload).toEqual({
+        index: logicalRecordCount - 1,
       });
-    }
-    // The production trigger is a physically grown journal. Setting only the
-    // size comparison avoids manufacturing 176k fsynced frames in this unit
-    // test while exercising the exact compact + replay logical-record paths.
-    internals.knownFileBytes = Number.MAX_SAFE_INTEGER;
-
-    expect(journal.compact()).toMatchObject({ records: logicalRecordCount });
-    expect(journal.currentSequence()).toBe(logicalRecordCount);
-    journal.close();
-
-    const reopened = openJournal();
-    expect(reopened.state().status).toBe("ready");
-    expect(reopened.currentSequence()).toBe(logicalRecordCount);
-    expect(reopened.records(logicalRecordCount - 1)[0]?.payload).toEqual({
-      index: logicalRecordCount - 1,
-    });
-    reopened.close();
-  });
+      reopened.close();
+    },
+  );
 });

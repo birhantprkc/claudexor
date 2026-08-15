@@ -1625,7 +1625,21 @@ a second Terminal; a create naming a DIFFERENT target while a login is active
 refuses with a typed 409, and a conflicting active mutating
 action is refused. Cancel is asynchronous. Cancel/timeout sends TERM and, after
 five seconds, KILL only when PID + kernel-start identity still matches; an
-unproven identity is never signalled or called cancelled. An ordinary daemon
+unproven identity is never signalled or called cancelled.
+
+On **win32** the same contract holds through platform-shaped mechanisms, and
+this is the ONLY lane that enables them. Kernel-start comes from the process
+creation time (`GetProcessTimes`, read through the absolute System32
+PowerShell), so a recycled PID compares DIFFERENT exactly as it does on POSIX;
+every other consumer keeps the fail-closed default where a win32 identity stays
+unprovable and no signal is sent. Windows has no process group and no
+cooperative TERM, so both escalation steps are one `taskkill /PID <leader> /T
+/F` of the recorded leader's tree, issued only while that identity still owns
+the PID, and emptiness is the LEADER's identity being gone afterwards — a
+leader-death proof, weaker than the POSIX group-ESRCH proof and recorded as
+such. The vendor binary is still executed without a shell: on win32 only an
+executable image (`.exe`/`.com`) resolves, so an npm `.cmd`/shell shim is
+refused with the install advisory rather than launched through `cmd.exe`. An ordinary daemon
 stop/restart no longer terminates an awaiting-user login runner (that regression
 killed the operator's own pending login in the 2026-07-21 incident); explicit
 `setup jobs cancel` and the login deadline's timeout escalation are the only

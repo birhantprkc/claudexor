@@ -57,7 +57,10 @@ function prepareJournal(options: DurableJournalOptions): PreparedJournal {
 let root: string;
 
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-journal-prepare-")));
+  // `.native` matters on Windows: the plain resolver keeps the 8.3 short
+  // form of %TEMP% (`RUNNER~1`), which the daemon's canonical-directory
+  // guard rightly refuses.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "claudexor-journal-prepare-")));
 });
 
 afterEach(() => {

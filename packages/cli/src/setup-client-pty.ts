@@ -48,6 +48,29 @@ export function awaitingSetupUserMessage(job: ControlSetupJob): string {
     : `Complete ${job.harness} native login in Terminal.`;
 }
 
+/**
+ * Codex login remedies. The legacy Terminal handoff is macOS-only
+ * (`startObservableLogin` refuses it elsewhere), so only macOS may be told to
+ * use it — every other platform reaches these messages through the
+ * daemon-hosted device-code flow.
+ */
+export function deviceAuthUnsupportedMessage(harness: string, platform: string): string {
+  const terminal =
+    platform === "darwin"
+      ? ", or retry the legacy Terminal flow with `claudexor auth login codex --browser-redirect`"
+      : "";
+  return `${harness} does not expose typed device-code auth over its app-server (upgrade the codex CLI)${terminal}.`;
+}
+
+export function deviceCodeRejectionRemedy(platform: string): string {
+  const terminal =
+    platform === "darwin" ? ", or use `claudexor auth login codex --browser-redirect`" : "";
+  return (
+    " If the sign-in page rejected your one-time code, enable ChatGPT → Settings → Security → " +
+    `"Allow device code login" and retry${terminal}.`
+  );
+}
+
 export function projectSetupDeviceCode(
   job: ControlSetupJob,
   sidecarPath: string,

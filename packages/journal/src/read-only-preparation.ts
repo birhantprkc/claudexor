@@ -11,7 +11,7 @@ import {
   readlinkSync,
   realpathSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { ZERO_HASH, replayFrames, type JournalRecord } from "./frame-codec.js";
 
 export interface JournalPreparationReceipt {
@@ -244,8 +244,15 @@ function walkPartition(
     return;
   }
   for (const name of names) {
-    const child = `${path}/${name}`;
-    const relative = child.slice(partitionDir.length + 1);
+    const child = join(path, name);
+    // `join` so the map keys match what callers look up (a `/`-built key never
+    // matched on Windows). The hashed LABEL is separator-normalized with
+    // `sep`, not a blanket backslash strip: on POSIX a backslash is an
+    // ordinary filename character and must stay distinct.
+    const relative = child
+      .slice(partitionDir.length + 1)
+      .split(sep)
+      .join("/");
     entries.add(child);
     const inspected = inspectEntry(
       child,

@@ -635,14 +635,16 @@
                       "type": "string",
                       "enum": [
                         "linux",
-                        "darwin"
+                        "darwin",
+                        "win32"
                       ]
                     },
                     "source": {
                       "type": "string",
                       "enum": [
                         "procfs_stat",
-                        "proc_pidinfo"
+                        "proc_pidinfo",
+                        "win32_process_times"
                       ]
                     },
                     "startToken": {
@@ -701,7 +703,7 @@
               "properties": {
                 "realpath": {
                   "type": "string",
-                  "pattern": "^\\/"
+                  "pattern": "^(?:\\/[^\\u0000]*|[A-Za-z]:[\\\\/][^\\u0000]*|\\\\\\\\[^\\\\/\\u0000]+[\\\\/][^\\\\/\\u0000]+(?:[\\\\/][^\\u0000]*)?)$"
                 },
                 "sha256": {
                   "$ref": "#/definitions/ControlSetupJob/properties/execution/properties/commandDigest"

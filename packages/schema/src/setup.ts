@@ -13,8 +13,8 @@ export const ProcessIdentityKnown = z
   .object({
     status: z.literal("known"),
     pid: z.number().int().positive(),
-    platform: z.enum(["linux", "darwin"]),
-    source: z.enum(["procfs_stat", "proc_pidinfo"]),
+    platform: z.enum(["linux", "darwin", "win32"]),
+    source: z.enum(["procfs_stat", "proc_pidinfo", "win32_process_times"]),
     startToken: z.string().min(1),
     processGroupId: z.number().int().positive(),
   })
@@ -80,7 +80,7 @@ export type SetupExecutionEvidence = z.infer<typeof SetupExecutionEvidence>;
 
 export const SetupExecutableEvidence = z
   .object({
-    realpath: z.string().startsWith("/"),
+    realpath: SetupLoginProtocol.SetupLoginAbsolutePath,
     sha256: Sha256Hex,
     size: z.number().int().nonnegative(),
     mode: z.number().int().nonnegative(),

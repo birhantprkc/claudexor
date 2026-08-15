@@ -1,4 +1,9 @@
-import { harnessRuntimeEnv, resolveHarnessBinary } from "@claudexor/core";
+import {
+  WINDOWS_RUNTIME_ENV_KEYS,
+  harnessRuntimeEnv,
+  pickAllowlistedEnv,
+  resolveHarnessBinary,
+} from "@claudexor/core";
 import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { CODEX_FILE_AUTH_ARGS, defaultNativeCodexHome } from "@claudexor/harness-codex";
 import { canonicalCursorProfileHome, cursorProfilePathEnv } from "@claudexor/harness-cursor";
@@ -146,7 +151,6 @@ export function nativeLoginEnv(
   configDirOverride?: string,
 ): NodeJS.ProcessEnv {
   const runtime = harnessRuntimeEnv(source);
-  const env: NodeJS.ProcessEnv = {};
   const allowed = [
     "PATH",
     "HOME",
@@ -171,11 +175,9 @@ export function nativeLoginEnv(
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
-  ] as const;
-  for (const key of allowed) {
-    const value = runtime[key];
-    if (value !== undefined) env[key] = value;
-  }
+    ...WINDOWS_RUNTIME_ENV_KEYS,
+  ];
+  const env = pickAllowlistedEnv(runtime, allowed);
   // Login and post-exit verification must address the SAME vendor-owned store.
   // These are paths only; Claudexor never reads or copies credential contents.
   if (harness === "codex") {

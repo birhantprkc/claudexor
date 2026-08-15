@@ -4,7 +4,7 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
-  ProcessGroupService,
+  processGroupServiceWithWindowsSupport,
   parseProcessGroupHandle,
   type ProcessGroupHandle,
 } from "@claudexor/core";
@@ -55,6 +55,8 @@ import { SetupSupervisor } from "./setup-supervisor.js";
 import { createDeviceCodeDisclosureWatcher } from "./setup-device-code-disclosure.js";
 import {
   awaitingSetupUserMessage,
+  deviceAuthUnsupportedMessage,
+  deviceCodeRejectionRemedy,
   clientPtyWaitingPatch,
   isDeviceCodeSetupJob,
   projectSetupDeviceCode,
@@ -119,7 +121,7 @@ export interface SetupJobManagerOptions {
   sleep?: (ms: number) => Promise<void>;
   spawn?: typeof spawn;
   openTerminal?: (scriptPath: string) => ChildProcess;
-  processGroups?: ProcessGroupService;
+  processGroups?: ReturnType<typeof processGroupServiceWithWindowsSupport>;
   runnerPath?: string;
   nodePath?: string;
 }
@@ -130,7 +132,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   const rootDir = opts.rootDir ?? daemonDir();
   const store = opts.store ?? new SetupJobStore(rootDir, { now });
   const processGroups =
-    opts.processGroups ?? new ProcessGroupService({ platform: opts.platform ?? process.platform });
+    opts.processGroups ?? processGroupServiceWithWindowsSupport(opts.platform ?? process.platform);
   const processing = new Map<string, Promise<void>>();
   const terminations = new Map<string, Promise<ControlSetupJob>>();
   const verificationControllers = new Map<string, AbortController>();
@@ -708,9 +710,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           jobId,
           "not_supported",
           "not_supported",
-          `${job.harness} does not expose typed device-code auth over its app-server ` +
-            `(upgrade the codex CLI), or retry the legacy Terminal flow with ` +
-            "`claudexor auth login codex --browser-redirect`.",
+          deviceAuthUnsupportedMessage(job.harness, platform),
         );
         return;
       }
@@ -738,8 +738,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     // flow, whose argv carries `app-server`).
     const deviceAuthRemedy =
       job.authorization?.args.includes("--device-auth") || isDeviceCodeSetupJob(job)
-        ? " If the sign-in page rejected your one-time code, enable ChatGPT → Settings → Security → " +
-          '"Allow device code login" and retry, or use `claudexor auth login codex --browser-redirect`.'
+        ? deviceCodeRejectionRemedy(platform)
         : "";
     finish(
       jobId,
@@ -1133,6 +1132,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         const runner = spawnProcess(nodePath, [runnerPath, paths.manifest], {
           detached: true,
           stdio: "ignore",
+          windowsHide: true, // "no Terminal" must also mean no console window
         });
         const failLaunch = (detail: string) => {
           if (!["idle", "healthy"].includes(supervisor.health().state)) return;
