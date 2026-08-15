@@ -52,9 +52,9 @@ describe("root authority barrier installation", () => {
     expect(() => readFileSync(join(anchor, "owner.json"))).toThrow();
     // The live claim moved to the nested slot behind the barrier.
     expect(grant.lease.path).toBe(join(anchor, "active.writer"));
-    expect(
-      JSON.parse(readFileSync(join(grant.lease.path, "owner.json"), "utf8")),
-    ).toMatchObject({ pid: process.pid });
+    expect(JSON.parse(readFileSync(join(grant.lease.path, "owner.json"), "utf8"))).toMatchObject({
+      pid: process.pid,
+    });
     grant.release();
   });
 

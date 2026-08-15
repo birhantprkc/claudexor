@@ -61,9 +61,7 @@ export function defaultSocketPath(platform: NodeJS.Platform = process.platform):
  * follows the data root, so runtimes with custom socket spellings still share
  * one root authority, and the legacy barrier stays at the address pre-fix
  * runtimes contend on. */
-export function canonicalDefaultSocketPath(
-  platform: NodeJS.Platform = process.platform,
-): string {
+export function canonicalDefaultSocketPath(platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32") {
     const digest = sha256(resolve(daemonDir()))
       .replace(/^sha256:/, "")
