@@ -80,8 +80,18 @@ export async function runStartupCrashGc(
  * Post-start: periodic live-children snapshots (the reap list a crash leaves
  * behind) and SIGTERM/SIGINT -> the shutdown state machine (abort children,
  * persist, close, bounded escalation). Returns the finalizer for main()'s tail.
+ *
+ * The snapshot timer is NOT armed here: with zero live children a snapshot
+ * DELETES pids.json, and until stage-4 crash-GC has consumed the previous
+ * life's file that file is the only record of surviving children (C2). The
+ * composition root calls `beginPidSnapshots()` once admission is normal;
+ * recovery-only serving leaves the previous pids.json byte-untouched, and the
+ * finalizer writes a final snapshot only when snapshots were armed.
  */
-export function armDaemonLifecycle(deps: LifecycleDeps): { finalize: () => void } {
+export function armDaemonLifecycle(deps: LifecycleDeps): {
+  beginPidSnapshots: () => void;
+  finalize: () => void;
+} {
   const pidsPath = join(deps.daemonDir, "pids.json");
   const signals = deps.signals ?? process;
   const snapshot = deps.snapshot ?? writePidsSnapshot;
@@ -96,8 +106,7 @@ export function armDaemonLifecycle(deps: LifecycleDeps): { finalize: () => void 
       });
     }
   };
-  const pidsTimer = setInterval(writeSnapshot, 2_000);
-  pidsTimer.unref?.();
+  let pidsTimer: NodeJS.Timeout | null = null;
 
   let stopping = false;
   let finalized = false;
@@ -120,15 +129,24 @@ export function armDaemonLifecycle(deps: LifecycleDeps): { finalize: () => void 
   signals.on("SIGINT", onSigint);
 
   return {
+    beginPidSnapshots: () => {
+      if (pidsTimer || finalized) return;
+      pidsTimer = setInterval(writeSnapshot, 2_000);
+      pidsTimer.unref?.();
+    },
     finalize: () => {
       if (finalized) return;
       finalized = true;
-      clearInterval(pidsTimer);
+      const snapshotsWereArmed = pidsTimer !== null;
+      if (pidsTimer) clearInterval(pidsTimer);
+      pidsTimer = null;
       signals.off("SIGTERM", onSigterm);
       signals.off("SIGINT", onSigint);
       // Graceful stop aborted all children; one final snapshot records any
       // that survived the grace window (SIGKILL escalation may be in flight).
-      writeSnapshot();
+      // Without armed snapshots there were no children to record, and the
+      // previous life's pids.json must stay byte-untouched (C2).
+      if (snapshotsWereArmed) writeSnapshot();
     },
   };
 }

@@ -559,6 +559,9 @@ export async function main(): Promise<void> {
       });
       if (servingMode === "normal" && !shutdownRuntime.requested()) {
         armQuotaPolling();
+        // Crash-GC has consumed the previous life's pids.json by now; live
+        // snapshots may own the file again (C2).
+        lifecycle.beginPidSnapshots();
         await setupBinding.start();
         quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
         scheduleStartupRetention(services.runRetention, {

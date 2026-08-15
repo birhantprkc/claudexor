@@ -89,6 +89,7 @@ describe("armDaemonLifecycle", () => {
 
     signals.emit("SIGTERM");
     await new Promise<void>((resolve) => setImmediate(resolve));
+    lifecycle.beginPidSnapshots();
     lifecycle.finalize();
 
     expect(records).toEqual(
@@ -131,6 +132,7 @@ describe("armDaemonLifecycle", () => {
     expect(signals.listenerCount("SIGTERM")).toBe(1);
     const log = readFileSync(join(root, "daemon.log"), "utf8");
     expect(log).toContain("SIGTERM received; stopping daemon");
+    lifecycle.beginPidSnapshots();
     lifecycle.finalize();
     lifecycle.finalize();
     expect(signals.listenerCount("SIGTERM")).toBe(0);
