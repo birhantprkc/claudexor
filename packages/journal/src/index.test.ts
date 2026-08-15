@@ -118,8 +118,12 @@ describe("DurableJournal", () => {
     // Read-only preparation walks the partition and keys its file map by path.
     // A `${dir}/${name}` key never matched the `join()`-built path the caller
     // looks up on Windows, so a reopened daemon read its own journal as
-    // missing and demanded recovery. This suite runs on the Windows lane.
-    const seeded = openJournal();
+    // missing and demanded recovery. This suite runs on the Windows lane,
+    // which is the only place the two spellings differ.
+    // Its own root: preparation refuses a journal root whose parent is
+    // world-writable, and the system temp dir is exactly that on Linux.
+    const rootDir = join(root, "separator");
+    const seeded = new DurableJournal({ rootDir, partition: "global" });
     seeded.append("accepted", { value: 1 });
     seeded.close();
 
@@ -127,7 +131,7 @@ describe("DurableJournal", () => {
       DurableJournal as unknown as {
         prepare(options: { rootDir: string; partition: string }): DurableJournal;
       }
-    ).prepare({ rootDir: root, partition: "global" });
+    ).prepare({ rootDir, partition: "global" });
     expect(prepared.state().status).toBe("ready");
     expect(prepared.records().map((record) => record.type)).toEqual(["accepted"]);
     prepared.close();
