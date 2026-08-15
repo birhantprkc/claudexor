@@ -35,6 +35,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // neither reports a false failure while the detached daemon is still starting.
 export const DAEMON_START_READY_TIMEOUT_MS = 90_000;
 
+// The bounded TAIL of that fresh-start budget spent waiting for the control
+// API after the daemon socket already answers (C10): the pointer file lands
+// as soon as the control transport binds — on the recovery plane too — so
+// this tail covers only bind/pointer-write latency, never journal replay
+// (that part is behind the socket wait above).
+export const DAEMON_CONTROL_API_FRESH_START_TAIL_MS = 10_000;
+
 /** Is something accepting on the daemon socket right now? (cheap reachability probe). */
 async function daemonReachable(client: DaemonClientType): Promise<boolean> {
   return client.health().then(
@@ -122,15 +129,17 @@ export async function ensureDaemon(
   // and resolves the run for apply/decision. Wait for its pointer to be written.
   let reached = await controlApiReachable();
   if (!reached) {
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + DAEMON_CONTROL_API_FRESH_START_TAIL_MS;
     while (Date.now() < deadline && !reached) {
       await sleep(150);
       reached = await controlApiReachable();
-      if (!reached && launch?.failure()) throw launch.callerError("control_api_wait", 10_000);
+      if (!reached && launch?.failure()) {
+        throw launch.callerError("control_api_wait", DAEMON_CONTROL_API_FRESH_START_TAIL_MS);
+      }
     }
   }
   if (!reached) {
-    if (launch) throw launch.callerError("control_api_wait", 10_000);
+    if (launch) throw launch.callerError("control_api_wait", DAEMON_CONTROL_API_FRESH_START_TAIL_MS);
     throw new Error(
       `daemon is up but its control API is not reachable (no ${daemonDir()}/control-api.json); it may be disabled by CLAUDEXOR_NO_CONTROL_API=1`,
     );

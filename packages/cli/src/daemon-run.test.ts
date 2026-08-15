@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "./cli-error.js";
 import { ENGINE_STOP_REMEDY, observedEngineSkew, recordEngineSkew } from "./engine-skew.js";
 import {
+  DAEMON_CONTROL_API_FRESH_START_TAIL_MS,
   DAEMON_START_READY_TIMEOUT_MS,
   connectDaemonIfRunning,
   daemonOutcomeSummary,
@@ -445,6 +446,13 @@ describe("absence vs refusal discrimination (#93)", () => {
 
   it("connectDaemonIfRunning: absence (no daemon at all) is null, never a spawn", async () => {
     expect(await connectDaemonIfRunning()).toBeNull();
+  });
+
+  it("pins the control-API fresh-start tail as a NAMED slice of the start budget (C10)", () => {
+    // ensureDaemon waits this bounded tail for the control-api pointer AFTER
+    // the socket answers; it must never grow past the whole start budget.
+    expect(DAEMON_CONTROL_API_FRESH_START_TAIL_MS).toBe(10_000);
+    expect(DAEMON_CONTROL_API_FRESH_START_TAIL_MS).toBeLessThan(DAEMON_START_READY_TIMEOUT_MS);
   });
 
   it("waitForDaemonReady: the default budget covers a journal-heavy cold start", async () => {
