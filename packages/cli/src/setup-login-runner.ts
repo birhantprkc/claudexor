@@ -4,7 +4,11 @@ import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { WINDOWS_RUNTIME_ENV_KEYS, processGroupServiceWithWindowsSupport } from "@claudexor/core";
+import {
+  WINDOWS_RUNTIME_ENV_KEYS,
+  pickAllowlistedEnv,
+  processGroupServiceWithWindowsSupport,
+} from "@claudexor/core";
 import {
   startCodexDeviceLogin,
   type CodexAppServerConnection,
@@ -518,8 +522,7 @@ function waitForExit(
 
 /** The bootstrap itself never needs model/provider credentials. */
 function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const key of [
+  return pickAllowlistedEnv(source, [
     "PATH",
     "HOME",
     "TMPDIR",
@@ -544,10 +547,7 @@ function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
     ...WINDOWS_RUNTIME_ENV_KEYS,
-  ] as const) {
-    if (source[key] !== undefined) env[key] = source[key];
-  }
-  return env;
+  ]);
 }
 
 function isDirectEntrypoint(): boolean {

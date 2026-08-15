@@ -1067,6 +1067,31 @@ import Testing
     #expect(b.diffstat == nil)
 }
 
+@Test func setupExecutableEvidenceMirrorsTheSharedAbsolutePathRule() throws {
+    // Mirrors ABSOLUTE_PATH_PATTERN in @claudexor/schema: POSIX, drive-rooted
+    // and UNC paths decode; drive-relative and root-relative ones do not.
+    let digest = String(repeating: "a", count: 64)
+    func evidence(_ realpath: String) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "realpath": realpath, "sha256": digest, "size": 1,
+            "mode": 493, "device": "1", "inode": "2",
+        ])
+    }
+    for accepted in ["/usr/bin/true", "C:\\Program Files\\Codex\\codex.exe", "C:/codex/codex.exe",
+                     "\\\\server\\share\\jobDir"] {
+        let data = try evidence(accepted)
+        #expect(throws: Never.self) {
+            try JSONDecoder().decode(SetupExecutableEvidence.self, from: data)
+        }
+    }
+    for refused in ["relative/path", "./codex.exe", "C:relative\\codex.exe", "\\Windows\\codex.exe"] {
+        let data = try evidence(refused)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(SetupExecutableEvidence.self, from: data)
+        }
+    }
+}
+
 @Suite(.serialized) struct SetupLifecycleTests {
     @Test func setupJobRejectsDeadFieldsAndUnknownV2Enums() throws {
         let legacy = """
