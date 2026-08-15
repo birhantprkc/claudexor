@@ -113,7 +113,9 @@ describe("exact-v3.3.7 legacy writer claimant fixture", () => {
             expect(from, "the migration renamed the canonical address away").not.toBe(anchor);
             renameSync(from, to);
             mutations += 1;
-            probeLegacyClaimant(`after rename #${mutations} (${basename(from)} -> ${basename(to)})`);
+            probeLegacyClaimant(
+              `after rename #${mutations} (${basename(from)} -> ${basename(to)})`,
+            );
           },
           remove: (path) => {
             expect(path, "the migration removed the canonical address").not.toBe(anchor);
@@ -129,9 +131,7 @@ describe("exact-v3.3.7 legacy writer claimant fixture", () => {
     probeLegacyClaimant("after barrier installation");
     expect(() => readFileSync(join(anchor, "owner.json"))).toThrow();
     expect(
-      readdirSync(anchor).some(
-        (name) => name.startsWith("owner.stale-") && name.endsWith(".json"),
-      ),
+      readdirSync(anchor).some((name) => name.startsWith("owner.stale-") && name.endsWith(".json")),
     ).toBe(true);
     expect(grant.lease.path).toBe(join(anchor, "active.writer"));
     grant.release();

@@ -111,7 +111,9 @@ describe("recovery plane availability and in-process reopen (C6)", () => {
       () => (daemon.exitCode !== null ? null : controlAddress(config)),
       "the recovery-plane control API pointer",
     ).catch((error: unknown) => {
-      throw new Error(`${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`,
+      );
     });
     const hello = await handshake(addr);
     expect(hello.servingMode).toBe("recovery_only");
@@ -129,7 +131,9 @@ describe("recovery plane availability and in-process reopen (C6)", () => {
       () => (daemon.exitCode !== null ? null : controlAddress(config)),
       "the control API pointer",
     ).catch((error: unknown) => {
-      throw new Error(`${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`,
+      );
     });
     expect((await handshake(addr)).servingMode).toBe("recovery_only");
     const authed = {

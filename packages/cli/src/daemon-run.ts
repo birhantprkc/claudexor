@@ -139,7 +139,8 @@ export async function ensureDaemon(
     }
   }
   if (!reached) {
-    if (launch) throw launch.callerError("control_api_wait", DAEMON_CONTROL_API_FRESH_START_TAIL_MS);
+    if (launch)
+      throw launch.callerError("control_api_wait", DAEMON_CONTROL_API_FRESH_START_TAIL_MS);
     throw new Error(
       `daemon is up but its control API is not reachable (no ${daemonDir()}/control-api.json); it may be disabled by CLAUDEXOR_NO_CONTROL_API=1`,
     );

@@ -78,13 +78,10 @@ describe("daemon startup diagnostics ownership (C8)", () => {
           : null,
       "the daemon to come up",
     );
-    const records = await waitFor(
-      () => {
-        const found = diagnosticRecords(config);
-        return found.length > 0 ? found : null;
-      },
-      "structured diagnostic records in claudexord.log",
-    );
+    const records = await waitFor(() => {
+      const found = diagnosticRecords(config);
+      return found.length > 0 ? found : null;
+    }, "structured diagnostic records in claudexord.log");
     const provenance = records.find((record) => record.launchSource === "cli_ensure_daemon");
     expect(provenance, "no record carries the launch source").toBeDefined();
     expect(provenance).toMatchObject({
@@ -109,13 +106,10 @@ describe("daemon startup diagnostics ownership (C8)", () => {
           : null,
       "the daemon to come up",
     );
-    const records = await waitFor(
-      () => {
-        const found = diagnosticRecords(config);
-        return found.length > 0 ? found : null;
-      },
-      "structured diagnostic records in claudexord.log",
-    );
+    const records = await waitFor(() => {
+      const found = diagnosticRecords(config);
+      return found.length > 0 ? found : null;
+    }, "structured diagnostic records in claudexord.log");
     expect(records.some((record) => record.launchSource === "unknown")).toBe(true);
     daemon.kill("SIGTERM");
   }, 40_000);
