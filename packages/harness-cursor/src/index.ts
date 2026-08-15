@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
-  AccessProfile,
   AuthPreference,
   ConformanceReport,
   HarnessCapabilityProfile,
@@ -86,16 +85,16 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
   attachment_inputs: [],
 });
 
-// `--force` alone force-allows commands with NO sandbox — materially broader
-// than claude acceptEdits / codex --sandbox workspace-write for the same
-// profile. Keep the sandbox on for workspace_write parity.
-const accessArgs: Record<AccessProfile, string[]> = {
-  readonly: ["--sandbox", "enabled", "--trust"],
-  workspace_write: ["--force", "--sandbox", "enabled", "--trust"],
-  full: ["--force", "--sandbox", "disabled", "--trust"],
-  external_sandbox_full: ["--force", "--sandbox", "disabled", "--trust"],
-  inherit_native: ["--trust"],
-};
+// Ask + sandbox bound readonly; force approves optional native web unless it is off.
+function accessArgs(spec: HarnessRunSpec): string[] {
+  if (spec.access === "readonly") {
+    const force = spec.external_context_policy === "off" ? [] : ["--force"];
+    return [...force, "--sandbox", "enabled", "--trust"];
+  }
+  if (spec.access === "workspace_write") return ["--force", "--sandbox", "enabled", "--trust"];
+  if (spec.access === "inherit_native") return ["--trust"];
+  return ["--force", "--sandbox", "disabled", "--trust"];
+}
 
 async function detectVersion(abortSignal?: AbortSignal): Promise<string | null> {
   try {
@@ -566,7 +565,7 @@ async function* runCursor(
     yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
     return;
   }
-  const args = ["-p", "--output-format", "stream-json", ...accessArgs[spec.access]];
+  const args = ["-p", "--output-format", "stream-json", ...accessArgs(spec)];
   // Native Plan's createPlan schema cannot carry D-16 WorkReport; native read-only
   // Ask preserves prompt-owned plan intent and the model-authored final report.
   // `readonly` access rides the SAME mode: Ask is the only mechanism this CLI

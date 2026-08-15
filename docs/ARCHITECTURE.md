@@ -371,15 +371,20 @@ contract that Control API and macOS use. Web policy is a manifest capability
 (`web_policy: native | tools | uncontrolled | none`): `native` is a config
 surface (codex), `tools` is permissioned tools (claude), `uncontrolled` means
 the harness can reach the web but exposes no enforceable switch (cursor,
-opencode today) and is excluded from BOTH `off` and web-required runs, while
-`none` means no web at all — trivially compatible with `off`, excluded from
-web-required runs. Harnesses that cannot enforce the effective per-route policy
-(including a per-harness `web` default upgrading a run-level `auto`) are
-excluded from the pool, and explicitly selecting one fails loudly. Per-route
+opencode today) and is incompatible only with strict `off`, while `none` means
+no web at all and is compatible with every policy. Ordinary run construction
+stores `web_required=false`: `auto`, `cached`, and `live` are optional
+preferences, so a route may use web, lack it, or have a native approval deny it
+without becoming ineligible or failing the run. Only `off + uncontrolled` is
+excluded from the pool; explicit selection fails before the harness starts and
+tells the caller to enable web or choose an off-enforceable harness. Per-route
 upgrades (Claude has no cached web index, so `cached` runs as `live`) are
-disclosed via `policy.web.upgraded` events and recorded in telemetry. Adapters map the policy to native surface controls: Claude Code gets
-explicit `WebSearch`/`WebFetch` allow/deny arguments, while Codex gets
-`web_search` config. Command/network sandboxing remains separate.
+disclosed via `policy.web.upgraded` events and recorded in telemetry. Adapters
+map the policy to native controls: Claude Code gets explicit
+`WebSearch`/`WebFetch` allow/deny arguments, Codex gets `web_search` config, and
+managed Cursor readonly uses Ask + `--force` + sandbox enabled for non-off
+policies while `off` and `inherit_native` receive no injected force.
+Command/network sandboxing remains separate.
 
 `access=full` (unsandboxed) additionally requires `allow_full_access: true` in
 the USER-LEVEL trust config (`~/.claudexor/v3/trust/<repo-hash>.yaml`); versioned
@@ -453,12 +458,13 @@ removes the same child before deleting recovery evidence. An artifact marker
 without valid recovery identity refuses cleanup rather than orphaning the child
 by deleting its only proof.
 
-`auto` is evidence-driven: it permits web tools where the harness supports them
-and records whether the harness actually attempted web. If a web tool is
-attempted and its `tool_result` errors, the attempt is `web-unsatisfied` until a
-later successful web result proves recovery. Read-only Ask/Audit can route
-fallback to another eligible harness and emits `route.fallback.started`,
-`route.fallback.completed`, or `route.fallback.exhausted`.
+`auto`, `cached`, and `live` permit web tools where the harness supports them
+and record whether web was attempted and at what verification strength. For
+ordinary contracts, web is optional: unused, denied, unavailable, or errored
+activity remains warning/evidence telemetry and neither decides terminal
+success nor starts route fallback. Only an explicitly persisted
+`web_required=true` compatibility contract can become `web-unsatisfied` and
+use the existing read-only fallback path.
 
 ## 5. Auth And Secrets
 
@@ -714,10 +720,9 @@ fails, the run still writes inspectable failure artifacts
 Ask also tracks normalized tool lifecycle. `tool_result.is_error === true`
 preserves redacted detail in the event payload and blocks a green verified claim
 unless verified recovery exists, but a produced deliverable can still be terminal
-success with warnings. When web evidence is unsatisfied and another eligible
-read-only route exists, Ask falls back before terminal failure. If no fallback
-can satisfy the policy, the run is `blocked` with a partial unverified output
-artifact when one exists.
+success with warnings. Optional web denial/error is warning evidence and does
+not trigger route fallback or terminal failure; a read-only route is judged on
+its answer and the ordinary harness/contract axes.
 
 ### Ask --deep-scan (research sweep)
 
@@ -2337,10 +2342,12 @@ macOS UI/UX SSOT. This section keeps only the engine-facing facts.
   `kind:"mcp"` (there is no `browser` ToolKind), so the attempt-telemetry web
   fold recognizes a browser tool call as trusted live-web activity by matching
   the ENGINE-INJECTED `browser` server namespace only (a user MCP server cannot
-  spoof it). A successful browser navigation therefore satisfies a required-web
-  gate (`web.verification: verified`) and records a typed
+  spoof it). A successful browser navigation records
+  `web.verification: verified` plus a typed
   `browser: {attempted, satisfied, failed, unused}` receipt; a failed browser
-  call blocks required web with the real error rather than "web never attempted".
+  call remains attributable warning evidence. The separate explicit Browser
+  capability preflight is unchanged and still refuses a pool with no effective
+  Browser lane before a harness starts.
   An armed-but-unused browser (generic `web_search` satisfied instead) is
   disclosed as an unused-browser flag on that receipt — disclosure only, never a
   run failure.
@@ -2748,10 +2755,9 @@ code touching one of these areas must honor it or change it explicitly here.
 - Startup crash GC sweeps orphaned envelopes only under project roots recorded
   in the daemon command journal; envelopes created by CLI/MCP/ACP runs
   in roots the daemon never saw are reclaimed only by their own process.
-- Under `--web auto`, "the harness attempted web" is the intent signal; a
-  separate did-this-task-NEED-web resolver does not exist yet, so web-required
-  enforcement applies only to explicit `cached`/`live` policies (the WHITEPAPER
-  documents the rationale).
+- Web use is optional under `auto`, `cached`, and `live`; no
+  did-this-task-NEED-web resolver or mandatory evidence gate is inferred from
+  those policies. `off` remains the only strict external-context policy.
 - In-place READ-ONLY flows on non-git folders get a best-effort copied baseline
   for diffing. An explicitly isolated read-only thread initializes the Git
   boundary first, while Git-backed write envelopes initialize per INV-075 and

@@ -452,10 +452,12 @@ network errors — with full provenance on the run record. See
 ## Web, Budgets, And Gates
 
 External web context is a typed run policy (`--web off|auto|cached|live`),
-separate from shell/network sandboxing; a run that attempted a web tool and
-failed cannot be plain green success without a proven recovery. Run terminal
-state is separate from output readiness (`outputReadyState`), so a finished
-answer with warnings stays usable while failed required evidence blocks.
+separate from shell/network sandboxing. `off` is strict; `auto`, `cached`, and
+`live` are optional preferences, so unused, denied, unavailable, or failed web
+never blocks an otherwise useful result and remains visible as evidence or a
+warning. A harness such as Cursor that cannot guarantee `off` is refused before
+it starts, with a prompt to enable web or choose an enforceable harness. Run
+terminal state remains separate from output readiness (`outputReadyState`).
 Paid budgets are explicit (`--max-usd N`; zero is a real zero-cash cap) and
 unknown cost is never reported as `$0` — a finite run can end
 `cost_unverifiable` or `budget_overshoot`. Deterministic gates use exact

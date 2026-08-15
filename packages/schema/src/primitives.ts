@@ -46,7 +46,7 @@ export type AccessProfile = z.infer<typeof AccessProfile>;
 export const ExternalContextPolicy = z
   .enum(["off", "auto", "cached", "live"])
   .describe(
-    "External web/context policy for a run: off (no external context), auto (engine decides), cached (cached sources only), live (live web access). Separate from process/network sandboxing.",
+    "External web/context policy for a run: off (strictly disable external context), auto (optional, engine decides), cached (optional cached-source preference), live (optional live-web preference). Separate from process/network sandboxing.",
   );
 export type ExternalContextPolicy = z.infer<typeof ExternalContextPolicy>;
 

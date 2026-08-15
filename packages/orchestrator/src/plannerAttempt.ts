@@ -156,9 +156,7 @@ export async function runPlannerAttempt(
       answer: new AnswerAssembly(),
       telemetry: createAttemptTelemetry(
         prepared.knobs.webPolicy,
-        contract.external_context.web_required ||
-          prepared.knobs.webPolicy === "cached" ||
-          prepared.knobs.webPolicy === "live",
+        contract.external_context.web_required,
         prepared.effectiveWeb,
         [],
         prepared.knobs.model,

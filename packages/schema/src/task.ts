@@ -275,7 +275,9 @@ export const TaskContract = z
         web_required: z
           .boolean()
           .default(false)
-          .describe("Whether the task requires live web evidence."),
+          .describe(
+            "Whether a persisted task contract explicitly requires web evidence; ordinary run policies keep this false.",
+          ),
         /** Mode the selected route actually executes (disclosed upgrades, e.g. claude cached->live). */
         effective_mode: ExternalContextPolicy.default("auto").describe(
           "Policy the selected route actually executes (disclosed upgrades, e.g. cached to live).",

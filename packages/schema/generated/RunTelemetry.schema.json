@@ -73,7 +73,7 @@
         "web_required": {
           "type": "boolean",
           "default": false,
-          "description": "Whether the run required web evidence."
+          "description": "Explicit stored web requirement."
         },
         "final_attempt_id": {
           "anyOf": [
@@ -95,7 +95,7 @@
             "required": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the run required web evidence."
+              "description": "Explicit stored web requirement."
             },
             "policy": {
               "type": "string",
@@ -121,7 +121,7 @@
             "satisfied": {
               "type": "boolean",
               "default": false,
-              "description": "Whether the web-evidence requirement was satisfied."
+              "description": "Completed without a typed failure; verification records retrieval-proof strength."
             },
             "status": {
               "type": "string",
@@ -132,7 +132,7 @@
                 "failed",
                 "unverified"
               ],
-              "description": "Web-evidence verdict for an attempt/run: none (no web activity), attempted, satisfied (required evidence produced), failed, or unverified.",
+              "description": "Observed web activity: none, attempted, satisfied, failed, or unverified.",
               "default": "none"
             },
             "verification": {
@@ -143,7 +143,7 @@
                 "none"
               ],
               "default": "none",
-              "description": "Retrieval strength of the web evidence: verified (typed retrieval), dispatched (completed but no typed outcome), or none."
+              "description": "Retrieval-proof strength of observed web activity: verified (typed successful retrieval; content proven), dispatched (operation completed but no typed retrieval outcome; content not proven), or none."
             },
             "tool": {
               "type": [

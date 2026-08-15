@@ -1446,18 +1446,12 @@ export class Orchestrator {
       // so judge the effective per-route policy.
       const routePolicy =
         policy === "auto" && cfgEntry?.web && cfgEntry.web !== "auto" ? cfgEntry.web : policy;
-      const routeWebRequired = routePolicy === "cached" || routePolicy === "live";
-      // Web policy is a capability: `off` needs an enforceable off state and a
-      // web-required run needs a route that can produce web evidence.
-      // `none` (no web at ALL) trivially satisfies `off`; `uncontrolled` (web
-      // exists but no switch) satisfies neither. A harness that cannot honor
-      // the policy is excluded — or, when the user explicitly selected it, the
-      // run fails loudly instead of silently downgrading.
-      const webIncompatible =
-        (routePolicy === "off" && webSupport === "uncontrolled") ||
-        (routeWebRequired && (webSupport === "none" || webSupport === "uncontrolled"));
+      // Only explicit off is an enforceable capability requirement. Every
+      // non-off policy is an optional web preference: a route may use web, lack
+      // it, or have a native approval deny it without becoming ineligible.
+      const webIncompatible = routePolicy === "off" && webSupport === "uncontrolled";
       if (webIncompatible) {
-        const why = `${id} cannot enforce web policy '${routePolicy}' (manifest web_policy=${webSupport}); choose a web-capable/enforceable harness or change --web to a compatible policy`;
+        const why = `${id} cannot guarantee web is disabled (manifest web_policy=uncontrolled); rerun with --web auto, --web cached, or --web live, or select a harness that can enforce --web off`;
         dropLane(id, "web", why);
         continue;
       }
@@ -2509,9 +2503,7 @@ export class Orchestrator {
     const browserServerName = spec.browser ? "browser" : null;
     const telemetry = createAttemptTelemetry(
       knobs.webPolicy,
-      contract.external_context.web_required ||
-        knobs.webPolicy === "cached" ||
-        knobs.webPolicy === "live",
+      contract.external_context.web_required,
       effectiveWebMode ?? knobs.webPolicy,
       [routed.browserRequirement, routed.denyRequirement, routed.delegationRequirement],
       knobs.model,
@@ -6672,9 +6664,7 @@ export class Orchestrator {
         const answer = new AnswerAssembly();
         const telemetry = createAttemptTelemetry(
           knobs.webPolicy,
-          contract.external_context.web_required ||
-            knobs.webPolicy === "cached" ||
-            knobs.webPolicy === "live",
+          contract.external_context.web_required,
           effectiveWeb,
           [],
           // Requested-model capture so ask/audit route receipts detect a silent

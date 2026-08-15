@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import {
   RunFailure,
+  RunTelemetry,
   SCHEMA_VERSION,
   TaskContract,
   makeOutcomeFacts,
@@ -209,5 +210,152 @@ describe("run-command pre-daemon machine contract", () => {
     expect(human.stdout).toContain("lifecycle: failed");
     expect(human.stdout).toContain("failure: harness_unavailable phase=harness");
     expect(human.stdout).toContain("next action: Choose another harness and retry.");
+  });
+
+  it("inspect classifies unrecovered tools by attempt outcome instead of web kind", () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-cli-inspect-tool-outcomes-"));
+    tempRoots.push(root);
+    const project = join(root, "project");
+    const config = join(root, "config");
+    mkdirSync(project, { recursive: true });
+    const store = new ArtifactStore(project, { claudexorDir: config });
+    const paths = store.createRun("run-tool-outcomes");
+    store.writeYaml(
+      join(paths.contextDir, "task.yaml"),
+      TaskContract.parse({
+        schema_version: SCHEMA_VERSION,
+        task_id: "task-tool-outcomes",
+        created_at: "2026-08-14T00:00:00.000Z",
+        repo: { root: project, base_ref: "HEAD" },
+        mode: { kind: "ask" },
+        user_intent: { raw: "inspect tool outcomes" },
+        tests: { commands: [] },
+      }),
+    );
+    store.writeYaml(
+      join(paths.finalDir, "telemetry.yaml"),
+      RunTelemetry.parse({
+        schema_version: SCHEMA_VERSION,
+        run_id: "run-tool-outcomes",
+        task_id: "task-tool-outcomes",
+        mode: "ask",
+        requested_access: "readonly",
+        effective_access: "readonly",
+        external_context_policy: "auto",
+        effective_web_mode: "auto",
+        final_attempt_id: "a-web",
+        web: { attempted: true, status: "failed", error_summary: "web denied" },
+        attempts: [
+          {
+            attempt_id: "a-web",
+            harness_id: "cursor",
+            web: { attempted: true, status: "failed", error_summary: "web denied" },
+            tool_errors: [
+              {
+                tool: "WebFetch",
+                kind: "web",
+                target: "https://example.com",
+                summary: "web denied",
+              },
+            ],
+            outcome: {
+              deliverable_present: true,
+              tool_warnings_count: 1,
+              status: "success_with_warnings",
+            },
+          },
+          {
+            attempt_id: "a-command",
+            harness_id: "codex",
+            web: {},
+            tool_errors: [
+              {
+                tool: "command",
+                kind: "command",
+                target: "npm test",
+                summary: "command failed",
+              },
+            ],
+            outcome: {
+              deliverable_present: false,
+              harness_errored: true,
+              tool_warnings_count: 1,
+              status: "failed",
+            },
+          },
+          {
+            attempt_id: "a-required-web",
+            harness_id: "claude",
+            web: { required: true, attempted: true, status: "failed" },
+            tool_errors: [
+              {
+                tool: "WebSearch",
+                kind: "web",
+                target: "required query",
+                summary: "required web failed",
+              },
+            ],
+            outcome: {
+              deliverable_present: true,
+              web_required_unsatisfied: true,
+              tool_warnings_count: 1,
+              status: "blocked",
+            },
+          },
+          {
+            attempt_id: "a-recovered",
+            harness_id: "claude",
+            web: {},
+            tool_errors: [
+              {
+                tool: "Read",
+                kind: "file",
+                target: "README.md",
+                summary: "temporary read failure",
+                recovered: true,
+              },
+            ],
+            outcome: { deliverable_present: true, status: "success" },
+          },
+        ],
+        generated_at: "2026-08-14T00:00:01.000Z",
+      }),
+    );
+    store.writeText(join(paths.finalDir, "summary.md"), "Tool outcome summary.\n");
+
+    const result = spawnSync(
+      process.execPath,
+      [tsxCli, cliSource, "inspect", "run-tool-outcomes", "--json"],
+      {
+        cwd: project,
+        encoding: "utf8",
+        env: { ...process.env, CLAUDEXOR_CONFIG_DIR: config },
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      toolWarnings: [{ attemptId: "a-web", tool: "WebFetch", summary: "web denied" }],
+      toolErrors: [
+        { attemptId: "a-command", tool: "command", summary: "command failed" },
+        {
+          attemptId: "a-required-web",
+          tool: "WebSearch",
+          summary: "required web failed",
+        },
+      ],
+    });
+
+    const human = spawnSync(process.execPath, [tsxCli, cliSource, "inspect", "run-tool-outcomes"], {
+      cwd: project,
+      encoding: "utf8",
+      env: { ...process.env, CLAUDEXOR_CONFIG_DIR: config },
+    });
+    expect(human.status, human.stderr).toBe(0);
+    expect(human.stdout).toContain("tool warnings (non-blocking):");
+    expect(human.stdout).toContain("a-web WebFetch: web denied");
+    expect(human.stdout).toContain("tool errors (unrecovered):");
+    expect(human.stdout).toContain("a-required-web WebSearch: required web failed");
+    expect(human.stdout).not.toContain("a-recovered Read");
   });
 });

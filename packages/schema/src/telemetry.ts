@@ -30,14 +30,12 @@ import { RunFacts } from "./run-facts.js";
 
 export const WebEvidenceStatus = z
   .enum(["none", "attempted", "satisfied", "failed", "unverified"])
-  .describe(
-    "Web-evidence verdict for an attempt/run: none (no web activity), attempted, satisfied (required evidence produced), failed, or unverified.",
-  );
+  .describe("Observed web activity: none, attempted, satisfied, failed, or unverified.");
 export type WebEvidenceStatus = z.infer<typeof WebEvidenceStatus>;
 
 export const WebEvidenceRecord = z
   .object({
-    required: z.boolean().default(false).describe("Whether the run required web evidence."),
+    required: z.boolean().default(false).describe("Explicit stored web requirement."),
     /** Requested policy for the run. */
     policy: ExternalContextPolicy.default("auto").describe("Requested web policy for the run."),
     /** Mode actually executed by the harness route (e.g. claude `cached` upgrades to `live`, disclosed). */
@@ -48,11 +46,13 @@ export const WebEvidenceRecord = z
     satisfied: z
       .boolean()
       .default(false)
-      .describe("Whether the web-evidence requirement was satisfied."),
+      .describe(
+        "Completed without a typed failure; verification records retrieval-proof strength.",
+      ),
     status: WebEvidenceStatus.default("none"),
     /**
-     * QA-042: retrieval STRENGTH of a satisfied/attempted web requirement,
-     * orthogonal to `status`. `verified` = at least one web result carried a
+     * QA-042: retrieval STRENGTH of satisfied/attempted web activity, orthogonal
+     * to `status`. `verified` = at least one web result carried a
      * typed successful retrieval (e.g. claude WebFetch content, a browser
      * navigation); `dispatched` = web activity completed but the route exposes
      * no typed fetch outcome (codex `web_search`/`open_page`), so the gate is
@@ -64,7 +64,7 @@ export const WebEvidenceRecord = z
       .enum(["verified", "dispatched", "none"])
       .default("none")
       .describe(
-        "Retrieval strength of the web evidence: verified (typed retrieval), dispatched (completed but no typed outcome), or none.",
+        "Retrieval-proof strength of observed web activity: verified (typed successful retrieval; content proven), dispatched (operation completed but no typed retrieval outcome; content not proven), or none.",
       ),
     tool: z
       .string()
@@ -507,7 +507,7 @@ export const RunTelemetry = z
     effective_web_mode: ExternalContextPolicy.describe(
       "Web policy actually executed by the selected route.",
     ),
-    web_required: z.boolean().default(false).describe("Whether the run required web evidence."),
+    web_required: z.boolean().default(false).describe("Explicit stored web requirement."),
     final_attempt_id: Id.nullable()
       .default(null)
       .describe(

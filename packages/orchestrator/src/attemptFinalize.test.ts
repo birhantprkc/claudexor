@@ -542,6 +542,27 @@ describe("unrecoveredToolErrorFailure (INV-043/INV-044 deliverable exception)", 
     ).toBe("command failed without recovery: exit 1");
   });
 
+  it("optional web errors never become the deliverable-less harness failure", () => {
+    expect(
+      unrecoveredToolErrorFailure(
+        [{ ...toolError("WebSearch", "User Rejected"), kind: "web" }],
+        false,
+      ),
+    ).toBeNull();
+  });
+
+  it("skips optional web errors and still escalates the first non-web error", () => {
+    expect(
+      unrecoveredToolErrorFailure(
+        [
+          { ...toolError("WebSearch", "User Rejected"), kind: "web" },
+          toolError("command", "exit 1"),
+        ],
+        false,
+      ),
+    ).toBe("command failed without recovery: exit 1");
+  });
+
   it("no unrecovered errors is never a failure, delivered or not", () => {
     expect(unrecoveredToolErrorFailure([], false)).toBeNull();
     expect(unrecoveredToolErrorFailure([], true)).toBeNull();

@@ -528,9 +528,10 @@ export function finalizeAttempt(input: FinalizeAttemptInput): FinalizeAttemptRes
  * `deliverableEvidence` MUST be the same raw evidence boolean `finalizeAttempt`
  * folds — the unwrapped D-16 deliverable, never the pre-envelope answer text —
  * so the WorkReport contract stays the one owner of what "delivered" means.
- * This decides ONLY the tool-error axis: required-but-unsatisfied web evidence
- * keeps its own hard gate, and the finalizer's contract-failure and interrupted
- * classes still outrank whatever this returns.
+ * This decides ONLY the non-web tool-error axis: optional web failures never
+ * determine terminal state, while an explicitly required-but-unsatisfied web
+ * contract keeps its separate hard gate. The finalizer's contract-failure and
+ * interrupted classes still outrank whatever this returns.
  *
  * Returns the harness-error message to escalate, or null to leave the errors as
  * warning evidence.
@@ -540,7 +541,7 @@ export function unrecoveredToolErrorFailure(
   deliverableEvidence: boolean,
 ): string | null {
   if (deliverableEvidence) return null;
-  const first = unrecovered[0];
+  const first = unrecovered.find((error) => error.kind !== "web");
   return first ? `${first.tool} failed without recovery: ${first.summary}` : null;
 }
 

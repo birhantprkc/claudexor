@@ -383,16 +383,39 @@ test("valid no-attempt preflight journal stays neutral without telemetry", () =>
     type: "run.created",
     payload: {},
   };
-  expect(
-    validateBatteryRunArtifacts({
-      job: { runId: "run-1", taskId: "task-1" },
-      task: FrozenTaskContractArtifact.parse(batteryTask()),
-      eventText: `${JSON.stringify(event)}\n`,
-      telemetry: null,
-      telemetryPresent: false,
-      ...artifactSchemas,
-    }),
-  ).toMatchObject({ valid: true, reason: null, telemetry: null });
+  const noStart = validateBatteryRunArtifacts({
+    job: { runId: "run-1", taskId: "task-1" },
+    task: FrozenTaskContractArtifact.parse(batteryTask()),
+    eventText: `${JSON.stringify(event)}\n`,
+    telemetry: null,
+    telemetryPresent: false,
+    ...artifactSchemas,
+  });
+  expect(noStart).toMatchObject({ valid: true, reason: null, telemetry: null });
+  expect(noStart.events.some((item) => item.type === "harness.started")).toBe(false);
+
+  const started = {
+    seq: 2,
+    ts: "2026-08-06T00:00:01Z",
+    run_id: "run-1",
+    task_id: "task-1",
+    type: "harness.started",
+    payload: {
+      harness_id: "cursor",
+      attempt_id: "a01",
+      external_context_policy: "off",
+    },
+  };
+  const withStart = validateBatteryRunArtifacts({
+    job: { runId: "run-1", taskId: "task-1" },
+    task: FrozenTaskContractArtifact.parse(batteryTask()),
+    eventText: `${JSON.stringify(event)}\n${JSON.stringify(started)}\n`,
+    telemetry: null,
+    telemetryPresent: false,
+    ...artifactSchemas,
+  });
+  expect(withStart).toMatchObject({ valid: true, reason: null, telemetry: null });
+  expect(withStart.events.some((item) => item.type === "harness.started")).toBe(true);
 });
 
 test("canonical run events discover admitted and raw required-harness attempts", () => {

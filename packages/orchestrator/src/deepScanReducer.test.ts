@@ -272,6 +272,29 @@ describe("runDeepScanReducer WorkReport contract parity (D-16)", () => {
     }
   });
 
+  it("does not infer required web from a live reducer policy", async () => {
+    const fixture = makeFiniteFixture();
+    const attemptTelemetries: Parameters<typeof runDeepScanReducer>[1]["attemptTelemetries"] = [];
+    try {
+      const result = await runFiniteReducer(fixture, reducerAdapter("Plain merged synthesis."), {
+        deps: {
+          webRequired: false,
+          buildSpec: (...args) => ({
+            ...makeDeps(inactiveMode).buildSpec(...args),
+            webPolicy: "live",
+            effectiveWeb: "live",
+          }),
+        },
+        args: { attemptTelemetries },
+      });
+      expect(result.status).toBe("success");
+      expect(attemptTelemetries).toHaveLength(1);
+      expect(attemptTelemetries[0]?.telemetry.web.required).toBe(false);
+    } finally {
+      fixture.log.dispose();
+    }
+  });
+
   it("a cancel on the OUTER run signal mid-reducer is a typed cancellation, never a laundered success (INV-116)", async () => {
     const root = mkdtempSync(join(tmpdir(), "claudexor-deepscan-"));
     __dirs.push(root);
