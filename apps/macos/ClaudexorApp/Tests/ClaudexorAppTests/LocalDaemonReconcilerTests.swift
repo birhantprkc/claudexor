@@ -34,6 +34,8 @@ private final class DaemonHandshakeURLProtocol: URLProtocol {
     nonisolated(unsafe) static var engine = EngineBuildIdentity(
         version: "3.1.2", sha: String(repeating: "a", count: 40), entry: "/old/daemon.js")
     nonisolated(unsafe) static var gate: ReconciliationHandshakeGate?
+    /// Issue #165: optional handshake servingMode ("recovery_only"/"normal").
+    nonisolated(unsafe) static var servingMode: String?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -50,7 +52,8 @@ private final class DaemonHandshakeURLProtocol: URLProtocol {
             data = Data(#"{"ok":true}"#.utf8)
         case "/v2/handshake":
             let engine = Self.engine
-            data = Data(#"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","engine":{"version":"\#(engine.version)","sha":"\#(engine.sha)","entry":"\#(engine.entry)"}}"#.utf8)
+            let mode = Self.servingMode.map { #","servingMode":"\#($0)""# } ?? ""
+            data = Data(#"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","engine":{"version":"\#(engine.version)","sha":"\#(engine.sha)","entry":"\#(engine.entry)"}\#(mode)}"#.utf8)
         default:
             client?.urlProtocol(self, didFailWithError: ReconciliationTestError())
             return
@@ -428,6 +431,63 @@ final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked Sendable 
         #expect(model.engineIdentity == nil)
         #expect(model.localDaemonReconciliationNotice
             == "The refreshed engine identity did not match the selected runtime. Reconnecting.")
+    }
+
+    @MainActor
+    @Test func recoveryOnlyHandshakeKeepsConnectingWithoutAdoptionOrReconciliation() async {
+        // Issue #165 D5: a recovery-only daemon proves transport but keeps
+        // product admission closed. tryConnect must NOT adopt the candidate,
+        // hydrate, run the reconciliation lifecycle, or earn a fallback
+        // launch — it stays in the Connecting loop (.retryWithoutLaunch).
+        DaemonHandshakeURLProtocol.servingMode = "recovery_only"
+        defer { DaemonHandshakeURLProtocol.servingMode = nil }
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        let previousClient = model.client
+        let previousEndpoint = model.endpoint
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DaemonHandshakeURLProtocol.self]
+        let candidate = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:4321")!, token: "test",
+            session: URLSession(configuration: config))
+
+        let result = await model.tryConnect(
+            candidate: candidate, endpoint: "127.0.0.1:4321", generation: 1)
+
+        #expect(result == .retryWithoutLaunch)
+        #expect(model.client === previousClient)
+        #expect(model.endpoint == previousEndpoint)
+        #expect(model.engineIdentity == nil)
+        #expect(daemon.busyProbes == 0)
+        #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
+    }
+
+    @MainActor
+    @Test func connectedPollFallsBackToConnectingWhenDaemonReentersRecovery() async {
+        // A daemon RESTARTED into a recovery-needed root re-answers the
+        // steady-state poll with recovery_only: the poll returns
+        // .retryWithoutLaunch (no outage launch, no reconciliation) and
+        // leaves the published state for the recovery loop to unwind.
+        DaemonHandshakeURLProtocol.servingMode = "recovery_only"
+        defer { DaemonHandshakeURLProtocol.servingMode = nil }
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.runningIdentity = target
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        model.engineIdentity = DaemonHandshakeURLProtocol.engine
+
+        let result = await model.pollLocalConnection(generation: 1)
+
+        #expect(result == .retryWithoutLaunch)
+        #expect(model.client != nil)
+        #expect(model.engineIdentity?.sha == DaemonHandshakeURLProtocol.engine.sha)
+        #expect(daemon.busyProbes == 0)
+        #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
     }
 
     @MainActor

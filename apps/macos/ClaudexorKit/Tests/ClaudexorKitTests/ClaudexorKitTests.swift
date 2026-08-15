@@ -2104,6 +2104,49 @@ import Testing
         #expect(noEngine.engine == nil)
     }
 
+    @Test func gatewayHandshakeCarriesServingModeAndRecoveryOnlyFact() async throws {
+        // Issue #165 D5: a recovery-only daemon reports servingMode in the
+        // handshake so the app can stay in Connecting instead of adopting a
+        // client whose product routes are typed-refused. Absent servingMode
+        // (older daemons) must keep meaning normal admission.
+        defer { RequestStubURLProtocol.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RequestStubURLProtocol.self]
+        let client = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "t",
+            session: URLSession(configuration: config)
+        )
+        func stub(handshakeBody: String) {
+            RequestStubURLProtocol.handler = { request in
+                switch (request.httpMethod, request.url?.path) {
+                case ("GET", "/healthz"):
+                    return (Self.response(for: request), Data(#"{"ok":true}"#.utf8))
+                case ("POST", "/v2/handshake"):
+                    return (Self.response(for: request), Data(handshakeBody.utf8))
+                default:
+                    throw TestTransportError.badRequest(request.url?.absoluteString ?? "nil")
+                }
+            }
+        }
+
+        stub(handshakeBody: #"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","servingMode":"recovery_only"}"#)
+        let recovering = try await client.handshake()
+        #expect(recovering.ok)
+        #expect(recovering.servingMode == "recovery_only")
+        #expect(recovering.recoveryOnly)
+
+        stub(handshakeBody: #"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","servingMode":"normal"}"#)
+        let serving = try await client.handshake()
+        #expect(serving.servingMode == "normal")
+        #expect(!serving.recoveryOnly)
+
+        // Pre-#165 daemons omit the field entirely: normal admission.
+        stub(handshakeBody: #"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations"}"#)
+        let legacy = try await client.handshake()
+        #expect(legacy.servingMode == nil)
+        #expect(!legacy.recoveryOnly)
+    }
+
     @Test func gatewayUploadsExactBytesAndFinalizesDigestBeforeReturningReference() async throws {
         defer { RequestStubURLProtocol.handler = nil }
         let config = URLSessionConfiguration.ephemeral
