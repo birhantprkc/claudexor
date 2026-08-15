@@ -2,7 +2,10 @@ import type { ProjectPartitions, ResourceStore } from "@claudexor/daemon";
 import type { ResourceAttachmentRef, TurnEnqueueProblem } from "@claudexor/schema";
 
 /** Thin Control API bindings over the daemon's durable thread-turn authority. */
-export function threadTurnServices(threads: ProjectPartitions, resources: ResourceStore) {
+export function threadTurnServices(
+  threads: ProjectPartitions,
+  resources: Pick<ResourceStore, "resolve">,
+) {
   return {
     threadDetail: async (id: string) => {
       const thread = threads.getThread(id);

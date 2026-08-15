@@ -105,16 +105,6 @@ export async function main(): Promise<void> {
     if (await socketAlive(socketPath)) {
       throw new Error(`a claudexor daemon is already listening on ${socketPath}; stop it first`);
     }
-    // Same-root config evolution hygiene (B9): strip + persist any known-retired
-    // keys an OLDER version wrote into the global config, before any strict
-    // parse can trip on them. Unknown keys NOT on the retired registry still
-    // fail loud at parse (INV-021).
-    for (const sweep of sweepRetiredConfigKeysAtStartup()) {
-      logLine(
-        logPath(),
-        `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
-      );
-    }
 
     const bus = new RunEventBus();
     const { authority: delegationBudgetAuthority, bind: bindDelegationDaemon } =
@@ -183,7 +173,12 @@ export async function main(): Promise<void> {
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
     });
-    const resources = new ResourceStore(join(daemonDir(), "resource-store"));
+    // C5b: construction mkdirs under the daemon dir, and the recovery plane
+    // serves no resources — the store materializes on first product use
+    // (every consumer sits behind normal admission).
+    let resourceStore: ResourceStore | null = null;
+    const resources = (): ResourceStore =>
+      (resourceStore ??= new ResourceStore(join(daemonDir(), "resource-store")));
 
     const server = new DaemonServer({
       socketPath,
@@ -419,7 +414,7 @@ export async function main(): Promise<void> {
                 : undefined,
             attachments: turnId
               ? (threads.getTurn(turnId)?.attachments ?? [])
-              : resources.resolve((p as { attachments?: ResourceAttachmentRef[] }).attachments),
+              : resources().resolve((p as { attachments?: ResourceAttachmentRef[] }).attachments),
             browser: (p as { browser?: boolean }).browser === true,
             mode: p.mode,
             contextMode: noProjectAsk
@@ -562,6 +557,16 @@ export async function main(): Promise<void> {
         // Crash-GC has consumed the previous life's pids.json by now; live
         // snapshots may own the file again (C2).
         lifecycle.beginPidSnapshots();
+        // Same-root config evolution hygiene (B9): persist the retired-key
+        // sweep only on the NORMAL plane (C5a). Pre-admission parses already
+        // tolerate retired keys via loadConfig's in-memory strip; unknown
+        // keys NOT on the retired registry still fail loud (INV-021).
+        for (const sweep of sweepRetiredConfigKeysAtStartup()) {
+          logLine(
+            logPath(),
+            `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
+          );
+        }
         await setupBinding.start();
         quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
         scheduleStartupRetention(services.runRetention, {

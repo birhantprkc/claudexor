@@ -99,7 +99,9 @@ export function controlServices(
   setupBinding: SetupBinding,
   journalManager: JournalManager,
   authReadiness: AuthReadinessService,
-  resources: ResourceStore,
+  /** Lazy accessor (C5b): the store mkdirs on construction and only product
+   * routes touch it, so the recovery plane must never materialize it. */
+  resources: () => ResourceStore,
   quotaRegistry: () => QuotaRegistry,
   daemonJobs: () => Promise<
     Array<{ runId?: string; state: string; finishedAt?: string; params?: unknown }>
@@ -145,7 +147,10 @@ export function controlServices(
     }
   };
   mkdirSync(NO_PROJECT_ROOT, { recursive: true, mode: 0o700 });
-  const preflightRunRequirements = createRunRequirementsPreflight(resources, NO_PROJECT_ROOT, {
+  const lazyResources: Pick<ResourceStore, "resolve"> = {
+    resolve: (refs) => resources().resolve(refs),
+  };
+  const preflightRunRequirements = createRunRequirementsPreflight(lazyResources, NO_PROJECT_ROOT, {
     requiresGit: (request: ControlRunStartRequest) => {
       const root = request.scope.kind === "project" ? request.scope.root : NO_PROJECT_ROOT;
       const thread = request.threadId ? threads.getThread(request.threadId) : undefined;
@@ -157,7 +162,7 @@ export function controlServices(
     },
   });
   const preflightThreadRunRequirements = createRunRequirementsPreflight(
-    resources,
+    lazyResources,
     NO_PROJECT_ROOT,
     {
       requiresGit: (request: ControlRunStartRequest) => {
@@ -176,18 +181,18 @@ export function controlServices(
     preflightRunRequirements,
     preflightThreadRunRequirements,
     createUpload: async (input: unknown, idempotencyKey: string) =>
-      resources.create(input, idempotencyKey),
+      resources().create(input, idempotencyKey),
     writeUpload: async (uploadId: string, chunks: AsyncIterable<Uint8Array>) =>
-      resources.write(uploadId, chunks),
-    uploadStatus: async (uploadId: string) => resources.status(uploadId),
-    cancelUpload: async (uploadId: string) => resources.cancel(uploadId),
+      resources().write(uploadId, chunks),
+    uploadStatus: async (uploadId: string) => resources().status(uploadId),
+    cancelUpload: async (uploadId: string) => resources().cancel(uploadId),
     finalizeUpload: async (
       uploadId: string,
       expectedSha256: string | undefined,
       idempotencyKey: string,
-    ) => resources.finalize(uploadId, expectedSha256, idempotencyKey),
+    ) => resources().finalize(uploadId, expectedSha256, idempotencyKey),
     validateResources: async (refs: ResourceAttachmentRef[]) => {
-      resources.resolve(refs);
+      resources().resolve(refs);
     },
     runRetention: createRetentionRunner({ projects, threads, daemonJobs }),
     // F3 nested-project disclosure: each project carries its recomputed
@@ -242,7 +247,7 @@ export function controlServices(
       const { threads: rows, problems } = threads.listThreadsResilient();
       return { threads: rows as unknown[], problems: problems as unknown[] };
     },
-    ...threadTurnServices(threads, resources),
+    ...threadTurnServices(threads, lazyResources),
     updateThread: async (
       id: string,
       patch: {
