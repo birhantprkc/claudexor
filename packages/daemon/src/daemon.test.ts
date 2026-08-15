@@ -9,6 +9,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
+import { connect, type Socket } from "node:net";
+import { createInterface } from "node:readline";
 import { DurableJournal } from "@claudexor/journal";
 import {
   RunEvent,
@@ -230,6 +233,96 @@ describe("DaemonServer", () => {
       expect(ran).toBe(1);
       await expect(new DaemonClient(socketPath, "wrong").health()).rejects.toThrow(/unauthorized/);
     } finally {
+      await server.stop();
+      authority.journal.close();
+    }
+  });
+
+  it("drops a disconnected RPC follower without crashing other followers", async () => {
+    // Keep the fixture name short: macOS caps Unix-domain socket paths.
+    const dir = tempDir("epipe");
+    const authority = commandAuthority(dir);
+    authority.store.accept({
+      id: "job-disconnected",
+      params: { value: 1 },
+      idempotencyKey: "disconnected",
+      clientId: "test",
+    });
+    let markStatusRead!: () => void;
+    const statusRead = new Promise<void>((resolve) => {
+      markStatusRead = resolve;
+    });
+    const socketPath = join(dir, "daemon.sock");
+    const server = new DaemonServer({
+      socketPath,
+      token: "token",
+      commands: {
+        current: () => authority.store,
+        findById: () => {
+          markStatusRead();
+          return authority.store;
+        },
+      },
+      runner: async () => ({ lifecycle: "succeeded" }),
+    });
+    const serverSockets = (server as unknown as { followers: { sockets: Set<Socket> } }).followers
+      .sockets;
+    const escaped: unknown[] = [];
+    const collect = (error: unknown): void => void escaped.push(error);
+    let survivor: Socket | undefined;
+    let doomed: Socket | undefined;
+    let survivorLines: ReturnType<typeof createInterface> | undefined;
+    process.on("uncaughtException", collect);
+    try {
+      await server.start();
+      survivor = connect(socketPath);
+      doomed = connect(socketPath);
+      survivor.on("error", () => {});
+      doomed.on("error", () => {});
+      await Promise.all([once(survivor, "connect"), once(doomed, "connect")]);
+      for (let attempt = 0; attempt < 50 && serverSockets.size !== 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(serverSockets.size).toBe(2);
+
+      doomed.write(
+        `${JSON.stringify({
+          id: 1,
+          method: "claudexor.status",
+          params: { id: "job-disconnected" },
+          token: "token",
+        })}\n`,
+      );
+      await statusRead;
+      doomed.destroy();
+
+      // The server's awaited dispatch resumes after the client closes. EPIPE is
+      // delivered asynchronously through readline, not thrown by Socket.write.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      survivorLines = createInterface({ input: survivor });
+      const survivorReply = new Promise<unknown>((resolve, reject) => {
+        survivorLines!.once("line", (line) => resolve(JSON.parse(line)));
+        survivorLines!.once("error", reject);
+      });
+      survivor.write(
+        `${JSON.stringify({
+          id: 2,
+          method: "claudexor.health",
+          token: "token",
+        })}\n`,
+      );
+      await expect(survivorReply).resolves.toMatchObject({
+        id: 2,
+        result: { ok: true },
+      });
+      expect(escaped).toEqual([]);
+      expect(serverSockets.size).toBe(1);
+    } finally {
+      process.off("uncaughtException", collect);
+      survivorLines?.close();
+      doomed?.destroy();
+      survivor?.destroy();
       await server.stop();
       authority.journal.close();
     }

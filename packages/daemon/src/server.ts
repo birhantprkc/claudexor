@@ -1,7 +1,7 @@
 import { type Server, type Socket, createServer } from "node:net";
 import { timingSafeEqual } from "node:crypto";
 import { chmodSync, lstatSync, unlinkSync } from "node:fs";
-import { createInterface } from "node:readline";
+import { RpcFollowers } from "./rpc-followers.js";
 import {
   assertNoInlineSecretValues,
   errorCode,
@@ -92,7 +92,7 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
 /** Unix-socket worker pool; scheduling stays in the injected Orchestrator. */
 export class DaemonServer {
   private server?: Server;
-  private readonly sockets = new Set<Socket>();
+  private readonly followers = new RpcFollowers();
   private readonly queue: string[] = [];
   private readonly cancelled = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
@@ -228,7 +228,7 @@ export class DaemonServer {
 
     // Existing local RPC sockets can otherwise keep server.close() pending
     // forever. They are destroyed only after every accepted command settled.
-    for (const socket of this.sockets) socket.destroy();
+    this.followers.destroyAll();
     await serverClosed;
     this.resolveShutdown();
   }
@@ -239,21 +239,13 @@ export class DaemonServer {
   }
 
   private onConnection(sock: Socket): void {
-    this.sockets.add(sock);
-    const rl = createInterface({ input: sock });
-    rl.on("line", (line) => {
+    this.followers.attach(sock, (line) => {
       void this.handle(line, sock);
     });
-    sock.on("error", () => rl.close());
-    sock.on("close", () => this.sockets.delete(sock));
   }
 
   private send(sock: Socket, obj: unknown): void {
-    try {
-      sock.write(JSON.stringify(obj) + "\n");
-    } catch {
-      /* socket closed */
-    }
+    this.followers.send(sock, obj);
   }
 
   private async handle(line: string, sock: Socket): Promise<void> {
