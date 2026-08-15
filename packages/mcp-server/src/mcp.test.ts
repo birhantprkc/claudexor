@@ -1,11 +1,52 @@
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
+import { makeOutcomeFacts, SCHEMA_VERSION, validateRunFactsInvariants } from "@claudexor/schema";
 import { defaultClaudexorTools, serveClaudexorMcp, type McpTool, type RunnerFn } from "./index.js";
 import { beltClaudexorTools } from "./delegation-belt.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function validPlanRunFacts(runId: string) {
+  return validateRunFactsInvariants({
+    schema_version: SCHEMA_VERSION,
+    run_id: runId,
+    task_id: `task-${runId}`,
+    mode: "plan",
+    outcome: makeOutcomeFacts("succeeded"),
+    deliverable: {
+      present: true,
+      kind: "plan",
+      path: "final/plan.md",
+      producer_attempt_id: "p01",
+    },
+    participants: {
+      planners: 1,
+      attempts: [
+        {
+          attempt_id: "p01",
+          harness_id: "codex",
+          role: "planner",
+          deliverable_present: true,
+          status: "success",
+        },
+      ],
+    },
+    gates: {
+      configured: false,
+      required: 0,
+      total: 0,
+      executed: false,
+      state: "not_configured",
+      receipt_attempt_id: null,
+    },
+    review: { state: "not_run", blocker_ids: [], blockers: 0 },
+    apply: { eligibility: null, operator_decision_present: false },
+    required_actions: [],
+    generated_at: "2026-08-14T00:00:00.000Z",
+  });
 }
 
 /** Drive the REAL stdio wire (newline JSON-RPC over streams) against the served factory. */
@@ -396,11 +437,13 @@ describe("Claudexor MCP server (SDK v2)", () => {
   });
 
   it("run tools return structuredContent mirroring the text (summary, handles, applyEligibility)", async () => {
+    const runFacts = validPlanRunFacts("r-s1");
     const tools = defaultClaudexorTools(async () => ({
       runId: "r-s1",
       runDir: "/tmp/r-s1",
       status: "succeeded",
       summary: "Did the thing.",
+      runFacts,
       applyEligibility: {
         eligible: false,
         state: "blocked",
@@ -424,6 +467,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
     expect(sc?.summary).toBe("Did the thing.");
     expect(sc?.runId).toBe("r-s1");
     expect(sc?.status).toBe("succeeded");
+    expect(sc?.runFacts).toEqual(runFacts);
     expect(sc?.applyEligibility?.eligible).toBe(false);
     expect(sc?.applyEligibility?.requiredAction).toBe("decision");
     // Read-only vs mutating annotations ride tools/list.
@@ -509,11 +553,13 @@ describe("Claudexor MCP server (SDK v2)", () => {
     // A schema-valid McpRunHandleResult passes; the SDK strictly validates
     // structuredContent against the declared outputSchema, so conformance is
     // enforced by the wire itself.
+    const runFacts = validPlanRunFacts("r-h1");
     const handle = {
       summary: "run r-h1: succeeded",
       runId: "r-h1",
       runDir: "/tmp/r-h1",
       status: "succeeded",
+      runFacts,
       decisionStatus: "approved",
       pendingInteractions: 0,
       outcomeFacts: null,
@@ -544,6 +590,7 @@ describe("Claudexor MCP server (SDK v2)", () => {
       expect(res?.isError, `${name} result should conform to its outputSchema`).not.toBe(true);
       const sc = res?.structuredContent as Record<string, any>;
       expect(sc?.runId).toBe("r-h1");
+      expect(sc?.runFacts).toEqual(runFacts);
       expect(sc?.applyEligibility?.eligible).toBe(true);
       expect(sc?.detailProblem?.code).toBe("detail_unavailable");
     }

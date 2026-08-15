@@ -50,6 +50,10 @@ export function structuredRunResult(result: unknown): Record<string, unknown> {
     runDir: typeof r["runDir"] === "string" && r["runDir"] ? r["runDir"] : null,
     // `status` carries the run LIFECYCLE (D8); the axes ride alongside as facts.
     status: typeof r["status"] === "string" && r["status"] ? r["status"] : null,
+    runFacts:
+      r["runFacts"] && typeof r["runFacts"] === "object" && !Array.isArray(r["runFacts"])
+        ? r["runFacts"]
+        : null,
     outcomeFacts:
       r["outcomeFacts"] && typeof r["outcomeFacts"] === "object" ? r["outcomeFacts"] : null,
     failure: r["failure"] && typeof r["failure"] === "object" ? r["failure"] : null,

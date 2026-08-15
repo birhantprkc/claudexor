@@ -112,6 +112,35 @@ describe("surface canaries (MCP + plugins over the built CLI)", () => {
       // The daemon tracks the run: the CLI resolves it OUTSIDE the MCP process.
       const inspect = cli(sb, ["inspect", runId as string, "--json"]);
       expect((inspect.json() as { runId: string }).runId).toBe(runId);
+
+      // issue #85: the terminal MCP structured receipt equals this run's own
+      // control/artifact receipt by structural deep equality, and is non-null.
+      let terminalFacts: unknown = null;
+      for (let poll = 0; poll < 60; poll++) {
+        const pollId = 50 + poll;
+        mcp.send({
+          jsonrpc: "2.0",
+          id: pollId,
+          method: "tools/call",
+          params: { name: "claudexor_run_result", arguments: { runId } },
+        });
+        const result = await mcp.waitFor(pollId, 15_000);
+        const structured = result.result?.structuredContent as
+          { status?: string; runFacts?: unknown } | undefined;
+        if (
+          structured &&
+          ["succeeded", "failed", "cancelled", "interrupted"].includes(String(structured.status))
+        ) {
+          terminalFacts = structured.runFacts ?? null;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      expect(terminalFacts, "terminal MCP structured runFacts must be present").toBeTruthy();
+      const inspected = cli(sb, ["inspect", runId as string, "--json"]).json() as {
+        runFacts?: unknown;
+      };
+      expect(terminalFacts).toEqual(inspected.runFacts);
     } finally {
       await mcp.close();
     }
@@ -256,6 +285,17 @@ describe("surface canaries (MCP + plugins over the built CLI)", () => {
           m.params?.update?.sessionUpdate === "agent_message_chunk",
       );
       expect(chunk).toBeTruthy();
+
+      // issue #85: the ACP terminal metadata receipt equals this run's own
+      // control/artifact receipt by structural deep equality, and is non-null.
+      const meta = done.result?._meta?.claudexor as
+        { runId?: string; runFacts?: unknown } | undefined;
+      expect(meta?.runId, "ACP _meta.claudexor.runId must be present").toBeTruthy();
+      expect(meta?.runFacts, "ACP terminal _meta runFacts must be present").toBeTruthy();
+      const inspected = cli(sb, ["inspect", meta?.runId as string, "--json"]).json() as {
+        runFacts?: unknown;
+      };
+      expect(meta?.runFacts).toEqual(inspected.runFacts);
     } finally {
       child.stdin.end();
       await new Promise((r) => setTimeout(r, 150));

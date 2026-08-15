@@ -276,6 +276,11 @@ describe("AcpServer official SDK projection", () => {
 
   it("uses the daemon thread id for prompts and exposes run/status/apply truth in response metadata", async () => {
     const cwd = project();
+    const runFacts = {
+      run_id: "run-2",
+      outcome: { lifecycle: "succeeded" },
+      receiptMarker: "exact-runner-object",
+    };
     let promptCall: any;
     await withClient(
       async (params) => {
@@ -286,6 +291,7 @@ describe("AcpServer official SDK projection", () => {
           status: "succeeded",
           summary: "completed through daemon",
           applyEligibility: { eligible: true, state: "verified" },
+          runFacts,
         };
       },
       async (agent, updates) => {
@@ -303,6 +309,7 @@ describe("AcpServer official SDK projection", () => {
           runId: "run-2",
           status: "succeeded",
           applyEligibility: { eligible: true },
+          runFacts,
         });
         expect(
           updates.some((item) => JSON.stringify(item).includes("completed through daemon")),
@@ -392,11 +399,12 @@ describe("AcpServer official SDK projection", () => {
           cwd,
           mcpServers: [],
         });
-        await agent.request(acp.methods.agent.session.prompt, {
+        const response = await agent.request(acp.methods.agent.session.prompt, {
           sessionId: session.sessionId,
           prompt: [{ type: "text", text: "plan it" }],
           _meta: { claudexor: { mode: "plan" } },
         });
+        expect(response._meta?.["claudexor"]).toMatchObject({ runFacts: null });
         expect(JSON.stringify(updates)).not.toContain("open question");
       },
     );

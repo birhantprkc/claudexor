@@ -2,10 +2,52 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeOutcomeFacts } from "@claudexor/schema";
+import { makeOutcomeFacts, SCHEMA_VERSION, validateRunFactsInvariants } from "@claudexor/schema";
 import { makeInteractionBridge } from "./mcp-runner.js";
 
 const addr = { baseUrl: "http://127.0.0.1:1", token: "t" } as never;
+const PUBLIC_RECOVERY_MODES = ["__run_inspect", "__run_status", "__run_result"] as const;
+const BELT_RECOVERY_MODES = ["__run_status", "__run_result"] as const;
+
+function validPlanRunFacts(runId: string) {
+  return validateRunFactsInvariants({
+    schema_version: SCHEMA_VERSION,
+    run_id: runId,
+    task_id: `task-${runId}`,
+    mode: "plan",
+    outcome: makeOutcomeFacts("succeeded"),
+    deliverable: {
+      present: true,
+      kind: "plan",
+      path: "final/plan.md",
+      producer_attempt_id: "p01",
+    },
+    participants: {
+      planners: 1,
+      attempts: [
+        {
+          attempt_id: "p01",
+          harness_id: "codex",
+          role: "planner",
+          deliverable_present: true,
+          status: "success",
+        },
+      ],
+    },
+    gates: {
+      configured: false,
+      required: 0,
+      total: 0,
+      executed: false,
+      state: "not_configured",
+      receipt_attempt_id: null,
+    },
+    review: { state: "not_run", blocker_ids: [], blockers: 0 },
+    apply: { eligibility: null, operator_decision_present: false },
+    required_actions: [],
+    generated_at: "2026-08-14T00:00:00.000Z",
+  });
+}
 
 describe("makeInteractionBridge (MCP daemon-run interaction plumbing)", () => {
   afterEach(() => {
@@ -350,6 +392,48 @@ describe("mcp daemon body mapping", () => {
     },
   );
 
+  it("keeps immediate missing and transport-unavailable detail as null without a problem", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-soft-absence",
+      runDir: "",
+      status: "succeeded",
+      jobId: "job-soft-absence",
+    });
+    try {
+      for (const unavailable of [false, true]) {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => {
+            if (unavailable) throw new Error("socket lost");
+            return { ok: false, status: 404, json: async () => ({}) } as never;
+          }),
+        );
+        const result = (await mcpSurfaceRunner()({ mode: "agent", prompt: "go" })) as Record<
+          string,
+          unknown
+        >;
+        expect(result).toMatchObject({
+          runId: "run-soft-absence",
+          runFacts: null,
+          outcomeFacts: null,
+          applyEligibility: null,
+        });
+        expect(result).not.toHaveProperty("detailProblem");
+      }
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("marks an unexpected post-terminal throw with the child terminal evidence for the belt", async () => {
     // Field contract with the delegation belt (childTerminalEvidence): a throw
     // AFTER the terminal is durable discloses the child really ran, so the
@@ -519,7 +603,12 @@ describe("mcp daemon body mapping", () => {
       vi.fn(async () => ({
         ok: true,
         json: async () => ({
-          summary: { runId: "run-other", delegatedFromRunId: "another-parent" },
+          summary: {
+            jobId: "job-other",
+            runId: "run-other",
+            state: "running",
+            delegatedFromRunId: "another-parent",
+          },
         }),
       })) as never,
     );
@@ -564,6 +653,7 @@ describe("mcp daemon body mapping", () => {
         expect.objectContaining({ waitForTerminal: false }),
       );
       expect(result).toMatchObject({ runId: "run-durable", status: "running" });
+      expect(result).toMatchObject({ runFacts: null });
       expect(detailSpy).not.toHaveBeenCalled();
       expect(ensureSpy).toHaveBeenCalledOnce();
     } finally {
@@ -646,12 +736,14 @@ describe("mcp daemon body mapping", () => {
       jobId: "job-child",
     });
     const outcomeFacts = makeOutcomeFacts("succeeded");
+    const runFacts = validPlanRunFacts("run-child");
     const fetchSpy = vi.fn(async () => ({
       ok: true,
       json: async () => ({
         summary: {
           jobId: "job-child",
           runId: "run-child",
+          taskId: "task-run-child",
           state: "succeeded",
           parentRunId: "run-parent",
           delegatedFromRunId: "run-parent",
@@ -665,6 +757,7 @@ describe("mcp daemon body mapping", () => {
           },
           outcomeFacts,
         },
+        runFacts,
         applyEligibility: {
           eligible: false,
           state: "no_op",
@@ -689,12 +782,168 @@ describe("mcp daemon body mapping", () => {
         outcomeBanner: "Completed",
         delegation: { reason: "not_requested" },
         outcomeFacts,
+        runFacts,
       });
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     } finally {
       ensureSpy.mockRestore();
       enqueueSpy.mockRestore();
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("clears the entire immediate detail snapshot when RunFacts invariants are invalid", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-invalid",
+      runDir: "/tmp/run-invalid",
+      status: "succeeded",
+      jobId: "job-invalid",
+    });
+    const valid = validPlanRunFacts("run-invalid");
+    const fetchSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      summary: {
+        runId: "run-invalid",
+        taskId: "task-run-invalid",
+        state: "succeeded",
+        spendUsd: 0.75,
+        outcomeFacts: makeOutcomeFacts("succeeded"),
+        parentRunId: "run-parent",
+        delegatedFromRunId: "run-parent",
+        delegation: {
+          requested: true,
+          effective: true,
+          used: true,
+          reason: null,
+          remediation: null,
+        },
+      },
+      runFacts: {
+        ...valid,
+        participants: { ...valid.participants, planners: 2 },
+      },
+      primaryOutput: { kind: "plan", path: "final/plan.md", text: "must be discarded" },
+      applyEligibility: {
+        eligible: false,
+        state: "no_op",
+        reason: null,
+        requiredAction: null,
+      },
+      outcomeBanner: "must be discarded",
+      planReadiness: { state: "ready", questionCount: 0 },
+      council: {
+        requested: 2,
+        drafted: 2,
+        degraded: false,
+        mergedBy: "codex",
+        members: [
+          { harnessId: "codex", role: "primary", status: "merged", error: null },
+          { harnessId: "cursor", role: "member", status: "drafted", error: null },
+        ],
+      },
+      budget: {
+        paidBudget: { kind: "finite", maxUsd: 2 },
+        spendUsd: 0.75,
+        valuationUsd: 1.25,
+        valuationKnowledge: "estimated",
+        remainingUsd: 1.25,
+        estimated: false,
+        source: "events",
+        evidence: "complete",
+      },
+      failure: {
+        phase: "execute",
+        category: "auth",
+        code: null,
+        harnessId: "codex",
+        attemptId: "p01",
+        safeMessage: "must be discarded",
+        rawDetailRef: null,
+        resetsAt: null,
+        logRefs: [],
+        eventRefs: [],
+        runDir: "/tmp/run-invalid",
+        nextActions: ["must be discarded"],
+      },
+    });
+    try {
+      const result = (await mcpSurfaceRunner()({ mode: "plan", prompt: "go" })) as Record<
+        string,
+        unknown
+      >;
+      expect(result).toMatchObject({
+        runId: "run-invalid",
+        status: "succeeded",
+        summary: "run succeeded",
+        runFacts: null,
+        outcomeFacts: null,
+        applyEligibility: null,
+        spendUsd: null,
+        outcomeBanner: null,
+        planReadiness: null,
+        council: null,
+        failure: null,
+        parentRunId: null,
+        delegatedFromRunId: null,
+        delegation: null,
+        detailProblem: { code: "run_facts_invalid", retryable: false },
+      });
+      expect(result).not.toHaveProperty("budget");
+      expect(result).not.toHaveProperty("primaryOutput");
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("clears the immediate detail snapshot when a shape-valid receipt carries the wrong run identity", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-right",
+      runDir: "/tmp/run-right",
+      status: "succeeded",
+      jobId: "job-right",
+    });
+    // HTTP 200 malformed-success without a summary identity, carrying a
+    // receipt that validates in isolation but belongs to a different run: the
+    // immediate call site itself must bind the enqueued identity (the
+    // summary-derived fallback is absent here by construction).
+    const fetchSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      runFacts: validPlanRunFacts("run-wrong"),
+      outcomeBanner: "must be discarded",
+    });
+    try {
+      const result = (await mcpSurfaceRunner()({ mode: "plan", prompt: "go" })) as Record<
+        string,
+        unknown
+      >;
+      expect(result).toMatchObject({
+        runId: "run-right",
+        status: "succeeded",
+        runFacts: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
+        detailProblem: { code: "run_facts_invalid", retryable: false },
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      fetchSpy.mockRestore();
     }
   });
 
@@ -746,6 +995,7 @@ describe("mcp daemon body mapping", () => {
   it("returns the terminal primary output and artifact handles from __run_result", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
+    const runFacts = validPlanRunFacts("run-result");
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
@@ -758,11 +1008,14 @@ describe("mcp daemon body mapping", () => {
           ok: true,
           json: async () => ({
             summary: {
+              jobId: "job-result",
               runId: "run-result",
+              taskId: "task-run-result",
               state: "succeeded",
               runDir: "/tmp/run-result",
               result: { kind: "plan", changed_files: [] },
             },
+            runFacts,
             finalSummary: "generic summary must not replace the plan",
             primaryOutput: {
               kind: "plan",
@@ -798,6 +1051,7 @@ describe("mcp daemon body mapping", () => {
         runDir: "/tmp/run-result",
         status: "succeeded",
         applyEligibility: { eligible: false, state: "no_op" },
+        runFacts,
       });
       expect(result).not.toHaveProperty("primaryOutput");
       expect(result).not.toHaveProperty("artifacts");
@@ -813,6 +1067,207 @@ describe("mcp daemon body mapping", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it.each(
+    PUBLIC_RECOVERY_MODES.flatMap((mode) =>
+      (["run_facts_invalid", "invalid_service_response"] as const).map(
+        (problemCode) => [mode, problemCode] as const,
+      ),
+    ),
+  )("degrades public %s typed %s to a minimal handle", async (mode, problemCode) => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    const retryable = problemCode === "invalid_service_response";
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        code: problemCode,
+        message: `typed ${problemCode}`,
+        retryable,
+      }),
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const result = (await mcpSurfaceRunner()({
+        mode,
+        runId: "run-degraded",
+      })) as Record<string, unknown>;
+      expect(result).toEqual({
+        summary: "run run-degraded: detail unavailable",
+        runId: "run-degraded",
+        runDir: null,
+        status: null,
+        runFacts: null,
+        decisionStatus: null,
+        pendingInteractions: null,
+        outcomeFacts: null,
+        failure: null,
+        outcomeBanner: null,
+        applyEligibility: null,
+        planReadiness: null,
+        council: null,
+        budget: null,
+        parentRunId: null,
+        delegatedFromRunId: null,
+        delegation: null,
+        detailProblem: {
+          code: problemCode,
+          message: `typed ${problemCode}`,
+          retryable,
+        },
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("also degrades malformed success and wrong receipt identity without partial authority", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    const responses = [
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({ summary: { runId: "run-degraded", state: "succeeded" } }),
+      },
+      {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          summary: {
+            jobId: "job-degraded",
+            runId: "run-degraded",
+            taskId: "task-run-degraded",
+            state: "succeeded",
+          },
+          runFacts: validPlanRunFacts("run-other"),
+        }),
+      },
+    ];
+    const fetchSpy = vi.fn(async () => responses.shift() as never);
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const runner = mcpSurfaceRunner();
+      for (const expectedCode of ["invalid_service_response", "run_facts_invalid"]) {
+        const result = (await runner({
+          mode: "__run_result",
+          runId: "run-degraded",
+        })) as Record<string, unknown>;
+        expect(result).toMatchObject({
+          runId: "run-degraded",
+          runDir: null,
+          status: null,
+          runFacts: null,
+          outcomeFacts: null,
+          failure: null,
+          applyEligibility: null,
+          council: null,
+          budget: null,
+          parentRunId: null,
+          delegatedFromRunId: null,
+          detailProblem: { code: expectedCode },
+        });
+      }
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(
+    PUBLIC_RECOVERY_MODES.flatMap((mode) =>
+      (["404", "auth", "untyped integrity-looking 500", "transport"] as const).map(
+        (failureKind) => [mode, failureKind] as const,
+      ),
+    ),
+  )("keeps public %s %s as a tool error", async (mode, failureKind) => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (failureKind === "transport") throw new Error("socket lost");
+        if (failureKind === "404") {
+          return { ok: false, status: 404, json: async () => ({ error: "missing" }) } as never;
+        }
+        if (failureKind === "auth") {
+          return {
+            ok: false,
+            status: 401,
+            json: async () => ({ code: "unauthorized", message: "denied", retryable: false }),
+          } as never;
+        }
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({ code: "run_facts_invalid", message: "missing typed fields" }),
+        } as never;
+      }),
+    );
+    try {
+      const run = mcpSurfaceRunner()({ mode, runId: "run-error" });
+      if (failureKind === "transport") await expect(run).rejects.toThrow("socket lost");
+      else if (failureKind === "404") await expect(run).rejects.toThrow("missing");
+      else if (failureKind === "auth") {
+        await expect(run).rejects.toMatchObject({ code: "unauthorized" });
+      } else {
+        await expect(run).rejects.toMatchObject({ code: "run_facts_invalid" });
+      }
+    } finally {
+      connectSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(BELT_RECOVERY_MODES)(
+    "keeps delegation-belt %s fail-closed when detail integrity hides lineage",
+    async (mode) => {
+      const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+      const daemonRun = await import("./daemon-run.js");
+      const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
+        client: {} as never,
+        addr: { baseUrl: "http://x", token: "t" } as never,
+      });
+      const fetchSpy = vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({
+          code: "run_facts_invalid",
+          message: "canonical receipt is invalid",
+          retryable: false,
+        }),
+      }));
+      vi.stubGlobal("fetch", fetchSpy);
+      try {
+        await expect(
+          mcpSurfaceRunner({
+            requireExistingDaemon: true,
+            delegationParentRunId: "run-parent",
+          })({ mode, runId: "run-child" }),
+        ).rejects.toMatchObject({ code: "run_facts_invalid" });
+        expect(fetchSpy).toHaveBeenCalledOnce();
+      } finally {
+        connectSpy.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("preserves typed RunFailure in recovery projections", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
@@ -843,6 +1298,7 @@ describe("mcp daemon body mapping", () => {
             ok: true,
             json: async () => ({
               summary: {
+                jobId: "job-failed",
                 runId: "run-failed",
                 state: "failed",
                 runDir: "/tmp/run-failed",

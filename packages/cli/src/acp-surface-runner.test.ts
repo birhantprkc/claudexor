@@ -2,11 +2,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { makeOutcomeFacts } from "@claudexor/schema";
+import {
+  SCHEMA_VERSION,
+  makeOutcomeFacts,
+  requiredActionsFor,
+  validateRunFactsInvariants,
+} from "@claudexor/schema";
 import {
   ACP_MAX_REPLAY_TURNS,
   acpTerminalRecordMode,
   acpTerminalSummary,
+  acpSessionQuery,
   projectAcpRunControls,
   projectTerminalTurnDetail,
   selectReplayTurns,
@@ -53,20 +59,76 @@ const typedFailure = {
   nextActions: ["Log in again"],
 };
 
+const terminalRunFacts = validateRunFactsInvariants({
+  schema_version: SCHEMA_VERSION,
+  run_id: "run-1",
+  task_id: "task-1",
+  mode: "plan",
+  outcome: makeOutcomeFacts("succeeded"),
+  deliverable: {
+    present: true,
+    kind: "plan",
+    path: "final/plan.md",
+    producer_attempt_id: "p01",
+  },
+  participants: {
+    planners: 1,
+    attempts: [
+      {
+        attempt_id: "p01",
+        harness_id: "codex",
+        role: "planner",
+        deliverable_present: true,
+        status: "success",
+      },
+    ],
+  },
+  gates: {
+    configured: false,
+    required: 0,
+    total: 0,
+    executed: false,
+    state: "not_configured",
+    receipt_attempt_id: null,
+  },
+  review: { state: "not_run", blocker_ids: [], blockers: 0 },
+  apply: { eligibility: null, operator_decision_present: false },
+  required_actions: [],
+  generated_at: "2026-08-14T00:00:00.000Z",
+});
+
+const failedOutcomeFacts = makeOutcomeFacts("failed", { reason: "harness_failed" });
+const failedRunFacts = validateRunFactsInvariants({
+  ...terminalRunFacts,
+  run_id: "run-failed",
+  outcome: failedOutcomeFacts,
+  required_actions: requiredActionsFor(failedOutcomeFacts, false),
+});
+
 // The post-terminal detail read DEGRADES: a finished ACP turn must never become
 // a JSON-RPC error that loses the runId — the terminal answer survives and the
 // typed problem rides the result as detailProblem.
 describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
-  it("carries a typed detailProblem instead of raising when the detail read fails", async () => {
+  it.each([
+    {
+      name: "typed receipt error",
+      code: "run_facts_invalid",
+      message: "canonical RunFacts receipt is invalid",
+      retryable: false,
+    },
+    {
+      name: "malformed successful response",
+      code: "invalid_service_response",
+      message: "run detail endpoint returned an invalid response",
+      retryable: true,
+    },
+  ])("carries a typed detailProblem for a $name", async ({ code, message, retryable }) => {
     const daemonRun = await import("./daemon-run.js");
-    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockRejectedValue(
-      Object.assign(new Error("canonical RunFacts receipt is invalid"), {
-        code: "run_facts_invalid",
-        retryable: false,
-      }),
-    );
+    const detailSpy = vi
+      .spyOn(daemonRun, "fetchRunDetail")
+      .mockRejectedValue(Object.assign(new Error(message), { code, retryable }));
     try {
-      await expect(projectTerminalTurnDetail(addr, "run-1")).resolves.toEqual({
+      await expect(projectTerminalTurnDetail(addr, "run-1", "succeeded")).resolves.toEqual({
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
@@ -74,16 +136,105 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         primaryOutput: null,
         outcomeFacts: null,
         outcomeBanner: null,
+        runFacts: null,
         detailProblem: {
-          code: "run_facts_invalid",
-          message: "canonical RunFacts receipt is invalid",
-          retryable: false,
+          code,
+          message,
+          retryable,
         },
       });
+      expect(detailSpy).toHaveBeenCalledTimes(1);
     } finally {
       detailSpy.mockRestore();
     }
   });
+
+  it("returns the exact validated receipt from the same single detail read", async () => {
+    const daemonRun = await import("./daemon-run.js");
+    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      summary: { runId: "run-1", taskId: "task-1" },
+      runFacts: terminalRunFacts,
+    });
+    try {
+      const projected = await projectTerminalTurnDetail(addr, "run-1", "succeeded");
+      expect(projected.runFacts).toEqual(terminalRunFacts);
+      expect(detailSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      detailSpy.mockRestore();
+    }
+  });
+
+  it("keeps an explicit legacy receipt null without fabricating a problem", async () => {
+    const daemonRun = await import("./daemon-run.js");
+    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      summary: { runId: "run-1" },
+      runFacts: null,
+    });
+    try {
+      const projected = await projectTerminalTurnDetail(addr, "run-1", "succeeded");
+      expect(projected).toMatchObject({ runFacts: null });
+      expect(projected).not.toHaveProperty("detailProblem");
+      expect(detailSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      detailSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ["run identity", { ...terminalRunFacts, run_id: "run-other" }, "succeeded"],
+    ["terminal lifecycle", terminalRunFacts, "failed"],
+  ] as const)(
+    "clears the whole detail-derived snapshot on wrong %s",
+    async (_axis, receipt, lifecycle) => {
+      const daemonRun = await import("./daemon-run.js");
+      const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+        summary: {
+          runId: "run-1",
+          taskId: "task-1",
+          outcomeFacts: makeOutcomeFacts("succeeded"),
+        },
+        runFacts: receipt,
+        applyEligibility: {
+          eligible: false,
+          state: "needs_review",
+          reason: null,
+          requiredAction: null,
+        },
+        planReadiness: { state: "needs_answers", questionCount: 1 },
+        planQuestions: [{ id: "q1" }],
+        failure: typedFailure,
+        primaryOutput: {
+          kind: "plan",
+          path: "final/plan.md",
+          text: "# Untrusted plan",
+          bytes: 16,
+          truncated: false,
+        },
+        outcomeBanner: "Done",
+      });
+      try {
+        await expect(projectTerminalTurnDetail(addr, "run-1", lifecycle)).resolves.toEqual({
+          applyEligibility: null,
+          planReadiness: null,
+          planQuestions: [],
+          failure: null,
+          primaryOutput: null,
+          outcomeFacts: null,
+          outcomeBanner: null,
+          runFacts: null,
+          detailProblem: {
+            code: "run_facts_invalid",
+            message:
+              "canonical RunFacts receipt is invalid; inspect final/run_facts.yaml before retrying",
+            retryable: false,
+          },
+        });
+        expect(detailSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        detailSpy.mockRestore();
+      }
+    },
+  );
 
   it("projects eligibility, readiness, questions, and typed failure from ONE detail read", async () => {
     const daemonRun = await import("./daemon-run.js");
@@ -110,7 +261,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
       },
     });
     try {
-      await expect(projectTerminalTurnDetail(addr, "run-1")).resolves.toEqual({
+      await expect(projectTerminalTurnDetail(addr, "run-1", "cancelled")).resolves.toEqual({
         applyEligibility: {
           eligible: false,
           state: "needs_review",
@@ -122,6 +273,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         failure: typedFailure,
         outcomeFacts: makeOutcomeFacts("cancelled", { reason: "wall_clock_exceeded" }),
         outcomeBanner: "Time limit reached",
+        runFacts: null,
         primaryOutput: {
           kind: "plan",
           path: "final/plan.md",
@@ -142,7 +294,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
       failure: { category: "invented", safeMessage: 42 },
     });
     try {
-      await expect(projectTerminalTurnDetail(addr, "run-1")).resolves.toEqual({
+      await expect(projectTerminalTurnDetail(addr, "run-1", "succeeded")).resolves.toEqual({
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
@@ -150,6 +302,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         primaryOutput: null,
         outcomeFacts: null,
         outcomeBanner: null,
+        runFacts: null,
       });
     } finally {
       detailSpy.mockRestore();
@@ -160,7 +313,7 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
     const daemonRun = await import("./daemon-run.js");
     const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue(null);
     try {
-      await expect(projectTerminalTurnDetail(addr, "run-1")).resolves.toEqual({
+      await expect(projectTerminalTurnDetail(addr, "run-1", "succeeded")).resolves.toEqual({
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
@@ -168,8 +321,9 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         primaryOutput: null,
         outcomeFacts: null,
         outcomeBanner: null,
+        runFacts: null,
       });
-      await expect(projectTerminalTurnDetail(addr, "")).resolves.toEqual({
+      await expect(projectTerminalTurnDetail(addr, "", "succeeded")).resolves.toEqual({
         applyEligibility: null,
         planReadiness: null,
         planQuestions: [],
@@ -177,10 +331,72 @@ describe("projectTerminalTurnDetail (post-terminal degrade)", () => {
         primaryOutput: null,
         outcomeFacts: null,
         outcomeBanner: null,
+        runFacts: null,
       });
       expect(detailSpy).toHaveBeenCalledTimes(1);
     } finally {
       detailSpy.mockRestore();
+    }
+  });
+});
+
+describe("acpSessionQuery terminal RunFacts binding", () => {
+  it("uses the exact terminal status runId and failed lifecycle at the detail boundary", async () => {
+    const daemonRun = await import("./daemon-run.js");
+    const live = await import("./live.js");
+    const terminalStatus = vi.fn().mockResolvedValue({
+      state: "failed",
+      runId: "run-failed",
+      runDir: "/runs/run-failed",
+      error: "harness failed",
+      params: { mode: "plan" },
+    });
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: { status: terminalStatus },
+      addr,
+    } as never);
+    const detailSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      summary: {
+        runId: "run-failed",
+        taskId: "task-1",
+        outcomeFacts: failedOutcomeFacts,
+      },
+      runFacts: failedRunFacts,
+      outcomeBanner: "Run failed",
+    });
+    const controlSpy = vi
+      .spyOn(live, "controlApiFetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ thread: { id: "thread-1", repoRoot: "/repo" } }),
+      } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ jobId: "job-failed" }) } as Response);
+    try {
+      const result = (await acpSessionQuery(
+        {
+          mode: "__acp_session_prompt",
+          sessionId: "thread-1",
+          prompt: "run it",
+          runMode: "plan",
+        },
+        undefined,
+        {} as never,
+      )) as Record<string, unknown>;
+
+      expect(terminalStatus).toHaveBeenCalledWith("job-failed");
+      expect(detailSpy).toHaveBeenCalledTimes(1);
+      expect(detailSpy).toHaveBeenCalledWith(addr, "run-failed");
+      expect(result).toMatchObject({
+        runId: "run-failed",
+        status: "failed",
+        outcomeFacts: failedOutcomeFacts,
+      });
+      expect(result["runFacts"]).toEqual(failedRunFacts);
+      expect(result).not.toHaveProperty("detailProblem");
+    } finally {
+      ensureSpy.mockRestore();
+      detailSpy.mockRestore();
+      controlSpy.mockRestore();
     }
   });
 });
@@ -194,6 +410,7 @@ describe("ACP terminal primary-output projection", () => {
     primaryOutput: null,
     outcomeFacts: null,
     outcomeBanner: null,
+    runFacts: null,
     detailProblem: { code: "detail_unavailable", message: "offline", retryable: true },
   };
 

@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import zlib from "node:zlib";
 import {
   assertNoPreexistingDaemon,
@@ -2680,6 +2681,20 @@ async function runMcpServePhase() {
         initialStatus: structured.status,
         terminalStatus: terminal.status,
       });
+      // issue #85: the terminal MCP structured receipt must equal the
+      // control-detail receipt for the same run, structurally, and be non-null.
+      const projected = await controlRunDetail(structured.runId);
+      const controlFacts = projected.detail?.runFacts ?? null;
+      const mcpFacts = terminal.runFacts ?? null;
+      if (mcpFacts !== null && controlFacts !== null && isDeepStrictEqual(mcpFacts, controlFacts))
+        pass(phase, "mcp runFacts parity", { harness: h, runId: structured.runId });
+      else
+        fail(phase, "mcp runFacts parity", {
+          runId: structured.runId,
+          mcpReceiptPresent: mcpFacts !== null,
+          controlReceiptPresent: controlFacts !== null,
+          projectionError: projected.error,
+        });
     } else {
       const text = String(call?.result?.content?.[0]?.text ?? "");
       fail(phase, "mcp ask result", {
@@ -2769,9 +2784,22 @@ async function runAcpServePhase() {
       receipt.runId.length > 0 &&
       receipt.status === "succeeded" &&
       controlsApplied
-    )
+    ) {
       pass(phase, "acp prompt round-trip", { harness: h, runId: receipt.runId });
-    else
+      // issue #85: the ACP terminal _meta receipt must equal the control-detail
+      // receipt for the same run, structurally, and be non-null.
+      const acpFacts = receipt.runFacts ?? null;
+      const controlFacts = projected.detail?.runFacts ?? null;
+      if (acpFacts !== null && controlFacts !== null && isDeepStrictEqual(acpFacts, controlFacts))
+        pass(phase, "acp runFacts parity", { harness: h, runId: receipt.runId });
+      else
+        fail(phase, "acp runFacts parity", {
+          runId: receipt.runId,
+          acpReceiptPresent: acpFacts !== null,
+          controlReceiptPresent: controlFacts !== null,
+          projectionError: projected.error,
+        });
+    } else
       fail(phase, "acp prompt round-trip", {
         stopReason: done?.result?.stopReason,
         sawChunk: Boolean(chunk),
