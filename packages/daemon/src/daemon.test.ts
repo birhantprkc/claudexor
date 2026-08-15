@@ -265,7 +265,8 @@ describe("DaemonServer", () => {
       },
       runner: async () => ({ lifecycle: "succeeded" }),
     });
-    const serverSockets = (server as unknown as { sockets: Set<Socket> }).sockets;
+    const serverSockets = (server as unknown as { followers: { sockets: Set<Socket> } }).followers
+      .sockets;
     const escaped: unknown[] = [];
     const collect = (error: unknown): void => void escaped.push(error);
     let survivor: Socket | undefined;
