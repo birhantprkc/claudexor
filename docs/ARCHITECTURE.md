@@ -1397,10 +1397,14 @@ verdict, no truncation), the socket + Control API come up serving
 `recovery_only` — health, handshake, shutdown, and the `/recovery/*` surface
 stay reachable while every product route/RPC is refused with a typed
 `daemon_recovery_only` 503 — and only after transport is provably up does the
-daemon advance the floor, run destructive recovery (activation truncation,
-crash GC, orphan/debris sweeps, retention), and open normal admission. A root
+daemon revalidate every read-only preparation, and only on all-green advance
+the floor, run destructive recovery (activation truncation, crash GC,
+orphan/debris sweeps, retention), and open normal admission. A root
 with a recovery-needed partition keeps the floor unchanged and destructive
-work off, staying online recovery-only instead of dying dark. The handshake
+work off, staying online recovery-only instead of dying dark — the control
+API binds for that plane even under `CLAUDEXOR_NO_CONTROL_API=1`, and a
+successful `/recovery/*` quarantine re-runs the admission completion in
+process, so the daemon transitions to normal serving without a restart. The handshake
 discloses `servingMode` (`normal`/`recovery_only`; absent means a pre-fix
 daemon, treated as normal); the macOS app maps `recovery_only` to its
 existing Connecting loop — no adoption, no hydration, no reconciliation, no

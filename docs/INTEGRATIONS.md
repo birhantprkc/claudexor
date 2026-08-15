@@ -801,7 +801,7 @@ always preferred.
 | `CLAUDEXOR_RAWAPI_BASE_URL` / `CLAUDEXOR_RAWAPI_KEY` / `CLAUDEXOR_RAWAPI_MODEL` | raw-api adapter | OpenAI-compatible endpoint, key, and model for the raw-API route. |
 | `CLAUDEXOR_OPENROUTER_BASE_URL` / `CLAUDEXOR_OPENROUTER_MODEL` | openrouter route | Base URL and default model for the built-in OpenRouter raw-API instance (key: `OPENROUTER_API_KEY`). |
 | `CLAUDEXOR_CONTROL_PORT` | daemon | Pin the control-API port (default: OS-assigned loopback port). |
-| `CLAUDEXOR_NO_CONTROL_API` | daemon | Start the daemon without the HTTP control API (socket only). |
+| `CLAUDEXOR_NO_CONTROL_API` | daemon | Start the daemon without the HTTP control API (socket only). A recovery-required startup verdict overrides it and binds the control API anyway — the `/recovery/*` surface is the recovery plane's point — and the override is disclosed in the daemon log. |
 | `CLAUDEXOR_DAEMON_SOCK` | daemon | Override the daemon's UNIX socket path. |
 | `CLAUDEXOR_DAEMON_ENTRY` | remote runtime wrapper | Internal path to the bundled daemon entrypoint used by `claudexor remote bootstrap`; release-built wrappers set it, users do not. |
 | `CLAUDEXOR_DAEMON_LAUNCH_SOURCE` | daemon (internal child env) | Launch-provenance marker (`cli_ensure_daemon` / `cli_explicit_start`) the CLI stamps into the environment of a detached daemon it spawns, so a running daemon process discloses which caller launched it. Never set by hand. |
