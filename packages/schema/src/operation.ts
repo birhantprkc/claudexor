@@ -36,6 +36,18 @@ export const ControlHandshakeResponse = z
       })
       .strict()
       .describe("Build identity of the serving engine."),
+    /** Product admission of the serving daemon (issue #165 D5). Transport/
+     * protocol success stays separate from product readiness: `recovery_only`
+     * means the recovery control plane is online but normal product routes
+     * are closed; clients keep polling the handshake and hydrate once the
+     * mode is `normal`. Optional on the wire so pre-#165 daemons (which are
+     * always serving normally) remain decodable. */
+    servingMode: z
+      .enum(["normal", "recovery_only"])
+      .optional()
+      .describe(
+        "Product admission: 'recovery_only' keeps normal product routes closed while recovery control stays reachable; absent means 'normal'.",
+      ),
   })
   .strict()
   .describe("Successful control-plane negotiation.");

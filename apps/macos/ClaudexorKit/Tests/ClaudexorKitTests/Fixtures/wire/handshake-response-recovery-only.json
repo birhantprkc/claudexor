@@ -1,0 +1,14 @@
+{
+  "schema": "ControlHandshakeResponse",
+  "value": {
+    "protocolMajor": 3,
+    "compatible": true,
+    "operationsPath": "/v2/operations",
+    "engine": {
+      "version": "3.4.0",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entry": "/opt/claudexor/daemon.js"
+    },
+    "servingMode": "recovery_only"
+  }
+}
