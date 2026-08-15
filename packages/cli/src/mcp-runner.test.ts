@@ -904,6 +904,49 @@ describe("mcp daemon body mapping", () => {
     }
   });
 
+  it("clears the immediate detail snapshot when a shape-valid receipt carries the wrong run identity", async () => {
+    const { mcpSurfaceRunner } = await import("./mcp-runner.js");
+    const daemonRun = await import("./daemon-run.js");
+    const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null },
+    });
+    const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
+      runId: "run-right",
+      runDir: "/tmp/run-right",
+      status: "succeeded",
+      jobId: "job-right",
+    });
+    // HTTP 200 malformed-success without a summary identity, carrying a
+    // receipt that validates in isolation but belongs to a different run: the
+    // immediate call site itself must bind the enqueued identity (the
+    // summary-derived fallback is absent here by construction).
+    const fetchSpy = vi.spyOn(daemonRun, "fetchRunDetail").mockResolvedValue({
+      runFacts: validPlanRunFacts("run-wrong"),
+      outcomeBanner: "must be discarded",
+    });
+    try {
+      const result = (await mcpSurfaceRunner()({ mode: "plan", prompt: "go" })) as Record<
+        string,
+        unknown
+      >;
+      expect(result).toMatchObject({
+        runId: "run-right",
+        status: "succeeded",
+        runFacts: null,
+        outcomeFacts: null,
+        outcomeBanner: null,
+        detailProblem: { code: "run_facts_invalid", retryable: false },
+      });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      ensureSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it("__runs_list walks the keyset cursor so the count is not undercounted by one page (QA-052)", async () => {
     const { mcpSurfaceRunner } = await import("./mcp-runner.js");
     const daemonRun = await import("./daemon-run.js");
