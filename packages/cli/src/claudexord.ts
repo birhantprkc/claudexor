@@ -25,6 +25,7 @@ import {
   ensureDaemonRuntimeRoot,
   logPath,
   socketAlive,
+  type DaemonServingMode,
 } from "@claudexor/daemon";
 import { DaemonControlApiServer, normalizeRunStartRequest } from "@claudexor/control-api";
 import { armDaemonLifecycle, logLine, runStartupCrashGc } from "./daemon-lifecycle.js";
@@ -169,6 +170,10 @@ export async function main(): Promise<void> {
       threadHeadPing,
     );
     const partitionsPreparation = threads.prepare();
+    const startupBlockedPartitions = recoveryBlockedPartitions({
+      globalPreparation,
+      partitionsPreparation,
+    });
     const interactions = new InteractionRegistry({
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
@@ -507,22 +512,125 @@ export async function main(): Promise<void> {
       () => quotaStoreSlot.current(),
       () => selfClient.list(),
     );
-    control =
-      process.env.CLAUDEXOR_NO_CONTROL_API === "1"
-        ? null
-        : new DaemonControlApiServer({
-            token,
-            daemon: new DaemonClient(socketPath, token),
-            port: Number(process.env.CLAUDEXOR_CONTROL_PORT ?? 0),
-            servingMode: admission.snapshot,
-            bus,
-            services,
-          });
+    // C6a: a recovery-required startup verdict binds the control API even
+    // under CLAUDEXOR_NO_CONTROL_API=1 — the recovery surface IS the point
+    // of the recovery plane.
+    const controlDisabledByEnv = process.env.CLAUDEXOR_NO_CONTROL_API === "1";
+    const controlEnabled = !controlDisabledByEnv || startupBlockedPartitions.length > 0;
+    if (controlDisabledByEnv && controlEnabled) {
+      logLine(
+        logPath(),
+        "recovery-required startup verdict overrides CLAUDEXOR_NO_CONTROL_API=1: binding the control API to serve the recovery surface",
+      );
+    }
+    control = !controlEnabled
+      ? null
+      : new DaemonControlApiServer({
+          token,
+          daemon: new DaemonClient(socketPath, token),
+          port: Number(process.env.CLAUDEXOR_CONTROL_PORT ?? 0),
+          servingMode: admission.snapshot,
+          bus,
+          services,
+        });
     lifecycle = armDaemonLifecycle({
       daemonDir: daemonDir(),
       logPath: logPath(),
       beginShutdown: (reason) => shutdownRuntime!.beginShutdown(reason),
     });
+
+    // Normal-plane side effects shared by the startup path and the C6b
+    // in-process reopen; guarded to run exactly once.
+    let normalAdmissionCompleted = false;
+    const onNormalAdmission = async (): Promise<void> => {
+      if (normalAdmissionCompleted || shutdownRuntime!.requested()) return;
+      normalAdmissionCompleted = true;
+      armQuotaPolling();
+      // Crash-GC has consumed the previous life's pids.json by now; live
+      // snapshots may own the file again (C2).
+      lifecycle!.beginPidSnapshots();
+      // Same-root config evolution hygiene (B9): persist the retired-key
+      // sweep only on the NORMAL plane (C5a). Pre-admission parses already
+      // tolerate retired keys via loadConfig's in-memory strip; unknown
+      // keys NOT on the retired registry still fail loud (INV-021).
+      for (const sweep of sweepRetiredConfigKeysAtStartup()) {
+        logLine(
+          logPath(),
+          `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
+        );
+      }
+      await setupBinding.start();
+      quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
+      scheduleStartupRetention(services.runRetention, {
+        logPath: logPath(),
+        shuttingDown: () => shutdownRuntime!.requested(),
+      });
+    };
+
+    // D5 stage 4, single-flight: the startup path runs it with the frozen
+    // stage-2 verdict; the C6b recovery-route reopen re-runs it with a live
+    // one. Concurrent callers join the in-flight completion.
+    let admissionCompletion: Promise<DaemonServingMode> | null = null;
+    const runAdmissionCompletion = (
+      blockedPartitions: () => string[],
+    ): Promise<DaemonServingMode> => {
+      if (admission.snapshot() === "normal") return Promise.resolve("normal");
+      admissionCompletion ??= (async () => {
+        try {
+          const servingMode = await completeStartupAdmission({
+            grant: rootAuthority,
+            blockedPartitions: blockedPartitions(),
+            global: journalManager,
+            partitions: threads,
+            crashGc: () => runStartupCrashGc({ daemonDir: daemonDir(), logPath: logPath() }),
+            admission,
+            log: (message) => logLine(logPath(), message),
+          });
+          if (servingMode === "normal") await onNormalAdmission();
+          return servingMode;
+        } finally {
+          admissionCompletion = null;
+        }
+      })();
+      return admissionCompletion;
+    };
+
+    // C6b: after a successful recovery-route quarantine (openGeneration) the
+    // daemon transitions to normal WITHOUT a restart: re-run the stage-4
+    // completion against a live re-verdict of the current partition state.
+    const reopenAfterRecovery = async (): Promise<void> => {
+      while (admission.snapshot() !== "normal") {
+        const joined = admissionCompletion;
+        if (joined) {
+          await joined.catch(() => {});
+          continue;
+        }
+        const servingMode = await runAdmissionCompletion(() =>
+          recoveryBlockedPartitions({
+            globalPreparation: { inspection: journalManager.inspect() },
+            partitionsPreparation: threads.refreshPreparation(),
+          }),
+        );
+        if (servingMode !== "normal") return; // partitions still block: stay protected
+      }
+    };
+    const quarantineService = services.recoveryQuarantinePartition;
+    services.recoveryQuarantinePartition = async (partition: string, input: unknown) => {
+      const receipt = await quarantineService(partition, input);
+      try {
+        await reopenAfterRecovery();
+      } catch (error) {
+        // The quarantine itself SUCCEEDED; a failed reopen stays on the
+        // protected recovery plane and is disclosed.
+        logLine(
+          logPath(),
+          `recovery reopen failed; still serving recovery only: ${redactSecrets(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+      }
+      return receipt;
+    };
 
     // D5 stage 3: bind the REAL transport with product admission CLOSED, then
     // prove self-health/exact identity through it before anything destructive.
@@ -542,38 +650,9 @@ export async function main(): Promise<void> {
         control: controlAddr,
       });
       // D5 stage 4: floor advance + destructive recovery + normal admission —
-      // or stay recovery-only with the floor unchanged and cleanup off.
-      const servingMode = await completeStartupAdmission({
-        grant: rootAuthority,
-        blockedPartitions: recoveryBlockedPartitions({ globalPreparation, partitionsPreparation }),
-        global: journalManager,
-        partitions: threads,
-        crashGc: () => runStartupCrashGc({ daemonDir: daemonDir(), logPath: logPath() }),
-        admission,
-        log: (message) => logLine(logPath(), message),
-      });
-      if (servingMode === "normal" && !shutdownRuntime.requested()) {
-        armQuotaPolling();
-        // Crash-GC has consumed the previous life's pids.json by now; live
-        // snapshots may own the file again (C2).
-        lifecycle.beginPidSnapshots();
-        // Same-root config evolution hygiene (B9): persist the retired-key
-        // sweep only on the NORMAL plane (C5a). Pre-admission parses already
-        // tolerate retired keys via loadConfig's in-memory strip; unknown
-        // keys NOT on the retired registry still fail loud (INV-021).
-        for (const sweep of sweepRetiredConfigKeysAtStartup()) {
-          logLine(
-            logPath(),
-            `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
-          );
-        }
-        await setupBinding.start();
-        quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
-        scheduleStartupRetention(services.runRetention, {
-          logPath: logPath(),
-          shuttingDown: () => shutdownRuntime!.requested(),
-        });
-      }
+      // or stay recovery-only with the floor unchanged and cleanup off. The
+      // normal-plane side effects run inside the single-flight completion.
+      await runAdmissionCompletion(() => startupBlockedPartitions);
     }
     await shutdownRuntime.wait();
     lifecycle.finalize();

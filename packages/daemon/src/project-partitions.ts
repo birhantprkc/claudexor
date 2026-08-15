@@ -34,6 +34,7 @@ import {
 import {
   activatePreparedProjectPartitions,
   prepareProjectPartitions,
+  refreshProjectPartitionsPreparation,
   ProjectPartitionCollection,
   type ProjectPartitionsPreparation,
 } from "./project-partition-preparation.js";
@@ -73,6 +74,22 @@ export class ProjectPartitions implements CommandAuthority {
   revalidatePreparation(): void {
     if (!this.preparationResult) throw new Error("project partitions are not prepared");
     for (const entry of this.partitions.values()) entry.manager.revalidatePreparation();
+  }
+
+  /** Live stage-2 re-verdict for the in-process reopen (C6): quarantined
+   * partitions reopened by their manager count ready, and a registry that
+   * became readable after a global reopen restores coverage. Refreshes the
+   * cached receipt the activation gate checks. */
+  refreshPreparation(): ProjectPartitionsPreparation {
+    if (!this.preparationResult) throw new Error("project partitions are not prepared");
+    this.preparationResult = refreshProjectPartitionsPreparation({
+      rootDir: this.rootDir,
+      projects: this.projects,
+      headPing: this.headPing,
+      previous: this.preparationResult,
+      entries: this.partitions,
+    });
+    return this.preparationResult;
   }
 
   activatePrepared(): void {

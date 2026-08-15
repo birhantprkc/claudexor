@@ -156,6 +156,76 @@ export function prepareProjectPartitions(input: {
   };
 }
 
+/**
+ * Live re-verdict for the in-process reopen (C6): recompute the stage-2
+ * receipt from CURRENT partition state. A partition the operator quarantined
+ * over the recovery route was reopened by its manager (openGeneration) and
+ * now inspects ready; a registry that became readable after a global reopen
+ * restores coverage. Read-only for everything still prepared — a registered
+ * project without an entry gets a read-only prepare, never a write.
+ */
+export function refreshProjectPartitionsPreparation(input: {
+  rootDir: string;
+  projects: JournalProjectionSlot<ProjectStore>;
+  headPing?: ThreadHeadPingSink;
+  previous: ProjectPartitionsPreparation;
+  entries: ProjectPartitionCollection;
+}): ProjectPartitionsPreparation {
+  let projects: ReturnType<ProjectStore["list"]>;
+  try {
+    const registry = input.projects.prepared();
+    registry.validateProjection();
+    projects = registry.list();
+  } catch {
+    return {
+      coverage: "global_registry_unavailable",
+      fingerprint: null,
+      registeredProjectIds: [],
+      trustedProjectRoots: [],
+      partitions: [],
+      readyPartitions: [],
+      recoveryRequiredPartitions: [],
+    };
+  }
+  const previousByPartition = new Map(
+    input.previous.partitions.map((entry) => [entry.partition, entry]),
+  );
+  const partitions: ProjectPartitionPreparationEntry[] = [];
+  for (const project of projects) {
+    const partition = `project:${project.id}`;
+    let entry = input.entries.get(project.id);
+    if (!entry) {
+      entry = createProjectPartition(input.rootDir, partition, input.headPing);
+      entry.manager.prepare();
+      input.entries.set(project.id, entry);
+    }
+    const inspection = entry.manager.inspect();
+    partitions.push({
+      projectId: project.id,
+      partition,
+      status: inspection.status === "ready" ? "ready" : "recovery_required",
+      virtual: previousByPartition.get(partition)?.virtual ?? false,
+      fingerprint: inspection.fingerprint,
+      manager: entry.manager,
+    });
+  }
+  const registeredProjectIds = projects.map((project) => project.id);
+  const trustedProjectRoots = projects.map((project) => project.root);
+  return {
+    coverage: "complete",
+    fingerprint: preparationFingerprint(registeredProjectIds, trustedProjectRoots, partitions),
+    registeredProjectIds,
+    trustedProjectRoots,
+    partitions,
+    readyPartitions: partitions
+      .filter((entry) => entry.status === "ready")
+      .map((entry) => entry.partition),
+    recoveryRequiredPartitions: partitions
+      .filter((entry) => entry.status === "recovery_required")
+      .map((entry) => entry.partition),
+  };
+}
+
 export function activatePreparedProjectPartitions(input: {
   rootDir: string;
   projects: JournalProjectionSlot<ProjectStore>;

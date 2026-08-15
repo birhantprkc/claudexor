@@ -31,10 +31,15 @@ export class DaemonStartupAdmission {
   }
 }
 
-/** Stage-2 verdict: every partition that blocks destructive recovery. */
+/** Stage-2 verdict: every partition that blocks destructive recovery. The
+ * loose Picks let the C6 in-process reopen feed LIVE inspections through the
+ * same verdict the frozen stage-2 receipts use. */
 export function recoveryBlockedPartitions(input: {
-  globalPreparation: JournalManagerPreparation;
-  partitionsPreparation: ProjectPartitionsPreparation;
+  globalPreparation: { inspection: Pick<JournalManagerPreparation["inspection"], "status"> };
+  partitionsPreparation: Pick<
+    ProjectPartitionsPreparation,
+    "coverage" | "recoveryRequiredPartitions"
+  >;
 }): string[] {
   const blocked: string[] = [];
   if (input.globalPreparation.inspection.status !== "ready") blocked.push("global");
