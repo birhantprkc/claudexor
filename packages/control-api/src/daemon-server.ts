@@ -201,7 +201,8 @@ import {
   WorkProduct,
 } from "@claudexor/schema";
 
-import { resolveControlProtocol } from "./operation-catalog.js";
+import { resolveControlProtocol, type ControlServingMode } from "./control-protocol.js";
+import { readControlRequestBody } from "./request-body.js";
 import {
   assertNoInlineSecretValues,
   containsSecretLikeToken,
@@ -223,6 +224,8 @@ export interface DaemonControlApiOptions {
   pollMs?: number;
   heartbeatMs?: number;
   runStartTimeoutMs?: number;
+  /** Issue #165 D5 admission snapshot; absent embedders always serve normal. */
+  servingMode?: () => ControlServingMode;
   bus?: { subscribe(listener: (event: { run_id: string }) => void): () => void };
   services?: DeliveryCommandServices &
     Partial<ResourceRouteServices> &
@@ -644,40 +647,8 @@ export class DaemonControlApiServer {
     );
   }
 
-  private async readBody(req: IncomingMessage): Promise<unknown> {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of req) {
-      size += (chunk as Buffer).length;
-      if (size > 10 * 1024 * 1024)
-        throw Object.assign(new Error("request body too large"), { status: 413 });
-      chunks.push(chunk as Buffer);
-    }
-    if (chunks.length === 0) return {};
-    // QA-056: decode the complete byte body STRICTLY. `Buffer.toString("utf8")`
-    // is non-fatal — it silently replaces malformed bytes with U+FFFD, so an
-    // invalid octet (FF, a lone continuation byte, overlong/ truncated sequence)
-    // would slip through as a valid JS string and could pass Zod, the secret
-    // fence, idempotency hashing and a durable mutation storing a value that
-    // differs from the wire bytes. TextDecoder({fatal:true}) throws on any
-    // malformed byte; concatenating first keeps valid multibyte chars split
-    // across HTTP chunks intact.
-    let decoded: string;
-    try {
-      decoded = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
-    } catch {
-      throw Object.assign(new Error("request body must be valid UTF-8"), {
-        status: 400,
-        code: "invalid_encoding",
-      });
-    }
-    const raw = decoded.trim();
-    if (!raw) return {};
-    try {
-      return JSON.parse(raw);
-    } catch {
-      throw Object.assign(new Error("invalid JSON body"), { status: 400 });
-    }
+  private readBody(req: IncomingMessage): Promise<unknown> {
+    return readControlRequestBody(req);
   }
 
   private onRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -736,6 +707,7 @@ export class DaemonControlApiServer {
         requestPath,
         requestedMajor: req.headers["x-claudexor-protocol-major"],
         readBody: () => this.readBody(req),
+        servingMode: this.opts.servingMode?.() ?? "normal",
       });
     } catch (error) {
       return this.requestError(res, error);
