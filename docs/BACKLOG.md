@@ -637,3 +637,10 @@ operator-subagent panel; ledger rows in `docs/reference/review-ledger.md`
 - `SetupLifecycleBinding.start()` unwind (F-S4, pre-existing): bind `active`
   only after `handle.start()` resolves (mirror `replaceAfter`'s unwind) so a
   start throw cannot leave a half-started handle bound.
+- Model-scoped quota windows (V-3, issue #187): the codex quota source
+  publishes every window with `applies_to_models=null`, so an exhausted
+  account-wide window blocks models whose own vendor window still has
+  headroom. Bind per-model windows (or derive scoping from window metadata)
+  so weak-model routing stays possible; keep failing closed when no scoping
+  evidence exists. Also blocks the "battery on a weak model" operational
+  scenario; the 3.4.0 battery ran post-factum under an owner waiver.
