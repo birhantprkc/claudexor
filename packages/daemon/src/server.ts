@@ -241,18 +241,35 @@ export class DaemonServer {
   private onConnection(sock: Socket): void {
     this.sockets.add(sock);
     const rl = createInterface({ input: sock });
+    const cleanup = () => {
+      rl.close();
+      this.dropSocket(sock);
+    };
     rl.on("line", (line) => {
       void this.handle(line, sock);
     });
-    sock.on("error", () => rl.close());
-    sock.on("close", () => this.sockets.delete(sock));
+    // readline re-emits input errors on the Interface. Handle that event too:
+    // Socket.write failures such as EPIPE arrive asynchronously, outside send's
+    // try/catch, and the disconnected RPC follower is no longer usable.
+    rl.on("error", cleanup);
+    sock.on("error", cleanup);
+    sock.on("close", cleanup);
+  }
+
+  private dropSocket(sock: Socket): void {
+    this.sockets.delete(sock);
+    if (!sock.destroyed) sock.destroy();
   }
 
   private send(sock: Socket, obj: unknown): void {
+    if (sock.destroyed || !sock.writable) {
+      this.dropSocket(sock);
+      return;
+    }
     try {
       sock.write(JSON.stringify(obj) + "\n");
     } catch {
-      /* socket closed */
+      this.dropSocket(sock);
     }
   }
 
