@@ -773,7 +773,11 @@ describe("handshake engine identity (v3.0.3 S4c)", () => {
         baseUrl: `http://127.0.0.1:${port}`,
         token: "t",
       });
-      expect(identity).toEqual({ engineVersion: CLAUDEXOR_VERSION, engineBuildSha: "unknown" });
+      expect(identity).toEqual({
+        engineVersion: CLAUDEXOR_VERSION,
+        engineBuildSha: "unknown",
+        servingMode: "normal",
+      });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
