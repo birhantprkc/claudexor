@@ -386,6 +386,18 @@ const TYPED_STOPPING_503 = () => ({
   }),
 });
 
+/** A recovery-only daemon's SUCCESSFUL handshake (issue #165 D5 / C7). */
+const RECOVERY_ONLY_200 = () => ({
+  status: 200,
+  body: JSON.stringify({
+    protocolMajor: 3,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version: CLAUDEXOR_VERSION, sha: "unknown", entry: "/opt/claudexor/daemon.js" },
+    servingMode: "recovery_only",
+  }),
+});
+
 describe("absence vs refusal discrimination (#93)", () => {
   let dir: string;
   let prevConfigDir: string | undefined;
@@ -528,6 +540,32 @@ describe("absence vs refusal discrimination (#93)", () => {
     }
     expect(observedEngineSkew()).toBeNull();
     expect(stderrChunks.join("")).toBe("");
+  });
+
+  it("connectDaemonIfRunning: surfaces the handshake servingMode to read-only consumers (C7a)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(RECOVERY_ONLY_200);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await connectDaemonIfRunning();
+    expect(conn).not.toBeNull();
+    expect(conn!.engine.servingMode).toBe("recovery_only");
+  });
+
+  it("ensureDaemon: a recovery-only daemon fails typed + retryable, never proceeding into route refusals (C7d)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(RECOVERY_ONLY_200);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const err: unknown = await ensureDaemon().then(
+      () => null,
+      (thrown: unknown) => thrown,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    const problem = err as CliError;
+    expect(problem.code).toBe("daemon_recovery_only");
+    expect(problem.retryable).toBe(true);
+    expect(problem.message).toContain("serving recovery only");
   });
 
   it("ensureDaemon: a typed refusal short-circuits (no 10s control-API wait, no NO_CONTROL_API flatten)", async () => {

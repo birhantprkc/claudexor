@@ -39,6 +39,10 @@ export interface EngineSkew {
 export interface EngineIdentity {
   engineVersion: string | null;
   engineBuildSha: string | null;
+  /** Product admission at handshake time (issue #165 D5). A pre-#165 daemon
+   * reports nothing and is always serving normally, so absent maps to
+   * `normal`; `recovery_only` means product routes are typed-closed. */
+  servingMode: "normal" | "recovery_only";
 }
 
 /** The ONE remedy wording — stderr advisory and typed requiredActions speak
@@ -90,9 +94,13 @@ export function consumeHandshakeIdentity(body: unknown): HandshakeIdentity {
   if (!parsed.success) {
     // Identity is advisory; a malformed body never fails the handshake.
     recordEngineSkew(null);
-    return { engine: { engineVersion: null, engineBuildSha: null }, skewAdvisory: null };
+    return {
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
+      skewAdvisory: null,
+    };
   }
   const { version, sha } = parsed.data.engine;
+  const servingMode = parsed.data.servingMode ?? "normal";
   const daemonVersion = ENGINE_VERSION_RE.test(version) ? version : null;
   const engineBuildSha = sha === "unknown" || BUILD_SHA_RE.test(sha) ? sha : null;
   if (daemonVersion && daemonVersion !== CLAUDEXOR_VERSION) {
@@ -102,14 +110,17 @@ export function consumeHandshakeIdentity(body: unknown): HandshakeIdentity {
       cliVersion: CLAUDEXOR_VERSION,
     });
     return {
-      engine: { engineVersion: daemonVersion, engineBuildSha },
+      engine: { engineVersion: daemonVersion, engineBuildSha, servingMode },
       skewAdvisory:
         `claudexor: daemon is engine ${daemonVersion} but this CLI is ${CLAUDEXOR_VERSION}; ` +
         `${ENGINE_STOP_REMEDY}\n`,
     };
   }
   recordEngineSkew(null);
-  return { engine: { engineVersion: daemonVersion, engineBuildSha }, skewAdvisory: null };
+  return {
+    engine: { engineVersion: daemonVersion, engineBuildSha, servingMode },
+    skewAdvisory: null,
+  };
 }
 
 /** The typed-problem fields `stampEngineSkew` shapes — a structural mirror of

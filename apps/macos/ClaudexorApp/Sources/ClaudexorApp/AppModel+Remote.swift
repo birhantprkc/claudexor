@@ -261,9 +261,14 @@ extension AppModel {
                 expectedRuntime: activeBootstrap.runtime,
                 requiresActivationCommit: activationLease != nil)
             let outcome = try await activeClient.handshake()
-            guard outcome.ok, publicationGate.acceptHandshake(outcome.engine) else {
+            // Issue #165 C7b: publication requires NORMAL serving — a
+            // recovery-only remote daemon must not be adopted (absent
+            // servingMode = a pre-#165 daemon serving normally).
+            guard outcome.ok, !outcome.recoveryOnly,
+                  publicationGate.acceptHandshake(outcome.engine)
+            else {
                 throw SSHConnectionError.unavailable(
-                    "remote daemon handshake does not match the bootstrapped runtime")
+                    "remote daemon handshake does not match the bootstrapped runtime or is serving recovery only")
             }
             guard remoteConnectionGenerations[id] == generation else {
                 throw CancellationError()

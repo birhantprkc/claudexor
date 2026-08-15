@@ -10,7 +10,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { journalPartitionDirectory } from "@claudexor/journal";
 import { afterEach, describe, expect, it } from "vitest";

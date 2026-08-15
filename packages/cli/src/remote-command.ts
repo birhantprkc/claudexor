@@ -53,6 +53,14 @@ function endpointPort(baseUrl: string): number {
 async function bootstrap(): Promise<number> {
   const { addr } = await ensureDaemon();
   const identity = await handshakeControlApi(addr, "claudexor-macos-remote");
+  // C7b: publication requires NORMAL serving (absent = normal for pre-#165
+  // daemons). A recovery-only remote must never be published to the app.
+  if (identity.servingMode !== "normal") {
+    throw Object.assign(
+      new Error("remote daemon is serving recovery only; publication requires normal serving"),
+      { code: "daemon_recovery_only", status: 503, retryable: true },
+    );
+  }
   printJson({
     ok: true,
     target: runtimeTarget(),

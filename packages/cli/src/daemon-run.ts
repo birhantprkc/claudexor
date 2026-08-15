@@ -136,6 +136,22 @@ export async function ensureDaemon(
     );
   }
   launch?.markReady();
+  // C7d: acting paths must not proceed into a wall of daemon_recovery_only
+  // route refusals — name the recovery state once, typed and retryable.
+  if (reached.engine.servingMode !== "normal") {
+    throw new CliError(
+      "operational",
+      "daemon is serving recovery only; product routes are closed until journal recovery completes",
+      {
+        code: "daemon_recovery_only",
+        retryable: true,
+        requiredActions: [
+          "inspect `claudexor daemon logs` and the /recovery control surface",
+          "retry after journal recovery completes",
+        ],
+      },
+    );
+  }
   return { client, addr: reached.addr, engine: reached.engine };
 }
 
@@ -151,6 +167,9 @@ export async function ensureDaemon(
 export async function connectDaemonIfRunning(): Promise<{
   client: DaemonClientType;
   addr: ControlApiAddress;
+  /** Handshake identity incl. servingMode (C7): read-only paths stay
+   * connectable to a recovery-only daemon and report the mode honestly. */
+  engine: EngineIdentity;
 } | null> {
   const token = readToken();
   if (!token) return null;
@@ -158,7 +177,7 @@ export async function connectDaemonIfRunning(): Promise<{
   if (!(await daemonReachable(client))) return null;
   const reached = await controlApiReachable();
   if (!reached) return null;
-  return { client, addr: reached.addr };
+  return { client, addr: reached.addr, engine: reached.engine };
 }
 
 /**
@@ -170,7 +189,7 @@ export async function connectDaemonIfRunning(): Promise<{
 export async function waitForDaemonReady(
   timeoutMs = DAEMON_START_READY_TIMEOUT_MS,
   abort?: () => Error | null,
-): Promise<{ client: DaemonClientType; addr: ControlApiAddress } | null> {
+): Promise<{ client: DaemonClientType; addr: ControlApiAddress; engine: EngineIdentity } | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const conn = await connectDaemonIfRunning();

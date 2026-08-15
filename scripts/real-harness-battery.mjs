@@ -387,6 +387,14 @@ async function startBatteryDaemon() {
   });
   if (!response.ok) throw new Error(`battery daemon handshake failed (HTTP ${response.status})`);
   const handshake = await response.json();
+  // C7e: the battery drives real product routes — a recovery-only daemon
+  // (absent servingMode = a pre-#165 daemon serving normally) is a hard stop.
+  const servingMode = handshake?.servingMode ?? "normal";
+  if (servingMode !== "normal") {
+    throw new Error(
+      `battery daemon is serving ${servingMode}; refusing to run the battery against a recovery plane`,
+    );
+  }
   // Capture the identity before candidate validation. A mismatching but valid
   // fresh daemon must still be stopped through the identity-bound RPC.
   runtimeState.daemonIdentity = runtimeReplacementIdentityFromHandshake(handshake);

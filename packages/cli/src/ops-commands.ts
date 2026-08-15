@@ -109,14 +109,21 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
         await new DaemonClient(defaultSocketPath(), existingToken).health();
         const existingReady = await waitForDaemonReady(5_000);
         if (existingReady) {
+          const servingMode = existingReady.engine.servingMode;
           if (json)
             printJson({
               pid: null,
               socket: defaultSocketPath(),
               ready: true,
               alreadyRunning: true,
+              servingMode,
             });
-          else print(`claudexord already running; socket ${defaultSocketPath()}`);
+          else
+            print(
+              servingMode === "recovery_only"
+                ? `claudexord already running and serving recovery only — product routes are closed until journal recovery completes; socket ${defaultSocketPath()}`
+                : `claudexord already running; socket ${defaultSocketPath()}`,
+            );
           return 0;
         }
         if (json)
@@ -172,10 +179,17 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
       );
     }
     launch.markReady();
+    // C7c: report the admission mode honestly — a recovery-only daemon came
+    // up (exit 0) but product routes are closed until recovery completes.
+    const servingMode = ready.engine.servingMode;
     if (json) {
-      printJson({ pid: launch.pid, socket: defaultSocketPath(), ready: true });
+      printJson({ pid: launch.pid, socket: defaultSocketPath(), ready: true, servingMode });
     } else {
-      print(`claudexord ready (pid ${launch.pid}); socket ${defaultSocketPath()}`);
+      print(
+        servingMode === "recovery_only"
+          ? `claudexord started (pid ${launch.pid}) and is serving recovery only — product routes are closed until journal recovery completes; socket ${defaultSocketPath()}`
+          : `claudexord ready (pid ${launch.pid}); socket ${defaultSocketPath()}`,
+      );
     }
     return 0;
   }

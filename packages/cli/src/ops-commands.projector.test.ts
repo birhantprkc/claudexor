@@ -113,6 +113,7 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
     vi.spyOn(daemonRun, "waitForDaemonReady").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://127.0.0.1:1", token: "token" },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
 
     const { code, env } = await captureJson(() =>
@@ -127,6 +128,34 @@ describe("ops-commands: ad-hoc failure envelopes route through the ONE projector
       }),
     );
     expect(markReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("`daemon start` reports a recovery-only daemon honestly (exit 0, servingMode field) (C7c)", async () => {
+    const markReady = vi.fn();
+    vi.spyOn(daemonLaunch, "launchDetachedDaemon").mockReturnValue({
+      pid: 12346,
+      failure: () => null,
+      markReady,
+      waitForFailure: async () => ({
+        kind: "preclaim_exit",
+        exitCode: 0,
+        signal: null,
+        stderr: { kind: "empty" },
+      }),
+      callerError: () => new CliError("operational", "unused"),
+    });
+    vi.spyOn(daemonRun, "waitForDaemonReady").mockResolvedValue({
+      client: {} as never,
+      addr: { baseUrl: "http://127.0.0.1:1", token: "token" },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "recovery_only" },
+    });
+
+    const { code, env } = await captureJson(() =>
+      daemonCommand(parseArgs(["daemon", "start"]), true),
+    );
+
+    expect(code).toBe(0);
+    expect(env).toMatchObject({ pid: 12346, ready: true, servingMode: "recovery_only" });
   });
 
   it.each([
