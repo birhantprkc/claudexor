@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -71,6 +71,32 @@ describe("root authority barrier installation", () => {
     expect(() => readFileSync(join(anchor, "owner.json"))).toThrow();
     expect(grant.lease.path).toBe(join(anchor, "active.writer"));
     expect(marker).toContain(anchor);
+    // C4: the stale owner record was preserved in place as evidence.
+    expect(
+      readdirSync(anchor).some(
+        (name) => name.startsWith("owner.stale-2147483646-") && name.endsWith(".json"),
+      ),
+    ).toBe(true);
+    grant.release();
+  });
+
+  it("completes a migration that crashed after preserving the stale owner (C4)", () => {
+    const { socketPath, anchor } = tempSocket();
+    // The only producer of {preservation file, no owner.json} is a crashed
+    // step-1 migration; the next candidate must finish the installation.
+    mkdirSync(anchor, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(anchor, `owner.stale-2147483646-${"a".repeat(64)}.json`),
+      '{"pid":2147483646,"token":"legacy"}\n',
+      { mode: 0o600 },
+    );
+    const grant = grantFor(socketPath, "3.4.0");
+    expect(readRootAuthority(anchor)).toMatchObject({
+      status: "valid",
+      record: { state: "vacant", epoch: ROOT_AUTHORITY_EPOCH },
+    });
+    expect(() => readFileSync(join(anchor, "owner.json"))).toThrow();
+    expect(grant.lease.path).toBe(join(anchor, "active.writer"));
     grant.release();
   });
 

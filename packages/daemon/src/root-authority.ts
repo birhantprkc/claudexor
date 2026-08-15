@@ -32,18 +32,22 @@
  * This module builds ON the writer-lease owner (single-writer acquisition,
  * owner classification, stale quarantine) and never re-implements liveness.
  */
-import { randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ProcessIdentityReader } from "@claudexor/core";
 import { compareRuntimeSemver, isRuntimeSemver } from "@claudexor/util";
 import { canonicalDefaultSocketPath } from "./token.js";
 import {
   acquireDaemonWriterLease,
+  inspectDaemonWriterLease,
+  resolveWriterLeaseFilesystem,
   writerLeaseAnchorPath,
   ROOT_AUTHORITY_MARKER_FILE,
+  type DaemonLeaseOwner,
   type DaemonWriterLease,
   type DaemonWriterLeaseDependencies,
+  type DaemonWriterLeaseFilesystem,
 } from "./writer-lease.js";
 
 export const ROOT_AUTHORITY_SCHEMA_VERSION = 2;
@@ -222,6 +226,97 @@ function completeBarrierInstallation(anchorPath: string): void {
   rmSync(join(anchorPath, "owner.json"), { force: true });
 }
 
+/** In-place preservation name for a stale flat owner record (C4). The name
+ * never parses as the owner record, marks a migration as begun for crash
+ * completion, and keeps the dead owner's bytes as evidence (authority
+ * artifacts are never deleted). */
+function staleFlatOwnerPreservationName(owner: DaemonLeaseOwner): string {
+  const digest = createHash("sha256")
+    .update(String(owner.pid))
+    .update("\0")
+    .update(owner.token)
+    .digest("hex");
+  return `owner.stale-${owner.pid}-${digest}.json`;
+}
+
+function hasStaleFlatOwnerPreservation(anchorPath: string): boolean {
+  try {
+    return readdirSync(anchorPath).some(
+      (name) => name.startsWith("owner.stale-") && name.endsWith(".json"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Atomically install the migration sentinel as owner.json (temp + rename). */
+function installMigrationSentinel(anchorPath: string, fs: DaemonWriterLeaseFilesystem): void {
+  const temp = join(anchorPath, `.owner.json.${process.pid}-${randomUUID()}`);
+  fs.writeOwner(temp, `${JSON.stringify(MIGRATION_SENTINEL)}\n`);
+  fs.rename(temp, join(anchorPath, "owner.json"));
+}
+
+/**
+ * C4: convert a PROVEN-STALE flat legacy generation into the barrier IN
+ * PLACE, before any claim. The shared lease machinery's stale quarantine
+ * renames the WHOLE directory to the tombstone and recreates it — an absence
+ * window a newly arriving legacy claimant wins, beyond D3's accepted
+ * already-running limitation. On this migration path the directory is never
+ * absent and owner.json is never a parseable dead owner after our first
+ * mutation:
+ *   1. atomically rename owner.json to the in-dir stale-owner preservation
+ *      file (a legacy claimant fails closed on the missing owner record and
+ *      never writes one into an existing directory);
+ *   2. atomically install the migration sentinel as owner.json;
+ *   3. publish the marker and retire the sentinel.
+ * A crash between 1 and 2 leaves {preservation file, no owner.json} — a
+ * state only this module produces — and the next fixed candidate completes
+ * the installation deterministically; a crash between 2 and 3 is the
+ * existing sentinel-completion path. Nested-slot (#159) semantics are
+ * untouched: this runs only on the barrier-less flat address.
+ */
+function migrateStaleFlatGenerationInPlace(
+  anchorPath: string,
+  canonical: string,
+  deps: DaemonWriterLeaseDependencies,
+): void {
+  const status = inspectDaemonWriterLease(canonical, deps);
+  if (status.path !== anchorPath) return; // a barrier already resolved the nested slot
+  const fs = resolveWriterLeaseFilesystem(deps);
+  try {
+    if (status.status === "owned" && status.capability.status === "proven_stale") {
+      fs.rename(
+        join(anchorPath, "owner.json"),
+        join(anchorPath, staleFlatOwnerPreservationName(status.owner)),
+      );
+      installMigrationSentinel(anchorPath, fs);
+      completeBarrierInstallation(anchorPath);
+      return;
+    }
+    if (
+      status.status === "unknown" &&
+      status.reason === "owner_missing" &&
+      hasStaleFlatOwnerPreservation(anchorPath)
+    ) {
+      // A previous migration crashed after preserving the stale owner.
+      installMigrationSentinel(anchorPath, fs);
+      completeBarrierInstallation(anchorPath);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      // A concurrent fixed contender is migrating the same generation; the
+      // claim below arbitrates through the shared single-writer machinery.
+      return;
+    }
+    throw rootAuthorityRefusal(
+      "root_authority_unreadable",
+      `root authority barrier could not be installed over the stale flat generation at ${anchorPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
 /**
  * Stage-1 startup admission: validate/install the permanent barrier, apply
  * the epoch + floor refusals, and claim single-writer authority for this
@@ -253,6 +348,14 @@ export function acquireRootAuthority(input: AcquireRootAuthorityInput): RootAuth
     // publishing the marker. The address stayed opaque throughout; finish the
     // interrupted installation deterministically.
     completeBarrierInstallation(anchorPath);
+  } else {
+    // C4: a PROVEN-STALE flat generation migrates in place BEFORE any claim,
+    // so the shared quarantine's rename-away/recreate absence window never
+    // opens on the legacy-visible address.
+    migrateStaleFlatGenerationInPlace(anchorPath, canonical, {
+      identity: input.identity,
+      ...(input.deps ?? {}),
+    });
   }
 
   // Claim the canonical root address. With a barrier installed the lease

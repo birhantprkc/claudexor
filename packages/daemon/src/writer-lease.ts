@@ -161,6 +161,14 @@ function filesystem(deps: DaemonWriterLeaseDependencies): DaemonWriterLeaseFiles
   return { ...DEFAULT_FILESYSTEM, ...deps.filesystem };
 }
 
+/** Resolved filesystem seam. The root-authority in-place migration (C4)
+ * shares it so its atomic steps stay deterministically observable in tests. */
+export function resolveWriterLeaseFilesystem(
+  deps: DaemonWriterLeaseDependencies,
+): DaemonWriterLeaseFilesystem {
+  return filesystem(deps);
+}
+
 function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException)?.code;
 }
