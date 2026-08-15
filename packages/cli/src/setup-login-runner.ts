@@ -60,6 +60,8 @@ export async function runSetupLogin(
   const worker = spawnProcess(process.execPath, [runnerPath, "--worker", resolve(manifestPath)], {
     cwd: manifest.cwd,
     env: runnerBootstrapEnv(),
+    // A detached child opens its own console on Windows unless hidden.
+    windowsHide: true,
     detached: true,
     stdio: "inherit",
   });

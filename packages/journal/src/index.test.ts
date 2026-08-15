@@ -115,18 +115,22 @@ describe("DurableJournal", () => {
   // rewrite these cases depend on cannot run there. That gap is the journal
   // writer's own, older than this lane, and is tracked separately.
   it("addresses partition entries with the platform separator, not a literal slash", () => {
-    // A `${dir}/${name}` key never matched the `join()`-built path callers look
-    // up on Windows, so a reopened daemon read its journal as missing and
-    // demanded recovery. This suite runs on the Windows lane, where the bug
-    // reproduces.
-    const journal = openJournal();
-    journal.append("accepted", { value: 1 });
-    journal.close();
+    // Read-only preparation walks the partition and keys its file map by path.
+    // A `${dir}/${name}` key never matched the `join()`-built path the caller
+    // looks up on Windows, so a reopened daemon read its own journal as
+    // missing and demanded recovery. This suite runs on the Windows lane.
+    const seeded = openJournal();
+    seeded.append("accepted", { value: 1 });
+    seeded.close();
 
-    const reopened = openJournal();
-    expect(reopened.state().status).toBe("ready");
-    expect(reopened.records().map((record) => record.type)).toEqual(["accepted"]);
-    reopened.close();
+    const prepared = (
+      DurableJournal as unknown as {
+        prepare(options: { rootDir: string; partition: string }): DurableJournal;
+      }
+    ).prepare({ rootDir: root, partition: "global" });
+    expect(prepared.state().status).toBe("ready");
+    expect(prepared.records().map((record) => record.type)).toEqual(["accepted"]);
+    prepared.close();
   });
 
   const itPosixReplace = it.runIf(process.platform !== "win32");

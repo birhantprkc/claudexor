@@ -1955,6 +1955,45 @@ describe("setup jobs", () => {
     await manager.shutdown();
   });
 
+  it("never offers the macOS-only Terminal handoff off macOS", async () => {
+    // The remedy names `--browser-redirect`, which startObservableLogin refuses
+    // unless the daemon runs on macOS. Windows reaches this message now that
+    // the daemon-hosted login works there, so it must not be advertised.
+    const group = processGroupFixture({ leader: knownLeader(107) });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "device-auth-unsupported-linux"),
+      platform: "linux",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      // The device-code flow launches the runner via spawn (no Terminal); the
+      // fake stays alive so the state machine is driven by the sidecars below.
+      spawn: (() => fakeOpener()) as unknown as typeof import("node:child_process").spawn,
+      monitorPollMs: 1,
+      processGroups: group.service,
+      sleep: async () => {},
+    });
+    await manager.start();
+    // The device-code flow is the daemon-hosted one that works off macOS.
+    const job = manager.create(DEVICE_CODE_REQUEST);
+    const observedAt = new Date().toISOString();
+    writeRunnerStateV2(manager, job.jobId, group.leader, "awaiting_permit", observedAt);
+    await waitForPhase(manager, job.jobId, "awaiting_user");
+    writeRunnerStateV2(manager, job.jobId, group.leader, "running", observedAt);
+    const permitIssuedAt = manager.status({ jobId: job.jobId }).execution?.permitIssuedAt ?? null;
+    writeRunnerResultV2(manager, job.jobId, {
+      commandStarted: false,
+      errorCode: "device_auth_unsupported",
+      exitCode: null,
+      permitIssuedAt,
+    });
+    await waitForTerminal(manager, job.jobId);
+    const done = manager.status({ jobId: job.jobId });
+    expect(done.state).toBe("not_supported");
+    expect(done.message).toContain("upgrade the codex CLI");
+    expect(done.message).not.toContain("--browser-redirect");
+    await manager.shutdown();
+  });
+
   it("seals the daemon-resolved default native store into a default-lane login manifest", async () => {
     // Hit live 2026-08-04: the detached login worker re-derived the codex home
     // from its own bootstrap env, which drops CLAUDEXOR_CONFIG_DIR — so
