@@ -23,17 +23,22 @@ import { afterEach, describe, expect, it } from "vitest";
  */
 
 const daemonEntry = resolve(import.meta.dirname, "../dist/claudexord.js");
-const cleanups: Array<() => void> = [];
+const cleanups: Array<() => void | Promise<void>> = [];
 
-afterEach(() => {
-  for (const dispose of cleanups.splice(0)) dispose();
+// Dispose in REVERSE registration order so a spawned daemon is killed and
+// REAPED before its root is removed: a SIGTERMed daemon still writes during
+// shutdown, and a recursive rm racing those writes fails ENOTEMPTY on Linux.
+afterEach(async () => {
+  for (const dispose of cleanups.splice(0).reverse()) await dispose();
 });
 
 function corruptGlobalRoot(): string {
   // A SHORT real root (belt-entry convention): the daemon binds a Unix socket
   // under it, and the darwin per-user tmpdir would blow the 104-char limit.
   const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "cx-reopen-")));
-  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  cleanups.push(() =>
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+  );
   const config = join(root, "config");
   const partitionDir = journalPartitionDirectory(join(config, "daemon", "journal"), "global");
   mkdirSync(partitionDir, { recursive: true });
@@ -52,7 +57,9 @@ async function seedRegisteredProjects(
   count: number,
 ): Promise<{ config: string; projectIds: string[] }> {
   const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "cx-mixed-")));
-  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  cleanups.push(() =>
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+  );
   const config = join(root, "config");
   mkdirSync(config, { recursive: true });
   chmodSync(config, 0o700);
@@ -180,8 +187,13 @@ function spawnDaemon(
   child.stderr?.on("data", (chunk) => {
     stderr += String(chunk);
   });
-  cleanups.push(() => {
-    if (child.exitCode === null) child.kill("SIGKILL");
+  cleanups.push(async () => {
+    if (child.exitCode !== null) return;
+    child.kill("SIGKILL");
+    await waitFor(
+      () => (child.exitCode === null && child.signalCode === null ? null : true),
+      "the daemon to be reaped",
+    );
   });
   return Object.assign(child, { stderrText: () => stderr });
 }
