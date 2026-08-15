@@ -377,11 +377,17 @@ describe("recovery plane availability and in-process reopen (C6)", () => {
     expect((await handshake(addr)).servingMode).toBe("recovery_only");
     expect((await inspectPartition(addr, firstPartition)).status).toBe("ready");
     expect((await inspectPartition(addr, "global")).status).toBe("ready");
-    const log = readFileSync(join(config, "daemon", "claudexord.log"), "utf8");
-    const verdicts = [
-      ...log.matchAll(/serving recovery only [^(]*\(recovery required: ([^)]+)\)/g),
-    ];
-    expect(verdicts.at(-1)?.[1]).toBe(secondPartition);
+    // The re-verdict log line lands asynchronously after the quarantine
+    // response, so poll for it instead of racing a single read.
+    const lastVerdict = await waitFor(() => {
+      const log = readFileSync(join(config, "daemon", "claudexord.log"), "utf8");
+      const verdicts = [
+        ...log.matchAll(/serving recovery only [^(]*\(recovery required: ([^)]+)\)/g),
+      ];
+      const last = verdicts.at(-1)?.[1] ?? null;
+      return last === secondPartition ? last : null;
+    }, `the post-quarantine re-verdict listing exactly ${secondPartition}`);
+    expect(lastVerdict).toBe(secondPartition);
 
     const secondInspection = await inspectPartition(addr, secondPartition);
     expect(secondInspection.status).toBe("recovery_required");
