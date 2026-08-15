@@ -1,0 +1,186 @@
+import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { journalPartitionDirectory } from "@claudexor/journal";
+import { afterEach, describe, expect, it } from "vitest";
+
+/**
+ * C6 (sol SCOPE-04 + grok G-REC-01), proven against the BUILT daemon entry:
+ * (a) a recovery-required startup verdict binds the control API even under
+ * CLAUDEXOR_NO_CONTROL_API=1 — the recovery surface IS the point of the
+ * recovery plane; (b) a successful recovery-route quarantine re-runs the
+ * admission completion IN PROCESS, so product routes open without a restart.
+ */
+
+const daemonEntry = resolve(import.meta.dirname, "../dist/claudexord.js");
+const cleanups: Array<() => void> = [];
+
+afterEach(() => {
+  for (const dispose of cleanups.splice(0)) dispose();
+});
+
+function corruptGlobalRoot(): string {
+  // A SHORT real root (belt-entry convention): the daemon binds a Unix socket
+  // under it, and the darwin per-user tmpdir would blow the 104-char limit.
+  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "cx-reopen-")));
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "config");
+  const partitionDir = journalPartitionDirectory(join(config, "daemon", "journal"), "global");
+  mkdirSync(partitionDir, { recursive: true });
+  for (const dir of [config, join(config, "daemon"), join(config, "daemon", "journal")]) {
+    chmodSync(dir, 0o700);
+  }
+  chmodSync(partitionDir, 0o700);
+  writeFileSync(join(partitionDir, "journal.bin"), "GARBAGE-NOT-A-JOURNAL-FRAME", { mode: 0o600 });
+  return config;
+}
+
+function spawnDaemon(
+  config: string,
+  extraEnv: Record<string, string> = {},
+): ChildProcess & { stderrText: () => string } {
+  const child = spawn(process.execPath, [daemonEntry], {
+    stdio: ["ignore", "ignore", "pipe"],
+    env: {
+      HOME: process.env.HOME ?? "/tmp",
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      CLAUDEXOR_CONFIG_DIR: config,
+      ...extraEnv,
+    },
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  cleanups.push(() => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  return Object.assign(child, { stderrText: () => stderr });
+}
+
+async function waitFor<T>(probe: () => T | null, what: string, timeoutMs = 20_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = probe();
+    if (value !== null) return value;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+function controlAddress(config: string): { base: string; token: string } | null {
+  const pointer = join(config, "daemon", "control-api.json");
+  const tokenPath = join(config, "daemon", "token");
+  if (!existsSync(pointer) || !existsSync(tokenPath)) return null;
+  try {
+    const addr = JSON.parse(readFileSync(pointer, "utf8")) as { host: string; port: number };
+    return {
+      base: `http://${addr.host}:${addr.port}`,
+      token: readFileSync(tokenPath, "utf8").trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function handshake(addr: { base: string; token: string }): Promise<Record<string, unknown>> {
+  const response = await fetch(`${addr.base}/v2/handshake`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ protocolMajor: 3, client: "reopen-test" }),
+  });
+  expect(response.ok).toBe(true);
+  return (await response.json()) as Record<string, unknown>;
+}
+
+describe("recovery plane availability and in-process reopen (C6)", () => {
+  it("binds the control API on a recovery-required verdict even under CLAUDEXOR_NO_CONTROL_API=1", async () => {
+    const config = corruptGlobalRoot();
+    const daemon = spawnDaemon(config, { CLAUDEXOR_NO_CONTROL_API: "1" });
+    const addr = await waitFor(
+      () => (daemon.exitCode !== null ? null : controlAddress(config)),
+      "the recovery-plane control API pointer",
+    ).catch((error: unknown) => {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`);
+    });
+    const hello = await handshake(addr);
+    expect(hello.servingMode).toBe("recovery_only");
+    // The override is disclosed in the daemon log.
+    const log = readFileSync(join(config, "daemon", "claudexord.log"), "utf8");
+    expect(log).toContain("CLAUDEXOR_NO_CONTROL_API=1");
+    daemon.kill("SIGTERM");
+  }, 40_000);
+
+  it("opens product routes in process after a recovery-route quarantine (no restart)", async () => {
+    const config = corruptGlobalRoot();
+    const daemon = spawnDaemon(config);
+    const daemonPid = await waitFor(() => daemon.pid ?? null, "daemon pid");
+    const addr = await waitFor(
+      () => (daemon.exitCode !== null ? null : controlAddress(config)),
+      "the control API pointer",
+    ).catch((error: unknown) => {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`);
+    });
+    expect((await handshake(addr)).servingMode).toBe("recovery_only");
+    const authed = {
+      authorization: `Bearer ${addr.token}`,
+      "x-claudexor-protocol-major": "3",
+    };
+    // Product routes are typed-closed on the recovery plane.
+    const closed = await fetch(`${addr.base}/v2/threads`, { headers: authed });
+    expect(closed.status).toBe(503);
+    expect(((await closed.json()) as { code?: string }).code).toBe("daemon_recovery_only");
+
+    // Operator recovery: inspect the corrupt partition, then quarantine it.
+    const inspected = await fetch(`${addr.base}/v2/recovery/partitions/global`, {
+      headers: authed,
+    });
+    expect(inspected.status).toBe(200);
+    const inspection = (await inspected.json()) as { fingerprint: string; status: string };
+    expect(inspection.status).toBe("recovery_required");
+    const quarantined = await fetch(`${addr.base}/v2/recovery/partitions/global/quarantine`, {
+      method: "POST",
+      headers: {
+        ...authed,
+        "content-type": "application/json",
+        "idempotency-key": randomUUID(),
+      },
+      body: JSON.stringify({
+        expectedFingerprint: inspection.fingerprint,
+        confirmation: "quarantine_and_start_fresh",
+      }),
+    });
+    expect(quarantined.status, await quarantined.clone().text()).toBe(200);
+
+    // The SAME process must transition to normal serving: handshake reports
+    // normal and product routes answer, without any restart.
+    const deadline = Date.now() + 20_000;
+    let servingMode = "";
+    while (Date.now() < deadline) {
+      servingMode = String((await handshake(addr)).servingMode ?? "");
+      if (servingMode === "normal") break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    expect(servingMode, "handshake never reported normal serving after the quarantine").toBe(
+      "normal",
+    );
+    const open = await fetch(`${addr.base}/v2/threads`, { headers: authed });
+    expect(open.status, await open.clone().text()).toBe(200);
+    expect(daemon.pid).toBe(daemonPid);
+    expect(daemon.exitCode).toBeNull();
+    // The quarantined bytes were preserved, never deleted.
+    expect(existsSync(join(config, "daemon", "journal-quarantine"))).toBe(true);
+    daemon.kill("SIGTERM");
+  }, 60_000);
+});
