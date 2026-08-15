@@ -25,19 +25,17 @@ import {
   ensureDaemonRuntimeRoot,
   logPath,
   socketAlive,
-  type DaemonServingMode,
 } from "@claudexor/daemon";
 import { DaemonControlApiServer, normalizeRunStartRequest } from "@claudexor/control-api";
-import { armDaemonLifecycle, logLine, runStartupCrashGc } from "./daemon-lifecycle.js";
-import { DAEMON_LAUNCH_SOURCE_ENV } from "./daemon-launch.js";
 import {
-  openDaemonStartupDiagnosticsAfterAuthority,
-  safeDaemonLaunchSource,
-  type DaemonStartupDiagnostics,
-} from "./startup-diagnostics.js";
+  createDaemonQuotaPoller,
+  createStartupAdmissionRuntime,
+  openStartupDiagnostics,
+} from "./daemon-admission-runtime.js";
+import { armDaemonLifecycle, logLine } from "./daemon-lifecycle.js";
 import {
   bindRecoveryTransport,
-  completeStartupAdmission,
+  controlApiEnabledForStartup,
   DaemonStartupAdmission,
   proveRecoveryTransport,
   quarantineGhostProjectsAtStartup,
@@ -46,9 +44,9 @@ import {
 import { assertPlanImplementReady } from "./plan-implement-readiness.js";
 import { Orchestrator } from "@claudexor/orchestrator";
 import { delegationBeltForRun } from "./delegation-belt-descriptor.js";
-import { loadConfig, sweepRetiredConfigKeysAtStartup } from "@claudexor/config";
+import { loadConfig } from "@claudexor/config";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
-import { type QuotaSubject, type ResourceAttachmentRef } from "@claudexor/schema";
+import { type ResourceAttachmentRef } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
@@ -64,30 +62,16 @@ import {
   threadRunStartRequiresGit,
 } from "./thread-execution-workspace.js";
 import { preflightRunGitRequirement } from "./request-preflight.js";
-import { dispatchClaudexordEntry, runIfDirectEntry } from "./claudexord-entry.js";
+import {
+  dispatchClaudexordEntry,
+  runIfDirectEntry,
+  runProbeIfRequested,
+} from "./claudexord-entry.js";
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 import { quotaSubjectUniverseFromConfig } from "./quota-subject-universe.js";
 import { runStopIfRequested } from "./runtime-replacement-stop.js";
 import { threadContinuityContext } from "./thread-continuity-context.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
-
-/** Public daemon-composition hook retained for embedders and tests. */
-export function quotaSubjectUniverse(): QuotaSubject[] {
-  return quotaSubjectUniverseFromConfig();
-}
-
-/** Handle `claudexord --probe`: print the engine build identity as ONE JSON line
- * ({version, buildSha}) and exit WITHOUT any durable startup — no writer lease,
- * no socket bind, no journal open, no runtime root. This is the pre-swap
- * handshake the macOS installer's RuntimeInstallCoordinator.probeVersion runs
- * against a freshly-unpacked closure with the app-bundled Node (D-2). Returns
- * true when the probe handled the invocation. */
-export function runProbeIfRequested(argv: readonly string[]): boolean {
-  if (!argv.includes("--probe")) return false;
-  const id = engineBuildIdentity();
-  process.stdout.write(`${JSON.stringify({ version: id.version, buildSha: id.sha })}\n`);
-  return true;
-}
 
 export async function main(): Promise<void> {
   // Probe and identity-proven stop must run before any durable startup.
@@ -98,37 +82,8 @@ export async function main(): Promise<void> {
   const socketPath = defaultSocketPath();
   // D5 stage 1: permanent barrier (epoch/floor refusals) before ANY recovery.
   const rootAuthority = acquireRootAuthority({ socketPath, version: servingIdentity.version });
-  // C8: the private diagnostics owner opens right after the authority win,
-  // with full launch provenance. Diagnostic failures never control lifecycle.
-  let diagnostics: DaemonStartupDiagnostics | null = null;
-  try {
-    diagnostics = openDaemonStartupDiagnosticsAfterAuthority({
-      runtimeVersion: servingIdentity.version,
-      buildSha: servingIdentity.sha,
-      entryPath: servingIdentity.entry,
-      pid: process.pid,
-      dataRoot: daemonDir(),
-      launchSource: safeDaemonLaunchSource(process.env[DAEMON_LAUNCH_SOURCE_ENV]),
-    });
-    diagnostics.record({
-      stage: "root_authority_won",
-      message: "root authority acquired; startup diagnostics online",
-    });
-  } catch (error) {
-    logLine(
-      logPath(),
-      `startup diagnostics unavailable: ${redactSecrets(
-        error instanceof Error ? error.message : String(error),
-      )}`,
-    );
-  }
-  const recordStage = (stage: string, message: string): void => {
-    try {
-      diagnostics?.record({ stage, message });
-    } catch {
-      /* diagnostics never control lifecycle */
-    }
-  };
+  // C8: private diagnostics open right after the authority win (never control lifecycle).
+  const startupDiagnostics = openStartupDiagnostics(servingIdentity);
   let shutdownRuntime: DaemonRuntimeShutdown | null = null;
   // Release wave round-12 BLOCK: the single-writer lease may only be released
   // after a CLEAN shutdown — a failed/partial shutdown keeps components that
@@ -136,7 +91,7 @@ export async function main(): Promise<void> {
   // beside them. On failure the lease dies with the process instead.
   let releaseWriterLease = true;
   let lifecycle: ReturnType<typeof armDaemonLifecycle> | null = null;
-  let quotaPollTimer: NodeJS.Timeout | null = null;
+  let quotaPoller: ReturnType<typeof createDaemonQuotaPoller> | null = null;
   try {
     const token = ensureToken();
 
@@ -156,7 +111,7 @@ export async function main(): Promise<void> {
     const runEventStoreSlot = journalManager.registerProjection(runEventProjection());
     const projectStoreSlot = journalManager.registerProjection(projectProjection());
     const quotaStoreSlot = journalManager.registerProjection(
-      quotaProjection(quotaRefreshers(), quotaSubjectUniverse),
+      quotaProjection(quotaRefreshers(), quotaSubjectUniverseFromConfig),
     );
     // Sidebar invalidation ping (W12): a GLOBAL-partition emitter every
     // ThreadStore (global + per-project) writes through, so any thread
@@ -180,22 +135,11 @@ export async function main(): Promise<void> {
     // D5 stage 2: read-only prepare + validate; zero recovery writes.
     const globalPreparation = journalManager.prepare();
     const admission = new DaemonStartupAdmission();
-    // Armed only on NORMAL admission (C1a): polling against unactivated
-    // projections is a swallowed throw, and the recovery plane must stay
-    // byte-for-byte non-mutating. The immediate poll on arming also removes
-    // the one-minute stale window the swallowed stage-2 poll used to leave
-    // (G-QUOTA-01).
-    const pollQuota = () => {
+    quotaPoller = createDaemonQuotaPoller(() => {
       try {
         void quotaStoreSlot.current().pollStale();
       } catch {}
-    };
-    const armQuotaPolling = () => {
-      if (quotaPollTimer) return;
-      quotaPollTimer = setInterval(pollQuota, 60_000);
-      quotaPollTimer.unref();
-      pollQuota();
-    };
+    });
     const threads = new ProjectPartitions(
       daemonDir(),
       projectStoreSlot,
@@ -215,9 +159,8 @@ export async function main(): Promise<void> {
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
     });
-    // C5b: construction mkdirs under the daemon dir, and the recovery plane
-    // serves no resources — the store materializes on first product use
-    // (every consumer sits behind normal admission).
+    // C5b: construction mkdirs under the daemon dir and the recovery plane
+    // serves no resources — the store materializes on first product use.
     let resourceStore: ResourceStore | null = null;
     const resources = (): ResourceStore =>
       (resourceStore ??= new ResourceStore(join(daemonDir(), "resource-store")));
@@ -528,7 +471,7 @@ export async function main(): Promise<void> {
       control: () => control,
       journal: {
         close: () => {
-          if (quotaPollTimer) clearInterval(quotaPollTimer);
+          quotaPoller?.stop();
           threads.close();
           journalManager.close();
         },
@@ -549,18 +492,11 @@ export async function main(): Promise<void> {
       () => quotaStoreSlot.current(),
       () => selfClient.list(),
     );
-    // C6a: a recovery-required startup verdict binds the control API even
-    // under CLAUDEXOR_NO_CONTROL_API=1 — the recovery surface IS the point
-    // of the recovery plane.
-    const controlDisabledByEnv = process.env.CLAUDEXOR_NO_CONTROL_API === "1";
-    const controlEnabled = !controlDisabledByEnv || startupBlockedPartitions.length > 0;
-    if (controlDisabledByEnv && controlEnabled) {
-      logLine(
-        logPath(),
-        "recovery-required startup verdict overrides CLAUDEXOR_NO_CONTROL_API=1: binding the control API to serve the recovery surface",
-      );
-    }
-    control = !controlEnabled
+    control = !controlApiEnabledForStartup({
+      disabledByEnv: process.env.CLAUDEXOR_NO_CONTROL_API === "1",
+      blockedPartitions: startupBlockedPartitions,
+      log: (message) => logLine(logPath(), message),
+    })
       ? null
       : new DaemonControlApiServer({
           token,
@@ -573,110 +509,33 @@ export async function main(): Promise<void> {
     lifecycle = armDaemonLifecycle({
       daemonDir: daemonDir(),
       logPath: logPath(),
-      ...(diagnostics ? { diagnostics } : {}),
+      ...(startupDiagnostics.diagnostics ? { diagnostics: startupDiagnostics.diagnostics } : {}),
       beginShutdown: (reason) => shutdownRuntime!.beginShutdown(reason),
     });
 
-    // Normal-plane side effects shared by the startup path and the C6b
-    // in-process reopen; guarded to run exactly once.
-    let normalAdmissionCompleted = false;
-    const onNormalAdmission = async (): Promise<void> => {
-      if (normalAdmissionCompleted || shutdownRuntime!.requested()) return;
-      normalAdmissionCompleted = true;
-      armQuotaPolling();
-      // Crash-GC has consumed the previous life's pids.json by now; live
-      // snapshots may own the file again (C2).
-      lifecycle!.beginPidSnapshots();
-      // Same-root config evolution hygiene (B9): persist the retired-key
-      // sweep only on the NORMAL plane (C5a). Pre-admission parses already
-      // tolerate retired keys via loadConfig's in-memory strip; unknown
-      // keys NOT on the retired registry still fail loud (INV-021).
-      for (const sweep of sweepRetiredConfigKeysAtStartup()) {
-        logLine(
-          logPath(),
-          `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
-        );
-      }
-      await setupBinding.start();
-      quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
-      scheduleStartupRetention(services.runRetention, {
-        logPath: logPath(),
-        shuttingDown: () => shutdownRuntime!.requested(),
-      });
-    };
-
-    // D5 stage 4, single-flight: the startup path runs it with the frozen
-    // stage-2 verdict; the C6b recovery-route reopen re-runs it with a live
-    // one. Concurrent callers join the in-flight completion.
-    let admissionCompletion: Promise<DaemonServingMode> | null = null;
-    const runAdmissionCompletion = (
-      blockedPartitions: () => string[],
-    ): Promise<DaemonServingMode> => {
-      if (admission.snapshot() === "normal") return Promise.resolve("normal");
-      admissionCompletion ??= (async () => {
-        try {
-          const servingMode = await completeStartupAdmission({
-            grant: rootAuthority,
-            blockedPartitions: blockedPartitions(),
-            global: journalManager,
-            partitions: threads,
-            crashGc: () =>
-              runStartupCrashGc({
-                daemonDir: daemonDir(),
-                logPath: logPath(),
-                ...(diagnostics ? { diagnostics } : {}),
-              }),
-            admission,
-            log: (message) => {
-              logLine(logPath(), message);
-              recordStage("startup_admission", message);
-            },
-          });
-          if (servingMode === "normal") await onNormalAdmission();
-          return servingMode;
-        } finally {
-          admissionCompletion = null;
-        }
-      })();
-      return admissionCompletion;
-    };
-
-    // C6b: after a successful recovery-route quarantine (openGeneration) the
-    // daemon transitions to normal WITHOUT a restart: re-run the stage-4
-    // completion against a live re-verdict of the current partition state.
-    const reopenAfterRecovery = async (): Promise<void> => {
-      while (admission.snapshot() !== "normal") {
-        const joined = admissionCompletion;
-        if (joined) {
-          await joined.catch(() => {});
-          continue;
-        }
-        const servingMode = await runAdmissionCompletion(() =>
-          recoveryBlockedPartitions({
-            globalPreparation: { inspection: journalManager.inspect() },
-            partitionsPreparation: threads.refreshPreparation(),
+    const { runAdmissionCompletion, wrapQuarantineWithReopen } = createStartupAdmissionRuntime({
+      admission,
+      grant: rootAuthority,
+      global: journalManager,
+      partitions: threads,
+      diagnostics: startupDiagnostics,
+      normalPlane: {
+        requested: () => shutdownRuntime!.requested(),
+        armQuotaPolling: () => quotaPoller!.arm(),
+        beginPidSnapshots: () => lifecycle!.beginPidSnapshots(),
+        startSetup: () => setupBinding.start(),
+        quarantineGhosts: () =>
+          quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message)),
+        scheduleRetention: () =>
+          scheduleStartupRetention(services.runRetention, {
+            logPath: logPath(),
+            shuttingDown: () => shutdownRuntime!.requested(),
           }),
-        );
-        if (servingMode !== "normal") return; // partitions still block: stay protected
-      }
-    };
-    const quarantineService = services.recoveryQuarantinePartition;
-    services.recoveryQuarantinePartition = async (partition: string, input: unknown) => {
-      const receipt = await quarantineService(partition, input);
-      try {
-        await reopenAfterRecovery();
-      } catch (error) {
-        // The quarantine itself SUCCEEDED; a failed reopen stays on the
-        // protected recovery plane and is disclosed.
-        logLine(
-          logPath(),
-          `recovery reopen failed; still serving recovery only: ${redactSecrets(
-            error instanceof Error ? error.message : String(error),
-          )}`,
-        );
-      }
-      return receipt;
-    };
+      },
+    });
+    services.recoveryQuarantinePartition = wrapQuarantineWithReopen(
+      services.recoveryQuarantinePartition,
+    );
 
     // D5 stage 3: bind the REAL transport with product admission CLOSED, then
     // prove self-health/exact identity through it before anything destructive.
@@ -703,7 +562,7 @@ export async function main(): Promise<void> {
     await shutdownRuntime.wait();
     lifecycle.finalize();
     logLine(logPath(), "claudexord shut down");
-    recordStage("shutdown_complete", "claudexord shut down");
+    startupDiagnostics.recordStage("shutdown_complete", "claudexord shut down");
   } catch (error) {
     // logLine is already best-effort; a failed diagnostic write never masks
     // the lifecycle failure itself.
@@ -713,11 +572,7 @@ export async function main(): Promise<void> {
         error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       )}`,
     );
-    try {
-      diagnostics?.record({ stage: "startup_failure", message: "daemon lifecycle FAILED", error });
-    } catch {
-      /* diagnostics never control lifecycle */
-    }
+    startupDiagnostics.recordFailure("daemon lifecycle FAILED", error);
     if (shutdownRuntime) {
       try {
         await shutdownRuntime.beginShutdown("startup failure");
@@ -738,8 +593,8 @@ export async function main(): Promise<void> {
     }
     throw error;
   } finally {
-    if (quotaPollTimer) clearInterval(quotaPollTimer);
-    diagnostics?.close();
+    quotaPoller?.stop();
+    startupDiagnostics.close();
     // Drops only the live writer claim; the barrier itself persists (D1).
     if (releaseWriterLease) rootAuthority.release();
   }

@@ -50,6 +50,22 @@ export function recoveryBlockedPartitions(input: {
   return blocked;
 }
 
+/** C6a: whether the control API binds this startup. CLAUDEXOR_NO_CONTROL_API=1
+ * is honored only on a clean verdict — the recovery surface IS the point of
+ * the recovery plane, so a recovery-required verdict overrides it (logged). */
+export function controlApiEnabledForStartup(input: {
+  disabledByEnv: boolean;
+  blockedPartitions: string[];
+  log: (message: string) => void;
+}): boolean {
+  if (!input.disabledByEnv) return true;
+  if (input.blockedPartitions.length === 0) return false;
+  input.log(
+    "recovery-required startup verdict overrides CLAUDEXOR_NO_CONTROL_API=1: binding the control API to serve the recovery surface",
+  );
+  return true;
+}
+
 /** Stage 3 bind: start the REAL socket + control transports (product
  * admission still closed) and publish their addresses. Returns the control
  * address, or null when the control API is disabled or shutdown began. */

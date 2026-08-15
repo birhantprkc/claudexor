@@ -181,10 +181,6 @@ export class JournalManager {
 
   revalidatePreparation(): void {
     this.assertStarted();
-    // An ACTIVE manager's preparation was already consumed by activation; the
-    // live single-writer journal is self-fencing (C6 in-process reopen runs
-    // the stage-4 revalidation over a mix of prepared and reopened managers).
-    if (this.lifecycle === "active") return;
     if (this.lifecycle === "recovery_required") {
       throw new JournalRecoveryRequiredError(this.recovery as never);
     }

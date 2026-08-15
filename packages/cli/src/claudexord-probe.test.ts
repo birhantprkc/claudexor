@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { type DaemonWriterLeaseStatus } from "@claudexor/daemon";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
-import { runProbeIfRequested } from "./claudexord.js";
+import { runProbeIfRequested } from "./claudexord-entry.js";
 import {
   admitAndAwaitRuntimeReplacementStop,
   decideRuntimeReplacementWithoutControl,

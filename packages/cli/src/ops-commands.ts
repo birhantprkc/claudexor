@@ -33,6 +33,7 @@ import { harnessListPath, requestedHarnesses, unknownHarnesses } from "./ops-har
 import { CliError, controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
 import { profilesCommand, secretsCommand } from "./credential-commands.js";
 import { CLI_DAEMON_LAUNCH_SOURCES, launchDetachedDaemon } from "./daemon-launch.js";
+import { reportDaemonStartReady } from "./daemon-start-report.js";
 import {
   authSourceAvailability,
   checksSummary,
@@ -109,21 +110,13 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
         await new DaemonClient(defaultSocketPath(), existingToken).health();
         const existingReady = await waitForDaemonReady(5_000);
         if (existingReady) {
-          const servingMode = existingReady.engine.servingMode;
-          if (json)
-            printJson({
-              pid: null,
-              socket: defaultSocketPath(),
-              ready: true,
-              alreadyRunning: true,
-              servingMode,
-            });
-          else
-            print(
-              servingMode === "recovery_only"
-                ? `claudexord already running and serving recovery only — product routes are closed until journal recovery completes; socket ${defaultSocketPath()}`
-                : `claudexord already running; socket ${defaultSocketPath()}`,
-            );
+          reportDaemonStartReady({
+            json,
+            socket: defaultSocketPath(),
+            servingMode: existingReady.engine.servingMode,
+            pid: null,
+            alreadyRunning: true,
+          });
           return 0;
         }
         if (json)
@@ -179,18 +172,13 @@ export async function daemonCommand(args: ParsedArgs, json: boolean): Promise<nu
       );
     }
     launch.markReady();
-    // C7c: report the admission mode honestly — a recovery-only daemon came
-    // up (exit 0) but product routes are closed until recovery completes.
-    const servingMode = ready.engine.servingMode;
-    if (json) {
-      printJson({ pid: launch.pid, socket: defaultSocketPath(), ready: true, servingMode });
-    } else {
-      print(
-        servingMode === "recovery_only"
-          ? `claudexord started (pid ${launch.pid}) and is serving recovery only — product routes are closed until journal recovery completes; socket ${defaultSocketPath()}`
-          : `claudexord ready (pid ${launch.pid}); socket ${defaultSocketPath()}`,
-      );
-    }
+    reportDaemonStartReady({
+      json,
+      socket: defaultSocketPath(),
+      servingMode: ready.engine.servingMode,
+      pid: launch.pid,
+      alreadyRunning: false,
+    });
     return 0;
   }
   if (sub === "logs") {

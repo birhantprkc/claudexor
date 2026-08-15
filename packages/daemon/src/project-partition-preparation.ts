@@ -241,7 +241,10 @@ export function activatePreparedProjectPartitions(input: {
     throw new Error("project partitions require recovery before activation");
   }
   try {
-    for (const entry of input.entries.values()) entry.manager.revalidatePreparation();
+    for (const entry of input.entries.values()) {
+      // Reopened-after-quarantine managers are live (C6); skip revalidation.
+      if (!entry.manager.ready()) entry.manager.revalidatePreparation();
+    }
     for (const entry of input.entries.values()) entry.manager.activatePrepared();
   } catch (error) {
     const recovery = recoveryFrom(error, "project partition activation failed");

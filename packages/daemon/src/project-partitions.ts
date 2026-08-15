@@ -38,6 +38,7 @@ import {
   ProjectPartitionCollection,
   type ProjectPartitionsPreparation,
 } from "./project-partition-preparation.js";
+import { listProjectThreadsResilient } from "./project-thread-listing.js";
 
 export type { ProjectPartitionsPreparation } from "./project-partition-preparation.js";
 export class ProjectPartitions implements CommandAuthority {
@@ -73,7 +74,12 @@ export class ProjectPartitions implements CommandAuthority {
 
   revalidatePreparation(): void {
     if (!this.preparationResult) throw new Error("project partitions are not prepared");
-    for (const entry of this.partitions.values()) entry.manager.revalidatePreparation();
+    for (const entry of this.partitions.values()) {
+      // A manager reopened by a recovery-route quarantine is live authority
+      // (C6): only still-prepared partitions revalidate.
+      if (entry.manager.ready()) continue;
+      entry.manager.revalidatePreparation();
+    }
   }
 
   /** Live stage-2 re-verdict for the in-process reopen (C6): quarantined
@@ -348,39 +354,14 @@ export class ProjectPartitions implements CommandAuthority {
     return this.listThreadsResilient().threads;
   }
 
-  /**
-   * Thread listing that is RESILIENT to a dead project (F2): a
-   * registered project whose filesystem root has vanished (e.g. a swept ghost
-   * envelope worktree) is SKIPPED with a disclosed per-project problem instead
-   * of failing the whole listing, while every other project's threads load.
-   * Each store sorts ITS threads by recency, but the stores concatenate —
-   * without a merge-sort a fresh project thread lands below every global one
-   * (dogfood: the fresh thread sank to the bottom). One global recency order.
-   */
+  /** Dead-project-resilient listing in one global recency order (F2);
+   * the mechanics live in project-thread-listing.ts. */
   listThreadsResilient(): { threads: Thread[]; problems: ControlProjectListingProblem[] } {
-    this.partitions.sync();
-    const registry = this.projects.current();
-    const threads: Thread[] = [...this.globalThreads.current().listThreads()];
-    const problems: ControlProjectListingProblem[] = [];
-    for (const [id, entry] of this.partitions) {
-      if (!entry.manager.ready()) continue;
-      const root = registry.get(id)?.root;
-      if (!root) continue;
-      if (!existsSync(root)) {
-        problems.push({
-          projectId: id,
-          root,
-          code: "project_root_missing",
-          message: `project root no longer exists: ${root}`,
-        });
-        continue;
-      }
-      for (const thread of entry.threads.current().listThreads()) threads.push(thread);
-    }
-    threads.sort((a, b) =>
-      a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
-    );
-    return { threads, problems };
+    return listProjectThreadsResilient({
+      partitions: this.partitions,
+      projects: this.projects,
+      globalThreads: this.globalThreads,
+    });
   }
 
   getThread(id: string): Thread | undefined {
