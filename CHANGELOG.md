@@ -3,6 +3,29 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.4.0** (2026-08-15) — Shared data roots are now protected by a
+  persistent root-authority barrier: the daemon records a writer epoch and a
+  proven serving-version floor, refuses grants from released or foreign
+  leases, and rejects malformed version candidates even on a fresh floor.
+  Startup runs in two stages — a strictly read-only preparation that inspects
+  the writer lease and journal partitions, then, only after the authority is
+  won and the preparation revalidates, the floor advance, crash garbage
+  collection, and journal activation. A stale flat-layout root from an older
+  daemon migrates in place with no window where the anchor file is absent,
+  and staleness is only concluded from a proven-dead writer. When a partition
+  needs recovery the daemon serves recovery-only: product routes answer a
+  typed error while recovery routes stay available, and a successful
+  quarantine reopens the journals and completes normal admission in the same
+  process, so repair needs no restart. The serving mode is reported honestly
+  across the control handshake, CLI start report, remote commands, the macOS
+  app, and the harness battery. Quarantining one partition can no longer
+  disturb a healthy sibling's preparation identity, and the setup supervisor
+  cannot be started twice after an in-process reopen. The daemon also
+  recovers automatically from Linux zombie writer leases while keeping live
+  or uncertain owners fail-closed, survives disconnected RPC followers
+  instead of crashing, and treats web access as optional for every non-off
+  policy with native Cursor web approvals for managed read-only runs.
+
 - **v3.3.16** (2026-08-15) — The macOS packager now removes the exact
   pre-3.3.13 `dist/Claudexor.app` only after a successful Swift build produces
   the release executable; failed or incomplete builds preserve both app paths,
