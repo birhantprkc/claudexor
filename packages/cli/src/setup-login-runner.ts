@@ -2,7 +2,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProcessGroupService, defaultProcessGroupService } from "@claudexor/core";
 import {
@@ -39,6 +39,21 @@ export interface SetupLoginRunnerOptions {
   processGroupService?: ProcessGroupService;
   selfPid?: number;
   runnerPath?: string;
+}
+
+function spawnTargetProcess(
+  binary: string,
+  args: readonly string[],
+  options: SpawnOptions,
+  spawnProcess: typeof spawn = spawn,
+): ChildProcess {
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(binary)) {
+    return spawnProcess(binary, [...args], {
+      ...options,
+      shell: true,
+    });
+  }
+  return spawnProcess(binary, [...args], options);
 }
 
 /**
@@ -195,7 +210,7 @@ export async function runSetupLoginWorker(
           ? ["inherit", "pipe", "pipe"]
           : "inherit",
     };
-    const child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
+    const child = spawnTargetProcess(manifest.binary, manifest.args, spawnOptions, spawnProcess);
     if (teeOutput) {
       const tee = (sink: NodeJS.WriteStream) => (chunk: Buffer) => {
         sink.write(chunk);
@@ -251,12 +266,17 @@ async function runDeviceCodeLogin(
   }
   let child: ChildProcess;
   try {
-    child = spawnProcess(manifest.binary, manifest.args, {
-      cwd: manifest.cwd,
-      env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
-      detached: false,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    child = spawnTargetProcess(
+      manifest.binary,
+      manifest.args,
+      {
+        cwd: manifest.cwd,
+        env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
+        detached: false,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+      spawnProcess,
+    );
   } catch {
     persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
@@ -430,12 +450,18 @@ function probeLoginHelp(
     };
     let probe: ReturnType<typeof spawn>;
     try {
-      probe = spawnProcess(binary, ["login", "--help"], {
-        // Same provider-secret-scrubbed allowlist env as the real vendor
-        // spawn — the probe must never inherit the Terminal's full env.
-        env: probeEnv,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      probe = spawnTargetProcess(
+        binary,
+        ["login", "--help"],
+        {
+          cwd: dirname(resolve(binary)),
+          // Same provider-secret-scrubbed allowlist env as the real vendor
+          // spawn — the probe must never inherit the Terminal's full env.
+          env: probeEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+        spawnProcess,
+      );
     } catch {
       settle(false);
       return;
@@ -451,10 +477,14 @@ function probeLoginHelp(
     probe.stdout?.on("data", retain);
     probe.stderr?.on("data", retain);
     probe.on("error", () => settle(false));
-    // `close` (streams drained) + exit code 0: an errored-but-chatty probe
-    // (old CLI printing \"unrecognized subcommand\") must fail OPEN to the
-    // real spawn, and `exit` could race the final help-output chunks.
-    probe.on("close", (code) => settle(code === 0 && retainedBytes > 0));
+    let exitCode: number | null = null;
+    probe.on("exit", (code) => {
+      exitCode = code;
+    });
+    probe.on("close", (code) => {
+      const finalCode = code ?? exitCode ?? probe.exitCode;
+      settle(finalCode === 0 && retainedBytes > 0);
+    });
     const timer = setTimeout(() => {
       try {
         probe.kill("SIGKILL");
@@ -469,10 +499,10 @@ function probeLoginHelp(
 
 function validateManifest(manifestPath: string): SetupLoginManifest {
   const manifest = readLoginManifest(manifestPath);
-  const base = resolve(dirname(manifestPath));
+  const base = realpathSync(dirname(resolve(manifestPath)));
   for (const output of [manifest.statePath, manifest.resultPath, manifest.permitPath]) {
-    const absolute = resolve(output);
-    if (!absolute.startsWith(base + sep))
+    const parent = realpathSync(dirname(resolve(output)));
+    if (parent !== base)
       throw new Error("setup-login sidecar escapes its job directory");
   }
   return manifest;

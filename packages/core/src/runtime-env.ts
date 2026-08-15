@@ -35,7 +35,7 @@ export function managedRunnerNodeDir(
   if (!execPath || !isAbsolute(execPath)) return null;
   if (atRiskNodeAdvisory(execPath, platform) !== null) return null;
   // realpath + regular-file + executable facts (identity-stable, bounded).
-  if (!isLaunchableExecutable(execPath)) return null;
+  if (!isLaunchableExecutable(execPath, platform)) return null;
   // Anchor the REAL binary's dir (follow symlinks) rather than the launcher's.
   let runnerDir: string;
   try {
@@ -44,7 +44,13 @@ export function managedRunnerNodeDir(
     return null;
   }
   // A group/world-writable runner dir is an injection surface — skip the prepend.
-  if (platform !== "win32" && dirIsGroupOrWorldWritable(runnerDir)) return null;
+  if (
+    process.platform !== "win32" &&
+    platform !== "win32" &&
+    dirIsGroupOrWorldWritable(runnerDir)
+  ) {
+    return null;
+  }
   return runnerDir;
 }
 

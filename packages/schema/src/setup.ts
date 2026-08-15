@@ -80,7 +80,7 @@ export type SetupExecutionEvidence = z.infer<typeof SetupExecutionEvidence>;
 
 export const SetupExecutableEvidence = z
   .object({
-    realpath: z.string().startsWith("/"),
+    realpath: SetupLoginProtocol.SetupLoginAbsolutePath,
     sha256: Sha256Hex,
     size: z.number().int().nonnegative(),
     mode: z.number().int().nonnegative(),

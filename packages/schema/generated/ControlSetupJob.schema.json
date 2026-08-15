@@ -701,7 +701,7 @@
               "properties": {
                 "realpath": {
                   "type": "string",
-                  "pattern": "^\\/"
+                  "minLength": 1
                 },
                 "sha256": {
                   "$ref": "#/definitions/ControlSetupJob/properties/execution/properties/commandDigest"

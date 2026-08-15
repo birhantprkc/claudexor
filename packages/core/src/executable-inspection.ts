@@ -68,7 +68,11 @@ export function withExecutableInspection<T>(
     const stat = fstatSync(fd, { bigint: true });
     const named = lstatSync(canonical, { bigint: true });
     const identityStable =
-      !named.isSymbolicLink() && named.isFile() && named.dev === stat.dev && named.ino === stat.ino;
+      !named.isSymbolicLink() &&
+      named.isFile() &&
+      (process.platform === "win32"
+        ? named.size === stat.size
+        : named.dev === stat.dev && named.ino === stat.ino);
     const info: ExecutableInspection = {
       realpath: canonical,
       isRegularFile: stat.isFile(),
@@ -103,11 +107,14 @@ export function isBoundedRegularExecutable(info: ExecutableInspection): boolean 
  * bounded regular file the current user may execute. No content hash. Returns
  * false on any inspection error (dangling symlink, permission, mid-walk race).
  */
-export function isLaunchableExecutable(path: string): boolean {
+export function isLaunchableExecutable(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   try {
     const info = inspectExecutable(path);
     if (!info.isRegularFile || !info.identityStable) return false;
-    if (process.platform !== "win32") accessSync(info.realpath, constants.X_OK);
+    if (platform !== "win32") accessSync(info.realpath, constants.X_OK);
     return true;
   } catch (err) {
     // An exec-only binary (mode 0o111, not readable) cannot be O_RDONLY-opened
@@ -118,7 +125,7 @@ export function isLaunchableExecutable(path: string): boolean {
       try {
         const real = realpathSync(resolve(path));
         if (!statSync(real).isFile()) return false;
-        if (process.platform !== "win32") accessSync(real, constants.X_OK);
+        if (platform !== "win32") accessSync(real, constants.X_OK);
         return true;
       } catch {
         return false;

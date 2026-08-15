@@ -120,9 +120,20 @@ export function resolveSetupLoginRunnerPath(
   moduleUrl: string = import.meta.url,
   pathExists: (path: string) => boolean = existsSync,
 ): string {
-  const directory = dirname(fileURLToPath(moduleUrl));
-  const bundled = resolve(directory, "setup-login-runner.cjs");
-  return pathExists(bundled) ? bundled : resolve(directory, "setup-login-runner.js");
+  let directory: string;
+  try {
+    directory = dirname(fileURLToPath(moduleUrl));
+  } catch {
+    directory = dirname(moduleUrl.replace(/^file:\/\/\/?/, "/"));
+  }
+  const isPosix = directory.startsWith("/");
+  const bundled = isPosix
+    ? `${directory.replace(/\/$/, "")}/setup-login-runner.cjs`
+    : resolve(directory, "setup-login-runner.cjs");
+  const esm = isPosix
+    ? `${directory.replace(/\/$/, "")}/setup-login-runner.js`
+    : resolve(directory, "setup-login-runner.js");
+  return pathExists(bundled) ? bundled : esm;
 }
 
 export function waitWithAbort(

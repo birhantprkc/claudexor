@@ -289,19 +289,22 @@ describe("managedRunnerNodeDir (QA-022 grandchild-shell Node anchor)", () => {
     expect(managedRunnerNodeDir(join(root, "missing", "node"), "darwin")).toBeNull();
   });
 
-  it("returns null when the runner dir is group/world-writable (PATH injection surface)", () => {
-    const dir = join(root, "writable", "Resources");
-    const exec = fakeNode(dir);
-    // A world-writable runner dir lets a local attacker drop a malicious node.
-    chmodSync(dir, 0o777);
-    expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
-    // Group-writable alone is also refused.
-    chmodSync(dir, 0o775);
-    expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
-    // Owner-only is accepted again.
-    chmodSync(dir, 0o755);
-    expect(managedRunnerNodeDir(exec, "darwin")).toBe(dir);
-  });
+  it.skipIf(process.platform === "win32")(
+    "returns null when the runner dir is group/world-writable (PATH injection surface)",
+    () => {
+      const dir = join(root, "writable", "Resources");
+      const exec = fakeNode(dir);
+      // A world-writable runner dir lets a local attacker drop a malicious node.
+      chmodSync(dir, 0o777);
+      expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
+      // Group-writable alone is also refused.
+      chmodSync(dir, 0o775);
+      expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
+      // Owner-only is accepted again.
+      chmodSync(dir, 0o755);
+      expect(managedRunnerNodeDir(exec, "darwin")).toBe(dir);
+    },
+  );
 
   it("anchors the REAL dir when execPath is a symlinked launcher", () => {
     const realDir = join(root, "real", "Resources");
@@ -314,17 +317,20 @@ describe("managedRunnerNodeDir (QA-022 grandchild-shell Node anchor)", () => {
     expect(managedRunnerNodeDir(linked, "darwin")).toBe(realDir);
   });
 
-  it("returns null when the symlink resolves into a group/world-writable real dir", () => {
-    const realDir = join(root, "real2", "Resources");
-    const exec = fakeNode(realDir);
-    chmodSync(realDir, 0o777);
-    const linkDir = join(root, "safe-link");
-    mkdirSync(linkDir, { recursive: true, mode: 0o755 });
-    const linked = join(linkDir, "node");
-    symlinkSync(exec, linked);
-    // Even though the symlink's own dir is safe, the RESOLVED dir is writable.
-    expect(managedRunnerNodeDir(linked, "darwin")).toBeNull();
-  });
+  it.skipIf(process.platform === "win32")(
+    "returns null when the symlink resolves into a group/world-writable real dir",
+    () => {
+      const realDir = join(root, "real2", "Resources");
+      const exec = fakeNode(realDir);
+      chmodSync(realDir, 0o777);
+      const linkDir = join(root, "safe-link");
+      mkdirSync(linkDir, { recursive: true, mode: 0o755 });
+      const linked = join(linkDir, "node");
+      symlinkSync(exec, linked);
+      // Even though the symlink's own dir is safe, the RESOLVED dir is writable.
+      expect(managedRunnerNodeDir(linked, "darwin")).toBeNull();
+    },
+  );
 
   it("normalizedHarnessPath prepends the managed-runner dir ahead of every guessed entry", () => {
     const home = join(root, "home");
