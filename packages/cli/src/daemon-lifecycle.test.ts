@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { armDaemonLifecycle } from "./daemon-lifecycle.js";
+import { describe, expect, it, vi } from "vitest";
+import { armDaemonLifecycle, runStartupCrashGc } from "./daemon-lifecycle.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -19,6 +19,55 @@ __afterAllReap(() => {
 });
 
 describe("armDaemonLifecycle", () => {
+  it("leaves a previous life's pids.json byte-untouched until snapshots are armed; crash-GC consumes it on the normal start (C2)", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = reapMk(join(tmpdir(), "claudexor-lifecycle-"));
+      const pidsPath = join(root, "pids.json");
+      // A crashed previous life's reap list: one dead process group recorded
+      // with full birth identity (the only record of surviving children).
+      const previousLife = `${JSON.stringify({
+        pids: [
+          {
+            pid: 999_999_990,
+            cmd: "crashed-previous-life-harness",
+            processGroup: {
+              schemaVersion: 1,
+              pgid: 999_999_990,
+              leader: {
+                status: "known",
+                pid: 999_999_990,
+                platform: "darwin",
+                source: "proc_pidinfo",
+                startToken: "darwin:1:000001",
+                processGroupId: 999_999_990,
+              },
+            },
+          },
+        ],
+      })}\n`;
+      writeFileSync(pidsPath, previousLife, { mode: 0o600 });
+      const signals = new EventEmitter() as EventEmitter & Pick<NodeJS.Process, "on" | "off">;
+      const lifecycle = armDaemonLifecycle({
+        daemonDir: root,
+        logPath: join(root, "daemon.log"),
+        signals,
+        beginShutdown: async () => {},
+      });
+      // Recovery-only serving: crash-GC never ran, so the previous file must
+      // survive every snapshot interval AND the shutdown finalizer.
+      vi.advanceTimersByTime(10_000);
+      expect(readFileSync(pidsPath, "utf8")).toBe(previousLife);
+      lifecycle.finalize();
+      expect(readFileSync(pidsPath, "utf8")).toBe(previousLife);
+      // The later NORMAL start's crash-GC consumes the reap list.
+      await runStartupCrashGc({ daemonDir: root, logPath: join(root, "daemon.log") });
+      expect(existsSync(pidsPath)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("routes lifecycle messages through the post-authority diagnostic sink with exact stages", async () => {
     const root = reapMk(join(tmpdir(), "claudexor-lifecycle-"));
     const signals = new EventEmitter() as EventEmitter & Pick<NodeJS.Process, "on" | "off">;
