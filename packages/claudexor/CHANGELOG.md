@@ -1,5 +1,18 @@
 # claudexor
 
+## 3.4.0
+
+### Minor Changes
+
+- 530e8e3: Protect shared data roots with a persistent root-authority barrier (writer epoch + proven serving-version floor) and start the daemon in two stages: transport comes up recovery-only with product routes typed-refused, destructive recovery runs only after the read-only journal verdict and floor advance, and the handshake reports servingMode so the macOS app keeps Connecting instead of adopting a recovering daemon. Pre-fix runtimes can no longer seize a fixed root or reap live runs before journal readiness.
+
+### Patch Changes
+
+- 3798dd1: The daemon no longer crashes when a disconnected follower is written to.
+- e0b2bbb: Treat web as optional for every non-off policy, keep Cursor web-off refusals explicit, and enable native Cursor web approvals for managed read-only runs without disabling its sandbox.
+- f53a085: Recover automatically from Linux zombie daemon writer leases while keeping live or uncertain owners fail-closed and fencing concurrent stale takeovers by lease generation.
+  - @claudexor/cli@3.4.0
+
 ## 3.3.16
 
 ### Patch Changes
