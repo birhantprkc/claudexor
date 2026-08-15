@@ -21,6 +21,7 @@ import {
 } from "@claudexor/workspace";
 import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
 import {
+  ControlHarnessSetupHarness,
   type ResourceAttachmentRef,
   ControlCredentialProfileCreateRequest,
   type CredentialProfile,
@@ -425,9 +426,16 @@ export function controlServices(
       if (!harnessId || !profileId) {
         throw Object.assign(new Error("harnessId and profileId are required"), { status: 400 });
       }
-      const activeLogin = setupJobs()
-        .list({ harness: harnessId as "claude" | "codex" | "cursor" })
-        .find((job) => ACTIVE_SETUP_STATES.has(job.state) && job.profileId === profileId);
+      // The active-login 409 fence is derived from the setup-harness enum's own
+      // options (never a hand-copied list): a harness outside the enum (agy
+      // until its managed-login phase lands) can have no setup jobs to fence.
+      const activeLogin = ControlHarnessSetupHarness.options.includes(
+        harnessId as ControlHarnessSetupHarness,
+      )
+        ? setupJobs()
+            .list({ harness: harnessId as ControlHarnessSetupHarness })
+            .find((job) => ACTIVE_SETUP_STATES.has(job.state) && job.profileId === profileId)
+        : undefined;
       if (activeLogin) {
         throw Object.assign(
           new Error(

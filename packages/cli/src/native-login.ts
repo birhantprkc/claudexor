@@ -7,6 +7,7 @@ import {
 import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { CODEX_FILE_AUTH_ARGS, defaultNativeCodexHome } from "@claudexor/harness-codex";
 import { canonicalCursorProfileHome, cursorProfilePathEnv } from "@claudexor/harness-cursor";
+import { canonicalAgyProfileHome } from "@claudexor/harness-agy";
 import { ensureDir } from "@claudexor/util";
 import { isAbsolute } from "node:path";
 
@@ -60,6 +61,15 @@ const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
     args: ["login"],
     displayCommand: "cursor-agent login",
   },
+  agy: {
+    binaryName: () => process.env.CLAUDEXOR_AGY_BIN || "agy",
+    // agy has no login subcommand: the interactive TUI prints the sign-in URL
+    // and accepts the pasted code (it needs a real TTY, which the CLI
+    // profiles-login path gives it via spawnSync stdio:inherit). The managed
+    // in-app login card is a later phase; this is the CLI/terminal route.
+    args: [],
+    displayCommand: "agy (interactive login)",
+  },
 };
 
 /**
@@ -111,7 +121,12 @@ export function nativeLoginSpec(
     binary: resolved,
     args: [...definition.args],
     displayCommand: definition.displayCommand,
-    loginMode: harness === "claude" ? "url_disclosure_with_input" : "url_disclosure",
+    loginMode:
+      harness === "claude"
+        ? "url_disclosure_with_input"
+        : harness === "agy"
+          ? "terminal"
+          : "url_disclosure",
   };
 }
 
@@ -188,6 +203,18 @@ export function nativeLoginEnv(
     // Default and profile Claude stores are both Claudexor-owned (INV-067 /
     // INV-135); ordinary ~/.claude is never created, read, or mutated here.
     ensureDir(env.CLAUDE_CONFIG_DIR);
+  } else if (harness === "agy") {
+    // agy takes its whole config root from $HOME; the profile HOME IS the
+    // isolation locator. No keychain is created inside it — the vendor falls
+    // back to its file-based token there (PLAN Л-15). Pin the auto-updater so
+    // the closed binary cannot replace itself mid-login.
+    env.AGY_CLI_DISABLE_AUTO_UPDATE = "true";
+    if (configDirOverride) {
+      const home = canonicalAgyProfileHome(configDirOverride);
+      ensureDir(home);
+      env.HOME = home;
+      env.USERPROFILE = home;
+    }
   } else if (harness === "cursor") {
     // url_disclosure: the CLI must print its sign-in URL instead of opening a
     // browser on the daemon host (the user may be on another device). The

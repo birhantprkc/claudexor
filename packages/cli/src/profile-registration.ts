@@ -1,5 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import {
+  configDirLoginHarnessList,
+  isConfigDirLoginHarness,
+} from "./config-dir-login-harnesses.js";
 import { updateGlobalConfig } from "@claudexor/config";
 import type { CredentialProfile } from "@claudexor/schema";
 import { claudexorOwnedRoot, nowIso } from "@claudexor/util";
@@ -26,10 +30,10 @@ export function registerConfigDirProfile(input: RegisterProfileInput): {
   configPath: string;
 } {
   const { harnessId, profileId } = input;
-  if (harnessId !== "claude" && harnessId !== "codex" && harnessId !== "cursor") {
+  if (!isConfigDirLoginHarness(harnessId)) {
     throw Object.assign(
       new Error(
-        `harness "${harnessId}" has no isolated config-dir login; register claude, codex, or cursor profiles here (secret-ref profiles for other harnesses are hand-registered in the global config)`,
+        `harness "${harnessId}" has no isolated config-dir login; register ${configDirLoginHarnessList()} profiles here (secret-ref profiles for other harnesses are hand-registered in the global config)`,
       ),
       { status: 400 },
     );
