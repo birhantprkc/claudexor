@@ -8,6 +8,7 @@ export const QuotaSource = z
     "claude_statusline",
     "claude_api_retry",
     "claude_oauth_usage",
+    "agy_command_usage",
   ])
   .describe("Machine-readable source of quota evidence, classified by schema-owned traits.");
 export type QuotaSource = z.infer<typeof QuotaSource>;
@@ -21,7 +22,7 @@ export interface QuotaSourceTraits {
   readonly vendorAuthenticated: boolean;
   /** A missing/stale primary observation from this harness creates daemon
    * refresh demand. Reactive and spool sources deliberately use null. */
-  readonly refreshDemandHarness: "claude" | "codex" | null;
+  readonly refreshDemandHarness: "claude" | "codex" | "agy" | null;
   /** At least one registered top-level quota refresher can produce this
    * source. This is independent of whether it satisfies refresh demand. */
   readonly producedByRefresher: boolean;
@@ -53,20 +54,41 @@ export const QUOTA_SOURCE_TRAITS = {
     refreshDemandHarness: "claude",
     producedByRefresher: true,
   },
+  agy_command_usage: {
+    // agy's `/quota` print-mode command is authenticated with the profile's
+    // own token, produced by a top-level refresher, and creates refresh demand
+    // for agy (its profiles only — agy has no default subject, PLAN Л-4).
+    vendorAuthenticated: true,
+    refreshDemandHarness: "agy",
+    producedByRefresher: true,
+  },
 } as const satisfies Record<QuotaSource, QuotaSourceTraits>;
 
 export function quotaSourceTraits(source: QuotaSource): QuotaSourceTraits {
   return QUOTA_SOURCE_TRAITS[source];
 }
 
-export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex"> {
+export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex" | "agy"> {
   return [
     ...new Set(
       Object.values(QUOTA_SOURCE_TRAITS)
         .map((traits) => traits.refreshDemandHarness)
-        .filter((harness): harness is "claude" | "codex" => harness !== null),
+        .filter((harness): harness is "claude" | "codex" | "agy" => harness !== null),
     ),
   ].sort();
+}
+
+/**
+ * Whether a refresh-demand harness ALSO has an unprofiled DEFAULT quota subject
+ * (an engine-default credential store). agy is deliberately absent: it has no
+ * default account — every agy identity is a named profile (owner decision,
+ * PLAN Л-4), so its subject universe is profiles-only. claude/codex keep their
+ * native-login default subject.
+ */
+export function quotaHarnessHasDefaultSubject(
+  harness: "claude" | "codex" | "agy",
+): boolean {
+  return harness !== "agy";
 }
 
 export function quotaSourcesProducedByRefreshers(): QuotaSource[] {

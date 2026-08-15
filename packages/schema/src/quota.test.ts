@@ -29,8 +29,9 @@ function constraint(overrides: Partial<QuotaConstraint> & { id: string }): Quota
 describe("quotaSnapshotAvailability", () => {
   it("keeps one exhaustive source-trait registry with orthogonal capabilities", () => {
     expect(Object.keys(QUOTA_SOURCE_TRAITS).sort()).toEqual([...QuotaSource.options].sort());
-    expect(quotaRefreshDemandHarnesses().sort()).toEqual(["claude", "codex"]);
+    expect(quotaRefreshDemandHarnesses().sort()).toEqual(["agy", "claude", "codex"]);
     expect(quotaSourcesProducedByRefreshers().sort()).toEqual([
+      "agy_command_usage",
       "claude_oauth_usage",
       "claude_statusline",
       "codex_app_server",
