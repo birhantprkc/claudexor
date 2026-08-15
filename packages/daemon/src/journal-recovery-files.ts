@@ -117,6 +117,18 @@ interface AncestryObservation {
   missingPath: string | null;
 }
 
+/**
+ * S2-CR1: the shared parent of every partition's recovery-operations dir is
+ * DAEMON-OWNED MUTABLE INFRASTRUCTURE — the first quarantine on a root
+ * creates it (journal-manager quarantineAndStartFresh). Its existence must
+ * not bear preparation identity, or that legitimate write would poison the
+ * missing-ancestry suffix of every OTHER still-prepared partition and flip a
+ * healthy sibling into recovery_required. Its privacy/canonical form is
+ * still fully validated whenever it is present, and it stays identity-BEARING
+ * when it is the fingerprinted target itself.
+ */
+const IDENTITY_EXEMPT_INFRASTRUCTURE = "recovery-operations";
+
 function inspectCanonicalAncestry(
   path: string,
   trustedRoot: string,
@@ -137,6 +149,9 @@ function inspectCanonicalAncestry(
       paths.push(cursor);
     }
   }
+  const identityExempt = (index: number): boolean =>
+    index !== paths.length - 1 &&
+    relative(absoluteRoot, paths[index]!) === IDENTITY_EXEMPT_INFRASTRUCTURE;
   const entries: AncestryObservation["entries"] = [];
   let missingPath: string | null = null;
   for (const [index, entryPath] of paths.entries()) {
@@ -149,13 +164,18 @@ function inspectCanonicalAncestry(
       identityHash.update(
         `missing\0${paths
           .slice(index)
+          .filter((_, offset) => !identityExempt(index + offset))
           .map((value) => relative(absoluteRoot, value))
           .join("\0")}\0`,
       );
       break;
     }
     entries.push({ path: entryPath, stat });
-    identityHash.update(`path\0${relative(absoluteRoot, entryPath)}\0${identityMetadata(stat)}\0`);
+    if (!identityExempt(index)) {
+      identityHash.update(
+        `path\0${relative(absoluteRoot, entryPath)}\0${identityMetadata(stat)}\0`,
+      );
+    }
     if (stat.isSymbolicLink()) {
       problems.push(`journal tree ancestry is a symbolic link: ${entryPath}`);
       break;

@@ -45,6 +45,124 @@ function corruptGlobalRoot(): string {
   return config;
 }
 
+/** Mixed-root fixture (S2-CR1): a HEALTHY global journal with `count`
+ * registered projects, built by a real seed daemon so the registry and the
+ * project partitions carry genuine bytes. The caller corrupts partitions. */
+async function seedRegisteredProjects(
+  count: number,
+): Promise<{ config: string; projectIds: string[] }> {
+  const root = realpathSync(mkdtempSync(join(realpathSync("/tmp"), "cx-mixed-")));
+  cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "config");
+  mkdirSync(config, { recursive: true });
+  chmodSync(config, 0o700);
+  const daemon = spawnDaemon(config);
+  const addr = await waitFor(
+    () => (daemon.exitCode !== null ? null : controlAddress(config)),
+    "the seed daemon control API pointer",
+  );
+  try {
+    await waitForServingMode(addr, "normal");
+  } catch (error) {
+    let log = "";
+    try {
+      log = readFileSync(join(config, "daemon", "claudexord.log"), "utf8").slice(-1500);
+    } catch {}
+    throw new Error(
+      `seed daemon never reached normal: ${error instanceof Error ? error.message : String(error)}; exitCode=${daemon.exitCode}; stderr=${daemon.stderrText().slice(-1000)}; log=${log}`,
+    );
+  }
+  const projectIds: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const projectRoot = join(root, `project-${index}`);
+    mkdirSync(projectRoot, { recursive: true });
+    const response = await fetch(`${addr.base}/v2/projects`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${addr.token}`,
+        "x-claudexor-protocol-major": "3",
+        "content-type": "application/json",
+        "idempotency-key": randomUUID(),
+      },
+      body: JSON.stringify({ root: projectRoot }),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    projectIds.push(((await response.json()) as { id: string }).id);
+  }
+  daemon.kill("SIGTERM");
+  await waitFor(() => (daemon.exitCode === null ? null : true), "the seed daemon to exit");
+  // Drop the seed daemon's control pointer so the daemon under test cannot be
+  // probed through a stale address before it publishes its own.
+  rmSync(join(config, "daemon", "control-api.json"), { force: true });
+  return { config, projectIds };
+}
+
+function corruptProjectPartition(config: string, projectId: string): void {
+  const partitionDir = journalPartitionDirectory(
+    join(config, "daemon", "journal"),
+    `project:${projectId}`,
+  );
+  writeFileSync(join(partitionDir, "journal.bin"), "GARBAGE-NOT-A-JOURNAL-FRAME", {
+    mode: 0o600,
+  });
+}
+
+async function waitForServingMode(
+  addr: { base: string; token: string },
+  expected: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let servingMode = "";
+  while (Date.now() < deadline) {
+    servingMode = String((await handshake(addr)).servingMode ?? "");
+    if (servingMode === expected) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  expect(servingMode, `handshake never reported ${expected} serving`).toBe(expected);
+}
+
+async function inspectPartition(
+  addr: { base: string; token: string },
+  partition: string,
+): Promise<{ fingerprint: string; status: string }> {
+  const response = await fetch(
+    `${addr.base}/v2/recovery/partitions/${encodeURIComponent(partition)}`,
+    {
+      headers: {
+        authorization: `Bearer ${addr.token}`,
+        "x-claudexor-protocol-major": "3",
+      },
+    },
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+  return (await response.json()) as { fingerprint: string; status: string };
+}
+
+async function quarantinePartition(
+  addr: { base: string; token: string },
+  partition: string,
+  expectedFingerprint: string,
+): Promise<void> {
+  const response = await fetch(
+    `${addr.base}/v2/recovery/partitions/${encodeURIComponent(partition)}/quarantine`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${addr.token}`,
+        "x-claudexor-protocol-major": "3",
+        "content-type": "application/json",
+        "idempotency-key": randomUUID(),
+      },
+      body: JSON.stringify({
+        expectedFingerprint,
+        confirmation: "quarantine_and_start_fresh",
+      }),
+    },
+  );
+  expect(response.status, await response.clone().text()).toBe(200);
+}
+
 function spawnDaemon(
   config: string,
   extraEnv: Record<string, string> = {},
@@ -186,4 +304,81 @@ describe("recovery plane availability and in-process reopen (C6)", () => {
     expect(existsSync(join(config, "daemon", "journal-quarantine"))).toBe(true);
     daemon.kill("SIGTERM");
   }, 60_000);
+
+  it("quarantining a corrupt PROJECT partition never poisons the healthy global sibling (S2-CR1)", async () => {
+    const { config, projectIds } = await seedRegisteredProjects(1);
+    const partition = `project:${projectIds[0]}`;
+    corruptProjectPartition(config, projectIds[0]!);
+    const daemon = spawnDaemon(config);
+    const daemonPid = await waitFor(() => daemon.pid ?? null, "daemon pid");
+    const addr = await waitFor(
+      () => (daemon.exitCode !== null ? null : controlAddress(config)),
+      "the control API pointer",
+    ).catch((error: unknown) => {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`,
+      );
+    });
+    expect((await handshake(addr)).servingMode).toBe("recovery_only");
+    expect((await inspectPartition(addr, "global")).status).toBe("ready");
+    const projectInspection = await inspectPartition(addr, partition);
+    expect(projectInspection.status).toBe("recovery_required");
+
+    await quarantinePartition(addr, partition, projectInspection.fingerprint);
+
+    // The healthy global sibling was NEVER flipped to recovery_required by
+    // the project quarantine's recovery-operations infrastructure write.
+    expect((await inspectPartition(addr, "global")).status).toBe("ready");
+    // The SAME process reaches normal serving without a restart.
+    await waitForServingMode(addr, "normal");
+    expect((await inspectPartition(addr, "global")).status).toBe("ready");
+    expect(daemon.pid).toBe(daemonPid);
+    expect(daemon.exitCode).toBeNull();
+    daemon.kill("SIGTERM");
+  }, 90_000);
+
+  it("reopens in process after quarantining TWO broken project partitions in sequence (S2-CR1)", async () => {
+    const { config, projectIds } = await seedRegisteredProjects(2);
+    const [firstPartition, secondPartition] = projectIds.map((id) => `project:${id}`) as [
+      string,
+      string,
+    ];
+    corruptProjectPartition(config, projectIds[0]!);
+    corruptProjectPartition(config, projectIds[1]!);
+    const daemon = spawnDaemon(config);
+    const daemonPid = await waitFor(() => daemon.pid ?? null, "daemon pid");
+    const addr = await waitFor(
+      () => (daemon.exitCode !== null ? null : controlAddress(config)),
+      "the control API pointer",
+    ).catch((error: unknown) => {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; daemon stderr: ${daemon.stderrText().slice(-500)}`,
+      );
+    });
+    expect((await handshake(addr)).servingMode).toBe("recovery_only");
+    const firstInspection = await inspectPartition(addr, firstPartition);
+    expect(firstInspection.status).toBe("recovery_required");
+    await quarantinePartition(addr, firstPartition, firstInspection.fingerprint);
+
+    // Still protected: the live re-verdict lists EXACTLY the second broken
+    // partition — the first reopened in place and global stays healthy.
+    expect((await handshake(addr)).servingMode).toBe("recovery_only");
+    expect((await inspectPartition(addr, firstPartition)).status).toBe("ready");
+    expect((await inspectPartition(addr, "global")).status).toBe("ready");
+    const log = readFileSync(join(config, "daemon", "claudexord.log"), "utf8");
+    const verdicts = [
+      ...log.matchAll(/serving recovery only [^(]*\(recovery required: ([^)]+)\)/g),
+    ];
+    expect(verdicts.at(-1)?.[1]).toBe(secondPartition);
+
+    const secondInspection = await inspectPartition(addr, secondPartition);
+    expect(secondInspection.status).toBe("recovery_required");
+    await quarantinePartition(addr, secondPartition, secondInspection.fingerprint);
+
+    await waitForServingMode(addr, "normal");
+    expect((await inspectPartition(addr, "global")).status).toBe("ready");
+    expect(daemon.pid).toBe(daemonPid);
+    expect(daemon.exitCode).toBeNull();
+    daemon.kill("SIGTERM");
+  }, 120_000);
 });

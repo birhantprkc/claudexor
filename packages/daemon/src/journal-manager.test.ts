@@ -280,6 +280,69 @@ describe("JournalManager", () => {
     },
   );
 
+  it("keeps a still-prepared sibling partition valid across another partition's quarantine (S2-CR1)", () => {
+    // Mixed root: healthy global (prepared, still-prepared at quarantine
+    // time) + corrupt project. The FIRST quarantine on a root creates the
+    // shared recovery-operations/ parent; that daemon-owned infrastructure
+    // write must not poison the sibling's read-only preparation identity.
+    const global = new JournalManager(root);
+    const globalSlot = registerProbe(global);
+    global.start();
+    globalSlot.current().journal.append("probe.saved", { partition: "global" });
+    global.close();
+    seedCorruptPartition("project:victim");
+
+    const preparedGlobal = new JournalManager(root);
+    registerProbe(preparedGlobal);
+    expect(preparedGlobal.prepare().inspection.status).toBe("ready");
+    const project = new JournalManager(root, { partition: "project:victim" });
+    registerProbe(project);
+    const projectInspection = project.prepare().inspection;
+    expect(projectInspection.status).toBe("recovery_required");
+
+    const receipt = project.quarantineAndStartFresh({
+      idempotencyKey: "recover-project-victim",
+      expectedFingerprint: projectInspection.fingerprint,
+      confirmation: "quarantine_and_start_fresh",
+    });
+    expect(receipt.partition).toBe("project:victim");
+    expect(project.inspect().status).toBe("ready");
+
+    // The sibling's preparation must still revalidate and activate.
+    preparedGlobal.revalidatePreparation();
+    preparedGlobal.activatePrepared();
+    expect(preparedGlobal.ready()).toBe(true);
+    expect(preparedGlobal.inspect().status).toBe("ready");
+    project.close();
+    preparedGlobal.close();
+  });
+
+  it("still fails revalidation when the shared recovery-operations parent appears TAMPERED (S2-CR1)", () => {
+    // The quarantine-infrastructure exemption is existence-only: a shared
+    // parent that appears with a non-private mode (or as a symlink) after
+    // read-only preparation is genuine ancestry tampering and must still
+    // fail closed.
+    for (const kind of ["public", "symlink"] as const) {
+      const caseRoot = join(root, `tampered-shared-parent-${kind}`);
+      mkdirSync(caseRoot, { mode: 0o700 });
+      const manager = new JournalManager(caseRoot);
+      registerProbe(manager);
+      expect(manager.prepare().inspection.status).toBe("ready");
+      const operationsParent = join(caseRoot, "recovery-operations");
+      if (kind === "public") {
+        mkdirSync(operationsParent, { mode: 0o755 });
+      } else {
+        const outside = join(root, `tampered-shared-parent-outside-${kind}`);
+        mkdirSync(outside, { mode: 0o700 });
+        symlinkSync(outside, operationsParent);
+      }
+
+      expect(() => manager.revalidatePreparation()).toThrow(/requires recovery/);
+      expect(manager.inspect().status).toBe("recovery_required");
+      manager.close();
+    }
+  });
+
   it("binds prepared recovery-operation input to its pathname identity", () => {
     const caseRoot = join(root, "operations-identity-replacement");
     mkdirSync(caseRoot, { mode: 0o700 });
