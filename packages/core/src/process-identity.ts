@@ -2,8 +2,8 @@ import { constants, accessSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export type ProcessIdentityPlatform = "linux" | "darwin";
-export type ProcessIdentitySource = "procfs_stat" | "proc_pidinfo";
+export type ProcessIdentityPlatform = "linux" | "darwin" | "win32";
+export type ProcessIdentitySource = "procfs_stat" | "proc_pidinfo" | "win32_process";
 export type ProcessIdentityUnknownReason =
   | "invalid_pid"
   | "unsupported_platform"
@@ -246,6 +246,13 @@ export function isKnownProcessIdentity(value: unknown): value is KnownProcessIde
       /^darwin:(0|[1-9][0-9]*):[0-9]{6}$/.test(candidate.startToken)
     );
   }
+  if (candidate.platform === "win32") {
+    return (
+      candidate.source === "win32_process" &&
+      typeof candidate.startToken === "string" &&
+      /^win32:(0|[1-9][0-9]*)$/.test(candidate.startToken)
+    );
+  }
   return false;
 }
 
@@ -326,6 +333,7 @@ export class ProcessIdentityService implements ProcessIdentityReader {
     if (!validPositiveInteger(pid)) return unknown(pid, this.platform, "invalid_pid");
     if (this.platform === "linux") return this.readLinux(pid);
     if (this.platform === "darwin") return this.readDarwin(pid);
+    if (this.platform === "win32") return this.readWin32(pid);
     return unknown(pid, this.platform, "unsupported_platform");
   }
 
@@ -353,6 +361,27 @@ export class ProcessIdentityService implements ProcessIdentityReader {
     if (execution.status === 4) return unknown(pid, "darwin", "permission_denied");
     if (execution.status !== 0) return unknown(pid, "darwin", "helper_failed");
     return parseDarwinHelperOutput(execution.stdout, pid);
+  }
+
+  private readWin32(pid: number): ProcessIdentity {
+    try {
+      process.kill(pid, 0);
+      return {
+        status: "known",
+        pid,
+        platform: "win32",
+        source: "win32_process",
+        startToken: `win32:${pid}`,
+        processGroupId: pid,
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ESRCH") return { status: "missing", pid, platform: "win32" };
+      if (code === "EPERM" || code === "EACCES") {
+        return unknown(pid, "win32", "permission_denied");
+      }
+      return unknown(pid, "win32", "io_error");
+    }
   }
 }
 

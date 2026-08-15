@@ -640,14 +640,16 @@
                               "type": "string",
                               "enum": [
                                 "linux",
-                                "darwin"
+                                "darwin",
+                                "win32"
                               ]
                             },
                             "source": {
                               "type": "string",
                               "enum": [
                                 "procfs_stat",
-                                "proc_pidinfo"
+                                "proc_pidinfo",
+                                "win32_process"
                               ]
                             },
                             "startToken": {

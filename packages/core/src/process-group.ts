@@ -126,11 +126,12 @@ export class ProcessGroupService {
 
   /** Only ESRCH proves the complete group empty; every other error is unknown. */
   probeEmpty(handle: ProcessGroupHandle): ProcessGroupEmptyProbe {
-    if (this.platform !== "linux" && this.platform !== "darwin") {
+    if (this.platform !== "linux" && this.platform !== "darwin" && this.platform !== "win32") {
       return { status: "unknown", pgid: handle.pgid, reason: "unsupported_platform" };
     }
     try {
-      this.probeProcessGroup(-handle.pgid);
+      const target = this.platform === "win32" ? handle.pgid : -handle.pgid;
+      this.probeProcessGroup(target);
       return { status: "nonempty", pgid: handle.pgid };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
@@ -154,7 +155,8 @@ export class ProcessGroupService {
       return { status: "unknown", pgid: handle.pgid, signal, reason };
     }
     try {
-      this.signalProcessGroup(-handle.pgid, signal);
+      const target = this.platform === "win32" ? handle.pgid : -handle.pgid;
+      this.signalProcessGroup(target, signal);
       return { status: "sent", pgid: handle.pgid, signal };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
