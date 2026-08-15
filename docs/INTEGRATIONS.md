@@ -804,6 +804,7 @@ always preferred.
 | `CLAUDEXOR_NO_CONTROL_API` | daemon | Start the daemon without the HTTP control API (socket only). |
 | `CLAUDEXOR_DAEMON_SOCK` | daemon | Override the daemon's UNIX socket path. |
 | `CLAUDEXOR_DAEMON_ENTRY` | remote runtime wrapper | Internal path to the bundled daemon entrypoint used by `claudexor remote bootstrap`; release-built wrappers set it, users do not. |
+| `CLAUDEXOR_DAEMON_LAUNCH_SOURCE` | daemon (internal child env) | Launch-provenance marker (`cli_ensure_daemon` / `cli_explicit_start`) the CLI stamps into the environment of a detached daemon it spawns, so a running daemon process discloses which caller launched it. Never set by hand. |
 | `CLAUDEXOR_REMOTE_RUNTIME` | remote runtime wrapper / core | Internal `1` marker set by signed remote-runtime wrappers. It adds the app-owned remote vendor CLI directory to harness discovery ahead of inherited PATH entries; users do not set it. |
 | `CLAUDEXOR_DOCTOR_TTL_MS` / `CLAUDEXOR_DOCTOR_NON_OK_TTL_MS` | doctor | Cache TTLs for ok / non-ok doctor probes. |
 | `CLAUDEXOR_CLI_PATH` / `CLAUDEXOR_NODE_PATH` | plugins | Paths baked into generated host-plugin MCP configs (set by the installer, rarely by hand). |
