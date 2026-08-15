@@ -132,13 +132,22 @@ export async function proveRecoveryTransport(input: {
   }
 }
 
-/** Stage 4: floor advance + destructive recovery + normal admission — or the
- * protected recovery-only outcome (floor unchanged, cleanup off). */
+/** Stage 4: revalidate every read-only preparation FIRST; only on all-green
+ * advance the floor, run destructive recovery and open normal admission — or
+ * the protected recovery-only outcome (floor unchanged, cleanup off). */
 export async function completeStartupAdmission(input: {
   grant: Pick<RootAuthorityGrant, "advanceFloor">;
   blockedPartitions: string[];
-  global: { activatePrepared(): void; recoverAfterStartup(): void };
-  partitions: { activatePrepared(): void; recoverAfterStartup(): void };
+  global: {
+    revalidatePreparation(): void;
+    activatePrepared(): void;
+    recoverAfterStartup(): void;
+  };
+  partitions: {
+    revalidatePreparation(): void;
+    activatePrepared(): void;
+    recoverAfterStartup(): void;
+  };
   crashGc: () => Promise<void>;
   admission: DaemonStartupAdmission;
   log: (message: string) => void;
@@ -149,6 +158,21 @@ export async function completeStartupAdmission(input: {
     );
     return "recovery_only";
   }
+  // C3: prove the filesystem still matches every stage-2 preparation BEFORE
+  // the first irreversible act. Any revalidation failure leaves the floor
+  // UNCHANGED and zero destructive work done.
+  try {
+    input.global.revalidatePreparation();
+    input.partitions.revalidatePreparation();
+  } catch (error) {
+    if (error instanceof JournalRecoveryRequiredError) {
+      input.log(
+        `startup admission: preparation revalidation failed; serving recovery only with floor unchanged (${error.message})`,
+      );
+      return "recovery_only";
+    }
+    throw error;
+  }
   input.grant.advanceFloor();
   await input.crashGc();
   try {
@@ -158,7 +182,7 @@ export async function completeStartupAdmission(input: {
     input.partitions.recoverAfterStartup();
   } catch (error) {
     if (error instanceof JournalRecoveryRequiredError) {
-      // Revalidation/activation raced a journal mutation: stay on the
+      // Activation re-revalidates and raced a journal mutation: stay on the
       // recovery plane instead of serving a partition we could not activate.
       input.log(
         `startup admission: prepared activation entered recovery; serving recovery only (${error.message})`,
