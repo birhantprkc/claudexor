@@ -312,6 +312,14 @@ function writeOversizeDiscardReceipt(
   }
 }
 
+/** Coerce an environment-supplied launch source into a SAFE_LABEL value —
+ * "unknown" when absent or unsafe. Diagnostics never fail daemon startup, so
+ * a malformed environment must degrade to a safe label, not a throw. */
+export function safeDaemonLaunchSource(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  return SAFE_LABEL.test(trimmed) ? trimmed : "unknown";
+}
+
 /** Open the canonical writer only after a separate root-authority owner won. */
 export function openDaemonStartupDiagnosticsAfterAuthority(
   context: DaemonStartupDiagnosticContext,

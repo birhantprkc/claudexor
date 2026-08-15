@@ -29,6 +29,12 @@ import {
 } from "@claudexor/daemon";
 import { DaemonControlApiServer, normalizeRunStartRequest } from "@claudexor/control-api";
 import { armDaemonLifecycle, logLine, runStartupCrashGc } from "./daemon-lifecycle.js";
+import { DAEMON_LAUNCH_SOURCE_ENV } from "./daemon-launch.js";
+import {
+  openDaemonStartupDiagnosticsAfterAuthority,
+  safeDaemonLaunchSource,
+  type DaemonStartupDiagnostics,
+} from "./startup-diagnostics.js";
 import {
   bindRecoveryTransport,
   completeStartupAdmission,
@@ -92,6 +98,37 @@ export async function main(): Promise<void> {
   const socketPath = defaultSocketPath();
   // D5 stage 1: permanent barrier (epoch/floor refusals) before ANY recovery.
   const rootAuthority = acquireRootAuthority({ socketPath, version: servingIdentity.version });
+  // C8: the private diagnostics owner opens right after the authority win,
+  // with full launch provenance. Diagnostic failures never control lifecycle.
+  let diagnostics: DaemonStartupDiagnostics | null = null;
+  try {
+    diagnostics = openDaemonStartupDiagnosticsAfterAuthority({
+      runtimeVersion: servingIdentity.version,
+      buildSha: servingIdentity.sha,
+      entryPath: servingIdentity.entry,
+      pid: process.pid,
+      dataRoot: daemonDir(),
+      launchSource: safeDaemonLaunchSource(process.env[DAEMON_LAUNCH_SOURCE_ENV]),
+    });
+    diagnostics.record({
+      stage: "root_authority_won",
+      message: "root authority acquired; startup diagnostics online",
+    });
+  } catch (error) {
+    logLine(
+      logPath(),
+      `startup diagnostics unavailable: ${redactSecrets(
+        error instanceof Error ? error.message : String(error),
+      )}`,
+    );
+  }
+  const recordStage = (stage: string, message: string): void => {
+    try {
+      diagnostics?.record({ stage, message });
+    } catch {
+      /* diagnostics never control lifecycle */
+    }
+  };
   let shutdownRuntime: DaemonRuntimeShutdown | null = null;
   // Release wave round-12 BLOCK: the single-writer lease may only be released
   // after a CLEAN shutdown — a failed/partial shutdown keeps components that
@@ -536,6 +573,7 @@ export async function main(): Promise<void> {
     lifecycle = armDaemonLifecycle({
       daemonDir: daemonDir(),
       logPath: logPath(),
+      ...(diagnostics ? { diagnostics } : {}),
       beginShutdown: (reason) => shutdownRuntime!.beginShutdown(reason),
     });
 
@@ -582,9 +620,17 @@ export async function main(): Promise<void> {
             blockedPartitions: blockedPartitions(),
             global: journalManager,
             partitions: threads,
-            crashGc: () => runStartupCrashGc({ daemonDir: daemonDir(), logPath: logPath() }),
+            crashGc: () =>
+              runStartupCrashGc({
+                daemonDir: daemonDir(),
+                logPath: logPath(),
+                ...(diagnostics ? { diagnostics } : {}),
+              }),
             admission,
-            log: (message) => logLine(logPath(), message),
+            log: (message) => {
+              logLine(logPath(), message);
+              recordStage("startup_admission", message);
+            },
           });
           if (servingMode === "normal") await onNormalAdmission();
           return servingMode;
@@ -657,6 +703,7 @@ export async function main(): Promise<void> {
     await shutdownRuntime.wait();
     lifecycle.finalize();
     logLine(logPath(), "claudexord shut down");
+    recordStage("shutdown_complete", "claudexord shut down");
   } catch (error) {
     // logLine is already best-effort; a failed diagnostic write never masks
     // the lifecycle failure itself.
@@ -666,6 +713,11 @@ export async function main(): Promise<void> {
         error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       )}`,
     );
+    try {
+      diagnostics?.record({ stage: "startup_failure", message: "daemon lifecycle FAILED", error });
+    } catch {
+      /* diagnostics never control lifecycle */
+    }
     if (shutdownRuntime) {
       try {
         await shutdownRuntime.beginShutdown("startup failure");
@@ -687,6 +739,7 @@ export async function main(): Promise<void> {
     throw error;
   } finally {
     if (quotaPollTimer) clearInterval(quotaPollTimer);
+    diagnostics?.close();
     // Drops only the live writer claim; the barrier itself persists (D1).
     if (releaseWriterLease) rootAuthority.release();
   }
