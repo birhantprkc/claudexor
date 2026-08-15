@@ -1,0 +1,16 @@
+{
+  "tag": "v3.3.7",
+  "commit": "a4b004d79d54bfe03735a247c40b297552c2a624",
+  "sourcePath": "packages/daemon/src/writer-lease.ts",
+  "sourceBlob": "f2cde81164ee0843b22fb8266e43193d2f05f1eb",
+  "sourceSha256": "f8bf76956c24bdadec40ff2917f59bc6c2dfff02e15b9f4a4cc14ec9151b8344",
+  "fixtureSha256": "5abf7e48822d52e3c954d99c09777f3eb974995f89aaa9b0156f1079b9ce42c8",
+  "parityMarkers": [
+    "for (let attempt = 0; attempt < 2; attempt += 1)",
+    "mkdirSync(path, { mode: 0o700 });",
+    "writeFileSync(ownerPath, `${JSON.stringify(owner)}\\n`, {",
+    "if (!existing || processIsAlive(existing.pid)) throw writerBusy(path);",
+    "renameSync(path, stale);",
+    "rmSync(stale, { recursive: true, force: true });"
+  ]
+}

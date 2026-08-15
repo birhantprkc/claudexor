@@ -41,9 +41,22 @@ export type ProcessIdentity =
   KnownProcessIdentity | MissingProcessIdentity | UnknownProcessIdentity;
 export type ProcessIdentityComparison = "same" | "different" | "missing" | "unknown";
 
+export type LinuxProcessState =
+  "R" | "S" | "D" | "Z" | "T" | "t" | "X" | "x" | "K" | "W" | "P" | "I";
+
+export interface ProcessObservation {
+  readonly identity: ProcessIdentity;
+  /** Mutable Linux execution state from the same proc-stat read as identity. */
+  readonly linuxState: LinuxProcessState | null;
+}
+
 export interface ProcessIdentityReader {
   read(pid: number): ProcessIdentity;
   self(): ProcessIdentity;
+}
+
+export interface ProcessObservationReader {
+  observe(pid: number): ProcessObservation;
 }
 
 export interface DarwinHelperExecution {
@@ -62,7 +75,20 @@ export interface ProcessIdentityServiceOptions {
   runDarwinHelper?: (path: string, pid: number) => DarwinHelperExecution;
 }
 
-const LINUX_PROCESS_STATES = new Set(["R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I"]);
+const LINUX_PROCESS_STATES = new Set<LinuxProcessState>([
+  "R",
+  "S",
+  "D",
+  "Z",
+  "T",
+  "t",
+  "X",
+  "x",
+  "K",
+  "W",
+  "P",
+  "I",
+]);
 
 function validPositiveInteger(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0;
@@ -84,19 +110,25 @@ function unknown(
   return { status: "unknown", pid, platform, reason };
 }
 
-/** Parse Linux proc stat field 5 (pgrp) and field 22 (starttime). */
-export function parseLinuxProcStat(raw: string, expectedPid: number): ProcessIdentity {
-  if (!validPositiveInteger(expectedPid)) return unknown(expectedPid, "linux", "invalid_pid");
+/** Parse Linux proc stat fields 3 (state), 5 (pgrp), and 22 (starttime). */
+export function parseLinuxProcStatObservation(
+  raw: string,
+  expectedPid: number,
+): ProcessObservation {
+  const malformed = (reason: ProcessIdentityUnknownReason): ProcessObservation => ({
+    identity: unknown(expectedPid, "linux", reason),
+    linuxState: null,
+  });
+  if (!validPositiveInteger(expectedPid)) return malformed("invalid_pid");
   const firstSpace = raw.indexOf(" ");
   const commEnd = raw.lastIndexOf(")");
-  if (firstSpace <= 0 || commEnd <= firstSpace + 1)
-    return unknown(expectedPid, "linux", "malformed_response");
+  if (firstSpace <= 0 || commEnd <= firstSpace + 1) return malformed("malformed_response");
   const parsedPid = raw.slice(0, firstSpace);
   if (!canonicalPositive(parsedPid) || Number(parsedPid) !== expectedPid) {
-    return unknown(expectedPid, "linux", "malformed_response");
+    return malformed("malformed_response");
   }
   if (raw[firstSpace + 1] !== "(" || raw[commEnd + 1] !== " ") {
-    return unknown(expectedPid, "linux", "malformed_response");
+    return malformed("malformed_response");
   }
   const fieldsFromState = raw
     .slice(commEnd + 2)
@@ -107,22 +139,39 @@ export function parseLinuxProcStat(raw: string, expectedPid: number): ProcessIde
   const startTicks = fieldsFromState[19];
   if (
     !state ||
-    !LINUX_PROCESS_STATES.has(state) ||
+    !LINUX_PROCESS_STATES.has(state as LinuxProcessState) ||
     !processGroup ||
     !canonicalPositive(processGroup) ||
     !startTicks ||
     !canonicalUnsigned(startTicks)
   ) {
-    return unknown(expectedPid, "linux", "malformed_response");
+    return malformed("malformed_response");
   }
   return {
-    status: "known",
-    pid: expectedPid,
-    platform: "linux",
-    source: "procfs_stat",
-    startToken: `linux:${startTicks}`,
-    processGroupId: Number(processGroup),
+    identity: {
+      status: "known",
+      pid: expectedPid,
+      platform: "linux",
+      source: "procfs_stat",
+      startToken: `linux:${startTicks}`,
+      processGroupId: Number(processGroup),
+    },
+    linuxState: state as LinuxProcessState,
   };
+}
+
+/** Legacy identity-only projection; persisted and wire-facing bytes stay unchanged. */
+export function parseLinuxProcStat(raw: string, expectedPid: number): ProcessIdentity {
+  return parseLinuxProcStatObservation(raw, expectedPid).identity;
+}
+
+export function observeProcess(
+  identity: ProcessIdentityReader,
+  pid: number,
+  observation?: ProcessObservationReader,
+): ProcessObservation {
+  if (observation) return observation.observe(pid);
+  return { identity: identity.read(pid), linuxState: null };
 }
 
 /** Strict parser for the bundled Darwin helper's locale-independent protocol. */
@@ -235,6 +284,27 @@ function executeDarwinHelper(path: string, pid: number): DarwinHelperExecution {
   };
 }
 
+function readLinuxProcessObservation(
+  readTextFile: (path: string) => string,
+  pid: number,
+): ProcessObservation {
+  try {
+    return parseLinuxProcStatObservation(readTextFile(`/proc/${pid}/stat`), pid);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ESRCH") {
+      return { identity: { status: "missing", pid, platform: "linux" }, linuxState: null };
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      return {
+        identity: unknown(pid, "linux", "permission_denied"),
+        linuxState: null,
+      };
+    }
+    return { identity: unknown(pid, "linux", "io_error"), linuxState: null };
+  }
+}
+
 export class ProcessIdentityService implements ProcessIdentityReader {
   private readonly platform: string;
   private readonly selfPid: number;
@@ -265,15 +335,7 @@ export class ProcessIdentityService implements ProcessIdentityReader {
   }
 
   private readLinux(pid: number): ProcessIdentity {
-    try {
-      return parseLinuxProcStat(this.readTextFile(`/proc/${pid}/stat`), pid);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ENOENT" || code === "ESRCH")
-        return { status: "missing", pid, platform: "linux" };
-      if (code === "EACCES" || code === "EPERM") return unknown(pid, "linux", "permission_denied");
-      return unknown(pid, "linux", "io_error");
-    }
+    return readLinuxProcessObservation(this.readTextFile, pid).identity;
   }
 
   private readDarwin(pid: number): ProcessIdentity {
@@ -295,3 +357,24 @@ export class ProcessIdentityService implements ProcessIdentityReader {
 }
 
 export const defaultProcessIdentityService = new ProcessIdentityService();
+
+export function createProcessObservationReader(
+  options: ProcessIdentityServiceOptions = {},
+): ProcessObservationReader {
+  const platform = options.platform ?? process.platform;
+  const identity = new ProcessIdentityService(options);
+  const readTextFile = options.readTextFile ?? ((path: string) => readFileSync(path, "utf8"));
+  return {
+    observe(pid: number): ProcessObservation {
+      if (platform === "linux") {
+        if (!validPositiveInteger(pid)) {
+          return { identity: unknown(pid, platform, "invalid_pid"), linuxState: null };
+        }
+        return readLinuxProcessObservation(readTextFile, pid);
+      }
+      return { identity: identity.read(pid), linuxState: null };
+    },
+  };
+}
+
+export const defaultProcessObservationReader = createProcessObservationReader();

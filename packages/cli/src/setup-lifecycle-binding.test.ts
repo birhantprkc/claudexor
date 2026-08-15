@@ -187,6 +187,61 @@ describe("SetupLifecycleBinding", () => {
     expect(events).toEqual(["start:1", "drain:1", "shutdown:1", "start:1"]);
   });
 
+  it("keeps the replacement-bound supervisor when startup's start() arrives afterwards (S2-CR2)", async () => {
+    // Global-reopen sequence: the daemon starts recovery_only (start() never
+    // ran), the quarantine route binds+starts supervisor #1 via replaceAfter,
+    // then the in-process reopen's onNormalAdmission calls startSetup() =
+    // start(). start() must NOT create a second supervisor over the same
+    // store and orphan the running one.
+    let generation = 1;
+    const events: string[] = [];
+    const handles: FakeHandle[] = [];
+    const slot = {
+      current: () => ({ generation }),
+      generation: () => generation,
+    };
+    const binding = new SetupLifecycleBinding(slot, (store) => {
+      const handle = new FakeHandle(store.generation, events);
+      handles.push(handle);
+      return handle;
+    });
+
+    await binding.replaceAfter(() => {
+      generation = 2;
+      events.push("quarantine");
+      return "receipt";
+    });
+    const bound = binding.current();
+    await binding.start();
+
+    expect(binding.current()).toBe(bound);
+    expect(handles).toHaveLength(1);
+    await binding.shutdown();
+    // Exactly one live supervisor existed and shutdown drained IT.
+    expect(events).toEqual(["quarantine", "start:2", "drain:2", "shutdown:2"]);
+  });
+
+  it("refuses to bind a fresh supervisor once drain or shutdown began (S2-CR2)", async () => {
+    const events: string[] = [];
+    const handles: FakeHandle[] = [];
+    const slot = {
+      current: () => ({ generation: 1 }),
+      generation: () => 1,
+    };
+    const binding = new SetupLifecycleBinding(slot, (store) => {
+      const handle = new FakeHandle(store.generation, events);
+      handles.push(handle);
+      return handle;
+    });
+    await binding.start();
+    await binding.shutdown();
+
+    await binding.start();
+    expect(handles).toHaveLength(1);
+    expect(() => binding.current()).toThrowError(/unavailable/);
+    expect(events).toEqual(["start:1", "drain:1", "shutdown:1"]);
+  });
+
   it("does not advertise a generation whose replacement supervisor failed to start", async () => {
     let generation = 1;
     const events: string[] = [];

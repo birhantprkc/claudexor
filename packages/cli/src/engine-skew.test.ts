@@ -38,7 +38,11 @@ describe("consumeHandshakeIdentity", () => {
   it("records a validated same-major skew with the daemon sha and returns the advisory", () => {
     const sha = "f".repeat(40);
     const identity = consumeHandshakeIdentity(canonical("9.9.9", sha));
-    expect(identity.engine).toEqual({ engineVersion: "9.9.9", engineBuildSha: sha });
+    expect(identity.engine).toEqual({
+      engineVersion: "9.9.9",
+      engineBuildSha: sha,
+      servingMode: "normal",
+    });
     expect(identity.skewAdvisory).toContain("daemon is engine 9.9.9");
     expect(identity.skewAdvisory).toContain(ENGINE_STOP_REMEDY);
     expect(observedEngineSkew()).toEqual({
@@ -54,6 +58,7 @@ describe("consumeHandshakeIdentity", () => {
     expect(identity.engine).toEqual({
       engineVersion: CLAUDEXOR_VERSION,
       engineBuildSha: "unknown",
+      servingMode: "normal",
     });
     expect(identity.skewAdvisory).toBeNull();
     expect(observedEngineSkew()).toBeNull();
@@ -66,7 +71,7 @@ describe("consumeHandshakeIdentity", () => {
       engine: { version: "9.9.9", sha: "x", entry: "/e" },
     });
     expect(identity).toEqual({
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
       skewAdvisory: null,
     });
     expect(observedEngineSkew()).toBeNull();
@@ -81,7 +86,11 @@ describe("consumeHandshakeIdentity", () => {
 
   it("omits a malformed sha from the identity and the skew record", () => {
     const identity = consumeHandshakeIdentity(canonical("9.9.9", "not-a-sha"));
-    expect(identity.engine).toEqual({ engineVersion: "9.9.9", engineBuildSha: null });
+    expect(identity.engine).toEqual({
+      engineVersion: "9.9.9",
+      engineBuildSha: null,
+      servingMode: "normal",
+    });
     expect(observedEngineSkew()).toEqual({
       daemonVersion: "9.9.9",
       cliVersion: CLAUDEXOR_VERSION,

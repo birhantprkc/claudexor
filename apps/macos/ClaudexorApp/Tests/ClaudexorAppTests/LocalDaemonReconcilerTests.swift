@@ -5,21 +5,55 @@ import ClaudexorKit
 
 private struct ReconciliationTestError: Error {}
 
+private final class ReconciliationHandshakeGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var entered = false
+    private var released = false
+
+    var hasEntered: Bool {
+        condition.withLock { entered }
+    }
+
+    func block() {
+        condition.lock()
+        entered = true
+        condition.broadcast()
+        while !released { condition.wait() }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.withLock {
+            released = true
+            condition.broadcast()
+        }
+    }
+}
+
 private final class DaemonHandshakeURLProtocol: URLProtocol {
     nonisolated(unsafe) static var engine = EngineBuildIdentity(
         version: "3.1.2", sha: String(repeating: "a", count: 40), entry: "/old/daemon.js")
+    nonisolated(unsafe) static var gate: ReconciliationHandshakeGate?
+    /// Issue #165: optional handshake servingMode ("recovery_only"/"normal").
+    nonisolated(unsafe) static var servingMode: String?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.gate?.block()
+        respond()
+    }
+
+    private func respond() {
         let data: Data
         switch request.url?.path {
         case "/healthz":
             data = Data(#"{"ok":true}"#.utf8)
         case "/v2/handshake":
             let engine = Self.engine
-            data = Data(#"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","engine":{"version":"\#(engine.version)","sha":"\#(engine.sha)","entry":"\#(engine.entry)"}}"#.utf8)
+            let mode = Self.servingMode.map { #","servingMode":"\#($0)""# } ?? ""
+            data = Data(#"{"protocolMajor":3,"compatible":true,"operationsPath":"/v2/operations","engine":{"version":"\#(engine.version)","sha":"\#(engine.sha)","entry":"\#(engine.entry)"}\#(mode)}"#.utf8)
         default:
             client?.urlProtocol(self, didFailWithError: ReconciliationTestError())
             return
@@ -35,13 +69,15 @@ private final class DaemonHandshakeURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked Sendable {
+final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked Sendable {
     private let lock = NSLock()
     var busy: Bool? = false
     var targetIdentity: RuntimeClosureIdentity?
     var runningIdentity: RuntimeClosureIdentity?
     var handshakeNilCount = 0
     var busyDelayNanoseconds: UInt64 = 0
+    var busyGate: SuspendedReconciliationEffect?
+    var stopGate: SuspendedReconciliationEffect?
     var stopThrows = false
     var replacementStopRefusal: RuntimeReplacementStopError?
     var startThrows = false
@@ -52,18 +88,24 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
     private(set) var stoppedIdentities: [RuntimeClosureIdentity] = []
 
     func isBusy() async -> Bool? {
-        let delay = lock.withLock { busyProbes += 1; return busyDelayNanoseconds }
+        let (delay, gate) = lock.withLock {
+            busyProbes += 1
+            return (busyDelayNanoseconds, busyGate)
+        }
         if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+        await gate?.wait()
         return lock.withLock { busy }
     }
 
     func stopForRuntimeReplacement(expectedIdentity: RuntimeClosureIdentity) async throws {
-        try lock.withLock {
+        let gate = try lock.withLock {
             stops += 1
             stoppedIdentities.append(expectedIdentity)
             if let replacementStopRefusal { throw replacementStopRefusal }
             if stopThrows { throw ReconciliationTestError() }
+            return stopGate
         }
+        await gate?.wait()
     }
 
     func start() throws {
@@ -329,6 +371,7 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
         #expect(LocalDaemonReconciliationPolicy(.failed(.startFailed))
             == .failOffline(notice: "Engine refresh stopped the previous engine but could not start the selected runtime. Reconnecting."))
         #expect(LocalDaemonReconciliationPolicy(.replaced(target)) == .reconnect)
+        #expect(LocalDaemonReconciliationPolicy(.supersededBeforeLifecycle) == .retry)
     }
 
     @MainActor
@@ -388,6 +431,154 @@ private final class ReconciliationDaemonStub: RuntimeDaemonControl, @unchecked S
         #expect(model.engineIdentity == nil)
         #expect(model.localDaemonReconciliationNotice
             == "The refreshed engine identity did not match the selected runtime. Reconnecting.")
+    }
+
+    @MainActor
+    @Test func recoveryOnlyHandshakeKeepsConnectingWithoutAdoptionOrReconciliation() async {
+        // Issue #165 D5: a recovery-only daemon proves transport but keeps
+        // product admission closed. tryConnect must NOT adopt the candidate,
+        // hydrate, run the reconciliation lifecycle, or earn a fallback
+        // launch — it stays in the Connecting loop (.retryWithoutLaunch).
+        DaemonHandshakeURLProtocol.servingMode = "recovery_only"
+        defer { DaemonHandshakeURLProtocol.servingMode = nil }
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        let previousClient = model.client
+        let previousEndpoint = model.endpoint
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DaemonHandshakeURLProtocol.self]
+        let candidate = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:4321")!, token: "test",
+            session: URLSession(configuration: config))
+
+        let result = await model.tryConnect(
+            candidate: candidate, endpoint: "127.0.0.1:4321", generation: 1)
+
+        #expect(result == .retryWithoutLaunch)
+        #expect(model.client === previousClient)
+        #expect(model.endpoint == previousEndpoint)
+        #expect(model.engineIdentity == nil)
+        #expect(daemon.busyProbes == 0)
+        #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
+    }
+
+    @MainActor
+    @Test func connectedPollFallsBackToConnectingWhenDaemonReentersRecovery() async {
+        // A daemon RESTARTED into a recovery-needed root re-answers the
+        // steady-state poll with recovery_only: the poll returns
+        // .retryWithoutLaunch (no outage launch, no reconciliation) and
+        // leaves the published state for the recovery loop to unwind.
+        DaemonHandshakeURLProtocol.servingMode = "recovery_only"
+        defer { DaemonHandshakeURLProtocol.servingMode = nil }
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.runningIdentity = target
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        model.engineIdentity = DaemonHandshakeURLProtocol.engine
+
+        let result = await model.pollLocalConnection(generation: 1)
+
+        #expect(result == .retryWithoutLaunch)
+        #expect(model.client != nil)
+        #expect(model.engineIdentity?.sha == DaemonHandshakeURLProtocol.engine.sha)
+        #expect(daemon.busyProbes == 0)
+        #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
+    }
+
+    @MainActor
+    @Test func stalePollBeforeStopAdmissionCannotLaunchOrPublish() async {
+        DaemonHandshakeURLProtocol.engine = EngineBuildIdentity(
+            version: old.version, sha: old.buildSha, entry: "/old/daemon.js")
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.runningIdentity = target
+        let gate = SuspendedReconciliationEffect()
+        daemon.busyGate = gate
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        model.engineIdentity = DaemonHandshakeURLProtocol.engine
+
+        let task = Task { @MainActor in
+            await model.pollLocalConnection(generation: 1)
+        }
+        await gate.waitUntilEntered()
+        model.connectionGeneration = 2
+        await gate.release()
+
+        #expect(await task.value == .superseded)
+        #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
+        #expect(model.engineIdentity?.sha == old.buildSha)
+    }
+
+    @MainActor
+    @Test func delayedInitialHandshakeCannotAdoptAfterManualReconnect() async {
+        let gate = ReconciliationHandshakeGate()
+        DaemonHandshakeURLProtocol.gate = gate
+        defer { DaemonHandshakeURLProtocol.gate = nil }
+        DaemonHandshakeURLProtocol.engine = EngineBuildIdentity(
+            version: old.version, sha: old.buildSha, entry: "/old/daemon.js")
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = old
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        let oldCandidate = try! #require(model.client)
+        let successor = appModel(ReconciliationDaemonStub()).client!
+
+        let task = Task { @MainActor in
+            await model.tryConnect(
+                candidate: oldCandidate, endpoint: "127.0.0.1:old", generation: 1)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !gate.hasEntered, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(gate.hasEntered)
+        model.connectionGeneration = 2
+        model.adoptClientForReconnect(successor)
+        model.endpoint = "127.0.0.1:new"
+        model.health = .connected
+        model.engineIdentity = EngineBuildIdentity(
+            version: target.version, sha: target.buildSha, entry: "/new/daemon.js")
+        gate.release()
+
+        #expect(await task.value == .superseded)
+        #expect(model.client === successor)
+        #expect(model.endpoint == "127.0.0.1:new")
+        #expect(model.health == .connected)
+        #expect(model.engineIdentity?.sha == target.buildSha)
+        #expect(daemon.busyProbes == 0)
+        #expect(daemon.stops == 0)
+        #expect(daemon.starts == 0)
+    }
+
+    @MainActor
+    @Test func admittedPollRecoveryFinishesButStaleCallerPublishesNothing() async {
+        DaemonHandshakeURLProtocol.engine = EngineBuildIdentity(
+            version: old.version, sha: old.buildSha, entry: "/old/daemon.js")
+        let daemon = ReconciliationDaemonStub()
+        daemon.targetIdentity = target
+        daemon.runningIdentity = target
+        let gate = SuspendedReconciliationEffect()
+        daemon.stopGate = gate
+        let model = appModel(daemon)
+        model.connectionGeneration = 1
+        model.engineIdentity = DaemonHandshakeURLProtocol.engine
+
+        let task = Task { @MainActor in
+            await model.pollLocalConnection(generation: 1)
+        }
+        await gate.waitUntilEntered()
+        model.connectionGeneration = 2
+        await gate.release()
+
+        #expect(await task.value == .superseded)
+        #expect(daemon.stops == 1)
+        #expect(daemon.starts == 1)
+        #expect(model.engineIdentity?.sha == old.buildSha)
     }
 
     @MainActor

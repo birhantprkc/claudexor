@@ -42,6 +42,14 @@
           ],
           "additionalProperties": false,
           "description": "Build identity of the serving engine."
+        },
+        "servingMode": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "recovery_only"
+          ],
+          "description": "Product admission: 'recovery_only' keeps normal product routes closed while recovery control stays reachable; absent means 'normal'."
         }
       },
       "required": [

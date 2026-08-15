@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   DaemonClient,
@@ -20,20 +20,33 @@ import {
   type ThreadHeadPingSink,
   daemonDir,
   defaultSocketPath,
-  acquireDaemonWriterLease,
+  acquireRootAuthority,
   ensureToken,
   ensureDaemonRuntimeRoot,
   logPath,
   socketAlive,
 } from "@claudexor/daemon";
 import { DaemonControlApiServer, normalizeRunStartRequest } from "@claudexor/control-api";
-import { armDaemonLifecycle, logLine, runStartupCrashGc } from "./daemon-lifecycle.js";
+import {
+  createDaemonQuotaPoller,
+  createStartupAdmissionRuntime,
+  openStartupDiagnostics,
+} from "./daemon-admission-runtime.js";
+import { armDaemonLifecycle, logLine } from "./daemon-lifecycle.js";
+import {
+  bindRecoveryTransport,
+  controlApiEnabledForStartup,
+  DaemonStartupAdmission,
+  proveRecoveryTransport,
+  quarantineGhostProjectsAtStartup,
+  recoveryBlockedPartitions,
+} from "./daemon-startup.js";
 import { assertPlanImplementReady } from "./plan-implement-readiness.js";
 import { Orchestrator } from "@claudexor/orchestrator";
 import { delegationBeltForRun } from "./delegation-belt-descriptor.js";
-import { loadConfig, sweepRetiredConfigKeysAtStartup } from "@claudexor/config";
+import { loadConfig } from "@claudexor/config";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
-import { type QuotaSubject, type ResourceAttachmentRef } from "@claudexor/schema";
+import { type ResourceAttachmentRef } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
@@ -49,30 +62,16 @@ import {
   threadRunStartRequiresGit,
 } from "./thread-execution-workspace.js";
 import { preflightRunGitRequirement } from "./request-preflight.js";
-import { dispatchClaudexordEntry, runIfDirectEntry } from "./claudexord-entry.js";
+import {
+  dispatchClaudexordEntry,
+  runIfDirectEntry,
+  runProbeIfRequested,
+} from "./claudexord-entry.js";
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 import { quotaSubjectUniverseFromConfig } from "./quota-subject-universe.js";
 import { runStopIfRequested } from "./runtime-replacement-stop.js";
 import { threadContinuityContext } from "./thread-continuity-context.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
-
-/** Public daemon-composition hook retained for embedders and tests. */
-export function quotaSubjectUniverse(): QuotaSubject[] {
-  return quotaSubjectUniverseFromConfig();
-}
-
-/** Handle `claudexord --probe`: print the engine build identity as ONE JSON line
- * ({version, buildSha}) and exit WITHOUT any durable startup — no writer lease,
- * no socket bind, no journal open, no runtime root. This is the pre-swap
- * handshake the macOS installer's RuntimeInstallCoordinator.probeVersion runs
- * against a freshly-unpacked closure with the app-bundled Node (D-2). Returns
- * true when the probe handled the invocation. */
-export function runProbeIfRequested(argv: readonly string[]): boolean {
-  if (!argv.includes("--probe")) return false;
-  const id = engineBuildIdentity();
-  process.stdout.write(`${JSON.stringify({ version: id.version, buildSha: id.sha })}\n`);
-  return true;
-}
 
 export async function main(): Promise<void> {
   // Probe and identity-proven stop must run before any durable startup.
@@ -81,7 +80,10 @@ export async function main(): Promise<void> {
   const servingIdentity = engineBuildIdentity();
   ensureDaemonRuntimeRoot();
   const socketPath = defaultSocketPath();
-  const writerLease = acquireDaemonWriterLease(socketPath);
+  // D5 stage 1: permanent barrier (epoch/floor refusals) before ANY recovery.
+  const rootAuthority = acquireRootAuthority({ socketPath, version: servingIdentity.version });
+  // C8: private diagnostics open right after the authority win (never control lifecycle).
+  const startupDiagnostics = openStartupDiagnostics(servingIdentity);
   let shutdownRuntime: DaemonRuntimeShutdown | null = null;
   // Release wave round-12 BLOCK: the single-writer lease may only be released
   // after a CLEAN shutdown — a failed/partial shutdown keeps components that
@@ -89,23 +91,12 @@ export async function main(): Promise<void> {
   // beside them. On failure the lease dies with the process instead.
   let releaseWriterLease = true;
   let lifecycle: ReturnType<typeof armDaemonLifecycle> | null = null;
-  let quotaPollTimer: NodeJS.Timeout | null = null;
+  let quotaPoller: ReturnType<typeof createDaemonQuotaPoller> | null = null;
   try {
     const token = ensureToken();
 
     if (await socketAlive(socketPath)) {
       throw new Error(`a claudexor daemon is already listening on ${socketPath}; stop it first`);
-    }
-    await runStartupCrashGc({ daemonDir: daemonDir(), logPath: logPath() });
-    // Same-root config evolution hygiene (B9): strip + persist any known-retired
-    // keys an OLDER version wrote into the global config, before any strict
-    // parse can trip on them (mirrors the crash-GC startup sweep). Unknown keys
-    // NOT on the retired registry still fail loud at parse (INV-021).
-    for (const sweep of sweepRetiredConfigKeysAtStartup()) {
-      logLine(
-        logPath(),
-        `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
-      );
     }
 
     const bus = new RunEventBus();
@@ -120,7 +111,7 @@ export async function main(): Promise<void> {
     const runEventStoreSlot = journalManager.registerProjection(runEventProjection());
     const projectStoreSlot = journalManager.registerProjection(projectProjection());
     const quotaStoreSlot = journalManager.registerProjection(
-      quotaProjection(quotaRefreshers(), quotaSubjectUniverse),
+      quotaProjection(quotaRefreshers(), quotaSubjectUniverseFromConfig),
     );
     // Sidebar invalidation ping (W12): a GLOBAL-partition emitter every
     // ThreadStore (global + per-project) writes through, so any thread
@@ -141,14 +132,14 @@ export async function main(): Promise<void> {
       create: (journal) => new SetupJobStore(daemonDir(), { journal }),
       validate: (store) => store.validateProjection(),
     });
-    journalManager.start();
-    const pollQuota = () => {
+    // D5 stage 2: read-only prepare + validate; zero recovery writes.
+    const globalPreparation = journalManager.prepare();
+    const admission = new DaemonStartupAdmission();
+    quotaPoller = createDaemonQuotaPoller(() => {
       try {
         void quotaStoreSlot.current().pollStale();
       } catch {}
-    };
-    quotaPollTimer = setInterval(pollQuota, 60_000).unref();
-    pollQuota();
+    });
     const threads = new ProjectPartitions(
       daemonDir(),
       projectStoreSlot,
@@ -159,16 +150,26 @@ export async function main(): Promise<void> {
       threadStoreSlot,
       threadHeadPing,
     );
+    const partitionsPreparation = threads.prepare();
+    const startupBlockedPartitions = recoveryBlockedPartitions({
+      globalPreparation,
+      partitionsPreparation,
+    });
     const interactions = new InteractionRegistry({
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
     });
-    const resources = new ResourceStore(join(daemonDir(), "resource-store"));
+    // C5b: construction mkdirs under the daemon dir and the recovery plane
+    // serves no resources — the store materializes on first product use.
+    let resourceStore: ResourceStore | null = null;
+    const resources = (): ResourceStore =>
+      (resourceStore ??= new ResourceStore(join(daemonDir(), "resource-store")));
 
     const server = new DaemonServer({
       socketPath,
       token,
       commands: threads,
+      servingMode: admission.snapshot,
       delegationAuthority: delegationBudgetAuthority,
       onRunTerminal: (runId, threadId) => {
         interactions.dropForRun(runId);
@@ -191,7 +192,7 @@ export async function main(): Promise<void> {
         return shutdownRuntime.beginRuntimeReplacement();
       },
       runtimeIdentity: { version: servingIdentity.version, buildSha: servingIdentity.sha },
-      runtimeLeaseOwner: writerLease.owner,
+      runtimeLeaseOwner: rootAuthority.lease.owner,
       runner: async (params, ctx) => {
         const p = normalizeRunStartRequest(params);
         const mode = p.mode;
@@ -398,7 +399,7 @@ export async function main(): Promise<void> {
                 : undefined,
             attachments: turnId
               ? (threads.getTurn(turnId)?.attachments ?? [])
-              : resources.resolve((p as { attachments?: ResourceAttachmentRef[] }).attachments),
+              : resources().resolve((p as { attachments?: ResourceAttachmentRef[] }).attachments),
             browser: (p as { browser?: boolean }).browser === true,
             mode: p.mode,
             contextMode: noProjectAsk
@@ -470,7 +471,7 @@ export async function main(): Promise<void> {
       control: () => control,
       journal: {
         close: () => {
-          if (quotaPollTimer) clearInterval(quotaPollTimer);
+          quotaPoller?.stop();
           threads.close();
           journalManager.close();
         },
@@ -491,101 +492,98 @@ export async function main(): Promise<void> {
       () => quotaStoreSlot.current(),
       () => selfClient.list(),
     );
-    control =
-      process.env.CLAUDEXOR_NO_CONTROL_API === "1"
-        ? null
-        : new DaemonControlApiServer({
-            token,
-            daemon: new DaemonClient(socketPath, token),
-            port: Number(process.env.CLAUDEXOR_CONTROL_PORT ?? 0),
-            bus,
-            services,
-          });
+    control = !controlApiEnabledForStartup({
+      disabledByEnv: process.env.CLAUDEXOR_NO_CONTROL_API === "1",
+      blockedPartitions: startupBlockedPartitions,
+      log: (message) => logLine(logPath(), message),
+    })
+      ? null
+      : new DaemonControlApiServer({
+          token,
+          daemon: new DaemonClient(socketPath, token),
+          port: Number(process.env.CLAUDEXOR_CONTROL_PORT ?? 0),
+          servingMode: admission.snapshot,
+          bus,
+          services,
+        });
     lifecycle = armDaemonLifecycle({
       daemonDir: daemonDir(),
       logPath: logPath(),
+      ...(startupDiagnostics.diagnostics ? { diagnostics: startupDiagnostics.diagnostics } : {}),
       beginShutdown: (reason) => shutdownRuntime!.beginShutdown(reason),
     });
 
-    await setupBinding.start();
-    if (!shutdownRuntime.requested()) await server.start();
+    const { runAdmissionCompletion, wrapQuarantineWithReopen } = createStartupAdmissionRuntime({
+      admission,
+      grant: rootAuthority,
+      global: journalManager,
+      partitions: threads,
+      diagnostics: startupDiagnostics,
+      normalPlane: {
+        requested: () => shutdownRuntime!.requested(),
+        armQuotaPolling: () => quotaPoller!.arm(),
+        beginPidSnapshots: () => lifecycle!.beginPidSnapshots(),
+        startSetup: () => setupBinding.start(),
+        quarantineGhosts: () =>
+          quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message)),
+        scheduleRetention: () =>
+          scheduleStartupRetention(services.runRetention, {
+            logPath: logPath(),
+            shuttingDown: () => shutdownRuntime!.requested(),
+          }),
+      },
+    });
+    services.recoveryQuarantinePartition = wrapQuarantineWithReopen(
+      services.recoveryQuarantinePartition,
+    );
+
+    // D5 stage 3: bind the REAL transport with product admission CLOSED, then
+    // prove self-health/exact identity through it before anything destructive.
+    const controlAddr = await bindRecoveryTransport({
+      server,
+      control,
+      requested: () => shutdownRuntime!.requested(),
+      daemonDir: daemonDir(),
+      logPath: logPath(),
+      socketPath,
+    });
     if (!shutdownRuntime.requested()) {
-      appendFileSync(
-        logPath(),
-        `[${new Date().toISOString()}] claudexord listening on ${socketPath}\n`,
-      );
-    }
-    if (control && !shutdownRuntime.requested()) {
-      const controlAddr = await control.start();
-      if (!shutdownRuntime.requested()) {
-        writeFileSync(
-          join(daemonDir(), "control-api.json"),
-          `${JSON.stringify({ ...controlAddr, tokenPath: join(daemonDir(), "token") }, null, 2)}\n`,
-          { mode: 0o600 },
-        );
-        appendFileSync(
-          logPath(),
-          `[${new Date().toISOString()}] claudexor control-api listening on http://${controlAddr.host}:${controlAddr.port}\n`,
-        );
-      }
-    } else if (!control && !shutdownRuntime.requested()) {
-      appendFileSync(
-        logPath(),
-        `[${new Date().toISOString()}] claudexor control-api disabled by CLAUDEXOR_NO_CONTROL_API=1\n`,
-      );
-    }
-    if (!shutdownRuntime.requested()) {
-      // F2 ghost-cleanup: retire projects auto-registered from an
-      // envelope worktree (root inside the Claudexor runtime tree) or whose
-      // root is permanently gone, so a dead root can never poison listings.
-      try {
-        const retired = threads.quarantineGhostProjects();
-        for (const ghost of retired) {
-          logLine(
-            logPath(),
-            `projects: quarantined ghost ${ghost.projectId} (${ghost.reason}): ${ghost.root}`,
-          );
-        }
-      } catch (error) {
-        logLine(
-          logPath(),
-          `projects: ghost sweep failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      scheduleStartupRetention(services.runRetention, {
-        logPath: logPath(),
-        shuttingDown: () => shutdownRuntime!.requested(),
+      await proveRecoveryTransport({
+        socket: selfClient,
+        identity: servingIdentity,
+        token,
+        control: controlAddr,
       });
+      // D5 stage 4: floor advance + destructive recovery + normal admission —
+      // or stay recovery-only with the floor unchanged and cleanup off. The
+      // normal-plane side effects run inside the single-flight completion.
+      await runAdmissionCompletion(() => startupBlockedPartitions);
     }
     await shutdownRuntime.wait();
     lifecycle.finalize();
-    appendFileSync(logPath(), `[${new Date().toISOString()}] claudexord shut down\n`);
+    logLine(logPath(), "claudexord shut down");
+    startupDiagnostics.recordStage("shutdown_complete", "claudexord shut down");
   } catch (error) {
-    try {
-      appendFileSync(
-        logPath(),
-        `[${new Date().toISOString()}] daemon lifecycle FAILED: ${redactSecrets(
-          error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-        )}\n`,
-      );
-    } catch {
-      /* preserve the lifecycle failure */
-    }
+    // logLine is already best-effort; a failed diagnostic write never masks
+    // the lifecycle failure itself.
+    logLine(
+      logPath(),
+      `daemon lifecycle FAILED: ${redactSecrets(
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      )}`,
+    );
+    startupDiagnostics.recordFailure("daemon lifecycle FAILED", error);
     if (shutdownRuntime) {
       try {
         await shutdownRuntime.beginShutdown("startup failure");
         lifecycle?.finalize();
       } catch (shutdownError) {
-        try {
-          appendFileSync(
-            logPath(),
-            `[${new Date().toISOString()}] shutdown FAILED: ${redactSecrets(
-              shutdownError instanceof Error ? shutdownError.message : String(shutdownError),
-            )}\n`,
-          );
-        } catch {
-          /* preserve the shutdown failure */
-        }
+        logLine(
+          logPath(),
+          `shutdown FAILED: ${redactSecrets(
+            shutdownError instanceof Error ? shutdownError.message : String(shutdownError),
+          )}`,
+        );
         releaseWriterLease = false;
         throw new AggregateError(
           [error, shutdownError],
@@ -595,8 +593,10 @@ export async function main(): Promise<void> {
     }
     throw error;
   } finally {
-    if (quotaPollTimer) clearInterval(quotaPollTimer);
-    if (releaseWriterLease) writerLease.release();
+    quotaPoller?.stop();
+    startupDiagnostics.close();
+    // Drops only the live writer claim; the barrier itself persists (D1).
+    if (releaseWriterLease) rootAuthority.release();
   }
 }
 

@@ -1364,7 +1364,62 @@ Explicit operator shutdown keeps its forceful semantics. The daemon records its
 birth identity in the writer lease at startup; `claudexor daemon stop` then CONFIRMS death
 (released lease, gone pid, or identity-verified SIGKILL escalation — a
 recycled pid is never signalled) before reporting success, so scripts and
-test disposers can trust its exit code. Stdio bridges (`mcp serve`/`acp
+test disposers can trust its exit code. The lease is acquired before the
+daemon publishes its socket or Control descriptor, so a present lease without
+a reachable socket remains a protected startup window unless its owner is
+proven stale. That proof is deliberately narrow: a missing pid, a birth-identity
+mismatch, or exact Linux `/proc` state `Z` is stale; a matching non-zombie
+owner, malformed or unreadable authority, and any unavailable identity/state
+proof remain fail-closed. Recovery never signals the stale owner. Acquisition
+moves the exact stale generation to a deterministic, nonempty tombstone keyed
+by pid and a digest of its token, then preserves that tombstone so a delayed
+contender cannot quarantine a live successor. Acquisition is the only
+quarantine mutator and tombstones have no automatic GC.
+
+Above the per-socket lease sits a PERSISTENT root authority for the shared
+data root. Before any journal work the daemon validates/installs a permanent
+barrier at the canonical default writer address: the lease directory carries
+`root-authority-v2.json` and no top-level owner record, so a pre-fix claimant's
+owner parse fails closed forever (it can neither adopt nor quarantine the
+address), while fixed runtimes contend on a nested `active` slot inside the
+barrier. First migration of an owned flat generation is an in-place atomic
+owner replacement (owner record swapped for an unparseable migration sentinel,
+marker published, sentinel retired), so the address is never absent and never
+carries a dead parseable owner; an already-live pre-fix owner still refuses the
+candidate through the shared lease machinery and cannot be retroactively
+revoked. The barrier record persists two separate facts, both refused typed
+and fail-closed: the writer protocol epoch (foreign epochs refused) and the
+semantic-version floor of the last runtime that PROVED it could serve
+(strictly lower versions refused; equal versions contend normally). The
+barrier survives clean shutdown and is never automatically removed. Startup
+itself is two-stage: after authority, the journal is prepared READ-ONLY (scan/
+verdict, no truncation), the socket + Control API come up serving
+`recovery_only` — health, handshake, shutdown, and the `/recovery/*` surface
+stay reachable while every product route/RPC is refused with a typed
+`daemon_recovery_only` 503 — and only after transport is provably up does the
+daemon revalidate every read-only preparation, and only on all-green advance
+the floor, run destructive recovery (activation truncation, crash GC,
+orphan/debris sweeps, retention), and open normal admission. A root
+with a recovery-needed partition keeps the floor unchanged and destructive
+work off, staying online recovery-only instead of dying dark — the control
+API binds for that plane even under `CLAUDEXOR_NO_CONTROL_API=1`, and a
+successful `/recovery/*` quarantine re-runs the admission completion in
+process, so the daemon transitions to normal serving without a restart. The handshake
+discloses `servingMode` (`normal`/`recovery_only`; absent means a pre-fix
+daemon, treated as normal); the macOS app maps `recovery_only` to its
+existing Connecting loop — no adoption, no hydration, no reconciliation, no
+fallback launch — until admission opens.
+
+Termination, local and remote runtime replacement, and the real-harness
+battery consume the same strict owner classification. They recheck the exact
+generation at the action boundary; classification alone never grants signal
+authority, and only an explicitly pinned, identity-matching capable owner may
+be escalated. Socket-unreachable plus an absent or proven-stale lease may prove
+an idempotent stopped state, while capable or uncertain ownership blocks. The
+battery may start through a stale lease because normal acquisition heals it,
+but cleanup succeeds only after the main lease is physically absent.
+
+Stdio bridges (`mcp serve`/`acp
 serve`) bound their life to their host's with a reparent watchdog — a dead
 host whose pipe stays open (inherited fds) no longer leaves an idle bridge.
 No-project command state, setup, and the project registry

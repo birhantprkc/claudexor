@@ -1,20 +1,25 @@
+import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DurableJournal, JournalCursorError } from "@claudexor/journal";
 import { JournalManager } from "./journal-manager.js";
+import { fingerprintPartition } from "./journal-recovery-files.js";
 
 let root: string;
 
@@ -51,6 +56,14 @@ function seedCorruptPartition(partition = "global") {
   const journalPath = slot.current().journal.path;
   first.close();
   return { journalPath, corruptBytes: corruptFirstByte(journalPath) };
+}
+
+function recoveryOperationsDir(manager: JournalManager): string {
+  return join(manager.rootDir, "recovery-operations", basename(manager.partitionDir));
+}
+
+function treeReceipt(path: string): { bytes: Buffer; mode: number } {
+  return { bytes: readFileSync(path), mode: statSync(path).mode & 0o777 };
 }
 
 interface StoredOperation {
@@ -129,6 +142,253 @@ describe("JournalManager", () => {
     expect(() => registerProbe(manager, "late")).toThrow(/registration is closed/);
     manager.close();
   });
+
+  it("fails closed and revokes the writer when prepared projection activation throws", () => {
+    const manager = new JournalManager(root, {
+      faults: {
+        beforeProjectionActivation: () => {
+          throw new Error("simulated projection activation failure");
+        },
+      },
+    });
+    const slot = registerProbe(manager);
+    expect(manager.prepare().inspection.status).toBe("ready");
+    const preparedProjection = slot.prepared();
+
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(manager.ready()).toBe(false);
+    expect(() => slot.current()).toThrow(/requires recovery/);
+    expect(() => preparedProjection.journal.append("probe", {})).toThrow(/closed/);
+    manager.close();
+  });
+
+  it("turns a disappeared prepared partition into recovery without recreating it", () => {
+    const seeded = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    seeded.append("probe.saved", { value: 1 });
+    const original = seeded.partitionDir;
+    const bytes = readFileSync(seeded.path);
+    seeded.close();
+    const manager = new JournalManager(root);
+    registerProbe(manager);
+    expect(manager.prepare().inspection.status).toBe("ready");
+    const moved = `${original}.moved`;
+    renameSync(original, moved);
+
+    expect(() => manager.revalidatePreparation()).toThrow(/requires recovery/);
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(existsSync(original)).toBe(false);
+    expect(readFileSync(join(moved, "journal.bin"))).toEqual(bytes);
+    manager.close();
+  });
+
+  it("turns a pathname replacement race into recovery without touching replacement bytes", () => {
+    const seeded = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    seeded.append("probe.saved", { value: 1 });
+    const original = seeded.partitionDir;
+    const originalBytes = readFileSync(seeded.path);
+    seeded.close();
+    const manager = new JournalManager(root);
+    registerProbe(manager);
+    expect(manager.prepare().inspection.status).toBe("ready");
+    renameSync(original, `${original}.original`);
+    mkdirSync(original, { mode: 0o700 });
+    writeFileSync(join(original, "journal.bin"), originalBytes, { mode: 0o600 });
+
+    expect(manager.validate()).toMatchObject({
+      status: "recovery_required",
+      projectionStatus: [expect.objectContaining({ name: "probe", status: "invalid" })],
+    });
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(readFileSync(join(original, "journal.bin"))).toEqual(originalBytes);
+    manager.close();
+  });
+
+  it("rejects unsafe recovery-operation roots and ancestors without following or mutating them", () => {
+    for (const kind of [
+      "regular",
+      "symlink",
+      "public",
+      "public-ancestor",
+      "symlink-ancestor",
+    ] as const) {
+      const caseRoot = join(root, `unsafe-operations-${kind}`);
+      mkdirSync(caseRoot, { mode: 0o700 });
+      const manager = new JournalManager(caseRoot);
+      registerProbe(manager);
+      const sentinel = join(caseRoot, "no-write-sentinel");
+      writeFileSync(sentinel, "must-stay-byte-identical", { mode: 0o640 });
+      const sentinelBefore = treeReceipt(sentinel);
+      const operationsDir = recoveryOperationsDir(manager);
+      const operationsParent = join(caseRoot, "recovery-operations");
+      const outside = join(root, `unsafe-operations-outside-${kind}`);
+      mkdirSync(outside, { mode: 0o700 });
+      writeFileSync(join(outside, "sentinel"), "outside-sentinel", { mode: 0o600 });
+      if (kind === "symlink-ancestor") {
+        symlinkSync(outside, operationsParent);
+        mkdirSync(join(outside, basename(operationsDir)), { mode: 0o700 });
+      } else {
+        mkdirSync(operationsParent, { mode: 0o700 });
+        if (kind === "regular") writeFileSync(operationsDir, "not-a-directory", { mode: 0o600 });
+        if (kind === "symlink") symlinkSync(outside, operationsDir);
+        if (kind === "public") {
+          mkdirSync(operationsDir, { mode: 0o700 });
+          chmodSync(operationsDir, 0o755);
+        }
+        if (kind === "public-ancestor") chmodSync(operationsParent, 0o755);
+      }
+      const outsideBefore = readFileSync(join(outside, "sentinel"));
+
+      expect(manager.prepare()).toMatchObject({
+        inspection: { status: "recovery_required" },
+      });
+      expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+      expect(readFileSync(join(outside, "sentinel"))).toEqual(outsideBefore);
+      expect(treeReceipt(sentinel)).toEqual(sentinelBefore);
+      if (kind === "regular") expect(readFileSync(operationsDir, "utf8")).toBe("not-a-directory");
+      if (kind === "public") expect(statSync(operationsDir).mode & 0o777).toBe(0o755);
+      if (kind === "public-ancestor") {
+        expect(statSync(operationsParent).mode & 0o777).toBe(0o755);
+      }
+      manager.close();
+    }
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "rejects a FIFO recovery-operation root without opening or replacing it",
+    () => {
+      const caseRoot = join(root, "unsafe-operations-fifo");
+      mkdirSync(caseRoot, { mode: 0o700 });
+      const manager = new JournalManager(caseRoot);
+      registerProbe(manager);
+      const sentinel = join(caseRoot, "no-write-sentinel");
+      writeFileSync(sentinel, "must-stay-byte-identical", { mode: 0o640 });
+      const sentinelBefore = treeReceipt(sentinel);
+      const operationsDir = recoveryOperationsDir(manager);
+      mkdirSync(join(caseRoot, "recovery-operations"), { mode: 0o700 });
+      execFileSync("mkfifo", [operationsDir]);
+
+      expect(manager.prepare()).toMatchObject({
+        inspection: { status: "recovery_required" },
+      });
+      expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+      expect(statSync(operationsDir).isFIFO()).toBe(true);
+      expect(treeReceipt(sentinel)).toEqual(sentinelBefore);
+      manager.close();
+    },
+  );
+
+  it("keeps a still-prepared sibling partition valid across another partition's quarantine (S2-CR1)", () => {
+    // Mixed root: healthy global (prepared, still-prepared at quarantine
+    // time) + corrupt project. The FIRST quarantine on a root creates the
+    // shared recovery-operations/ parent; that daemon-owned infrastructure
+    // write must not poison the sibling's read-only preparation identity.
+    const global = new JournalManager(root);
+    const globalSlot = registerProbe(global);
+    global.start();
+    globalSlot.current().journal.append("probe.saved", { partition: "global" });
+    global.close();
+    seedCorruptPartition("project:victim");
+
+    const preparedGlobal = new JournalManager(root);
+    registerProbe(preparedGlobal);
+    expect(preparedGlobal.prepare().inspection.status).toBe("ready");
+    const project = new JournalManager(root, { partition: "project:victim" });
+    registerProbe(project);
+    const projectInspection = project.prepare().inspection;
+    expect(projectInspection.status).toBe("recovery_required");
+
+    const receipt = project.quarantineAndStartFresh({
+      idempotencyKey: "recover-project-victim",
+      expectedFingerprint: projectInspection.fingerprint,
+      confirmation: "quarantine_and_start_fresh",
+    });
+    expect(receipt.partition).toBe("project:victim");
+    expect(project.inspect().status).toBe("ready");
+
+    // The sibling's preparation must still revalidate and activate.
+    preparedGlobal.revalidatePreparation();
+    preparedGlobal.activatePrepared();
+    expect(preparedGlobal.ready()).toBe(true);
+    expect(preparedGlobal.inspect().status).toBe("ready");
+    project.close();
+    preparedGlobal.close();
+  });
+
+  it("still fails revalidation when the shared recovery-operations parent appears TAMPERED (S2-CR1)", () => {
+    // The quarantine-infrastructure exemption is existence-only: a shared
+    // parent that appears with a non-private mode (or as a symlink) after
+    // read-only preparation is genuine ancestry tampering and must still
+    // fail closed.
+    for (const kind of ["public", "symlink"] as const) {
+      const caseRoot = join(root, `tampered-shared-parent-${kind}`);
+      mkdirSync(caseRoot, { mode: 0o700 });
+      const manager = new JournalManager(caseRoot);
+      registerProbe(manager);
+      expect(manager.prepare().inspection.status).toBe("ready");
+      const operationsParent = join(caseRoot, "recovery-operations");
+      if (kind === "public") {
+        mkdirSync(operationsParent, { mode: 0o755 });
+      } else {
+        const outside = join(root, `tampered-shared-parent-outside-${kind}`);
+        mkdirSync(outside, { mode: 0o700 });
+        symlinkSync(outside, operationsParent);
+      }
+
+      expect(() => manager.revalidatePreparation()).toThrow(/requires recovery/);
+      expect(manager.inspect().status).toBe("recovery_required");
+      manager.close();
+    }
+  });
+
+  it("binds prepared recovery-operation input to its pathname identity", () => {
+    const caseRoot = join(root, "operations-identity-replacement");
+    mkdirSync(caseRoot, { mode: 0o700 });
+    const manager = new JournalManager(caseRoot);
+    registerProbe(manager);
+    const operationsDir = recoveryOperationsDir(manager);
+    mkdirSync(join(caseRoot, "recovery-operations"), { mode: 0o700 });
+    mkdirSync(operationsDir, { mode: 0o700 });
+    expect(manager.prepare()).toMatchObject({ inspection: { status: "ready" } });
+    const contentFingerprint = fingerprintPartition(operationsDir, caseRoot).fingerprint;
+    renameSync(operationsDir, `${operationsDir}.original`);
+    mkdirSync(operationsDir, { mode: 0o700 });
+
+    expect(fingerprintPartition(operationsDir, caseRoot).fingerprint).toBe(contentFingerprint);
+    expect(() => manager.revalidatePreparation()).toThrow(/requires recovery/);
+    expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+    expect(manager.inspect().status).toBe("recovery_required");
+    expect(readdirSync(operationsDir)).toEqual([]);
+    manager.close();
+  });
+
+  it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
+    "reports an unreadable partition as recovery instead of throwing from fingerprinting",
+    () => {
+      const seeded = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+      seeded.append("probe.saved", { value: 1 });
+      const path = seeded.path;
+      const partitionDir = seeded.partitionDir;
+      const bytes = readFileSync(path);
+      seeded.close();
+      chmodSync(partitionDir, 0o000);
+      const manager = new JournalManager(root);
+      registerProbe(manager);
+      try {
+        expect(manager.prepare()).toMatchObject({
+          inspection: { status: "recovery_required" },
+        });
+        expect(() => manager.activatePrepared()).toThrow(/requires recovery/);
+      } finally {
+        chmodSync(partitionDir, 0o700);
+      }
+      expect(readFileSync(path)).toEqual(bytes);
+      expect(manager.inspect().status).toBe("recovery_required");
+      manager.close();
+    },
+  );
 
   it("keeps inspect, validate and secret-safe export online without mutating corrupt bytes", () => {
     const { journalPath, corruptBytes } = seedCorruptPartition();
@@ -267,7 +527,14 @@ describe("JournalManager", () => {
 
     const resumed = new JournalManager(root);
     const slot = registerProbe(resumed);
-    expect(resumed.start().status).toBe("ready");
+    expect(resumed.prepare()).toMatchObject({
+      inspection: { status: "ready" },
+      virtual: true,
+    });
+    expect(storedOperation().status).toBe("prepared");
+    resumed.revalidatePreparation();
+    expect(storedOperation().status).toBe("prepared");
+    resumed.activatePrepared();
     expect(
       slot
         .current()
@@ -300,7 +567,10 @@ describe("JournalManager", () => {
 
     const resumed = new JournalManager(root);
     const slot = registerProbe(resumed);
-    expect(resumed.start().status).toBe("ready");
+    expect(resumed.prepare().inspection.status).toBe("ready");
+    expect(storedOperation().status).toBe("prepared");
+    resumed.revalidatePreparation();
+    resumed.activatePrepared();
     expect(slot.current().journal.records()).toHaveLength(1);
     expect(storedOperation().status).toBe("completed");
     resumed.close();
@@ -331,7 +601,7 @@ describe("JournalManager", () => {
     rogue.close();
     const restarted = new JournalManager(root);
     const slot = registerProbe(restarted);
-    expect(restarted.start().status).toBe("recovery_required");
+    expect(restarted.prepare().inspection.status).toBe("recovery_required");
     expect(() => slot.current()).toThrow(/requires recovery/);
     restarted.close();
   });

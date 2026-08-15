@@ -40,6 +40,10 @@ export class InteractionStore {
 
   constructor(private readonly journal: DurableJournal) {
     this.replay();
+  }
+
+  /** Resolve replayed pending interactions only after bootstrap activation. */
+  recoverAfterStartup(): void {
     this.interruptAfterRestart();
   }
 
@@ -248,6 +252,7 @@ export function interactionProjection() {
     name: "interactions",
     create: (journal: DurableJournal) => new InteractionStore(journal),
     validate: (store: InteractionStore) => store.validateProjection(),
+    recover: (store: InteractionStore) => store.recoverAfterStartup(),
   };
 }
 

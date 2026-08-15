@@ -245,7 +245,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -316,6 +316,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -349,7 +350,7 @@ describe("mcp daemon body mapping", () => {
       const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
         client: {} as never,
         addr: { baseUrl: "http://x", token: "t" } as never,
-        engine: { engineVersion: null, engineBuildSha: null },
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
       });
       const runDir = mkdtempSync(join(tmpdir(), "claudexor-mcp-detail-problem-"));
       mkdirSync(join(runDir, "final"));
@@ -398,7 +399,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-soft-absence",
@@ -443,7 +444,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-done",
@@ -480,7 +481,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi
       .spyOn(daemonRun, "enqueueAndAwait")
@@ -508,7 +509,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-best-of",
@@ -541,7 +542,7 @@ describe("mcp daemon body mapping", () => {
     const connection = {
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" as const },
     };
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue(connection);
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue(connection);
@@ -597,6 +598,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -635,7 +637,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-durable",
@@ -683,7 +685,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-fast-failed",
@@ -727,7 +729,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-child",
@@ -798,7 +800,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-invalid",
@@ -910,7 +912,7 @@ describe("mcp daemon body mapping", () => {
     const ensureSpy = vi.spyOn(daemonRun, "ensureDaemon").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
-      engine: { engineVersion: null, engineBuildSha: null },
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const enqueueSpy = vi.spyOn(daemonRun, "enqueueAndAwait").mockResolvedValue({
       runId: "run-right",
@@ -953,6 +955,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     // Page 1 caps at 2 with hasMore; page 2 (cursor present) returns the tail.
     const urls: string[] = [];
@@ -999,6 +1002,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -1080,6 +1084,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const retryable = problemCode === "invalid_service_response";
     const fetchSpy = vi.fn(async () => ({
@@ -1134,6 +1139,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const responses = [
       {
@@ -1198,6 +1204,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     vi.stubGlobal(
       "fetch",
@@ -1243,6 +1250,7 @@ describe("mcp daemon body mapping", () => {
       const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
         client: {} as never,
         addr: { baseUrl: "http://x", token: "t" } as never,
+        engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
       });
       const fetchSpy = vi.fn(async () => ({
         ok: false,
@@ -1275,6 +1283,7 @@ describe("mcp daemon body mapping", () => {
     const connectSpy = vi.spyOn(daemonRun, "connectDaemonIfRunning").mockResolvedValue({
       client: {} as never,
       addr: { baseUrl: "http://x", token: "t" } as never,
+      engine: { engineVersion: null, engineBuildSha: null, servingMode: "normal" },
     });
     const failure = {
       phase: "execute",

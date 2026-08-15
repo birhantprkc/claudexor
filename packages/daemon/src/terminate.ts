@@ -1,9 +1,18 @@
 import {
   compareProcessIdentity,
   defaultProcessIdentityService,
+  type ProcessIdentity,
   type ProcessIdentityReader,
+  type ProcessObservation,
 } from "@claudexor/core";
-import { daemonLeaseOwner, processIsAlive, type DaemonLeaseOwner } from "./writer-lease.js";
+import {
+  classifyDaemonLeaseOwner,
+  inspectDaemonWriterLease,
+  processIsAlive,
+  type DaemonLeaseOwner,
+  type DaemonLeaseOwnerCapability,
+  type DaemonWriterLeaseStatus,
+} from "./writer-lease.js";
 
 export type DaemonTerminationOutcome =
   /** The daemon released its lease or its pid is gone — confirmed dead. */
@@ -44,6 +53,155 @@ export interface DaemonTerminationDeps {
 }
 
 /**
+ * Strict writer-lease authority used by termination. This is deliberately a
+ * separate argument rather than new optional members on DaemonTerminationDeps:
+ * downstream dependency objects may already use these names for unrelated
+ * private or runtime state.
+ */
+export interface DaemonTerminationLeaseAuthority {
+  inspect(socketPath: string): DaemonWriterLeaseStatus;
+  classify(owner: DaemonLeaseOwner): DaemonLeaseOwnerCapability;
+}
+
+const DEFAULT_LEASE_AUTHORITY: DaemonTerminationLeaseAuthority = {
+  inspect: (socketPath) => inspectDaemonWriterLease(socketPath),
+  classify: (owner) => classifyDaemonLeaseOwner(owner),
+};
+
+function compatibilityObservation(identity: ProcessIdentity): ProcessObservation {
+  return { identity, linuxState: null };
+}
+
+function compatibilityUnknownObservation(owner: DaemonLeaseOwner): ProcessObservation {
+  return compatibilityObservation({
+    status: "unknown",
+    pid: owner.pid,
+    platform: process.platform,
+    reason: "unsupported_platform",
+  });
+}
+
+function classifyCompatibilityIdentity(
+  owner: DaemonLeaseOwner,
+  identity: ProcessIdentityReader,
+): DaemonLeaseOwnerCapability {
+  if (!owner.identity) {
+    return {
+      status: "capable",
+      reason: "legacy_process_present",
+      observation: compatibilityUnknownObservation(owner),
+    };
+  }
+
+  const observed = identity.read(owner.pid);
+  const observation = compatibilityObservation(observed);
+  if (observed.status === "missing") {
+    return { status: "proven_stale", reason: "process_missing", observation };
+  }
+  if (observed.status === "known") {
+    return compareProcessIdentity(owner.identity, observed) === "same"
+      ? { status: "capable", reason: "identity_match", observation }
+      : { status: "proven_stale", reason: "identity_mismatch", observation };
+  }
+  return { status: "unknown", reason: "identity_unavailable", observation };
+}
+
+/**
+ * Patch-compatible dependency adapter for callers that supplied the old
+ * identity/isAlive test seams. It is unreachable from normal production and
+ * from the explicit strict fourth-argument authority. Filesystem inspection
+ * remains strict; only a valid owner's injected process capability follows the
+ * old isAlive-before-identity order. The shared termination loop still owns
+ * target pinning, successor refusal, and explicit-owner-only signal authority.
+ */
+function createCompatibilityLeaseAuthority(
+  identity: ProcessIdentityReader,
+  isAlive: (pid: number) => boolean,
+): DaemonTerminationLeaseAuthority {
+  const classify = (owner: DaemonLeaseOwner): DaemonLeaseOwnerCapability => {
+    if (!isAlive(owner.pid)) {
+      return {
+        status: "proven_stale",
+        reason: "process_missing",
+        observation: compatibilityObservation({
+          status: "missing",
+          pid: owner.pid,
+          platform: process.platform,
+        }),
+      };
+    }
+    return classifyCompatibilityIdentity(owner, identity);
+  };
+
+  return {
+    inspect: (socketPath) => {
+      const current = inspectDaemonWriterLease(socketPath);
+      return current.status === "owned"
+        ? {
+            ...current,
+            // Inspection proves only that a valid record is present. The
+            // shared loop classifies the pinned target exactly once; this
+            // placeholder also preserves old successor refusal semantics.
+            capability: {
+              status: "capable",
+              reason: "legacy_process_present",
+              observation: compatibilityUnknownObservation(current.owner),
+            },
+          }
+        : current;
+    },
+    classify,
+  };
+}
+
+function sameOwner(left: DaemonLeaseOwner, right: DaemonLeaseOwner): boolean {
+  return left.pid === right.pid && left.token === right.token;
+}
+
+function staleOwnerDetail(owner: DaemonLeaseOwner, capability: DaemonLeaseOwnerCapability): string {
+  if (capability.status !== "proven_stale") return `daemon pid ${owner.pid} exited`;
+  switch (capability.reason) {
+    case "process_missing":
+      return `daemon pid ${owner.pid} is gone`;
+    case "identity_mismatch":
+      return `pid ${owner.pid} was recycled by another process (never signalled)`;
+    case "linux_zombie":
+      return `daemon pid ${owner.pid} is a Linux zombie (never signalled)`;
+  }
+}
+
+function staleOwnerOutcome(
+  owner: DaemonLeaseOwner,
+  capability: DaemonLeaseOwnerCapability,
+  current: DaemonWriterLeaseStatus,
+  requireNoSuccessor: boolean | undefined,
+  killed: boolean,
+): DaemonTerminationOutcome {
+  const successor = current.status === "owned" && !sameOwner(current.owner, owner) ? current : null;
+  if (requireNoSuccessor) {
+    if (current.status === "unknown") {
+      return {
+        outcome: "still_alive",
+        detail: `daemon pid ${owner.pid} exited but writer-lease activity is unknown (${current.reason})`,
+      };
+    }
+    if (successor && successor.capability.status !== "proven_stale") {
+      return {
+        outcome: "still_alive",
+        detail: `daemon pid ${owner.pid} exited but successor pid ${successor.owner.pid} owns the writer lease`,
+      };
+    }
+  }
+  const successorDetail = successor
+    ? ` (writer lease now records stale pid ${successor.owner.pid})`
+    : "";
+  return {
+    outcome: killed ? "killed" : "exited",
+    detail: `${staleOwnerDetail(owner, capability)}${successorDetail}`,
+  };
+}
+
+/**
  * Await the CONFIRMED death of the daemon owning `socketPath`'s writer lease
  * (W3.5): "stop requested" is not "stopped" — a disposer that removes state
  * under a still-live daemon manufactures orphans.
@@ -55,83 +213,100 @@ export interface DaemonTerminationDeps {
  * window (the app auto-starts one) could be waited on — and SIGKILLed — in
  * place of the process we were asked to stop.
  *
- * Confirmed death = the pinned owner's lease is gone or taken over by a
- * different token/pid, or its pid is gone/recycled. Past the graceful window a
- * SIGKILL is sent ONLY when the pinned birth identity still matches the live
- * process (a recycled pid is never signalled, sol #5); without a verifiable
- * identity this fails closed to an honest `still_alive`.
+ * Confirmed death = the pinned owner released its lease, or the canonical
+ * classifier proves its pid missing, recycled, or a Linux zombie. A takeover
+ * alone does not prove that the old owner exited. Past the graceful window a
+ * SIGKILL is sent ONLY when an explicitly supplied pinned birth identity still
+ * matches the process in that same iteration; without that proof this fails
+ * closed to an honest `still_alive`.
  */
 export async function awaitDaemonTermination(
   socketPath: string,
   options: AwaitDaemonTerminationOptions = {},
   deps: DaemonTerminationDeps = {},
+  leaseAuthority?: DaemonTerminationLeaseAuthority,
 ): Promise<DaemonTerminationOutcome> {
   const deadlineMs = options.deadlineMs ?? 20_000;
   const killAfterMs = options.killAfterMs ?? 17_000;
   const allowSigkill = options.allowSigkill ?? false;
   const pollMs = options.pollMs ?? 150;
-  const identity = deps.identity ?? defaultProcessIdentityService;
-  const kill = deps.kill ?? ((pid, signal) => process.kill(pid, signal));
-  const isAlive = deps.isAlive ?? processIsAlive;
-  const sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const now = deps.now ?? Date.now;
+  // Legacy execution dependencies retain their one-read accessor behavior.
+  const configuredKill = deps.kill;
+  const configuredSleep = deps.sleep;
+  const configuredNow = deps.now;
+  const kill = configuredKill ?? ((pid, signal) => process.kill(pid, signal));
+  const sleep =
+    configuredSleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = configuredNow ?? Date.now;
+  let authority: DaemonTerminationLeaseAuthority;
+  let classifySignalTarget: (owner: DaemonLeaseOwner) => DaemonLeaseOwnerCapability;
+  if (leaseAuthority) {
+    authority = leaseAuthority;
+    classifySignalTarget = (owner) => leaseAuthority.classify(owner);
+  } else {
+    // Do not even inspect the old policy getters when an explicit fourth
+    // authority is present. Without one, capture each exactly once and enable
+    // compatibility only when the caller actually supplied that seam.
+    const configuredIdentity = deps.identity;
+    const configuredIsAlive = deps.isAlive;
+    if (configuredIdentity !== undefined || configuredIsAlive !== undefined) {
+      const identity = configuredIdentity ?? defaultProcessIdentityService;
+      authority = createCompatibilityLeaseAuthority(identity, configuredIsAlive ?? processIsAlive);
+      classifySignalTarget = (owner) => classifyCompatibilityIdentity(owner, identity);
+    } else {
+      authority = DEFAULT_LEASE_AUTHORITY;
+      classifySignalTarget = (owner) => DEFAULT_LEASE_AUTHORITY.classify(owner);
+    }
+  }
 
   const start = now();
   let killed = false;
   let noKillReason: string | null = null;
+  let current = authority.inspect(socketPath);
   // The ONE owner this call is about. Everything below judges the world
   // against this snapshot — never against whoever holds the lease later.
-  const owner = options.expectedOwner ?? daemonLeaseOwner(socketPath);
-  if (!owner) return { outcome: "exited", detail: "no daemon owns the writer lease" };
+  let owner = options.expectedOwner;
+  if (!owner) {
+    if (current.status === "absent") {
+      return { outcome: "exited", detail: "no daemon owns the writer lease" };
+    }
+    if (current.status === "unknown") {
+      return {
+        outcome: "still_alive",
+        detail: `daemon activity is unknown (${current.reason})`,
+      };
+    }
+    if (current.capability.status === "proven_stale") {
+      return { outcome: "exited", detail: staleOwnerDetail(current.owner, current.capability) };
+    }
+    owner = current.owner;
+  }
+
+  const explicitOwner = options.expectedOwner !== undefined;
   for (;;) {
-    const current = daemonLeaseOwner(socketPath);
-    if (!current) {
+    if (current.status === "absent") {
       return {
         outcome: killed ? "killed" : "exited",
         detail: killed ? "daemon exited after SIGKILL escalation" : "daemon released its lease",
       };
     }
-    // A different token/pid holds the lease: the pinned daemon released it and
-    // a REPLACEMENT took over. The one we were asked to stop is gone — confirm
-    // that, and never touch the newcomer.
-    if (current.token !== owner.token || current.pid !== owner.pid) {
-      // Takeover proves OWNERSHIP changed, not that the old daemon died
-      // (release wave tier1 #2): confirm the pinned pid is actually gone
-      // before reporting exit; a still-alive old process keeps this loop
-      // (and its escalation) on the case.
-      if (!isAlive(owner.pid)) {
-        if (options.requireNoSuccessor) {
-          return {
-            outcome: "still_alive",
-            detail: `daemon pid ${owner.pid} exited but successor pid ${current.pid} owns the writer lease`,
-          };
-        }
-        return {
-          outcome: killed ? "killed" : "exited",
-          detail: `daemon pid ${owner.pid} released its lease (now held by pid ${current.pid})`,
-        };
-      }
-    } else if (!isAlive(owner.pid)) {
-      return {
-        outcome: killed ? "killed" : "exited",
-        detail: `daemon pid ${owner.pid} is gone (stale lease left behind)`,
-      };
+
+    // The current lease record may have the same pid/token but different
+    // identity bytes. Classify the immutable pinned target itself every time;
+    // a current record's capability may describe only a successor/current
+    // generation and can never lend signal authority to the target.
+    const targetCapability = authority.classify(owner);
+
+    if (targetCapability.status === "proven_stale") {
+      return staleOwnerOutcome(
+        owner,
+        targetCapability,
+        current,
+        options.requireNoSuccessor,
+        killed,
+      );
     }
-    if (owner.identity) {
-      const observed = identity.read(owner.pid);
-      if (observed.status === "missing") {
-        return { outcome: killed ? "killed" : "exited", detail: `daemon pid ${owner.pid} is gone` };
-      }
-      if (
-        observed.status === "known" &&
-        compareProcessIdentity(owner.identity, observed) === "different"
-      ) {
-        return {
-          outcome: "exited",
-          detail: `pid ${owner.pid} was recycled by another process (never signalled)`,
-        };
-      }
-    }
+
     const elapsed = now() - start;
     if (elapsed >= deadlineMs) {
       return {
@@ -146,28 +321,46 @@ export async function awaitDaemonTermination(
     if (!killed && elapsed >= killAfterMs) {
       if (!allowSigkill) {
         noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (caller has no signal authority)`;
-        await sleep(pollMs);
-        continue;
-      }
-      // Escalate ONLY under a verified identity match observed THIS iteration.
-      const observed = owner.identity ? identity.read(owner.pid) : null;
-      if (
-        owner.identity &&
-        observed?.status === "known" &&
-        compareProcessIdentity(owner.identity, observed) === "same"
-      ) {
-        try {
-          kill(owner.pid, "SIGKILL");
-          killed = true;
-        } catch {
-          /* delivery raced its exit; the next poll observes the truth */
-        }
+      } else if (!explicitOwner) {
+        noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (no explicit expected owner)`;
+      } else if (current.status === "unknown") {
+        noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (writer-lease authority unknown)`;
+      } else if (!owner.identity) {
+        noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (no recorded birth identity)`;
       } else {
-        noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (${
-          owner.identity ? "identity unverifiable" : "no recorded birth identity"
-        })`;
+        // Time and injected dependencies may advance between the loop's exit
+        // classification and this escalation point. Only a second proof made
+        // immediately before delivery can authorize a signal.
+        const signalCapability = classifySignalTarget(owner);
+        if (signalCapability.status === "proven_stale") {
+          // Runtime replacement must also refuse a successor that appeared
+          // during the pre-signal identity recheck. The loop's `current`
+          // snapshot predates `now()` and this second classification, so it
+          // cannot prove the no-successor condition at this return boundary.
+          // Other callers preserve their existing inspection/call counts.
+          const requireNoSuccessor = options.requireNoSuccessor;
+          const exitCurrent = requireNoSuccessor ? authority.inspect(socketPath) : current;
+          return staleOwnerOutcome(
+            owner,
+            signalCapability,
+            exitCurrent,
+            requireNoSuccessor,
+            killed,
+          );
+        }
+        if (signalCapability.status === "capable" && signalCapability.reason === "identity_match") {
+          try {
+            kill(owner.pid, "SIGKILL");
+            killed = true;
+          } catch {
+            /* delivery raced its exit; the next poll observes the truth */
+          }
+        } else {
+          noKillReason = `daemon pid ${owner.pid} is still alive; SIGKILL withheld (identity unverifiable)`;
+        }
       }
     }
     await sleep(pollMs);
+    current = authority.inspect(socketPath);
   }
 }

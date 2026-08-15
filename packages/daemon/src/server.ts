@@ -1,6 +1,4 @@
 import { type Server, type Socket, createServer } from "node:net";
-import { timingSafeEqual } from "node:crypto";
-import { chmodSync, lstatSync, unlinkSync } from "node:fs";
 import { RpcFollowers } from "./rpc-followers.js";
 import {
   assertNoInlineSecretValues,
@@ -22,6 +20,7 @@ import {
   publicAcceptedCommand,
 } from "./command-rpc.js";
 import { productCommandRecords, prunableCommandIds } from "./command-retention.js";
+import { clearStaleUnixSocketPath, listenOnDaemonEndpoint } from "./daemon-listen.js";
 import {
   admitDelegatedRequest,
   delegatedParentOf,
@@ -37,6 +36,12 @@ import {
   type JobRecord,
 } from "./job-record.js";
 import { settleJobError } from "./job-settlement.js";
+import {
+  daemonTokenMatches,
+  recoveryOnlyRefusal,
+  servingModeOf,
+  type DaemonServingModeSnapshot,
+} from "./serving-admission.js";
 import { socketAlive } from "./socket-probe.js";
 import { isWindowsPipePath } from "./token.js";
 import {
@@ -80,6 +85,8 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
   onTurnEnqueueFailed?: (turnId: string, problem: TurnEnqueueProblemValue) => void;
   onShutdownRequested?: () => Promise<void>;
   onRuntimeReplacementRequested?: () => Promise<void>;
+  /** Issue #165 D5 admission snapshot; absent embedders always serve normal. */
+  servingMode?: DaemonServingModeSnapshot;
   /** Test-only barriers around command authority acquisition. */
   startupBarrier?: (
     barrier: "before_registry_load" | "after_registry_load",
@@ -143,32 +150,16 @@ export class DaemonServer {
     }
     await this.opts.startupBarrier?.("before_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled before listen");
-    commandStores(this.opts.commands);
+    // With product admission closed (issue #165 D5 stage 3) the command
+    // projections are not activated yet; the registry materializes lazily
+    // once normal admission opens.
+    if (servingModeOf(this.opts.servingMode) === "normal") commandStores(this.opts.commands);
     await this.opts.startupBarrier?.("after_registry_load");
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled after registry load");
-    if (!pipeEndpoint && pathExists(this.opts.socketPath)) {
-      const stale = lstatSync(this.opts.socketPath);
-      if (!stale.isSocket() || (process.getuid && stale.uid !== process.getuid())) {
-        throw Object.assign(new Error(`refusing to replace non-owned Unix socket path`), {
-          code: "unsafe_daemon_socket_path",
-        });
-      }
-      unlinkSync(this.opts.socketPath);
-    }
+    if (!pipeEndpoint) clearStaleUnixSocketPath(this.opts.socketPath);
     if (this.stopping) throw this.stoppingError("daemon startup was cancelled before listen");
-    await new Promise<void>((resolve, reject) => {
-      this.server = createServer((sock) => this.onConnection(sock));
-      this.server.once("error", reject);
-      this.server.listen(this.opts.socketPath, () => {
-        if (pipeEndpoint) return resolve();
-        try {
-          chmodSync(this.opts.socketPath, 0o600);
-        } catch {
-          /* best-effort on exotic filesystems */
-        }
-        resolve();
-      });
-    });
+    this.server = createServer((sock) => this.onConnection(sock));
+    await listenOnDaemonEndpoint(this.server, this.opts.socketPath, pipeEndpoint);
   }
 
   stop(): Promise<void> {
@@ -258,7 +249,7 @@ export class DaemonServer {
       return;
     }
     const { id, method, params, token } = msg;
-    if (!tokenMatches(typeof token === "string" ? token : "", this.opts.token)) {
+    if (!daemonTokenMatches(typeof token === "string" ? token : "", this.opts.token)) {
       this.send(sock, { id, error: { message: "unauthorized" } });
       return;
     }
@@ -274,7 +265,13 @@ export class DaemonServer {
           ...(err && typeof err === "object" && "status" in err
             ? { status: Number((err as { status: unknown }).status) }
             : {}),
-          ...(replacementRefusal(err) ? { retryable: true } : {}),
+          ...(err &&
+          typeof err === "object" &&
+          typeof (err as { retryable?: unknown }).retryable === "boolean"
+            ? { retryable: (err as { retryable: boolean }).retryable }
+            : replacementRefusal(err)
+              ? { retryable: true }
+              : {}),
         },
       });
     }
@@ -292,17 +289,24 @@ export class DaemonServer {
       this.opts.runtimeLeaseOwner,
     );
     if (shutdown) return shutdown;
+    const servingMode = servingModeOf(this.opts.servingMode);
+    if (method === "claudexor.health") {
+      return {
+        ok: true,
+        uptime_ms: Date.now() - this.startedAt,
+        queue: this.queue.length,
+        running: this.active > 0,
+        active: this.active,
+        // Command projections are not activated while admission is closed.
+        jobs: servingMode === "normal" ? this.allRecords().length : 0,
+        stopping: this.stopping,
+        servingMode,
+      };
+    }
+    // Issue #165 D5: with product admission closed, every product RPC gets
+    // one typed refusal; health above and the shutdown RPCs stay reachable.
+    if (servingMode !== "normal") throw recoveryOnlyRefusal(method);
     switch (method) {
-      case "claudexor.health":
-        return {
-          ok: true,
-          uptime_ms: Date.now() - this.startedAt,
-          queue: this.queue.length,
-          running: this.active > 0,
-          active: this.active,
-          jobs: this.allRecords().length,
-          stopping: this.stopping,
-        };
       case "claudexor.enqueue": {
         if (this.stopping) {
           throw Object.assign(new Error("daemon is stopping; retry after reconnect"), {
@@ -608,12 +612,4 @@ export class DaemonServer {
       if (!this.stopping) this.drain();
     }
   }
-}
-
-/** Constant-time token comparison (parity with the HTTP control facade). */
-function tokenMatches(candidate: string, expected: string): boolean {
-  const a = Buffer.from(candidate);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
 }

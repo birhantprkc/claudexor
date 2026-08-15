@@ -45,6 +45,16 @@ export function buildWireFixtures() {
     operationsPath: "/v2/operations",
     engine: { version: "3.1.0", sha: "unknown", entry: "/opt/claudexor/daemon.js" },
   });
+  // Recovery-only admission (issue #165 D5): transport/protocol succeed while
+  // product routes stay closed; Swift must decode servingMode losslessly so
+  // the I-A loop can keep the existing Connecting behavior until normal.
+  add("handshake-response-recovery-only", "ControlHandshakeResponse", {
+    protocolMajor: schema.CONTROL_PROTOCOL_MAJOR,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version: "3.4.0", sha: "b".repeat(40), entry: "/opt/claudexor/daemon.js" },
+    servingMode: "recovery_only",
+  });
 
   add("problem-minimal", "ControlProblem", {
     code: "plan_not_ready",

@@ -53,6 +53,10 @@ export class CommandStore {
     private readonly now: () => Date = () => new Date(),
   ) {
     this.replay();
+  }
+
+  /** Apply crash terminalization only after bootstrap has proved every required partition. */
+  recoverAfterStartup(): void {
     this.interruptUnknownCommands();
   }
 
@@ -521,6 +525,7 @@ export function commandProjection() {
     name: "commands",
     create: (journal: DurableJournal) => new CommandStore(journal),
     validate: (store: CommandStore) => store.validateProjection(),
+    recover: (store: CommandStore) => store.recoverAfterStartup(),
   };
 }
 

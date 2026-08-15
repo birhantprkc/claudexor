@@ -13,12 +13,14 @@ import {
   readdirSync,
   readlinkSync,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { JournalRecoveryRequiredError, type JournalRecoveryState } from "@claudexor/journal";
+import type { ControlJournalExportReceipt } from "@claudexor/schema";
 import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 
 export function recoveryFrom(
@@ -49,26 +51,192 @@ export function safeMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
-export function fingerprintPartition(path: string): string {
-  const hash = createHash("sha256");
-  if (!existsSync(path)) return hash.update("missing\0").digest("hex");
-  const root = lstatSync(path, { bigint: true });
-  if (root.isSymbolicLink()) {
-    hash.update(`symlink\0${readlinkSync(path)}\0`);
-    return hash.digest("hex");
+export interface PartitionFingerprint {
+  fingerprint: string;
+  preparationIdentity: string;
+  exists: boolean;
+  problem: string | null;
+}
+
+/** Observe a recovery tree without throwing. Callers must reject `problem`
+ * before trusting the fingerprint for activation or mutation. */
+export function fingerprintPartition(
+  path: string,
+  trustedRoot = dirname(path),
+): PartitionFingerprint {
+  const contentHash = createHash("sha256");
+  const identityHash = createHash("sha256");
+  let exists = false;
+  const problems: string[] = [];
+  try {
+    const ancestry = inspectCanonicalAncestry(path, trustedRoot, identityHash, problems);
+    const root = ancestry.target;
+    exists = root !== null;
+    if (!root) {
+      contentHash.update("missing\0");
+    } else if (root.isSymbolicLink()) {
+      contentHash.update(`symlink\0${safeReadlink(path)}\0`);
+      problems.push("journal tree root is a symbolic link");
+    } else if (!root.isDirectory()) {
+      contentHash.update(`other\0${metadata(root)}\0`);
+      problems.push("journal tree root is not a directory");
+    } else {
+      // Preserve the public recovery fingerprint across an atomic quarantine
+      // rename and across this preparation hardening. Path/security identity
+      // is intentionally separate below.
+      contentHash.update("directory\0");
+      fingerprintDirectory(path, contentHash, root);
+    }
+    revalidateAncestry(ancestry, problems);
+  } catch (error) {
+    problems.push(`journal tree could not be fingerprinted safely: ${safeMessage(error)}`);
+    contentHash.update(`fingerprint-error\0${safeMessage(error)}\0`);
+    identityHash.update(`fingerprint-error\0${safeMessage(error)}\0`);
   }
-  if (!root.isDirectory()) return hash.update(`other\0${metadata(root)}\0`).digest("hex");
-  // Deliberately exclude the root inode/timestamps: this content fingerprint
-  // must remain stable when the owned partition is atomically quarantined.
-  hash.update("directory\0");
-  for (const name of readdirSync(path).sort()) {
-    const entryPath = join(path, name);
-    const stat = lstatSync(entryPath, { bigint: true });
-    hash.update(`entry\0${name}\0${metadata(stat)}\0`);
-    if (stat.isSymbolicLink()) hash.update(`target\0${readlinkSync(entryPath)}\0`);
-    else if (stat.isFile() && stat.nlink === 1n) hash.update(hashOwnedFile(entryPath));
+  const fingerprint = contentHash.digest("hex");
+  identityHash.update(`content\0${fingerprint}\0`);
+  return {
+    fingerprint,
+    preparationIdentity: identityHash.digest("hex"),
+    exists,
+    problem: problems[0] ?? null,
+  };
+}
+
+export function requireStablePreparationIdentity(
+  observed: PartitionFingerprint,
+  context: string,
+): string {
+  if (observed.problem) throw new Error(`${context}: ${observed.problem}`);
+  return observed.preparationIdentity;
+}
+
+interface AncestryObservation {
+  target: BigIntStats | null;
+  entries: Array<{ path: string; stat: BigIntStats }>;
+  missingPath: string | null;
+}
+
+/**
+ * S2-CR1: the shared parent of every partition's recovery-operations dir is
+ * DAEMON-OWNED MUTABLE INFRASTRUCTURE — the first quarantine on a root
+ * creates it (journal-manager quarantineAndStartFresh). Its existence must
+ * not bear preparation identity, or that legitimate write would poison the
+ * missing-ancestry suffix of every OTHER still-prepared partition and flip a
+ * healthy sibling into recovery_required. Its privacy/canonical form is
+ * still fully validated whenever it is present, and it stays identity-BEARING
+ * when it is the fingerprinted target itself.
+ */
+const IDENTITY_EXEMPT_INFRASTRUCTURE = "recovery-operations";
+
+function inspectCanonicalAncestry(
+  path: string,
+  trustedRoot: string,
+  identityHash: ReturnType<typeof createHash>,
+  problems: string[],
+): AncestryObservation {
+  const absolutePath = resolve(path);
+  const absoluteRoot = resolve(trustedRoot);
+  const rel = relative(absoluteRoot, absolutePath);
+  if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) {
+    throw new Error(`journal tree escapes trusted root: ${absolutePath}`);
   }
-  return hash.digest("hex");
+  const paths = [absoluteRoot];
+  if (rel) {
+    let cursor = absoluteRoot;
+    for (const component of rel.split(sep)) {
+      cursor = join(cursor, component);
+      paths.push(cursor);
+    }
+  }
+  const identityExempt = (index: number): boolean =>
+    index !== paths.length - 1 &&
+    relative(absoluteRoot, paths[index]!) === IDENTITY_EXEMPT_INFRASTRUCTURE;
+  const entries: AncestryObservation["entries"] = [];
+  let missingPath: string | null = null;
+  for (const [index, entryPath] of paths.entries()) {
+    let stat: BigIntStats;
+    try {
+      stat = lstatSync(entryPath, { bigint: true });
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+      missingPath = entryPath;
+      identityHash.update(
+        `missing\0${paths
+          .slice(index)
+          .filter((_, offset) => !identityExempt(index + offset))
+          .map((value) => relative(absoluteRoot, value))
+          .join("\0")}\0`,
+      );
+      break;
+    }
+    entries.push({ path: entryPath, stat });
+    if (!identityExempt(index)) {
+      identityHash.update(
+        `path\0${relative(absoluteRoot, entryPath)}\0${identityMetadata(stat)}\0`,
+      );
+    }
+    if (stat.isSymbolicLink()) {
+      problems.push(`journal tree ancestry is a symbolic link: ${entryPath}`);
+      break;
+    }
+    const isTarget = index === paths.length - 1;
+    if (!isTarget && !stat.isDirectory()) {
+      problems.push(`journal tree ancestry is not a directory: ${entryPath}`);
+      break;
+    }
+    if (stat.isDirectory()) validatePrivateDirectory(entryPath, stat, problems);
+  }
+  const final = entries.at(-1);
+  return {
+    target: !missingPath && final?.path === absolutePath ? final.stat : null,
+    entries,
+    missingPath,
+  };
+}
+
+function validatePrivateDirectory(path: string, stat: BigIntStats, problems: string[]): void {
+  if (typeof process.getuid === "function" && stat.uid !== BigInt(process.getuid())) {
+    problems.push(`journal tree directory is not owned by the current user: ${path}`);
+  }
+  if (process.platform !== "win32" && Number(stat.mode & 0o777n) !== 0o700) {
+    problems.push(`journal tree directory is not private: ${path}`);
+  }
+  try {
+    if (realpathSync.native(path) !== resolve(path)) {
+      problems.push(`journal tree directory is not canonical: ${path}`);
+    }
+  } catch (error) {
+    problems.push(`journal tree directory cannot be resolved canonically: ${safeMessage(error)}`);
+  }
+}
+
+function revalidateAncestry(observed: AncestryObservation, problems: string[]): void {
+  for (const entry of observed.entries) {
+    try {
+      const after = lstatSync(entry.path, { bigint: true });
+      if (observationMetadata(entry.stat) !== observationMetadata(after)) {
+        problems.push(`journal tree ancestry changed while fingerprinting: ${entry.path}`);
+      }
+    } catch (error) {
+      problems.push(`journal tree ancestry became unavailable: ${safeMessage(error)}`);
+    }
+  }
+  if (observed.missingPath) {
+    try {
+      lstatSync(observed.missingPath);
+      problems.push(`journal tree appeared while fingerprinting: ${observed.missingPath}`);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        problems.push(`journal tree missing state is ambiguous: ${safeMessage(error)}`);
+      }
+    }
+  }
+}
+
+export function requireStableFingerprint(observed: PartitionFingerprint, context: string): string {
+  if (observed.problem) throw new Error(`${context}: ${observed.problem}`);
+  return observed.fingerprint;
 }
 
 export function exportPartitionEntries(source: string, destination: string) {
@@ -124,6 +292,70 @@ export function exportPartitionEntries(source: string, destination: string) {
     });
 }
 
+export function exportJournalRecovery(input: {
+  rootDir: string;
+  partitionDir: string;
+  partition: string;
+  recovery: JournalRecoveryState;
+  now: () => Date;
+}): ControlJournalExportReceipt {
+  const fingerprint = requireStableFingerprint(
+    fingerprintPartition(input.partitionDir, input.rootDir),
+    "journal recovery export input is unavailable",
+  );
+  const exportId = `journal-export-${input.now().getTime().toString(36)}-${randomUUID()}`;
+  const exportsRoot = join(input.rootDir, "recovery-exports");
+  ensureCanonicalPrivateDirectory(exportsRoot);
+  const bundlePath = join(exportsRoot, exportId);
+  ensureCanonicalPrivateDirectory(bundlePath);
+  try {
+    const entries = exportPartitionEntries(input.partitionDir, bundlePath);
+    const createdAt = input.now().toISOString();
+    const manifestPath = join(bundlePath, "manifest.json");
+    writeExclusiveFile(
+      manifestPath,
+      Buffer.from(
+        `${JSON.stringify(
+          {
+            schemaVersion: 1,
+            exportId,
+            partition: input.partition,
+            fingerprint,
+            recovery: input.recovery,
+            createdAt,
+            entries,
+          },
+          null,
+          2,
+        )}\n`,
+      ),
+      0o400,
+    );
+    fsyncDirectory(bundlePath);
+    if (
+      requireStableFingerprint(
+        fingerprintPartition(input.partitionDir, input.rootDir),
+        "journal recovery export input became unavailable",
+      ) !== fingerprint
+    ) {
+      throw new Error("journal changed during recovery export");
+    }
+    return {
+      schemaVersion: 1,
+      exportId,
+      partition: input.partition,
+      fingerprint,
+      bundlePath,
+      manifestSha256: sha256File(manifestPath),
+      createdAt,
+    };
+  } catch (error) {
+    rmSync(bundlePath, { recursive: true, force: true });
+    fsyncDirectory(exportsRoot);
+    throw error;
+  }
+}
+
 export function readOwnedFile(path: string): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -170,10 +402,13 @@ export function sha256File(path: string): string {
   return hashOwnedFile(path).toString("hex");
 }
 
-function hashOwnedFile(path: string): Buffer {
+function hashOwnedFile(path: string, expected?: BigIntStats): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const before = fstatSync(fd, { bigint: true });
+    if (expected && metadata(expected) !== metadata(before)) {
+      throw new Error(`journal file changed before hashing: ${path}`);
+    }
     assertOwnedRegular(path, before);
     const hash = createHash("sha256");
     const buffer = Buffer.allocUnsafe(64 * 1024);
@@ -212,6 +447,74 @@ function metadata(stat: BigIntStats): string {
   return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].join(
     ":",
   );
+}
+
+function securityMetadata(stat: BigIntStats): string {
+  const base = [entryType(stat), stat.mode & 0o777n, stat.uid, stat.gid];
+  if (!stat.isDirectory()) base.push(stat.nlink);
+  return base.join(":");
+}
+
+function identityMetadata(stat: BigIntStats): string {
+  return [stat.dev, stat.ino, securityMetadata(stat)].join(":");
+}
+
+function observationMetadata(stat: BigIntStats): string {
+  return [identityMetadata(stat), stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+}
+
+function entryType(stat: BigIntStats): string {
+  if (stat.isDirectory()) return "directory";
+  if (stat.isFile()) return "file";
+  if (stat.isSymbolicLink()) return "symlink";
+  return "other";
+}
+
+function safeReadlink(path: string): string {
+  try {
+    return readlinkSync(path);
+  } catch (error) {
+    return `unavailable:${errorCode(error) ?? "unknown"}`;
+  }
+}
+
+function fingerprintDirectory(
+  path: string,
+  hash: ReturnType<typeof createHash>,
+  before: BigIntStats,
+): void {
+  const names = readdirSync(path).sort();
+  for (const name of names) {
+    const entryPath = join(path, name);
+    const stat = lstatSync(entryPath, { bigint: true });
+    hash.update(`entry\0${name}\0${metadata(stat)}\0`);
+    if (stat.isSymbolicLink()) {
+      hash.update(`target\0${readlinkSync(entryPath)}\0`);
+      assertUnchanged(entryPath, stat);
+    } else if (stat.isFile() && stat.nlink === 1n) {
+      hash.update(hashOwnedFile(entryPath, stat));
+      assertUnchanged(entryPath, stat);
+    } else {
+      assertUnchanged(entryPath, stat);
+    }
+  }
+  if (readdirSync(path).sort().join("\0") !== names.join("\0")) {
+    throw new Error(`journal directory entries changed while hashing: ${path}`);
+  }
+  assertUnchanged(path, before);
+}
+
+function assertUnchanged(path: string, before: BigIntStats): void {
+  const after = lstatSync(path, { bigint: true });
+  if (metadata(before) !== metadata(after)) {
+    throw new Error(`journal tree changed while hashing: ${path}`);
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
 }
 
 export function writeExclusiveFile(path: string, bytes: Buffer, mode: number): void {

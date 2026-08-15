@@ -8,19 +8,17 @@ import type {
 } from "@claudexor/schema";
 import { isEphemeralRunScope } from "@claudexor/schema";
 import { hashJson, isClaudexorOwnedRuntimePath } from "@claudexor/util";
-import { commandProjection, type CommandStore } from "./command-store.js";
-import { JournalManager, type JournalProjectionSlot } from "./journal-manager.js";
-import { interactionProjection, type InteractionStore } from "./interactions.js";
+import type { CommandStore } from "./command-store.js";
+import type { JournalManager, JournalProjectionSlot } from "./journal-manager.js";
+import type { InteractionStore } from "./interactions.js";
 import {
-  operatorDecisionProjection,
   type OperatorDecisionRecord,
   type OperatorDecisionStore,
   type RecordedOperatorDecision,
 } from "./operator-decisions.js";
-import { runEventProjection, type RunEventStore } from "./run-events.js";
+import type { RunEventStore } from "./run-events.js";
 import type { ProjectStore } from "./projects.js";
 import {
-  threadProjection,
   type CreateThreadInput,
   type CreateTurnInput,
   type ThreadHeadPingSink,
@@ -33,18 +31,19 @@ import {
   completeDeliveryCommand,
   failDeliveryCommand,
 } from "./delivery-command.js";
+import {
+  activatePreparedProjectPartitions,
+  prepareProjectPartitions,
+  refreshProjectPartitionsPreparation,
+  ProjectPartitionCollection,
+  type ProjectPartitionsPreparation,
+} from "./project-partition-preparation.js";
+import { listProjectThreadsResilient } from "./project-thread-listing.js";
 
-interface ProjectPartition {
-  manager: JournalManager;
-  commands: JournalProjectionSlot<CommandStore>;
-  interactions: JournalProjectionSlot<InteractionStore>;
-  decisions: JournalProjectionSlot<OperatorDecisionStore>;
-  runEvents: JournalProjectionSlot<RunEventStore>;
-  threads: JournalProjectionSlot<ThreadStore>;
-}
-
+export type { ProjectPartitionsPreparation } from "./project-partition-preparation.js";
 export class ProjectPartitions implements CommandAuthority {
-  private readonly partitions = new Map<string, ProjectPartition>();
+  private readonly partitions: ProjectPartitionCollection;
+  private preparationResult: ProjectPartitionsPreparation | null = null;
 
   constructor(
     private readonly rootDir: string,
@@ -57,27 +56,83 @@ export class ProjectPartitions implements CommandAuthority {
     /** Global-partition `thread.head.updated` sink, threaded into every project ThreadStore. */
     private readonly headPing?: ThreadHeadPingSink,
   ) {
-    this.sync();
+    this.partitions = new ProjectPartitionCollection(rootDir, projects, headPing);
+  }
+
+  prepare(): ProjectPartitionsPreparation {
+    if (this.preparationResult) return this.preparationResult;
+    const prepared = prepareProjectPartitions({
+      rootDir: this.rootDir,
+      projects: this.projects,
+      headPing: this.headPing,
+    });
+    this.partitions.clear();
+    for (const [id, entry] of prepared.entries) this.partitions.set(id, entry);
+    this.preparationResult = prepared.receipt;
+    return prepared.receipt;
+  }
+
+  revalidatePreparation(): void {
+    if (!this.preparationResult) throw new Error("project partitions are not prepared");
+    for (const entry of this.partitions.values()) {
+      // A manager reopened by a recovery-route quarantine is live authority
+      // (C6): only still-prepared partitions revalidate.
+      if (entry.manager.ready()) continue;
+      entry.manager.revalidatePreparation();
+    }
+  }
+
+  /** Live stage-2 re-verdict for the in-process reopen (C6): quarantined
+   * partitions reopened by their manager count ready, and a registry that
+   * became readable after a global reopen restores coverage. Refreshes the
+   * cached receipt the activation gate checks. */
+  refreshPreparation(): ProjectPartitionsPreparation {
+    if (!this.preparationResult) throw new Error("project partitions are not prepared");
+    this.preparationResult = refreshProjectPartitionsPreparation({
+      rootDir: this.rootDir,
+      projects: this.projects,
+      headPing: this.headPing,
+      previous: this.preparationResult,
+      entries: this.partitions,
+    });
+    return this.preparationResult;
+  }
+
+  activatePrepared(): void {
+    if (!this.preparationResult) throw new Error("project partitions are not prepared");
+    activatePreparedProjectPartitions({
+      rootDir: this.rootDir,
+      projects: this.projects,
+      headPing: this.headPing,
+      receipt: this.preparationResult,
+      entries: this.partitions,
+      resetReceipt: (receipt) => (this.preparationResult = receipt),
+    });
+  }
+  recoverAfterStartup(): void {
+    for (const entry of this.partitions.values()) entry.manager.recoverAfterStartup();
   }
 
   all(): CommandStore[] {
     return [
       this.globalCommands.current(),
-      ...this.healthy().map((entry) => entry.commands.current()),
+      ...this.partitions.healthy().map((entry) => entry.commands.current()),
     ];
   }
 
   interactionStores(): InteractionStore[] {
     return [
       this.globalInteractions.current(),
-      ...this.healthy().map((entry) => entry.interactions.current()),
+      ...this.partitions.healthy().map((entry) => entry.interactions.current()),
     ];
   }
 
   interactionsForRequest(params: unknown): InteractionStore {
     const commandStore = this.forRequest(params);
     if (commandStore === this.globalCommands.current()) return this.globalInteractions.current();
-    const entry = this.healthy().find((candidate) => candidate.commands.current() === commandStore);
+    const entry = this.partitions
+      .healthy()
+      .find((candidate) => candidate.commands.current() === commandStore);
     if (!entry) throw new Error("command partition has no interaction authority");
     return entry.interactions.current();
   }
@@ -143,7 +198,7 @@ export class ProjectPartitions implements CommandAuthority {
 
   registerProject(input: Parameters<ProjectStore["register"]>[0]): Project {
     const project = this.projects.current().register(input);
-    this.ensure(project.id);
+    this.partitions.ensure(project.id);
     return project;
   }
 
@@ -169,13 +224,13 @@ export class ProjectPartitions implements CommandAuthority {
         reason: owned ? "root_inside_claudexor_runtime" : "root_permanently_missing",
       });
     }
-    if (retired.length > 0) this.sync();
+    if (retired.length > 0) this.partitions.sync();
     return retired;
   }
 
   relinkProject(id: string, root: string): Project {
     const project = this.projects.current().relink(id, root);
-    this.ensure(id).threads.current().relinkProjectRoot(project.root);
+    this.partitions.ensure(id).threads.current().relinkProjectRoot(project.root);
     return project;
   }
 
@@ -202,7 +257,7 @@ export class ProjectPartitions implements CommandAuthority {
         status: 404,
       });
     }
-    this.sync();
+    this.partitions.sync();
     const entry = this.partitions.get(id);
     if (entry) {
       if (!entry.manager.ready()) {
@@ -275,8 +330,13 @@ export class ProjectPartitions implements CommandAuthority {
   journal(partition: string): JournalManager {
     if (!partition.startsWith("project:")) throw unknownPartition(partition);
     const id = partition.slice("project:".length);
+    const prepared = this.partitions.get(id);
+    if (prepared) return prepared.manager;
+    if (this.preparationResult?.coverage === "global_registry_unavailable") {
+      throw unknownPartition(partition);
+    }
     if (!id || !this.projects.current().get(id)) throw unknownPartition(partition);
-    return this.ensure(id).manager;
+    return this.partitions.ensure(id).manager;
   }
 
   /** `ephemeral`: the caller declared this root ONE-SHOT (INV-035) — never registered, so the
@@ -294,39 +354,14 @@ export class ProjectPartitions implements CommandAuthority {
     return this.listThreadsResilient().threads;
   }
 
-  /**
-   * Thread listing that is RESILIENT to a dead project (F2): a
-   * registered project whose filesystem root has vanished (e.g. a swept ghost
-   * envelope worktree) is SKIPPED with a disclosed per-project problem instead
-   * of failing the whole listing, while every other project's threads load.
-   * Each store sorts ITS threads by recency, but the stores concatenate —
-   * without a merge-sort a fresh project thread lands below every global one
-   * (dogfood: the fresh thread sank to the bottom). One global recency order.
-   */
+  /** Dead-project-resilient listing in one global recency order (F2);
+   * the mechanics live in project-thread-listing.ts. */
   listThreadsResilient(): { threads: Thread[]; problems: ControlProjectListingProblem[] } {
-    this.sync();
-    const registry = this.projects.current();
-    const threads: Thread[] = [...this.globalThreads.current().listThreads()];
-    const problems: ControlProjectListingProblem[] = [];
-    for (const [id, entry] of this.partitions) {
-      if (!entry.manager.ready()) continue;
-      const root = registry.get(id)?.root;
-      if (!root) continue;
-      if (!existsSync(root)) {
-        problems.push({
-          projectId: id,
-          root,
-          code: "project_root_missing",
-          message: `project root no longer exists: ${root}`,
-        });
-        continue;
-      }
-      for (const thread of entry.threads.current().listThreads()) threads.push(thread);
-    }
-    threads.sort((a, b) =>
-      a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0,
-    );
-    return { threads, problems };
+    return listProjectThreadsResilient({
+      partitions: this.partitions,
+      projects: this.projects,
+      globalThreads: this.globalThreads,
+    });
   }
 
   getThread(id: string): Thread | undefined {
@@ -371,7 +406,7 @@ export class ProjectPartitions implements CommandAuthority {
   }
 
   assertCredentialProfileInvalidationReady(): void {
-    this.sync();
+    this.partitions.sync();
     const unavailable = [...this.partitions.entries()]
       .filter(([, entry]) => !entry.manager.ready())
       .map(([id]) => id);
@@ -490,41 +525,6 @@ export class ProjectPartitions implements CommandAuthority {
     this.partitions.clear();
   }
 
-  private sync(): void {
-    const ids = new Set(
-      this.projects
-        .current()
-        .list()
-        .map((project) => project.id),
-    );
-    for (const id of ids) this.ensure(id);
-    for (const [id, entry] of this.partitions) {
-      if (ids.has(id)) continue;
-      entry.manager.close();
-      this.partitions.delete(id);
-    }
-  }
-
-  private ensure(projectId: string): ProjectPartition {
-    const existing = this.partitions.get(projectId);
-    if (existing) return existing;
-    const manager = new JournalManager(this.rootDir, { partition: `project:${projectId}` });
-    const commands = manager.registerProjection(commandProjection());
-    const interactions = manager.registerProjection(interactionProjection());
-    const decisions = manager.registerProjection(operatorDecisionProjection());
-    const runEvents = manager.registerProjection(runEventProjection());
-    const threads = manager.registerProjection(threadProjection(this.headPing));
-    manager.start();
-    const entry = { manager, commands, interactions, decisions, runEvents, threads };
-    this.partitions.set(projectId, entry);
-    return entry;
-  }
-
-  private healthy(): ProjectPartition[] {
-    this.sync();
-    return [...this.partitions.values()].filter((entry) => entry.manager.ready());
-  }
-
   /**
    * Canonical roots whose partition journal is READY — the set whose thread
    * lineage / job records are trustworthy. Retention (W3.6) fails CLOSED on a
@@ -533,18 +533,10 @@ export class ProjectPartitions implements CommandAuthority {
    * so its referenced runs would otherwise look unreferenced).
    */
   healthyProjectRoots(): string[] {
-    this.sync();
-    const registry = this.projects.current();
-    const roots: string[] = [];
-    for (const [id, entry] of this.partitions) {
-      if (!entry.manager.ready()) continue;
-      const root = registry.get(id)?.root;
-      if (root) roots.push(root);
-    }
-    return roots;
+    return this.partitions.healthyRoots();
   }
 
-  private partitionForRoot(root: string): ProjectPartition {
+  private partitionForRoot(root: string) {
     const project = this.projects.current().findByRoot(root);
     if (!project) {
       throw Object.assign(new Error(`project is not registered: ${root}`), {
@@ -552,13 +544,13 @@ export class ProjectPartitions implements CommandAuthority {
         status: 404,
       });
     }
-    return this.ensure(project.id);
+    return this.partitions.ensure(project.id);
   }
 
   private threadStores(): ThreadStore[] {
     return [
       this.globalThreads.current(),
-      ...this.healthy().map((entry) => entry.threads.current()),
+      ...this.partitions.healthy().map((entry) => entry.threads.current()),
     ];
   }
 
@@ -588,7 +580,9 @@ export class ProjectPartitions implements CommandAuthority {
 
   private commandStoreForThreadStore(store: ThreadStore): CommandStore {
     if (store === this.globalThreads.current()) return this.globalCommands.current();
-    const entry = this.healthy().find((candidate) => candidate.threads.current() === store);
+    const entry = this.partitions
+      .healthy()
+      .find((candidate) => candidate.threads.current() === store);
     if (!entry) throw new Error("thread partition has no command authority");
     return entry.commands.current();
   }
@@ -596,7 +590,9 @@ export class ProjectPartitions implements CommandAuthority {
   private decisionStoreForRequest(params: unknown): OperatorDecisionStore {
     const commands = this.forRequest(params);
     if (commands === this.globalCommands.current()) return this.globalDecisions.current();
-    const entry = this.healthy().find((candidate) => candidate.commands.current() === commands);
+    const entry = this.partitions
+      .healthy()
+      .find((candidate) => candidate.commands.current() === commands);
     if (!entry) throw new Error("command partition has no operator-decision authority");
     return entry.decisions.current();
   }
@@ -604,7 +600,9 @@ export class ProjectPartitions implements CommandAuthority {
   private runEventStoreForRequest(params: unknown): RunEventStore {
     const commands = this.forRequest(params);
     if (commands === this.globalCommands.current()) return this.globalRunEvents.current();
-    const entry = this.healthy().find((candidate) => candidate.commands.current() === commands);
+    const entry = this.partitions
+      .healthy()
+      .find((candidate) => candidate.commands.current() === commands);
     if (!entry) throw new Error("command partition has no run-event authority");
     return entry.runEvents.current();
   }

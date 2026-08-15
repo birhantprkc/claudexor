@@ -606,27 +606,6 @@ final class AppModel {
         return url.path
     }
 
-    func refreshSecrets(locationID requestedLocationID: ExecutionLocationID? = nil) async {
-        let locationID = requestedLocationID ?? activeExecutionLocation
-        guard let requestClient = gateway(for: locationID) else { return }
-        do {
-            let response = try await requestClient.listSecrets()
-            if locationID == .local {
-                secretBackend = response.backend
-                storedSecrets = response.secrets
-            } else {
-                remoteSecretBackends[locationID] = response.backend
-                remoteStoredSecrets[locationID] = response.secrets
-            }
-        } catch {
-            if locationID == .local {
-                secretBackend = "unknown"
-            } else {
-                remoteSecretBackends[locationID] = "unknown"
-            }
-        }
-    }
-
     /// Model-internal busy bracket for turn-start paths that live in other
     /// files (retryTurn in AppModelTrust.swift): `turnSubmitting` keeps its
     /// private(set) so views can never write it directly.
@@ -805,38 +784,6 @@ final class AppModel {
     }
 
     // MARK: Threads (chat/session-first)
-
-    /// Returns true when the list now REFLECTS server truth (incl. the honest
-    /// 501 empty state); false on transport failure (last-known rows kept) so
-    /// the ping watermark can surrender instead of dropping future pings.
-    @discardableResult
-    func refreshThreads() async -> Bool {
-        guard let client else { return false }
-        do {
-            let list = try await client.listThreads()
-            threads = list.threads
-            projectListingProblems = list.problems
-            if list.droppedThreads > 0 {
-                // Per-row salvage disclosed: the store carried rows this
-                // app build cannot decode — say so instead of hiding them.
-                threadStatus = "\(list.droppedThreads) thread(s) could not be decoded by this app version and are hidden."
-            } else if threadStatus?.contains("could not be decoded") == true {
-                // The condition is gone; a stale warning must not linger.
-                threadStatus = nil
-            }
-            return true
-        } catch let GatewayError.http(status, _) where status == 501 {
-            // Engine builds without thread support: honestly empty.
-            threads = []
-            projectListingProblems = []
-            return true
-        } catch {
-            // A transport/decode failure is NOT an empty thread list: keep the
-            // last-known rows and surface the error.
-            threadStatus = "Could not refresh threads: \(userMessage(for: error))"
-            return false
-        }
-    }
 
     /// The thread the conversation is currently showing (detail preferred — it is
     /// the freshest copy after a PATCH/turn — falling back to the list summary).
