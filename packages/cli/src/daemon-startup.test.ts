@@ -66,9 +66,16 @@ function partitionsPreparation(
   } as unknown as ProjectPartitionsPreparation;
 }
 
-function orderedFixture(options: { failActivation?: boolean } = {}) {
+function orderedFixture(options: { failActivation?: boolean; failRevalidation?: boolean } = {}) {
   const order: string[] = [];
   const admission = new DaemonStartupAdmission();
+  const recoveryRequired = () =>
+    new JournalRecoveryRequiredError({
+      status: "recovery_required",
+      discardedTailBytes: 0,
+      reason: "journal changed during validation",
+      offset: 0,
+    } as never);
   return {
     order,
     admission,
@@ -80,20 +87,18 @@ function orderedFixture(options: { failActivation?: boolean } = {}) {
         },
       },
       global: {
+        revalidatePreparation: () => {
+          order.push("global.revalidatePreparation");
+          if (options.failRevalidation) throw recoveryRequired();
+        },
         activatePrepared: () => {
           order.push("global.activatePrepared");
-          if (options.failActivation) {
-            throw new JournalRecoveryRequiredError({
-              status: "recovery_required",
-              discardedTailBytes: 0,
-              reason: "journal changed during validation",
-              offset: 0,
-            } as never);
-          }
+          if (options.failActivation) throw recoveryRequired();
         },
         recoverAfterStartup: () => order.push("global.recoverAfterStartup"),
       },
       partitions: {
+        revalidatePreparation: () => order.push("partitions.revalidatePreparation"),
         activatePrepared: () => order.push("partitions.activatePrepared"),
         recoverAfterStartup: () => order.push("partitions.recoverAfterStartup"),
       },
@@ -114,12 +119,14 @@ describe("two-stage startup admission ordering (issue #165 D5)", () => {
     expect(admission.snapshot()).toBe("normal");
   });
 
-  it("runs floor advance and destructive recovery strictly AFTER the read-only verdict, in order", async () => {
+  it("revalidates every preparation FIRST; floor advance and destructive recovery follow only on all-green (C3)", async () => {
     const { order, admission, input } = orderedFixture();
     const mode = await completeStartupAdmission({ ...input, blockedPartitions: [] });
     expect(mode).toBe("normal");
     expect(admission.snapshot()).toBe("normal");
     expect(order).toEqual([
+      "global.revalidatePreparation",
+      "partitions.revalidatePreparation",
       "advanceFloor",
       "crashGc",
       "global.activatePrepared",
@@ -127,6 +134,14 @@ describe("two-stage startup admission ordering (issue #165 D5)", () => {
       "global.recoverAfterStartup",
       "partitions.recoverAfterStartup",
     ]);
+  });
+
+  it("a revalidation failure keeps the floor UNCHANGED with zero destructive work (C3)", async () => {
+    const { order, admission, input } = orderedFixture({ failRevalidation: true });
+    const mode = await completeStartupAdmission({ ...input, blockedPartitions: [] });
+    expect(mode).toBe("recovery_only");
+    expect(admission.snapshot()).toBe("recovery_only");
+    expect(order).toEqual(["global.revalidatePreparation"]);
   });
 
   it("keeps the floor unchanged and destructive work OFF for a recovery-needed partition", async () => {
@@ -145,7 +160,13 @@ describe("two-stage startup admission ordering (issue #165 D5)", () => {
     const mode = await completeStartupAdmission({ ...input, blockedPartitions: [] });
     expect(mode).toBe("recovery_only");
     expect(admission.snapshot()).toBe("recovery_only");
-    expect(order).toEqual(["advanceFloor", "crashGc", "global.activatePrepared"]);
+    expect(order).toEqual([
+      "global.revalidatePreparation",
+      "partitions.revalidatePreparation",
+      "advanceFloor",
+      "crashGc",
+      "global.activatePrepared",
+    ]);
     expect(order).not.toContain("global.recoverAfterStartup");
   });
 
