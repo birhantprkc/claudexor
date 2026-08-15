@@ -1,4 +1,14 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -259,6 +269,63 @@ describe("root authority floor advancement and persistence", () => {
     // A pre-fix-shaped flat acquisition attempt still fails closed: the anchor
     // directory exists and carries no parseable owner record.
     expect(() => readFileSync(join(anchor, "owner.json"))).toThrow();
+  });
+});
+
+describe("root authority validation hardening (C9, sol SCOPE-07)", () => {
+  it("a released grant superseded by a newer generation cannot advance the floor", () => {
+    const { socketPath, anchor } = tempSocket();
+    const stale = grantFor(socketPath, "3.4.0");
+    stale.release();
+    // A newer generation owns the root now; the stale grant must be fenced.
+    const live = grantFor(socketPath, "3.5.0");
+    expect(() => stale.advanceFloor()).toThrow(
+      expect.objectContaining({ code: "root_authority_grant_stale" }),
+    );
+    // The live generation's authority is undisturbed by the stale attempt.
+    expect(readRootAuthority(anchor)).toMatchObject({ status: "valid" });
+    expect(live.advanceFloor().floor).toBe("3.5.0");
+    live.release();
+  });
+
+  it("refuses to overwrite a missing or corrupt marker at floor advancement", () => {
+    const { socketPath, marker } = tempSocket();
+    const grant = grantFor(socketPath, "3.4.0");
+    // The marker vanishes underneath the serving daemon: refusal, no rewrite.
+    rmSync(marker);
+    expect(() => grant.advanceFloor()).toThrow(
+      expect.objectContaining({ code: "root_authority_unreadable" }),
+    );
+    expect(existsSync(marker)).toBe(false);
+    // A corrupt marker is typed-refused and its bytes stay untouched.
+    writeFileSync(marker, "not json\n", { mode: 0o600 });
+    expect(() => grant.advanceFloor()).toThrow(
+      expect.objectContaining({ code: "root_authority_unreadable" }),
+    );
+    expect(readFileSync(marker, "utf8")).toBe("not json\n");
+    grant.release();
+  });
+
+  it("refuses a malformed candidate semantic version even on a fresh floor", () => {
+    const { socketPath, anchor } = tempSocket();
+    expect(() => grantFor(socketPath, "not-a-semver")).toThrow(
+      expect.objectContaining({ code: "root_authority_candidate_invalid" }),
+    );
+    // Nothing was installed by the refused candidate.
+    expect(readRootAuthority(anchor)).toMatchObject({ status: "absent" });
+  });
+
+  it("refuses a world-writable/foreign-mode marker (validated like startup diagnostics)", () => {
+    if (!process.getuid) return; // POSIX-only privacy semantics
+    const { socketPath, anchor, marker } = tempSocket();
+    writeMarker(anchor, { schemaVersion: 2, epoch: ROOT_AUTHORITY_EPOCH, state: "vacant" });
+    chmodSync(marker, 0o666);
+    expect(readRootAuthority(anchor)).toMatchObject({ status: "invalid" });
+    expect(() => grantFor(socketPath, "3.4.0")).toThrow(
+      expect.objectContaining({ code: "root_authority_unreadable" }),
+    );
+    // The foreign-mode bytes were not repaired or replaced.
+    expect(lstatSync(marker).mode & 0o777).toBe(0o666);
   });
 });
 
