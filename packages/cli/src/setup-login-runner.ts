@@ -2,9 +2,9 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProcessGroupService, defaultProcessGroupService } from "@claudexor/core";
+import { WINDOWS_RUNTIME_ENV_KEYS, processGroupServiceWithWindowsSupport } from "@claudexor/core";
 import {
   startCodexDeviceLogin,
   type CodexAppServerConnection,
@@ -36,24 +36,9 @@ export interface SetupLoginRunnerOptions {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   spawnProcess?: typeof spawn;
-  processGroupService?: ProcessGroupService;
+  processGroupService?: ReturnType<typeof processGroupServiceWithWindowsSupport>;
   selfPid?: number;
   runnerPath?: string;
-}
-
-function spawnTargetProcess(
-  binary: string,
-  args: readonly string[],
-  options: SpawnOptions,
-  spawnProcess: typeof spawn = spawn,
-): ChildProcess {
-  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(binary)) {
-    return spawnProcess(binary, [...args], {
-      ...options,
-      shell: true,
-    });
-  }
-  return spawnProcess(binary, [...args], options);
 }
 
 /**
@@ -65,7 +50,7 @@ export async function runSetupLogin(
   manifestPath: string,
   options: SetupLoginRunnerOptions = {},
 ): Promise<number> {
-  const manifest = validateManifest(manifestPath);
+  const manifest = readLoginManifest(manifestPath);
   const spawnProcess = options.spawnProcess ?? spawn;
   const runnerPath = options.runnerPath ?? fileURLToPath(import.meta.url);
   const worker = spawnProcess(process.execPath, [runnerPath, "--worker", resolve(manifestPath)], {
@@ -83,11 +68,11 @@ export async function runSetupLoginWorker(
   manifestPath: string,
   options: SetupLoginRunnerOptions = {},
 ): Promise<number> {
-  const manifest = validateManifest(manifestPath);
+  const manifest = readLoginManifest(manifestPath);
   const now = options.now ?? (() => new Date());
   const sleep = options.sleep ?? ((ms) => new Promise<void>((done) => setTimeout(done, ms)));
   const spawnProcess = options.spawnProcess ?? spawn;
-  const processGroups = options.processGroupService ?? defaultProcessGroupService;
+  const processGroups = options.processGroupService ?? processGroupServiceWithWindowsSupport();
   const captured = processGroups.captureLeader(options.selfPid ?? process.pid);
   if (captured.status !== "known") {
     throw new Error(
@@ -210,7 +195,7 @@ export async function runSetupLoginWorker(
           ? ["inherit", "pipe", "pipe"]
           : "inherit",
     };
-    const child = spawnTargetProcess(manifest.binary, manifest.args, spawnOptions, spawnProcess);
+    const child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
     if (teeOutput) {
       const tee = (sink: NodeJS.WriteStream) => (chunk: Buffer) => {
         sink.write(chunk);
@@ -266,17 +251,12 @@ async function runDeviceCodeLogin(
   }
   let child: ChildProcess;
   try {
-    child = spawnTargetProcess(
-      manifest.binary,
-      manifest.args,
-      {
-        cwd: manifest.cwd,
-        env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
-        detached: false,
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-      spawnProcess,
-    );
+    child = spawnProcess(manifest.binary, manifest.args, {
+      cwd: manifest.cwd,
+      env: nativeLoginEnv(manifest.harness, process.env, manifest.profileConfigDir),
+      detached: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   } catch {
     persistFailure(manifest, now, permit.issuedAt, "spawn_failed");
     return 1;
@@ -450,18 +430,12 @@ function probeLoginHelp(
     };
     let probe: ReturnType<typeof spawn>;
     try {
-      probe = spawnTargetProcess(
-        binary,
-        ["login", "--help"],
-        {
-          cwd: dirname(resolve(binary)),
-          // Same provider-secret-scrubbed allowlist env as the real vendor
-          // spawn — the probe must never inherit the Terminal's full env.
-          env: probeEnv,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-        spawnProcess,
-      );
+      probe = spawnProcess(binary, ["login", "--help"], {
+        // Same provider-secret-scrubbed allowlist env as the real vendor
+        // spawn — the probe must never inherit the Terminal's full env.
+        env: probeEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     } catch {
       settle(false);
       return;
@@ -477,14 +451,10 @@ function probeLoginHelp(
     probe.stdout?.on("data", retain);
     probe.stderr?.on("data", retain);
     probe.on("error", () => settle(false));
-    let exitCode: number | null = null;
-    probe.on("exit", (code) => {
-      exitCode = code;
-    });
-    probe.on("close", (code) => {
-      const finalCode = code ?? exitCode ?? probe.exitCode;
-      settle(finalCode === 0 && retainedBytes > 0);
-    });
+    // `close` (streams drained) + exit code 0: an errored-but-chatty probe
+    // (old CLI printing \"unrecognized subcommand\") must fail OPEN to the
+    // real spawn, and `exit` could race the final help-output chunks.
+    probe.on("close", (code) => settle(code === 0 && retainedBytes > 0));
     const timer = setTimeout(() => {
       try {
         probe.kill("SIGKILL");
@@ -495,17 +465,6 @@ function probeLoginHelp(
     }, 10_000);
     timer.unref?.();
   });
-}
-
-function validateManifest(manifestPath: string): SetupLoginManifest {
-  const manifest = readLoginManifest(manifestPath);
-  const base = realpathSync(dirname(resolve(manifestPath)));
-  for (const output of [manifest.statePath, manifest.resultPath, manifest.permitPath]) {
-    const parent = realpathSync(dirname(resolve(output)));
-    if (parent !== base)
-      throw new Error("setup-login sidecar escapes its job directory");
-  }
-  return manifest;
 }
 
 function persistResult(
@@ -584,6 +543,7 @@ function runnerBootstrapEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Pro
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "NODE_EXTRA_CA_CERTS",
+    ...WINDOWS_RUNTIME_ENV_KEYS,
   ] as const) {
     if (source[key] !== undefined) env[key] = source[key];
   }

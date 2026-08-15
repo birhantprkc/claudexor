@@ -96,22 +96,24 @@ describe("resolveHarnessBinary", () => {
     expect(resolveHarnessBinary("tool-b", env)).toBe(target);
   });
 
-  it("forwards the injected platform into name-candidate expansion (win32 tries PATHEXT)", () => {
-    // The injected platform must drive BOTH PATH ordering AND the name candidates:
-    // on a darwin host, an injected win32 has to try `tool-w.CMD` (PATHEXT), while an
-    // injected darwin sees only the bare name and never finds the .CMD file.
+  it("resolves only Windows executable images, never a shim (git.exe rule)", () => {
+    // Node cannot launch a `.cmd`/`.bat` without a shell, and Claudexor never
+    // spawns a harness through one, so an npm shim must not resolve at all —
+    // the same call v3.3.9 made for `git.exe`.
     const home = join(root, "win-home");
     const binDir = join(root, "win-bin");
-    const target = fakeBin(binDir, "tool-w.CMD");
-    const env = {
-      HOME: home,
-      PATH: binDir,
-      PATHEXT: ".COM;.EXE;.BAT;.CMD",
-    } as NodeJS.ProcessEnv;
+    fakeBin(binDir, "tool-w"); // npm's extensionless sh shim
+    fakeBin(binDir, "tool-w.CMD");
+    const env = { HOME: home, PATH: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" } as NodeJS.ProcessEnv;
     // Pin a non-launchable runner so the managed-runner prepend stays out of the way.
-    expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBe(target);
-    // Injected darwin → bare name only, so the .CMD candidate is never tried.
-    expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "darwin")).toBeNull();
+    expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBeNull();
+    const image = fakeBin(binDir, "tool-w.exe");
+    expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "win32")).toBe(image);
+    // An explicit spelling is honored as written; POSIX keeps the bare name.
+    expect(resolveHarnessBinary("tool-w.exe", env, "/no/such/node", "win32")).toBe(image);
+    expect(resolveHarnessBinary("tool-w", env, "/no/such/node", "darwin")).toBe(
+      join(binDir, "tool-w"),
+    );
   });
 
   it("brokenInstallAdvisory returns null when the binary resolves or nothing is on disk", () => {
@@ -289,22 +291,19 @@ describe("managedRunnerNodeDir (QA-022 grandchild-shell Node anchor)", () => {
     expect(managedRunnerNodeDir(join(root, "missing", "node"), "darwin")).toBeNull();
   });
 
-  it.skipIf(process.platform === "win32")(
-    "returns null when the runner dir is group/world-writable (PATH injection surface)",
-    () => {
-      const dir = join(root, "writable", "Resources");
-      const exec = fakeNode(dir);
-      // A world-writable runner dir lets a local attacker drop a malicious node.
-      chmodSync(dir, 0o777);
-      expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
-      // Group-writable alone is also refused.
-      chmodSync(dir, 0o775);
-      expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
-      // Owner-only is accepted again.
-      chmodSync(dir, 0o755);
-      expect(managedRunnerNodeDir(exec, "darwin")).toBe(dir);
-    },
-  );
+  it("returns null when the runner dir is group/world-writable (PATH injection surface)", () => {
+    const dir = join(root, "writable", "Resources");
+    const exec = fakeNode(dir);
+    // A world-writable runner dir lets a local attacker drop a malicious node.
+    chmodSync(dir, 0o777);
+    expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
+    // Group-writable alone is also refused.
+    chmodSync(dir, 0o775);
+    expect(managedRunnerNodeDir(exec, "darwin")).toBeNull();
+    // Owner-only is accepted again.
+    chmodSync(dir, 0o755);
+    expect(managedRunnerNodeDir(exec, "darwin")).toBe(dir);
+  });
 
   it("anchors the REAL dir when execPath is a symlinked launcher", () => {
     const realDir = join(root, "real", "Resources");
@@ -317,20 +316,17 @@ describe("managedRunnerNodeDir (QA-022 grandchild-shell Node anchor)", () => {
     expect(managedRunnerNodeDir(linked, "darwin")).toBe(realDir);
   });
 
-  it.skipIf(process.platform === "win32")(
-    "returns null when the symlink resolves into a group/world-writable real dir",
-    () => {
-      const realDir = join(root, "real2", "Resources");
-      const exec = fakeNode(realDir);
-      chmodSync(realDir, 0o777);
-      const linkDir = join(root, "safe-link");
-      mkdirSync(linkDir, { recursive: true, mode: 0o755 });
-      const linked = join(linkDir, "node");
-      symlinkSync(exec, linked);
-      // Even though the symlink's own dir is safe, the RESOLVED dir is writable.
-      expect(managedRunnerNodeDir(linked, "darwin")).toBeNull();
-    },
-  );
+  it("returns null when the symlink resolves into a group/world-writable real dir", () => {
+    const realDir = join(root, "real2", "Resources");
+    const exec = fakeNode(realDir);
+    chmodSync(realDir, 0o777);
+    const linkDir = join(root, "safe-link");
+    mkdirSync(linkDir, { recursive: true, mode: 0o755 });
+    const linked = join(linkDir, "node");
+    symlinkSync(exec, linked);
+    // Even though the symlink's own dir is safe, the RESOLVED dir is writable.
+    expect(managedRunnerNodeDir(linked, "darwin")).toBeNull();
+  });
 
   it("normalizedHarnessPath prepends the managed-runner dir ahead of every guessed entry", () => {
     const home = join(root, "home");

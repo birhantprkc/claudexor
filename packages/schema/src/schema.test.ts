@@ -1004,48 +1004,43 @@ describe("CredentialProfile validation (INV-135)", () => {
   });
 });
 
-describe("SetupLoginAbsolutePath and cross-platform validation", () => {
-  it("accepts valid POSIX absolute paths", () => {
-    for (const p of ["/var/run/job", "/Users/user/.codex", "/tmp/state.json", "/a"]) {
-      expect(SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(p).success).toBe(true);
+describe("SetupLoginAbsolutePath (cross-platform absolute paths)", () => {
+  const accepted = [
+    "/var/run/job",
+    "/Users/user/.codex",
+    "/a",
+    "C:\\Users\\user\\AppData\\Local\\claudexor",
+    "c:\\program files\\codex\\bin\\codex.exe",
+    "C:/Users/user/AppData/Local/claudexor",
+    "\\\\server\\share\\jobDir",
+    "//server/share/jobDir",
+  ];
+  const refused = [
+    "relative/path",
+    "./relative",
+    "../parent",
+    "runner-state.json",
+    // Drive- and root-relative spellings resolve against per-process state.
+    "C:relative\\without\\slash",
+    "d:foo/bar",
+    "\\Windows\\System32\\cmd.exe",
+    "",
+    "   ",
+    "/path/with/\0/nullbyte",
+    "C:\\path\\with\0null",
+  ];
+
+  it("accepts POSIX, drive-rooted and UNC paths and refuses the rest", () => {
+    for (const path of accepted) {
+      expect(SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(path).success).toBe(true);
+    }
+    for (const path of refused) {
+      expect(SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(path).success).toBe(false);
     }
   });
 
-  it("accepts valid Windows absolute paths with backslashes and forward slashes", () => {
-    for (const p of [
-      "C:\\Users\\user\\AppData\\Local\\claudexor",
-      "c:\\program files\\codex\\bin\\codex.exe",
-      "C:/Users/user/AppData/Local/claudexor",
-      "d:/data/runner-result.json",
-      "X:\\state\\runner-state.json",
-      "\\\\server\\share\\jobDir",
-      "//server/share/jobDir",
-    ]) {
-      const parsed = SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(p);
-      expect(parsed.success).toBe(true);
-    }
-  });
-
-  it("rejects relative, drive-relative, and malformed paths", () => {
-    for (const p of [
-      "relative/path",
-      "./relative",
-      "../parent",
-      "runner-state.json",
-      "C:relative\\without\\slash",
-      "d:foo/bar",
-      "",
-      "   ",
-      "/path/with/\0/nullbyte",
-      "C:\\path\\with\0null",
-    ]) {
-      const parsed = SetupLoginProtocol.SetupLoginAbsolutePath.safeParse(p);
-      expect(parsed.success).toBe(false);
-    }
-  });
-
-  it("validates SetupExecutableEvidence with Windows and POSIX realpaths", () => {
-    const validPosix = {
+  it("applies the same rule to executable evidence realpaths", () => {
+    const evidence = {
       realpath: "/usr/local/bin/codex",
       sha256: "0".repeat(64),
       size: 1024,
@@ -1053,23 +1048,22 @@ describe("SetupLoginAbsolutePath and cross-platform validation", () => {
       device: "123",
       inode: "456",
     };
-    expect(SetupExecutableEvidence.safeParse(validPosix).success).toBe(true);
+    expect(SetupExecutableEvidence.safeParse(evidence).success).toBe(true);
+    expect(
+      SetupExecutableEvidence.safeParse({
+        ...evidence,
+        realpath: "C:\\Program Files\\Codex\\codex.exe",
+      }).success,
+    ).toBe(true);
+    expect(
+      SetupExecutableEvidence.safeParse({ ...evidence, realpath: "./codex.exe" }).success,
+    ).toBe(false);
+  });
 
-    const validWin = {
-      realpath: "C:\\Program Files\\Codex\\codex.exe",
-      sha256: "0".repeat(64),
-      size: 1024,
-      mode: 0o755,
-      device: "123",
-      inode: "456",
-    };
-    expect(SetupExecutableEvidence.safeParse(validWin).success).toBe(true);
-
-    const invalidRel = {
-      ...validWin,
-      realpath: "./codex.exe",
-    };
-    expect(SetupExecutableEvidence.safeParse(invalidRel).success).toBe(false);
+  it("survives schema generation as a JSON Schema pattern, not a refinement", () => {
+    // A `.refine()` is invisible to schema:gen, so every wire consumer would
+    // silently accept relative paths; the regex is the shared contract.
+    expect(SetupLoginProtocol.ABSOLUTE_PATH_PATTERN.test("C:\\x")).toBe(true);
+    expect(SetupLoginProtocol.ABSOLUTE_PATH_PATTERN.test("C:x")).toBe(false);
   });
 });
-

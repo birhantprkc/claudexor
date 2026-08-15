@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export type ProcessIdentityPlatform = "linux" | "darwin" | "win32";
-export type ProcessIdentitySource = "procfs_stat" | "proc_pidinfo" | "win32_process";
+export type ProcessIdentitySource = "procfs_stat" | "proc_pidinfo" | "win32_process_times";
 export type ProcessIdentityUnknownReason =
   | "invalid_pid"
   | "unsupported_platform"
@@ -59,12 +59,14 @@ export interface ProcessObservationReader {
   observe(pid: number): ProcessObservation;
 }
 
-export interface DarwinHelperExecution {
+export interface ProcessHelperExecution {
   status: number | null;
   stdout: string;
   stderr: string;
   errorCode?: string;
 }
+/** @deprecated Use {@link ProcessHelperExecution} — the shape is not Darwin-specific. */
+export type DarwinHelperExecution = ProcessHelperExecution;
 
 export interface ProcessIdentityServiceOptions {
   platform?: string;
@@ -72,7 +74,15 @@ export interface ProcessIdentityServiceOptions {
   readTextFile?: (path: string) => string;
   /** Absolute path to the bundled proc_pidinfo helper; null disables it. */
   darwinHelperPath?: string | null;
-  runDarwinHelper?: (path: string, pid: number) => DarwinHelperExecution;
+  runDarwinHelper?: (path: string, pid: number) => ProcessHelperExecution;
+  /**
+   * OPT-IN win32 birth-time reader. Absent (the production default) keeps
+   * win32 `unsupported_platform`, so every consumer that fails closed there
+   * today — run capture, the orphan reaper, the daemon writer lease — is
+   * untouched. A lane that needs a Windows identity passes
+   * {@link executeWin32ProcessTimes} explicitly and owns the cost.
+   */
+  runWin32Reader?: (pid: number) => ProcessHelperExecution;
 }
 
 const LINUX_PROCESS_STATES = new Set<LinuxProcessState>([
@@ -248,9 +258,11 @@ export function isKnownProcessIdentity(value: unknown): value is KnownProcessIde
   }
   if (candidate.platform === "win32") {
     return (
-      candidate.source === "win32_process" &&
+      candidate.source === "win32_process_times" &&
       typeof candidate.startToken === "string" &&
-      /^win32:(0|[1-9][0-9]*)$/.test(candidate.startToken)
+      /^win32:[1-9][0-9]*$/.test(candidate.startToken) &&
+      // Windows has no process groups: a win32 handle is leader-only.
+      candidate.processGroupId === candidate.pid
     );
   }
   return false;
@@ -276,7 +288,7 @@ function bundledDarwinHelperPath(): string | null {
   return null;
 }
 
-function executeDarwinHelper(path: string, pid: number): DarwinHelperExecution {
+function executeDarwinHelper(path: string, pid: number): ProcessHelperExecution {
   const result = spawnSync(path, ["--pid", String(pid)], {
     encoding: "utf8",
     timeout: 1_500,
@@ -288,6 +300,75 @@ function executeDarwinHelper(path: string, pid: number): DarwinHelperExecution {
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
     errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code,
+  };
+}
+
+/**
+ * Windows birth-time reader. Windows exposes no `/proc`, so the kernel's own
+ * `GetProcessTimes` creation time is read through the absolute System32
+ * PowerShell (same pinned-path discipline as the `taskkill` owner) and printed
+ * as a locale-independent FILETIME. Blocking and ~sub-second, so it is opt-in
+ * per lane rather than a default for every spawn.
+ */
+export function executeWin32ProcessTimes(pid: number): ProcessHelperExecution {
+  const systemRoot = process.env["SystemRoot"] || "C:\\Windows";
+  const powershell = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+  const script =
+    "try { $p = [System.Diagnostics.Process]::GetProcessById(" +
+    String(pid) +
+    "); " +
+    "[Console]::Out.Write('claudexor-process-identity-win32-v1' + [char]9 + $p.Id + [char]9 + " +
+    "$p.StartTime.ToFileTimeUtc()); exit 0 } " +
+    "catch [System.ArgumentException] { exit 3 } " +
+    "catch [System.ComponentModel.Win32Exception] { exit 4 } " +
+    "catch { exit 5 }";
+  const result = spawnSync(
+    powershell,
+    ["-NoProfile", "-NonInteractive", "-NoLogo", "-Command", script],
+    {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+      env: { SystemRoot: systemRoot, PATH: `${systemRoot}\\System32` },
+    },
+  );
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code,
+  };
+}
+
+/** Strict parser for the win32 reader's locale-independent protocol. */
+export function parseWin32ReaderOutput(raw: string, expectedPid: number): ProcessIdentity {
+  if (!validPositiveInteger(expectedPid)) return unknown(expectedPid, "win32", "invalid_pid");
+  const line = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
+  const fields = line.trim().split("\t");
+  if (fields.length !== 3 || fields[0] !== "claudexor-process-identity-win32-v1") {
+    return unknown(expectedPid, "win32", "malformed_response");
+  }
+  const [, pidText, fileTime] = fields;
+  // The FILETIME is 100-ns ticks since 1601: ~1.3e17 today, well past
+  // Number.MAX_SAFE_INTEGER, so it stays an opaque decimal string.
+  if (
+    !pidText ||
+    !canonicalPositive(pidText) ||
+    Number(pidText) !== expectedPid ||
+    !fileTime ||
+    !/^[1-9][0-9]{0,19}$/.test(fileTime)
+  ) {
+    return unknown(expectedPid, "win32", "malformed_response");
+  }
+  return {
+    status: "known",
+    pid: expectedPid,
+    platform: "win32",
+    source: "win32_process_times",
+    startToken: `win32:${fileTime}`,
+    // Windows has no process groups; the handle addresses this process only.
+    processGroupId: expectedPid,
   };
 }
 
@@ -317,7 +398,8 @@ export class ProcessIdentityService implements ProcessIdentityReader {
   private readonly selfPid: number;
   private readonly readTextFile: (path: string) => string;
   private readonly darwinHelperPath: string | null;
-  private readonly runDarwinHelper: (path: string, pid: number) => DarwinHelperExecution;
+  private readonly runDarwinHelper: (path: string, pid: number) => ProcessHelperExecution;
+  private readonly runWin32Reader?: (pid: number) => ProcessHelperExecution;
   private cachedSelf: ProcessIdentity | undefined;
 
   constructor(options: ProcessIdentityServiceOptions = {}) {
@@ -327,6 +409,7 @@ export class ProcessIdentityService implements ProcessIdentityReader {
     this.darwinHelperPath =
       options.darwinHelperPath === undefined ? bundledDarwinHelperPath() : options.darwinHelperPath;
     this.runDarwinHelper = options.runDarwinHelper ?? executeDarwinHelper;
+    this.runWin32Reader = options.runWin32Reader;
   }
 
   read(pid: number): ProcessIdentity {
@@ -364,24 +447,18 @@ export class ProcessIdentityService implements ProcessIdentityReader {
   }
 
   private readWin32(pid: number): ProcessIdentity {
+    if (!this.runWin32Reader) return unknown(pid, "win32", "unsupported_platform");
+    let execution: ProcessHelperExecution;
     try {
-      process.kill(pid, 0);
-      return {
-        status: "known",
-        pid,
-        platform: "win32",
-        source: "win32_process",
-        startToken: `win32:${pid}`,
-        processGroupId: pid,
-      };
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ESRCH") return { status: "missing", pid, platform: "win32" };
-      if (code === "EPERM" || code === "EACCES") {
-        return unknown(pid, "win32", "permission_denied");
-      }
-      return unknown(pid, "win32", "io_error");
+      execution = this.runWin32Reader(pid);
+    } catch {
+      return unknown(pid, "win32", "helper_failed");
     }
+    if (execution.errorCode) return unknown(pid, "win32", "helper_unavailable");
+    if (execution.status === 3) return { status: "missing", pid, platform: "win32" };
+    if (execution.status === 4) return unknown(pid, "win32", "permission_denied");
+    if (execution.status !== 0) return unknown(pid, "win32", "helper_failed");
+    return parseWin32ReaderOutput(execution.stdout, pid);
   }
 }
 

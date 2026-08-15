@@ -1,22 +1,22 @@
-import { isAbsolute as isPosixAbsolute } from "node:path/posix";
-import { isAbsolute as isWin32Absolute } from "node:path/win32";
 import { z } from "zod/v3";
 
-export function isCrossPlatformAbsolutePath(value: string): boolean {
-  if (typeof value !== "string" || value.length === 0 || value.includes("\0")) {
-    return false;
-  }
-  return isPosixAbsolute(value) || isWin32Absolute(value);
-}
+/**
+ * Rooted path in either family: POSIX `/x`, a drive-rooted Windows path
+ * (`C:\x`, `C:/x`), or a UNC share (`\\host\share\x`). Deliberately a REGEX,
+ * not a `node:path` refinement: `packages/schema` is a pure contract package
+ * and only a regex survives `schema:gen` as a JSON Schema `pattern`, so every
+ * wire consumer keeps the same rule the daemon enforces. Drive-relative
+ * (`C:x`) and root-relative (`\x`) spellings are refused — both resolve
+ * against per-process state, so they are not absolute evidence — as is NUL.
+ */
+export const ABSOLUTE_PATH_PATTERN =
+  /^(?:\/[^\u0000]*|[A-Za-z]:[\\/][^\u0000]*|\\\\[^\\/\u0000]+[\\/][^\\/\u0000]+(?:[\\/][^\u0000]*)?)$/;
 
 export const SetupLoginJobId = z.string().regex(/^setup-[A-Za-z0-9-]+$/);
 export const SetupLoginExecutionId = z.string().regex(/^[A-Za-z0-9-]+$/);
-export const SetupLoginAbsolutePath = z
-  .string()
-  .min(1)
-  .refine(isCrossPlatformAbsolutePath, {
-    message: 'must be an absolute path (POSIX or Windows)',
-  });
+export const SetupLoginAbsolutePath = z.string().regex(ABSOLUTE_PATH_PATTERN, {
+  message: "must be an absolute POSIX or Windows path",
+});
 
 export const SetupClientPtyPermitWaitMs = z
   .number()

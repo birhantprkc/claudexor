@@ -4,7 +4,7 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
-  ProcessGroupService,
+  processGroupServiceWithWindowsSupport,
   parseProcessGroupHandle,
   type ProcessGroupHandle,
 } from "@claudexor/core";
@@ -119,7 +119,7 @@ export interface SetupJobManagerOptions {
   sleep?: (ms: number) => Promise<void>;
   spawn?: typeof spawn;
   openTerminal?: (scriptPath: string) => ChildProcess;
-  processGroups?: ProcessGroupService;
+  processGroups?: ReturnType<typeof processGroupServiceWithWindowsSupport>;
   runnerPath?: string;
   nodePath?: string;
 }
@@ -130,7 +130,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
   const rootDir = opts.rootDir ?? daemonDir();
   const store = opts.store ?? new SetupJobStore(rootDir, { now });
   const processGroups =
-    opts.processGroups ?? new ProcessGroupService({ platform: opts.platform ?? process.platform });
+    opts.processGroups ?? processGroupServiceWithWindowsSupport(opts.platform ?? process.platform);
   const processing = new Map<string, Promise<void>>();
   const terminations = new Map<string, Promise<ControlSetupJob>>();
   const verificationControllers = new Map<string, AbortController>();

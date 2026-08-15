@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join } from "node:path";
 import { isLaunchableExecutable } from "./executable-inspection.js";
 
 /**
@@ -44,13 +44,7 @@ export function managedRunnerNodeDir(
     return null;
   }
   // A group/world-writable runner dir is an injection surface — skip the prepend.
-  if (
-    process.platform !== "win32" &&
-    platform !== "win32" &&
-    dirIsGroupOrWorldWritable(runnerDir)
-  ) {
-    return null;
-  }
+  if (platform !== "win32" && dirIsGroupOrWorldWritable(runnerDir)) return null;
   return runnerDir;
 }
 
@@ -154,39 +148,35 @@ export function resolveHarnessBinary(
   execPath: string = process.execPath,
   platform: NodeJS.Platform = process.platform,
 ): string | null {
-  const names = binaryNameCandidates(bin, source, platform);
+  const names = binaryNameCandidates(bin, platform);
   if (isAbsolute(bin)) {
-    for (const name of names) if (isLaunchableExecutable(name)) return name;
+    for (const name of names) if (isLaunchableExecutable(name, platform)) return name;
     return null;
   }
   for (const dir of normalizedHarnessPath(source, execPath, platform).split(delimiter)) {
     if (!dir) continue;
     for (const name of names) {
       const candidate = join(dir, name);
-      if (isLaunchableExecutable(candidate)) return candidate;
+      if (isLaunchableExecutable(candidate, platform)) return candidate;
     }
   }
   return null;
 }
 
 /**
- * Name candidates in cmd.exe lookup order: on Windows a bare `codex` is
- * spawnable as `codex.exe`/`codex.cmd` via PATHEXT, so the resolver must try
- * those too or doctor reports null for a perfectly runnable CLI. Elsewhere the
- * name is used as-is. `platform` is forwarded from the resolver (same default,
- * so production is unchanged) so an injected win32 gets win32 name candidates,
- * not just win32 PATH ordering.
+ * Windows executable IMAGES only — the same call Claudexor already makes for
+ * `git.exe` (v3.3.9): Node refuses to launch `.cmd`/`.bat` without a shell,
+ * and Claudexor never spawns a harness through one, so offering those
+ * spellings would only resolve a path that cannot be run. A bare extensionless
+ * name is not offered either: on Windows it is an npm/sh shim, not an image.
+ * An explicit name that already carries an extension is honored as written.
  */
-function binaryNameCandidates(
-  bin: string,
-  source: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform = process.platform,
-): string[] {
+const WINDOWS_IMAGE_EXTENSIONS = [".exe", ".com"] as const;
+
+function binaryNameCandidates(bin: string, platform: NodeJS.Platform): string[] {
   if (platform !== "win32") return [bin];
-  const exts = (source.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
-  const lower = bin.toLowerCase();
-  if (exts.some((e) => lower.endsWith(e.toLowerCase()))) return [bin];
-  return [bin, ...exts.map((e) => bin + e)];
+  if (extname(bin) !== "") return [bin];
+  return WINDOWS_IMAGE_EXTENSIONS.map((ext) => bin + ext);
 }
 
 const HOMEBREW_PREFIXES = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
@@ -216,7 +206,11 @@ export function brokenInstallAdvisory(
 ): string | null {
   if (resolveHarnessBinary(bin, source) !== null) return null;
   const name = basename(bin);
-  const names = binaryNameCandidates(bin, source);
+  const names = binaryNameCandidates(bin, process.platform);
+  // A Windows npm install ships shims (`codex`, `codex.cmd`) and no image, so
+  // the resolver correctly finds nothing; say that instead of "not installed".
+  const shimNames =
+    process.platform === "win32" && extname(bin) === "" ? [bin, `${bin}.cmd`, `${bin}.bat`] : [];
   const candidates = isAbsolute(bin)
     ? names
     : normalizedHarnessPath(source)
@@ -238,6 +232,13 @@ export function brokenInstallAdvisory(
       brewRemediation(target ?? candidate) ??
       `reinstall ${name} or point the binary override at a working install`;
     return `${where} exists but ${how} — ${fix}`;
+  }
+  for (const dir of normalizedHarnessPath(source).split(delimiter)) {
+    if (!dir) continue;
+    for (const shim of shimNames) {
+      if (lstatKind(join(dir, shim)) === null) continue;
+      return `${join(dir, shim)} exists but is a launcher script, not a Windows executable — install the native ${name}.exe or point the binary override at one`;
+    }
   }
   if (!SAFE_BREW_NAME.test(name)) return null;
   for (const prefix of brewPrefixes) {

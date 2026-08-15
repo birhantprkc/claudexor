@@ -98,6 +98,29 @@ export function providerScrubEnv(keep: readonly string[] = []): Record<string, n
  * the allowlist (defense-in-depth on top of providerScrubEnv), and the adapter
  * re-adds its single chosen credential explicitly afterward.
  */
+/**
+ * Windows process-environment keys a spawned native CLI needs to start at all:
+ * the system root and shell that Windows itself resolves against, the temp and
+ * profile roots every vendor CLI writes to, and PATHEXT. Read case-insensitively
+ * on Windows, so the canonical uppercase spelling here matches any casing the OS
+ * used. Kept as one named set so every scrubbed spawn env forwards the same
+ * keys instead of each caller guessing.
+ */
+export const WINDOWS_RUNTIME_ENV_KEYS: readonly string[] = [
+  "SYSTEMROOT",
+  "SYSTEMDRIVE",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "TEMP",
+  "TMP",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+];
+
 export const CLEAN_ENV_ALLOWLIST: readonly string[] = [
   "PATH",
   "HOME",

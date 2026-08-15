@@ -1,6 +1,5 @@
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   linkSync,
   mkdtempSync,
@@ -42,20 +41,22 @@ import {
 
 let root: string;
 beforeEach(() => {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "setup-protocol-")));
+  root = realpathSync(mkdtempSync(join(tmpdir(), "setup protocol with spaces ")));
 });
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-const knownLeader = (pid: number): KnownProcessIdentity => ({
-  status: "known",
-  pid,
-  platform: "darwin",
-  source: "procfs_stat",
-  startToken: "token-1",
-  processGroupId: pid,
-});
+function knownLeader(pid: number): KnownProcessIdentity {
+  return {
+    status: "known",
+    pid,
+    platform: "darwin",
+    source: "proc_pidinfo",
+    startToken: "darwin:1710000000:000001",
+    processGroupId: pid,
+  };
+}
 
 function processGroups(pid = 4242): ProcessGroupService {
   const leader = knownLeader(pid);
@@ -80,109 +81,10 @@ function prepare(
   name = "setup-protocol",
 ) {
   const jobDir = join(root, name);
-  mkdirSync(jobDir, { mode: 0o700, recursive: true });
-  const isWin = process.platform === "win32";
-  const binary = join(jobDir, isWin ? "codex.exe" : "codex");
-  if (!isWin) {
-    writeFileSync(binary, script, { mode: 0o700 });
-    chmodSync(binary, 0o700);
-  } else {
-    copyFileSync(process.execPath, binary);
-    const loginScriptPath = join(jobDir, "login");
-    const stubCode = `
-import fs from "node:fs";
-const args = process.argv.slice(2);
-const script = ${JSON.stringify(script)};
-
-function run() {
-  if (script.includes('argv.txt')) {
-    fs.writeFileSync('argv.txt', args[0] || 'login');
-    const envVal = [
-      process.env.OPENAI_API_KEY || '',
-      process.env.ANTHROPIC_API_KEY || '',
-      process.env.OPENAI_BASE_URL || '',
-      process.env.CODEX_HOME || ''
-    ].join('|');
-    fs.writeFileSync('env.txt', envVal);
-    process.exitCode = 0;
-    return;
-  }
-
-  if (args.includes('--help')) {
-    if (script.includes('exit 7')) {
-      process.exitCode = 7;
-      return;
-    }
-    if (script.includes('--with-api-key')) {
-      process.stdout.write('Usage: codex login\\n  --with-api-key\\n');
-      process.exitCode = 0;
-      return;
-    }
-    if (script.includes('--device-auth')) {
-      process.stdout.write('Usage: codex login\\n  --device-auth\\n');
-      process.exitCode = 0;
-      return;
-    }
-    if (script.includes('error: probe crashed')) {
-      process.stderr.write('error: probe crashed but here is help\\nUsage: codex login\\n');
-      process.exitCode = 1;
-      return;
-    }
-    process.exitCode = 0;
-    return;
-  }
-
-  if (script.includes('touch real-run.txt')) {
-    fs.writeFileSync('real-run.txt', 'ok');
-  }
-
-  if (script.includes('device code rejected')) {
-    process.stderr.write('\\u001b[94mdevice code rejected\\u001b[0m by server\\n');
-    process.exitCode = 3;
-    return;
-  }
-
-  if (script.includes('конец')) {
-    process.stdout.write('начало ЛОГ вывод конец\\n');
-    process.exitCode = 4;
-    return;
-  }
-
-  if (script.includes('plain readable words here') || script.includes('secret_openai_live_key')) {
-    process.stderr.write('ESC in text: \\u001b[94mplain readable words here\\u001b[0m, osc8 hyperlink: \\u001b]8;;https://example.com\\u0007hyperlinked words\\u001b]8;;\\u0007, and a bare \\u001b[31mred\\u001b[0m token.\\n');
-    process.stderr.write('Bearer secret_openai_live_key_12345678901234567890\\n');
-    process.stderr.write('tail end\\n');
-    process.exitCode = 3;
-    return;
-  }
-
-  if (script.includes('clean success') || script.includes('Successfully logged in')) {
-    process.stdout.write('clean success\\n');
-    process.exitCode = 0;
-    return;
-  }
-
-  if (script.trim().endsWith("exit 7") || (script.includes('exit 7\\n') && !script.includes('--help'))) {
-    process.exitCode = 7;
-    return;
-  }
-
-  if (script.trim().endsWith("exit 3") || script.includes('exit 3')) {
-    process.exitCode = 3;
-    return;
-  }
-
-  if (script.includes('kill -TERM') || script.includes('SIGTERM')) {
-    process.exitCode = 143;
-    return;
-  }
-
-  process.exitCode = 0;
-}
-run();
-`;
-    writeFileSync(loginScriptPath, stubCode, "utf8");
-  }
+  mkdirSync(jobDir, { mode: 0o700 });
+  const binary = join(jobDir, "codex");
+  writeFileSync(binary, script, { mode: 0o700 });
+  chmodSync(binary, 0o700);
   const executable = captureExecutableEvidence(binary);
   const args = overrides.args ?? ["login"];
   const spec = sealLoginManifest({
@@ -314,15 +216,10 @@ describe("setup-login sidecar protocol v2", () => {
     }
   });
 
-  const exitCases =
-    process.platform === "win32"
-      ? [{ script: "sleep 0.01\nexit 7", exitCode: 7, signal: null }]
-      : [
-          { script: "sleep 0.01\nexit 7", exitCode: 7, signal: null },
-          { script: "sleep 0.01\nkill -TERM $$", exitCode: null, signal: "SIGTERM" },
-        ];
-
-  it.each(exitCases)("persists non-success exit evidence %#", async ({ script, exitCode, signal }) => {
+  it.each([
+    { script: "sleep 0.01\nexit 7", exitCode: 7, signal: null },
+    { script: "sleep 0.01\nkill -TERM $$", exitCode: null, signal: "SIGTERM" },
+  ])("persists non-success exit evidence %#", async ({ script, exitCode, signal }) => {
     const { manifestPath, spec } = prepare("#!/bin/sh\n" + script + "\n");
     issuePermit(spec);
     expect(
@@ -845,10 +742,7 @@ describe("D-17 device-code runner worker", () => {
       stdin,
       stderr: new PassThrough(),
       kill: () => {
-        setImmediate(() => {
-          emitter.emit("exit", 0, null);
-          emitter.emit("close", 0, null);
-        });
+        setImmediate(() => emitter.emit("exit", 0, null));
         return true;
       },
     }) as unknown as ChildProcess;
@@ -857,15 +751,10 @@ describe("D-17 device-code runner worker", () => {
 
   function prepareDeviceCode() {
     const jobDir = join(root, "device-code");
-    mkdirSync(jobDir, { mode: 0o700, recursive: true });
-    const isWin = process.platform === "win32";
-    const binary = join(jobDir, isWin ? "codex.exe" : "codex");
-    if (!isWin) {
-      writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-      chmodSync(binary, 0o700);
-    } else {
-      copyFileSync(process.execPath, binary);
-    }
+    mkdirSync(jobDir, { mode: 0o700 });
+    const binary = join(jobDir, "codex");
+    writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(binary, 0o700);
     const executable = captureExecutableEvidence(binary);
     const args = ["app-server", "--stdio"];
     const spec = sealLoginManifest({
@@ -964,10 +853,7 @@ describe("D-17 device-code runner worker", () => {
         stdin,
         stderr: new PassThrough(),
         kill: () => {
-          setImmediate(() => {
-            emitter.emit("exit", 0, null);
-            emitter.emit("close", 0, null);
-          });
+          setImmediate(() => emitter.emit("exit", 0, null));
           return true;
         },
       }) as unknown as ChildProcess;

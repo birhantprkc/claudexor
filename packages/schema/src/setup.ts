@@ -14,7 +14,7 @@ export const ProcessIdentityKnown = z
     status: z.literal("known"),
     pid: z.number().int().positive(),
     platform: z.enum(["linux", "darwin", "win32"]),
-    source: z.enum(["procfs_stat", "proc_pidinfo", "win32_process"]),
+    source: z.enum(["procfs_stat", "proc_pidinfo", "win32_process_times"]),
     startToken: z.string().min(1),
     processGroupId: z.number().int().positive(),
   })

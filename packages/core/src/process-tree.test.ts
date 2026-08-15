@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   descendantProcessGroupIds,
   killWindowsProcessTree,
+  processGroupServiceWithWindowsSupport,
   readProcessTable,
   reapProcessTree,
   resolveKillTreeStrategy,
@@ -566,5 +567,21 @@ describe("reapProcessTree on win32 (taskkill leg)", () => {
     });
     expect(windowsKills).toBe(0);
     expect(outcome.state).toBe("confirmed");
+  });
+});
+
+describe("processGroupServiceWithWindowsSupport", () => {
+  it("is the ordinary process-group service off win32", () => {
+    const platform = process.platform;
+    expect(processGroupServiceWithWindowsSupport(platform).captureLeader(process.pid)).toEqual(
+      new ProcessGroupService({ platform }).captureLeader(process.pid),
+    );
+  });
+
+  it("refuses to capture a win32 leader when the birth-time reader is unavailable", () => {
+    // The production win32 service reads through PowerShell; on this host the
+    // reader cannot run, so identity stays unprovable and nothing is signalled.
+    const service = processGroupServiceWithWindowsSupport("win32");
+    expect(service.captureLeader(process.pid).status).toBe("unknown");
   });
 });

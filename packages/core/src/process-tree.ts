@@ -17,16 +17,38 @@
  */
 import { spawnSync } from "node:child_process";
 import {
+  ProcessGroupService,
   defaultProcessGroupService,
   type ProcessGroupHandle,
-  type ProcessGroupService,
 } from "./process-group.js";
 import {
+  ProcessIdentityService,
   compareProcessIdentity,
   defaultProcessIdentityService,
+  executeWin32ProcessTimes,
   type KnownProcessIdentity,
   type ProcessIdentityReader,
 } from "./process-identity.js";
+
+/**
+ * Process-group service for a lane that must supervise its child on Windows
+ * too — today the interactive native-login runner and the daemon that watches
+ * it. Off win32 this is the ordinary service. On win32 it opts into the two
+ * Windows seams: the kernel birth-time identity reader (so a recycled pid is
+ * never mistaken for the recorded process) and this module's `taskkill /T /F`
+ * as the terminator. Every other consumer keeps the fail-closed default, where
+ * win32 identity stays unprovable and no group signal is ever sent.
+ */
+export function processGroupServiceWithWindowsSupport(
+  platform: NodeJS.Platform = process.platform,
+): ProcessGroupService {
+  if (platform !== "win32") return new ProcessGroupService({ platform });
+  return new ProcessGroupService({
+    platform,
+    identity: new ProcessIdentityService({ platform, runWin32Reader: executeWin32ProcessTimes }),
+    killProcessTree: (pid) => killWindowsProcessTree(pid).status,
+  });
+}
 
 export interface ProcessTreeNode {
   pid: number;

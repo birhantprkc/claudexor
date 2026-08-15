@@ -68,11 +68,7 @@ export function withExecutableInspection<T>(
     const stat = fstatSync(fd, { bigint: true });
     const named = lstatSync(canonical, { bigint: true });
     const identityStable =
-      !named.isSymbolicLink() &&
-      named.isFile() &&
-      (process.platform === "win32"
-        ? named.size === stat.size
-        : named.dev === stat.dev && named.ino === stat.ino);
+      !named.isSymbolicLink() && named.isFile() && named.dev === stat.dev && named.ino === stat.ino;
     const info: ExecutableInspection = {
       realpath: canonical,
       isRegularFile: stat.isFile(),

@@ -699,7 +699,7 @@
                               "enum": [
                                 "procfs_stat",
                                 "proc_pidinfo",
-                                "win32_process"
+                                "win32_process_times"
                               ]
                             },
                             "startToken": {
@@ -758,7 +758,7 @@
                       "properties": {
                         "realpath": {
                           "type": "string",
-                          "minLength": 1
+                          "pattern": "^(?:\\/[^\\u0000]*|[A-Za-z]:[\\\\/][^\\u0000]*|\\\\\\\\[^\\\\/\\u0000]+[\\\\/][^\\\\/\\u0000]+(?:[\\\\/][^\\u0000]*)?)$"
                         },
                         "sha256": {
                           "$ref": "#/definitions/ControlSetupJobEvent/anyOf/0/properties/job/properties/execution/properties/commandDigest"

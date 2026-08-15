@@ -397,6 +397,25 @@ describe("DurableJournal read-only preparation", () => {
     prepared.close();
   });
 
+  it("addresses partition entries with the platform separator, not a literal slash", () => {
+    // A `${dir}/${name}` key never matched the `join()`-built path callers look
+    // up on Windows, so a reopened daemon read the journal as missing and
+    // demanded recovery. Proven here by the receipt: the walker must see the
+    // journal bytes it just wrote.
+    const journalRoot = join(root, "separator");
+    const seeded = new DurableJournal({ rootDir: journalRoot, partition: "global" });
+    seeded.append("accepted", { value: 1 });
+    seeded.close();
+
+    const prepared = prepareJournal({ rootDir: journalRoot, partition: "global" });
+    expect(preparedState(prepared)).toMatchObject({
+      state: { status: "ready" },
+      records: [expect.objectContaining({ type: "accepted" })],
+      receipt: { virtual: false, deferredRepair: null },
+    });
+    prepared.close();
+  });
+
   it("contains traversal-like partition ids inside the journal root", () => {
     const journalRoot = join(root, "traversal-journal");
     const outside = join(root, "outside-partition");

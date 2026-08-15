@@ -19,9 +19,11 @@ public struct SetupProcessIdentityKnown: Codable, Sendable, Equatable {
         source = try container.decode(String.self, forKey: .source)
         startToken = try container.decode(String.self, forKey: .startToken)
         processGroupId = try container.decode(Int.self, forKey: .processGroupId)
-        try require(status == "known" && pid > 0 && ["linux", "darwin"].contains(platform)
-                    && ["procfs_stat", "proc_pidinfo"].contains(source) && !startToken.isEmpty
-                    && processGroupId > 0, decoder: decoder, "Invalid known process identity")
+        try require(status == "known" && pid > 0
+                    && ["linux", "darwin", "win32"].contains(platform)
+                    && ["procfs_stat", "proc_pidinfo", "win32_process_times"].contains(source)
+                    && !startToken.isEmpty && processGroupId > 0,
+                    decoder: decoder, "Invalid known process identity")
     }
 }
 
@@ -95,7 +97,7 @@ public struct SetupExecutableEvidence: Codable, Sendable, Equatable {
         mode = try container.decode(Int.self, forKey: .mode)
         device = try container.decode(String.self, forKey: .device)
         inode = try container.decode(String.self, forKey: .inode)
-        try require(realpath.hasPrefix("/") && isSHA256(sha256) && size >= 0 && mode >= 0
+        try require(isAbsolutePath(realpath) && isSHA256(sha256) && size >= 0 && mode >= 0
                     && isUnsignedDecimal(device) && isUnsignedDecimal(inode), decoder: decoder,
                     "Invalid setup executable evidence")
     }

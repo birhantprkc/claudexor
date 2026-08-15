@@ -4,6 +4,7 @@ import {
   compareProcessIdentity,
   createProcessObservationReader,
   observeProcess,
+  isKnownProcessIdentity,
   parseDarwinHelperOutput,
   parseLinuxProcStat,
   parseLinuxProcStatObservation,
@@ -14,6 +15,21 @@ import {
   type ProcessObservationReader,
 } from "./process-identity.js";
 import { ProcessGroupService, parseProcessGroupHandle } from "./process-group.js";
+
+const WIN32_READING = "claudexor-process-identity-win32-v1\t4242\t133700000000000000";
+
+function win32Service(
+  runWin32Reader: (pid: number) => {
+    status: number | null;
+    stdout: string;
+    stderr: string;
+    errorCode?: string;
+  },
+): ProcessIdentityService {
+  return new ProcessIdentityService({ platform: "win32", runWin32Reader });
+}
+
+const win32Reader = () => ({ status: 0, stdout: WIN32_READING, stderr: "" });
 
 function linuxStat(
   pid: number,
@@ -340,5 +356,156 @@ describe("process group handles", () => {
       status: "unknown",
       reason: "permission_denied",
     });
+  });
+});
+
+describe("win32 process identity (opt-in kernel birth token)", () => {
+  it("stays unprovable until a lane opts a reader in", () => {
+    const withoutReader = new ProcessIdentityService({ platform: "win32" });
+    expect(withoutReader.read(4242)).toEqual({
+      status: "unknown",
+      pid: 4242,
+      platform: "win32",
+      reason: "unsupported_platform",
+    });
+  });
+
+  it("reads the process creation FILETIME as the birth token", () => {
+    expect(win32Service(win32Reader).read(4242)).toEqual({
+      status: "known",
+      pid: 4242,
+      platform: "win32",
+      source: "win32_process_times",
+      startToken: "win32:133700000000000000",
+      processGroupId: 4242,
+    });
+  });
+
+  it("detects a recycled pid instead of trusting the number", () => {
+    const recorded = win32Service(win32Reader).read(4242) as KnownProcessIdentity;
+    const recycled = win32Service(() => ({
+      status: 0,
+      stdout: "claudexor-process-identity-win32-v1\t4242\t133700000000009999",
+      stderr: "",
+    })).read(4242);
+    expect(compareProcessIdentity(recorded, recycled)).toBe("different");
+    expect(compareProcessIdentity(recorded, win32Service(win32Reader).read(4242))).toBe("same");
+  });
+
+  it("maps reader exits to missing, permission_denied and helper failures", () => {
+    expect(win32Service(() => ({ status: 3, stdout: "", stderr: "" })).read(4242)).toMatchObject({
+      status: "missing",
+      platform: "win32",
+    });
+    expect(win32Service(() => ({ status: 4, stdout: "", stderr: "" })).read(4242)).toMatchObject({
+      status: "unknown",
+      reason: "permission_denied",
+    });
+    expect(win32Service(() => ({ status: 5, stdout: "", stderr: "" })).read(4242)).toMatchObject({
+      status: "unknown",
+      reason: "helper_failed",
+    });
+    expect(
+      win32Service(() => ({ status: null, stdout: "", stderr: "", errorCode: "ENOENT" })).read(
+        4242,
+      ),
+    ).toMatchObject({ status: "unknown", reason: "helper_unavailable" });
+    expect(
+      win32Service(() => ({ status: 0, stdout: "surprise\n", stderr: "" })).read(4242),
+    ).toMatchObject({ status: "unknown", reason: "malformed_response" });
+    expect(
+      win32Service(() => ({ status: 0, stdout: WIN32_READING, stderr: "" })).read(99),
+    ).toMatchObject({ status: "unknown", reason: "malformed_response" });
+  });
+
+  it("refuses an identity whose source or group shape is not the win32 contract", () => {
+    const honest = win32Service(win32Reader).read(4242) as KnownProcessIdentity;
+    expect(isKnownProcessIdentity(honest)).toBe(true);
+    // A pid-shaped token is refused by shape alone only when it collides with
+    // the pid: the point of the source name is that a reader without birth
+    // times can never mint this record.
+    expect(isKnownProcessIdentity({ ...honest, source: "win32_process" })).toBe(false);
+    expect(isKnownProcessIdentity({ ...honest, processGroupId: 7 })).toBe(false);
+  });
+});
+
+describe("win32 process-group semantics (leader-death proof, tree kill)", () => {
+  const leader: KnownProcessIdentity = {
+    status: "known",
+    pid: 4242,
+    platform: "win32",
+    source: "win32_process_times",
+    startToken: "win32:133700000000000000",
+    processGroupId: 4242,
+  };
+  const service = (
+    identity: ProcessIdentity,
+    killProcessTree?: (pid: number) => "killed" | "not_found" | "failed",
+  ) =>
+    new ProcessGroupService({
+      platform: "win32",
+      identity: { read: () => identity, self: () => identity },
+      killProcessTree,
+      probeProcessGroup: () => {
+        throw new Error("win32 must never probe a POSIX process group");
+      },
+      signalProcessGroup: () => {
+        throw new Error("win32 must never signal a POSIX process group");
+      },
+    });
+  const handle = parseProcessGroupHandle({ schemaVersion: 1, pgid: leader.pid, leader });
+
+  it("reads emptiness from the leader identity, never from a group probe", () => {
+    expect(service(leader).probeEmpty(handle)).toMatchObject({ status: "nonempty" });
+    expect(
+      service({ status: "missing", pid: 4242, platform: "win32" }).probeEmpty(handle),
+    ).toMatchObject({ status: "empty" });
+    // A recycled pid is a different process: the recorded one is gone.
+    expect(
+      service({ ...leader, startToken: "win32:133700000000009999" }).probeEmpty(handle),
+    ).toMatchObject({ status: "empty" });
+    expect(
+      service({
+        status: "unknown",
+        pid: 4242,
+        platform: "win32",
+        reason: "helper_failed",
+      }).probeEmpty(handle),
+    ).toMatchObject({ status: "unknown", reason: "probe_failed" });
+  });
+
+  it("terminates through the injected tree kill and never without one", () => {
+    const calls: number[] = [];
+    const killer = service(leader, (pid) => {
+      calls.push(pid);
+      return "killed";
+    });
+    expect(killer.signal(handle, "SIGTERM")).toMatchObject({ status: "sent" });
+    expect(killer.signal(handle, "SIGKILL")).toMatchObject({ status: "sent" });
+    expect(calls).toEqual([4242, 4242]);
+    expect(service(leader, () => "not_found").signal(handle, "SIGTERM")).toMatchObject({
+      status: "empty",
+    });
+    expect(service(leader, () => "failed").signal(handle, "SIGTERM")).toMatchObject({
+      status: "unknown",
+      reason: "signal_failed",
+    });
+    expect(service(leader).signal(handle, "SIGTERM")).toMatchObject({
+      status: "unknown",
+      reason: "unsupported_platform",
+    });
+  });
+
+  it("never kills a pid the recorded identity no longer owns", () => {
+    const calls: number[] = [];
+    const recycled = service({ ...leader, startToken: "win32:1" }, (pid) => {
+      calls.push(pid);
+      return "killed";
+    });
+    expect(recycled.signal(handle, "SIGKILL")).toMatchObject({
+      status: "unknown",
+      reason: "stale_leader",
+    });
+    expect(calls).toEqual([]);
   });
 });

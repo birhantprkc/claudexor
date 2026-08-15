@@ -164,7 +164,7 @@ jobs:
   # matrix fails or is cancelled, and a skipped required check never reports.
   build-test-gate:
     name: build-test
-    needs: build-test
+    needs: [build-test, windows-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -173,11 +173,16 @@ jobs:
         # when every leg succeeded (fail-fast: false means all of them ran).
         env:
           MATRIX_RESULT: ${{ needs.build-test.result }}
+          WINDOWS_RESULT: ${{ needs.windows-test.result }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "$MATRIX_RESULT" != "success" ]; then
             echo "::error::Node matrix result is '$MATRIX_RESULT' (expected 'success')."
+            exit 1
+          fi
+          if [ "$WINDOWS_RESULT" != "success" ]; then
+            echo "::error::Windows lane result is '$WINDOWS_RESULT' (expected 'success')."
             exit 1
           fi
 
@@ -204,8 +209,18 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Test (schema, login protocol, runtime-env, setup-jobs)
-        run: pnpm vitest run packages/schema/src/schema.test.ts packages/core/src/runtime-env.test.ts packages/cli/src/setup-login-protocol.test.ts packages/cli/src/setup-jobs.test.ts
+      # The Windows-shaped surfaces, and only suites whose fixtures are
+      # portable: the absolute-path contract, win32 process identity and
+      # termination, and the journal walker whose separator bug reproduces
+      # ONLY here. Suites built on POSIX mode bits, symlinks or `#!/bin/sh`
+      # fixtures stay on the Linux/macOS legs; their win32 branches are
+      # proven by injected-platform unit tests instead.
+      - name: Test (paths, process identity, journal)
+        run: >
+          pnpm vitest run packages/schema/src/schema.test.ts
+          packages/core/src/process-identity.test.ts
+          packages/core/src/process-tree.test.ts
+          packages/journal/src/index.test.ts
 
   swift:
     runs-on: macos-26
@@ -221,4 +236,3 @@ jobs:
       - name: Swift tests and build (ClaudexorApp)
         working-directory: apps/macos/ClaudexorApp
         run: swift test && swift build
-
