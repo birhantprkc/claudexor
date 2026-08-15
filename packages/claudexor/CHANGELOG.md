@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Windows native-login groundwork with honest process contracts (PR #189, with Renat/dead9111): cross-platform absolute-path schema (regex pattern survives schema generation, Swift mirror included), opt-in win32 kernel-birth-time process identity (PowerShell GetProcessTimes reader, login lane only), identity-gated `taskkill /T /F` termination with a disclosed leader-death emptiness proof, `.exe`-only Windows harness binary resolution with a shim advisory, Windows environment-key forwarding matched case-insensitively, the journal partition walker separator fix (Windows daemon no longer demands recovery on second start), and a required windows-latest CI lane.
+- Windows native-login groundwork with honest process contracts (PR #189, with Renat/dead9111): cross-platform absolute-path schema (regex pattern survives schema generation, Swift mirror included), opt-in win32 kernel-birth-time process identity (PowerShell GetProcessTimes reader, login lane only), identity-gated `taskkill /T /F` termination with a disclosed leader-death emptiness proof, executable-image-only (`.exe`/`.com`) Windows harness binary resolution with a shim advisory, Windows environment-key forwarding matched case-insensitively, the journal partition walker separator fix (Windows daemon no longer demands recovery on second start), and a required windows-latest CI lane.
   - @claudexor/cli@3.4.1
 
 ## 3.4.0
