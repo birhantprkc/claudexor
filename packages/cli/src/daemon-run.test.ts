@@ -399,6 +399,24 @@ const RECOVERY_ONLY_200 = () => ({
   }),
 });
 
+/** A normally-serving daemon's handshake (stage 4 completed). */
+const NORMAL_200 = () => ({
+  status: 200,
+  body: JSON.stringify({
+    protocolMajor: 3,
+    compatible: true,
+    operationsPath: "/v2/operations",
+    engine: { version: CLAUDEXOR_VERSION, sha: "unknown", entry: "/opt/claudexor/daemon.js" },
+    servingMode: "normal",
+  }),
+});
+
+/** Stage-3→4 startup: the first N handshakes report recovery_only, then normal. */
+const STARTUP_WINDOW_200 = (recoveryHandshakes: number) => {
+  let seen = 0;
+  return () => (seen++ < recoveryHandshakes ? RECOVERY_ONLY_200() : NORMAL_200());
+};
+
 describe("absence vs refusal discrimination (#93)", () => {
   let dir: string;
   let prevConfigDir: string | undefined;
@@ -560,12 +578,14 @@ describe("absence vs refusal discrimination (#93)", () => {
     expect(conn!.engine.servingMode).toBe("recovery_only");
   });
 
-  it("ensureDaemon: a recovery-only daemon fails typed + retryable, never proceeding into route refusals (C7d)", async () => {
+  it("ensureDaemon: a daemon that STAYS recovery-only past the budget fails typed + retryable, never proceeding into route refusals (C7d)", async () => {
     socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
     const api = await fakeControlApi(RECOVERY_ONLY_200);
     httpServer = api.server;
     writeDaemonFixture(api.port);
-    const err: unknown = await ensureDaemon().then(
+    // Short budget: a genuinely blocked root never opens normal admission, so
+    // the bounded wait must end in the SAME typed error as before, only later.
+    const err: unknown = await ensureDaemon(600).then(
       () => null,
       (thrown: unknown) => thrown,
     );
@@ -574,6 +594,39 @@ describe("absence vs refusal discrimination (#93)", () => {
     expect(problem.code).toBe("daemon_recovery_only");
     expect(problem.retryable).toBe(true);
     expect(problem.message).toContain("serving recovery only");
+  });
+
+  it("ensureDaemon: a HEALTHY daemon still in startup stage 4 (transient recovery_only handshake) is waited for, not failed (CR3)", async () => {
+    // D5 stage 3 writes the pointer with admission closed; stage 4 opens
+    // normal admission after journal recovery. ensureDaemon must ride that
+    // window out within its budget instead of throwing daemon_recovery_only
+    // at a healthy auto-start.
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(STARTUP_WINDOW_200(2));
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await ensureDaemon(5_000);
+    expect(conn.engine.servingMode).toBe("normal");
+  });
+
+  it("waitForDaemonReady: reports the TERMINAL servingMode, not the transient stage-3 recovery_only (CR3)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(STARTUP_WINDOW_200(2));
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await waitForDaemonReady(5_000);
+    expect(conn).not.toBeNull();
+    expect(conn!.engine.servingMode).toBe("normal");
+  });
+
+  it("waitForDaemonReady: a genuinely blocked root is reported honestly as recovery_only at the deadline (CR3)", async () => {
+    socketServer = await fakeDaemonSocket(process.env.CLAUDEXOR_DAEMON_SOCK as string);
+    const api = await fakeControlApi(RECOVERY_ONLY_200);
+    httpServer = api.server;
+    writeDaemonFixture(api.port);
+    const conn = await waitForDaemonReady(600);
+    expect(conn).not.toBeNull();
+    expect(conn!.engine.servingMode).toBe("recovery_only");
   });
 
   it("ensureDaemon: a typed refusal short-circuits (no 10s control-API wait, no NO_CONTROL_API flatten)", async () => {

@@ -96,6 +96,10 @@ export async function ensureDaemon(
   const socketPath = defaultSocketPath();
   let client = new DaemonClient(socketPath, token);
   let launch: DetachedDaemonLaunch | null = null;
+  // ONE shared budget for the whole readiness sequence (socket, pointer,
+  // normal admission): a journal-heavy startup may spend most of it in any
+  // single phase, and stacking per-phase budgets would multiply the worst case.
+  const overallDeadline = Date.now() + timeoutMs;
 
   const ok = await daemonReachable(client);
   if (!ok) {
@@ -109,9 +113,8 @@ export async function ensureDaemon(
       env: harnessRuntimeEnv(),
     });
     // Wait for the socket to accept connections (health round-trip).
-    const deadline = Date.now() + timeoutMs;
     let started = false;
-    while (Date.now() < deadline) {
+    while (Date.now() < overallDeadline) {
       await sleep(150);
       // Re-read the token: ensureToken() above generated it before spawn, and the
       // daemon reuses the same per-user token file, so this client stays valid.
@@ -146,6 +149,22 @@ export async function ensureDaemon(
     );
   }
   launch?.markReady();
+  // C7d × D5: the daemon binds its transport and writes the pointer in
+  // startup stage 3 with product admission still CLOSED (handshake reports
+  // recovery_only), and only stage 4 — journal revalidation, crash-GC, the
+  // full recover(), activation — opens normal admission. On journal-heavy
+  // roots stage 4 takes the tens of seconds this shared start budget exists
+  // for, so a recovery_only handshake here is AMBIGUOUS between "still
+  // starting" and "genuinely blocked". Keep re-handshaking until the budget
+  // expires; a genuinely blocked root never opens normal and still gets the
+  // typed error below (the macOS app connect loop waits the same way).
+  while (reached.engine.servingMode !== "normal" && Date.now() < overallDeadline) {
+    await sleep(150);
+    if (launch?.failure()) throw launch.callerError("normal_admission_wait", timeoutMs);
+    // Absence mid-wait (daemon died or is restarting) keeps the last observed
+    // identity: the loop stays bounded and the deadline names the state.
+    reached = (await controlApiReachable()) ?? reached;
+  }
   // C7d: acting paths must not proceed into a wall of daemon_recovery_only
   // route refusals — name the recovery state once, typed and retryable.
   if (reached.engine.servingMode !== "normal") {
@@ -201,12 +220,19 @@ export async function waitForDaemonReady(
   abort?: () => Error | null,
 ): Promise<{ client: DaemonClientType; addr: ControlApiAddress; engine: EngineIdentity } | null> {
   const deadline = Date.now() + timeoutMs;
+  // D5: a reachable daemon may still be mid-startup (stage 3 binds the
+  // transport recovery-only; stage 4 opens normal admission after journal
+  // recovery). Report the TERMINAL mode, not the transient stage-3 value:
+  // keep polling a recovery_only handshake until it opens normal or the
+  // budget expires — a genuinely blocked root is then reported honestly.
+  let last: Awaited<ReturnType<typeof connectDaemonIfRunning>> = null;
   for (;;) {
     const conn = await connectDaemonIfRunning();
-    if (conn) return conn;
+    if (conn?.engine.servingMode === "normal") return conn;
+    last = conn ?? last;
     const failure = abort?.();
     if (failure) throw failure;
-    if (Date.now() >= deadline) return null;
+    if (Date.now() >= deadline) return last;
     await sleep(150);
   }
 }
