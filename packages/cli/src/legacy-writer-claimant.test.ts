@@ -1,8 +1,18 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
+import { acquireRootAuthority, readRootAuthority } from "@claudexor/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 
 const fixtureRoot = resolve(import.meta.dirname, "fixtures", "legacy-v3.3.7");
@@ -55,6 +65,76 @@ describe("exact-v3.3.7 legacy writer claimant fixture", () => {
       expect(source, `tag source missing parity marker: ${marker}`).toContain(marker);
       expect(fixture, `fixture missing parity marker: ${marker}`).toContain(marker);
     }
+  });
+
+  it("fails closed at every step of the stale-flat first migration; the address is never absent (C4)", () => {
+    const dataRoot = mkdtempSync(join(tmpdir(), "claudexor-legacy-claimant-"));
+    roots.push(dataRoot);
+    const daemonRoot = join(dataRoot, "daemon");
+    mkdirSync(daemonRoot, { recursive: true, mode: 0o700 });
+    const socketPath = join(daemonRoot, "claudexord.sock");
+    const anchor = `${socketPath}.writer`;
+    // A DEAD pre-fix owner holds the flat legacy address: the exact state the
+    // first migration converts. Before our first mutation a legacy claimant
+    // may still win (D3's bounded limitation); after it, never.
+    mkdirSync(anchor, { mode: 0o700 });
+    writeFileSync(join(anchor, "owner.json"), '{"pid":2147483646,"token":"legacy"}\n', {
+      mode: 0o600,
+    });
+
+    const probeLegacyClaimant = (step: string): void => {
+      expect(lstatSync(anchor).isDirectory(), `address absent at ${step}`).toBe(true);
+      const result = spawnSync(process.execPath, [claimantPath], {
+        cwd: dataRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CLAUDEXOR_CONFIG_DIR: dataRoot,
+          CLAUDEXOR_DAEMON_SOCK: socketPath,
+        },
+      });
+      expect(result.status, `legacy claimant won at ${step}: ${result.stdout}`).toBe(1);
+      expect(lstatSync(anchor).isDirectory(), `claimant destroyed the address at ${step}`).toBe(
+        true,
+      );
+    };
+
+    // Every rename/remove of the migration flows through the lease seam. The
+    // canonical address itself must never be renamed away or removed — that
+    // is the absence window a newly arriving legacy claimant wins.
+    let mutations = 0;
+    const grant = acquireRootAuthority({
+      socketPath,
+      version: "3.4.0",
+      canonicalSocketPath: socketPath,
+      deps: {
+        filesystem: {
+          rename: (from, to) => {
+            expect(from, "the migration renamed the canonical address away").not.toBe(anchor);
+            renameSync(from, to);
+            mutations += 1;
+            probeLegacyClaimant(`after rename #${mutations} (${basename(from)} -> ${basename(to)})`);
+          },
+          remove: (path) => {
+            expect(path, "the migration removed the canonical address").not.toBe(anchor);
+            rmSync(path, { recursive: true, force: true });
+          },
+        },
+      },
+    });
+    expect(mutations).toBeGreaterThanOrEqual(2);
+    // Final state: permanent barrier + nested claim; the stale owner record is
+    // preserved as evidence inside the same directory; no parseable owner.
+    expect(readRootAuthority(anchor)).toMatchObject({ status: "valid" });
+    probeLegacyClaimant("after barrier installation");
+    expect(() => readFileSync(join(anchor, "owner.json"))).toThrow();
+    expect(
+      readdirSync(anchor).some(
+        (name) => name.startsWith("owner.stale-") && name.endsWith(".json"),
+      ),
+    ).toBe(true);
+    expect(grant.lease.path).toBe(join(anchor, "active.writer"));
+    grant.release();
   });
 
   it("fails before journal/GC when a later opaque barrier occupies the canonical legacy path", () => {
