@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   DaemonClient,
@@ -20,7 +20,7 @@ import {
   type ThreadHeadPingSink,
   daemonDir,
   defaultSocketPath,
-  acquireDaemonWriterLease,
+  acquireRootAuthority,
   ensureToken,
   ensureDaemonRuntimeRoot,
   logPath,
@@ -28,6 +28,14 @@ import {
 } from "@claudexor/daemon";
 import { DaemonControlApiServer, normalizeRunStartRequest } from "@claudexor/control-api";
 import { armDaemonLifecycle, logLine, runStartupCrashGc } from "./daemon-lifecycle.js";
+import {
+  bindRecoveryTransport,
+  completeStartupAdmission,
+  DaemonStartupAdmission,
+  proveRecoveryTransport,
+  quarantineGhostProjectsAtStartup,
+  recoveryBlockedPartitions,
+} from "./daemon-startup.js";
 import { assertPlanImplementReady } from "./plan-implement-readiness.js";
 import { Orchestrator } from "@claudexor/orchestrator";
 import { delegationBeltForRun } from "./delegation-belt-descriptor.js";
@@ -81,7 +89,8 @@ export async function main(): Promise<void> {
   const servingIdentity = engineBuildIdentity();
   ensureDaemonRuntimeRoot();
   const socketPath = defaultSocketPath();
-  const writerLease = acquireDaemonWriterLease(socketPath);
+  // D5 stage 1: permanent barrier (epoch/floor refusals) before ANY recovery.
+  const rootAuthority = acquireRootAuthority({ socketPath, version: servingIdentity.version });
   let shutdownRuntime: DaemonRuntimeShutdown | null = null;
   // Release wave round-12 BLOCK: the single-writer lease may only be released
   // after a CLEAN shutdown — a failed/partial shutdown keeps components that
@@ -96,11 +105,10 @@ export async function main(): Promise<void> {
     if (await socketAlive(socketPath)) {
       throw new Error(`a claudexor daemon is already listening on ${socketPath}; stop it first`);
     }
-    await runStartupCrashGc({ daemonDir: daemonDir(), logPath: logPath() });
     // Same-root config evolution hygiene (B9): strip + persist any known-retired
     // keys an OLDER version wrote into the global config, before any strict
-    // parse can trip on them (mirrors the crash-GC startup sweep). Unknown keys
-    // NOT on the retired registry still fail loud at parse (INV-021).
+    // parse can trip on them. Unknown keys NOT on the retired registry still
+    // fail loud at parse (INV-021).
     for (const sweep of sweepRetiredConfigKeysAtStartup()) {
       logLine(
         logPath(),
@@ -141,7 +149,9 @@ export async function main(): Promise<void> {
       create: (journal) => new SetupJobStore(daemonDir(), { journal }),
       validate: (store) => store.validateProjection(),
     });
-    journalManager.start();
+    // D5 stage 2: read-only prepare + validate; zero recovery writes.
+    const globalPreparation = journalManager.prepare();
+    const admission = new DaemonStartupAdmission();
     const pollQuota = () => {
       try {
         void quotaStoreSlot.current().pollStale();
@@ -159,6 +169,7 @@ export async function main(): Promise<void> {
       threadStoreSlot,
       threadHeadPing,
     );
+    const partitionsPreparation = threads.prepare();
     const interactions = new InteractionRegistry({
       forRequest: (params) => threads.interactionsForRequest(params),
       all: () => threads.interactionStores(),
@@ -169,6 +180,7 @@ export async function main(): Promise<void> {
       socketPath,
       token,
       commands: threads,
+      servingMode: admission.snapshot,
       delegationAuthority: delegationBudgetAuthority,
       onRunTerminal: (runId, threadId) => {
         interactions.dropForRun(runId);
@@ -191,7 +203,7 @@ export async function main(): Promise<void> {
         return shutdownRuntime.beginRuntimeReplacement();
       },
       runtimeIdentity: { version: servingIdentity.version, buildSha: servingIdentity.sha },
-      runtimeLeaseOwner: writerLease.owner,
+      runtimeLeaseOwner: rootAuthority.lease.owner,
       runner: async (params, ctx) => {
         const p = normalizeRunStartRequest(params);
         const mode = p.mode;
@@ -498,6 +510,7 @@ export async function main(): Promise<void> {
             token,
             daemon: new DaemonClient(socketPath, token),
             port: Number(process.env.CLAUDEXOR_CONTROL_PORT ?? 0),
+            servingMode: admission.snapshot,
             bus,
             services,
           });
@@ -507,85 +520,66 @@ export async function main(): Promise<void> {
       beginShutdown: (reason) => shutdownRuntime!.beginShutdown(reason),
     });
 
-    await setupBinding.start();
-    if (!shutdownRuntime.requested()) await server.start();
+    // D5 stage 3: bind the REAL transport with product admission CLOSED, then
+    // prove self-health/exact identity through it before anything destructive.
+    const controlAddr = await bindRecoveryTransport({
+      server,
+      control,
+      requested: () => shutdownRuntime!.requested(),
+      daemonDir: daemonDir(),
+      logPath: logPath(),
+      socketPath,
+    });
     if (!shutdownRuntime.requested()) {
-      appendFileSync(
-        logPath(),
-        `[${new Date().toISOString()}] claudexord listening on ${socketPath}\n`,
-      );
-    }
-    if (control && !shutdownRuntime.requested()) {
-      const controlAddr = await control.start();
-      if (!shutdownRuntime.requested()) {
-        writeFileSync(
-          join(daemonDir(), "control-api.json"),
-          `${JSON.stringify({ ...controlAddr, tokenPath: join(daemonDir(), "token") }, null, 2)}\n`,
-          { mode: 0o600 },
-        );
-        appendFileSync(
-          logPath(),
-          `[${new Date().toISOString()}] claudexor control-api listening on http://${controlAddr.host}:${controlAddr.port}\n`,
-        );
-      }
-    } else if (!control && !shutdownRuntime.requested()) {
-      appendFileSync(
-        logPath(),
-        `[${new Date().toISOString()}] claudexor control-api disabled by CLAUDEXOR_NO_CONTROL_API=1\n`,
-      );
-    }
-    if (!shutdownRuntime.requested()) {
-      // F2 ghost-cleanup: retire projects auto-registered from an
-      // envelope worktree (root inside the Claudexor runtime tree) or whose
-      // root is permanently gone, so a dead root can never poison listings.
-      try {
-        const retired = threads.quarantineGhostProjects();
-        for (const ghost of retired) {
-          logLine(
-            logPath(),
-            `projects: quarantined ghost ${ghost.projectId} (${ghost.reason}): ${ghost.root}`,
-          );
-        }
-      } catch (error) {
-        logLine(
-          logPath(),
-          `projects: ghost sweep failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      scheduleStartupRetention(services.runRetention, {
-        logPath: logPath(),
-        shuttingDown: () => shutdownRuntime!.requested(),
+      await proveRecoveryTransport({
+        socket: selfClient,
+        identity: servingIdentity,
+        token,
+        control: controlAddr,
       });
+      // D5 stage 4: floor advance + destructive recovery + normal admission —
+      // or stay recovery-only with the floor unchanged and cleanup off.
+      const servingMode = await completeStartupAdmission({
+        grant: rootAuthority,
+        blockedPartitions: recoveryBlockedPartitions({ globalPreparation, partitionsPreparation }),
+        global: journalManager,
+        partitions: threads,
+        crashGc: () => runStartupCrashGc({ daemonDir: daemonDir(), logPath: logPath() }),
+        admission,
+        log: (message) => logLine(logPath(), message),
+      });
+      if (servingMode === "normal" && !shutdownRuntime.requested()) {
+        await setupBinding.start();
+        quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message));
+        scheduleStartupRetention(services.runRetention, {
+          logPath: logPath(),
+          shuttingDown: () => shutdownRuntime!.requested(),
+        });
+      }
     }
     await shutdownRuntime.wait();
     lifecycle.finalize();
-    appendFileSync(logPath(), `[${new Date().toISOString()}] claudexord shut down\n`);
+    logLine(logPath(), "claudexord shut down");
   } catch (error) {
-    try {
-      appendFileSync(
-        logPath(),
-        `[${new Date().toISOString()}] daemon lifecycle FAILED: ${redactSecrets(
-          error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-        )}\n`,
-      );
-    } catch {
-      /* preserve the lifecycle failure */
-    }
+    // logLine is already best-effort; a failed diagnostic write never masks
+    // the lifecycle failure itself.
+    logLine(
+      logPath(),
+      `daemon lifecycle FAILED: ${redactSecrets(
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      )}`,
+    );
     if (shutdownRuntime) {
       try {
         await shutdownRuntime.beginShutdown("startup failure");
         lifecycle?.finalize();
       } catch (shutdownError) {
-        try {
-          appendFileSync(
-            logPath(),
-            `[${new Date().toISOString()}] shutdown FAILED: ${redactSecrets(
-              shutdownError instanceof Error ? shutdownError.message : String(shutdownError),
-            )}\n`,
-          );
-        } catch {
-          /* preserve the shutdown failure */
-        }
+        logLine(
+          logPath(),
+          `shutdown FAILED: ${redactSecrets(
+            shutdownError instanceof Error ? shutdownError.message : String(shutdownError),
+          )}`,
+        );
         releaseWriterLease = false;
         throw new AggregateError(
           [error, shutdownError],
@@ -596,7 +590,8 @@ export async function main(): Promise<void> {
     throw error;
   } finally {
     if (quotaPollTimer) clearInterval(quotaPollTimer);
-    if (releaseWriterLease) writerLease.release();
+    // Drops only the live writer claim; the barrier itself persists (D1).
+    if (releaseWriterLease) rootAuthority.release();
   }
 }
 
