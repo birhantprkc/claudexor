@@ -29,6 +29,7 @@ import {
   GitCapability,
 } from "@claudexor/schema";
 import { type ParsedArgs, flagBool, flagStr } from "./args.js";
+import { harnessListPath, requestedHarnesses, unknownHarnesses } from "./ops-harness-selection.js";
 import { CliError, controlProblemError, renderCliFailure, usageError } from "./cli-error.js";
 import { profilesCommand, secretsCommand } from "./credential-commands.js";
 import { CLI_DAEMON_LAUNCH_SOURCES, launchDetachedDaemon } from "./daemon-launch.js";
@@ -268,31 +269,6 @@ export async function daemonGet(path: string): Promise<unknown> {
     throw new Error(`control API ${path} failed (${response.status}): ${await response.text()}`);
   }
   return response.json();
-}
-
-function requestedHarnesses(args: ParsedArgs): string[] | undefined {
-  const only = flagStr(args, "harness");
-  return only
-    ? only
-        .split(",")
-        .map((id) => id.trim())
-        .filter(Boolean)
-    : undefined;
-}
-
-function harnessListPath(args: ParsedArgs, fresh = false): string {
-  const query = new URLSearchParams();
-  if (fresh) query.set("fresh", "true");
-  if (flagBool(args, "all")) query.set("all", "true");
-  for (const id of requestedHarnesses(args) ?? []) query.append("harness", id);
-  const encoded = query.toString();
-  return `/harnesses${encoded ? `?${encoded}` : ""}`;
-}
-
-function unknownHarnesses(requested: string[] | undefined, observed: string[]): string[] {
-  if (!requested) return [];
-  const known = new Set(observed);
-  return requested.filter((id) => !known.has(id));
 }
 
 export async function doctorCommand(args: ParsedArgs, json: boolean): Promise<number> {
