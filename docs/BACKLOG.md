@@ -128,8 +128,8 @@ deferred; they are recorded here now.
   `claudexor release check` still collapses every failure — typed handshake
   refusals and a corrupt pointer included — to "engine unknown" (read-only by
   design); `claudexor daemon start` human wording ("socket is alive but its
-  control API is not ready" / "did not become ready within 15s") predates
-  typed refusals, though the refusal itself now propagates typed;
+  control API is not ready" / "did not become ready within <start budget>s")
+  predates typed refusals, though the refusal itself now propagates typed;
   `daemonReachable`'s socket-RPC health() still flattens every socket-level
   failure to "not reachable" (a diverged future socket protocol would
   auto-start into the singleton guard — same class, different transport); MCP
@@ -608,3 +608,32 @@ authoritative for each exact disposition.
   CODEX_HOME; claude does not canonicalize at startup); the failure direction
   is a loud crash, never a weakened boundary. Extend the ancestor chain to the
   scoped home when a real harness pulls the requirement.
+
+## 3.4.0 operator-subagent panel advisories (2026-08-15)
+
+Adjudicated backlog rows from the 3.4.0 release wave (owner-excepted
+operator-subagent panel; ledger rows in `docs/reference/review-ledger.md`
+3.4.0 wave). None are default-reachable regressions.
+
+- Per-package changelogs stay thin relative to the root CHANGELOG narrative
+  (3.3.16 FBL-2, carried): decide a per-package depth convention at the next
+  changelog touch instead of duplicating the root story ad hoc.
+- Reopen-path duty hygiene (P-S1): when `onNormalAdmission` throws mid-reopen
+  after `openNormal`, log truthfully (admission IS normal) and let the
+  remaining normal-plane duties (ghost quarantine, retention) rerun instead
+  of being skipped for the process life. Fault-injection-only today.
+- Type `staleReplacementFailed` (P-S2) with a machine code like
+  `daemon_replacement_failed` so operator tooling can distinguish contention
+  outcomes the way it can for `daemon_writer_busy`.
+- Operator docs note (P-S3): a downgrade below the serving floor surfaces as
+  `root_authority_floor_regression` by design — document so support does not
+  misread it as corruption.
+- ARCHITECTURE.md optional-web sentence (G-S2): split the clause that names a
+  web-policy value (`off`) and an access-profile value (`inherit_native`)
+  together so the two enums cannot be misread as one.
+- `ensureDaemon` deadline message (F-S3): add a died-mid-wait hint when the
+  last handshake identity is stale because the daemon disappeared during the
+  bounded recovery wait.
+- `SetupLifecycleBinding.start()` unwind (F-S4, pre-existing): bind `active`
+  only after `handle.start()` resolves (mirror `replaceAfter`'s unwind) so a
+  start throw cannot leave a half-started handle bound.
