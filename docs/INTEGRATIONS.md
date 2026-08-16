@@ -575,6 +575,12 @@ stdin, but do not assume resume, estimate, live steering, or structured output
 support unless the capability profile and adapter doctor output prove it for
 the active run.
 
+The Antigravity adapter is the one closed-source vendor CLI in tree: `agy`
+ships as a signed Go binary with no npm artifact and no source repository, so
+its wire shapes are pinned by RECORDED fixtures rather than by reading vendor
+code, and every claim below is re-verified when the pinned vendor version
+moves.
+
 Discovery/manifests describe static capabilities and possible auth sources.
 Doctor output is the readiness source: UI status, routing, reviewer selection,
 and live controls must rely on doctor status, enabled intents, and smoke checks.
@@ -673,6 +679,27 @@ string; it falls back to `result` only when no complete assistant frame exists.
 No typed rate-limit path exists: transient conditions
 surface as generic `error` events — honest degradation, never invented
 status.
+
+**Antigravity CLI (`agy`)** — wire: `agy -p "<prompt>" --output-format
+stream-json --model <slug> --mode <plan|accept-edits> --add-dir <cwd>`
+(`--dangerously-skip-permissions` for full access; `--conversation <id>`
+resumes). Events: `init` → `started` (the vendor `conversation_id` is the
+resumable native session id); `step_update` with `step_type: "tool"` → a
+`tool_call` on `state: "ACTIVE"` and a `tool_result` on `state: "DONE"`
+(+ `file_change` for a writing tool) — every OTHER state, including a future
+one, is a recognized no-op, never a fabricated success; `step_update` with
+`text_delta` → a `message` narration segment (complete segments, not display
+deltas); terminal `result` → the typed final from `response`
+(`final_source: result`), or from a serialized `structured_output` envelope
+when a schema is passed. `status: "SUCCESS"` with an EMPTY response is the
+vendor's soft-deny class (upstream #794) and surfaces as a typed `error`, not
+an empty success — the same shape the vendor returns on a login timeout, where
+it also exits 0. `usage` carries input/output/cache-read tokens;
+`thinking_tokens` has no schema home and is dropped rather than folded into
+output. No typed rate-limit path exists. The CLI has no config-dir env var
+(upstream #155), so a named identity is a Claudexor-owned `HOME` — which also
+relocates the vendor's conversation and cache state, so one profile HOME holds
+every thread's vendor state.
 
 **OpenCode** — markerless: no typed final message; the engine's
 AnswerAssembly falls back to joining narration (the documented degradation

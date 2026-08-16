@@ -51,13 +51,14 @@ struct HarnessFamily: RawRepresentable, Identifiable, Hashable {
     static let claude = Self(rawValue: "claude")
     static let cursor = Self(rawValue: "cursor")
     static let opencode = Self(rawValue: "opencode")
+    static let agy = Self(rawValue: "agy")
     static let raw = Self(rawValue: "raw-api")
     /// The openrouter raw-API instance (registry.ts `createRawApiAdapter({ id:
     /// "openrouter" })`): a second api-key meta-host, not a built-in family row —
     /// it renders only when its key is configured and the daemon lists it live.
     static let openrouter = Self(rawValue: "openrouter")
     static let fake = Self(rawValue: "fake")
-    static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .raw]
+    static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .agy, .raw]
     var id: String { rawValue }
 
     var label: String {
@@ -65,6 +66,9 @@ struct HarnessFamily: RawRepresentable, Identifiable, Hashable {
         if self == .claude { return "Claude" }
         if self == .cursor { return "Cursor" }
         if self == .opencode { return "OpenCode" }
+        // The vendor brands the product "Antigravity" and the binary `agy`;
+        // the human-facing label is the product name.
+        if self == .agy { return "Antigravity" }
         if self == .raw { return "Raw API" }
         if self == .openrouter { return "OpenRouter" }
         if self == .fake { return "Fake" }

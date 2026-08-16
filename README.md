@@ -11,7 +11,8 @@
 [Website](https://claudexor.ai/)
 
 Claudexor is a local-first control plane for the AI coding agents you already
-pay for. It runs Codex CLI, Claude Code, Cursor CLI, OpenCode, and raw API
+pay for. It runs Codex CLI, Claude Code, Cursor CLI, OpenCode, Antigravity
+CLI, and raw API
 adapters behind one typed interface: a chat of turns where read-only questions
 resume the vendor's own native session, write turns land as inspectable
 patches, races pit harnesses against each other with cross-family review, and
@@ -76,8 +77,9 @@ composer](docs/assets/app-agent-run.jpg)
 - Git for isolated workspaces, candidate envelopes, and delivery. Supported
   in-place non-Git paths remain available; Doctor reports Git availability, and
   the app's Workspace Git check explains whether the selected shape is admitted.
-- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`, or
-  `opencode` — OR a provider API key (adapters accept `OPENAI_API_KEY`,
+- At least one logged-in vendor CLI — `codex`, `claude`, `cursor-agent`,
+  `opencode`, or `agy` (Antigravity, for a Gemini subscription) — OR a
+  provider API key (adapters accept `OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, ... as fallbacks; the raw-API route needs only a key).
   Log in through Claudexor, not the bare vendor CLI — see
   [Install And Login](docs/AGENT_ONBOARDING.md#install-and-login)
@@ -131,8 +133,9 @@ SSH local forward. Vendor CLIs and their credentials remain on the server and
 with the vendors. Claudexor can install a harness CLI on the host for you
 through a disclosed, exact-pinned flow — `claudexor harness install`, or
 Settings → Harnesses for a connected host: Claude, Codex, and OpenCode
-install one exact pinned npm version, and Cursor's vendor script is
-downloaded in full and runs in the visible terminal where you watch it;
+install one exact pinned npm version, while the Cursor and Antigravity vendor
+scripts are downloaded in full and run in the visible terminal where you watch
+them;
 nothing executes before the exact command is disclosed and confirmed.
 (Installing them on the host yourself works too.) Then sign in from the app,
 which runs each vendor's own login in an embedded SSH terminal (Codex uses
@@ -503,6 +506,7 @@ claudexor auth status
 claudexor auth login codex    # codex login (device-auth by default)
 claudexor auth login claude   # claude auth login (claude.ai subscription route)
 claudexor auth login cursor   # cursor-agent login 
+claudexor auth login agy      # Antigravity login (Google subscription route)
 claudexor secrets set openai --from-env OPENAI_API_KEY
 claudexor secrets list
 claudexor settings show

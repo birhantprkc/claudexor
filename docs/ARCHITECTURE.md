@@ -147,7 +147,7 @@ at every wire boundary.
   `RunFacts` projection from canonical run artifacts.
 - `packages/gateway`: harness discovery and capability/intent gating (route
   selection itself lives in the budget router and orchestrator routing).
-- `packages/harness-codex|claude|cursor|opencode|raw-api|fake`: adapters that
+- `packages/harness-codex|claude|cursor|opencode|agy|raw-api|fake`: adapters that
   translate native CLI/API streams into typed `HarnessEvent`s. The `fake-*` kinds
   are deterministic offline test fixtures (incl. `fake-implement`, which writes a
   real worktree file); they are explicit-`--harness` only and never enter

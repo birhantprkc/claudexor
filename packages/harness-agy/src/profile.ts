@@ -45,6 +45,17 @@ export function agyTokenFilePresent(profileHome: string): boolean {
  * itself mid-run, and the provider scrub drops every API-key route
  * (`GEMINI_API_KEY` included) so a native subscription run can never silently
  * turn metered (INV-061).
+ *
+ * Unlike Cursor — whose mutable state is separately relocatable via
+ * `CURSOR_CONFIG_DIR`, so a run keeps state in its LANE home and reads auth
+ * from the profile — agy has exactly one lever. Overriding HOME therefore
+ * moves the vendor's conversations/brain/cache into the profile HOME too, and
+ * the per-lane home is unused for agy runs. Deliberate, not an oversight: a
+ * lane-scoped `.gemini` would be a dead directory the vendor never reads.
+ * Lane continuity still holds through the vendor conversation id
+ * (`--conversation`, INV-137); the visible cost is that one profile HOME
+ * accumulates every thread's vendor state, which the Accounts card discloses
+ * by size (Л-30).
  */
 export function agyProfileRunEnv(profileHome: string, specEnv: EnvMap = {}): EnvMap {
   const home = canonicalAgyProfileHome(profileHome);

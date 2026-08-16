@@ -19,7 +19,7 @@ struct RemoteNativeLoginReadiness: Equatable {
 /// packages/cli/src/harness-installer.ts). The remote CLI re-enforces the
 /// allowlist itself (usage exit 2 for anything else); this constant only
 /// feeds the Settings install menu and the pre-flight guard.
-let installableRemoteHarnesses = ["claude", "codex", "cursor", "opencode"]
+let installableRemoteHarnesses = ["agy", "claude", "codex", "cursor", "opencode"]
 
 enum RemoteHarnessInstallVerification: String, Decodable, Equatable, Sendable {
     case releaseVerified = "release_verified"

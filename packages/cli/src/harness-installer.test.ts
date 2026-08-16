@@ -6,6 +6,7 @@ import { CODEX_VENDOR_CLI_VERSION } from "@claudexor/harness-codex";
 import { OPENCODE_VENDOR_CLI_VERSION } from "@claudexor/harness-opencode";
 import type { ParsedArgs } from "./args.js";
 import {
+  AGY_INSTALL_URL,
   CURSOR_INSTALL_URL,
   INSTALLABLE_HARNESSES,
   harnessInstallCommand,
@@ -100,6 +101,19 @@ describe("pinned versions (issue #89: never @latest)", () => {
     });
   });
 
+  it("agy takes the same honest unpinnable path as cursor (one branch, two rows)", () => {
+    const disclosure = harnessInstallerDisclosure("agy");
+    expect(disclosure.pinnedVersion).toBeNull();
+    expect(disclosure.verification).toBe("human_observed");
+    expect(disclosure.command).toContain(AGY_INSTALL_URL);
+    expect(disclosure.command).toContain("--fail");
+    // Google documents `curl ... | bash`; Claudexor NEVER pipes a remote
+    // script into a shell — it downloads the whole file, prints its sha256,
+    // and executes the file the operator was shown.
+    expect(disclosure.command).not.toMatch(/\|\s*(\/bin\/)?(ba)?sh/);
+    expect(disclosure.installLocation).toContain("~/.local/bin");
+  });
+
   it("cursor is honestly unpinnable: full download, never piped, human watches the PTY", () => {
     const disclosure = harnessInstallerDisclosure("cursor");
     expect(disclosure.pinnedVersion).toBeNull();
@@ -111,6 +125,22 @@ describe("pinned versions (issue #89: never @latest)", () => {
 });
 
 describe("runHarnessInstaller", () => {
+  it("downloads and executes the agy script through the shared script branch", () => {
+    const spawn = noisySpawn(0);
+    const stdout = captureStdout();
+    const result = runHarnessInstaller("agy", { home: "/tmp/operator", spawn: spawn as never });
+    stdout.restore();
+    expect(result).toEqual({ exitCode: 0 });
+    const curlArgv = spawn.mock.calls[0]![1] as string[];
+    expect(curlArgv).toContain(AGY_INSTALL_URL);
+    const installerPath = curlArgv.at(-1)!;
+    expect(installerPath).toContain("claudexor-agy-install-");
+    expect(spawn.mock.calls[1]![0]).toBe("/bin/sh");
+    expect(stdout.lines()).toMatch(/agy installer downloaded: \d+ bytes, sha256 [0-9a-f]{64}/);
+    // The private temp dir is removed on the success path too.
+    expect(existsSync(dirname(installerPath))).toBe(false);
+  });
+
   it("uses the shared clean child environment instead of forwarding provider secrets", () => {
     const names = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "HTTPS_PROXY"];
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));

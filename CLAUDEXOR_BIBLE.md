@@ -90,8 +90,8 @@ invariant or owner decision before proceeding.
 
 ## 2. Harnesses Are Not Roles
 
-- **INV-010** Codex, Claude Code, Cursor, OpenCode, raw APIs, and future
-  adapters are harnesses. Roles are intents (`explain`, `plan`, `spec`,
+- **INV-010** Codex, Claude Code, Cursor, OpenCode, Antigravity CLI, raw APIs,
+  and future adapters are harnesses. Roles are intents (`explain`, `plan`, `spec`,
   `implement`, `create_from_scratch`, `repair`, `review`, `verify`,
   `synthesize`, `audit` — the canonical `Intent` enum in
   `packages/schema`). No harness is privileged and no semantic role is

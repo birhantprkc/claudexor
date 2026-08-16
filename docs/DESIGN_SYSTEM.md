@@ -129,8 +129,12 @@ Brand + accent:
 Harness-family palette (functional color-coding of candidates/findings/routes):
 
 - `harness/codex` (teal), `harness/claude` (warm orange), `harness/cursor` (violet),
-  `harness/opencode` (lime), `harness/raw-api` (magenta), `harness/fake` (neutral) — each a
+  `harness/opencode` (lime), `harness/agy` (cyan), `harness/raw-api` (magenta),
+  `harness/fake` (neutral) — each a
   distinct, AA-legible hue tuned to differ from each other AND from the status palette.
+  `harness/agy` and `harness/codex` are the palette's closest pair; agy is pushed toward
+  blue and carries the highest contrast of the set, and no surface ever conveys harness
+  identity by hue alone.
   Used for candidate chips, race lanes, route-proof, per-harness budget, and harness dots.
   These are the ONLY place we use multiple strong hues.
 
