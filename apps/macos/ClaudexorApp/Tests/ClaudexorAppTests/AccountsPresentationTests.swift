@@ -18,8 +18,12 @@ import Testing
         for id in AccountsPresentation.configDirLoginHarnessIds where id != "agy" {
             #expect(HarnessFamily(rawValue: id).defaultAuthReadinessRequest?.source == .nativeSession)
         }
-        // Rotation is a separate question with its own owner — untouched here.
-        #expect(!AccountsAutoBalance.capableHarnessIds.contains("agy"))
+        // Rotation IS available to agy — it has a real vendor quota source —
+        // but with no native identity to fall back on, one profile is one
+        // account and there is nothing to rotate to until a second exists.
+        #expect(AccountsAutoBalance.capableHarnessIds.contains("agy"))
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
     }
 
     @Test func accountActionNoticeClearsAndRejectsLateCompletions() {

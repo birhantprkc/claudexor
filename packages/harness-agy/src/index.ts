@@ -20,16 +20,10 @@ import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
 import { parseAgyEvent } from "./parse.js";
 import { AGY_BIN, probeAgyCredentialProfile, resolveAgyProfileRoute } from "./profile.js";
 import { AGY_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
-export { AGY_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
-export {
-  AGY_BIN,
-  agyProfileRunEnv,
-  agyTokenPath,
-  canonicalAgyProfileHome,
-  probeAgyCredentialProfile,
-  resolveAgyProfileRoute,
-} from "./profile.js";
-export { parseAgyEvent } from "./parse.js";
+// The package publishes only what other packages consume. The profile probe,
+// the route resolver and the stream parser are reached through the adapter
+// this file returns, so re-exporting them would be a dead public surface.
+export { AGY_BIN, agyProfileRunEnv, agyTokenPath, canonicalAgyProfileHome } from "./profile.js";
 
 /**
  * Access mapping, each leg LIVE-PROVEN on agy 1.1.13 (PLAN §1.2 F11, §1.2d):
