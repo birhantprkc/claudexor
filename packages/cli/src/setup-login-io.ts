@@ -78,7 +78,13 @@ export function createTailBuffer(): {
   const forgotten: string[] = [];
   return {
     forget(value) {
-      if (value.trim().length >= 4) forgotten.push(value.trim());
+      // Every delivered value is a secret, however short. A tty also echoes a
+      // CR as a LINE BREAK, so the string we wrote comes back as two lines and
+      // a whole-string match would miss both halves.
+      for (const part of value.split(/[\r\n]+/)) {
+        const trimmed = part.trim();
+        if (trimmed) forgotten.push(trimmed);
+      }
     },
     push(chunk) {
       const combined = Buffer.concat([tail, chunk]);

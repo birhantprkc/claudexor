@@ -347,9 +347,11 @@ describe("refreshAgyQuota bare-route scoping", () => {
       "gemini-weekly": true,
       "3p-weekly": false,
     });
+    // A slug we cannot place at ALL is governed by every window, so an
+    // exhausted account is refused rather than reading as healthy.
     expect(await flags("some-future-vendor-model")).toEqual({
       "gemini-weekly": true,
-      "3p-weekly": false,
+      "3p-weekly": true,
     });
   });
 });

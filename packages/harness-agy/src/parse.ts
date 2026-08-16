@@ -14,7 +14,10 @@ type Json = any;
  */
 export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | null {
   const ts = nowIso();
-  const event = String(obj?.event ?? "");
+  // A non-string `event` must not be COERCED: an object whose `toString` is
+  // not callable throws, and the run loop would report a mid-stream parse
+  // failure as "the harness failed to start" and drop the rest of the run.
+  const event = typeof obj?.event === "string" ? obj.event : "";
 
   if (event === "init") {
     const nativeId = stringOrUndef(obj.conversation_id);
@@ -34,15 +37,20 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
 
   if (event === "step_update") {
     const step = obj.step_update ?? {};
-    const stepType = String(step.step_type ?? "");
+    const stepType = typeof step.step_type === "string" ? step.step_type : "";
     const events: HarnessEvent[] = [];
 
     if (stepType === "tool") {
       const info = step.tool_info ?? {};
-      const name = String(info.name ?? step.tool_name ?? "tool");
+      const name =
+        typeof info.name === "string" && info.name
+          ? info.name
+          : typeof step.tool_name === "string" && step.tool_name
+            ? step.tool_name
+            : "tool";
       const target = boundedTarget(primaryToolTarget(info.parameters));
       const tool: ToolRef = { name, kind: toolKindFor(name), target };
-      const state = String(step.state ?? "");
+      const state = typeof step.state === "string" ? step.state : "";
       if (state === "ACTIVE") {
         // ACTIVE/DONE arrive as a pair per call (fixture-pinned): ACTIVE is
         // the call, DONE the result.
@@ -96,7 +104,7 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
 
   if (event === "result") {
     const r = obj.result ?? {};
-    const status = String(r.status ?? "");
+    const status = typeof r.status === "string" ? r.status : "";
     const events: HarnessEvent[] = [];
     const usage = stepUsage(r.usage);
 

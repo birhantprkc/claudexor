@@ -242,3 +242,24 @@ describe("parseAgyEvent", () => {
     expect(parseAgyEvent({ nonsense: true }, SID)).toBeNull();
   });
 });
+
+describe("hostile top-level shapes never abort the run", () => {
+  it("refuses to coerce a non-string discriminator instead of throwing", () => {
+    // An object whose `toString` is not callable THROWS under String(), and
+    // the run loop reports a mid-stream parse failure as "the harness failed
+    // to start" — dropping the rest of a run that was going fine.
+    const poison = JSON.parse('{"toString": 1}');
+    expect(parseAgyEvent({ event: poison }, SID)).toBeNull();
+    expect(
+      parseAgyEvent({ event: "step_update", step_update: { step_type: poison } }, SID),
+    ).toEqual([]);
+    expect(
+      parseAgyEvent(
+        { event: "step_update", step_update: { step_type: "tool", state: poison } },
+        SID,
+      ),
+    ).toEqual([]);
+    const result = parseAgyEvent({ event: "result", result: { status: poison } }, SID)!;
+    expect(result[0]).toMatchObject({ type: "error" });
+  });
+});

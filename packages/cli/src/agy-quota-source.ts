@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { loadConfig } from "@claudexor/config";
 import { providerScrubEnv } from "@claudexor/core";
 import type { QuotaRefreshResult } from "@claudexor/daemon";
@@ -8,7 +7,7 @@ import {
   AGY_GEMINI_MODELS,
   AGY_THIRD_PARTY_MODELS,
   agyProfileRunEnv,
-  agyTokenPath,
+  agyTokenFilePresent,
   canonicalAgyProfileHome,
 } from "@claudexor/harness-agy";
 import { QuotaConstraint as QuotaConstraintSchema } from "@claudexor/schema";
@@ -41,7 +40,7 @@ export async function refreshAgyQuota(
       // vendor's file token cannot yield a window — typed absence WITHOUT
       // spawning agy, which would otherwise open the user's browser and block
       // on an interactive login prompt.
-      if (!existsSync(agyTokenPath(home))) {
+      if (!agyTokenFilePresent(home)) {
         return {
           absence: agyAbsence(
             candidate.subjectId,
@@ -132,10 +131,18 @@ function scopeUnspecifiedModel(
   // EVERY window ungoverned: that reads as a healthy account no matter how
   // spent it is, and rotation never fires. The Gemini group is the documented
   // fallback, the same one an unreadable `/model` gets.
-  const governs =
-    selectedModel !== null && scoped.some((c) => c.applies_to_models!.includes(selectedModel))
-      ? (c: QuotaConstraint) => c.applies_to_models!.includes(selectedModel)
-      : (c: QuotaConstraint) => c.applies_to_models!.some((m) => m.startsWith("gemini-"));
+  const known =
+    selectedModel !== null && scoped.some((c) => c.applies_to_models!.includes(selectedModel));
+  const governs = known
+    ? (c: QuotaConstraint) => c.applies_to_models!.includes(selectedModel!)
+    : selectedModel === null || selectedModel.startsWith("gemini-")
+      ? // Unreadable, or a Gemini slug newer than the pinned inventory: the
+        // vendor's own group governs, as it does for a fresh profile.
+        (c: QuotaConstraint) => c.applies_to_models!.some((m) => m.startsWith("gemini-"))
+      : // A slug we cannot place at all: EVERY window governs, so an exhausted
+        // account is refused rather than reading as healthy. Over-refusing a
+        // bare run costs a rotation; under-refusing costs the whole feature.
+        () => true;
   return constraints.map((constraint) =>
     constraint.applies_to_models && constraint.applies_to_models.length > 0
       ? { ...constraint, applies_to_unspecified_model: governs(constraint) }

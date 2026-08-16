@@ -122,3 +122,35 @@ describe("device-login app-server termination", () => {
     expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
   });
 });
+
+/**
+ * A tty-backed login ECHOES what the runner writes, so the pasted sign-in code
+ * comes straight back out on the tee'd output and would otherwise ride a
+ * failure receipt to disk (INV-062). The tail is told to forget the delivered
+ * value — and must forget it in the shapes a terminal actually produces.
+ */
+describe("createTailBuffer().forget (tty echo of a delivered sign-in code)", () => {
+  const echoed = (code: string): string => {
+    const tail = createTailBuffer();
+    tail.forget(code);
+    // The line discipline turns a CR into a line break, so the code comes back
+    // as the runner wrote it OR split across lines.
+    tail.push(
+      Buffer.from(`Sign in: https://vendor/auth\n${code.replaceAll("\r", "\n")}\nrejected`),
+    );
+    return tail.text();
+  };
+
+  it("forgets a short code, a padded one, and one a terminal split across lines", () => {
+    for (const code of ["x", "a9x", "  spaced-code  ", "abcd1234\refgh5678", "AB\r\nCD"]) {
+      const out = echoed(code);
+      for (const part of code.split(/[\r\n]+/)) {
+        if (part.trim()) expect(out).not.toContain(part.trim());
+      }
+    }
+  });
+
+  it("keeps the surrounding diagnostic that makes a failure readable", () => {
+    expect(echoed("code-123456")).toContain("rejected");
+  });
+});
