@@ -603,6 +603,24 @@ authoritative for each exact disposition.
   the default roots; tighten `contains()` to reject only the parent forms
   (`..`, `../…`) at the next confinement touch.
 
+## 3.4.2 formal-review advisories (2026-08-16)
+
+From the 3.4.2 formal initial wave (ledger rows in
+`docs/reference/review-ledger.md`, 3.4.2 block). Neither is default-reachable;
+both belong to the next confinement touch.
+
+- Self-defeating-layout refusal and exact equality (SOL-342-W01): the
+  `applyConfinement` refusal flags an own root that strictly CONTAINS a denied
+  path but not one exactly EQUAL to it, so a hand-crafted input whose own root
+  equals a denied path would re-open that path via the own-roots allow. The
+  engine never derives such roots and v2 registration refuses runtime-tree
+  roots; tighten the check to include equality at the next confinement touch.
+- Worktree-chain traversal test (SOL-342-W02): the own-roots union is pinned
+  under a real sandbox-exec for the scoped-home and native-root arms; add the
+  symmetric worktree-inside-runtime-root canonicalize case when the shape
+  gains a producer (today delegated worktrees ride live isolation outside the
+  runtime root).
+
 ## 3.4.1 Windows-lane residuals (2026-08-15)
 
 From the PR #189 review waves and the first required windows-latest CI runs
