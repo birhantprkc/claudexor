@@ -21,7 +21,6 @@ import {
 } from "@claudexor/workspace";
 import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
 import {
-  ControlHarnessSetupHarness,
   type ResourceAttachmentRef,
   ControlCredentialProfileCreateRequest,
   type CredentialProfile,
@@ -45,8 +44,6 @@ import {
   invalidateDoctorCache,
   normalizeThroughExistingAncestor,
 } from "@claudexor/core";
-import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
-import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import {
@@ -57,7 +54,9 @@ import {
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
 import { commitSettingsUpdate, settingsSnapshot } from "./settings-service.js";
 import { createSetupJobManager } from "./setup-jobs.js";
-import { ACTIVE_SETUP_STATES, SetupJobStore } from "./setup-job-store.js";
+import { SetupJobStore } from "./setup-job-store.js";
+import { activeProfileLoginJob } from "./setup-job-support.js";
+import { canonicalProfileLoginDir, isConfigDirLoginHarness } from "./config-dir-login-harnesses.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { createRunRequirementsPreflight } from "./request-preflight.js";
 import { threadRunStartRequiresGit } from "./thread-execution-workspace.js";
@@ -426,16 +425,7 @@ export function controlServices(
       if (!harnessId || !profileId) {
         throw Object.assign(new Error("harnessId and profileId are required"), { status: 400 });
       }
-      // The active-login 409 fence is derived from the setup-harness enum's own
-      // options (never a hand-copied list): a harness outside the enum (agy
-      // until its managed-login phase lands) can have no setup jobs to fence.
-      const activeLogin = ControlHarnessSetupHarness.options.includes(
-        harnessId as ControlHarnessSetupHarness,
-      )
-        ? setupJobs()
-            .list({ harness: harnessId as ControlHarnessSetupHarness })
-            .find((job) => ACTIVE_SETUP_STATES.has(job.state) && job.profileId === profileId)
-        : undefined;
+      const activeLogin = activeProfileLoginJob(setupJobs, harnessId, profileId);
       if (activeLogin) {
         throw Object.assign(
           new Error(
@@ -464,12 +454,14 @@ export function controlServices(
       const cleanupWarnings: string[] = [];
       try {
         if (entry.credential_kind === "config_dir_login" && entry.isolation_locator) {
-          const dir =
-            harnessId === "claude"
-              ? canonicalProfileConfigDir(entry.isolation_locator)
-              : harnessId === "codex"
-                ? canonicalCodexProfileHome(entry.isolation_locator)
-                : canonicalIsolationLocator(entry.isolation_locator, "credential profile dir");
+          // Each member resolves through its OWN canonicalizer (the ladder
+          // this used to hand-write let cursor and agy fall through to the
+          // generic one, so a member whose canonicalizer adds a rule — claude
+          // already refuses the default native dir — would silently delete
+          // against a different path than its login wrote to).
+          const dir = isConfigDirLoginHarness(harnessId)
+            ? canonicalProfileLoginDir(harnessId, entry.isolation_locator)
+            : canonicalIsolationLocator(entry.isolation_locator, "credential profile dir");
           // Recursive deletion is fenced to a strict descendant of the profiles tree.
           const profilesRoot = normalizeThroughExistingAncestor(
             join(claudexorOwnedRoot(), "profiles"),

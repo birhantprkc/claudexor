@@ -19,7 +19,8 @@ export interface NativeLoginSpec {
    * "url_disclosure" = daemon-hosted vendor login whose sign-in URL is
    * captured into the disclosure sidecar (cursor). "url_disclosure_with_input"
    * = the same plus the one-shot stdin input sidecar (claude paste-code).
-   * "terminal" = the legacy Terminal handoff (codex browser_redirect only). */
+   * "terminal" = a login driven on the operator's own tty (the codex
+   * browser_redirect fallback, and agy whose vendor TUI needs a real tty). */
   loginMode?: "terminal" | "device_code" | "url_disclosure" | "url_disclosure_with_input";
   /** Which app-server auth flow the device_code runner requests (device_code only). */
   appServerFlow?: "chatgptDeviceCode" | "chatgpt";
@@ -205,16 +206,23 @@ export function nativeLoginEnv(
     ensureDir(env.CLAUDE_CONFIG_DIR);
   } else if (harness === "agy") {
     // agy takes its whole config root from $HOME; the profile HOME IS the
-    // isolation locator. No keychain is created inside it — the vendor falls
-    // back to its file-based token there (PLAN Л-15). Pin the auto-updater so
-    // the closed binary cannot replace itself mid-login.
-    env.AGY_CLI_DISABLE_AUTO_UPDATE = "true";
-    if (configDirOverride) {
-      const home = canonicalAgyProfileHome(configDirOverride);
-      ensureDir(home);
-      env.HOME = home;
-      env.USERPROFILE = home;
+    // isolation locator. There is NO default agy credential store (owner
+    // decision Л-4), so an absent override must REFUSE: falling through would
+    // leave the daemon's own HOME in place and write a vendor token into the
+    // operator's real home directory (INV-135).
+    if (!configDirOverride) {
+      throw new Error(
+        "agy has no default credential store: an Antigravity login must target a named profile HOME (INV-135, owner decision Л-4)",
+      );
     }
+    // No keychain is created inside the profile HOME — the vendor falls back to
+    // its file-based token there (PLAN Л-15). Pin the auto-updater so the
+    // closed binary cannot replace itself mid-login.
+    const home = canonicalAgyProfileHome(configDirOverride);
+    ensureDir(home);
+    env.AGY_CLI_DISABLE_AUTO_UPDATE = "true";
+    env.HOME = home;
+    env.USERPROFILE = home;
   } else if (harness === "cursor") {
     // url_disclosure: the CLI must print its sign-in URL instead of opening a
     // browser on the daemon host (the user may be on another device). The

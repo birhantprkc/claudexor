@@ -9,6 +9,7 @@ import { controlServices } from "./control-services.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
 
 const noteCredentialChange = vi.fn();
+const setupListFilters: Array<Record<string, unknown> | undefined> = [];
 
 // DELETE /credential-profiles/:harness/:id — the one branch of the accounts
 // scope that recursively deletes a directory. These tests pin the review-wave
@@ -20,7 +21,14 @@ function servicesWithJobs(
   jobs: Array<Record<string, unknown>>,
   invalidationError?: Error & { status?: number },
 ) {
-  const setupBinding = { current: () => ({ list: () => jobs }) };
+  const setupBinding = {
+    current: () => ({
+      list: (filter?: Record<string, unknown>) => {
+        setupListFilters.push(filter);
+        return jobs;
+      },
+    }),
+  };
   const threads = {
     invalidateCredentialProfile: () => {
       if (invalidationError) throw invalidationError;
@@ -52,6 +60,7 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     process.env.CLAUDEXOR_CONFIG_DIR = dir;
     vi.spyOn(console, "log").mockImplementation(() => {});
     noteCredentialChange.mockClear();
+    setupListFilters.length = 0;
   });
   afterEach(() => {
     if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
@@ -95,6 +104,27 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     ).rejects.toMatchObject({ status: 409 });
     // The registry must be untouched after the refusal.
     expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(1);
+    expect(setupListFilters).toEqual([{ harness: "claude" }]);
+  });
+
+  it("skips the active-login fence for a harness with no managed setup jobs (agy)", async () => {
+    const { profile } = registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
+    const locator = profile.isolation_locator as string;
+    // Same live job as the claude 409 case above, but agy is outside
+    // ControlHarnessSetupHarness (no daemon-managed login yet): the fence must
+    // not resolve the setup manager at all, let alone fabricate a 409 out of
+    // another harness's job.
+    const receipt = (await servicesWithJobs([
+      { jobId: "setup-1", state: "running", profileId: "work" },
+    ]).deleteCredentialProfile({ harnessId: "agy", profileId: "work" })) as {
+      removed: boolean;
+      credentialCleanup: string;
+    };
+    expect(setupListFilters).toEqual([]);
+    expect(receipt.removed).toBe(true);
+    expect(receipt.credentialCleanup).toBe("config_dir_removed");
+    expect(existsSync(locator)).toBe(false);
+    expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
   });
 
   it("refuses before registry removal when dependent partitions need recovery", async () => {
