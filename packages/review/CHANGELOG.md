@@ -1,5 +1,15 @@
 # @claudexor/review
 
+## 3.4.2
+
+### Patch Changes
+
+- @claudexor/config@3.4.2
+- @claudexor/context@3.4.2
+- @claudexor/core@3.4.2
+- @claudexor/schema@3.4.2
+- @claudexor/util@3.4.2
+
 ## 3.4.1
 
 ### Patch Changes

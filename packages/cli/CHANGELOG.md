@@ -1,5 +1,32 @@
 # @claudexor/cli
 
+## 3.4.2
+
+### Patch Changes
+
+- @claudexor/acp-server@3.4.2
+- @claudexor/artifact-store@3.4.2
+- @claudexor/config@3.4.2
+- @claudexor/control-api@3.4.2
+- @claudexor/core@3.4.2
+- @claudexor/daemon@3.4.2
+- @claudexor/delivery@3.4.2
+- @claudexor/gateway@3.4.2
+- @claudexor/harness-claude@3.4.2
+- @claudexor/harness-codex@3.4.2
+- @claudexor/harness-cursor@3.4.2
+- @claudexor/harness-fake@3.4.2
+- @claudexor/harness-opencode@3.4.2
+- @claudexor/harness-raw-api@3.4.2
+- @claudexor/journal@3.4.2
+- @claudexor/mcp-server@3.4.2
+- @claudexor/orchestrator@3.4.2
+- @claudexor/review@3.4.2
+- @claudexor/schema@3.4.2
+- @claudexor/secrets@3.4.2
+- @claudexor/util@3.4.2
+- @claudexor/workspace@3.4.2
+
 ## 3.4.1
 
 ### Patch Changes

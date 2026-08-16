@@ -3,6 +3,25 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.4.2** (2026-08-16): every mutating delegated cursor run on macOS
+  crashed within seconds — `RetriableError: [internal] unable to open database
+  file` (SQLITE_CANTOPEN). cursor-agent keeps its chat store in SQLite under
+  the scoped HOME, SQLite canonicalizes the database path on open
+  (`realpath(3)` lstat/readlinks every intermediate component), and the
+  Seatbelt profile's runtime-root read deny covered the components between the
+  runtime root and the allowed scoped home. This is the same class the 3.3.15
+  CODEX_HOME fix closed for the native state root — and the residual its
+  review predicted for the scoped home — so the metadata traversal carve-out
+  now covers the union of EVERY own root's denied ancestors (scoped home,
+  worktree, native state root): literal, metadata-only, placed after the deny
+  it punches through. Nothing else is re-opened — file data under the runtime
+  root, sibling projects, and directory listings stay denied, and the boundary
+  probe semantics are unchanged. Two-sided `sandbox-exec` regressions pin the
+  class (canonicalize of each own root, a cursor-shaped SQLite open+WAL write,
+  and both pre-fix reproductions with the carve-out stripped), and the
+  real-harness battery's delegated-confinement phase grows a cursor case
+  beside codex, capability-checked against the real repo mutation and its
+  green test gate rather than exit status alone.
 - **v3.4.1** (2026-08-15): the Windows native-login groundwork, grown from
   community PR #189 (Renat, @dead9111) and reworked with the contributor's
   three commits preserved. Windows could not reach the login lane at all: the
