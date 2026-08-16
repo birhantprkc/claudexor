@@ -1,6 +1,6 @@
 import { z } from "zod/v3";
 import * as SetupLoginProtocol from "./setup-login-protocol.js";
-import { SetupLoginProtocolVersion } from "./setup.js";
+import { SetupLoginProtocolVersion } from "./setup-login.js";
 
 const SetupTimestamp = z.string().datetime({ offset: true });
 

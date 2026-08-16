@@ -101,6 +101,49 @@ enum AuthSheetPresentation {
         }
     }
 
+    /// The `oauth_url_input` paste field's Submit availability (INV-134): a
+    /// disabled control names its real cause, and a LAPSED vendor sign-in window
+    /// is never a "type it again" state — the only act that works there is a
+    /// fresh link, so Submit stays off and says so.
+    struct SignInCodeAvailability: Equatable {
+        enum BlockedReason: Equatable {
+            case windowLapsed
+            case sending
+            case emptyField
+
+            var help: String {
+                switch self {
+                case .windowLapsed: return "The sign-in window closed. Get a new link first."
+                case .sending: return "Delivering the code to the sign-in…"
+                case .emptyField: return "Paste the code from the sign-in page first."
+                }
+            }
+        }
+
+        let blockedReason: BlockedReason?
+        var enabled: Bool { blockedReason == nil }
+
+        /// Hover help for Submit: the blocking cause while disabled, else the
+        /// plain action description.
+        var help: String {
+            blockedReason?.help ?? "Deliver this one-time code to the waiting sign-in."
+        }
+
+        /// Whitespace-only input counts as empty — the card trims before
+        /// submitting, so an untrimmed "enabled" would be a lie.
+        init(windowLapsed: Bool, sending: Bool, codeField: String) {
+            if windowLapsed {
+                blockedReason = .windowLapsed
+            } else if sending {
+                blockedReason = .sending
+            } else if codeField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                blockedReason = .emptyField
+            } else {
+                blockedReason = nil
+            }
+        }
+    }
+
     /// What the login-disclosure card may SAY and OFFER. The card is not
     /// codex-only — a terminal-mode claude/cursor login discloses its captured
     /// `oauth_url` through the same overlay — so both answers come from the
@@ -255,5 +298,17 @@ extension AuthSheetPresentation.PrimaryCTA {
         case .reconnect: return "Re-establish setup truth (re-snapshot the job / prove the process gone)."
         case .done: return "Close this auth sheet."
         }
+    }
+}
+
+/// Whether closing the AuthSheet needs a confirmation — pure, so the "silently
+/// abandoned a live login" cases stay unit-pinned. (Lives beside the sheet's
+/// other pure mappers rather than in the view file.)
+enum AuthSheetClosePolicy {
+    static func requiresConfirmation(job: SetupJob?, connection: SetupLifecycleConnection,
+                                     actionInFlight: Bool) -> Bool {
+        if actionInFlight { return true }
+        if job?.isActive == true || job?.blocksReplacement == true { return true }
+        return connection == .recovering || connection == .reconnecting || connection == .streamLost
     }
 }

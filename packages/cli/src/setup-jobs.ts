@@ -21,13 +21,13 @@ import {
   type ControlSetupJobListFilter,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
-import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import * as NativeLogin from "./native-login.js";
 import {
   SETUP_PROFILES,
   processGroupFromJob,
   profileDoctorProbe,
+  DEFAULT_STORE_OF,
+  assertDefaultLoginAllowed,
   resolveProfileBinding,
   resolveSetupLoginRunnerPath,
   shellQuote,
@@ -70,10 +70,6 @@ import {
   submitSetupLoginInput,
 } from "./setup-login-completion.js";
 
-const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
-  codex: defaultNativeCodexHome,
-  claude: defaultNativeClaudeConfigDir,
-};
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
 type NativeLoginSpec = NativeLogin.NativeLoginSpec;
@@ -1052,9 +1048,11 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const executionId = randomUUID();
       const executable = captureExecutableEvidence(spec.binary);
       const authorizedCommandDigest = commandDigest(executable, spec.args);
+      // A vendor window shorter than ours governs: counting past the moment it
+      // gave up would promise a login that is already over.
       const { loginDeadlineAt, permitDeadlineAt, permitWaitMs } = setupLoginDeadlines(
         now(),
-        loginTimeoutMs,
+        Math.min(loginTimeoutMs, spec.loginWindowMs ?? loginTimeoutMs),
         launcherTimeoutMs,
         job.transport,
       );
@@ -1074,7 +1072,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         version: SETUP_LOGIN_PROTOCOL_VERSION,
         jobId: job.jobId,
         executionId,
-        harness: job.harness as "codex" | "claude" | "cursor",
+        harness: job.harness,
         jobDir: paths.dir,
         binary: executable.realpath,
         args: [...spec.args],
@@ -1092,8 +1090,9 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           : isUrlDisclosureLoginMode(spec.loginMode)
             ? {
                 loginMode: spec.loginMode,
+                // ptyStdin only where the vendor refuses a piped stdin.
                 ...(spec.loginMode === "url_disclosure_with_input"
-                  ? { inputPath: paths.runnerInput }
+                  ? { inputPath: paths.runnerInput, ...(spec.ptyStdin ? { ptyStdin: true } : {}) }
                   : {}),
               }
             : {}),
@@ -1283,6 +1282,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const request = ControlSetupJobCreateRequest.parse(input);
       const { harness, action } = request;
       const profileBinding = resolveProfileBinding(harness, request.profileId);
+      assertDefaultLoginAllowed(harness, profileBinding !== null);
       const binding = idempotency ? { ...idempotency, request } : undefined;
       const prior = binding ? store.resolveCreate(binding) : null;
       if (prior) return prior;

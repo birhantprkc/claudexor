@@ -120,8 +120,11 @@ enum AccountsPresentation {
         "CLI login = existing vendor sign-in; named accounts = isolated profiles used by explicit pin or opt-in quota rotation."
 
     /// Harnesses whose native subscription login can be isolated as an
-    /// additive config-dir/HOME profile.
-    static let configDirLoginHarnessIds = ["claude", "codex", "cursor"]
+    /// additive config-dir/HOME profile. `agy` (Antigravity) has NO default
+    /// store, so every one of its accounts is a named profile registered here —
+    /// which is also why it must stay out of `defaultAuthReadinessRequest`
+    /// (DomainModels.swift), whose rows are the default "CLI login".
+    static let configDirLoginHarnessIds = ["agy", "claude", "codex", "cursor"]
 
     /// Compare legal offset timestamps by their absolute instant. Equal
     /// instants and malformed future values use raw lexical order so the

@@ -35,6 +35,11 @@ export function watchLoginInput(
   manifest: SetupLoginManifest,
   child: ChildProcess,
   now: () => Date,
+  /** Called with the value the moment it is delivered. A tty-backed login
+   * (ptyStdin) is ECHOED by the terminal line discipline, so the pasted code
+   * comes straight back out on the tee'd output — the tail must forget it
+   * before any failure receipt is written (INV-062). */
+  onDelivered?: (value: string) => void,
 ): () => void {
   let delivered = false;
   const timer = setInterval(() => {
@@ -42,6 +47,7 @@ export function watchLoginInput(
     const input = readRunnerLoginInput(manifest.inputPath, manifest.jobId, manifest.executionId);
     if (!input) return;
     delivered = true;
+    onDelivered?.(input.value);
     try {
       child.stdin.write(`${input.value}\n`);
     } catch {
@@ -55,7 +61,11 @@ export function watchLoginInput(
 }
 
 /** Ring buffer of the last OUTPUT_TAIL_BYTES of tee'd vendor output. */
-export function createTailBuffer(): { push(chunk: Buffer): void; text(): string } {
+export function createTailBuffer(): {
+  push(chunk: Buffer): void;
+  text(): string;
+  forget(value: string): void;
+} {
   // Byte-accurate ring: keep the final OUTPUT_TAIL_BYTES RAW bytes, decode
   // ONCE in text() (per-chunk String() splits multibyte UTF-8; UTF-16 .slice
   // miscounts the byte bound).
@@ -63,7 +73,13 @@ export function createTailBuffer(): { push(chunk: Buffer): void; text(): string 
   // Ring overflow is tracked HERE and handed to boundedTail — the decoded
   // string's length (already <= the cap) cannot recover it (X224).
   let overflowed = false;
+  // Exact strings the tail must never carry back out (a tty-echoed sign-in
+  // code); `redactSecrets` cannot anchor a vendor code with no known prefix.
+  const forgotten: string[] = [];
   return {
+    forget(value) {
+      if (value.trim().length >= 4) forgotten.push(value.trim());
+    },
     push(chunk) {
       const combined = Buffer.concat([tail, chunk]);
       if (combined.length > OUTPUT_TAIL_BYTES) overflowed = true;
@@ -74,7 +90,9 @@ export function createTailBuffer(): { push(chunk: Buffer): void; text(): string 
       // (0b10xxxxxx) so the decode never opens with a replacement char.
       let start = 0;
       while (start < tail.length && (tail[start]! & 0b1100_0000) === 0b1000_0000) start += 1;
-      return boundedTail(tail.subarray(start).toString("utf8"), overflowed || start > 0);
+      let text = tail.subarray(start).toString("utf8");
+      for (const value of forgotten) text = text.split(value).join("[redacted]");
+      return boundedTail(text, overflowed || start > 0);
     },
   };
 }

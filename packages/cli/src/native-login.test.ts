@@ -80,15 +80,27 @@ describe("native login specs", () => {
         displayCommand: "cursor-agent login",
         loginMode: "url_disclosure",
       });
-      // agy has no login subcommand at all: the bare interactive TUI prints the
-      // sign-in URL and takes the pasted code, so it needs the operator's own
-      // tty ("terminal"), not the daemon-hosted disclosure runner.
+      // agy has no login subcommand at all: the bare interactive CLI prints the
+      // sign-in URL and takes the pasted code — the same shape as claude, with
+      // one difference the runner has to honor, that the vendor reads its code
+      // only from a real terminal.
       expect(nativeLoginSpec("agy", resolver)).toEqual({
         binary: "/normalized/bin/agy",
         args: [],
         displayCommand: "agy (interactive login)",
-        loginMode: "terminal",
+        loginMode: "url_disclosure_with_input",
+        ptyStdin: true,
+        // The vendor's OWN paste window, sealed so the card counts down
+        // against the process rather than against the engine's 15 minutes.
+        loginWindowMs: 60_000,
       });
+      // No other harness claims a tty: a needless wrapper process around a
+      // login that never reads stdin.
+      for (const harness of ["codex", "claude", "cursor"]) {
+        expect(nativeLoginSpec(harness, resolver)?.ptyStdin).toBeUndefined();
+        // No other vendor caps its own window, so the engine's governs.
+        expect(nativeLoginSpec(harness, resolver)?.loginWindowMs).toBeUndefined();
+      }
       for (const harness of ["codex", "claude", "cursor", "agy"]) {
         expect(isAbsolute(nativeLoginSpec(harness, resolver)?.binary ?? "")).toBe(true);
       }

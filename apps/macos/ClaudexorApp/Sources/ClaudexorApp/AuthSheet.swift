@@ -127,14 +127,14 @@ struct AuthSheet: View {
                         )
                     }
                     if let disclosure = lifecycle.deviceCode, let job, job.phase == .awaitingUser {
-                        // Keyed on the JOB's harness, never the sheet's target.
-                        let card = AuthSheetPresentation.loginDisclosureCard(harness: job.harness)
+                        // Keyed on the JOB's harness/deadline, not this target.
                         AuthSheetDeviceCodeCard(
-                            disclosure: disclosure, vendor: card.vendor, waiting: true,
+                            disclosure: disclosure, job: job, waiting: true,
                             actionInFlight: actionInFlight,
                             cancel: { Task { await cancelJob() } },
-                            useBrowserCallback: card.offersBrowserCallback
-                                ? { Task { await switchToBrowserCallback() } } : nil
+                            useBrowserCallback: { Task { await restartLogin(loginFlow: .browserCallback) } },
+                            submitCode: { await submitLoginCode($0) },
+                            reissue: { Task { await restartLogin() } }
                         )
                     }
                     if let job { setupJobPanel(job) }
@@ -416,11 +416,11 @@ struct AuthSheet: View {
                                profileId: job.profileId, loginFlow: .browserRedirect)
     }
 
-    /// D-17 explicit browser-callback opt-in (device-auth-disabled orgs). The
-    /// device-code and browser-callback flows share the app-server "device-code"
-    /// conflict bucket, so a live job must be cancelled before the switch — this
-    /// is never a silent fallback.
-    private func switchToBrowserCallback() async {
+    /// Replace the live login: the D-17 browser-callback opt-in (codex orgs that
+    /// disable device-code), and the re-issue after a sign-in window lapsed
+    /// (`loginFlow` nil). Both share the app-server conflict bucket, so the
+    /// current job is cancelled first — never a silent fallback.
+    private func restartLogin(loginFlow: SetupCodexLoginFlow? = nil) async {
         guard let controller, let job else { return }
         actionInFlight = true
         defer { actionInFlight = false }
@@ -434,7 +434,16 @@ struct AuthSheet: View {
             }
         }
         await controller.start(harness: family.setupHarnessId, action: "login",
-                               profileId: job.profileId, loginFlow: .browserCallback)
+                               profileId: job.profileId, loginFlow: loginFlow)
+    }
+
+    /// Hand the pasted one-time code to the waiting login job: straight to the
+    /// daemon, never stored here or logged. Returns the refusal reason, if any.
+    private func submitLoginCode(_ code: String) async -> String? {
+        guard let controller else { return "Engine offline: reconnect and try again." }
+        actionInFlight = true
+        defer { actionInFlight = false }
+        return await controller.submitInput(code)
     }
 
     private func extendDeadline() async {
@@ -563,13 +572,4 @@ struct AuthSheet: View {
         "Cancellation reached a terminal result, but process termination was not confirmed. This sheet will stay open; reconnect and run Recheck before starting another login."
     }
 
-}
-
-enum AuthSheetClosePolicy {
-    static func requiresConfirmation(job: SetupJob?, connection: SetupLifecycleConnection,
-                                     actionInFlight: Bool) -> Bool {
-        if actionInFlight { return true }
-        if job?.isActive == true || job?.blocksReplacement == true { return true }
-        return connection == .recovering || connection == .reconnecting || connection == .streamLost
-    }
 }

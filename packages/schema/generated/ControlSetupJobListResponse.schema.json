@@ -19,7 +19,8 @@
                 "enum": [
                   "codex",
                   "claude",
-                  "cursor"
+                  "cursor",
+                  "agy"
                 ],
                 "description": "Harness ids with a managed native-login flow."
               },

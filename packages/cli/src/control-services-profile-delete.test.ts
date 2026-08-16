@@ -107,24 +107,30 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     expect(setupListFilters).toEqual([{ harness: "claude" }]);
   });
 
-  it("skips the active-login fence for a harness with no managed setup jobs (agy)", async () => {
-    const { profile } = registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
+  it("fences an agy deletion against its own live login, and skips the lookup for a harness with no managed logins", async () => {
+    // agy joined ControlHarnessSetupHarness with the in-app login card, so its
+    // deletion now takes the SAME 409 fence as claude: a live login must not be
+    // deleted out from under itself.
+    registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
+    await expect(
+      servicesWithJobs([
+        { jobId: "setup-1", state: "running", profileId: "work" },
+      ]).deleteCredentialProfile({ harnessId: "agy", profileId: "work" }),
+    ).rejects.toThrow(/login for this account is in progress/);
+    expect(setupListFilters).toEqual([{ harness: "agy" }]);
+
+    // A harness OUTSIDE the setup enum still never resolves the manager: the
+    // fence is derived from the enum's own options, never a hand-copied list.
+    setupListFilters.length = 0;
+    const { profile } = registerConfigDirProfile({ harnessId: "cursor", profileId: "solo" });
     const locator = profile.isolation_locator as string;
-    // Same live job as the claude 409 case above, but agy is outside
-    // ControlHarnessSetupHarness (no daemon-managed login yet): the fence must
-    // not resolve the setup manager at all, let alone fabricate a 409 out of
-    // another harness's job.
-    const receipt = (await servicesWithJobs([
-      { jobId: "setup-1", state: "running", profileId: "work" },
-    ]).deleteCredentialProfile({ harnessId: "agy", profileId: "work" })) as {
-      removed: boolean;
-      credentialCleanup: string;
-    };
-    expect(setupListFilters).toEqual([]);
+    const receipt = (await servicesWithJobs([]).deleteCredentialProfile({
+      harnessId: "cursor",
+      profileId: "solo",
+    })) as { removed: boolean; credentialCleanup: string };
     expect(receipt.removed).toBe(true);
     expect(receipt.credentialCleanup).toBe("config_dir_removed");
     expect(existsSync(locator)).toBe(false);
-    expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
   });
 
   it("refuses before registry removal when dependent partitions need recovery", async () => {

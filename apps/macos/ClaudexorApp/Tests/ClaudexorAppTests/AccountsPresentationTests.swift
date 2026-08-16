@@ -6,6 +6,22 @@ import Testing
 /// Owner dogfood: the internal profile id is DERIVED, never typed. The
 /// generator must always emit a server-valid slug, unique per harness.
 @Suite struct AccountsPresentationTests {
+    /// Antigravity registers named profiles (so it belongs in the config-dir
+    /// login set) but has NO default credential store, so it must NOT gain a
+    /// `defaultAuthReadinessRequest`: that field is what emits the default
+    /// "CLI login" row, and for agy it would be a row with nothing behind it.
+    /// The two facts are one decision, so they are pinned together.
+    @Test func antigravitySignsInAsNamedProfilesWithoutAPhantomCliLoginRow() {
+        #expect(AccountsPresentation.configDirLoginHarnessIds.contains("agy"))
+        #expect(HarnessFamily(rawValue: "agy").defaultAuthReadinessRequest == nil)
+        // Every OTHER config-dir login family keeps its native default row.
+        for id in AccountsPresentation.configDirLoginHarnessIds where id != "agy" {
+            #expect(HarnessFamily(rawValue: id).defaultAuthReadinessRequest?.source == .nativeSession)
+        }
+        // Rotation is a separate question with its own owner — untouched here.
+        #expect(!AccountsAutoBalance.capableHarnessIds.contains("agy"))
+    }
+
     @Test func accountActionNoticeClearsAndRejectsLateCompletions() {
         var notice = AccountsActionNotice()
         let first = notice.begin()

@@ -12,10 +12,13 @@ import {
   type ProcessGroupHandle,
 } from "@claudexor/core";
 import { loadConfig } from "@claudexor/config";
+import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
+import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import {
   ControlHarnessSetupHarness,
   type ControlSetupJob,
   type CredentialProfileStatus,
+  harnessHasDefaultCredentialStore,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
 import {
@@ -27,6 +30,14 @@ import { ACTIVE_SETUP_STATES } from "./setup-job-store.js";
 import type { SetupLoginRunnerState } from "./setup-login-protocol.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
+
+/** Where a harness's DEFAULT (unnamed) login lands, for the harnesses whose
+ * default store Claudexor owns. Absent = the vendor keeps its own default
+ * location, or (agy) has none at all. */
+export const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
+  codex: defaultNativeCodexHome,
+  claude: defaultNativeClaudeConfigDir,
+};
 
 export type SetupProfile = {
   guideUrl: string;
@@ -45,6 +56,10 @@ export const SETUP_PROFILES: Record<ControlHarnessSetupHarness, SetupProfile> = 
   cursor: {
     guideUrl: "https://docs.cursor.com/en/cli/reference/authentication",
     note: "Cursor native CLI login is reused when available.",
+  },
+  agy: {
+    guideUrl: "https://antigravity.google/docs/cli/install",
+    note: "Antigravity sign-in always targets one named account folder: the CLI keeps its whole state under a home directory, so every Google account you add gets its own.",
   },
 };
 
@@ -94,6 +109,22 @@ export function resolveProfileBinding(
     profileId,
     configDir: canonicalProfileLoginDir(harness, profile.isolation_locator ?? ""),
   };
+}
+
+/**
+ * A harness with no default credential store (agy — owner decision Л-4) can
+ * only sign in INTO a named account. Refusing at CREATE time keeps the runner
+ * from spawning a vendor login whose token would land in the daemon's own home
+ * directory, and gives the caller a 400 instead of an opaque spawn failure.
+ */
+export function assertDefaultLoginAllowed(harness: string, hasProfile: boolean): void {
+  if (hasProfile || harnessHasDefaultCredentialStore(harness)) return;
+  throw Object.assign(
+    new Error(
+      `harness "${harness}" has no default credential store: sign in from a named account (add one first, then start the login from it)`,
+    ),
+    { status: 400 },
+  );
 }
 
 /**

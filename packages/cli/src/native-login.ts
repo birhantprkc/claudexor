@@ -20,10 +20,16 @@ export interface NativeLoginSpec {
    * captured into the disclosure sidecar (cursor). "url_disclosure_with_input"
    * = the same plus the one-shot stdin input sidecar (claude paste-code).
    * "terminal" = a login driven on the operator's own tty (the codex
-   * browser_redirect fallback, and agy whose vendor TUI needs a real tty). */
+   * browser_redirect fallback). */
   loginMode?: "terminal" | "device_code" | "url_disclosure" | "url_disclosure_with_input";
   /** Which app-server auth flow the device_code runner requests (device_code only). */
   appServerFlow?: "chatgptDeviceCode" | "chatgpt";
+  /** The vendor reads its pasted code only from a real terminal (agy), so the
+   * daemon-hosted runner must give stdin a tty instead of a pipe. */
+  ptyStdin?: boolean;
+  /** How long the VENDOR itself will wait for the code, when that is shorter
+   * than Claudexor's own login window. Absent = the engine's window governs. */
+  loginWindowMs?: number;
 }
 
 type LoginDefinition = Omit<NativeLoginSpec, "binary"> & { binaryName: () => string };
@@ -32,6 +38,9 @@ type LoginDefinition = Omit<NativeLoginSpec, "binary"> & { binaryName: () => str
  * = app-server browser-callback (secondary); browser_redirect = legacy Terminal
  * localhost callback (the typed fallback). */
 export type CodexLoginFlow = "device_auth" | "browser_callback" | "browser_redirect";
+
+/** The vendor's own paste window for agy: 60 seconds, no flag to extend. */
+export const AGY_LOGIN_WINDOW_MS = 60_000;
 
 const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
   codex: {
@@ -64,10 +73,10 @@ const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
   },
   agy: {
     binaryName: () => process.env.CLAUDEXOR_AGY_BIN || "agy",
-    // agy has no login subcommand: the interactive TUI prints the sign-in URL
-    // and accepts the pasted code (it needs a real TTY, which the CLI
-    // profiles-login path gives it via spawnSync stdio:inherit). The managed
-    // in-app login card is a later phase; this is the CLI/terminal route.
+    // agy has no login subcommand: the bare interactive CLI prints the sign-in
+    // URL and waits for the pasted code. Both routes run this same command —
+    // `claudexor profiles login agy` gives it the operator's own tty, and the
+    // daemon-hosted card gives it one through the runner's pty (ptyStdin).
     args: [],
     displayCommand: "agy (interactive login)",
   },
@@ -118,16 +127,23 @@ export function nativeLoginSpec(
   // Terminal window. Claude's manual OAuth completion needs one line of user
   // input written back (the pasted code); cursor's login self-completes by
   // server-side polling once the URL is followed anywhere.
+  // agy takes the same paste-a-code shape as claude; the one difference is
+  // that its vendor refuses a piped stdin outright, so the runner must
+  // interpose a tty (proven 2026-08-16: with a plain pipe agy answers
+  // "authentication required", with a pty it prints the URL and consumes the
+  // pasted code).
+  const withInput = harness === "claude" || harness === "agy";
   return {
     binary: resolved,
     args: [...definition.args],
     displayCommand: definition.displayCommand,
-    loginMode:
-      harness === "claude"
-        ? "url_disclosure_with_input"
-        : harness === "agy"
-          ? "terminal"
-          : "url_disclosure",
+    loginMode: withInput ? "url_disclosure_with_input" : "url_disclosure",
+    // agy waits EXACTLY 60 seconds for the pasted code and offers no flag to
+    // extend it (measured across four runs, PLAN §1.2 F6). Sealing the vendor's
+    // real window instead of the engine's 15 minutes keeps the card's countdown
+    // honest and lets it re-issue the link the moment the vendor gives up
+    // (Л-23) rather than counting down against a process that already exited.
+    ...(harness === "agy" ? { ptyStdin: true, loginWindowMs: AGY_LOGIN_WINDOW_MS } : {}),
   };
 }
 

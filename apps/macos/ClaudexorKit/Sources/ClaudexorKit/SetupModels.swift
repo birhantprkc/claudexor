@@ -2,6 +2,10 @@ public enum SetupHarness: String, Codable, Sendable, CaseIterable {
     case codex
     case claude
     case cursor
+    /// Antigravity CLI (product label "Antigravity", harness id `agy`). Every
+    /// account is a named config-dir profile, so it has no default-store login;
+    /// without this case a server-issued agy login job would not decode at all.
+    case agy
 }
 
 public enum SetupJobAction: String, Codable, Sendable, CaseIterable {
@@ -56,6 +60,16 @@ public struct SetupJobCreateRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(loginFlow, forKey: .loginFlow)
         if transport != .daemon { try container.encode(transport, forKey: .transport) }
     }
+}
+
+/// Body of `POST /v2/setup/jobs/:id/input` (wire `ControlSetupJobInputRequest`):
+/// the one-time sign-in value a waiting `url_disclosure_with_input` login needs.
+/// The daemon lands it in a transient runner sidecar and feeds it to the vendor
+/// CLI's stdin; it is never journaled. Nothing here retains or logs it either.
+public struct SetupJobInputRequest: Codable, Sendable, Equatable {
+    public let value: String
+
+    public init(value: String) { self.value = value }
 }
 
 /// D-17 codex login flow selection (request-side). Absent = the app-server

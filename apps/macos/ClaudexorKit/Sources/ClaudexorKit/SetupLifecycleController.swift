@@ -9,6 +9,7 @@ public protocol SetupJobGateway: Sendable {
     func cancelSetupJob(jobId: String) async throws -> SetupJob
     func reconcileSetupJob(jobId: String) async throws -> SetupJob
     func extendSetupJob(jobId: String) async throws -> SetupJob
+    func submitSetupJobInput(jobId: String, value: String) async throws -> SetupJob
     func setupJobEvents(jobId: String, lastEventId: String) -> AsyncThrowingStream<SetupJobEvent, Error>
 }
 
@@ -197,6 +198,25 @@ public actor SetupLifecycleController {
         guard let job = current.job else { return }
         await performAction(deviceCode: .clear) {
             try await gateway.cancelSetupJob(jobId: job.jobId)
+        }
+    }
+
+    /// One-shot sign-in input for a `url_disclosure_with_input` login: the code
+    /// the user pasted into the card. nil means the daemon accepted it; a
+    /// returned string is the human reason to show. A 409 is a DEFINITIVE
+    /// refusal (wrong phase, or a value already delivered) — server state stays
+    /// known, so observation continues instead of forcing a reconcile. The value
+    /// itself only ever reaches the gateway: never a snapshot, log, or field.
+    public func submitInput(_ value: String) async -> String? {
+        guard let job = current.job else { return "No sign-in is waiting for a code." }
+        do {
+            let updated = try await gateway.submitSetupJobInput(jobId: job.jobId, value: value)
+            adoptAndObserve(updated, deviceCode: .preserveSameAwaiting)
+            return nil
+        } catch let GatewayError.http(status, body) where status == 409 {
+            return body.isEmpty ? "This sign-in no longer accepts a code." : Self.conflictMessage(body)
+        } catch {
+            return String(describing: error)
         }
     }
 
