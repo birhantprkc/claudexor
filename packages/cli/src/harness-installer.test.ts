@@ -394,9 +394,12 @@ describe("--json stdout purity on the execute path (--yes)", () => {
 
 describe("Windows installer path (Л-24: best effort, honestly bounded)", () => {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
-  const asWindows = (): void =>
+  const asWindows = (): void => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-  afterEach(() => Object.defineProperty(process, "platform", originalPlatform));
+  };
+  afterEach(() => {
+    Object.defineProperty(process, "platform", originalPlatform);
+  });
 
   it("discloses the vendor's own Windows installer for agy", () => {
     asWindows();
