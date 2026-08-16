@@ -191,7 +191,7 @@ export const QuotaModelScopedExhaustion = z
   })
   .strict()
   .describe(
-    "A spent or cooling window that applies only to the named models. Without a requested model it never sets the whole subject exhausted; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
+    "A spent or cooling window that applies only to the named models. Without a requested model only a window that DECLARES it governs the unspecified-model route can exhaust the subject; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
   );
 export type QuotaModelScopedExhaustion = z.infer<typeof QuotaModelScopedExhaustion>;
 

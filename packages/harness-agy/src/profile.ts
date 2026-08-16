@@ -56,8 +56,8 @@ export function agyTokenFilePresent(profileHome: string): boolean {
  * conversation by id (`--conversation`, INV-137). Nothing scopes those
  * conversations to a lane yet — the vendor's project mechanism
  * (`--new-project`/`--project`, Л-19) is not wired here — so one profile HOME
- * accumulates every thread's vendor state, which the Accounts card discloses
- * by size (Л-30).
+ * accumulates every thread's vendor state, and conversations are NOT scoped per
+ * chat thread.
  */
 export function agyProfileRunEnv(profileHome: string, specEnv: EnvMap = {}): EnvMap {
   const home = canonicalAgyProfileHome(profileHome);

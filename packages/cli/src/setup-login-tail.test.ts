@@ -153,4 +153,16 @@ describe("createTailBuffer().forget (tty echo of a delivered sign-in code)", () 
   it("keeps the surrounding diagnostic that makes a failure readable", () => {
     expect(echoed("code-123456")).toContain("rejected");
   });
+
+  it("forgets a code the vendor re-prints IN COLOUR", () => {
+    // Escapes inside the value defeat an exact-string match; stripping them
+    // afterwards then reassembles the plaintext into a durable receipt.
+    const code = "4/0AY0e-PASTEDCODE-xyz";
+    const tail = createTailBuffer();
+    tail.forget(code);
+    tail.push(Buffer.from("rejected: \u001b[32m4/0AY0e-\u001b[0mPASTEDCODE-xyz\n"));
+    const out = tail.text();
+    expect(out).not.toContain("PASTEDCODE");
+    expect(out).toContain("rejected");
+  });
 });

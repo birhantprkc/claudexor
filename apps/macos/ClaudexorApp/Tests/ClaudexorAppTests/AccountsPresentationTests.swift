@@ -42,6 +42,45 @@ import Testing
         }
     }
 
+    /// The global popover's add flow is DERIVED from the config-dir login set,
+    /// not hand-listed. The hand-listed picker offered Claude/Codex/Cursor only,
+    /// so a user who had added one Google account found no way to add the second
+    /// and no explanation — the two-account story dead-ended in the one surface
+    /// that owns adding accounts.
+    @Test func everyConfigDirLoginFamilyIsAddableAndNamedInTheCaption() {
+        let addable = AccountsPresentation.addableFamilies
+        #expect(addable.map(\.rawValue) == AccountsPresentation.configDirLoginHarnessIds)
+        #expect(addable.contains(HarnessFamily.agy))
+
+        // The caption names the PRODUCTS, in the SSOT's own order, and can
+        // never again omit a family the picker offers.
+        let caption = AccountsPresentation.addAccountCaption(family: nil)
+        for family in addable { #expect(caption.contains(family.label)) }
+        #expect(caption.contains("Antigravity"))
+        // Л-14: never the binary id.
+        #expect(!caption.contains("Agy"))
+
+        // A family-scoped host (the Harness Doctor's Manage sheet) names its
+        // one vendor instead of the whole list.
+        let scoped = AccountsPresentation.addAccountCaption(family: .agy)
+        #expect(scoped.contains("Antigravity"))
+        #expect(!scoped.contains("Cursor"))
+
+        // The form's initial selection must be a row the picker actually
+        // offers, or the control opens on nothing.
+        #expect(AccountsPresentation.configDirLoginHarnessIds
+            .contains(AccountsPresentation.defaultAddHarnessId))
+    }
+
+    /// Oxford list: a future two-family set must not read "A, or B".
+    @Test func addableFamilyListReadsAsProse() {
+        #expect(AccountsPresentation.listed([]) == "")
+        #expect(AccountsPresentation.listed(["Claude"]) == "Claude")
+        #expect(AccountsPresentation.listed(["Claude", "Codex"]) == "Claude or Codex")
+        #expect(AccountsPresentation.listed(["Antigravity", "Claude", "Codex"])
+            == "Antigravity, Claude, or Codex")
+    }
+
     @Test func accountActionNoticeClearsAndRejectsLateCompletions() {
         var notice = AccountsActionNotice()
         let first = notice.begin()

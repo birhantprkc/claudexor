@@ -96,7 +96,15 @@ export function createTailBuffer(): {
       // (0b10xxxxxx) so the decode never opens with a replacement char.
       let start = 0;
       while (start < tail.length && (tail[start]! & 0b1100_0000) === 0b1000_0000) start += 1;
-      let text = tail.subarray(start).toString("utf8");
+      // Escapes come off BEFORE the forget match: a vendor that re-prints the
+      // code in colour splits it with control bytes, the exact-string match
+      // misses, and boundedTail then reassembles the plaintext into a durable
+      // receipt. Stripping first means the match sees what the reader will.
+      let text = tail
+        .subarray(start)
+        .toString("utf8")
+        .replace(TERM_ESCAPE_RE, "")
+        .replace(C0_CONTROL_RE, "");
       for (const value of forgotten) text = text.split(value).join("[redacted]");
       return boundedTail(text, overflowed || start > 0);
     },

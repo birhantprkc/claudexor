@@ -2675,6 +2675,31 @@ describe("one-shot sign-in input (url_disclosure_with_input, owner directive 202
     await manager.shutdown();
   });
 
+  it("gives the token exchange its own window, so the clock cannot kill a delivered code", async () => {
+    // The vendor's window bounds how long the USER had to paste; the exchange
+    // that follows is a different thing. Without this the deadline monitor
+    // SIGKILLs the vendor mid-exchange — and against a sixty-second window the
+    // user is racing that clock, so a successful paste being cancelled is the
+    // COMMON case, not an edge one.
+    const manager = createSetupJobManager({
+      rootDir: join(root, "input-grace"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      loginTimeoutMs: 60_000,
+    });
+    await manager.start();
+    const job = manager.create(CLAUDE_LOGIN);
+    const before = Date.parse(job.deadlineAt!);
+    expect(before - Date.parse(job.createdAt)).toBeLessThanOrEqual(61_000);
+    const updated = manager.input({ jobId: job.jobId, value: "pasted-code-9" });
+    expect(Date.parse(updated.deadlineAt!)).toBeGreaterThan(before);
+    // And the extended deadline is no longer the vendor's own, so a surface
+    // may offer to extend it again rather than refusing.
+    expect(updated.deadlineFixed).toBe(false);
+    await manager.shutdown();
+  });
+
   it("rejects input for flows that do not take it (cursor url_disclosure, codex device-code)", async () => {
     const manager = createSetupJobManager({
       rootDir: join(root, "input-wrong-mode"),

@@ -75,10 +75,27 @@ export function submitSetupLoginInput(deps: SetupLoginInputDeps, input: unknown)
     value,
     submittedAt: deps.iso(),
   });
+  // The vendor's own window governs how long the USER had to paste, not how
+  // long the exchange that follows may take. Without this the deadline monitor
+  // SIGKILLs the vendor mid token-exchange — and with a sixty-second window
+  // the user is racing that clock, so a successful paste being cancelled is
+  // the common case rather than an edge one.
+  // A FLOOR, never a replacement: a job whose own window is already longer
+  // keeps it (the reducer refuses a deadline that moves backwards anyway), and
+  // the extended deadline is no longer the vendor's own, so it stops being
+  // unextendable.
+  const grace = Date.parse(deps.iso()) + INPUT_EXCHANGE_GRACE_MS;
+  const current = job.deadlineAt ? Date.parse(job.deadlineAt) : 0;
+  const extended = grace > current;
   return deps.update(jobId, {
     message: `${job.harness} sign-in input received — completing the vendor login.`,
+    ...(extended ? { deadlineAt: new Date(grace).toISOString(), deadlineFixed: false } : {}),
   });
 }
+
+/** How long the vendor may take to finish its token exchange after the user's
+ * code is delivered. Bounded, so a vendor that hangs is still terminated. */
+const INPUT_EXCHANGE_GRACE_MS = 3 * 60_000;
 
 /** Post-deadline grace verification: one bounded final probe after the verify
  * window closed. Returns which oracle confirmed, or null (the honest timeout

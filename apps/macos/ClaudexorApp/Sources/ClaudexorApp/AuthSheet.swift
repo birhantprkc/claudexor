@@ -23,6 +23,8 @@ struct AuthSheet: View {
     @State private var lastRefreshedTerminalJobId: String?
     @State private var didAutoStartLogin = false
     @State private var showTerminalCaveat = false
+    /// Bounded automatic sign-in-link replacements (see `ReissueBudget`).
+    @State private var reissues = AuthSheetPresentation.ReissueBudget()
 
     private var secretName: String? { AuthSheetPresentation.managedSecretSlot(for: family) }
 
@@ -134,7 +136,11 @@ struct AuthSheet: View {
                             cancel: { Task { await cancelJob() } },
                             useBrowserCallback: { Task { await restartLogin(loginFlow: .browserCallback) } },
                             submitCode: { await submitLoginCode($0) },
-                            reissue: { Task { await restartLogin() } }
+                            autoReissueArmed: reissues.armed,
+                            reissue: { automatic in
+                                reissues.spend(automatic: automatic)
+                                Task { await restartLogin() }
+                            }
                         )
                     }
                     if let job { setupJobPanel(job) }
@@ -244,11 +250,8 @@ struct AuthSheet: View {
                     .tint(Theme.accentSolid)
                     .controlSize(.large)
                     .disabled(newSetupDisabled)
-                    .help(targetVerified
-                          ? "Open the native \(family.label) login flow to manage the verified session."
-                          : family.setupHarnessId == "codex"
-                            ? "Start the native \(family.label) device-code login — a one-time code appears here, no Terminal."
-                            : "Start the native \(family.label) login flow — a Terminal window opens automatically.")
+                    .help(AuthSheetPresentation.nativeLoginHelp(
+                        family: family, verified: targetVerified))
 
                     Button { Task { await recheck() } } label: {
                         Label("Recheck", systemImage: "arrow.clockwise")
@@ -468,15 +471,10 @@ struct AuthSheet: View {
         actionInFlight = true
         defer { actionInFlight = false }
         let matchingJob = activeJobMatchesTarget ? job : nil
-        if await model.refreshCredentialReadiness(
+        let refreshed = await model.refreshCredentialReadiness(
             for: family, profileId: profileId, after: matchingJob)
-        {
-            status = profileId == nil
-                ? "Exact auth-readiness check completed for \(family.label)."
-                : "Account readiness refreshed for this \(family.label) profile."
-        } else {
-            status = "Exact auth-readiness check failed for \(family.label). Reconnect the engine and try again."
-        }
+        status = AuthSheetPresentation.recheckStatus(
+            family: family, profileId: profileId, job: matchingJob, succeeded: refreshed)
     }
 
     private func reconnectSetupState() async {

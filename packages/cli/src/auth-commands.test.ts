@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { authSourceAvailability } from "./cli-io.js";
-import { isKnownAuthLoginHarness } from "./ops-commands.js";
+import { authLoginHarnessList, isKnownAuthLoginHarness } from "./ops-commands.js";
 
 describe("auth readiness output", () => {
   it("shows availability and verification independently without manifest inference", () => {
@@ -23,5 +23,11 @@ describe("post-login verification", () => {
     expect(isKnownAuthLoginHarness("codex")).toBe(true);
     expect(isKnownAuthLoginHarness("opencode")).toBe(false);
     expect(isKnownAuthLoginHarness("typo")).toBe(false);
+    // `auth login` signs in the DEFAULT account. A harness that has none —
+    // every agy identity is a named profile — must not be offered here, or the
+    // command would only ever reach a server-side refusal.
+    expect(isKnownAuthLoginHarness("agy")).toBe(false);
+    expect(authLoginHarnessList()).not.toContain("agy");
+    expect(authLoginHarnessList().split("|")).toEqual(["codex", "claude", "cursor"]);
   });
 });

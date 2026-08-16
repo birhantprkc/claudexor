@@ -16,10 +16,11 @@ import ClaudexorKit
 // its captured `oauth_url` through the same overlay, so every line naming a
 // vendor reads it from the job instead of asserting OpenAI.
 //
-// The `oauth_url_input` flow (claude today, Antigravity next) adds the paste
-// half: the link itself with Open/Copy, a one-shot code field wired to
-// POST /v2/setup/jobs/:id/input, and a lapsed-window state that re-issues the
-// login instead of leaving a dead link on screen.
+// The `oauth_url_input` flow (claude and Antigravity) adds the paste half: the
+// link itself with Open/Copy, a one-shot code field wired to
+// POST /v2/setup/jobs/:id/input, and a lapsed-window state that replaces the
+// dead link instead of leaving it on screen — a BOUNDED number of times, after
+// which the user's own button is the way forward.
 
 struct AuthSheetDeviceCodeCard: View {
     let disclosure: SetupDeviceCodeDisclosure
@@ -39,9 +40,15 @@ struct AuthSheetDeviceCodeCard: View {
     /// daemon's refusal reason, or nil once it was accepted; the card holds the
     /// value no longer than the call.
     let submitCode: @MainActor (String) async -> String?
+    /// Whether the card may still replace a lapsed link BY ITSELF. The budget
+    /// is the sheet's (`AuthSheetPresentation.ReissueBudget`): this card dies
+    /// and is rebuilt by each re-issue, so it cannot count its own.
+    let autoReissueArmed: Bool
     /// Start a fresh login once the vendor's sign-in window lapsed. That window
-    /// cannot be extended, so a new link is the only act left that works.
-    let reissue: () -> Void
+    /// cannot be extended, so a new link is the only act left that works. The
+    /// flag says whether the CARD asked (unattended) or the USER pressed the
+    /// button, which is what the sheet's budget is spent and re-armed on.
+    let reissue: (_ automatic: Bool) -> Void
 
     @State private var session = EphemeralSignInSession()
     @State private var copied = false
@@ -49,7 +56,11 @@ struct AuthSheetDeviceCodeCard: View {
     @State private var code = ""
     @State private var sending = false
     @State private var submitFailure: String?
-    @State private var windowLapsed = false
+    /// The vendor's sign-in window once it CLOSED, and what happens next:
+    /// `.replacing` while the card is issuing a fresh link by itself, `.dead`
+    /// when only the explicit button can help. nil while the window is open, so
+    /// "lapsed" and "a replacement is coming" cannot drift apart.
+    @State private var lapsedWindow: LapsedWindow?
     /// A code the daemon ACCEPTED for this login. Once set, the deadline may no
     /// longer lapse the card or re-issue the link: the vendor is exchanging that
     /// one-time value, and cancelling it there loses a sign-in that had already
@@ -57,6 +68,9 @@ struct AuthSheetDeviceCodeCard: View {
     @State private var codeDelivered = false
     /// The login attempt the typed code and delivery state belong to.
     @State private var armedJobId = ""
+
+    private enum LapsedWindow: Equatable { case replacing, dead }
+    private var windowLapsed: Bool { lapsedWindow != nil }
 
     /// Display name + codex-only affordance for the harness THIS login is for,
     /// from the shared `AuthSheetPresentation` vocabulary.
@@ -252,7 +266,7 @@ struct AuthSheetDeviceCodeCard: View {
             }
             // A fresh deadline means an open window again; a delivered code is
             // not un-delivered by it.
-            windowLapsed = false
+            lapsedWindow = nil
             guard acceptsCode, let deadline else { return }
             let remaining = deadline.timeIntervalSinceNow
             // Already past when this card arrived: show the lapsed state, but
@@ -271,11 +285,16 @@ struct AuthSheetDeviceCodeCard: View {
     /// daemon (or is on its way there). The vendor is exchanging that one-time
     /// value, and re-issuing would cancel the job mid exchange and burn it, so a
     /// delivered code keeps the card intact and leaves the new link to the user.
+    ///
+    /// The automatic replacement is BUDGETED. Once the budget is spent the
+    /// window still lapses — it just stops spawning vendor logins nobody is
+    /// watching, and hands the act to the user's button.
     private func lapse(reissuing: Bool) {
         guard AuthSheetPresentation.deadlineMayLapse(
             codeDelivered: codeDelivered, sending: sending) else { return }
-        windowLapsed = true
-        if reissuing { reissue() }
+        let replacing = reissuing && autoReissueArmed
+        lapsedWindow = replacing ? .replacing : .dead
+        if replacing { reissue(true) }
     }
 
     /// The `oauth_url_input` paste half. Four honest states: ready to paste,
@@ -294,8 +313,9 @@ struct AuthSheetDeviceCodeCard: View {
                         .foregroundStyle(deadline <= context.date ? Theme.status(.caution) : .secondary)
                 }
             }
-            if windowLapsed {
-                Label("That sign-in window closed before a code arrived, and it cannot be extended. The link above is dead — Claudexor is issuing a fresh one, and it replaces the link here as soon as it arrives.",
+            if let lapsedWindow {
+                Label(AuthSheetPresentation.lapsedWindowMessage(
+                        replacing: lapsedWindow == .replacing),
                       systemImage: "clock.badge.exclamationmark")
                     .font(.caption)
                     .foregroundStyle(Theme.status(.caution))
@@ -343,7 +363,7 @@ struct AuthSheetDeviceCodeCard: View {
     /// pressing it would throw a live token exchange away.
     @ViewBuilder private func newLinkButton(prominent: Bool) -> some View {
         if prominent {
-            Button(action: reissue) { Label("Get a new link", systemImage: "arrow.clockwise") }
+            Button { reissue(false) } label: { Label("Get a new link", systemImage: "arrow.clockwise") }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accentSolid)
                 .disabled(actionInFlight)
@@ -351,7 +371,7 @@ struct AuthSheetDeviceCodeCard: View {
                       ? "Wait for the current action to finish."
                       : "Start a fresh \(vendor) sign-in and show a new link.")
         } else {
-            Button(action: reissue) { Label("Get a new link", systemImage: "arrow.clockwise") }
+            Button { reissue(false) } label: { Label("Get a new link", systemImage: "arrow.clockwise") }
                 .buttonStyle(.bordered)
                 .disabled(actionInFlight)
                 .help(actionInFlight

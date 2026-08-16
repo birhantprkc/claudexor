@@ -136,7 +136,7 @@ extension AppModel {
                 }
                 guard presentRemoteTerminal(
                     terminalPresentation,
-                    title: "\(harness.rawValue.capitalized) login — \(connection.displayName)",
+                    title: "\(HarnessFamily(rawValue: harness.rawValue).label) login — \(connection.displayName)",
                     invocation: invocation,
                     purpose: .setup(lease, job.jobId))
                 else {
@@ -329,7 +329,7 @@ extension AppModel {
                 "~/.claudexor/remote/current/bin/claudexor harness install "
                 + SSHCommandFactory.posixQuote(prompt.harness) + " --yes"
             settingsRemoteTerminalSheet = RemoteTerminalSheetRequest(
-                title: "Install \(prompt.harness.capitalized) — \(connection.displayName)",
+                title: "Install \(HarnessFamily(rawValue: prompt.harness).label) — \(connection.displayName)",
                 invocation: factory.remoteCommand(command, requestTTY: true),
                 purpose: .install(prompt.lease, prompt.harness))
         } catch {
@@ -346,7 +346,7 @@ extension AppModel {
     ) async {
         guard remoteActionIsCurrent(lease) else { return }
         let connectionID = lease.connectionID
-        let displayName = harness.capitalized
+        let displayName = HarnessFamily(rawValue: harness).label
         guard exitCode == 0 else {
             remoteConnectionMessages[connectionID] =
                 "\(displayName) installer failed with exit code \(exitCode)."
@@ -405,6 +405,9 @@ extension AppModel {
         actionLease: RemoteActionLease? = nil
     ) async -> RemoteNativeLoginReadiness? {
         let location = ExecutionLocationID.remote(connectionID)
+        // The vendor's PRODUCT name (Л-14): `agy.capitalized` reads "Agy",
+        // which is the binary nobody recognises.
+        let label = HarnessFamily(rawValue: harnessID).label
         if remoteClients[location] == nil { await connectRemote(connectionID) }
         guard let client = remoteClients[location] else { return nil }
         if let actionLease {
@@ -421,8 +424,8 @@ extension AppModel {
             let readiness = RemoteNativeLoginReadiness.profile(entry)
             remoteConnectionMessages[connectionID] =
                 readiness.nativeSessionVerified && readiness.harnessRoutable
-                ? "\(harnessID.capitalized) account is signed in and ready."
-                : (entry.status.detail ?? "\(harnessID.capitalized) account is not ready yet.")
+                ? "\(label) account is signed in and ready."
+                : (entry.status.detail ?? "\(label) account is not ready yet.")
             return readiness
         }
         guard await refreshHarnesses(
@@ -444,10 +447,10 @@ extension AppModel {
             harnessRoutable: !harness.routableIntents.isEmpty)
         if readiness.nativeSessionVerified && readiness.harnessRoutable {
             remoteConnectionMessages[connectionID] =
-                "\(harnessID.capitalized) is signed in and ready."
+                "\(label) is signed in and ready."
         } else {
             remoteConnectionMessages[connectionID] =
-                harness.reasons.first ?? "\(harnessID.capitalized) is not ready yet."
+                harness.reasons.first ?? "\(label) is not ready yet."
         }
         return readiness
     }

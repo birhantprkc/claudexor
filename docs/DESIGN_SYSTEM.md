@@ -511,8 +511,10 @@ frequency and volume are. The contracts:
     accounts") + worst quota % + chevron — that opens a popover to manage
     accounts in-app — no commands to copy. Codex native login runs the official
     codex app-server device-code flow in-app with NO Terminal (D-17 AuthSheet
-    story below); Claude/Cursor still run the official vendor CLI in an
-    auto-opened Terminal window (the setup-job handoff below). Each popover row is one account (a
+    story below); Claude, Cursor and Antigravity run the official vendor CLI
+    daemon-hosted with no Terminal either — the sign-in link is captured into
+    the card, and the two that need a pasted code take it there (the setup-job
+    handoff below). Each popover row is one account (a
     default vendor login named for its harness and badged `CLI login`, or a registered
     credential profile): a readiness dot (ready means that exact source is
     `available + passed`, never aggregate harness health), its name, ONE compact
@@ -1093,9 +1095,13 @@ views in the shared design-system files; screens compose them.
   each disables what it must: in-flight while the code is being delivered;
   delivered ("Waiting for … to finish the sign-in"), which retires the
   countdown and permanently disarms the auto-reissue so a successful sign-in
-  can never be cancelled by a clock; and lapsed, which strikes the dead link,
-  disables all three link controls, and says plainly that a fresh link replaces
-  it in place. A window the VENDOR owns cannot be extended, so the job carries
+  can never be cancelled by a clock — the daemon raises a bounded exchange
+  floor for the same reason; and lapsed, which strikes the dead link and
+  disables all three link controls. The lapsed copy tells the truth per branch:
+  a replacement is promised only when one is actually being issued. The
+  automatic replacement is BOUNDED (one), so a user who walked away returns to
+  one spare sign-in rather than a fresh detached login every minute, and the
+  explicit "Get a new link" re-arms it. A window the VENDOR owns cannot be extended, so the job carries
   that fact and the Extend control does not render — the app never offers what
   the daemon will refuse.
 - **Thread workspace (trailing `.inspector`).** ONE panel whose identity is the
@@ -1234,8 +1240,9 @@ views in the shared design-system files; screens compose them.
 - **Onboarding.** First run is native-first: explain Codex/Claude/Cursor native auth
   and expose daemon-owned native-login jobs, then offer API-key fallback
   that writes only to the local secret store. Claudexor does not broker SaaS OAuth itself: Codex native login runs the
-  official app-server device-code flow fully in-app (D-17); Claude/Cursor
-  launch their official CLI in an auto-opened Terminal. Either way Claudexor
+  official app-server device-code flow fully in-app (D-17); Claude, Cursor and
+  Antigravity run their official CLI daemon-hosted, with the sign-in link
+  surfaced in the card rather than a Terminal window. Either way Claudexor
   verifies the native session without receiving/copying/storing vendor
   session tokens or credential files. Native
   readiness is distinct from overall/API-key readiness: absent means unavailable/not-run,

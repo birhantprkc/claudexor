@@ -153,6 +153,44 @@ enum AuthSheetPresentation {
         !codeDelivered && !sending
     }
 
+    /// How often the sign-in card may replace a lapsed link BY ITSELF. Л-23
+    /// keeps the automatic replacement; this bounds it. The vendor's window is
+    /// a hard 60 s, so ONE automatic link buys a full second window for exactly
+    /// the case auto-re-issue exists for — a consent screen that ran slightly
+    /// long. Past that the presses are unattended: an uncapped card hands a user
+    /// who walked away a fresh DETACHED vendor login every minute, and each new
+    /// link silently invalidates the code the previous one is still showing, so
+    /// they come back to a clean-looking field belonging to a cancelled job.
+    ///
+    /// The budget lives on the SHEET, not the card: every re-issue creates a new
+    /// job, which unmounts and rebuilds the card, so card-local state could
+    /// never count past one.
+    struct ReissueBudget: Equatable {
+        static let automaticLimit = 1
+        private(set) var automatic = 0
+
+        /// Whether an unattended replacement may still fire.
+        var armed: Bool { automatic < Self.automaticLimit }
+
+        /// A user press proves someone is watching and RE-ARMS the budget; an
+        /// unattended replacement spends it.
+        mutating func spend(automatic isAutomatic: Bool) {
+            automatic = isAutomatic ? automatic + 1 : 0
+        }
+    }
+
+    /// What a CLOSED sign-in window says. Two reachable branches, two truths:
+    /// the card promises a replacement link only when it is actually issuing
+    /// one. It is not, when the card mounts on an already-expired job and when
+    /// the automatic budget above is spent — in both the explicit button is the
+    /// only thing that still works.
+    static func lapsedWindowMessage(replacing: Bool) -> String {
+        let closed = "That sign-in window closed before a code arrived, and it cannot be extended. The link above is dead"
+        return replacing
+            ? "\(closed) — Claudexor is issuing a fresh one, and it replaces the link here as soon as it arrives."
+            : "\(closed) — get a new link below to start over."
+    }
+
     /// The ONE cause line for every control that acts on a LAPSED sign-in link.
     /// The URL is dead the moment the vendor's window closes, so Open/Copy are
     /// disabled and say this rather than silently doing nothing (INV-134).
@@ -195,6 +233,45 @@ enum AuthSheetPresentation {
         LoginDisclosureCard(
             vendor: HarnessFamily(rawValue: harness.rawValue).label,
             offersBrowserCallback: harness == .codex)
+    }
+
+    /// Hover help for the native-setup panel's Log in / Manage Login button.
+    /// It names NO Terminal: every login this sheet starts uses the `daemon`
+    /// transport, and every daemon-hosted mode (device_code, url_disclosure,
+    /// url_disclosure_with_input) is hosted in this card by construction —
+    /// packages/cli/src/setup-jobs.ts, "Daemon-hosted modes never touch
+    /// Terminal". The old text special-cased codex and promised the other
+    /// families a Terminal window that has not opened since the 2026-08-04
+    /// owner directive; a per-family branch here would only be a second guess
+    /// at a server-owned fact, so the sentence stays true for all of them.
+    static func nativeLoginHelp(family: HarnessFamily, verified: Bool) -> String {
+        verified
+            ? "Open the native \(family.label) login flow to manage the verified session."
+            : "Start the native \(family.label) sign-in — the link and any one-time code appear here in this sheet, with no Terminal window."
+    }
+
+    /// The Recheck / reconnect outcome sentence. A family with no default
+    /// credential store never runs a source-targeted probe, so it must neither
+    /// claim one completed nor blame the engine for one that never started;
+    /// what it really refreshed is its accounts projection, and it says so.
+    static func recheckStatus(
+        family: HarnessFamily,
+        profileId: String?,
+        job: SetupJob?,
+        succeeded: Bool
+    ) -> String {
+        let noDefaultStore = profileId == nil && family.authReadinessRequest(after: job) == nil
+        guard succeeded else {
+            return noDefaultStore
+                ? "Could not refresh the \(family.label) accounts. Reconnect the engine and try again."
+                : "Exact auth-readiness check failed for \(family.label). Reconnect the engine and try again."
+        }
+        if noDefaultStore {
+            return "\(family.label) keeps no default login store, so there is nothing to probe — its accounts were refreshed instead."
+        }
+        return profileId == nil
+            ? "Exact auth-readiness check completed for \(family.label)."
+            : "Account readiness refreshed for this \(family.label) profile."
     }
 
     /// D-17 audit point 8: the codex device-code `not_supported` terminal state

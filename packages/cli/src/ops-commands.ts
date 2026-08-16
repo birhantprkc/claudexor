@@ -43,7 +43,7 @@ import {
   statusGlyph,
 } from "./cli-io.js";
 import { authLoginHarnessList, isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
-export { isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
+export { authLoginHarnessList, isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
 import { DAEMON_START_READY_TIMEOUT_MS, ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";

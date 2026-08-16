@@ -67,6 +67,96 @@ import Testing
             disclosureFlow: .oauthUrlInput, phase: .verifying))
     }
 
+    /// The automatic replacement is BOUNDED. Uncapped, a user who stepped away
+    /// collected a fresh detached vendor login every 60 s, each one silently
+    /// invalidating the code the previous link was still showing.
+    @Test func automaticLinkReplacementIsBoundedAndUserPressesReArmIt() {
+        var budget = AuthSheetPresentation.ReissueBudget()
+        #expect(budget.armed)
+
+        // Unattended replacements spend the budget and do not renew it.
+        for _ in 0..<AuthSheetPresentation.ReissueBudget.automaticLimit {
+            budget.spend(automatic: true)
+        }
+        #expect(!budget.armed)
+        budget.spend(automatic: true)
+        #expect(!budget.armed)
+
+        // A user pressing "Get a new link" proves someone is watching.
+        budget.spend(automatic: false)
+        #expect(budget.armed)
+    }
+
+    /// The lapsed copy must not promise a replacement link in the branch that
+    /// is not issuing one — reachable both when the card mounts on an already
+    /// expired job and when the automatic budget above is spent.
+    @Test func lapsedCopyPromisesAFreshLinkOnlyWhenOneIsComing() {
+        let replacing = AuthSheetPresentation.lapsedWindowMessage(replacing: true)
+        let dead = AuthSheetPresentation.lapsedWindowMessage(replacing: false)
+        #expect(replacing != dead)
+        for message in [replacing, dead] {
+            #expect(message.contains("cannot be extended"))
+            #expect(message.contains("dead"))
+        }
+        #expect(replacing.localizedCaseInsensitiveContains("issuing a fresh one"))
+        #expect(!dead.localizedCaseInsensitiveContains("issuing"))
+        #expect(dead.localizedCaseInsensitiveContains("get a new link"))
+    }
+
+    /// The Log in tooltip promised a Terminal window for every family except
+    /// codex. No login this sheet starts opens one: it always uses the `daemon`
+    /// transport, and every daemon-hosted mode is hosted in the sheet's own card
+    /// (packages/cli/src/setup-jobs.ts). One sentence, no per-family guessing.
+    @Test func loginTooltipNeverPromisesATerminalWindow() {
+        for family in [HarnessFamily.agy, .claude, .codex, .cursor] {
+            let start = AuthSheetPresentation.nativeLoginHelp(family: family, verified: false)
+            let manage = AuthSheetPresentation.nativeLoginHelp(family: family, verified: true)
+            #expect(start.contains(family.label))
+            #expect(manage.contains(family.label))
+            #expect(!start.localizedCaseInsensitiveContains("a Terminal window opens"))
+            #expect(start.contains("no Terminal window"))
+            #expect(start != manage)
+        }
+        #expect(AuthSheetPresentation.nativeLoginHelp(family: .agy, verified: false)
+            .contains("Antigravity"))
+    }
+
+    /// Recheck ran `refreshAuthReadinessAfterSetupLifecycle`, which returns
+    /// false immediately for a family with no default credential store — so
+    /// Antigravity reported "check failed … reconnect the engine" every time,
+    /// including right after a successful login. A check that never ran must
+    /// not be reported as a failure, nor as a probe that completed.
+    @Test func recheckTellsTheTruthForAFamilyWithNoDefaultStore() {
+        let agy = AuthSheetPresentation.recheckStatus(
+            family: .agy, profileId: nil, job: nil, succeeded: true)
+        #expect(agy.contains("Antigravity"))
+        #expect(!agy.localizedCaseInsensitiveContains("failed"))
+        #expect(agy.localizedCaseInsensitiveContains("no default login store"))
+        #expect(agy.localizedCaseInsensitiveContains("accounts were refreshed"))
+
+        // A REAL failure of that accounts refresh still says so, without
+        // claiming a source-targeted probe was run.
+        let agyFailed = AuthSheetPresentation.recheckStatus(
+            family: .agy, profileId: nil, job: nil, succeeded: false)
+        #expect(agyFailed.localizedCaseInsensitiveContains("could not refresh"))
+        #expect(!agyFailed.contains("Exact auth-readiness check"))
+
+        // Families that DO have a default store keep their existing wording.
+        for family in [HarnessFamily.claude, .codex, .cursor] {
+            #expect(AuthSheetPresentation.recheckStatus(
+                family: family, profileId: nil, job: nil, succeeded: true)
+                == "Exact auth-readiness check completed for \(family.label).")
+            #expect(AuthSheetPresentation.recheckStatus(
+                family: family, profileId: nil, job: nil, succeeded: false)
+                == "Exact auth-readiness check failed for \(family.label). Reconnect the engine and try again.")
+        }
+
+        // A PROFILE sheet always has an exact store to read, agy included.
+        #expect(AuthSheetPresentation.recheckStatus(
+            family: .agy, profileId: "work", job: nil, succeeded: true)
+            == "Account readiness refreshed for this Antigravity profile.")
+    }
+
     /// Submit stays off for a lapsed window: retyping cannot reach a vendor
     /// that stopped listening, so the card names the cause and offers a link.
     @Test func lapsedWindowRefusesAnotherPasteAndSaysWhy() {

@@ -9,8 +9,10 @@ import ClaudexorKit
 /// SSH auth. Claude and Codex install the exact pinned npm version this
 /// release was verified against; OpenCode installs its exact pin as a
 /// deterministic install target (no recorded verification fixture covers
-/// it); Cursor's script is downloaded in full and executed under the
-/// user's eyes because it cannot be pinned.
+/// it); the script vendors (Antigravity and Cursor) have their installer
+/// downloaded in full and executed under the user's eyes because they
+/// cannot be pinned. Every vendor NAME here comes from `HarnessFamily.label`
+/// — never `id.capitalized`, which renders Antigravity as "Agy".
 struct RemoteHarnessInstallSection: View {
     @Environment(AppModel.self) private var model
 
@@ -20,7 +22,7 @@ struct RemoteHarnessInstallSection: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 SectionLabel("Remote Harness Install", systemImage: "arrow.down.circle")
                 Text(
-                    "Puts a vendor CLI on an SSH host. Claude and Codex install the exact npm version this Claudexor release was verified against; OpenCode installs its exact pinned version as a deterministic target (not covered by recorded verification fixtures); Cursor's installer script is downloaded in full and runs in the embedded terminal where you watch it. Nothing runs before you confirm the exact command.")
+                    "Puts a vendor CLI on an SSH host. Claude and Codex install the exact npm version this Claudexor release was verified against; OpenCode installs its exact pinned version as a deterministic target (not covered by recorded verification fixtures); the Antigravity and Cursor installer scripts ship no pinnable npm artifact, so each is downloaded in full and runs in the embedded terminal where you watch it. Nothing runs before you confirm the exact command.")
                     .font(.caption).foregroundStyle(.secondary)
                 ForEach(model.remoteConnections) { connection in
                     HStack {
@@ -29,7 +31,7 @@ struct RemoteHarnessInstallSection: View {
                         Menu("Install…") {
                             ForEach(installableRemoteHarnesses, id: \.self) {
                                 harness in
-                                Button(harness.capitalized) {
+                                Button(HarnessFamily(rawValue: harness).label) {
                                     Task {
                                         await model.startRemoteHarnessInstall(
                                             connectionID: connection.id, harness: harness)
@@ -54,7 +56,7 @@ struct RemoteHarnessInstallSection: View {
                 RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
                     .stroke(Theme.separator, lineWidth: 1))
             .confirmationDialog(
-                "Install \(model.remoteHarnessInstallPrompt?.harness.capitalized ?? "harness")?",
+                "Install \(model.remoteHarnessInstallPrompt.map { HarnessFamily(rawValue: $0.harness).label } ?? "harness")?",
                 isPresented: Binding(
                     get: { model.remoteHarnessInstallPrompt != nil },
                     set: { presented in
@@ -87,6 +89,11 @@ struct RemoteHarnessInstallSection: View {
     ) -> String {
         let host = model.remoteConnections
             .first(where: { $0.id == prompt.connectionID })?.displayName ?? "the remote host"
+        // The vendor's own product name. The unpinnable branch used to say
+        // "Cursor" outright, which named the wrong vendor the moment a second
+        // script installer (Antigravity) reached it — in the most
+        // security-sensitive dialog in the app.
+        let vendor = HarnessFamily(rawValue: prompt.harness).label
         let pin: String
         switch prompt.verification {
         case .releaseVerified:
@@ -98,7 +105,7 @@ struct RemoteHarnessInstallSection: View {
                 + "(exact deterministic install target; not covered by recorded "
                 + "verification fixtures; npm verifies its registry integrity checksum)"
         case .humanObserved:
-            pin = "No version pin: Cursor ships no pinnable npm artifact; the vendor script "
+            pin = "No version pin: \(vendor) ships no pinnable npm artifact; the vendor script "
                 + "is downloaded in full, its size and SHA-256 print, and it runs in the "
                 + "embedded terminal where you watch it"
         }

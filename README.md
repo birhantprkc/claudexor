@@ -506,7 +506,8 @@ claudexor auth status
 claudexor auth login codex    # codex login (device-auth by default)
 claudexor auth login claude   # claude auth login (claude.ai subscription route)
 claudexor auth login cursor   # cursor-agent login 
-claudexor auth login agy      # Antigravity login (Google subscription route)
+claudexor profiles add agy work    # Antigravity signs in per named account
+claudexor profiles login agy work # (it has no default account to sign in to)
 claudexor secrets set openai --from-env OPENAI_API_KEY
 claudexor secrets list
 claudexor settings show

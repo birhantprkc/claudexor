@@ -126,6 +126,41 @@ enum AccountsPresentation {
     /// (DomainModels.swift), whose rows are the default "CLI login".
     static let configDirLoginHarnessIds = ["agy", "claude", "codex", "cursor"]
 
+    /// The families the add-account flow may register, DERIVED from the set
+    /// above so a fifth family is one entry there and nothing else. The picker
+    /// and its caption both read this; hand-listing the vendors is what left
+    /// Antigravity addable by the daemon and unreachable in the popover.
+    static let addableFamilies: [HarnessFamily] =
+        configDirLoginHarnessIds.map(HarnessFamily.init(rawValue:))
+
+    /// The add form's initial vendor. Claude stays the common case, but the
+    /// value must be a MEMBER of the derived list — a hardcoded id that leaves
+    /// the set would select a row the picker no longer offers.
+    static var defaultAddHarnessId: String {
+        configDirLoginHarnessIds.contains(HarnessFamily.claude.rawValue)
+            ? HarnessFamily.claude.rawValue
+            : configDirLoginHarnessIds.first ?? ""
+    }
+
+    /// The add form's caption. Family-scoped hosts (the Harness Doctor's Manage
+    /// sheet) name their one vendor; the global popover lists every addable
+    /// one in the SSOT's own order, so the sentence cannot go stale.
+    static func addAccountCaption(family: HarnessFamily?) -> String {
+        let subject = family?.label ?? listed(addableFamilies.map(\.label))
+        return "A second \(subject) subscription — one click opens the official CLI login."
+    }
+
+    /// "A", "A or B", "A, B, or C" — an Oxford list, so a two-family future
+    /// does not read "A, or B".
+    static func listed(_ labels: [String]) -> String {
+        switch labels.count {
+        case 0: return ""
+        case 1: return labels[0]
+        case 2: return "\(labels[0]) or \(labels[1])"
+        default: return labels.dropLast().joined(separator: ", ") + ", or \(labels[labels.count - 1])"
+        }
+    }
+
     /// Whether a login may target the ENGINE-DEFAULT credential store — that is,
     /// whether a PROFILE-LESS login can succeed at all. `agy` has no default
     /// store, so the daemon refuses every profile-less Antigravity login; a
