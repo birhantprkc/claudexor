@@ -88,6 +88,15 @@ const AGY_KNOWN_MODELS = [
   "gpt-oss-120b-medium",
 ] as const;
 
+/**
+ * The vendor's two quota GROUPS map onto disjoint halves of the same
+ * inventory: "Gemini Models" and "Claude and GPT models" (PLAN §1.2 F8). The
+ * split is DERIVED from the one model list so a slug the vendor adds cannot
+ * land in neither half and silently escape window scoping (INV-138).
+ */
+export const AGY_GEMINI_MODELS = AGY_KNOWN_MODELS.filter((m) => m.startsWith("gemini-"));
+export const AGY_THIRD_PARTY_MODELS = AGY_KNOWN_MODELS.filter((m) => !m.startsWith("gemini-"));
+
 const AGY_ENABLED_INTENTS = [
   "explain",
   "plan",

@@ -85,9 +85,7 @@ export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex" | "agy">
  * PLAN Л-4), so its subject universe is profiles-only. claude/codex keep their
  * native-login default subject.
  */
-export function quotaHarnessHasDefaultSubject(
-  harness: "claude" | "codex" | "agy",
-): boolean {
+export function quotaHarnessHasDefaultSubject(harness: "claude" | "codex" | "agy"): boolean {
   return harness !== "agy";
 }
 
@@ -129,6 +127,16 @@ export const QuotaConstraint = z
      * list is the producer's canonical model-id/alias scope, so a
      * model-specific cap never cools a different model on the same subject. */
     applies_to_models: z.array(Id).nullable().optional(),
+    /**
+     * Whether this MODEL-SCOPED window also governs a run that names no model.
+     * Default (absent) is the conservative answer: a scoped window cannot
+     * refuse a route whose concrete model is unknowable before spawn. A source
+     * sets it when the vendor's unspecified-model route provably consumes THIS
+     * window — the case where every window is scoped, so the conservative
+     * default would leave an exhausted subscription unrefusable and its
+     * profile rotation unreachable.
+     */
+    applies_to_unspecified_model: z.boolean().optional(),
     used_ratio: z.number().min(0).max(1).nullable(),
     window_seconds: z.number().positive().nullable(),
     resets_at: z.string().datetime({ offset: true }).nullable(),

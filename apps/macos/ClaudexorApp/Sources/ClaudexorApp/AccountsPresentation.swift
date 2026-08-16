@@ -366,7 +366,10 @@ enum AccountsAutoBalance {
     /// cursor adapter emits no quota snapshots or typed limit events yet, so a
     /// cursor toggle would be a knob without an observable action (INV-023) —
     /// it stays out until a vendor usage source exists.
-    static let capableHarnessIds = ["claude", "codex"]
+    /// agy qualifies on the same test: `config_dir_login` profiles plus a real
+    /// vendor quota source (`agy_command_usage`, read from the CLI's own
+    /// `/quota`), so a toggle here has an observable action to drive.
+    static let capableHarnessIds = ["claude", "codex", "agy"]
 
     /// Harnesses eligible for the toggle: a capable family with ≥1 registered
     /// profile (so native + profile = 2+ identities to rotate between).

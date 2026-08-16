@@ -366,7 +366,10 @@ export class QuotaRegistry {
         freshness: "fresh",
       });
     }
-    if (event.data.rate_limit && credentialRoute && ["codex", "claude", "agy"].includes(harnessId)) {
+    // agy is deliberately ABSENT: its adapter emits no `rate_limit` event, so
+    // an agy branch here would be a knob with no producer (INV-022/023). It
+    // joins the list in the same change that makes the adapter emit one.
+    if (event.data.rate_limit && credentialRoute && ["codex", "claude"].includes(harnessId)) {
       this.upsertCooldown(harnessId, credentialRoute, event.data);
     }
   }
@@ -461,8 +464,7 @@ export class QuotaRegistry {
     const cooldownUntil =
       reset ??
       new Date(now.getTime() + (typeof delay === "number" ? delay : 5 * 60_000)).toISOString();
-    const source =
-      harness === "claude" ? "claude_api_retry" : harness === "agy" ? "agy_command_usage" : "codex_rollout";
+    const source = harness === "claude" ? "claude_api_retry" : "codex_rollout";
     // The event's profile stamp scopes the cooldown to ITS subject (release
     // wave round-11): a profiled limit must never cool the default subject
     // down (or vice versa), and two profiles never share one quota key.

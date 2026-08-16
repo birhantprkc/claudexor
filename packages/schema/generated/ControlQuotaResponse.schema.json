@@ -72,6 +72,9 @@
                         }
                       ]
                     },
+                    "applies_to_unspecified_model": {
+                      "type": "boolean"
+                    },
                     "used_ratio": {
                       "anyOf": [
                         {
