@@ -126,14 +126,19 @@ function scopeUnspecifiedModel(
   constraints: QuotaConstraint[],
   selectedModel: string | null,
 ): QuotaConstraint[] {
-  const model = selectedModel ?? AGY_GEMINI_MODELS[0];
+  const scoped = constraints.filter((c) => c.applies_to_models && c.applies_to_models.length > 0);
+  // A model the pinned inventory does not know — the vendor ships new slugs
+  // between releases and the user picks them in its own TUI — must not leave
+  // EVERY window ungoverned: that reads as a healthy account no matter how
+  // spent it is, and rotation never fires. The Gemini group is the documented
+  // fallback, the same one an unreadable `/model` gets.
+  const governs =
+    selectedModel !== null && scoped.some((c) => c.applies_to_models!.includes(selectedModel))
+      ? (c: QuotaConstraint) => c.applies_to_models!.includes(selectedModel)
+      : (c: QuotaConstraint) => c.applies_to_models!.some((m) => m.startsWith("gemini-"));
   return constraints.map((constraint) =>
     constraint.applies_to_models && constraint.applies_to_models.length > 0
-      ? {
-          ...constraint,
-          applies_to_unspecified_model:
-            model !== undefined && constraint.applies_to_models.includes(model),
-        }
+      ? { ...constraint, applies_to_unspecified_model: governs(constraint) }
       : constraint,
   );
 }
@@ -312,12 +317,9 @@ export function parseAgyQuotaEnvelope(raw: string): AgyQuotaParse {
         id: nonBlank(bucket?.id) ?? `${groupName}-${window || "window"}`,
         label: nonBlank(bucket?.name) ?? nonBlank(window) ?? "Requests",
         applies_to_models: models,
-        // A run that names no model goes to the vendor's selected model, which
-        // is always a Gemini slug (the Claude/GPT slugs are opt-in), so the
-        // Gemini windows govern it. Without this the account's every window is
-        // scoped and a bare run could never be refused — Л-2 rotation would
-        // never fire in a default configuration (review Ф2 #5).
-        applies_to_unspecified_model: models === geminiModels,
+        // Which window governs a run that NAMES NO MODEL is stamped by
+        // scopeUnspecifiedModel from the profile's actually selected model —
+        // one owner, so the parser never guesses it.
         used_ratio: usedRatio,
         // Own-property lookup only: a `window` of `__proto__`/`toString`
         // otherwise resolves to an inherited value, not a number.

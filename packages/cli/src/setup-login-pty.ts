@@ -4,6 +4,10 @@ import { existsSync } from "node:fs";
 export const PTY_UNAVAILABLE =
   "this sign-in needs a terminal on stdin and no terminal helper (expect, script) is available here; run the CLI login instead";
 
+/** Refusal when the sealed command cannot be carried to the helper verbatim. */
+export const PTY_UNQUOTABLE =
+  "this sign-in command contains characters the terminal helper cannot carry unchanged; run the CLI login instead";
+
 /**
  * Wrap a login command that needs a real terminal on stdin.
  *
@@ -24,23 +28,38 @@ export function ptyWrappedCommand(
   binary: string,
   args: string[],
   exists: (path: string) => boolean = existsSync,
-): { binary: string; args: string[] } | null {
+): { binary: string; args: string[] } | { refusal: string } {
   const words = [binary, ...args];
   const EXPECT = "/usr/bin/expect";
   const SCRIPT = "/usr/bin/script";
   if (exists(EXPECT)) {
-    if (words.some((word) => /[{}\\\n]/.test(word))) return null;
+    if (words.some((word) => /[{}\\\n]/.test(word))) return { refusal: PTY_UNQUOTABLE };
     const spawnCommand = words.map((word) => `{${word}}`).join(" ");
     return {
       binary: EXPECT,
       // `interact` relays our pipes both ways for the whole login; the vendor
       // sees a terminal, we see its URL and can write the pasted code.
-      args: ["-c", `set timeout -1; spawn -noecho ${spawnCommand}; interact`],
+      //
+      // Everything after it exists because `interact` returns expect's OWN
+      // status, not the vendor's: without this an authentication that the
+      // vendor REJECTED would be recorded as a successful login, and its
+      // diagnostic tail would be dropped. `wait` yields the child's exit code,
+      // a signal death is reported as one, and a spawn that never started is
+      // 127 — the same shape a shell would give.
+      args: [
+        "-c",
+        `set timeout -1; if {[catch {spawn -noecho ${spawnCommand}}]} { exit 127 }; ` +
+          "set pid [exp_pid]; interact; catch {wait} r; " +
+          "if {[lsearch -exact $r CHILDKILLED] >= 0} { exit 129 }; " +
+          "catch {exec kill -TERM $pid}; exit [lindex $r 3]",
+      ],
     };
   }
   if (exists(SCRIPT) && process.platform !== "darwin") {
     const quoted = words.map((word) => `'${word.replaceAll("'", `'"'"'`)}'`).join(" ");
-    return { binary: SCRIPT, args: ["-q", "-c", quoted, "/dev/null"] };
+    // `-e` for the same reason: without it script reports its own status and
+    // a rejected login reads as a successful one.
+    return { binary: SCRIPT, args: ["-e", "-q", "-c", quoted, "/dev/null"] };
   }
-  return null;
+  return { refusal: PTY_UNAVAILABLE };
 }

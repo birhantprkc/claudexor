@@ -78,6 +78,10 @@
                   "format": "date-time",
                   "description": "Current native-login deadline when the job has one."
                 },
+                "deadlineFixed": {
+                  "type": "boolean",
+                  "description": "Whether the deadline is the VENDOR's own window and cannot be extended (agy waits exactly 60s for its pasted code); absent = the engine owns the window and extending it is honest."
+                },
                 "outcome": {
                   "type": "object",
                   "properties": {

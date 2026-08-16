@@ -1,6 +1,6 @@
 import { loadConfig } from "@claudexor/config";
 import {
-  quotaHarnessHasDefaultSubject,
+  harnessHasDefaultCredentialStore,
   quotaRefreshDemandHarnesses,
   type QuotaSubject,
 } from "@claudexor/schema";
@@ -19,7 +19,10 @@ export function quotaSubjectUniverseFromConfig(): QuotaSubject[] {
     if (settings?.enabled === false) continue;
     // agy has no unprofiled default subject (PLAN Л-4): its universe is
     // profiles-only, so a null-subject default is never expected of it.
-    if (quotaHarnessHasDefaultSubject(harness) && settings?.native_credentials_enabled !== false) {
+    if (
+      harnessHasDefaultCredentialStore(harness) &&
+      settings?.native_credentials_enabled !== false
+    ) {
       subjects.push({
         harness,
         credential_route: "vendor_native",

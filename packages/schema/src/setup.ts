@@ -283,6 +283,12 @@ export const ControlSetupJob = z
     deadlineAt: SetupTimestamp.optional().describe(
       "Current native-login deadline when the job has one.",
     ),
+    deadlineFixed: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether the deadline is the VENDOR's own window and cannot be extended (agy waits exactly 60s for its pasted code); absent = the engine owns the window and extending it is honest.",
+      ),
     outcome: ControlSetupJobOutcome.optional(),
     command: z
       .string()

@@ -128,12 +128,37 @@ export function assertDefaultLoginAllowed(harness: string, hasProfile: boolean):
 }
 
 /**
+ * Whether a login's deadline may be pushed out. A deadline that IS the
+ * vendor's own window cannot be: publishing a later one would promise fifteen
+ * more minutes of a login the vendor abandons after sixty seconds.
+ */
+export function assertSetupJobExtendable(
+  job: ControlSetupJob,
+): asserts job is ControlSetupJob & { deadlineAt: string } {
+  if (
+    !ACTIVE_SETUP_STATES.has(job.state) ||
+    !["launching", "awaiting_user"].includes(job.phase ?? "") ||
+    !job.deadlineAt
+  ) {
+    throw Object.assign(new Error("setup job cannot be extended"), { status: 409 });
+  }
+  if (job.deadlineFixed) {
+    throw Object.assign(
+      new Error(
+        `${job.harness} sets its own sign-in window and it cannot be extended; start a new sign-in instead`,
+      ),
+      { status: 409 },
+    );
+  }
+}
+
+/**
  * The in-progress login a profile deletion must refuse against (INV-135 409
  * fence). Membership is derived from the setup-harness enum's OWN options,
- * never a hand-copied list: a harness outside the enum (agy until its
- * managed-login phase lands) can have no setup jobs, so the lookup is honestly
- * skipped instead of cast into a filter it does not satisfy. The manager is
- * passed as a thunk so a skipped harness never resolves it.
+ * never a hand-copied list: a harness outside the enum can have no setup jobs,
+ * so the lookup is honestly skipped instead of cast into a filter it does not
+ * satisfy. The manager is passed as a thunk so a skipped harness never
+ * resolves it.
  */
 export function activeProfileLoginJob(
   setupJobs: () => { list: (filter: { harness: ControlHarnessSetupHarness }) => ControlSetupJob[] },

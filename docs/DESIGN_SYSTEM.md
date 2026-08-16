@@ -1084,6 +1084,20 @@ views in the shared design-system files; screens compose them.
   app-server `browser_callback` flow), never a silent fallback. The one-time
   code is transient — read from the snapshot/SSE overlay only, never persisted
   by the app.
+- **The same card's paste half (`oauth_url_input`).** A vendor that prints a
+  sign-in link and then waits for the user to paste a code back (Claude, and
+  Antigravity whose window is a hard sixty seconds) uses the SAME card: the
+  link with **Open private sign-in** / **Open in browser** / **Copy link**, a
+  single-line code field, and a countdown against the DAEMON-published
+  deadline — never an interval the app invents. Three states are explicit and
+  each disables what it must: in-flight while the code is being delivered;
+  delivered ("Waiting for … to finish the sign-in"), which retires the
+  countdown and permanently disarms the auto-reissue so a successful sign-in
+  can never be cancelled by a clock; and lapsed, which strikes the dead link,
+  disables all three link controls, and says plainly that a fresh link replaces
+  it in place. A window the VENDOR owns cannot be extended, so the job carries
+  that fact and the Extend control does not render — the app never offers what
+  the daemon will refuse.
 - **Thread workspace (trailing `.inspector`).** ONE panel whose identity is the
   CURRENT THREAD's workspace (D42), with three always-present tabs
   (`WorkspaceTab`: `changes`, `artifacts`, `evidence`, via the shared

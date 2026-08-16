@@ -126,6 +126,15 @@ enum AccountsPresentation {
     /// (DomainModels.swift), whose rows are the default "CLI login".
     static let configDirLoginHarnessIds = ["agy", "claude", "codex", "cursor"]
 
+    /// Whether a login may target the ENGINE-DEFAULT credential store — that is,
+    /// whether a PROFILE-LESS login can succeed at all. `agy` has no default
+    /// store, so the daemon refuses every profile-less Antigravity login; a
+    /// surface that offers one must gate on THIS, never on whether the harness
+    /// id happens to decode as a `SetupHarness`.
+    static func supportsDefaultStoreLogin(_ family: HarnessFamily) -> Bool {
+        family.defaultAuthReadinessRequest?.source == .nativeSession
+    }
+
     /// Compare legal offset timestamps by their absolute instant. Equal
     /// instants and malformed future values use raw lexical order so the
     /// projection remains deterministic rather than depending on group order.

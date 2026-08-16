@@ -1394,6 +1394,41 @@ import Testing
         #expect(!makeSetupJob(id: "verifying", state: "running", phase: .verifying).canExtend)
     }
 
+    /// A VENDOR-owned sign-in window cannot be extended by anyone: Antigravity
+    /// waits exactly 60 s for its pasted code and offers no way to lengthen it,
+    /// so the daemon refuses the extend and the client must not offer the
+    /// button. Absent (older daemon) still means the engine owns the window.
+    @Test func vendorOwnedLoginWindowIsNotExtendable() {
+        #expect(!makeSetupJob(id: "agy-wait", state: "waiting_for_input", phase: .awaitingUser,
+                              harness: .agy, deadlineFixed: true).canExtend)
+        #expect(!makeSetupJob(id: "agy-launch", state: "waiting_for_input", phase: .launching,
+                              harness: .agy, deadlineFixed: true).canExtend)
+        #expect(makeSetupJob(id: "agy-engine-window", state: "waiting_for_input",
+                             phase: .awaitingUser, harness: .agy, deadlineFixed: false).canExtend)
+        #expect(makeSetupJob(id: "agy-legacy", state: "waiting_for_input",
+                             phase: .awaitingUser, harness: .agy).canExtend)
+    }
+
+    /// `SetupJob` decodes STRICTLY (unknown keys are fatal), so the daemon
+    /// publishing `deadlineFixed` must be a key this client knows — otherwise
+    /// every setup screen stops decoding the moment the field ships.
+    @Test func vendorWindowFlagSurvivesTheStrictWire() throws {
+        let job = makeSetupJob(id: "agy-wire", state: "waiting_for_input", phase: .awaitingUser,
+                               harness: .agy, deadlineFixed: true)
+        let data = try JSONEncoder().encode(job)
+        let wire = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(wire["deadlineFixed"] as? Bool == true)
+        let decoded = try JSONDecoder().decode(SetupJob.self, from: data)
+        #expect(decoded.deadlineFixed == true)
+        #expect(!decoded.canExtend)
+        // Absent stays absent: an older daemon's body must not gain the key.
+        let legacy = try JSONEncoder().encode(
+            makeSetupJob(id: "legacy", state: "waiting_for_input", phase: .awaitingUser))
+        let legacyWire = try #require(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        #expect(legacyWire["deadlineFixed"] == nil)
+        #expect(try JSONDecoder().decode(SetupJob.self, from: legacy).canExtend)
+    }
+
     @Test func terminationUnconfirmedIsNotSafeForCancelAndClose() {
         let unconfirmed = makeSetupJob(
             id: "uncertain", state: "failed", phase: .completed,
@@ -2635,7 +2670,8 @@ private func makeSetupCapability(
 private func makeSetupJob(id: String, state: String,
                           phase: SetupJobPhase, outcome: SetupJobOutcome? = nil,
                           terminationReconciliation: SetupTerminationReconciliation? = nil,
-                          harness: SetupHarness = .claude) -> SetupJob {
+                          harness: SetupHarness = .claude,
+                          deadlineFixed: Bool? = nil) -> SetupJob {
     let typedState = SetupJobState(rawValue: state)!
     let terminal = typedState == .succeeded || typedState == .failed || typedState == .cancelled
         || typedState == .timedOut || typedState == .interruptedUnknown || typedState == .notSupported
@@ -2650,6 +2686,7 @@ private func makeSetupJob(id: String, state: String,
     }
     return SetupJob(jobId: id, harness: harness, action: .login, state: typedState, phase: phase,
              deadlineAt: state == "waiting_for_input" ? "2099-01-01T00:00:00Z" : nil,
+             deadlineFixed: deadlineFixed,
              outcome: outcome ?? defaultOutcome, message: state, createdAt: "2026-07-13T00:00:00Z",
              startedAt: typedState == .queued ? nil : "2026-07-13T00:00:01Z",
              finishedAt: terminal ? "2026-07-13T00:00:02Z" : nil,

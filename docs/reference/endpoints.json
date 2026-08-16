@@ -770,7 +770,8 @@
           "enum": [
             "codex",
             "claude",
-            "cursor"
+            "cursor",
+            "agy"
           ],
           "schema_ref": "ControlSetupJobListFilter#/properties/harness",
           "description": "Filter setup jobs to one harness."

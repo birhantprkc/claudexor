@@ -11,8 +11,8 @@
  * NOT a consumer, deliberately: the profile-deletion 409 fence
  * (`setup-job-support.ts` `activeProfileLoginJob`) asks a different question —
  * "does this harness have daemon-managed setup jobs at all" — and derives from
- * `ControlHarnessSetupHarness.options`, which is a SUBSET of this list (agy has
- * config-dir profiles but no managed login yet).
+ * `ControlHarnessSetupHarness.options` — the same members today, but a
+ * different question, and nothing keeps the two lists equal.
  */
 import { canonicalAgyProfileHome } from "@claudexor/harness-agy";
 import { canonicalProfileConfigDir } from "@claudexor/harness-claude";

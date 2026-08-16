@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { QuotaConstraint, quotaHarnessHasDefaultSubject } from "@claudexor/schema";
+import { QuotaConstraint, harnessHasDefaultCredentialStore } from "@claudexor/schema";
 import { parseAgyQuotaEnvelope, refreshAgyQuota } from "./agy-quota-source.js";
 
 const FIXTURES = fileURLToPath(new URL("./__fixtures__", import.meta.url));
@@ -27,10 +27,12 @@ describe("parseAgyQuotaEnvelope", () => {
     expect(byId["gemini-5h"].window_seconds).toBe(5 * 60 * 60);
     expect(byId["gemini-weekly"].window_seconds).toBe(7 * 24 * 60 * 60);
     expect(byId["gemini-weekly"].resets_at).toBeTruthy();
-    // A run that names no model consumes the GEMINI budget, so only those
-    // windows govern the bare route; the third-party windows must not.
-    expect(byId["gemini-weekly"].applies_to_unspecified_model).toBe(true);
-    expect(byId["3p-weekly"].applies_to_unspecified_model).toBe(false);
+    // Which window governs a run that names NO model is not the parser's
+    // call: it belongs to the profile's selected model and is stamped by the
+    // refresher (see the bare-route suite below), so the envelope carries no
+    // guess of its own.
+    expect(byId["gemini-weekly"].applies_to_unspecified_model).toBeUndefined();
+    expect(byId["3p-weekly"].applies_to_unspecified_model).toBeUndefined();
   });
 
   it("tolerates a lower tier with NO 5-hour windows (missing window is normal)", () => {
@@ -187,11 +189,11 @@ describe("refreshAgyQuota", () => {
   });
 });
 
-describe("quotaHarnessHasDefaultSubject (Л-4: agy has no default store)", () => {
+describe("harnessHasDefaultCredentialStore (Л-4: agy has no default store)", () => {
   it("keeps a default subject for the harnesses that have one and denies agy", () => {
-    expect(quotaHarnessHasDefaultSubject("claude")).toBe(true);
-    expect(quotaHarnessHasDefaultSubject("codex")).toBe(true);
-    expect(quotaHarnessHasDefaultSubject("agy")).toBe(false);
+    expect(harnessHasDefaultCredentialStore("claude")).toBe(true);
+    expect(harnessHasDefaultCredentialStore("codex")).toBe(true);
+    expect(harnessHasDefaultCredentialStore("agy")).toBe(false);
   });
 });
 
@@ -335,5 +337,19 @@ describe("refreshAgyQuota bare-route scoping", () => {
 
   it("falls back to the Gemini group when the vendor will not say", async () => {
     expect(await flags(null)).toEqual({ "gemini-weekly": true, "3p-weekly": false });
+  });
+
+  it("falls back rather than leaving EVERY window ungoverned for an unknown slug", async () => {
+    // The vendor ships new slugs between our releases and the user picks them
+    // in its own TUI. Matching none must not read as a healthy account: that
+    // would make an exhausted subscription unrefusable and rotation dead.
+    expect(await flags("gemini-4.0-flash-high")).toEqual({
+      "gemini-weekly": true,
+      "3p-weekly": false,
+    });
+    expect(await flags("some-future-vendor-model")).toEqual({
+      "gemini-weekly": true,
+      "3p-weekly": false,
+    });
   });
 });

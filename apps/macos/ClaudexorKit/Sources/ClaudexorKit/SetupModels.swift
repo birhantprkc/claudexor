@@ -184,6 +184,12 @@ public struct SetupJob: Codable, Sendable, Equatable {
     public let state: SetupJobState
     public let phase: SetupJobPhase
     public let deadlineAt: String?
+    /// Whether `deadlineAt` is the VENDOR's own sign-in window rather than one
+    /// the engine owns. Antigravity waits exactly 60 s for its pasted code and
+    /// offers no way to lengthen that, so the daemon REFUSES to extend such a
+    /// job; absent (older daemons) = the engine owns the window and extending
+    /// it is honest. Wire: `ControlSetupJob.deadlineFixed`.
+    public let deadlineFixed: Bool?
     public let outcome: SetupJobOutcome?
     public let command: String?
     public let guideUrl: String?
@@ -198,13 +204,15 @@ public struct SetupJob: Codable, Sendable, Equatable {
     public let terminationReconciliation: SetupTerminationReconciliation?
 
     enum CodingKeys: String, CodingKey, CaseIterable, StrictCodingKey {
-        case jobId, harness, action, transport, profileId, state, phase, deadlineAt, outcome, command, guideUrl
+        case jobId, harness, action, transport, profileId, state, phase, deadlineAt, deadlineFixed
+        case outcome, command, guideUrl
         case message, createdAt, startedAt, finishedAt, authCapability, execution, authorization, nativeCommand
         case terminationReconciliation
     }
 
     public init(jobId: String, harness: SetupHarness, action: SetupJobAction, state: SetupJobState,
-                phase: SetupJobPhase, deadlineAt: String? = nil, outcome: SetupJobOutcome? = nil,
+                phase: SetupJobPhase, deadlineAt: String? = nil, deadlineFixed: Bool? = nil,
+                outcome: SetupJobOutcome? = nil,
                 command: String? = nil, guideUrl: String? = nil, message: String,
                 createdAt: String, startedAt: String? = nil, finishedAt: String? = nil,
                 authCapability: AuthCapabilityLifecycle? = nil,
@@ -222,6 +230,7 @@ public struct SetupJob: Codable, Sendable, Equatable {
         self.state = state
         self.phase = phase
         self.deadlineAt = deadlineAt
+        self.deadlineFixed = deadlineFixed
         self.outcome = outcome
         self.command = command
         self.guideUrl = guideUrl
@@ -252,6 +261,7 @@ public struct SetupJob: Codable, Sendable, Equatable {
         state = try container.decode(SetupJobState.self, forKey: .state)
         phase = try container.decode(SetupJobPhase.self, forKey: .phase)
         deadlineAt = try container.decodeIfPresent(String.self, forKey: .deadlineAt)
+        deadlineFixed = try container.decodeIfPresent(Bool.self, forKey: .deadlineFixed)
         outcome = try container.decodeIfPresent(SetupJobOutcome.self, forKey: .outcome)
         command = try Self.decodeRequiredNullable(String.self, from: container, forKey: .command)
         guideUrl = try Self.decodeRequiredNullable(String.self, from: container, forKey: .guideUrl)
@@ -277,6 +287,7 @@ public struct SetupJob: Codable, Sendable, Equatable {
         try container.encode(state, forKey: .state)
         try container.encode(phase, forKey: .phase)
         try container.encodeIfPresent(deadlineAt, forKey: .deadlineAt)
+        try container.encodeIfPresent(deadlineFixed, forKey: .deadlineFixed)
         try container.encodeIfPresent(outcome, forKey: .outcome)
         if let command { try container.encode(command, forKey: .command) } else { try container.encodeNil(forKey: .command) }
         if let guideUrl { try container.encode(guideUrl, forKey: .guideUrl) } else { try container.encodeNil(forKey: .guideUrl) }
@@ -387,8 +398,14 @@ public struct SetupJob: Codable, Sendable, Equatable {
     }
 
     public var canCancel: Bool { isActive && phase != .cancelling }
+    /// A live login whose deadline the DAEMON owns and may lengthen. A
+    /// vendor-capped window (`deadlineFixed`) is extendable at no layer — the
+    /// daemon refuses it — so the client must not offer the act at all: an
+    /// "Extend login wait" button there promises what the server will reject
+    /// while the vendor's window is already gone.
     public var canExtend: Bool {
-        isActive && deadlineAt != nil && (phase == .launching || phase == .awaitingUser)
+        isActive && deadlineAt != nil && deadlineFixed != true
+            && (phase == .launching || phase == .awaitingUser)
     }
     /// An unproven termination may still have a vendor process alive. Treating
     /// that record like an ordinary terminal failure would let Retry open a

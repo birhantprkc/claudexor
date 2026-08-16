@@ -17,7 +17,7 @@ import {
 import { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 export { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 import { nativeLoginEnv } from "./native-login.js";
-import { PTY_UNAVAILABLE, ptyWrappedCommand } from "./setup-login-pty.js";
+import { ptyWrappedCommand } from "./setup-login-pty.js";
 import { createOAuthUrlDetector } from "./setup-login-url.js";
 export { createOAuthUrlDetector, extractOAuthUrl } from "./setup-login-url.js";
 import { boundedTail, createTailBuffer, watchLoginInput } from "./setup-login-io.js";
@@ -187,8 +187,8 @@ export async function runSetupLoginWorker(
   const command = manifest.ptyStdin
     ? ptyWrappedCommand(manifest.binary, manifest.args)
     : { binary: manifest.binary, args: manifest.args };
-  if (!command) {
-    persistFailure(manifest, now, permit.issuedAt, "spawn_failed", PTY_UNAVAILABLE);
+  if ("refusal" in command) {
+    persistFailure(manifest, now, permit.issuedAt, "spawn_failed", command.refusal);
     return 1;
   }
 

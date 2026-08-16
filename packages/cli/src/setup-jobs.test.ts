@@ -2293,6 +2293,31 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     expect(() => manager.create(LOGIN_REQUEST)).toThrow(/another codex login job is active/);
   });
 
+  it("refuses a default Antigravity login and never offers to extend its own window", async () => {
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg-agy");
+    registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "store-agy"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+    });
+    const AGY_LOGIN = { harness: "agy", action: "login", authRequest: "subscription" } as const;
+    // agy has NO default credential store, so a profile-less login is refused
+    // at create time rather than dropping a vendor token in the daemon's home.
+    expect(() => manager.create(AGY_LOGIN)).toThrow(/no default credential store/);
+
+    const job = manager.create({ ...AGY_LOGIN, profileId: "work" });
+    // The deadline is the VENDOR's 60s window, published as fixed so no
+    // surface offers to extend a window the vendor will not honor.
+    expect(job.deadlineFixed).toBe(true);
+    const window = Date.parse(job.deadlineAt!) - Date.parse(job.createdAt);
+    expect(window).toBeGreaterThan(0);
+    expect(window).toBeLessThanOrEqual(61_000);
+    expect(() => manager.extend({ jobId: job.jobId })).toThrow(/cannot be extended/);
+    await manager.shutdown();
+  });
+
   it("binds a cursor profile login to its canonical Claudexor-owned HOME (valentine)", () => {
     process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg");
     const { profile } = registerConfigDirProfile({ harnessId: "cursor", profileId: "valentine" });

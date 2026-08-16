@@ -42,6 +42,8 @@ import {
   printUsageError,
   statusGlyph,
 } from "./cli-io.js";
+import { authLoginHarnessList, isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
+export { isKnownAuthLoginHarness } from "./auth-login-harnesses.js";
 import { DAEMON_START_READY_TIMEOUT_MS, ensureDaemon, waitForDaemonReady } from "./daemon-run.js";
 import { controlApiFetch } from "./live.js";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
@@ -416,12 +418,14 @@ export async function authCommand(
   }
   if (sub === "login") {
     if (!harness) {
-      return printUsageError(json, "usage: claudexor auth login <codex|claude|cursor>");
+      return printUsageError(json, `usage: claudexor auth login <${authLoginHarnessList()}>`);
     }
     if (!isKnownAuthLoginHarness(harness)) {
       return printUsageError(
         json,
-        `claudexor: unknown auth-login harness '${harness}' (expected codex|claude|cursor)`,
+        ControlHarnessSetupHarness.safeParse(harness).success
+          ? `claudexor: ${harness} has no default account to sign in to — use \`claudexor profiles login ${harness} <profile-id>\``
+          : `claudexor: unknown auth-login harness '${harness}' (expected ${authLoginHarnessList()})`,
       );
     }
     // --browser-redirect (codex only): explicit opt-in for the localhost
@@ -485,10 +489,6 @@ export async function authCommand(
     return accepted ? 0 : 1;
   }
   return printUsageError(json, "usage: claudexor auth status|login");
-}
-
-export function isKnownAuthLoginHarness(harness: string): boolean {
-  return ControlHarnessSetupHarness.safeParse(harness).success;
 }
 
 /** Thin client of the daemon-owned retention service (W3.6). */

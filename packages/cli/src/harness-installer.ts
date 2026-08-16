@@ -86,9 +86,15 @@ const NPM_PINS: Partial<
 };
 
 export const CURSOR_INSTALL_URL = "https://cursor.com/install";
-/** Google's official Antigravity CLI installer (antigravity.google/docs/cli/
- * install). agy ships as a single signed Go binary from a GitHub release, not
- * an npm package, so it takes the same human-observed path as cursor. */
+/**
+ * Google's official Antigravity CLI installer, as published on
+ * antigravity.google/docs/cli/install (`curl -fsSL <this url> | bash`, which
+ * Claudexor deliberately does NOT do — see the header). Verified end to end on
+ * 2026-08-16: the script fetched from this URL installed agy 1.1.13 to
+ * `~/.local/bin/agy`, which is the destination disclosed below. The vendor
+ * ships one signed Go binary and no npm package, so it takes the same
+ * human-observed path as cursor.
+ */
 export const AGY_INSTALL_URL = "https://antigravity.google/cli/install.sh";
 
 /** Vendors distributed as a shell installer instead of a pinnable npm
@@ -114,8 +120,12 @@ const SCRIPT_INSTALLERS: Record<
 
 type ScriptInstaller = (typeof SCRIPT_INSTALLERS)[keyof typeof SCRIPT_INSTALLERS];
 
+/** Membership is asked of the TABLE, never re-typed: a third script vendor is
+ * one row, and cannot be added to the table yet fall through here. */
 function scriptInstaller(harness: InstallableHarness): ScriptInstaller | null {
-  return harness === "agy" || harness === "cursor" ? SCRIPT_INSTALLERS[harness] : null;
+  return Object.hasOwn(SCRIPT_INSTALLERS, harness)
+    ? SCRIPT_INSTALLERS[harness as keyof typeof SCRIPT_INSTALLERS]
+    : null;
 }
 
 export interface HarnessInstallerDisclosure {

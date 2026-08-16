@@ -28,6 +28,7 @@ import {
   profileDoctorProbe,
   DEFAULT_STORE_OF,
   assertDefaultLoginAllowed,
+  assertSetupJobExtendable,
   resolveProfileBinding,
   resolveSetupLoginRunnerPath,
   shellQuote,
@@ -1049,7 +1050,9 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const executable = captureExecutableEvidence(spec.binary);
       const authorizedCommandDigest = commandDigest(executable, spec.args);
       // A vendor window shorter than ours governs: counting past the moment it
-      // gave up would promise a login that is already over.
+      // gave up would promise a login that is already over — and it cannot be
+      // extended either, which the job says out loud so no surface offers to.
+      const vendorCapped = (spec.loginWindowMs ?? Infinity) < loginTimeoutMs;
       const { loginDeadlineAt, permitDeadlineAt, permitWaitMs } = setupLoginDeadlines(
         now(),
         Math.min(loginTimeoutMs, spec.loginWindowMs ?? loginTimeoutMs),
@@ -1114,6 +1117,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           state: "waiting_for_input",
           phase: "launching",
           deadlineAt: loginDeadlineAt,
+          ...(vendorCapped ? { deadlineFixed: true } : {}),
           startedAt: iso(),
           command: spec.displayCommand,
           authorization: {
@@ -1190,6 +1194,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         state: "waiting_for_input",
         phase: "launching",
         deadlineAt: loginDeadlineAt,
+        ...(vendorCapped ? { deadlineFixed: true } : {}),
         startedAt: iso(),
         command: spec.displayCommand,
         authorization: {
@@ -1493,13 +1498,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         if (prior) return prior;
       }
       const job = store.status(jobId);
-      if (
-        !ACTIVE_SETUP_STATES.has(job.state) ||
-        !["launching", "awaiting_user"].includes(job.phase ?? "") ||
-        !job.deadlineAt
-      ) {
-        throw Object.assign(new Error("setup job cannot be extended"), { status: 409 });
-      }
+      assertSetupJobExtendable(job);
       const extended = update(
         jobId,
         {

@@ -26,6 +26,22 @@ import Testing
         #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
     }
 
+    /// "This harness id decodes as a SetupHarness" is NOT "this harness has a
+    /// default store". A surface that offers a PROFILE-LESS login (the remote
+    /// Setup button) must gate on the store, or it posts a login the daemon
+    /// refuses — agy has no default subject at all.
+    @Test func onlyFamiliesWithADefaultStoreOfferAProfilelessLogin() {
+        #expect(!AccountsPresentation.supportsDefaultStoreLogin(.agy))
+        #expect(SetupHarness(rawValue: HarnessFamily.agy.setupHarnessId) != nil)
+        for family in [HarnessFamily.claude, .codex, .cursor] {
+            #expect(AccountsPresentation.supportsDefaultStoreLogin(family))
+        }
+        // API-key families have no native default login to start either.
+        for family in [HarnessFamily.opencode, .raw, .openrouter] {
+            #expect(!AccountsPresentation.supportsDefaultStoreLogin(family))
+        }
+    }
+
     @Test func accountActionNoticeClearsAndRejectsLateCompletions() {
         var notice = AccountsActionNotice()
         let first = notice.begin()

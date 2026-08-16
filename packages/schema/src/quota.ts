@@ -78,17 +78,6 @@ export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex" | "agy">
   ].sort();
 }
 
-/**
- * Whether a refresh-demand harness ALSO has an unprofiled DEFAULT quota subject
- * (an engine-default credential store). agy is deliberately absent: it has no
- * default account — every agy identity is a named profile (owner decision,
- * PLAN Л-4), so its subject universe is profiles-only. claude/codex keep their
- * native-login default subject.
- */
-export function quotaHarnessHasDefaultSubject(harness: "claude" | "codex" | "agy"): boolean {
-  return harness !== "agy";
-}
-
 export function quotaSourcesProducedByRefreshers(): QuotaSource[] {
   return (Object.keys(QUOTA_SOURCE_TRAITS) as QuotaSource[]).filter(
     (source) => QUOTA_SOURCE_TRAITS[source].producedByRefresher,

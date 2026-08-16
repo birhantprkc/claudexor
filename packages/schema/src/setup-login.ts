@@ -7,6 +7,7 @@
  * readable file.
  */
 import { z } from "zod/v3";
+import { harnessHasDefaultCredentialStore } from "./credential-store.js";
 import * as SetupLoginProtocol from "./setup-login-protocol.js";
 import {
   ControlHarnessSetupHarness,
@@ -92,6 +93,15 @@ export const SetupLoginManifest = z
       deny(["inputPath"], "inputPath rides url_disclosure_with_input manifests, exactly");
     // A tty exists only to deliver the pasted code; claiming it elsewhere
     // would wrap a login that never reads stdin.
+    // A harness with no default credential store has nowhere to sign in
+    // EXCEPT a named profile, so a manifest without one is malformed rather
+    // than merely unlucky — the runner would otherwise fail opaquely and the
+    // reason (INV-135 / owner decision Л-4) would never reach the user.
+    if (!harnessHasDefaultCredentialStore(value.harness) && !value.profileConfigDir)
+      deny(
+        ["profileConfigDir"],
+        `${value.harness} has no default credential store: its login manifest must target a named profile HOME`,
+      );
     if (value.ptyStdin && value.loginMode !== "url_disclosure_with_input")
       deny(["ptyStdin"], "ptyStdin exists only for url_disclosure_with_input manifests");
   });

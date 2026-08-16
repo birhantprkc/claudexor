@@ -144,6 +144,38 @@ enum AuthSheetPresentation {
         }
     }
 
+    /// Whether the sign-in deadline passing may LAPSE the card (and, per the
+    /// auto-re-issue decision, replace the link). Auto-re-issue exists for a
+    /// window that closed with nothing delivered; firing it once a code is on
+    /// its way cancels the vendor mid token-exchange and burns the one-time
+    /// code, so a delivered — or still-sending — value outranks the clock.
+    static func deadlineMayLapse(codeDelivered: Bool, sending: Bool) -> Bool {
+        !codeDelivered && !sending
+    }
+
+    /// The ONE cause line for every control that acts on a LAPSED sign-in link.
+    /// The URL is dead the moment the vendor's window closes, so Open/Copy are
+    /// disabled and say this rather than silently doing nothing (INV-134).
+    static let lapsedSignInLinkHelp = "This sign-in link expired. Get a new link first."
+
+    /// VoiceOver name for the disclosed sign-in link. The label DESCRIBES the
+    /// URL, never replaces it: a bare "Sign-in link" left a VoiceOver user with
+    /// no way to hear the address they were about to open, and no way to tell a
+    /// live link from an expired one.
+    static func signInLinkLabel(url: String, lapsed: Bool) -> String {
+        lapsed ? "Expired sign-in link \(url)" : "Sign-in link \(url)"
+    }
+
+    /// Whether the setup-job panel draws the deadline countdown. One fact, one
+    /// owner: while the paste card is on screen the countdown belongs THERE,
+    /// beside the field it governs, so the panel yields instead of rendering a
+    /// second clock for the same deadline.
+    static func jobPanelShowsDeadline(
+        disclosureFlow: SetupLoginDisclosureFlow?, phase: SetupJobPhase
+    ) -> Bool {
+        !(disclosureFlow == .oauthUrlInput && phase == .awaitingUser)
+    }
+
     /// What the login-disclosure card may SAY and OFFER. The card is not
     /// codex-only — a terminal-mode claude/cursor login discloses its captured
     /// `oauth_url` through the same overlay — so both answers come from the

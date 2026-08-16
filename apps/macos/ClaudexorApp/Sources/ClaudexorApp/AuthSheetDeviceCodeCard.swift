@@ -50,6 +50,13 @@ struct AuthSheetDeviceCodeCard: View {
     @State private var sending = false
     @State private var submitFailure: String?
     @State private var windowLapsed = false
+    /// A code the daemon ACCEPTED for this login. Once set, the deadline may no
+    /// longer lapse the card or re-issue the link: the vendor is exchanging that
+    /// one-time value, and cancelling it there loses a sign-in that had already
+    /// succeeded. The escape hatch stays a deliberate user act.
+    @State private var codeDelivered = false
+    /// The login attempt the typed code and delivery state belong to.
+    @State private var armedJobId = ""
 
     /// Display name + codex-only affordance for the harness THIS login is for,
     /// from the shared `AuthSheetPresentation` vocabulary.
@@ -62,6 +69,14 @@ struct AuthSheetDeviceCodeCard: View {
     private var deadline: Date? { AuthSheetJobPanel.parseDate(job.deadlineAt) }
     private var submitAvailability: AuthSheetPresentation.SignInCodeAvailability {
         .init(windowLapsed: windowLapsed, sending: sending, codeField: code)
+    }
+    /// Copy above the link block. It must never tell the user to open a link
+    /// that no longer works, so the lapsed wording points at the replacement.
+    private var linkIntro: String {
+        if !acceptsCode { return "Complete the sign-in in your browser to finish." }
+        return windowLapsed
+            ? "That link expired before a code arrived. Get a new one below, then paste the code \(vendor) shows:"
+            : "Open this sign-in link, then paste the code \(vendor) shows back here:"
     }
 
     var body: some View {
@@ -91,24 +106,30 @@ struct AuthSheetDeviceCodeCard: View {
                         .help("Copy the one-time code to the clipboard.")
                     }
                 } else {
-                    Text(acceptsCode
-                         ? "Open this sign-in link, then paste the code \(vendor) shows back here:"
-                         : "Complete the sign-in in your browser to finish.")
+                    Text(linkIntro)
                         .font(.caption).foregroundStyle(.secondary)
                     if acceptsCode {
                         // The link IS the handoff for this flow, so it is shown
                         // in full, selectable and copyable — a browser button
                         // alone strands anyone signing in on another device.
+                        // Struck through once the window lapsed: the URL is dead
+                        // then, and a live-looking link is a false promise.
                         Text(disclosure.verificationUrl)
                             .font(.system(.caption, design: .monospaced))
+                            .strikethrough(windowLapsed)
+                            .foregroundStyle(windowLapsed ? .secondary : .primary)
                             .padding(Theme.Spacing.sm)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Theme.surfaceCode, in: RoundedRectangle(cornerRadius: Theme.Radius.control))
                             .textSelection(.enabled)
-                            .accessibilityLabel("Sign-in link")
+                            .accessibilityLabel(AuthSheetPresentation.signInLinkLabel(
+                                url: disclosure.verificationUrl, lapsed: windowLapsed))
                     }
                 }
 
+                // Every control here ACTS ON the disclosed URL, so all three go
+                // dead together the moment the window lapses — and each names
+                // that cause instead of looking clickable on a dead link.
                 HStack(spacing: Theme.Spacing.sm) {
                     Button {
                         session.open(url: disclosure.verificationUrl)
@@ -117,7 +138,10 @@ struct AuthSheetDeviceCodeCard: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accentSolid)
-                    .help("Open the \(vendor) sign-in page in a private browser session.")
+                    .disabled(windowLapsed)
+                    .help(windowLapsed
+                          ? AuthSheetPresentation.lapsedSignInLinkHelp
+                          : "Open the \(vendor) sign-in page in a private browser session.")
 
                     if disclosure.hasUserCode || acceptsCode {
                         // A plain fallback to the default browser for anyone who
@@ -131,6 +155,10 @@ struct AuthSheetDeviceCodeCard: View {
                             Label("Open in browser", systemImage: "safari")
                         }
                         .buttonStyle(.bordered)
+                        .disabled(windowLapsed)
+                        .help(windowLapsed
+                              ? AuthSheetPresentation.lapsedSignInLinkHelp
+                              : "Open the \(vendor) sign-in page in your default browser.")
                     }
 
                     if acceptsCode {
@@ -145,7 +173,10 @@ struct AuthSheetDeviceCodeCard: View {
                                   systemImage: linkCopied ? "checkmark" : "link")
                         }
                         .buttonStyle(.bordered)
-                        .help("Copy the sign-in link to the clipboard.")
+                        .disabled(windowLapsed)
+                        .help(windowLapsed
+                              ? AuthSheetPresentation.lapsedSignInLinkHelp
+                              : "Copy the sign-in link to the clipboard.")
                     }
                 }
 
@@ -201,35 +232,61 @@ struct AuthSheetDeviceCodeCard: View {
         .onDisappear { session.cancel() }
         // The vendor's sign-in window is fixed and cannot be extended, so a
         // lapsed link is a dead end. Watch the deadline the DAEMON published
-        // (never a vendor timeout invented here) and re-issue once per link the
-        // moment it passes — the consumed-once shape the sheet's auto-start uses.
-        .task(id: "\(job.jobId)|\(disclosure.verificationUrl)") {
+        // (never a vendor timeout invented here) and re-issue once the moment it
+        // passes — the consumed-once shape the sheet's auto-start uses.
+        //
+        // Keyed on the job and its DEADLINE, never on the disclosed URL: a job
+        // may disclose a provisional capture and then the same URL with more of
+        // its tail, and keying on the URL wiped a code the user had already
+        // typed the moment that longer capture landed.
+        .task(id: "\(job.jobId)|\(job.deadlineAt ?? "")") {
+            // Typed input and delivery belong to ONE login attempt; a mere new
+            // deadline for the same job leaves them alone.
+            if armedJobId != job.jobId {
+                armedJobId = job.jobId
+                codeDelivered = false
+                submitFailure = nil
+                code = ""
+                copied = false
+                linkCopied = false
+            }
+            // A fresh deadline means an open window again; a delivered code is
+            // not un-delivered by it.
             windowLapsed = false
-            submitFailure = nil
-            code = ""
-            copied = false
-            linkCopied = false
             guard acceptsCode, let deadline else { return }
             let remaining = deadline.timeIntervalSinceNow
             // Already past when this card arrived: show the lapsed state, but
             // let the USER ask for the new link. Auto-firing on a link that was
             // dead before it rendered is how a re-issue loop starts.
-            guard remaining > 0 else { windowLapsed = true; return }
+            guard remaining > 0 else { lapse(reissuing: false); return }
             try? await Task.sleep(for: .seconds(remaining))
             guard !Task.isCancelled else { return }
-            windowLapsed = true
-            reissue()
+            lapse(reissuing: true)
         }
+        .revertsCopyConfirmation($copied)
+        .revertsCopyConfirmation($linkCopied)
     }
 
-    /// The `oauth_url_input` paste half. Three honest states: ready to paste,
-    /// delivering, and lapsed — where retyping cannot help, so the card hands
-    /// back a fresh link instead of a field that can only fail.
+    /// Close the window the card is showing — unless a code already reached the
+    /// daemon (or is on its way there). The vendor is exchanging that one-time
+    /// value, and re-issuing would cancel the job mid exchange and burn it, so a
+    /// delivered code keeps the card intact and leaves the new link to the user.
+    private func lapse(reissuing: Bool) {
+        guard AuthSheetPresentation.deadlineMayLapse(
+            codeDelivered: codeDelivered, sending: sending) else { return }
+        windowLapsed = true
+        if reissuing { reissue() }
+    }
+
+    /// The `oauth_url_input` paste half. Four honest states: ready to paste,
+    /// delivering, DELIVERED (the vendor owns the outcome — the card must not
+    /// take the sign-in away from it), and lapsed, where retyping cannot help so
+    /// the card hands back a fresh link instead of a field that can only fail.
     @ViewBuilder private var signInCodeSection: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            if let deadline, !windowLapsed {
-                // Same countdown vocabulary as the setup-job panel (one owner
-                // per fact); only the lapsed copy below belongs to this card.
+            if let deadline, !windowLapsed, !codeDelivered {
+                // The countdown's ONE owner while this card is on screen (the
+                // setup-job panel yields it); only the copy below is card-local.
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     Label(AuthSheetJobPanel.deadlineText(deadline, now: context.date),
                           systemImage: "timer")
@@ -238,19 +295,21 @@ struct AuthSheetDeviceCodeCard: View {
                 }
             }
             if windowLapsed {
-                Label("That sign-in window closed before a code arrived, and it cannot be extended. Claudexor is issuing a fresh link — use the new one above.",
+                Label("That sign-in window closed before a code arrived, and it cannot be extended. The link above is dead — Claudexor is issuing a fresh one, and it replaces the link here as soon as it arrives.",
                       systemImage: "clock.badge.exclamationmark")
                     .font(.caption)
                     .foregroundStyle(Theme.status(.caution))
-                Button(action: reissue) {
-                    Label("Get a new link", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accentSolid)
-                .disabled(actionInFlight)
-                .help(actionInFlight
-                      ? "Wait for the current action to finish."
-                      : "Start a fresh \(vendor) sign-in and show a new link.")
+                newLinkButton(prominent: true)
+            } else if codeDelivered {
+                // The vendor is exchanging that code now. No countdown and no
+                // second paste field: both would only invite cancelling a
+                // sign-in that may already have succeeded. The way out stays
+                // available but quiet, for the case the vendor refuses it.
+                Label("Code delivered. Waiting for \(vendor) to finish the sign-in…",
+                      systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                newLinkButton(prominent: false)
             } else {
                 Text("Paste the code from the sign-in page:")
                     .font(.caption).foregroundStyle(.secondary)
@@ -278,6 +337,29 @@ struct AuthSheetDeviceCodeCard: View {
         }
     }
 
+    /// The one act that still works on a dead — or already answered — window:
+    /// start a fresh login and disclose a new link. Prominent where it is the
+    /// ONLY way forward, quiet where the sign-in may still be completing and
+    /// pressing it would throw a live token exchange away.
+    @ViewBuilder private func newLinkButton(prominent: Bool) -> some View {
+        if prominent {
+            Button(action: reissue) { Label("Get a new link", systemImage: "arrow.clockwise") }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accentSolid)
+                .disabled(actionInFlight)
+                .help(actionInFlight
+                      ? "Wait for the current action to finish."
+                      : "Start a fresh \(vendor) sign-in and show a new link.")
+        } else {
+            Button(action: reissue) { Label("Get a new link", systemImage: "arrow.clockwise") }
+                .buttonStyle(.bordered)
+                .disabled(actionInFlight)
+                .help(actionInFlight
+                      ? "Wait for the current action to finish."
+                      : "Cancel this sign-in and start a fresh one — only if \(vendor) refused the code you sent.")
+        }
+    }
+
     /// The pasted value is a one-time secret: it goes straight to the caller and
     /// is cleared from the field once the daemon accepted it. A refusal keeps it
     /// visible on purpose — the user may still need it for the next link.
@@ -289,8 +371,27 @@ struct AuthSheetDeviceCodeCard: View {
         Task { @MainActor in
             let failure = await submitCode(value)
             submitFailure = failure
-            if failure == nil { code = "" }
+            // The daemon took it: from here the vendor owns the outcome, and
+            // the deadline must never cancel the job out from under it.
+            if failure == nil {
+                code = ""
+                codeDelivered = true
+            }
             sending = false
+        }
+    }
+}
+
+private extension View {
+    /// Revert a transient "Copied" acknowledgement. It is feedback for one
+    /// press, not a permanent label: left latched, the control reads as spent
+    /// and the user cannot tell a second copy actually happened.
+    func revertsCopyConfirmation(_ flag: Binding<Bool>) -> some View {
+        task(id: flag.wrappedValue) {
+            guard flag.wrappedValue else { return }
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            flag.wrappedValue = false
         }
     }
 }
