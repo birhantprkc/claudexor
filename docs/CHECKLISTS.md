@@ -490,7 +490,7 @@ repository context that small review packets lost.
 > the owner-approved tier set {`claude-fable-5-thinking-max`,
 > `claude-fable-5-thinking-medium`, `claude-fable-5-thinking-high`} with the
 > full context, slot `sol` = one
-> slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
+> slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`, `gpt-5.6-sol-high`,
 > `gpt-5.6-sol-medium`}. The tier sets are an
 > operator decision of 2026-08-06 ~08:29 MSK under the owner authorization of
 > 08:04 MSK («меня удовлетворяют модели fable-5 и gpt-5.6-sol», given after
@@ -503,7 +503,12 @@ repository context that small review packets lost.
 > operator addendum likewise admits the same-family `high` Fable tier after
 > the live catalog exposed only that Fable tier — ratified explicitly by the
 > owner the same day (verbatim «согласен с рекоментадцией. Продолжай»,
-> 2026-08-10 ~20:46 MSK, after the constitutional gap was surfaced); no other
+> 2026-08-10 ~20:46 MSK, after the constitutional gap was surfaced); the
+> 2026-08-16 operator addendum likewise admits the same-family `high` Sol
+> tier after the live catalog exposed only that Sol tier — ratified
+> explicitly by the owner the same day (quiz answer A, 2026-08-16 ~05:05
+> MSK: «допустить тир gpt-5.6-sol-high в Sol-слот»; it sits above the
+> already-approved `medium`, so the assurance floor does not drop); no other
 > family is admitted. Each slot's sealed artifact is its markdown report plus metadata
 > (model slug, exact ISO-8601 start/finish, `pass|warn` verdict,
 > mandatory `review_scope: "full"`, report SHA-256), and the two executions
@@ -534,7 +539,7 @@ repository context that small review packets lost.
   {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`,
   `claude-fable-5-thinking-high`}, slot
   `sol` = one slug from {`gpt-5.6-sol-xhigh`, `gpt-5.6-sol-max`,
-  `gpt-5.6-sol-medium`}. Each
+  `gpt-5.6-sol-high`, `gpt-5.6-sol-medium`}. Each
   reviewer receives the complete Git-visible candidate repository, complete
   diff, the same sealed evidence, owner dialogue/decisions, and tests, and may
   use live internet access where source verification is useful. No substitute

@@ -686,7 +686,7 @@ invariant or owner decision before proceeding.
   tier set {`claude-fable-5-thinking-max`, `claude-fable-5-thinking-medium`,
   `claude-fable-5-thinking-high`}
   and the sol slot on one slug from {`gpt-5.6-sol-xhigh`,
-  `gpt-5.6-sol-max`, `gpt-5.6-sol-medium`},
+  `gpt-5.6-sol-max`, `gpt-5.6-sol-high`, `gpt-5.6-sol-medium`},
   both executed as the Cursor operator's
   own subagents (protocol `cursor-operator-fable-sol-v1`). Decision trail:
   owner decision 2026-08-04, verbatim: «зачем тебе кодекс? Ревьюй курсором и
@@ -716,6 +716,11 @@ invariant or owner decision before proceeding.
   `high` Fable tier is admitted after the live subagent catalog exposed only
   that Fable tier; the ratification is recorded verbatim in the CHECKLISTS
   protocol decision trail and the 3.3.15 release evidence.
+  Operator addendum 2026-08-16, owner-ratified the same day: the same-family
+  `high` Sol tier is admitted after the live subagent catalog exposed only
+  that Sol tier; it sits above the already-approved `medium`, so the
+  assurance floor does not drop. The ratification is recorded in the
+  CHECKLISTS protocol decision trail and the 3.4.2 release evidence.
   Slot artifacts are the reviewer's complete report plus exact-shape metadata
   — model slug, ISO start/finish intervals, verdict, the mandatory
   `review_scope: "full"`, report SHA-256 — sealed against the packet; real

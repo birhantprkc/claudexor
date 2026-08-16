@@ -47,7 +47,10 @@ export const RELEASE_REVIEW_MIN_PLAUSIBLE_MS = 1_000;
 // 2026-08-06 ~08:29 MSK under the owner authorization of 08:04 MSK «меня
 // удовлетворяют модели fable-5 и gpt-5.6-sol»: two subagent-model catalog
 // flaps within one hour; a hard single-tier pin would have blocked the
-// formal pair on the frozen SHA). The actually used slug is recorded in the
+// formal pair on the frozen SHA; the same-family `high` Sol tier joined on
+// 2026-08-16, owner-ratified the same day, after the live catalog exposed
+// only that Sol tier — it sits above the already-approved `medium`, so the
+// assurance floor does not drop). The actually used slug is recorded in the
 // reviewer metadata and the signed review entry; a slug outside the set
 // refuses fail-closed. This constant is the single source for BOTH
 // comparison points: the semantic validator below and the sealer.
@@ -62,7 +65,12 @@ export const OWNER_REVIEW_PANEL = Object.freeze([
   }),
   Object.freeze({
     slot: "sol",
-    allowedModels: Object.freeze(["gpt-5.6-sol-xhigh", "gpt-5.6-sol-max", "gpt-5.6-sol-medium"]),
+    allowedModels: Object.freeze([
+      "gpt-5.6-sol-xhigh",
+      "gpt-5.6-sol-max",
+      "gpt-5.6-sol-high",
+      "gpt-5.6-sol-medium",
+    ]),
   }),
 ]);
 
