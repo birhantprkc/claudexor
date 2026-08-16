@@ -61,18 +61,14 @@ struct HarnessFamily: RawRepresentable, Identifiable, Hashable {
     static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .agy, .raw]
     var id: String { rawValue }
 
+    /// Human-facing family names; anything else title-cases its rawValue. The
+    /// vendor brands the PRODUCT "Antigravity" — `agy` is only its binary.
+    private static let labels = [
+        "codex": "Codex", "claude": "Claude", "cursor": "Cursor", "opencode": "OpenCode",
+        "agy": "Antigravity", "raw-api": "Raw API", "openrouter": "OpenRouter", "fake": "Fake",
+    ]
     var label: String {
-        if self == .codex { return "Codex" }
-        if self == .claude { return "Claude" }
-        if self == .cursor { return "Cursor" }
-        if self == .opencode { return "OpenCode" }
-        // The vendor brands the product "Antigravity" and the binary `agy`;
-        // the human-facing label is the product name.
-        if self == .agy { return "Antigravity" }
-        if self == .raw { return "Raw API" }
-        if self == .openrouter { return "OpenRouter" }
-        if self == .fake { return "Fake" }
-        return rawValue.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+        Self.labels[rawValue] ?? rawValue.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
     }
     // Vendor iconography is owned solely by `HarnessIcon` (M9-UX item 5): a real
     // brand mark where we ship one, else ONE shared generic glyph. No per-family

@@ -126,7 +126,7 @@ enum Theme {
         case .opencode: return Color(dark: (0.70, 0.84, 0.38), light: (0.43, 0.62, 0.18))// lime
         // Antigravity cyan. The palette's tightest neighbour pair is this vs
         // codex teal-green, so it is pushed hard toward BLUE (b 0.92 vs 0.60)
-        // and carries the highest contrast of any family color (6.4:1 dark,
+        // and clears AA against `surfaceRaised` in both themes (6.4:1 dark,
         // 5.1:1 light) — the harness dot never rides hue alone anyway: every
         // surface pairs it with the label or brand mark.
         case .agy: return Color(dark: (0.38, 0.80, 0.92), light: (0.05, 0.47, 0.58))     // cyan

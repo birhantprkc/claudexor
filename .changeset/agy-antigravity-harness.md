@@ -1,6 +1,5 @@
 ---
 "@claudexor/harness-agy": minor
-"@claudexor/schema": minor
 "@claudexor/util": minor
 "@claudexor/cli": minor
 ---

@@ -52,8 +52,10 @@ export function agyTokenFilePresent(profileHome: string): boolean {
  * moves the vendor's conversations/brain/cache into the profile HOME too, and
  * the per-lane home is unused for agy runs. Deliberate, not an oversight: a
  * lane-scoped `.gemini` would be a dead directory the vendor never reads.
- * Lane continuity still holds through the vendor conversation id
- * (`--conversation`, INV-137); the visible cost is that one profile HOME
+ * What holds today is per-lane RESUME: a lane replays its own vendor
+ * conversation by id (`--conversation`, INV-137). Nothing scopes those
+ * conversations to a lane yet — the vendor's project mechanism
+ * (`--new-project`/`--project`, Л-19) is not wired here — so one profile HOME
  * accumulates every thread's vendor state, which the Accounts card discloses
  * by size (Л-30).
  */

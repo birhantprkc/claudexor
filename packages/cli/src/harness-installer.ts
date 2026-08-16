@@ -40,8 +40,8 @@ import { composeBaseEnv } from "@claudexor/core";
 import type { PinnedVendorCliVersion } from "@claudexor/util";
 import { flagBool, type ParsedArgs } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
+import { INSTALLABLE_HARNESSES } from "./harness-command-specs.js";
 
-export const INSTALLABLE_HARNESSES = ["agy", "claude", "codex", "cursor", "opencode"] as const;
 export type InstallableHarness = (typeof INSTALLABLE_HARNESSES)[number];
 
 export function isInstallableHarness(value: string): value is InstallableHarness {

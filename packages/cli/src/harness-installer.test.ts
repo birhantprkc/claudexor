@@ -5,10 +5,10 @@ import { CLAUDE_VENDOR_CLI_VERSION } from "@claudexor/harness-claude";
 import { CODEX_VENDOR_CLI_VERSION } from "@claudexor/harness-codex";
 import { OPENCODE_VENDOR_CLI_VERSION } from "@claudexor/harness-opencode";
 import type { ParsedArgs } from "./args.js";
+import { INSTALLABLE_HARNESSES } from "./harness-command-specs.js";
 import {
   AGY_INSTALL_URL,
   CURSOR_INSTALL_URL,
-  INSTALLABLE_HARNESSES,
   harnessInstallCommand,
   harnessInstallerDisclosure,
   isInstallableHarness,
