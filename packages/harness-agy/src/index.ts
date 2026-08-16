@@ -186,6 +186,15 @@ export function createAgyAdapter(): HarnessAdapter {
         version !== null && installedSemver !== AGY_VENDOR_CLI_VERSION
           ? `installed agy "${version}" differs from the verified ${AGY_VENDOR_CLI_VERSION}; the file-token profile mechanism is re-proven per version (R-2')`
           : null;
+      // Л-24: the account isolation mechanism — one Claudexor-owned HOME per
+      // identity, with the vendor keeping its token in a file inside it — was
+      // proven on macOS across three live Google accounts. The same HOME lever
+      // exists on every platform the vendor supports, but nobody has run it
+      // there, so the platform says so instead of implying a proof it lacks.
+      const platformProof =
+        process.platform === "darwin"
+          ? null
+          : `named-account isolation is unverified on ${process.platform}: the mechanism is the same profile HOME proven on macOS, but no live multi-account run has been recorded here`;
       const requestedSource = spec.authSource;
       if (requestedSource !== undefined && requestedSource !== "native_session") {
         return ConformanceReportSchema.parse({
@@ -250,12 +259,16 @@ export function createAgyAdapter(): HarnessAdapter {
           ...(versionDrift
             ? [{ id: "version_pin", status: "fail" as const, detail: versionDrift }]
             : [{ id: "version_pin", status: "pass" as const, detail: AGY_VENDOR_CLI_VERSION }]),
+          ...(platformProof
+            ? [{ id: "platform_isolation", status: "warn" as const, detail: platformProof }]
+            : []),
         ],
         enabled_intents: [],
         disabled_intents: AGY_ENABLED_INTENTS,
         reasons: [
           "agy routes only through named accounts: add one (`claudexor profiles add agy <id>` + `claudexor profiles login agy <id>`) and pin it (--profile)",
           ...(versionDrift ? [versionDrift] : []),
+          ...(platformProof ? [platformProof] : []),
         ],
         auth_sources: [
           {

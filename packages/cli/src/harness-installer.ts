@@ -96,16 +96,21 @@ export const CURSOR_INSTALL_URL = "https://cursor.com/install";
  * human-observed path as cursor.
  */
 export const AGY_INSTALL_URL = "https://antigravity.google/cli/install.sh";
+/** The vendor's Windows installer, from the same documentation page. */
+export const AGY_INSTALL_URL_WINDOWS = "https://antigravity.google/cli/install.ps1";
 
 /** Vendors distributed as a shell installer instead of a pinnable npm
  * artifact. ONE branch serves both entries; the per-harness text below is the
  * only thing that differs, so a third such vendor is a row, not a fork. */
 const SCRIPT_INSTALLERS: Record<
   "agy" | "cursor",
-  { url: string; installLocation: string; pinNote: string }
+  { url: string; windowsUrl?: string; installLocation: string; pinNote: string }
 > = {
   agy: {
     url: AGY_INSTALL_URL,
+    // The one vendor here that publishes a Windows installer of its own; the
+    // POSIX row would otherwise be all Claudexor could honestly offer.
+    windowsUrl: AGY_INSTALL_URL_WINDOWS,
     installLocation: "~/.local/bin (as selected by Google's Antigravity installer)",
     pinNote:
       "none — Antigravity ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it",
@@ -159,12 +164,20 @@ export function harnessInstallerDisclosure(
   /* c8 ignore next -- every non-npm harness has a script row; this is the
      unreachable guard that keeps the two tables honest. */
   if (!script) throw new Error(`harness ${harness} has neither an npm pin nor a script installer`);
+  const windows = process.platform === "win32";
+  const url = windows ? (script.windowsUrl ?? script.url) : script.url;
+  const file = windows && script.windowsUrl ? "install.ps1" : "install.sh";
+  const runner =
+    windows && script.windowsUrl ? "powershell -ExecutionPolicy Bypass -File" : "/bin/sh";
   return {
     harness,
     command:
-      `curl --fail --silent --show-error --location ${script.url} ` +
-      "--output <private-tmpdir>/install.sh && /bin/sh <private-tmpdir>/install.sh",
-    installLocation: script.installLocation,
+      `curl --fail --silent --show-error --location ${url} ` +
+      `--output <private-tmpdir>/${file} && ${runner} <private-tmpdir>/${file}`,
+    installLocation:
+      windows && script.windowsUrl
+        ? "%LOCALAPPDATA%\\agy\\bin (as selected by Google's Antigravity installer)"
+        : script.installLocation,
     pinnedVersion: null,
     verification: "human_observed",
   };
@@ -240,8 +253,17 @@ export function runHarnessInstaller(
   const script = scriptInstaller(harness);
   /* c8 ignore next */
   if (!script) return { exitCode: 1, refusal: `no installer is defined for ${harness}` };
+  const windows = process.platform === "win32";
+  const useWindowsScript = windows && script.windowsUrl !== undefined;
+  const url = useWindowsScript ? script.windowsUrl! : script.url;
+  if (windows && !useWindowsScript) {
+    return {
+      exitCode: 1,
+      refusal: `${harness} publishes no Windows installer; install it yourself and re-run \`claudexor doctor\``,
+    };
+  }
   const temporaryDirectory = mkdtempSync(join(tmpdir(), `claudexor-${harness}-install-`));
-  const installerPath = join(temporaryDirectory, "install.sh");
+  const installerPath = join(temporaryDirectory, useWindowsScript ? "install.ps1" : "install.sh");
   try {
     const downloaded = spawn(
       "curl",
@@ -251,7 +273,7 @@ export function runHarnessInstaller(
     if (downloaded.status !== 0) {
       return {
         exitCode: downloaded.status ?? 1,
-        refusal: `the download of ${script.url} failed (curl exit ${downloaded.status ?? "unknown"}); nothing was executed`,
+        refusal: `the download of ${url} failed (curl exit ${downloaded.status ?? "unknown"}); nothing was executed`,
       };
     }
     let payload: Buffer;
@@ -267,8 +289,11 @@ export function runHarnessInstaller(
       `${harness} installer downloaded: ${payload.length} bytes, ` +
         `sha256 ${createHash("sha256").update(payload).digest("hex")}`,
     );
-    note(`running: /bin/sh ${installerPath}`);
-    const executed = spawn("/bin/sh", [installerPath], { stdio: childStdio, env: environment });
+    const runner: [string, string[]] = useWindowsScript
+      ? ["powershell", ["-ExecutionPolicy", "Bypass", "-File", installerPath]]
+      : ["/bin/sh", [installerPath]];
+    note(`running: ${runner[0]} ${runner[1].join(" ")}`);
+    const executed = spawn(runner[0], runner[1], { stdio: childStdio, env: environment });
     return { exitCode: executed.status ?? 1 };
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });

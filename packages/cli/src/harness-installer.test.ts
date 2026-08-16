@@ -8,6 +8,7 @@ import type { ParsedArgs } from "./args.js";
 import { INSTALLABLE_HARNESSES } from "./harness-command-specs.js";
 import {
   AGY_INSTALL_URL,
+  AGY_INSTALL_URL_WINDOWS,
   CURSOR_INSTALL_URL,
   harnessInstallCommand,
   harnessInstallerDisclosure,
@@ -388,5 +389,29 @@ describe("--json stdout purity on the execute path (--yes)", () => {
     stdout.restore();
     expect(stdout.lines()).toMatch(/cursor installer downloaded: \d+ bytes, sha256 [0-9a-f]{64}/);
     expect(stdout.lines()).toContain("vendor noise");
+  });
+});
+
+describe("Windows installer path (Л-24: best effort, honestly bounded)", () => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const asWindows = (): void =>
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  afterEach(() => Object.defineProperty(process, "platform", originalPlatform));
+
+  it("discloses the vendor's own Windows installer for agy", () => {
+    asWindows();
+    const disclosure = harnessInstallerDisclosure("agy");
+    expect(disclosure.command).toContain(AGY_INSTALL_URL_WINDOWS);
+    expect(disclosure.command).toContain("powershell");
+    expect(disclosure.command).not.toMatch(/\|\s*(iex|Invoke-Expression)/i);
+    expect(disclosure.installLocation).toContain("LOCALAPPDATA");
+  });
+
+  it("refuses rather than running a POSIX script for a vendor with no Windows installer", () => {
+    asWindows();
+    const spawn = vi.fn();
+    const result = runHarnessInstaller("cursor", { home: "/tmp/operator", spawn: spawn as never });
+    expect(result.refusal).toMatch(/no Windows installer/);
+    expect(spawn).not.toHaveBeenCalled();
   });
 });
