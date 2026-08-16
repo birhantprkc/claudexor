@@ -606,8 +606,9 @@ authoritative for each exact disposition.
 ## 3.4.2 formal-review advisories (2026-08-16)
 
 From the 3.4.2 formal initial wave (ledger rows in
-`docs/reference/review-ledger.md`, 3.4.2 block). Neither is default-reachable;
-both belong to the next confinement touch.
+`docs/reference/review-ledger.md`, 3.4.2 block). The first is not
+default-reachable; the second's shape is reachable but already covered by the
+union's construction. Both belong to the next confinement touch.
 
 - Self-defeating-layout refusal and exact equality (SOL-342-W01): the
   `applyConfinement` refusal flags an own root that strictly CONTAINS a denied
