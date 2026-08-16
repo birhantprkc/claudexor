@@ -185,20 +185,34 @@ describe("confinement profile", () => {
 });
 
 /**
- * The codex-startup regression (2026-08-10, live): codex canonicalizes its
- * CODEX_HOME (`fs::canonicalize` = `realpath(3)`), which lstat/readlinks every
- * INTERMEDIATE path component. The own-roots allow covers the native root's
- * subtree, but the components between the runtime root and the native root
- * matched the read deny — EPERM, `failed to canonicalize CODEX_HOME`, and every
- * mutating delegated codex run crashed within seconds. The profile now carries
- * a literal, metadata-only allowance for exactly that ancestor chain.
+ * Two startup regressions of one class, measured live on different own roots.
+ * Canonicalization — libc `realpath(3)`, Rust `fs::canonicalize`, SQLite's
+ * unix VFS path resolution — lstat/readlinks every INTERMEDIATE path
+ * component. The own-roots allow covers each root's subtree, but the
+ * components between the runtime root and the root matched the read deny:
+ * codex died canonicalizing CODEX_HOME under the native state root
+ * (2026-08-10, EPERM, `failed to canonicalize CODEX_HOME`), and cursor-agent
+ * died opening its SQLite chat store under the scoped HOME (2026-08-15,
+ * SQLITE_CANTOPEN, `unable to open database file`). The profile now carries a
+ * literal, metadata-only allowance for the union of every own root's denied
+ * ancestor chain.
  */
-describe("metadata traversal carve-out for the native state root", () => {
+describe("metadata traversal carve-out for the run's own roots", () => {
   const fixture = scaffold();
   afterAll(() => rmSync(fixture.base, { recursive: true, force: true }));
   const res = (path: string): string => realpathSync.native(path);
+  const lit = (path: string): string => `(literal ${JSON.stringify(res(path))})`;
+  // The scoped home sits five levels below the runtime root in the scaffold
+  // (the production workspace shape), so its chain is the deepest one.
+  const scopedHomeChain = [
+    join(fixture.input.runtimeRoot, "projects", "abc", "workspaces", "a01"),
+    join(fixture.input.runtimeRoot, "projects", "abc", "workspaces"),
+    join(fixture.input.runtimeRoot, "projects", "abc"),
+    join(fixture.input.runtimeRoot, "projects"),
+    fixture.input.runtimeRoot,
+  ];
 
-  it("emits literal metadata allows for the denied ancestors, between the read deny and the own-roots allow", () => {
+  it("emits literal metadata allows for every own root's denied ancestors, deduplicated", () => {
     const profile = buildConfinementProfile(fixture.input);
     const lines = profile.split("\n");
     const deny = lines.findIndex((line) => line.startsWith("(deny file-read* "));
@@ -210,46 +224,164 @@ describe("metadata traversal carve-out for the native state root", () => {
     expect(meta).toBeGreaterThan(deny);
     expect(own).toBeGreaterThan(meta);
     expect(own).toBe(lines.length - 2);
-    // literal, never subpath: metadata of the directory entry itself, nothing under it.
-    expect(lines[meta]).toBe(
-      `(allow file-read-metadata (literal ${JSON.stringify(res(fixture.input.runtimeRoot))}))`,
-    );
+    // literal, never subpath: metadata of the directory entry itself, nothing
+    // under it. The scoped-home chain comes first (own-roots order), the
+    // worktree is outside the runtime root and contributes nothing, and the
+    // native root's only ancestor — the runtime root — is already collected.
+    expect(lines[meta]).toBe(`(allow file-read-metadata ${scopedHomeChain.map(lit).join(" ")})`);
     expect(lines[meta]).not.toContain("subpath");
   });
 
-  it("walks every intermediate directory for a deeper native root", () => {
+  it("walks every intermediate directory for a deeper native root, deduplicated against the scoped-home chain", () => {
     const deepNative = join(fixture.input.runtimeRoot, "native", "vendors", "codex-deep");
     mkdirSync(deepNative, { recursive: true });
     const profile = buildConfinementProfile({ ...fixture.input, nativeStateRoot: deepNative });
     const meta = profile.split("\n").find((line) => line.startsWith("(allow file-read-metadata "));
     expect(meta).toBe(
       "(allow file-read-metadata " +
-        `(literal ${JSON.stringify(res(join(fixture.input.runtimeRoot, "native", "vendors")))}) ` +
-        `(literal ${JSON.stringify(res(join(fixture.input.runtimeRoot, "native")))}) ` +
-        `(literal ${JSON.stringify(res(fixture.input.runtimeRoot))}))`,
+        `${scopedHomeChain.map(lit).join(" ")} ` +
+        `${lit(join(fixture.input.runtimeRoot, "native", "vendors"))} ` +
+        `${lit(join(fixture.input.runtimeRoot, "native"))})`,
     );
   });
 
-  it("emits no carve-out when the native root is not inside the runtime root", () => {
-    const outside = join(fixture.base, "native-outside");
-    mkdirSync(outside, { recursive: true });
-    const profile = buildConfinementProfile({ ...fixture.input, nativeStateRoot: outside });
+  it("emits no carve-out when no own root lies inside the runtime root", () => {
+    const nativeOutside = join(fixture.base, "native-outside");
+    const scopedHomeOutside = join(fixture.base, "scoped-home-outside");
+    mkdirSync(nativeOutside, { recursive: true });
+    mkdirSync(scopedHomeOutside, { recursive: true });
+    const profile = buildConfinementProfile({
+      ...fixture.input,
+      nativeStateRoot: nativeOutside,
+      scopedHome: scopedHomeOutside,
+    });
     expect(profile).not.toContain("file-read-metadata");
   });
 
-  it.runIf(darwin)("lets a confined child canonicalize CODEX_HOME, the codex startup path", () => {
-    const profile = buildConfinementProfile(fixture.input);
-    expect(canonicalizeUnder(profile, fixture.codexHome)).toBe(0);
-    expect(canonicalizeUnder(profile, fixture.input.nativeStateRoot)).toBe(0);
+  it("keeps the scoped-home chain when only the native root moves outside", () => {
+    const outside = join(fixture.base, "native-outside-solo");
+    mkdirSync(outside, { recursive: true });
+    const profile = buildConfinementProfile({ ...fixture.input, nativeStateRoot: outside });
+    const meta = profile.split("\n").find((line) => line.startsWith("(allow file-read-metadata "));
+    expect(meta).toBe(`(allow file-read-metadata ${scopedHomeChain.map(lit).join(" ")})`);
   });
+
+  it.runIf(darwin)(
+    "lets a confined child canonicalize its own roots — CODEX_HOME and the scoped HOME",
+    () => {
+      const profile = buildConfinementProfile(fixture.input);
+      expect(canonicalizeUnder(profile, fixture.codexHome)).toBe(0);
+      expect(canonicalizeUnder(profile, fixture.input.nativeStateRoot)).toBe(0);
+      expect(canonicalizeUnder(profile, fixture.input.scopedHome)).toBe(0);
+    },
+  );
+
+  it.runIf(darwin)(
+    "proves the carve-out is load-bearing: stripping it kills the same canonicalize",
+    () => {
+      const stripped = buildConfinementProfile(fixture.input)
+        .split("\n")
+        .filter((line) => !line.startsWith("(allow file-read-metadata "))
+        .join("\n");
+      expect(canonicalizeUnder(stripped, fixture.input.scopedHome)).not.toBe(0);
+      expect(canonicalizeUnder(stripped, fixture.codexHome)).not.toBe(0);
+    },
+  );
 
   it.runIf(darwin)("does not re-open data reads or listings under the runtime root", () => {
     const profile = buildConfinementProfile(fixture.input);
     // File DATA inside the daemon dir stays denied.
     expect(readUnder(profile, fixture.token)).not.toBe(0);
+    // A sibling project's file data stays denied even though `projects` itself
+    // is now a metadata-allowed literal on the scoped-home chain.
+    expect(
+      readUnder(profile, join(fixture.input.runtimeRoot, "projects", "other-project", "note")),
+    ).not.toBe(0);
     // readdir is a data read on the DIRECTORY, not metadata: listing stays denied.
     expect(listUnder(profile, fixture.input.runtimeRoot)).not.toBe(0);
     expect(listUnder(profile, join(fixture.input.runtimeRoot, "daemon"))).not.toBe(0);
+    expect(listUnder(profile, join(fixture.input.runtimeRoot, "projects"))).not.toBe(0);
+  });
+});
+
+/**
+ * The cursor-startup regression (2026-08-15, live), pinned end to end:
+ * cursor-agent keeps its chat store in SQLite under the scoped HOME
+ * (`<scoped home>/.config/cursor/chats/<cwd-hash>/<chat-uuid>/store.db`), and
+ * SQLite's unix VFS canonicalizes the database path on open — the same
+ * lstat/readlink walk as `realpath(3)`. Without the scoped-home ancestor
+ * carve-out that open died with SQLITE_CANTOPEN (`RetriableError: [internal]
+ * unable to open database file`) on 100% of mutating delegated cursor runs.
+ * Apple's /usr/bin/sqlite3 build does NOT canonicalize on open (verified: it
+ * survives the pre-fix profile), so this pin drives Node's own SQLite binding
+ * — the engine cursor-agent actually runs on — through the real sandbox.
+ */
+describe("cursor sqlite regression: chat store under the scoped HOME", () => {
+  const fixture = scaffold();
+  afterAll(() => rmSync(fixture.base, { recursive: true, force: true }));
+  const chatDir = join(
+    fixture.input.scopedHome,
+    ".config",
+    "cursor",
+    "chats",
+    "0123abcd",
+    "chat-uuid-1",
+  );
+  mkdirSync(chatDir, { recursive: true });
+
+  /** Open + WAL-write a SQLite db INSIDE the profile, the way cursor-agent's chat store does. */
+  function sqliteUnder(
+    profile: string,
+    dbPath: string,
+  ): { status: number | null; stdout: string; stderr: string } {
+    const script = [
+      'const { DatabaseSync } = require("node:sqlite");',
+      'const { existsSync } = require("node:fs");',
+      "const db = new DatabaseSync(process.argv[1]);",
+      'db.exec("PRAGMA journal_mode=WAL");',
+      'db.exec("CREATE TABLE IF NOT EXISTS t(x)");',
+      'db.exec("INSERT INTO t VALUES(1)");',
+      // WAL actually engaged: the sidecars exist while the connection is open
+      // (SQLite removes them again on a clean close).
+      'if (!existsSync(process.argv[1] + "-wal")) throw new Error("wal sidecar missing");',
+      'if (!existsSync(process.argv[1] + "-shm")) throw new Error("shm sidecar missing");',
+      "db.close();",
+      'console.log("cursor-sqlite-ok");',
+    ].join("\n");
+    const run = spawnSync(
+      "/usr/bin/sandbox-exec",
+      ["-p", profile, process.execPath, "-e", script, dbPath],
+      { encoding: "utf8" },
+    );
+    return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
+  }
+
+  it.runIf(darwin)("lets a confined cursor-shaped child open and WAL-write its chat store", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    const opened = sqliteUnder(profile, join(chatDir, "store.db"));
+    expect(opened.stderr).not.toMatch(/unable to open database file/);
+    expect(opened.status).toBe(0);
+    expect(opened.stdout).toContain("cursor-sqlite-ok");
+  });
+
+  it.runIf(darwin)("reproduces the pre-fix crash when the traversal carve-out is stripped", () => {
+    const stripped = buildConfinementProfile(fixture.input)
+      .split("\n")
+      .filter((line) => !line.startsWith("(allow file-read-metadata "))
+      .join("\n");
+    const opened = sqliteUnder(stripped, join(chatDir, "store-prefix.db"));
+    expect(opened.status).not.toBe(0);
+    expect(opened.stderr).toMatch(/unable to open database file/);
+  });
+
+  it.runIf(darwin)("keeps the boundary intact around the sqlite grant", () => {
+    const profile = buildConfinementProfile(fixture.input);
+    // The daemon token's data and the runtime root's listing stay denied.
+    expect(readUnder(profile, fixture.token)).not.toBe(0);
+    expect(listUnder(profile, fixture.input.runtimeRoot)).not.toBe(0);
+    // A database INSIDE the denied daemon dir stays unopenable.
+    const denied = sqliteUnder(profile, join(fixture.input.runtimeRoot, "daemon", "planted.db"));
+    expect(denied.status).not.toBe(0);
   });
 });
 

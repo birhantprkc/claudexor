@@ -602,12 +602,6 @@ authoritative for each exact disposition.
   canonicalization through such a layout would still fail. Unreachable through
   the default roots; tighten `contains()` to reject only the parent forms
   (`..`, `../…`) at the next confinement touch.
-- Scoped-home ancestors get no metadata carve-out: a future harness that
-  canonicalizes its scoped `$HOME` at startup would hit the same EPERM class
-  the CODEX_HOME fix closed. Unreachable today (codex canonicalizes only
-  CODEX_HOME; claude does not canonicalize at startup); the failure direction
-  is a loud crash, never a weakened boundary. Extend the ancestor chain to the
-  scoped home when a real harness pulls the requirement.
 
 ## 3.4.1 Windows-lane residuals (2026-08-15)
 

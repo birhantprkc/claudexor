@@ -133,8 +133,9 @@ matches resolved paths (`/tmp` is `/private/tmp`).
 (allow default)                       ; nothing is restricted that §3 does not name
 (deny file-read*  <claudexor runtime root + operator credential stores, from the
                    sensitive-resource owner — one directive, every subpath>)
-(allow file-read-metadata <the native root's intermediate directories, LITERAL each,
-                           dirname(native root) up to and including the runtime root>) ; §7.1
+(allow file-read-metadata <the own roots' intermediate directories, LITERAL each,
+                           dirname(each own root) up to and including the runtime
+                           root, deduplicated>)                                       ; §7.1
 (allow file-read* <managed toolchain root, SUBPATH — only when it lies inside the
                    runtime root>)                                                      ; §7.2
 (deny file-write* <system prefixes: /usr /opt /Library /Applications /System /bin /sbin /etc /var>)
@@ -155,26 +156,40 @@ punch through, BEFORE the write section, so neither can outrank a write deny —
 
 ### 7.1 The metadata traversal carve-out (canonicalize semantics)
 
-codex calls Rust `fs::canonicalize` — libc `realpath(3)` — on its `CODEX_HOME`
-(`<runtime root>/v3/native/codex` in the default layout) at startup, which lstat/readlinks every INTERMEDIATE path
-component. The own-roots allow re-opens the native root's SUBTREE, but the components between
-the runtime root and the native root (`<runtime root>` itself, and any directory between it and
-the native root) still matched the read deny. Result, measured live 2026-08-10: EPERM,
-`codex exited with code 1: failed to canonicalize CODEX_HOME`, within seconds, on 100% of
-mutating delegated codex runs. Readonly/ask runs survived only because they get no confinement
-at all, and claude survived because it never canonicalizes its home at startup.
+Path canonicalization — libc `realpath(3)`, Rust `fs::canonicalize`, SQLite's unix VFS
+full-path resolution — lstat/readlinks every INTERMEDIATE path component. The own-roots allow
+re-opens each root's SUBTREE, but the components between the runtime root and the root itself
+still matched the read deny, so the walk died with EPERM before the harness ran a single turn.
+Measured live twice, on two different own roots:
 
-The carve-out is deliberately the narrowest thing that fixes this: `file-read-metadata` on the
-LITERAL resolved path of exactly those intermediate directories (`dirname(native root)` walking
-up to and including the runtime root — two literals in the default layout, `<runtime root>/v3`
-and `<runtime root>`; a `CLAUDEXOR_CONFIG_DIR` override collapses the chain to the runtime root
-itself). Metadata means
-stat/readlink/getattrlist of the directory entry: enough for `realpath(3)` to walk through. It
-does NOT re-open file data anywhere under the runtime root, and it does NOT allow listing the
-runtime root's contents — readdir is a data read on the directory, not metadata — both of which
-the tests assert under a real `sandbox-exec`. The probe semantics are unchanged: the boundary is
-still verified by reading the first denied path (`<runtime root>/daemon`), whose data read and
-listing both stay denied.
+- codex calls Rust `fs::canonicalize` on its `CODEX_HOME` (`<runtime root>/v3/native/codex` in
+  the default layout) at startup. 2026-08-10: EPERM, `codex exited with code 1: failed to
+  canonicalize CODEX_HOME`, within seconds, on 100% of mutating delegated codex runs.
+- cursor-agent keeps its chat store in SQLite under the scoped HOME
+  (`<scoped home>/.config/cursor/chats/<cwd-hash>/<chat-uuid>/store.db`), and SQLite
+  canonicalizes the database path on open. 2026-08-15: SQLITE_CANTOPEN,
+  `cursor-agent exited with internal sqlite error: RetriableError: [internal] unable to open
+  database file`, within seconds, on 100% of mutating delegated cursor runs.
+
+Readonly/ask runs survived both only because they get no confinement at all, and claude
+survived because it neither canonicalizes its home nor opens SQLite state at startup.
+
+The carve-out is deliberately the narrowest thing that fixes the class: `file-read-metadata` on
+the LITERAL resolved path of the intermediate directories of EVERY own root — for each of the
+scoped home, the worktree, and the native state root, `dirname(root)` walking up to and
+including the runtime root, deduplicated. In the default layout that is `<runtime root>/v3` and
+`<runtime root>` for the native root, plus the scoped home's own workspace/project ancestors
+under `<runtime root>/v3/projects/…`; a `CLAUDEXOR_CONFIG_DIR` override collapses each chain
+toward the runtime root itself, and a root outside the runtime root contributes nothing
+(nothing denies its ancestors there). Metadata means stat/readlink/getattrlist of the directory
+entry: enough for `realpath(3)` to walk through. It does NOT re-open file data anywhere under
+the runtime root — a sibling project's files stay unreadable even though `projects` itself is
+on the chain — and it does NOT allow listing the runtime root's contents — readdir is a data
+read on the directory, not metadata. Both directions, including the cursor-shaped SQLite
+open+WAL write and its pre-fix reproduction with the carve-out stripped, are asserted under a
+real `sandbox-exec`. The probe semantics are unchanged: the boundary is still verified by
+reading the first denied path (`<runtime root>/daemon`), whose data read and listing both stay
+denied.
 
 Stated plainly, because it is the consequence operators actually hit: **a `TMPDIR` inside
 `$HOME` is NOT writable under this policy** — the later home deny wins — unless that path also

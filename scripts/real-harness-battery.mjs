@@ -2475,81 +2475,101 @@ async function runDelegationPhase() {
 }
 
 /**
- * Delegated MUTATING run under the OS boundary (the CODEX_HOME canonicalize
- * regression, 2026-08-10). A run with `execution.delegated: true` and a
+ * Delegated MUTATING runs under the OS boundary — one per harness that ever
+ * crashed inside it. A run with `execution.delegated: true` and a
  * write-capable access is the ONE shape that gets the engine's kernel-enforced
- * confinement (macOS Seatbelt) — and codex canonicalizes its CODEX_HOME through
- * the confined runtime root at startup. Before the metadata traversal
- * carve-out in confinement.ts, that shape crashed 100% of the time within
- * seconds (`failed to canonicalize CODEX_HOME ... Operation not permitted`,
- * `route.transient.exhausted: process_crash`), while readonly/ask children —
- * including everything the belt phase above starts — sailed through, which is
- * exactly how the regression shipped unnoticed. This phase is the smoke that
- * makes it visible.
+ * confinement (macOS Seatbelt), and two harnesses died there in production
+ * while every readonly/ask child sailed through: codex canonicalizes its
+ * CODEX_HOME through the confined runtime root at startup (2026-08-10,
+ * `failed to canonicalize CODEX_HOME ... Operation not permitted`,
+ * `route.transient.exhausted: process_crash`), and cursor-agent opens its
+ * SQLite chat store under the scoped HOME, whose open canonicalizes the
+ * database path (2026-08-15, `RetriableError: [internal] unable to open
+ * database file`). Both crashed 100% of the time within seconds, which is
+ * exactly how each regression shipped unnoticed. This phase is the smoke that
+ * makes the whole class visible, and it does not stop at exit status: the
+ * disposable repo must actually carry the fix and its test gate must be
+ * green, so a run that "succeeded" without working is still a failure.
  */
 async function runDelegatedConfinementPhase() {
   const phase = "phase13";
-  if (!harnessOk("codex")) {
-    skip(phase, "delegated mutating codex confined", { reason: "codex not doctor-ok" });
-    return;
-  }
-  const repo = makeMathRepo(`${phase}-codex-delegated`, { addBug: true });
-  try {
-    const { ensureDaemon, enqueueAndAwait } = await import("../packages/cli/dist/daemon-run.js");
-    const { client, addr } = await ensureDaemon();
-    // The external-orchestrator shape, verbatim: one-shot POST /runs, live
-    // isolation, delegated, workspace_write, codex.
-    const outcome = await enqueueAndAwait(
-      client,
-      addr,
-      {
-        prompt: "Fix add() in src/math.js so the node:test suite passes. Do not ask questions.",
-        mode: "agent",
-        scope: { kind: "project", root: repo },
-        execution: { isolation: "live", delegated: true },
-        harnesses: ["codex"],
-        primaryHarness: "codex",
-        access: "workspace_write",
-        effort: "low",
-        paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
-        maxSeconds: 15 * 60,
-        tests: [{ program: "node", args: ["--test"] }],
-      },
-      { waitForTerminal: true },
-    );
-    const projected = outcome.runId
-      ? await controlRunDetail(outcome.runId)
-      : { detail: null, error: "run id missing" };
-    const confinements = (projected.detail?.candidates ?? [])
-      .map((candidate) => candidate.confinement)
-      .filter(Boolean);
-    // On macOS the boundary must be PROVEN (mechanism + verified denied path);
-    // elsewhere the attempt must state the reason there was none. Either way,
-    // silence is a failure — a delegated mutating run may not terminalize
-    // without applied evidence.
-    const evidenceOk =
-      confinements.length > 0 &&
-      (process.platform === "darwin"
-        ? confinements.every((c) => c.proven === true && c.verifiedDeniedPath)
-        : confinements.every((c) => c.proven === true || c.unavailableReason));
-    if (outcome.status === "succeeded" && evidenceOk) {
-      pass(phase, "delegated mutating codex confined", {
-        runId: outcome.runId,
-        confinements,
-      });
-    } else {
-      fail(phase, "delegated mutating codex confined", {
-        runId: outcome.runId ?? null,
-        status: outcome.status,
-        error: outcome.error ?? null,
-        confinements,
-        projectionError: projected.error ?? null,
+  for (const h of ["codex", "cursor"]) {
+    const name = `delegated mutating ${h} confined`;
+    if (!requestedHarnesses.includes(h)) {
+      skip(phase, name, { reason: `${h} not requested` });
+      continue;
+    }
+    if (!harnessOk(h)) {
+      skip(phase, name, { reason: `${h} not doctor-ok` });
+      continue;
+    }
+    const repo = makeMathRepo(`${phase}-${h}-delegated`, { addBug: true });
+    try {
+      const { ensureDaemon, enqueueAndAwait } = await import("../packages/cli/dist/daemon-run.js");
+      const { client, addr } = await ensureDaemon();
+      // The external-orchestrator shape, verbatim: one-shot POST /runs, live
+      // isolation, delegated, workspace_write, one pinned harness.
+      const outcome = await enqueueAndAwait(
+        client,
+        addr,
+        {
+          prompt: "Fix add() in src/math.js so the node:test suite passes. Do not ask questions.",
+          mode: "agent",
+          scope: { kind: "project", root: repo },
+          execution: { isolation: "live", delegated: true },
+          harnesses: [h],
+          primaryHarness: h,
+          access: "workspace_write",
+          effort: "low",
+          paidBudget: { kind: "finite", maxUsd: Number(maxUsd) },
+          maxSeconds: 15 * 60,
+          tests: [{ program: "node", args: ["--test"] }],
+        },
+        { waitForTerminal: true },
+      );
+      const projected = outcome.runId
+        ? await controlRunDetail(outcome.runId)
+        : { detail: null, error: "run id missing" };
+      const confinements = (projected.detail?.candidates ?? [])
+        .map((candidate) => candidate.confinement)
+        .filter(Boolean);
+      // On macOS the boundary must be PROVEN (mechanism + verified denied path);
+      // elsewhere the attempt must state the reason there was none. Either way,
+      // silence is a failure — a delegated mutating run may not terminalize
+      // without applied evidence.
+      const evidenceOk =
+        confinements.length > 0 &&
+        (process.platform === "darwin"
+          ? confinements.every((c) => c.proven === true && c.verifiedDeniedPath)
+          : confinements.every((c) => c.proven === true || c.unavailableReason));
+      // The capability side of the boundary: the live tree really changed and
+      // its test gate really passes. A crashed-but-terminalized harness cannot
+      // fake either from inside the sandbox story.
+      const mutated = run("git", ["status", "--porcelain"], { cwd: repo }).stdout.trim() !== "";
+      const gateGreen = run("node", ["--test"], { cwd: repo, timeoutMs: 120_000 }).code === 0;
+      if (outcome.status === "succeeded" && evidenceOk && mutated && gateGreen) {
+        pass(phase, name, {
+          runId: outcome.runId,
+          confinements,
+          mutated,
+          gateGreen,
+        });
+      } else {
+        fail(phase, name, {
+          runId: outcome.runId ?? null,
+          status: outcome.status,
+          error: outcome.error ?? null,
+          confinements,
+          mutated,
+          gateGreen,
+          projectionError: projected.error ?? null,
+        });
+      }
+    } catch (error) {
+      fail(phase, name, {
+        error: redactSecrets(error instanceof Error ? error.message : String(error)),
       });
     }
-  } catch (error) {
-    fail(phase, "delegated mutating codex confined", {
-      error: redactSecrets(error instanceof Error ? error.message : String(error)),
-    });
   }
 }
 

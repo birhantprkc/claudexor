@@ -133,30 +133,40 @@ function literal(paths: readonly string[]): string {
 }
 
 /**
- * The strict ancestors of the native state root that lie INSIDE the denied
- * runtime root: `dirname(nativeStateRoot)` walking up to and including
- * `runtimeRoot` itself.
+ * The strict ancestors of the run's OWN roots that lie INSIDE the denied
+ * runtime root: for each own root, `dirname(root)` walking up to and including
+ * `runtimeRoot` itself, deduplicated in first-encounter order.
  *
- * WHY THESE NEED A METADATA CARVE-OUT. codex calls Rust `fs::canonicalize`
- * (= `realpath(3)`) on its `CODEX_HOME` at startup, which lstat/readlinks every
- * intermediate path component. The own-roots allow re-opens the native root's
- * SUBTREE, but the components BETWEEN the runtime root and the native root
- * still match the runtime-root read deny — so the child dies with EPERM
- * (`failed to canonicalize CODEX_HOME`) before it runs a single turn. These
- * directories get `file-read-metadata` on the LITERAL path only: stat/readlink
- * of the directory entry itself, never the data of any file under the runtime
- * root and never a directory listing (readdir is a data read on the directory).
+ * WHY THESE NEED A METADATA CARVE-OUT. Path canonicalization — libc
+ * `realpath(3)`, Rust `fs::canonicalize`, SQLite's unix VFS full-path
+ * resolution — lstat/readlinks every intermediate path component. The
+ * own-roots allow re-opens each root's SUBTREE, but the components BETWEEN
+ * the runtime root and the root still match the runtime-root read deny, so
+ * the walk dies with EPERM before the harness runs a single turn. Measured
+ * live on two different own roots: codex canonicalizes its CODEX_HOME under
+ * the native state root at startup (2026-08-10, `failed to canonicalize
+ * CODEX_HOME`), and cursor-agent opens its SQLite chat store under the scoped
+ * HOME, whose open canonicalizes the database path (2026-08-15,
+ * `RetriableError: [internal] unable to open database file`, SQLITE_CANTOPEN,
+ * 100% of mutating delegated cursor runs). These directories get
+ * `file-read-metadata` on the LITERAL path only: stat/readlink of the
+ * directory entry itself, never the data of any file under the runtime root
+ * and never a directory listing (readdir is a data read on the directory).
  */
-function nativeStateTraversalAncestors(input: ConfinementInput): string[] {
+function ownRootTraversalAncestors(input: ConfinementInput): string[] {
   const root = resolved(input.runtimeRoot);
   const chain: string[] = [];
-  let current = dirname(resolved(input.nativeStateRoot));
-  while (contains(root, current)) {
-    chain.push(current);
-    if (current === root) break;
-    const parent = dirname(current);
-    if (parent === current) break; // filesystem root; cannot ascend further
-    current = parent;
+  for (const ownRoot of ownRoots(input)) {
+    let current = dirname(resolved(ownRoot));
+    // An already-collected ancestor proves the rest of its chain up to the
+    // runtime root was collected with it, so the walk can stop there.
+    while (contains(root, current) && !chain.includes(current)) {
+      chain.push(current);
+      if (current === root) break;
+      const parent = dirname(current);
+      if (parent === current) break; // filesystem root; cannot ascend further
+      current = parent;
+    }
   }
   return chain;
 }
@@ -165,7 +175,7 @@ function nativeStateTraversalAncestors(input: ConfinementInput): string[] {
  * The managed toolchain subtree (`<operator home>/.claudexor/node` — the Node
  * distribution plus the pinned vendor CLI shims), WHEN it lies inside the
  * denied runtime root. Null when it does not — nothing denies it there, so a
- * carve-out would be a no-op, mirroring the native-root pattern above.
+ * carve-out would be a no-op, mirroring the own-roots traversal pattern above.
  *
  * WHY THIS NEEDS A READ+EXEC CARVE-OUT. In the DEFAULT layout the runtime
  * root IS `~/.claudexor`, so the very binaries the spawn layer resolves for
@@ -220,7 +230,7 @@ const SEATBELT: ConfinementMechanism = {
   /** SBPL text. Last match wins, so the carve-outs follow the denies. */
   buildProfile(input) {
     const scratch = input.tmpDir ?? process.env.TMPDIR ?? "/tmp";
-    const traversal = nativeStateTraversalAncestors(input);
+    const traversal = ownRootTraversalAncestors(input);
     const toolchain = managedToolchainSubtree(input);
     // SBPL is last-match-wins, and the order below is the policy. The scratch
     // allow sits ABOVE the operator-home deny on purpose: a `TMPDIR` configured
@@ -230,9 +240,10 @@ const SEATBELT: ConfinementMechanism = {
     // live, which is exactly the delegated shape). The two read carve-outs sit
     // directly AFTER the read deny they punch through, and BEFORE the write
     // section so neither can outrank a write deny: literal-only stat/readlink
-    // on the native root's intermediate directories, so `realpath(CODEX_HOME)`
-    // works while file data and directory listings under the runtime root stay
-    // denied (see nativeStateTraversalAncestors); then a full read allow on the
+    // on the own roots' intermediate directories, so `realpath(CODEX_HOME)` and
+    // cursor's SQLite open under the scoped HOME work while file data and
+    // directory listings under the runtime root stay denied (see
+    // ownRootTraversalAncestors); then a full read allow on the
     // managed toolchain subtree, so the child can exec the very binaries the
     // spawn layer resolved for it (see managedToolchainSubtree). Writes to the
     // toolchain stay denied by the operator-home deny below.
