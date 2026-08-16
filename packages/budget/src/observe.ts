@@ -48,8 +48,13 @@ export function observationsFromEvent(harnessId: string, ev: HarnessEvent): Budg
         quality: "native",
         kind: "quota_constraint",
         constraint_id: constraint.id,
+        // The scope travels as a PAIR: dropping the unspecified-model half
+        // here would silently widen a scoped window on this path.
         ...(constraint.applies_to_models !== undefined
           ? { applies_to_models: constraint.applies_to_models }
+          : {}),
+        ...(constraint.applies_to_unspecified_model !== undefined
+          ? { applies_to_unspecified_model: constraint.applies_to_unspecified_model }
           : {}),
         used_ratio: constraint.used_ratio,
         window_seconds: constraint.window_seconds,

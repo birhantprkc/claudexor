@@ -371,11 +371,21 @@ enum AccountsAutoBalance {
     /// `/quota`), so a toggle here has an observable action to drive.
     static let capableHarnessIds = ["claude", "codex", "agy"]
 
-    /// Harnesses eligible for the toggle: a capable family with ≥1 registered
-    /// profile (so native + profile = 2+ identities to rotate between).
+    /// Harnesses whose rotation has NO native identity to fall back on: their
+    /// accounts are all named profiles, so one profile is one identity and
+    /// there is nothing to rotate to.
+    static let harnessesWithoutNativeIdentity: Set<String> = ["agy"]
+
+    /// Harnesses eligible for the toggle: a capable family with enough
+    /// identities to rotate BETWEEN — one registered profile is enough where a
+    /// native login also exists, and two are needed where it does not.
     static func eligibleHarnessIds(profileHarnessIds: [String]) -> [String] {
-        let withProfiles = Set(profileHarnessIds)
-        return capableHarnessIds.filter { withProfiles.contains($0) }
+        var counts: [String: Int] = [:]
+        for id in profileHarnessIds { counts[id, default: 0] += 1 }
+        return capableHarnessIds.filter { harness in
+            let needed = harnessesWithoutNativeIdentity.contains(harness) ? 2 : 1
+            return (counts[harness] ?? 0) >= needed
+        }
     }
 
     /// Aggregate on/off/mixed/unavailable from each eligible harness's action.

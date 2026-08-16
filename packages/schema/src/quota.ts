@@ -356,7 +356,17 @@ export function quotaSnapshotAvailability(
       });
     }
     if (release === null) continue;
-    if (scoped && (model === null || !modelScopeMatches(scope, model))) continue;
+    // The projection and the router must answer the SAME question: a scoped
+    // window that declares it governs the unspecified-model route blocks a
+    // bare run, or the Accounts card would read "available" for an account the
+    // router is already refusing.
+    if (
+      scoped &&
+      (model === null
+        ? constraint.applies_to_unspecified_model !== true
+        : !modelScopeMatches(scope, model))
+    )
+      continue;
     blocking.push(constraint.id);
     if (exhausted) sawExhausted = true;
     if (earliestRelease === null || release.at < earliestRelease.at) {

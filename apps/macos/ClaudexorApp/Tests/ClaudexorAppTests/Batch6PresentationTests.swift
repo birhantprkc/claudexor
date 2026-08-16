@@ -18,6 +18,13 @@ import ClaudexorKit
         #expect(ids == ["claude", "codex"])
     }
 
+    @Test func aHarnessWithNoNativeIdentityNeedsTwoProfiles() {
+        // agy has NO default credential store, so one profile is one identity
+        // and the toggle would have nothing to rotate to (INV-023).
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
+    }
+
     @Test func nonCapableHarnessProfilesAreIgnored() {
         // Only config_dir_login families with a quota/typed-limit source are
         // capable: cursor can register a profile but has no rotation trigger

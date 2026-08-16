@@ -109,6 +109,9 @@ describe("refreshAgyQuota", () => {
     return { bin };
   }
 
+  const MODEL_ENVELOPE = (id: string) =>
+    JSON.stringify({ status: "SUCCESS", command: { name: "model", data: { id } } });
+
   const ENVELOPE = JSON.stringify({
     status: "SUCCESS",
     command: {
@@ -129,7 +132,7 @@ describe("refreshAgyQuota", () => {
     // The fake resolves `node` itself: proof the child inherited a real PATH.
     const { bin } = scaffold({
       token: true,
-      script: `#!/bin/sh\ncommand -v node >/dev/null || { echo '{"status":"ERROR","error":"no PATH"}'; exit 0; }\ncat <<'JSON'\n${ENVELOPE}\nJSON\n`,
+      script: `#!/bin/sh\ncommand -v node >/dev/null || { echo '{"status":"ERROR","error":"no PATH"}'; exit 0; }\ncase "$2" in\n"/model") cat <<'JSON'\n${MODEL_ENVELOPE("gemini-3.7-flash-high")}\nJSON\n;;\n*) cat <<'JSON'\n${ENVELOPE}\nJSON\n;;\nesac\n`,
     });
     const out = await refreshAgyQuota({ bin });
     expect(out.absences ?? []).toEqual([]);
@@ -236,5 +239,101 @@ describe("parseAgyQuotaEnvelope hostile shapes (review Ф2 #3)", () => {
       }),
     );
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});
+
+/**
+ * Which window governs a run that NAMES NO MODEL. Every agy window is
+ * model-scoped, so without this stamp an exhausted account can never refuse a
+ * bare run and Л-2 rotation never fires; stamping the wrong group is just as
+ * wrong in the other direction, so the source follows the profile's SELECTED
+ * model rather than an assumption about it.
+ */
+describe("refreshAgyQuota bare-route scoping", () => {
+  const roots: string[] = [];
+  const originalConfig = process.env.CLAUDEXOR_CONFIG_DIR;
+  afterEach(() => {
+    if (originalConfig === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+    else process.env.CLAUDEXOR_CONFIG_DIR = originalConfig;
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function scaffoldWithModel(selected: string | null): { bin: string } {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-agy-scope-"));
+    roots.push(root);
+    process.env.CLAUDEXOR_CONFIG_DIR = root;
+    const home = join(root, "profiles", "agy-prof-a");
+    mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+    writeFileSync(join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "t", {
+      mode: 0o600,
+    });
+    writeFileSync(
+      join(root, "config.yaml"),
+      [
+        "version: 1",
+        "credential_profiles:",
+        "  - profile_id: prof-a",
+        "    harness_id: agy",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${home}`,
+        "    enabled: true",
+        "",
+      ].join("\n"),
+    );
+    const quota = JSON.stringify({
+      status: "SUCCESS",
+      command: {
+        data: {
+          groups: [
+            {
+              name: "Gemini Models",
+              buckets: [
+                { id: "gemini-weekly", name: "W", window: "weekly", remaining_fraction: 0 },
+              ],
+            },
+            {
+              name: "Claude and GPT models",
+              buckets: [{ id: "3p-weekly", name: "W", window: "weekly", remaining_fraction: 1 }],
+            },
+          ],
+        },
+      },
+    });
+    const model =
+      selected === null
+        ? '{"status":"ERROR","error":"no model"}'
+        : JSON.stringify({ status: "SUCCESS", command: { name: "model", data: { id: selected } } });
+    const bin = join(root, "fake-agy");
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ncase "$2" in\n"/model") echo '${model}' ;;\n*) cat <<'JSON'\n${quota}\nJSON\n;;\nesac\n`,
+    );
+    chmodSync(bin, 0o755);
+    return { bin };
+  }
+
+  const flags = async (selected: string | null): Promise<Record<string, boolean | undefined>> => {
+    const out = await refreshAgyQuota({ bin: scaffoldWithModel(selected).bin });
+    return Object.fromEntries(
+      out.snapshots[0]!.constraints.map((c) => [c.id, c.applies_to_unspecified_model]),
+    );
+  };
+
+  it("follows the profile's selected model, in both directions", async () => {
+    expect(await flags("gemini-3.7-flash-high")).toEqual({
+      "gemini-weekly": true,
+      "3p-weekly": false,
+    });
+    // A user who selected a third-party slug must be refused on THAT budget,
+    // and must not rotate accounts because the Gemini budget ran out.
+    expect(await flags("claude-opus-4-6-thinking")).toEqual({
+      "gemini-weekly": false,
+      "3p-weekly": true,
+    });
+  });
+
+  it("falls back to the Gemini group when the vendor will not say", async () => {
+    expect(await flags(null)).toEqual({ "gemini-weekly": true, "3p-weekly": false });
   });
 });
