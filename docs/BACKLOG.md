@@ -616,10 +616,12 @@ both belong to the next confinement touch.
   engine never derives such roots and v2 registration refuses runtime-tree
   roots; tighten the check to include equality at the next confinement touch.
 - Worktree-chain traversal test (SOL-342-W02): the own-roots union is pinned
-  under a real sandbox-exec for the scoped-home and native-root arms; add the
-  symmetric worktree-inside-runtime-root canonicalize case when the shape
-  gains a producer (today delegated worktrees ride live isolation outside the
-  runtime root).
+  under a real sandbox-exec for the scoped-home and native-root arms; the
+  worktree arm rides the identical loop and IS reachable today (a delegated
+  mutating one-shot without `isolation: live` gets an isolated envelope whose
+  worktree lives under the runtime root, INV-072) — the union covers it by
+  construction; add the direct worktree-inside-runtime-root canonicalize case
+  at the next confinement touch.
 
 ## 3.4.1 Windows-lane residuals (2026-08-15)
 
