@@ -514,21 +514,24 @@ frequency and volume are. The contracts:
     story below); Claude, Cursor and Antigravity run the official vendor CLI
     daemon-hosted with no Terminal either — the sign-in link is captured into
     the card, and the two that need a pasted code take it there (the setup-job
-    handoff below). Each popover row is one account (a
-    default vendor login named for its harness and badged `CLI login`, or a registered
-    credential profile): a readiness dot (ready means that exact source is
+    handoff below). Each popover row is one account — a registered credential
+    row; there is no separate "CLI login" pseudo-row (unified account model:
+    a legacy default-store login appears as the ordinary `<harness>-default`
+    row): a readiness dot (ready means that exact source is
     `available + passed`, never aggregate harness health), its name, ONE compact
     quota line (worst window % + reset), one "Log in" / "Manage" action, an
     **Enabled** toggle that includes/excludes the account from the harness's
     routing pool (a disabled account is never routable; there is NO user-settable
-    "active" account — an unpinned run uses the server-owned default route,
-    normally the harness's CLI login, or the opt-in quota rotation's next ready
-    account, and `next-up` is the server-computed INFORMATIONAL identity that
-    policy would pick, not an auto-default over every enabled account), and — on
-    registered profiles only — a confirmed Remove (trash) that deletes the
-    registration plus the account's own login/key
-    (`DELETE /v2/credential-profiles/:harness/:id`; the default vendor login
-    is never Claudexor's to delete); delete also clears matching thread pins,
+    "active" account — an unpinned run routes through the quota-aware pool of
+    enabled ready accounts, an unpinned thread stays sticky on its own
+    account, and `next-up` is the server-computed INFORMATIONAL pool verdict
+    from `accountPools`, not an auto-default the user can set), and a
+    confirmed Remove (trash) on EVERY row that deletes the
+    registration plus the account's own local login/key
+    (`DELETE /v2/credential-profiles/:harness/:id`; success is provable —
+    a partial cleanup is a typed retryable error, never a half-deleted row;
+    the vendor-side account survives and "Sign in" restores it); delete also
+    clears matching thread pins,
     native-session caches, and quota rows. The popover adds accounts inline
     (harness + optional name → `POST /v2/credential-profiles`, then that
     account's native login in ONE action — "Add & log in" and every account-row
@@ -540,23 +543,20 @@ frequency and volume are. The contracts:
     `(harness, credential route, profile)`. The account list + add + remove
     block is ONE shared component (`AccountsSurface`, SSOT): the Settings
     Harness Doctor's "Manage" sheet hosts the same surface scoped to its
-    family — account control is never forked per surface. In that sheet the
-    implicit default login is simply the first account row; named profiles
-    follow, and "Add another account" is the only add flow. There is no
-    parallel "Native setup" card competing with "Additional accounts"; a named
-    profile drill-in never exposes the default/global API-key fallback panel. The
+    family — account control is never forked per surface. "Add another
+    account" is the only add flow. There is no
+    parallel "Native setup" card competing with "Additional accounts"; an
+    account drill-in never exposes the default/global API-key fallback panel. The
     per-thread account PIN lives in the composer's account chip, not this popover;
     its "automatic account routing" option clears the pin back to automatic routing,
     and the choice persists through the thread DTO, never local-only UI state.
-    An engine-default API-key fallback is a ROUTE, never a synthetic account:
+    The API-key fallback is a ROUTE, never a synthetic account:
     it adds no row and does not increase "N accounts". The shared AccountsSurface
-    discloses "API key" when that route is next; an unpinned composer chip stays
+    discloses "API key" when that route is next (`next_up.kind =
+    api_key_route`); an unpinned composer chip stays
     "Automatic" because next-up may rotate. Auth remains the key management surface.
 
-    The implicit row is labelled **CLI login**, with help explaining that it is
-    the vendor sign-in already present on this host; named accounts are isolated
-    profiles used by an explicit pin or opt-in quota rotation. Do not globally
-    rename generic `Automatic`/`Default account`: the unprofiled route may use a
+    Do not globally rename generic `Automatic`: the unpinned route may use the
     policy API-key fallback, which is not an account row.
 
     The popover header is fixed. One screen-aware host-level vertical scroller,

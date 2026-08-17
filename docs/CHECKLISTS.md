@@ -260,8 +260,13 @@ pnpm test
   evidence that made it inconclusive. Release acceptance uses the credentialed
   disposable-VM existing-default lane from `docs/DEVELOPMENT.md`, without a
   phase filter: its forced uncached build and receipt must bind the launched
-  daemon entry digest to the exact candidate handshake, prove the default config
-  remained byte-identical, prove every durable route interval in every Codex and
+  daemon entry digest to the exact candidate handshake, prove the config
+  contract of the unified account model — a PRE-migration (v3.5) fixture may
+  undergo exactly ONE receipt-backed startup migration (the auto-registered
+  `<harness>-default` rows plus the migration phase file, nothing else), and
+  the SECOND and every later start must leave `config.yaml` byte-identical;
+  an already-migrated config must stay byte-identical from the first start —
+  prove every durable route interval in every Codex and
   Claude task attempt stayed on a disclosed native session, and report
   `FAIL=0 ENV=0 SKIP=0`. A scratch or partial run is diagnostic evidence, not
   this acceptance gate.

@@ -383,73 +383,70 @@ claudexor ask --deep-scan "map artifact writers and secret risk"
 claudexor agent --delegate "ship the v2 parser refactor across this repo"
 ```
 
-## Credential Profiles And Quota
+## Accounts And Quota
 
-A credential profile is an ADDITIVE identity for one harness beyond its
-default login: register several Claude or Codex subscriptions side by side,
-each in its own isolated vendor config dir. Claudexor's default Claude and
-Codex logins are also Claudexor-owned (`~/.claudexor/v3/native/...`);
-ordinary `~/.claude` / `~/.codex` stores are never used or mutated. Profiles
-may alternatively use namespaced secret-store keys
-(`anthropic:work`, `openai:acc2`). Profiles are durable non-secret entries in
-the global config's `credential_profiles`; secret material stays in the vendor
-dir or the secret store.
+Every account is a **named registry row** — one unified kind (INV-135), no
+separate "default" or "CLI login" account type. Register several Claude,
+Codex, or Cursor subscriptions side by side, each in its own isolated
+Claudexor-owned store. An existing legacy default-store login auto-registers
+at the first start of this engine as the ordinary `claude-default` /
+`codex-default` row (its credential bytes never move), and `claudexor auth
+login <harness>` is simply sugar for signing into that bootstrap row. The
+vendor's ordinary host stores (`~/.claude`, `~/.codex`, the host Cursor
+Keychain login) are never read or mutated — Cursor accounts live only in
+isolated file-store rows. Rows may alternatively use namespaced secret-store
+keys (`anthropic:work`, `openai:acc2`). Rows are durable non-secret entries in
+the global config's `credential_profiles`; secret material stays in the row's
+own store dir or the secret store.
 
 ```bash
-claudexor profiles                         # symmetric accounts per harness: CLI login + named accounts
-claudexor profiles add claude work         # register a config-dir login profile
-claudexor profiles login claude work       # the vendor's own login, scoped to the profile dir
+claudexor profiles                         # every account per harness + the informational next-up verdict
+claudexor auth login claude                # bootstrap sugar: sign into the claude-default row
+claudexor profiles add claude work         # register another account
+claudexor profiles login claude work       # the vendor's own login, scoped to the row's dir
 claudexor profiles disable claude work     # Enabled toggle: a disabled account is never routable
 claudexor profiles enable claude work
-# There is no "active account" to set. An unpinned run uses the harness's CLI
-# login by default (or, with quota rotation enabled, the next ready enabled
-# account); `claudexor profiles` shows the informational NEXT-UP identity that
-# policy would pick (from readiness + quota). Enabled named accounts route only
-# when you pin them — per-run --profile, or the composer's per-thread account chip.
-claudexor settings set harness.claude.native_credentials_enabled false  # exclude the CLI login
+claudexor profiles remove claude work      # delete the row AND its local credential material
 claudexor secrets set claude_oauth:work --from-env TOKEN_VAR
-claudexor agent "fix the parser" --profile work   # explicit per-run selection still wins
+claudexor agent "fix the parser" --profile work   # explicit per-run pin always wins
 ```
 
-Accounts are **symmetric** (INV-135). Per harness, every account is a row with
-an **Enabled** toggle — a disabled account is never routable. There is NO
-user-settable "active" account. An unpinned run routes to the harness's CLI
-login by default (or, when the opt-in quota rotation is on, the next ready
-enabled account); `claudexor profiles` shows the informational **next-up**
-identity that policy would pick (derived from readiness + quota) — not a claim
-that every enabled account is a silent default. Enabled named accounts route
-only through an explicit pin or that opt-in rotation. The native vendor login
-is itself a symmetric row named **"CLI login"** with the same toggle semantics
-but no Delete (the credential state is the vendor's, not Claudexor's — manage
-it through `claudexor auth login <harness>`, which drives the vendor's own
-login into the Claudexor-scoped store). Setting
-`native_credentials_enabled: false` EXCLUDES the CLI login
-from the ladder: a harness whose whole ladder is disabled then has nothing
-routable and refuses loudly rather than silently falling back into it. The macOS
-Accounts surface renders these rows directly from ONE server projection — no
-client re-derives Enabled or next-up. Each row's secondary line shows the
-account's non-secret **email · plan**, projected daemon-side from that account's
-OWN Claudexor-owned store (never a vendor credential file the app reads itself,
-and never the ordinary `~/.codex`/`~/.claude`). The per-thread PIN lives in the composer's
-account chip: a thread remembers the account you explicitly choose there —
-routing never silently creates a pin from an unpinned run; a run's
-`--profile` overrides it. Selection is turn/thread pin `--profile` > POOL AUTO
-(the enabled ladder led by the native/CLI login), and an explicit profile is
-STRICT — exactly its transport or a typed refusal, never a silent fallback.
-The engine-default API-key fallback is a credential route, not a synthetic
-account: it adds no Accounts row and does not change the account count. When it
-is the effective unprofiled route, the existing Next up/composer/footer
-disclosure says **API key**; key management stays in Auth.
-Vendor-session resume never crosses profiles. Subscription quota is tracked
-per profile from the vendor's own `oauth/usage` endpoint (proactive
+Accounts are **symmetric**: every row has the same **Enabled** toggle (the
+only routing control — there is NO user-settable "active" account) and the
+same **Remove** (removal deletes the row and its local credential material,
+provably: a partial cleanup is a typed retryable error, never a silent
+half-delete; your account at the vendor is untouched and "Sign in" brings it
+back). An UNPINNED run routes through the quota-aware **pool** of enabled,
+signed-in accounts: the freshest-headroom account wins, unknown-quota accounts
+rank after known headroom but before exhausted ones, and ties break
+deterministically. An unpinned chat thread is **sticky**: it stays on the
+account it started with while that account is ready, and switches to a pool
+sibling only with a disclosed lane switch. An explicit pin (per-run
+`--profile`, or the composer's per-thread account chip) is STRICT — exactly
+that account or a typed refusal (`subscription_window_exhausted` with the
+reset time when its quota window is spent), never a silent rotation.
+`claudexor profiles` shows the informational **next-up** verdict — who an
+unpinned run would route to next — computed server-side by the same routing
+owner (`accountPools`; also `GET /v2/account-pools`). When the pool is empty
+or exhausted, the typed API-key fallback may serve the run as an explicit,
+disclosed **route** — never a synthetic account row; key management stays in
+Auth. The macOS Accounts surface renders these rows directly from ONE server
+projection — no client re-derives Enabled or next-up. Each row's secondary
+line shows the account's non-secret **email · plan**, projected daemon-side
+from that account's OWN Claudexor-owned store.
+Vendor-session resume never crosses accounts. Subscription quota is tracked
+per account from the vendor's own `oauth/usage` endpoint (proactive
 five-hour/seven-day/per-model percentages in the app's quota footer, one chip
-per profile) — the access token is read transiently from the profile's own
+per account) — the access token is read transiently from the row's own
 vendor store, its macOS keychain item or on Linux the vendor's
-`.credentials.json` in the profile's config dir — and each harness may declare
+`.credentials.json` in the row's config dir — and each harness may declare
 a typed `profile_policy`
-(`limit_action: fail|ask|rotate`): rotation is opt-in and fires ONLY on typed
-vendor-limit signals or a proactive headroom breach — never on ordinary
-network errors — with full provenance on the run record. See
+(`limit_action: fail|ask|rotate`): reactive rotation moves pool-selected
+accounts ONLY on typed vendor-limit signals — never on ordinary
+network errors and never off an explicit pin — with full provenance on the
+run record. Downgrading to an older engine is supported through the engine's
+own rollback (`claudexor profiles rollback-migration`) run BEFORE the
+downgrade. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5 for the complete contract.
 
 ## Web, Budgets, And Gates

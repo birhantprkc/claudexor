@@ -498,18 +498,19 @@ containment strategy that keeps it honest. Native-session state remains owned by
 the vendor: Codex reads a Claudexor-dedicated `CODEX_HOME` with
 `cli_auth_credentials_store="file"`, never the operator's ordinary Codex profile
 or OS Keychain; Claude reads a Claudexor-owned config dir and its disposable
-child HOME bridges only the macOS login Keychain; Cursor declares an
-OS-keychain native route for the default login plus a `config_file` route for
-named profiles (the vendor file store scoped to a Claudexor-owned profile
-HOME, no Keychain bridge). Claude and default-Cursor expose only that narrow
+child HOME bridges only the macOS login Keychain; Cursor declares a single
+`config_file` native route — the vendor's own file credential store scoped to
+an account row's Claudexor-owned HOME. The host Cursor OS-Keychain login is a
+retired transport (INV-135 unified accounts): it is never probed, bridged, or
+claimed as a route, and a cursor native session is probed only in an env that
+explicitly selects the vendor file store. Claude exposes only its narrow
 host Keychain context; Codex keeps its separate vendor credential file outside
 every envelope. No route copies a vendor
 credential file into an envelope. Separate fallback routes may materialize only
 their selected source: Codex API-key auth seeds a temporary scoped `auth.json`,
 Claude injects either the stored setup token or `ANTHROPIC_API_KEY`, and Cursor
-injects `CURSOR_API_KEY`. Cursor's scoped native route bridges the user's
-`~/Library/Keychains` directory so Security-framework probes work while
-`.cursor` state still lands in the disposable scoped home.
+injects `CURSOR_API_KEY` (its isolated key smoke runs unbridged so it can never
+silently authenticate with a host login).
 
 Run params are validated before daemon enqueue. Inline `env`, `secrets`,
 `api_key`, `token`, `password`, or similar fields are rejected, so daemon
@@ -532,61 +533,97 @@ runnable by executing on it. The prepend is skipped when that Node is itself an
 at-risk Homebrew build, so a killable runtime never poisons the shell, and
 `claudexor doctor` still surfaces the non-gating at-risk-Node advisory.
 
-### Credential profiles (INV-135)
+### Credential profiles (INV-135, unified account model)
 
-A credential profile is an ADDITIVE identity for one harness beyond its
-engine-default credential ladder: `credential_profiles` in the global config
-holds durable NON-SECRET entries `{profile_id, harness_id, display_name,
-credential_kind, isolation_locator | secret_ref, enabled}`. `config_dir_login`
-profiles point at a Claudexor-scoped vendor login root (`CLAUDE_CONFIG_DIR` /
-`CODEX_HOME` / the Cursor file-store HOME, canonical absolute path, NEVER the
-default vendor store); `oauth_token`/`api_key` profiles point at a namespaced
+Every credential identity of a harness is a named registry row:
+`credential_profiles` in the global config holds durable NON-SECRET entries
+`{profile_id, harness_id, display_name, credential_kind, isolation_locator |
+secret_ref, enabled}`. There is no separate "default"/"CLI login" account
+type. `config_dir_login` rows point at a Claudexor-owned vendor login root
+(`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / the Cursor file-store HOME, canonical
+absolute path). The Claudexor-owned LEGACY native dirs are legal locators —
+the startup migration registers a detected claude/codex default-store login as
+the ordinary `claude-default`/`codex-default` row without moving bytes; the
+vendor's ordinary host stores (~/.claude, ~/.codex, the host Cursor Keychain)
+stay outside the owned root and are never locators.
+`oauth_token`/`api_key` rows point at a namespaced
 secret-store name (`claude_oauth:work`, `anthropic:acc2`, …) — the namespace
 is REQUIRED (the schema refuses a bare engine-default slot like `anthropic`,
-which would silently alias the default credential), and each adapter binds the
-ref's base to its own provider slot so one provider's key is never sent to
-another. Readiness is the doctor's separate `CredentialProfileStatus`
+which would silently alias the engine-default secret), and each adapter binds
+the ref's base to its own provider slot so one provider's key is never sent to
+another. Two rows can never share one `isolation_locator` (one dir = one
+credential). Readiness is the doctor's separate `CredentialProfileStatus`
 projection (`GET /v2/credential-profiles`, `claudexor profiles`), never
 durable config; every adapter's profile probe enforces the SAME slot binding
 as its run route, so a misconfigured profile reads `unavailable` instead of
 being admitted and refused mid-run.
 
-Named Cursor accounts (v3.3.7) ride the vendor's own FILE credential store:
-the default/CLI login keeps the OS login Keychain untouched, while a
-`config_dir_login` cursor profile selects `AGENT_CLI_CREDENTIAL_STORE=file`
+The startup migration is a crash-recoverable per-harness state machine
+persisted at `<config>/migration/accounts-unified.json` — deliberately outside
+`config.yaml`, so a downgraded engine's strict parser never sees it. Phases
+`reserved → registry_written → continuity_migrated → completed` are each
+restart-idempotent; an INCOMPLETE record refuses that harness's runs typed
+while other harnesses keep working. Continuity migrates as one unit (INV-137):
+thread sessions and lane checkpoints rewrite from the null engine-default
+subject onto the row id, durable lane homes rename, and the legacy null quota
+subject retires with no replay alias. `native_credentials_enabled=false` maps
+to `row.enabled=false`, and the deprecated key is kept mirrored for the
+downgrade window (the row is the authority; its Enabled PATCH updates the
+mirror). The supported downgrade path is the engine's own rollback —
+`POST /v2/accounts-migration/rollback` / `claudexor profiles
+rollback-migration` — run BEFORE installing an older engine whose
+canonicalizers refuse the native locator. `claudexor auth login <harness>` is
+bootstrap sugar: it ensures the `<harness>-default` row (claude/codex on their
+native dirs; cursor on an isolated file-store dir) and signs into it; a
+cancelled or failed login keeps the cold row with its Sign-in affordance.
+
+Every Cursor account rides the vendor's own FILE credential store: a
+`config_dir_login` cursor row selects `AGENT_CLI_CREDENTIAL_STORE=file`
 inside its Claudexor-owned profile HOME (`~/.claudexor/profiles/cursor-<id>`),
 where the CLI's auth store is keyed by `HOME`/`USERPROFILE` (macOS),
 `XDG_CONFIG_HOME` (Linux), and `APPDATA` (Windows) — all pinned to the profile
 HOME for the login, the status probe, and every profiled run. Mutable
 config/session state relocates separately: `CURSOR_CONFIG_DIR` and
-`CURSOR_DATA_DIR` stay in the run's lane/envelope HOME so two profiles (or a
-profile and the default) never share chat/session state. No token is ever
-copied between stores, the profile env never receives the scoped-HOME
-login-Keychain bridge, and `CURSOR_API_KEY` is scrubbed from profiled native
+`CURSOR_DATA_DIR` stay in the run's lane/envelope HOME so two rows never
+share chat/session state. No token is ever
+copied between stores, no env ever receives a host-Keychain bridge, and
+`CURSOR_API_KEY` is scrubbed from profiled native
 runs — the named identity is exactly its file store or a typed refusal.
 The Accounts-only Cursor probe receipt also carries an optional email parsed
-from the CLI's narrow typed status grammar. Default and named projections reuse
+from the CLI's narrow typed status grammar. Projections reuse
 the status invocation they already need; no credential file is read, no raw
 status output is persisted, and no extra subprocess is launched for identity.
 
 The orchestrator is the ONE resolve owner. There is no user-settable "Active"
-account — enabling/disabling a profile is the only routing control. The
-per-harness EFFECTIVE account is resolved by an owner-locked ladder (INV-135
-accounts authority): an explicit per-run/per-thread pin (`credentialProfileId`)
-wins; else null means POOL AUTO, the unprofiled/default subject. That subject
-may use a verified native/CLI login or the policy-governed API-key fallback.
-Enabled profiles route ONLY by explicit pin or as quota-rotation targets, never
-as a silent auto-default. The resolved profile pin, when present, becomes the
-typed `credential_profile` on every `HarnessRunSpec` the run builds (and keys
-the lane's read-only home),
-so the pin flows to the spec, preflight, continuity, and session recording. An
-unknown/disabled/harness-mismatched explicit id is a typed refusal before spawn.
-When the native/CLI login is EXCLUDED
-(`harnesses.<id>.native_credentials_enabled: false`) and there is no pin, an
-unpinned run has nothing routable: an explicit selection refuses naming the
-setting, an auto pool drops it — nothing silently falls back INTO the disabled
-login. An explicit profile is STRICT in the adapter —
-exactly the profile's transport or a typed error event, never a fallback to
+account — enabling/disabling a row is the only routing control. The
+per-harness EFFECTIVE account is resolved by the owner-locked order (INV-135):
+(1) an explicit per-run/per-thread pin (`credentialProfileId`) is STRICT — an
+unknown/disabled/harness-mismatched id is a typed refusal before spawn, a
+fresh exhausted quota window refuses typed (`subscription_window_exhausted`
+with its reset time), and a pin never silently rotates. (2) An unpinned
+THREAD turn stays on its durable bound account — the daemon derives the
+binding from the thread's own lane evidence (latest live session, else lane
+checkpoint, per harness) and hands it to the run as `threadAccountBindings`;
+a binding whose row became disabled/deleted/revoked/exhausted moves to a pool
+sibling with a typed `route.account.lane_switch` disclosure, never silently.
+(3) Otherwise the quota-aware POOL of enabled+ready subscription rows selects
+the account (`route.account.pool_selected`): fresh model-applicable headroom
+descending, unknown/stale quota after known-positive headroom but before
+exhausted (stale quota never authorizes routing), deterministic profile-id
+tie-break. An empty or exhausted pool is unavailability
+(`route.account.pool_exhausted`): under a paid-permitting `auth_preference`
+the spec is forced onto the explicit API-key route (billing classifies it
+`managed_api_key`; the adapter's typed key refusal is the backstop), and
+under explicit `subscription` the run refuses typed with the earliest known
+reset. Harnesses with NO registered rows keep the legacy default-subject
+ladder (unmigrated stores); an excluded legacy login
+(`native_credentials_enabled: false`) can only be served by the paid route —
+nothing ever silently falls back INTO a disabled login. The resolved row
+becomes the typed `credential_profile` on every `HarnessRunSpec` the run
+builds and keys the lane's read-only home, so the resolution flows to the
+spec, preflight, continuity, and session recording. An explicit profile is
+STRICT in the adapter — exactly the row's transport or a typed error event,
+never a fallback to
 default credentials (claude: config-dir login / stored token non-bare / stored
 key; codex: scoped `CODEX_HOME` login / scoped key `auth.json`; cursor: scoped
 file-store HOME login / namespaced key; opencode, raw-api: secret-ref keys
@@ -595,47 +632,63 @@ only). Adapters stamp
 and retry evidence stays profile-attributable, and the run's `auth_route`
 receipt carries `profile_id`; Control API projects it as `authRoute.profileId`
 without re-deriving it. Vendor sessions record the profile they were
-created under; resume never crosses profiles. `claudexor profiles login
+created under; resume never crosses rows — the engine boundary re-verifies
+every cached session against the RESOLVED account, so a pool switch starts a
+fresh vendor session with the thread's continuation packet instead of
+resuming a sibling's. `claudexor profiles login
 <harness> <id>` scopes the vendor login to the profile dir: codex rides the
 SAME durable device-code setup job as the default login (D-17); the other
 harnesses run the vendor command interactively in this terminal.
 
 Removal is daemon-owned and mirrors registration: `DELETE
-/v2/credential-profiles/:harness/:id` (CLI `claudexor profiles remove`) takes
-the registry entry out through the same locked global-config owner, then
-deletes the profile's OWN credential material — its confinement-checked scoped
-login dir or its namespaced secret, NEVER the default vendor store. A failed
-cleanup is disclosed on the receipt (`cleanupWarning`), never silent; removal
+/v2/credential-profiles/:harness/:id` (CLI `claudexor profiles remove`)
+deletes the row's OWN credential material FIRST — its confinement-checked
+scoped login dir (fenced to the `profiles/` tree PLUS exactly the migrated
+row's recorded legacy native locator from the migration record, never a
+general native-tree class) or its namespaced secret, NEVER the vendor's
+ordinary host store — and only then takes the registry entry out through the
+same locked global-config owner. `removed: true` therefore means the row AND
+its material are provably gone (D-U4); a cleanup failure is a typed RETRYABLE
+error (`credential_cleanup_failed`, 503) that leaves the row registered for a
+clean retry — never a removed-with-warning receipt the startup
+auto-registration would resurrect (`cleanupWarning` survives in the schema as
+a deprecated wire-compat field and is never emitted). Removal
 refuses with a typed 409 while a login job for that account is active. The same
 daemon mutation clears every legacy scalar thread pin carrying that profile
 id, clears any harness's `rotation_eligible` entry at the deleted id, marks matching harness/profile
-native-session caches stale, and removes profile quota snapshots, so deletion
+native-session caches stale, and removes profile quota snapshots; deleting a
+MIGRATED row additionally retires its legacy aliases — the null quota
+subject, the `<harness>-default` lane homes, and the migration record — in
+the same lifecycle operation, so deletion
 cannot leave a route that fails on the next turn or resurrect a session if the
 id is recreated. Dependent journal
 invalidation happens before registry removal; any unhealthy project partition
 returns typed 409/recovery-required, leaving the profile retryable.
 
-Selection precedence is turn > thread-sticky > the unprofiled/default subject:
+Selection precedence is turn > thread-sticky > thread binding > pool:
 a turn's explicit `credentialProfileId` (CLI `--profile`) beats the thread's
-durable `credential_profile_id` (PATCH /v2/threads/:id), which — when null —
-resolves to POOL AUTO. That subject can resolve to the verified native login or
-the policy-governed API-key fallback. The fallback is a route, not a synthetic
-account row or count. Accounts are SYMMETRIC (D25): the
-listing (`GET /v2/credential-profiles`, `claudexor profiles`) projects, per
-harness, every credential profile with its `enabled` flag (the only routing
-control), the native "CLI login" pseudo-row state (`native_credentials_enabled`
-+ a detected native login), and the server-computed informational `next_up`
-selection — who an unpinned run would route to next, computed by the routing
-owner. Its `kind` is `profile | native | none`; `profileId`, `route`, and
-`reason` remain fields of their respective variants. This is ONE projection so
-no surface re-derives the symmetry. A profile's `enabled` toggle is `PATCH
-/v2/credential-profiles/:harness/:id` (CLI `profiles enable|disable`); the
-CLI-login toggle is a per-harness setting
-(`harness.<id>.native_credentials_enabled`).
+durable `credential_profile_id` (PATCH /v2/threads/:id); when both are null,
+the thread's lane-derived account binding resolves first and the quota-aware
+pool serves unbound runs. The API-key fallback is a route, not a synthetic
+account row or count. Accounts are SYMMETRIC: the
+listing (`GET /v2/credential-profiles`, `claudexor profiles`) projects every
+credential row with its `enabled` flag (the only routing
+control) plus the additive `accountPools` key — the per-harness pool
+authority whose `next_up` verdict says who an unpinned run would route to
+next, computed by the same routing owner. Its `kind` is
+`profile | api_key_route | none`. The pool authority is also served alone by
+`GET /v2/account-pools`, whose catalog presence is the unified-accounts
+feature marker old clients detect. The legacy `harnessAccounts` key stays on
+the wire as `[]` for strict old clients, and its legacy `next_up` union never
+receives new kinds (old decoders throw on unknown discriminators). This is
+ONE projection so no surface re-derives the symmetry. Every row's `enabled`
+toggle is `PATCH /v2/credential-profiles/:harness/:id` (CLI `profiles
+enable|disable`); for a migrated row the PATCH also updates the deprecated
+`native_credentials_enabled` mirror for the downgrade window.
 
 Accounts has three location-scoped owners. Opening, connecting, and ordinary
 registry mutations use the cacheable plain `GET /v2/credential-profiles` to
-hydrate profiles plus stable native-login, identity, and status fields; it may
+hydrate the rows plus stable identity and status fields; it may
 probe on a cold server cache, but it never claims fenced quota or `next_up`
 authority. A display-only `GET /v2/quota` owns the quota values shown to the
 person. Explicit Refresh/Retry and exact post-login verification alone request
@@ -744,8 +797,12 @@ place of a quota-reset promise that would never help. The Accounts-surface
 projection of these observations is deliberately deferred (owner scope 4=A:
 run + rotation evidence now, UI as a separate issue).
 
-The DEFAULT subject participates under the same policy (auto-balance): with
-no pinned profile and a RESOLVED `rotate` (explicit, or `auto` on a
+Preflight headroom refusal applies to PINS only under the unified model
+(rotation never moves a pin); reactive `vendor_limit_rejected`/structural
+rotation moves POOL-SELECTED rows onto the next ready pool sibling, never a
+pin and never across credential kinds. The LEGACY default subject (a harness
+with no registered rows — an unmigrated store) participates under the same
+policy (auto-balance): with a RESOLVED `rotate` (explicit, or `auto` on a
 subscription route), a fresh default-store headroom breach starts the run on
 the next eligible SUBSCRIPTION profile (`route.profile.rotated` with
 `from_profile_id: null`), and a typed vendor limit on a profile-less attempt
@@ -2871,12 +2928,13 @@ code touching one of these areas must honor it or change it explicitly here.
   cross-run authority rather than rediscovering pressure independently in each
   run. Codex uses its app-server. Claude subscription windows arrive from the
   `oauth/usage` endpoint as the PRIMARY source (since 2.1): the daemon's
-  refresher reads each logged-in config dir's OAuth token transiently — the
-  default native dir (subject null) plus every claude `config_dir_login`
-  profile (subject = its profile id) — and a failing endpoint yields NO
+  refresher reads each logged-in config dir's OAuth token transiently —
+  every claude `config_dir_login` row (subject = its profile id), plus the
+  legacy default native dir (subject null) only while that store is
+  UNMIGRATED — and a failing endpoint yields NO
   snapshot, never degraded auth. The user-scoped status-line payload
   (installed explicitly by the Claude host-plugin lifecycle) remains a
-  SECONDARY source for the default subject only; its collector stores only
+  SECONDARY source for the legacy null subject only; its collector stores only
   allowlisted windows in the external v3 root and composes/restores any
   existing display command. Per-run budget observations remain run evidence,
   not quota authority.

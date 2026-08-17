@@ -317,9 +317,13 @@ invariant or owner decision before proceeding.
   receipt proves credential transport, not plan tier, entitlement, quota, or
   zero cost. verify: auth-capability verifier; setup restart/route/challenge
   tests; doctor route checks.
-- **INV-061** Explicit `subscription` never falls back to an API key. `auto` is
-  native-first for Codex, Claude, and Cursor; a paid route is eligible only under
-  the typed paid-fallback policy. Requested/effective credential route and
+- **INV-061** Explicit `subscription` never falls back to an API key. `auto`
+  is subscription-first for Codex, Claude, and Cursor: the enabled account
+  rows' native sessions (the INV-135 pool) are preferred, and a paid route is
+  eligible only under the typed paid-fallback policy — including when the
+  pool is empty or every ready row's window is exhausted, where the paid
+  route is taken explicitly and disclosed, never spawned back into an
+  exhausted or excluded login. Requested/effective credential route and
   source plus the selection reason are preserved as evidence. Codex subscription
   auth uses a Claudexor-owned `CODEX_HOME` with file-only credential storage,
   never the operator's ordinary `~/.codex` or OS Keychain. Native/subscription is
@@ -376,9 +380,12 @@ invariant or owner decision before proceeding.
   on macOS: a disposable Claude-only child HOME whose sole host bridge is
   `Library/Keychains`; a Claudexor-owned `CLAUDE_CONFIG_DIR` selects the exact
   default or profile-specific Keychain item). Ordinary `~/.claude` is never
-  read, written, or used for Claudexor native setup/runs. Other harnesses never
+  read, written, or used for   Claudexor native setup/runs. Other harnesses never
   receive that bridge, and all writable vendor state stays scoped. Codex remains portable through
-  its file-only `CODEX_HOME` seed. The doctor names the real cause and the
+  its file-only `CODEX_HOME` seed. Cursor accounts are portable through the
+  vendor's own FILE credential store inside each row's Claudexor-owned HOME;
+  the host OS-Keychain login is retired as a transport (INV-135) — it is
+  never probed, bridged, or claimed as a route. The doctor names the real cause and the
   Claudexor-owned in-app Native setup remedy (never a bare vendor login command
   that targets the ordinary store, never a bare "not authenticated"), and reviews of auth/
   readiness changes check every lane class — read-only scoped HOME, isolated
@@ -797,41 +804,54 @@ invariant or owner decision before proceeding.
   only through an explicit DESIGN_SYSTEM section; layouts use fixed
   grids/anchors — an element's position and size never drift with the
   length of its text. verify: DESIGN_SYSTEM §1.1; review.
-- **INV-135** Credential profiles: a profile is a durable NON-SECRET registry
-  entry {profile_id, harness_id, display_name, credential_kind,
-  isolation_locator|secret_ref, enabled} — secret material lives only in the
-  vendor-owned dir or the namespaced secret store, readiness only in the
-  doctor's projection. Profiles are ADDITIVE identities: the default vendor
-  stores (~/.claude, the native codex home) are never a profile target and are
-  never mutated by profile operations. There is NO user-settable "Active"
-  account: enabling/disabling a profile (the toggle) is the only routing
-  control. ONE resolve owner (the orchestrator) resolves the per-harness
-  EFFECTIVE account by an owner-locked ladder: an explicit per-run/per-thread
-  profile pin wins; else POOL AUTO — the unprofiled/default subject. That
-  subject may use a verified native/CLI login or the policy-governed API-key
-  fallback from INV-061. The fallback route is not a credential profile or an
-  account identity: it never creates a synthetic Accounts row or increments an
-  account count, and its effective `next_up`/route disclosure remains visible.
-  Enabled profiles route ONLY by explicit pin or as quota-rotation targets,
-  never as a silent auto-default. Unknown, disabled, or harness-mismatched
-  explicit ids refuse — an explicit profile never silently becomes the default
-  credential ladder — and an adapter given an unsupported transport refuses
-  typed. When the native/CLI login is excluded (`native_credentials_enabled:
-  false`) and no pin exists, an unpinned run has nothing routable: it refuses
-  (explicit) or drops (auto) and never silently falls back INTO the disabled
-  login. Accounts are SYMMETRIC across real identities: every account is a row
-  with an Enabled toggle (the only routing control), the native login is a
-  "CLI login" row with the same toggle semantics minus Delete, and ONE server
-  projection owns the informational `next_up` identity — who an unpinned run
-  would route to next, computed by the routing owner from enabled profiles +
-  default-route readiness + quota — so no surface re-derives it.
-  Native-session resume never crosses profiles. Selecting a named profile makes
-  its harness/pool coherent and every
-  selected lane probes the profile before spawn; deletion clears durable pins
-  (any harness's `rotation_eligible` entry), matching native-session caches, and
-  quota subjects so an id cannot dangle or resurrect stale auth. verify: schema
-  credential-profile.ts; orchestrator credential-profiles.ts; adapter profile
-  tests; threads resume-isolation test.
+- **INV-135** UNIFIED ACCOUNTS: every credential identity of a harness is a
+  named registry row — a durable NON-SECRET entry {profile_id, harness_id,
+  display_name, credential_kind, isolation_locator|secret_ref, enabled}.
+  Secret material lives only in the row's Claudexor-owned store dir or the
+  namespaced secret store; readiness lives only in the doctor's projection.
+  There is NO separate "default" / "CLI login" account type: a DETECTED
+  legacy default-store login (claude/codex) auto-registers at daemon start
+  as an ordinary `<harness>-default` row (bytes never move; progress is a
+  crash-recoverable per-harness phase file OUTSIDE config.yaml, and an
+  incomplete migration refuses that harness's runs typed while others keep
+  working), and `auth login <harness>` is bootstrap sugar into that row —
+  the bootstrap row has no routing privilege. The vendor's ordinary host
+  stores (~/.claude, ~/.codex, the host Cursor Keychain login) are never
+  read, probed, or mutated; cursor accounts live only in isolated
+  file-store rows (owner decision D-U3: host CLI logins disappeared).
+  ONE resolve owner (the orchestrator) resolves the per-harness EFFECTIVE
+  account by the owner-locked order: (1) an explicit per-run/per-thread pin
+  is STRICT — unknown/disabled/harness-mismatched ids refuse typed, a fresh
+  exhausted window refuses typed (`subscription_window_exhausted` + reset
+  time), and a pin never silently rotates; (2) an unpinned THREAD turn stays
+  on its durable bound account — derived from the thread's own lane
+  evidence, never a second hand-maintained record — while that row is
+  ready, and moves to a pool sibling ONLY with a disclosed lane switch;
+  (3) otherwise the quota-aware POOL of enabled+ready subscription rows
+  routes the run: fresh model-applicable headroom descending, unknown/stale
+  quota after known-positive headroom but before exhausted (stale quota
+  never authorizes routing — D3), deterministic profile-id tie-break.
+  An empty or exhausted pool is UNAVAILABILITY: the policy-governed API-key
+  fallback from INV-061 may serve the run as an explicit, disclosed ROUTE —
+  never a credential row, never an account count — or the run refuses typed
+  under an explicit `subscription` preference. Enabling/disabling a row
+  (the toggle) is the only routing control; there is NO user-settable
+  "Active" account. Accounts are SYMMETRIC: every row carries the same
+  Enabled toggle and the same Delete (removal is provable — success means
+  the row AND its credential material are gone; a partial cleanup is a
+  typed retryable error, never a removed-with-warning receipt). ONE server
+  projection — `accountPools` — owns the informational per-harness
+  `next_up` verdict, computed by the same routing owner, so no surface
+  re-derives it. Native-session resume never crosses rows (the engine
+  boundary re-verifies every cached session against the RESOLVED account).
+  Deletion retires the canonical id PLUS every migrated legacy alias (the
+  null quota subject, default lane homes, durable pins, `rotation_eligible`
+  entries) in one lifecycle operation, so an id cannot dangle or resurrect
+  stale auth; the supported downgrade path is the engine's own migration
+  rollback command, run BEFORE installing an older engine. verify: schema
+  credential-profile.ts + accounts-migration.ts; orchestrator
+  preflightProfile/account-pool tests; the accounts-unified-migration
+  battery; threads binding/resume-isolation tests; profile-delete tests.
 - **INV-136** High-volume UI evidence is PROGRESSIVE, BOUNDED, and honest:
   per-run milestone bursts are exactly one in-flight request plus at most one
   trailing refresh (events during the trailing load cannot chain more GETs);

@@ -176,4 +176,4 @@ reference). The ones agents most often need:
 - `CLAUDEXOR_<HARNESS>_BIN` (`CODEX`/`CLAUDE`/`CURSOR`/`OPENCODE`) — explicit
   vendor CLI binaries when PATH discovery is not enough.
 - Provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...) are read by the
-  ADAPTERS as fallbacks; native CLI login sessions are preferred.
+  ADAPTERS as fallbacks; the account rows' native sessions are preferred.
