@@ -16,7 +16,6 @@ import type { DoctorSpec, HarnessAdapter } from "@claudexor/core";
 import {
   abortSignalFromSpec,
   HarnessUnavailableError,
-  needsScopedHomeKeychainBridge,
   promptWithInstructions,
   providerScrubEnv,
   runCapture,
@@ -44,12 +43,7 @@ import {
   stampCursorProfileEvents,
 } from "./profile.js";
 export { canonicalCursorProfileHome, cursorProfilePathEnv } from "./profile.js";
-import {
-  bridgeMacLoginKeychain,
-  smokeIsolatedApiKey,
-  unsmokedApiSmoke,
-  type CursorApiSmokeResult,
-} from "./smoke.js";
+import { smokeIsolatedApiKey, unsmokedApiSmoke, type CursorApiSmokeResult } from "./smoke.js";
 export {
   cleanupCursorSmokeBase,
   cursorApiSmokeFinalText,
@@ -74,10 +68,11 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
     supported_sources: ["native_session", "api_key_env"],
     preferred_source: null,
     credential_transports: [
-      // Default native auth uses the OS Keychain. Named profiles select
-      // Cursor's vendor-supported file store, whose auth path is HOME/XDG/
-      // APPDATA-relocatable while config/session state is relocated separately.
-      { source: "native_session", kind: "os_keychain", relocatable_by: ["HOME"] },
+      // Unified account model (owner decision D-U3): every native cursor
+      // session lives in the vendor's FILE store inside a Claudexor-owned
+      // account-row HOME (HOME/XDG/APPDATA-relocatable; config/session state
+      // relocates separately). The host OS-Keychain login is never read,
+      // probed, or bridged — that transport is retired.
       { source: "native_session", kind: "config_file", relocatable_by: ["HOME"] },
       { source: "api_key_env", kind: "env_var", relocatable_by: ["ENV"] },
     ],
@@ -89,10 +84,17 @@ const CURSOR_CAPABILITY_PROFILE: HarnessCapabilityProfile = HarnessCapabilityPro
   // including write and shell", and a live probe wrote a file through it.
   access_control: { readonly_mechanism: "tool_allowlist" },
   isolation: {
-    supported_containment: ["scoped_home_keychain_bridge", "env_or_file_injection"],
+    supported_containment: ["env_or_file_injection"],
   },
   attachment_inputs: [],
 });
+
+/** True only when the supplied env explicitly selects the vendor FILE store
+ * (an account row's HOME, `AGENT_CLI_CREDENTIAL_STORE=file`). Any other env
+ * would resolve the HOST Keychain login, which is never read (D-U3). */
+function cursorFileStoreEnv(env?: EnvMap): boolean {
+  return env?.["AGENT_CLI_CREDENTIAL_STORE"] === "file";
+}
 
 // Ask + sandbox bound readonly; force approves optional native web unless it is off.
 function accessArgs(spec: HarnessRunSpec): string[] {
@@ -187,12 +189,6 @@ function cursorNativeEnv(env?: EnvMap): EnvMap {
   return { ...cursorBaseEnv(env), CURSOR_API_KEY: null };
 }
 
-function maybeBridgeScopedHome(env: EnvMap): void {
-  const home = env["HOME"];
-  if (home && needsScopedHomeKeychainBridge(CURSOR_CAPABILITY_PROFILE))
-    bridgeMacLoginKeychain(home);
-}
-
 async function resolveCursorAuthRoute(
   deps: CursorRuntimeDeps,
   input: {
@@ -200,7 +196,6 @@ async function resolveCursorAuthRoute(
     authPreference?: AuthPreference;
     fresh?: boolean;
     abortSignal?: AbortSignal;
-    bridgeNativeSession?: boolean;
   },
 ): Promise<{
   route: CursorAuthRoute;
@@ -211,11 +206,13 @@ async function resolveCursorAuthRoute(
 }> {
   const env = cursorBaseEnv(input.env);
   const scopedHome = Boolean(input.env?.["HOME"]);
-  if (scopedHome && input.bridgeNativeSession !== false) maybeBridgeScopedHome(env);
   const authPreference = input.authPreference ?? "auto";
   const key = authPreference === "subscription" ? null : deps.cursorApiKey(input.env);
+  // D-U3: a native session is probed ONLY in an env that explicitly selects
+  // the vendor FILE store (an account row's HOME). Any other env would read
+  // the HOST Keychain login, which the unified account model retired.
   const nativeProbe =
-    authPreference === "api_key"
+    authPreference === "api_key" || !cursorFileStoreEnv(input.env)
       ? ({ kind: "loggedOut" } satisfies CursorStatusObservation)
       : await deps.nativeAuthOk(env, input.abortSignal);
   const nativeAuthed = cursorObservationAuthenticated(nativeProbe);
@@ -270,13 +267,8 @@ async function listCursorModelsFromReadyRoute(
     }
     return [];
   }
-  const nativeEnv = cursorNativeEnv();
-  const nativeProbe = await deps.nativeAuthOk(nativeEnv, spec?.abortSignal);
-  if (cursorObservationAuthenticated(nativeProbe)) {
-    const nativeModels = await deps.listCursorModels(nativeEnv);
-    if (nativeModels.length > 0) return nativeModels;
-  }
-  if (cursorObservationError(nativeProbe)) return [];
+  // No default native session exists to list models from (D-U3: the host
+  // Keychain is never probed); the key route and the static catalog remain.
   const key = deps.cursorApiKey();
   if (!key) return catalogOnly();
   const apiSmoke = await smokeCursorApiKey(deps, key, spec?.fresh === true);
@@ -309,7 +301,7 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
       cursorApiKey: runtime.cursorApiKey,
       smokeApiKey: (key, fresh) => smokeCursorApiKey(runtime, key, fresh),
       nativeEnv: cursorNativeEnv,
-      bridgeScopedHome: maybeBridgeScopedHome,
+      fileStoreEnv: cursorFileStoreEnv,
     });
   return {
     id: "cursor",
@@ -321,8 +313,11 @@ export function createCursorAdapter(deps: Partial<CursorRuntimeDeps> = {}): Harn
           "cursor-agent not found on PATH (set CLAUDEXOR_CURSOR_BIN)",
         );
       }
-      const nativeProbe = await runtime.nativeAuthOk(cursorNativeEnv());
-      const nativeAuthed = cursorObservationAuthenticated(nativeProbe);
+      // D-U3: there is no default native session to detect (the host Keychain
+      // is never probed); manifest source availability reads the key only.
+      // Account rows prove their native sessions through their own profile
+      // probes at admission.
+      const nativeAuthed = false;
       const apiKey = runtime.cursorApiKey() !== null;
       return HarnessManifestSchema.parse({
         id: "cursor",

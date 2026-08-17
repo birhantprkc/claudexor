@@ -19,8 +19,11 @@ import {
   SetupNativeCommandReceipt,
   type ControlSetupJob,
   type ControlSetupJobListFilter,
+  harnessHasDefaultCredentialStore,
+  harnessSupportsBootstrapLogin,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
+import { ensureBootstrapProfile } from "./profile-registration.js";
 import * as NativeLogin from "./native-login.js";
 import {
   SETUP_PROFILES,
@@ -1287,7 +1290,34 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     create(input: unknown, idempotency?: { key: string; client: string }): ControlSetupJob {
       const request = ControlSetupJobCreateRequest.parse(input);
       const { harness, action } = request;
-      const profileBinding = resolveProfileBinding(harness, request.profileId);
+      let profileBinding = resolveProfileBinding(harness, request.profileId);
+      // Unified account model (K.4): a profile-less LOGIN request is the
+      // bootstrap sugar. Cursor has no default store (D-U3 — the host
+      // Keychain is never read), so its login auto-binds to the isolated
+      // `cursor-default` bootstrap row; the job response then exposes the
+      // resolved profileId for new clients. Claude/codex keep the
+      // default-store job (its INV-060 capability smoke attests exactly the
+      // native dir the bootstrap row wraps) but the row is ensured up front
+      // so the account is visible — cold with a "Sign in" affordance — even
+      // when the login is later cancelled or fails.
+      if (!profileBinding && action === "login" && harnessSupportsBootstrapLogin(harness)) {
+        if (!harnessHasDefaultCredentialStore(harness)) {
+          // Cursor: the isolated bootstrap row IS the login target — a
+          // registration failure must refuse the job (no host store exists).
+          profileBinding = resolveProfileBinding(harness, ensureBootstrapProfile(harness).profile_id);
+        } else {
+          // Claude/codex: the default-store job stays (its INV-060 smoke
+          // attests exactly the native dir the row wraps); the row itself is
+          // best-effort accounting — a registration failure (e.g. an
+          // env-overridden native home outside the owned root) must not
+          // block the login, which fails loudly on its own if truly unusable.
+          try {
+            ensureBootstrapProfile(harness);
+          } catch {
+            /* the startup migration registers the row after the login lands */
+          }
+        }
+      }
       assertDefaultLoginAllowed(harness, profileBinding !== null);
       const binding = idempotency ? { ...idempotency, request } : undefined;
       const prior = binding ? store.resolveCreate(binding) : null;

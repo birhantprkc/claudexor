@@ -251,11 +251,20 @@ export function nativeLoginEnv(
     // browser on the daemon host (the user may be on another device). The
     // vendor gates this on NO_OPEN_BROWSER (verified in the shipped bundle).
     env.NO_OPEN_BROWSER = "1";
-    if (configDirOverride) {
-      const home = canonicalCursorProfileHome(configDirOverride);
-      ensureDir(home);
-      Object.assign(env, cursorProfilePathEnv(home));
+    // Owner decision D-U3 (unified account model): cursor has NO default
+    // credential store — a login without a profile HOME would land in the
+    // HOST Keychain, which Claudexor never reads again. Every cursor login
+    // targets an isolated file-store row (the bootstrap `cursor-default` row
+    // when none was named); an absent override must REFUSE, never fall
+    // through to the operator's real HOME.
+    if (!configDirOverride) {
+      throw new Error(
+        "cursor has no default credential store: a Cursor login must target an account row's file-store HOME (D-U3; host Keychain logins are not used)",
+      );
     }
+    const home = canonicalCursorProfileHome(configDirOverride);
+    ensureDir(home);
+    Object.assign(env, cursorProfilePathEnv(home));
   }
   return env;
 }

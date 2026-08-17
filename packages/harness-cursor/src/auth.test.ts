@@ -239,7 +239,7 @@ describe("cursor API-key smoke parsing", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("bridges Keychain for Cursor's macOS Security dependency but requires env API-key proof", async () => {
+  it("never bridges the host Keychain into the smoke home (D-U3) and requires env API-key proof", async () => {
     const base = mkdtempSync(join(tmpdir(), "claudexor-cursor-smoke-test-"));
     const realHome = mkdtempSync(join(tmpdir(), "claudexor-cursor-real-home-"));
     const previousHome = process.env.HOME;
@@ -268,9 +268,10 @@ describe("cursor API-key smoke parsing", () => {
       expect(result.ok).toBe(true);
       expect(smokeEnv?.["HOME"]).toBe(join(base, "home"));
       expect(smokeEnv?.["CURSOR_API_KEY"]).toBe("cursor-key");
-      expect(existsSync(join(base, "home", "Library", "Keychains"))).toBe(
-        process.platform === "darwin",
-      );
+      // Unified account model: the host Keychain (where the retired host CLI
+      // login lives) is never linked into a Claudexor env — a bridged smoke
+      // could silently authenticate with the HOST login instead of the key.
+      expect(existsSync(join(base, "home", "Library", "Keychains"))).toBe(false);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
@@ -425,12 +426,12 @@ describe("cursor adapter auth route wiring", () => {
     });
 
   it("emits fallback disclosure and runs with the prepared API-key env when native is unavailable", async () => {
-    let probedEnv: Record<string, string | null | undefined> | undefined;
+    let nativeProbes = 0;
     let cliOpts: CliRunLoopOptions | undefined;
     const adapter = createCursorAdapter({
       detectVersion: async () => "cursor-test",
-      nativeAuthOk: async (env) => {
-        probedEnv = env;
+      nativeAuthOk: async () => {
+        nativeProbes += 1;
         return nativeProbe(false);
       },
       cursorApiKey: () => "cursor-key",
@@ -460,9 +461,9 @@ describe("cursor adapter auth route wiring", () => {
       events.push(ev);
     }
 
-    expect(probedEnv?.["CUSTOM_CA_BUNDLE"]).toBe("/ca.pem");
-    expect(probedEnv?.["OPENAI_API_KEY"]).toBeNull();
-    expect(probedEnv?.["CLAUDEXOR_CURSOR_API_KEY"]).toBeNull();
+    // D-U3: a scoped-but-not-file-store env has no native session to probe —
+    // probing it would read the HOST Keychain login, which is retired.
+    expect(nativeProbes).toBe(0);
     expect(cliOpts?.env?.["CUSTOM_CA_BUNDLE"]).toBe("/ca.pem");
     expect(cliOpts?.env?.["OPENAI_API_KEY"]).toBeNull();
     expect(cliOpts?.env?.["CLAUDEXOR_CURSOR_API_KEY"]).toBeNull();
@@ -480,7 +481,7 @@ describe("cursor adapter auth route wiring", () => {
     expect(events.at(-1)?.type).toBe("completed");
   });
 
-  it("keeps non-scoped auto on the native session without spending the API key", async () => {
+  it("keeps a FILE-STORE env on its native session without spending the API key (D-U3)", async () => {
     let smokeCalled = false;
     let cliOpts: CliRunLoopOptions | undefined;
     const adapter = createCursorAdapter({
@@ -506,6 +507,8 @@ describe("cursor adapter auth route wiring", () => {
     for await (const ev of adapter.run(
       spec({
         env: {
+          HOME: "/tmp/row-home",
+          AGENT_CLI_CREDENTIAL_STORE: "file",
           CURSOR_API_KEY: "must-be-scrubbed",
           CLAUDEXOR_CURSOR_API_KEY: "must-be-scrubbed",
         },
@@ -520,10 +523,14 @@ describe("cursor adapter auth route wiring", () => {
     expect(events[0]?.type).toBe("completed");
   });
 
-  it("advertises native session as the static preferred source when both sources exist", async () => {
+  it("discover never probes the host login: the key is the only default source (D-U3)", async () => {
+    let nativeProbes = 0;
     const adapter = createCursorAdapter({
       detectVersion: async () => "cursor-test",
-      nativeAuthOk: async () => nativeProbe(true),
+      nativeAuthOk: async () => {
+        nativeProbes += 1;
+        return nativeProbe(true);
+      },
       cursorApiKey: () => "cursor-key",
       listCursorModels: async () => [],
       smokeIsolatedApiKey: async () => ({ ok: true, detail: "ok" }),
@@ -537,9 +544,10 @@ describe("cursor adapter auth route wiring", () => {
     });
 
     await expect(adapter.discover()).resolves.toMatchObject({
-      capability_profile: { auth: { preferred_source: "native_session" } },
-      auth_modes: ["local_session", "api_key"],
+      capability_profile: { auth: { preferred_source: "api_key_env" } },
+      auth_modes: ["api_key"],
     });
+    expect(nativeProbes).toBe(0);
   });
 
   it("reuses a successful API-key smoke across repeated scoped runs", async () => {
@@ -747,39 +755,50 @@ describe("cursor adapter auth route wiring", () => {
     await adapter.discover();
     await adapter.doctor({ cwd: "/repo" });
 
-    expect(probedEnvs).toHaveLength(2);
+    // D-U3: neither discover nor a default doctor probes the host login at
+    // all — there is nothing for a probe env to leak.
+    expect(probedEnvs).toHaveLength(0);
+
+    const fileStoreEnv = { HOME: "/tmp/row-home", AGENT_CLI_CREDENTIAL_STORE: "file" };
+    await adapter.doctor({ cwd: "/repo", env: fileStoreEnv });
+    expect(probedEnvs).toHaveLength(1);
     expect(probedEnvs.every((env) => env?.["CURSOR_API_KEY"] === null)).toBe(true);
     expect(probedEnvs.every((env) => env?.["CLAUDEXOR_CURSOR_API_KEY"] === null)).toBe(true);
   });
 
-  it("returns default Accounts identity from the same doctor status probe", async () => {
+  it("the default Accounts receipt has NO host identity; a file-store env carries its row's identity (D-U3)", async () => {
     let nativeStatusCalls = 0;
     const adapter = createCursorAdapter({
       detectVersion: async () => "cursor-test",
       nativeAuthOk: async () => {
         nativeStatusCalls += 1;
-        return { kind: "authenticated", email: "default-cursor@example.test" };
+        return { kind: "authenticated", email: "row-cursor@example.test" };
       },
       cursorApiKey: () => null,
       listCursorModels: async () => [],
     });
 
-    // HarnessGateway statusAll already runs discover + doctor. The Accounts
-    // variant replaces doctor with this rich receipt; identity must not add a
-    // third native status process above that two-probe baseline.
     await adapter.discover();
     const receipt = await adapter.doctorForAccounts!({ cwd: "/repo", fresh: true });
-    expect(nativeStatusCalls).toBe(2);
-    expect(receipt.identity).toEqual({ email: "default-cursor@example.test" });
-    expect(receipt.identity).not.toHaveProperty("plan");
-    expect(receipt.report).not.toHaveProperty("identity");
-    expect(receipt.report).toMatchObject({ harness_id: "cursor", status: "ok" });
+    // The host Keychain login is never probed: no identity, no native source.
+    expect(nativeStatusCalls).toBe(0);
+    expect(receipt.identity).toBeNull();
     expect(
       receipt.report.auth_sources.find((source) => source.source === "native_session"),
-    ).toMatchObject({ availability: "available", verification: "passed" });
+    ).toMatchObject({ availability: "unavailable", verification: "not_run" });
+
+    // A row's file-store env proves ITS identity through the same receipt.
+    const rowReceipt = await adapter.doctorForAccounts!({
+      cwd: "/repo",
+      fresh: true,
+      env: { HOME: "/tmp/row-home", AGENT_CLI_CREDENTIAL_STORE: "file" },
+    });
+    expect(nativeStatusCalls).toBe(1);
+    expect(rowReceipt.identity).toEqual({ email: "row-cursor@example.test" });
+    expect(rowReceipt.report).toMatchObject({ harness_id: "cursor", status: "ok" });
   });
 
-  it("uses scoped doctor env for auth probing and Cursor API key readiness", async () => {
+  it("uses scoped doctor env for Cursor API key readiness without probing a non-file-store native session", async () => {
     const previousHostKey = process.env.CURSOR_API_KEY;
     process.env.CURSOR_API_KEY = "host-key-must-not-be-used";
     const probedEnvs: Array<Record<string, string | null | undefined> | undefined> = [];
@@ -815,8 +834,7 @@ describe("cursor adapter auth route wiring", () => {
       expect(report.status).toBe("ok");
       expect(report.enabled_intents).toContain("implement");
       expect(smokedKeys).toEqual(["scoped-key"]);
-      expect(probedEnvs[0]?.["HOME"]).toBe("/tmp/scoped-home");
-      expect(probedEnvs[0]?.["CURSOR_API_KEY"]).toBeNull();
+      expect(probedEnvs).toHaveLength(0);
     } finally {
       if (previousHostKey === undefined) delete process.env.CURSOR_API_KEY;
       else process.env.CURSOR_API_KEY = previousHostKey;
@@ -846,7 +864,11 @@ describe("cursor adapter auth route wiring", () => {
     const report = await adapter.doctor({
       cwd: "/repo",
       authPreference: "subscription",
-      env: { HOME: "/tmp/scoped-home", CURSOR_API_KEY: "available-but-forbidden-key" },
+      env: {
+        HOME: "/tmp/scoped-home",
+        AGENT_CLI_CREDENTIAL_STORE: "file",
+        CURSOR_API_KEY: "available-but-forbidden-key",
+      },
     });
 
     expect(smokeCalls).toBe(0);
@@ -917,6 +939,8 @@ describe("cursor adapter auth route wiring", () => {
         cwd: "/repo",
         authPreference: "subscription",
         authSource: "native_session",
+        // D-U3: only a file-store env may probe a native session.
+        env: { HOME: "/tmp/row-home", AGENT_CLI_CREDENTIAL_STORE: "file" },
         abortSignal: controller.signal,
       });
       expect(keyReads).toBe(0);
@@ -1020,7 +1044,7 @@ describe("cursor adapter auth route wiring", () => {
     ]);
   });
 
-  it("prefers native model inventory over an available key string", async () => {
+  it("prefers a file-store env's native model inventory over an available key string (D-U3)", async () => {
     let smokeCalls = 0;
     const modelEnvs: Array<Record<string, string | null | undefined> | undefined> = [];
     const adapter = createCursorAdapter({
@@ -1044,7 +1068,13 @@ describe("cursor adapter auth route wiring", () => {
       },
     });
 
-    await expect(adapter.models?.({ cwd: "/repo" })).resolves.toEqual([
+    await expect(
+      adapter.models?.({
+        cwd: "/repo",
+        env: { HOME: "/tmp/row-home", AGENT_CLI_CREDENTIAL_STORE: "file" },
+        authPreference: "auto",
+      }),
+    ).resolves.toEqual([
       { id: "native-model", label: "Native Model", context_window: null, routes: null },
     ]);
     expect(modelEnvs).toHaveLength(1);
@@ -1133,7 +1163,11 @@ describe("cursor adapter auth route wiring", () => {
     });
 
     await expect(
-      adapter.models?.({ cwd: "/repo", env: { HOME: "/tmp/scoped-home" }, authPreference: "auto" }),
+      adapter.models?.({
+        cwd: "/repo",
+        env: { HOME: "/tmp/scoped-home", AGENT_CLI_CREDENTIAL_STORE: "file" },
+        authPreference: "auto",
+      }),
     ).resolves.toEqual([]);
     expect(modelEnvs).toHaveLength(1);
     expect(modelEnvs[0]?.["HOME"]).toBe("/tmp/scoped-home");
@@ -1163,7 +1197,11 @@ describe("cursor adapter auth route wiring", () => {
     await expect(
       adapter.models?.({
         cwd: "/repo",
-        env: { HOME: "/tmp/scoped-home", CURSOR_API_KEY: "available-but-forbidden-key" },
+        env: {
+          HOME: "/tmp/scoped-home",
+          AGENT_CLI_CREDENTIAL_STORE: "file",
+          CURSOR_API_KEY: "available-but-forbidden-key",
+        },
         authPreference: "subscription",
       }),
     ).resolves.toEqual([]);
@@ -1213,7 +1251,11 @@ describe("cursor adapter auth route wiring", () => {
     });
 
     await expect(
-      adapter.models?.({ cwd: "/repo", env: { HOME: "/tmp/scoped-home" }, authPreference: "auto" }),
+      adapter.models?.({
+        cwd: "/repo",
+        env: { HOME: "/tmp/scoped-home", AGENT_CLI_CREDENTIAL_STORE: "file" },
+        authPreference: "auto",
+      }),
     ).resolves.toEqual([
       {
         id: "native-review-model",

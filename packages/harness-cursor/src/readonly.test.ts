@@ -21,6 +21,10 @@ const spec = (overrides: Partial<HarnessRunSpec> = {}): HarnessRunSpec =>
     intent: "review",
     prompt: "review this",
     cwd: "/repo",
+    // Unified account model (D-U3): a native cursor session is probed only in
+    // a vendor FILE-store env (an account row's HOME); these argv tests ride
+    // one so the stubbed authenticated probe still routes the spawn.
+    env: { AGENT_CLI_CREDENTIAL_STORE: "file" },
     ...overrides,
   });
 

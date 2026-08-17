@@ -19,7 +19,9 @@ export interface CursorDoctorDeps {
   cursorApiKey(env?: EnvMap): string | null;
   smokeApiKey(key: string, fresh: boolean): Promise<CursorApiSmokeResult>;
   nativeEnv(env?: EnvMap): EnvMap;
-  bridgeScopedHome(env: EnvMap): void;
+  /** True when the supplied env explicitly selects the vendor FILE store —
+   * the only env class whose native session may be probed (D-U3). */
+  fileStoreEnv(env?: EnvMap): boolean;
 }
 
 /** One Cursor doctor probe with an optional Accounts identity sidecar. */
@@ -40,7 +42,12 @@ export async function probeCursorDoctorForAccounts(
     };
   }
   const requestedSource = spec.authSource;
-  const probeNative = requestedSource === undefined || requestedSource === "native_session";
+  const probeNativeRequested = requestedSource === undefined || requestedSource === "native_session";
+  // D-U3 (unified account model): a native cursor session exists ONLY inside
+  // an account row's file store. Any other env would resolve the HOST
+  // Keychain login, which is never read — so the probe is honestly skipped
+  // and the native source reports unavailable with the remedy.
+  const probeNative = probeNativeRequested && runtime.fileStoreEnv(spec.env);
   const probeApi = requestedSource === undefined || requestedSource === "api_key_env";
   const env = runtime.nativeEnv(spec.env);
   const scopedHome = Boolean(spec.env?.["HOME"]);
@@ -50,7 +57,6 @@ export async function probeCursorDoctorForAccounts(
       : requestedSource === "api_key_env"
         ? "api_key"
         : (spec.authPreference ?? "auto");
-  if (probeNative && scopedHome) runtime.bridgeScopedHome(env);
   const nativeProbe: CursorStatusObservation = probeNative
     ? await runtime.nativeAuthOk(env, spec.abortSignal)
     : { kind: "loggedOut" };
@@ -117,7 +123,10 @@ export async function probeCursorDoctorForAccounts(
           source: "native_session",
           availability: "unavailable",
           verification: "not_run",
-          detail: "native Cursor session is not authenticated",
+          detail:
+            probeNativeRequested && !probeNative
+              ? "host CLI logins are not used (unified account model): connect an isolated Cursor account (`claudexor auth login cursor`)"
+              : "native Cursor session is not authenticated",
         };
   const apiSource: AuthSourceReadiness = {
     source: "api_key_env",
