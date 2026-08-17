@@ -24,7 +24,7 @@ import type {
 import { CredentialProfileStatus as CredentialProfileStatusSchema } from "@claudexor/schema";
 import { namespacedSecretRefBase } from "@claudexor/secrets";
 import { claudexorOwnedRoot, nowIso, redactSecrets } from "@claudexor/util";
-import { codexAuthModeAt, defaultNativeCodexHome, ensureCodexApiAuth } from "./auth.js";
+import { codexAuthModeAt, ensureCodexApiAuth } from "./auth.js";
 import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { BIN, codexNativeEnv, type CodexProfileRuntimeDeps } from "./index.js";
 
@@ -96,18 +96,14 @@ function isWithinOwnedRoot(dir: string): boolean {
 
 /**
  * Canonicalize a profile's CODEX_HOME (INV-135): absolute, symlinks resolved
- * when the dir exists, and NEVER the default native home — profiles are
- * additive identities; the vendor-owned default is never a profile target.
+ * when the dir exists. Under the unified account model the Claudexor-owned
+ * legacy native home IS a legal row locator — the exact dir the startup
+ * migration auto-registers as `codex-default` (bytes never move). The
+ * operator's ordinary ~/.codex stays outside the owned root and is still
+ * refused by the shared confinement check.
  */
 export function canonicalCodexProfileHome(locator: string): string {
-  const dir = canonicalIsolationLocator(locator, "credential profile CODEX_HOME");
-  const defaultDir = normalizeThroughExistingAncestor(defaultNativeCodexHome());
-  if (dir === defaultDir) {
-    throw new Error(
-      "credential profile CODEX_HOME must not be the default native codex home (profiles are additive; INV-135)",
-    );
-  }
-  return dir;
+  return canonicalIsolationLocator(locator, "credential profile CODEX_HOME");
 }
 
 /**

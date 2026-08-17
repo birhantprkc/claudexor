@@ -409,12 +409,16 @@ export class QuotaRegistry {
     this.apply(snapshot);
   }
 
-  removeSubject(harness: string, subjectId: string): number {
+  /** `subjectId: null` retires a harness's legacy default/native subject —
+   * the unified-accounts migration's quota step (no replay alias: the new row
+   * refreshes fresh, legacy null evidence is removed here or ages out). */
+  removeSubject(harness: string, subjectId: string | null): number {
     // Fence held official work at the earliest credential-deletion boundary.
     this.noteCredentialChange();
     const removed = [...this.snapshots.values()].filter(
       (snapshot) =>
-        snapshot.subject.harness === harness && snapshot.subject.subject_id === subjectId,
+        snapshot.subject.harness === harness &&
+        (snapshot.subject.subject_id ?? null) === subjectId,
     ).length;
     this.journal.append(REMOVED, { harness, subject_id: subjectId });
     this.remove(harness, subjectId);

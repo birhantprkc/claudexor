@@ -59,16 +59,19 @@ afterEach(() => {
  */
 const NO_EFFORT_PROBE = { probeEfforts: async () => null } as const;
 
-describe("canonicalCodexProfileHome (INV-135)", () => {
-  it("refuses relative paths, out-of-tree paths, and the default native home", () => {
+describe("canonicalCodexProfileHome (INV-135, unified account model)", () => {
+  it("refuses relative paths and paths outside the Claudexor-owned root", () => {
     expect(() => canonicalCodexProfileHome("relative/home")).toThrow(/absolute/);
     expect(() => canonicalCodexProfileHome("/tmp/anywhere")).toThrow(/must live under/);
-    // Under the vitest temp CLAUDEXOR_CONFIG_DIR the default home sits outside
-    // ~/.claudexor, so the confinement is what refuses it; the must-not-be-
-    // default arm fires when the default lives inside the owned tree.
-    expect(() => canonicalCodexProfileHome(defaultNativeCodexHome())).toThrow(
-      /must live under|must not be the default/,
-    );
+  });
+
+  it("accepts the Claudexor-owned legacy native home — the codex-default row locator", () => {
+    // The startup migration auto-registers the legacy default store as the
+    // `codex-default` row without moving bytes, so its exact dir is a legal
+    // locator now. The owned-root confinement is unchanged: the operator's
+    // ordinary ~/.codex stays refused (out-of-tree case above).
+    const home = defaultNativeCodexHome();
+    expect(canonicalCodexProfileHome(home)).toBe(canonicalCodexProfileHome(`${home}/`));
   });
 });
 

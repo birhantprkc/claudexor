@@ -391,6 +391,48 @@ export class ProjectPartitions implements CommandAuthority {
     return this.requireThreadStore(id).updateThread(id, patch);
   }
 
+  /**
+   * Unified-accounts migration continuity step, applied across the global
+   * store and every HEALTHY project partition. Quarantined partitions are
+   * skipped and DISCLOSED (their null-lane sessions migrate on a later start
+   * once recovered — no silent loss, a bounded disclosed residual).
+   */
+  migrateNullProfileContinuity(
+    harnessId: string,
+    rowId: string,
+  ): { sessions: number; checkpoints: number; skippedPartitions: string[] } {
+    return this.applyProfileContinuity((store) =>
+      store.migrateNullProfileContinuity(harnessId, rowId),
+    );
+  }
+
+  /** Reverse continuity step of the supported downgrade path. */
+  rollbackProfileContinuity(
+    harnessId: string,
+    rowId: string,
+  ): { sessions: number; checkpoints: number; skippedPartitions: string[] } {
+    return this.applyProfileContinuity((store) =>
+      store.rollbackProfileContinuity(harnessId, rowId),
+    );
+  }
+
+  private applyProfileContinuity(
+    apply: (store: ThreadStore) => { sessions: number; checkpoints: number },
+  ): { sessions: number; checkpoints: number; skippedPartitions: string[] } {
+    this.partitions.sync();
+    const skippedPartitions = [...this.partitions.entries()]
+      .filter(([, entry]) => !entry.manager.ready())
+      .map(([id]) => id);
+    let sessions = 0;
+    let checkpoints = 0;
+    for (const store of this.threadStores()) {
+      const result = apply(store);
+      sessions += result.sessions;
+      checkpoints += result.checkpoints;
+    }
+    return { sessions, checkpoints, skippedPartitions };
+  }
+
   invalidateCredentialProfile(harnessId: string, profileId: string) {
     this.assertCredentialProfileInvalidationReady();
     return this.threadStores().reduce(

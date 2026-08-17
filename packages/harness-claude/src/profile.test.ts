@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { CredentialProfile, HarnessEvent, HarnessRunSpec } from "@claudexor/schema";
 import type { CliRunLoopOptions } from "@claudexor/core";
 import { createClaudeAdapter, probeAuthStatus } from "./index.js";
+import { defaultNativeClaudeConfigDir } from "./native-home.js";
 import { canonicalProfileConfigDir } from "./profile.js";
 
 const readonlySupported = async () => ({
@@ -63,11 +64,19 @@ describe("canonicalProfileConfigDir (INV-135)", () => {
     expect(() => canonicalProfileConfigDir("relative/dir")).toThrow(/absolute/);
   });
 
-  it("refuses the default native Claude dir and any dir outside the owned tree", () => {
+  it("refuses any dir outside the owned tree (ordinary ~/.claude above all)", () => {
     // ~/.claude is outside the Claudexor-owned tree: the confinement fires
     // first (also covering arbitrary user/repo dirs).
     expect(() => canonicalProfileConfigDir(join(homedir(), ".claude"))).toThrow(/must live under/);
     expect(() => canonicalProfileConfigDir("/tmp/anywhere")).toThrow(/must live under/);
+  });
+
+  it("accepts the Claudexor-owned legacy native dir — the claude-default row locator", () => {
+    // The startup migration auto-registers the legacy default store as the
+    // `claude-default` row without moving bytes (Claude Code keys its Keychain
+    // item by this exact path), so the exact dir is a legal locator now.
+    const dir = defaultNativeClaudeConfigDir();
+    expect(canonicalProfileConfigDir(dir)).toBe(canonicalProfileConfigDir(`${dir}/`));
   });
 
   it("under a CLAUDEXOR_CONFIG_DIR override, the override IS the root — the host's real ~/.claudexor is rejected (round-18 #4)", () => {

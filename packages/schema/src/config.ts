@@ -307,6 +307,7 @@ export const GlobalConfig = z
       .default([])
       .superRefine((profiles, ctx) => {
         const seen = new Set<string>();
+        const locators = new Set<string>();
         for (const p of profiles) {
           const key = `${p.harness_id}\u0000${p.profile_id}`;
           if (seen.has(key))
@@ -315,6 +316,17 @@ export const GlobalConfig = z
               message: `duplicate credential profile ${p.profile_id} for harness ${p.harness_id}`,
             });
           seen.add(key);
+          // Locator uniqueness (unified account model): two rows sharing one
+          // config dir would be two names for ONE credential — deletion,
+          // routing, and quota attribution could not tell them apart.
+          if (p.isolation_locator) {
+            if (locators.has(p.isolation_locator))
+              ctx.addIssue({
+                code: "custom",
+                message: `credential profiles must not share isolation_locator ${p.isolation_locator}`,
+              });
+            locators.add(p.isolation_locator);
+          }
         }
       })
       .describe(

@@ -998,7 +998,10 @@ describe("CredentialProfile validation (INV-135)", () => {
     const dup = GlobalConfig.safeParse({ credential_profiles: [entry, entry] });
     expect(dup.success).toBe(false);
     const distinct = GlobalConfig.safeParse({
-      credential_profiles: [entry, { ...entry, harness_id: "codex" }],
+      credential_profiles: [
+        entry,
+        { ...entry, harness_id: "codex", isolation_locator: "/abs/other" },
+      ],
     });
     expect(distinct.success).toBe(true);
   });
@@ -1012,6 +1015,39 @@ describe("CredentialProfile validation (INV-135)", () => {
       });
       expect(cfg.harnesses["claude"]?.profile_policy.limit_action).toBe(limit_action);
     }
+  });
+
+  it("the config registry refuses two rows sharing one isolation_locator (unified account model)", () => {
+    // One dir = one credential: two names for the same store would make
+    // deletion, routing, and quota attribution ambiguous — including across
+    // harnesses (deleting one row's material would gut the other row).
+    const entry = {
+      ...base,
+      credential_kind: "config_dir_login",
+      isolation_locator: "/abs/dir",
+    };
+    const sharedAcrossIds = GlobalConfig.safeParse({
+      credential_profiles: [entry, { ...entry, profile_id: "other" }],
+    });
+    expect(sharedAcrossIds.success).toBe(false);
+    expect(JSON.stringify(sharedAcrossIds.error?.issues)).toContain("share isolation_locator");
+    const sharedAcrossHarnesses = GlobalConfig.safeParse({
+      credential_profiles: [entry, { ...entry, harness_id: "codex" }],
+    });
+    expect(sharedAcrossHarnesses.success).toBe(false);
+    // Secret-ref rows carry no locator and stay unconstrained by this rule.
+    const secretRefRows = GlobalConfig.safeParse({
+      credential_profiles: [
+        { ...base, credential_kind: "api_key", secret_ref: "anthropic:acc-1" },
+        {
+          ...base,
+          profile_id: "other",
+          credential_kind: "api_key",
+          secret_ref: "anthropic:acc-2",
+        },
+      ],
+    });
+    expect(secretRefRows.success).toBe(true);
   });
 });
 

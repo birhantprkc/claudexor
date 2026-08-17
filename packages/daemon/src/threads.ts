@@ -558,6 +558,67 @@ export class ThreadStore {
     if (threads.length > 0) this.commit({ threads });
   }
 
+  /**
+   * Unified-accounts migration (INV-137 continuity, one unit with the lane-home
+   * rename): live sessions recorded under the null engine-default subject are
+   * rewritten IN PLACE onto the auto-registered row id, and every
+   * `<thread>::<harness>::default` lane checkpoint gains a row under the new
+   * lane id (the legacy row stays inert — exact-id lookups never see it).
+   * Idempotent: a second run finds no null sessions and no missing checkpoints.
+   */
+  migrateNullProfileContinuity(
+    harnessId: string,
+    rowId: string,
+  ): { sessions: number; checkpoints: number } {
+    const now = nowIso();
+    const sessions = this.state.sessions
+      .filter((s) => s.harness_id === harnessId && (s.profile_id ?? null) === null)
+      .map((s) => SessionSchema.parse({ ...s, profile_id: rowId, updated_at: now }));
+    const checkpoints: LaneCheckpoint[] = [];
+    for (const checkpoint of this.state.checkpoints) {
+      if (checkpoint.harness_id !== harnessId || (checkpoint.profile_id ?? null) !== null) {
+        continue;
+      }
+      const migrated = makeLaneCheckpoint(
+        checkpoint.thread_id,
+        harnessId,
+        rowId,
+        checkpoint.turn_id,
+      );
+      // The row lane may already have advanced past the legacy lane (a crash
+      // between phases followed by new turns); never move it backwards.
+      if (this.state.checkpoints.some((c) => c.id === migrated.id)) continue;
+      checkpoints.push(migrated);
+    }
+    if (sessions.length > 0 || checkpoints.length > 0) this.commit({ sessions, checkpoints });
+    return { sessions: sessions.length, checkpoints: checkpoints.length };
+  }
+
+  /**
+   * The supported downgrade path's reverse of `migrateNullProfileContinuity`:
+   * sessions recorded under the migrated row id return to the null
+   * engine-default subject a 3.5.0 engine resumes, and each row-lane
+   * checkpoint re-seeds the `::default` lane id at its turn.
+   */
+  rollbackProfileContinuity(
+    harnessId: string,
+    rowId: string,
+  ): { sessions: number; checkpoints: number } {
+    const now = nowIso();
+    const sessions = this.state.sessions
+      .filter((s) => s.harness_id === harnessId && s.profile_id === rowId)
+      .map((s) => SessionSchema.parse({ ...s, profile_id: null, updated_at: now }));
+    const checkpoints: LaneCheckpoint[] = [];
+    for (const checkpoint of this.state.checkpoints) {
+      if (checkpoint.harness_id !== harnessId || checkpoint.profile_id !== rowId) continue;
+      checkpoints.push(
+        makeLaneCheckpoint(checkpoint.thread_id, harnessId, null, checkpoint.turn_id),
+      );
+    }
+    if (sessions.length > 0 || checkpoints.length > 0) this.commit({ sessions, checkpoints });
+    return { sessions: sessions.length, checkpoints: checkpoints.length };
+  }
+
   invalidateCredentialProfile(
     harnessId: string,
     profileId: string,
