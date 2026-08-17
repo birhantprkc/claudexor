@@ -2295,6 +2295,13 @@ describe("setup jobs for credential profiles (INV-135)", () => {
 
   it("refuses a default Antigravity login and never offers to extend its own window", async () => {
     process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg-agy");
+    // Hermetic like the claude/cursor fakes above: without this the test only
+    // passes on a host that happens to have a real `agy` on PATH.
+    const oldAgyBin = process.env.CLAUDEXOR_AGY_BIN;
+    const fakeAgy = join(root, "fake-agy");
+    writeFileSync(fakeAgy, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(fakeAgy, 0o700);
+    process.env.CLAUDEXOR_AGY_BIN = fakeAgy;
     registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
     const manager = createSetupJobManager({
       rootDir: join(root, "store-agy"),
@@ -2316,6 +2323,8 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     expect(window).toBeLessThanOrEqual(61_000);
     expect(() => manager.extend({ jobId: job.jobId })).toThrow(/cannot be extended/);
     await manager.shutdown();
+    if (oldAgyBin === undefined) delete process.env.CLAUDEXOR_AGY_BIN;
+    else process.env.CLAUDEXOR_AGY_BIN = oldAgyBin;
   });
 
   it("binds a cursor profile login to its canonical Claudexor-owned HOME (valentine)", () => {
