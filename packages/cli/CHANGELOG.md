@@ -1,5 +1,52 @@
 # @claudexor/cli
 
+## 3.5.0
+
+### Minor Changes
+
+- 2316ef8: Add the Antigravity CLI (`agy`) as a harness, so a Google AI Pro/Ultra
+  subscription runs through Claudexor like the other vendor CLIs.
+
+  Named Google identities are Claudexor-owned profile HOMEs (`config_dir_login`),
+  so several subscriptions stay signed in side by side without touching the
+  operator's real home or login keychain. `claudexor quota` reads each profile's
+  own `/quota` windows, and the windows are model-scoped: exhausting the Gemini
+  budget does not block the account's Claude/GPT slugs. `claudexor harness
+install agy` downloads Google's official installer in full, prints its size and
+  sha256, and runs the file you were shown — it is never piped into a shell.
+
+  The vendor exposes no config-dir environment variable, so the profile HOME also
+  holds its conversation and cache state, and it publishes no machine-readable
+  account identity — both are disclosed rather than papered over. Windows support
+  is best effort in this release.
+
+### Patch Changes
+
+- Updated dependencies [2316ef8]
+  - @claudexor/harness-agy@3.5.0
+  - @claudexor/util@3.5.0
+  - @claudexor/acp-server@3.5.0
+  - @claudexor/artifact-store@3.5.0
+  - @claudexor/config@3.5.0
+  - @claudexor/control-api@3.5.0
+  - @claudexor/core@3.5.0
+  - @claudexor/daemon@3.5.0
+  - @claudexor/delivery@3.5.0
+  - @claudexor/harness-claude@3.5.0
+  - @claudexor/harness-codex@3.5.0
+  - @claudexor/harness-cursor@3.5.0
+  - @claudexor/harness-fake@3.5.0
+  - @claudexor/harness-opencode@3.5.0
+  - @claudexor/harness-raw-api@3.5.0
+  - @claudexor/journal@3.5.0
+  - @claudexor/mcp-server@3.5.0
+  - @claudexor/orchestrator@3.5.0
+  - @claudexor/review@3.5.0
+  - @claudexor/schema@3.5.0
+  - @claudexor/secrets@3.5.0
+  - @claudexor/workspace@3.5.0
+  - @claudexor/gateway@3.5.0
+
 ## 3.4.2
 
 ### Patch Changes

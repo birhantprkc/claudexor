@@ -3,6 +3,33 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.5.0** (2026-08-17): Google's Antigravity CLI (`agy`) becomes a
+  Claudexor harness, with the thing the vendor itself does not offer — several
+  Google AI Pro/Ultra subscriptions signed in side by side and rotated on
+  quota. Accounts are named profiles, each a Claudexor-owned home directory
+  where the vendor keeps its own token file, so the operator's real home and
+  login keychain stay untouched (live-proven across three Google accounts on
+  macOS). Sign-in works from the app card: the vendor prints a link and waits
+  sixty seconds for a pasted code, reads that code only from a real terminal
+  (the daemon-hosted runner interposes `expect(1)` and propagates the vendor's
+  own exit status), and the job's deadline IS the vendor's window — published
+  as fixed, refused on extend, with a bounded exchange grace after the paste
+  so the clock cannot cancel a sign-in that succeeded. `claudexor quota` reads
+  each account's own `/quota`; every Antigravity window is model-scoped, so an
+  exhausted Gemini budget does not block the account's Claude/GPT slugs, and a
+  run naming no model is governed by whichever budget the profile's selected
+  model actually spends. `claudexor harness install agy` downloads Google's
+  official installer in full (PowerShell one on Windows), prints its size and
+  sha256, and runs the file it showed — never a piped script. Disclosed
+  honestly rather than hidden: the vendor exposes no config-dir variable, so
+  one profile home also holds its conversation state and threads are not
+  isolated from each other; no machine-readable account identity exists;
+  platform isolation is proven on macOS only and doctor says so elsewhere.
+  Also in this release: the Windows process-identity reader no longer times
+  out on a cold PowerShell, silently degrading Windows runs. Development ran
+  as five parallel reviewed phases plus an integration wave; the closing
+  triad+scope wave ran through Claudexor's own agentic flow and its sol slot
+  caught the resident-TUI login defect none of seven prior waves saw.
 - **v3.4.2** (2026-08-16): every mutating delegated cursor run on macOS
   crashed within seconds — `RetriableError: [internal] unable to open database
   file` (SQLITE_CANTOPEN). cursor-agent keeps its chat store in SQLite under

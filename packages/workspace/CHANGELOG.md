@@ -1,5 +1,14 @@
 # @claudexor/workspace
 
+## 3.5.0
+
+### Patch Changes
+
+- Updated dependencies [2316ef8]
+  - @claudexor/util@3.5.0
+  - @claudexor/core@3.5.0
+  - @claudexor/schema@3.5.0
+
 ## 3.4.2
 
 ### Patch Changes

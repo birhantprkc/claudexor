@@ -1,5 +1,12 @@
 # @claudexor/artifact-store
 
+## 3.5.0
+
+### Patch Changes
+
+- Updated dependencies [2316ef8]
+  - @claudexor/util@3.5.0
+
 ## 3.4.2
 
 ### Patch Changes
