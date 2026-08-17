@@ -18,7 +18,12 @@ import {
 } from "@claudexor/schema";
 import { type CandidateRun, unanimousDeclaredFailure } from "./candidateEvidence.js";
 import { preflightCredentialProfile, preflightDefaultSubject } from "./credential-preflight.js";
-import { rotateSpecOnTypedLimit, type ProfilePolicy } from "./credential-profile-rotation.js";
+import {
+  profileHeadroomBreach,
+  rotateSpecOnTypedLimit,
+  subscriptionWindowExhausted,
+  type ProfilePolicy,
+} from "./credential-profile-rotation.js";
 import { type DeclaredFailure, failTerminally } from "./runTerminalResults.js";
 
 const dirs: string[] = [];
@@ -62,20 +67,11 @@ const spent: QuotaSnapshot = {
 };
 
 function refusal(): unknown {
-  try {
-    preflightCredentialProfile({
-      profile,
-      harnessId: "claude",
-      policy: { limit_action: "fail", rotation_eligible: [], headroom_threshold: 0.9 },
-      registry: [profile],
-      snapshots: [spent],
-      readyProfileIds: new Set(),
-      emit: () => {},
-    });
-  } catch (error) {
-    return error;
-  }
-  throw new Error("preflightCredentialProfile did not refuse a breached headroom under fail");
+  // The strict-pin refusal path (D-U6): a fresh breach of the pinned
+  // account's window becomes the typed subscription_window_exhausted error.
+  const breach = profileHeadroomBreach([spent], "claude", profile.profile_id, 0.9, null);
+  if (!breach) throw new Error("fixture snapshot did not breach the headroom threshold");
+  return subscriptionWindowExhausted(profile.profile_id, "claude", breach);
 }
 
 function terminalFailure(error: unknown): RunFailure {

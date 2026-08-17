@@ -513,6 +513,14 @@ export class ProjectPartitions implements CommandAuthority {
     return this.requireThreadStore(id).resumeMap(id, profileId);
   }
 
+  resumeMapAuto(id: string): Record<string, { sessionId: string; profileId: string | null }> {
+    return this.requireThreadStore(id).resumeMapAuto(id);
+  }
+
+  accountBindings(id: string): Record<string, string> {
+    return this.requireThreadStore(id).accountBindings(id);
+  }
+
   recordSession(
     id: string,
     harnessId: string,

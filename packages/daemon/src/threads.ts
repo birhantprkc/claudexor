@@ -559,6 +559,54 @@ export class ThreadStore {
   }
 
   /**
+   * The thread's durable per-harness ACCOUNT BINDINGS (unified account model,
+   * D-U1 order 2): the account an UNPINNED turn stays on — derived from the
+   * lane evidence the thread already persists (its latest live session, else
+   * its latest lane checkpoint, per harness), never a second hand-maintained
+   * record. Null-profile lanes (unmigrated legacy state) bind nothing.
+   */
+  accountBindings(threadId: string): Record<string, string> {
+    const bindings: Record<string, string> = {};
+    const freshest: Record<string, string> = {};
+    const consider = (harnessId: string, profileId: string | null, updatedAt: string): void => {
+      if (!profileId) return;
+      const seen = freshest[harnessId];
+      if (seen !== undefined && seen >= updatedAt) return;
+      freshest[harnessId] = updatedAt;
+      bindings[harnessId] = profileId;
+    };
+    for (const s of this.state.sessions) {
+      if (s.thread_id !== threadId || s.state !== "live") continue;
+      consider(s.harness_id, s.profile_id ?? null, s.updated_at);
+    }
+    for (const c of this.state.checkpoints) {
+      if (c.thread_id !== threadId) continue;
+      consider(c.harness_id, c.profile_id ?? null, c.updated_at);
+    }
+    return bindings;
+  }
+
+  /**
+   * Native resume map for an UNPINNED thread turn: the latest live session per
+   * harness REGARDLESS of profile. Each entry carries its own profile, and the
+   * engine boundary (`resumeSessionForProfile`) re-verifies it against the
+   * RESOLVED account, so a pool switch away from the recorded account starts
+   * fresh instead of crossing profiles (INV-135/137).
+   */
+  resumeMapAuto(threadId: string): Record<string, { sessionId: string; profileId: string | null }> {
+    const map: Record<string, { sessionId: string; profileId: string | null }> = {};
+    const freshest: Record<string, string> = {};
+    for (const s of this.state.sessions) {
+      if (s.thread_id !== threadId || s.state !== "live" || !s.native_session_id) continue;
+      const seen = freshest[s.harness_id];
+      if (seen !== undefined && seen >= s.updated_at) continue;
+      freshest[s.harness_id] = s.updated_at;
+      map[s.harness_id] = { sessionId: s.native_session_id, profileId: s.profile_id ?? null };
+    }
+    return map;
+  }
+
+  /**
    * Unified-accounts migration (INV-137 continuity, one unit with the lane-home
    * rename): live sessions recorded under the null engine-default subject are
    * rewritten IN PLACE onto the auto-registered row id, and every

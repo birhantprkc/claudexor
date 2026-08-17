@@ -331,7 +331,18 @@ export async function main(): Promise<void> {
             threadId,
             executionRoot,
             projectGitInitialization,
-            resumeSessions: threadId ? threads.resumeMap(threadId, requestedProfileId) : undefined,
+            // Pinned turns resume ONLY the pin's own sessions; unpinned turns
+            // get the latest session per harness (any account) plus the
+            // thread's durable account bindings — the engine re-verifies each
+            // entry against the RESOLVED account (D-U1 order: pin → binding →
+            // pool), so resume never crosses profiles (INV-135).
+            resumeSessions: threadId
+              ? requestedProfileId
+                ? threads.resumeMap(threadId, requestedProfileId)
+                : threads.resumeMapAuto(threadId)
+              : undefined,
+            threadAccountBindings:
+              threadId && !requestedProfileId ? threads.accountBindings(threadId) : undefined,
             onSessionObserved: threadId
               ? (harnessId, nativeSessionId, observedModel, profileId) => {
                   // The EVENT's profile is the cache truth (INV-135): rotation

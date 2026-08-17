@@ -309,6 +309,39 @@ export function emitRotationExhausted(args: {
 }
 
 /**
+ * A spent subscription window on an EXPLICITLY PINNED account, refused
+ * MACHINE-READABLY (D-U6: a pin is strict — never a silent rotation).
+ *
+ * The verdict a caller actually needs from this refusal is "not now, come back
+ * at T" — and the only honest way to deliver T is as a field. Gluing it into
+ * the sentence and shipping the terminal as `category: internal, code: null`
+ * left every consumer (a surface, a scheduler, an automating host) to regex
+ * the prose for a timestamp, which no contract in this repo permits. The
+ * message stays human-readable; the machine reads `code` and `resetsAt`, which
+ * the run terminal lifts onto `final/failure.yaml` verbatim.
+ */
+export function subscriptionWindowExhausted(
+  profileId: string,
+  harnessId: string,
+  breach: HeadroomBreach,
+): Error {
+  return Object.assign(
+    new Error(
+      `credential profile "${profileId}" (${harnessId}) is over its headroom threshold ` +
+        `(${breach.constraint_id} at ${Math.round(breach.used_ratio * 100)}% >= ${Math.round(breach.threshold * 100)}%; ` +
+        `a pinned account never rotates${breach.resets_at ? `; resets ${breach.resets_at}` : ""})`,
+    ),
+    {
+      code: "subscription_window_exhausted",
+      // Not `internal`: nothing malfunctioned. The account cannot serve this
+      // run until its window reopens, which is what harness_unavailable means.
+      category: "harness_unavailable",
+      resetsAt: breach.resets_at,
+    },
+  );
+}
+
+/**
  * Reactive failover plan (`vendor_limit_rejected` / structural, W5.4 + A2):
  * rotation fires ONLY on the typed evidence predicate under a `rotate`
  * policy, marks the current profile tried (at most once per attempt each),
@@ -437,7 +470,12 @@ export async function rotateSpecOnTypedLimit(args: {
   /** Pre-spawn route estimate for a profile-less spec: default-subject
    * rotation is allowed ONLY off a vendor_native attempt. */
   defaultRouteWasVendorNative?: boolean;
+  /** D-U6 (unified account model): an EXPLICIT pin is strict — a typed vendor
+   * limit fails the attempt with its evidence, never a silent rotation onto a
+   * sibling account. Pool-selected rows (unpinned runs) still rotate. */
+  pinned?: boolean;
 }): Promise<HarnessRunSpec | { poolExhausted: Error } | null> {
+  if (args.pinned) return null;
   const current = args.spec.credential_profile ?? null;
   const evidence = reactiveRotationEvidence(args);
   const route = limitSubjectRoute(

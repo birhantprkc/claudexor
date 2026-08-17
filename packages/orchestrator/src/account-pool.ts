@@ -133,6 +133,33 @@ export type PoolSelection =
       resets_at: string | null;
     };
 
+/**
+ * Typed refusal for an unpinned run whose harness pool cannot serve it and
+ * whose auth preference forbids the paid API-key route (Q2=A: exhaustion is
+ * unavailability; `subscription` never falls to a key — INV-061). Machine
+ * fields mirror the pinned refusal: `code` + `resetsAt`, prose stays human.
+ */
+export function accountPoolUnavailable(
+  harnessId: string,
+  selection: Extract<PoolSelection, { outcome: "exhausted" | "empty" }>,
+): Error {
+  const exhausted = selection.outcome === "exhausted";
+  return Object.assign(
+    new Error(
+      exhausted
+        ? `every enabled ${harnessId} account is over its quota window` +
+          `${selection.resets_at ? ` (earliest reset ${selection.resets_at})` : ""}; ` +
+          `the requested subscription route forbids the API-key fallback`
+        : `no enabled ${harnessId} account is signed in and the requested subscription route forbids the API-key fallback; connect an account or pin one (--profile)`,
+    ),
+    {
+      code: exhausted ? "subscription_window_exhausted" : "no_routable_account",
+      category: "harness_unavailable",
+      resetsAt: selection.resets_at,
+    },
+  );
+}
+
 /** Select the unpinned-run account from the pool (or report why not). */
 export function selectFromAccountPool(
   args: Parameters<typeof rankAccountPool>[0],

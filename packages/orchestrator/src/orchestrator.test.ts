@@ -3384,6 +3384,7 @@ describe("Orchestrator", () => {
     process.env.CLAUDEXOR_CONFIG_DIR = configDir;
     const mkAsker = () => {
       const seen: unknown[] = [];
+      const prefs: string[] = [];
       const asker = askAdapter("asker", function* (sessionId) {
         const ts = new Date().toISOString();
         yield { type: "started", session_id: sessionId, ts };
@@ -3393,13 +3394,15 @@ describe("Orchestrator", () => {
       const inner = asker.run.bind(asker);
       asker.run = (spec) => {
         seen.push(spec.credential_profile);
+        prefs.push(spec.auth_preference ?? "auto");
         return inner(spec);
       };
-      return { asker, seen };
+      return { asker, seen, prefs };
     };
     try {
-      // Native disabled, no pin → nothing routable, refuse LOUDLY naming the
-      // setting; never silently fall back into the login.
+      // Native disabled, no rows, no pin, SUBSCRIPTION-only preference →
+      // nothing routable, refuse LOUDLY naming the setting; never silently
+      // fall back into the login (INV-135).
       writeFileSync(
         join(configDir, "config.yaml"),
         ["harnesses:", "  asker:", "    native_credentials_enabled: false", ""].join("\n"),
@@ -3408,10 +3411,37 @@ describe("Orchestrator", () => {
       const refused = await new Orchestrator({
         registry: new Map([["asker", off.asker]]),
         reviewers: [],
-      }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask", harnesses: ["asker"] });
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        authPreference: "subscription",
+      });
       expect(legacyOutcome(refused)).toBe("failed");
       expect(refused.summary).toMatch(/native_credentials_enabled=false/);
       expect(off.seen).toHaveLength(0);
+
+      // Same exclusion under the default `auto` preference: the pool is empty,
+      // so the run rides the typed PAID API-key route (Q2=A / INV-061) — the
+      // spec carries auth_preference=api_key so the adapter can never spawn
+      // back INTO the disabled login, and the fallback is disclosed.
+      const paid = mkAsker();
+      const paidEvents: string[] = [];
+      const paidRes = await new Orchestrator({
+        registry: new Map([["asker", paid.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        onEvent: (event) => paidEvents.push(event.type),
+      });
+      expect(legacyOutcome(paidRes)).toBe("success");
+      expect(paid.seen).toEqual([null]);
+      expect(paid.prefs).toEqual(["api_key"]);
+      expect(paidEvents).toContain("route.account.pool_exhausted");
 
       // Native disabled but an explicit --profile pin is given → the pin routes.
       writeFileSync(
@@ -3448,7 +3478,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("reactively rotates on a TYPED vendor limit — new session, new profile, provenance (W5.4)", async () => {
+  it("reactively rotates an UNPINNED pool row on a TYPED vendor limit — new session, new profile, provenance (W5.4, unified model)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-reactive-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -3460,8 +3490,8 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
@@ -3470,18 +3500,12 @@ describe("Orchestrator", () => {
         "  - profile_id: c",
         "    harness_id: limited",
         "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
-        "  - profile_id: d",
-        "    harness_id: limited",
-        "    display_name: D",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:d'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-c")}'`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
         "      limit_action: rotate",
-        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
@@ -3568,18 +3592,18 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).not.toBe("failed");
+      // The UNPINNED pool selects "a" (deterministic id tie-break among
+      // unknown-quota rows); the typed vendor limit rotates to the next READY
+      // pool sibling — b's expired login is skipped, c spawns fresh.
       expect(spawns.map((s) => s.profile)).toEqual(["a", "c"]);
-      // Admission probes the explicit current identity; rotation probes only
-      // the statically-selectable same-kind candidate. Cross-kind b is never
-      // activated merely to discover that policy cannot select it. The
-      // trailing "a" is A7's SIBLING differential probe of the CURRENT
-      // subject on the rotation-eligible failure — a doctor probe, never a
-      // spawned attempt (the spawn pin above stays two runs).
-      expect(probedProfiles).toEqual(["a", "c", "a"]);
+      // A7's SIBLING differential probe of the CURRENT subject fires on the
+      // rotation-eligible failure — a doctor probe, never a spawned attempt
+      // (the spawn pin above stays two runs).
+      expect(probedProfiles).toContain("a");
+      expect(probedProfiles).toContain("c");
       // Failover is a NEW vendor session under the new credential.
       expect(new Set(spawns.map((s) => s.session)).size).toBe(2);
       expect(events).toContain("route.profile.rotated");
@@ -3597,6 +3621,196 @@ describe("Orchestrator", () => {
         credential_profile_applied?: string | null;
       }>(join(res.runDir, "attempts", "a01", "attempt.yaml"));
       expect(attempt?.credential_profile_applied).toBe("c");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("an UNPINNED thread turn stays on its bound account; an unusable binding switches with a DISCLOSED lane switch (D-U1 order 2, Q1=A)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-binding-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const mk = (unreadyId: string | null) => {
+        const seen: Array<string | null> = [];
+        const asker = askAdapter("asker", function* (sessionId) {
+          const ts = new Date().toISOString();
+          yield { type: "started", session_id: sessionId, ts };
+          yield { type: "message", session_id: sessionId, ts, text: "4" };
+          yield { type: "completed", session_id: sessionId, ts };
+        });
+        asker.probeCredentialProfile = async (profile) => ({
+          profile_id: profile.profile_id,
+          harness_id: "asker",
+          availability: profile.profile_id === unreadyId ? "unavailable" : "available",
+          verification: profile.profile_id === unreadyId ? "failed" : "passed",
+          verification_source: "local_store",
+          detail: profile.profile_id === unreadyId ? "login expired" : "fixture verified",
+          last_verified_at: new Date().toISOString(),
+        });
+        const inner = asker.run.bind(asker);
+        asker.run = (spec) => {
+          seen.push(spec.credential_profile?.profile_id ?? null);
+          return inner(spec);
+        };
+        return { asker, seen };
+      };
+      // Healthy binding: the thread stays on "b" even though the pool's
+      // deterministic tie-break would pick "a" — stickiness beats ranking.
+      const sticky = mk(null);
+      const stickyEvents: string[] = [];
+      const stickyRes = await new Orchestrator({
+        registry: new Map([["asker", sticky.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadAccountBindings: { asker: "b" },
+        onEvent: (event) => stickyEvents.push(event.type),
+      });
+      expect(legacyOutcome(stickyRes)).toBe("success");
+      expect(sticky.seen).toEqual(["b"]);
+      expect(stickyEvents).not.toContain("route.account.lane_switch");
+
+      // The bound account became unusable: the run switches to the pool
+      // sibling and DISCLOSES the lane switch — never silent (Q1=A).
+      const switched = mk("b");
+      const switchedEvents: string[] = [];
+      const switchedRes = await new Orchestrator({
+        registry: new Map([["asker", switched.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadAccountBindings: { asker: "b" },
+        onEvent: (event) => switchedEvents.push(event.type),
+      });
+      expect(legacyOutcome(switchedRes)).toBe("success");
+      expect(switched.seen).toEqual(["a"]);
+      expect(switchedEvents).toContain("route.account.lane_switch");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("an EXPLICIT pin never rotates on a typed vendor limit — strict, the attempt fails with its evidence (D-U6)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-pin-strict-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: c",
+        "    harness_id: limited",
+        "    display_name: C",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-c")}'`,
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          spawns.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          yield {
+            type: "status",
+            session_id: spec.session_id,
+            ts,
+            text: "api_retry: rate limited",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          };
+          yield { type: "error", session_id: spec.session_id, ts, error: "vendor rate limit" };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "a",
+        onEvent: (event) => events.push(event.type),
+      });
+      // The pinned account hit its vendor limit: no silent rotation onto "c" —
+      // every (bounded transient-retry) attempt stays on the pin and the run
+      // fails with the typed evidence (consistent with reviewer pins).
+      expect(legacyOutcome(res)).toBe("failed");
+      expect(spawns.length).toBeGreaterThanOrEqual(1);
+      expect(new Set(spawns)).toEqual(new Set(["a"]));
+      expect(events).not.toContain("route.profile.rotated");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -4219,7 +4433,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("reactively rotates in the READ-ONLY lane too (release wave round-13)", async () => {
+  it("reactively rotates in the READ-ONLY lane too (release wave round-13; unpinned pool)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-ro-rotate-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4231,23 +4445,17 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: asker",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
         "    credential_kind: config_dir_login",
         `    isolation_locator: '${join(configDir, "profile-b")}'`,
-        "  - profile_id: c",
-        "    harness_id: asker",
-        "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
         "harnesses:",
         "  asker:",
         "    profile_policy:",
         "      limit_action: rotate",
-        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
@@ -4299,15 +4507,18 @@ describe("Orchestrator", () => {
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).toBe("success");
-      expect(profilesSeen).toEqual(["a", "c"]);
-      // Trailing "a" = A7's sibling differential probe of the current subject
-      // (doctor probe only — profilesSeen above proves no third attempt ran).
-      expect(probedProfiles).toEqual(["a", "c", "a"]);
+      // Unpinned pool selects "a" (id tie-break); the typed limit rotates the
+      // read-only lane onto the next ready pool sibling. A7's sibling
+      // differential probe of the current subject rides the same decision
+      // (doctor probe only — profilesSeen proves no third attempt ran).
+      expect(profilesSeen).toEqual(["a", "b"]);
+      expect(probedProfiles).toContain("a");
+      expect(probedProfiles).toContain("b");
       expect(events).toContain("route.profile.rotated");
+      expect(events).toContain("route.account.pool_selected");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -5128,7 +5339,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("preflight rotation skips an unready target and spawns the next ready profile", async () => {
+  it("the unpinned pool skips exhausted and unready rows and spawns the best ready sibling; a PIN refuses typed (D-U1/D-U6)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-rotate-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -5140,28 +5351,27 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: asker",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
         "  - profile_id: c",
         "    harness_id: asker",
         "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-c")}'`,
         "  - profile_id: d",
         "    harness_id: asker",
         "    display_name: D",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:d'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-d")}'`,
         "harnesses:",
         "  asker:",
         "    profile_policy:",
         "      limit_action: rotate",
-        "      rotation_eligible: [b, c]",
         "",
       ].join("\n"),
     );
@@ -5191,46 +5401,72 @@ describe("Orchestrator", () => {
         seen.push(spec.credential_profile?.profile_id ?? "(none)");
         return askerRun(spec);
       };
+      const saturatedA = () => [
+        {
+          subject: {
+            harness: "asker",
+            credential_route: "vendor_native" as const,
+            plan_label: null,
+            subject_id: "a",
+          },
+          constraints: [
+            {
+              id: "five_hour",
+              label: "5 hour",
+              used_ratio: 0.97,
+              window_seconds: 18000,
+              resets_at: null,
+              cooldown_until: null,
+            },
+          ],
+          source: "claude_oauth_usage" as const,
+          observed_at: new Date().toISOString(),
+          freshness: "fresh" as const,
+        },
+      ];
       const events: string[] = [];
       const res = await new Orchestrator({
         registry: new Map([["asker", asker]]),
         reviewers: [],
-        quotaSnapshots: () => [
-          {
-            subject: {
-              harness: "asker",
-              credential_route: "managed_api_key",
-              plan_label: null,
-              subject_id: "a",
-            },
-            constraints: [
-              {
-                id: "five_hour",
-                label: "5 hour",
-                used_ratio: 0.97,
-                window_seconds: 18000,
-                resets_at: null,
-                cooldown_until: null,
-              },
-            ],
-            source: "claude_oauth_usage",
-            observed_at: new Date().toISOString(),
-            freshness: "fresh",
-          },
-        ],
+        quotaSnapshots: saturatedA,
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(legacyOutcome(res)).toBe("success");
+      // The unpinned pool skips exhausted "a" (fresh breach) and unready "b"
+      // (expired login) and lands on the best ready sibling deterministically.
+      expect(seen).toEqual(["c"]);
+      expect(probedProfiles).toContain("a");
+      expect(probedProfiles).toContain("b");
+      expect(probedProfiles).toContain("c");
+      expect(events).toContain("route.account.pool_selected");
+      expect(events).not.toContain("route.profile.rotated");
+
+      // An EXPLICIT pin on the exhausted "a" refuses TYPED before any spawn
+      // (D-U6) — never a silent rotation onto the ready siblings.
+      seen.length = 0;
+      const pinnedEvents: string[] = [];
+      const pinned = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+        quotaSnapshots: saturatedA,
       }).run({
         repoRoot: repo,
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
         credentialProfileId: "a",
-        onEvent: (event) => events.push(event.type),
+        onEvent: (event) => pinnedEvents.push(event.type),
       });
-      expect(legacyOutcome(res)).toBe("success");
-      expect(seen).toEqual(["c"]);
-      expect(probedProfiles).toEqual(["a", "b", "c"]);
-      expect(events).toContain("route.profile.headroom_exceeded");
-      expect(events).toContain("route.profile.rotated");
+      expect(legacyOutcome(pinned)).toBe("failed");
+      expect(pinned.summary).toMatch(/over its headroom threshold/);
+      expect(seen).toEqual([]);
+      expect(pinnedEvents).toContain("route.profile.headroom_exceeded");
+      expect(pinnedEvents).not.toContain("route.profile.rotated");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -5371,9 +5607,9 @@ describe("Orchestrator", () => {
 
   it.each([
     { action: "rotate" as const, expectedProfile: "release-sol", expectedStarts: 1 },
-    { action: "fail" as const, expectedProfile: null, expectedStarts: 0 },
+    { action: "fail" as const, expectedProfile: "release-sol", expectedStarts: 1 },
   ])(
-    "resolves a saturated default account before pool filtering when policy is $action",
+    "an unpinned run routes to the ready pool row regardless of limit_action=$action (unified model: the saturated legacy default subject is not a row)",
     async ({ action, expectedProfile, expectedStarts }) => {
       const repo = await initRepo();
       const configDir = reapMk(join(tmpdir(), `claudexor-default-${action}-quota-`));
@@ -5435,17 +5671,13 @@ describe("Orchestrator", () => {
           onEvent: (event) => events.push(event.type),
         });
         expect(profilesSeen).toHaveLength(expectedStarts);
-        if (expectedStarts > 0) {
-          expect(legacyOutcome(result)).toBe("success");
-          expect(profilesSeen).toEqual([expectedProfile]);
-          expect(events.filter((type) => type === "route.profile.headroom_exceeded")).toHaveLength(
-            1,
-          );
-          expect(events.filter((type) => type === "route.profile.rotated")).toHaveLength(1);
-        } else {
-          expect(legacyOutcome(result)).toBe("failed");
-          expect(events).not.toContain("route.profile.rotated");
-        }
+        // The registered row IS the pool; the saturated null-subject snapshot
+        // belongs to the legacy default subject (not a row) and cannot demote
+        // the ready row — no rotation event fires, the pool simply selects.
+        expect(legacyOutcome(result)).toBe("success");
+        expect(profilesSeen).toEqual([expectedProfile]);
+        expect(events).toContain("route.account.pool_selected");
+        expect(events).not.toContain("route.profile.rotated");
       } finally {
         if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
         else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;

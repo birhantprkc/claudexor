@@ -1,17 +1,21 @@
 import { existsSync } from "node:fs";
 import {
   effectiveAuthPreference,
+  effectiveLimitAction,
   observeNativeSessionEvent,
+  preflightDefaultSubject,
+  profileHeadroomBreach,
   resolveCredentialProfile,
   resumeSessionForProfile,
   rotateSpecOnTypedLimit,
-  runProfilePreflight,
   selectedProfileAvailability,
+  subscriptionWindowExhausted,
   type ProfilePolicy,
   type VendorQuotaObservations,
 } from "./credential-profiles.js";
 import { currentSubjectProber, readyProfilesForRotation } from "./credential-differential.js";
 import type { TransientFailureObservation } from "./transientClassify.js";
+import { accountPoolRows, accountPoolUnavailable, selectFromAccountPool } from "./account-pool.js";
 import { writeRunTelemetryArtifact } from "./runTelemetryWriter.js";
 import {
   buildFileBackedSynthesisInput,
@@ -458,6 +462,14 @@ export interface RunInput {
   /** Explicit credential profile for this turn (INV-135): resolved once per
    * routed harness; unknown/disabled/mismatched ids refuse, never default. */
   credentialProfileId?: string | null;
+  /** The thread's durable per-harness ACCOUNT BINDINGS (unified account model,
+   * D-U1 order 2), derived by the daemon from the thread's own lane evidence
+   * (latest live session / lane checkpoint per harness). An UNPINNED turn
+   * stays on its bound account while that row is ready; a bound account that
+   * became disabled/deleted/revoked/exhausted switches to the pool with a
+   * disclosed lane switch (owner Q1=A). Supplied only for unpinned thread
+   * turns; an explicit pin always wins. */
+  threadAccountBindings?: Record<string, string>;
   /**
    * Native CLI session ids to resume, keyed by harness id (the thread's vendor
    * session cache). A routed harness with an entry continues its own native
@@ -990,14 +1002,27 @@ export class Orchestrator {
       quotaAdmission?.model === model
         ? quotaAdmission.profile
         : await this.preflightProfile(input, harnessId, model, log, defaultRoute);
+    // Q2=A: an unpinned run whose pool was empty/exhausted rides the PAID
+    // API-key route explicitly — the adapter's explicit-key ladder can never
+    // silently spawn back into an exhausted or excluded native login. The
+    // admission receipt (quotaAdmission.route) is the carrier when this spec
+    // build reuses the admission resolution; a fresh resolution reads the
+    // per-run flag it just set.
+    const forcedApiKeyRoute =
+      profile === null &&
+      (quotaAdmission?.model === model
+        ? quotaAdmission.route === "managed_api_key"
+        : this.poolApiKeyRoute(input, harnessId));
     return {
       // "auto" at ANY level falls through (thread turns send the thread default
       // "auto" as a per-run value; it must not shadow a configured preference).
-      auth_preference: effectiveAuthPreference(
-        input.authPreference,
-        cfg?.harnesses?.[harnessId]?.auth_preference,
-        cfg?.routing?.auth_preference,
-      ),
+      auth_preference: forcedApiKeyRoute
+        ? "api_key"
+        : effectiveAuthPreference(
+            input.authPreference,
+            cfg?.harnesses?.[harnessId]?.auth_preference,
+            cfg?.routing?.auth_preference,
+          ),
       resume_session_id: resumeSessionForProfile(input.resumeSessions?.[harnessId], profile),
       credential_profile: profile,
     };
@@ -1012,25 +1037,46 @@ export class Orchestrator {
    * Keyed by the run's REQUESTED credential profile — the same key the daemon's
    * `resumeMap` lookup uses (INV-135), so record and resume land in one home.
    */
-  private laneHomeEnvFor(input: RunInput, harnessId: string): Record<string, string> | null {
+  private laneHomeEnvFor(
+    input: RunInput,
+    harnessId: string,
+    // The lane is keyed by the RESOLVED account (INV-135/137, K.2 SSOT): the
+    // pin, the thread-bound row, or the pool selection — the same key the
+    // recorded native session carries, so record and resume share one home.
+    resolvedProfileId: string | null,
+  ): Record<string, string> | null {
     if (!input.threadId) return null;
     return new WorkspaceManager(input.repoRoot).laneHomeEnv(
       input.threadId,
       harnessId,
-      // The lane is keyed by the EFFECTIVE account (INV-135): an explicit pin,
-      // else null resolves the same home the recorded native session lives in.
-      this.effectiveProfileId(input, harnessId),
+      resolvedProfileId,
     ).env;
   }
 
   /**
-   * The per-harness EFFECTIVE credential profile id (INV-135 accounts
-   * authority): an explicit per-run/per-thread pin wins; else null — POOL AUTO,
-   * the native/CLI login default subject (enabled profiles route only by
-   * explicit pin or quota rotation, never as a silent Active default).
+   * The per-harness EXPLICIT pin (INV-135 accounts authority, unified model):
+   * an explicit per-run/per-thread pin is strict and wins everything. Null
+   * means UNPINNED — the run resolves through the thread's account binding,
+   * then the quota-aware pool (D-U1), inside `preflightProfile`.
    */
   private effectiveProfileId(input: RunInput, _harnessId: string): string | null {
     return input.credentialProfileId ?? null;
+  }
+
+  /** Per-run record of harnesses whose unpinned route fell to the PAID
+   * API-key ROUTE because the account pool was empty/exhausted (Q2=A): the
+   * spec then carries auth_preference=api_key so the adapter can never spawn
+   * back into an exhausted or excluded native login. */
+  private readonly poolApiKeyRoutes = new WeakMap<RunInput, Set<string>>();
+
+  private notePoolApiKeyRoute(input: RunInput, harnessId: string): void {
+    const set = this.poolApiKeyRoutes.get(input) ?? new Set<string>();
+    set.add(harnessId);
+    this.poolApiKeyRoutes.set(input, set);
+  }
+
+  private poolApiKeyRoute(input: RunInput, harnessId: string): boolean {
+    return this.poolApiKeyRoutes.get(input)?.has(harnessId) ?? false;
   }
 
   /** Whether the native/CLI login is EXCLUDED from this harness's credential
@@ -1141,6 +1187,18 @@ export class Orchestrator {
     };
   }
 
+  /**
+   * The ONE account-resolution owner for a run's harness (INV-135 rewrite,
+   * D-U1): (1) an explicit pin is STRICT — a fresh exhausted window is a
+   * typed refusal, never a silent rotation (D-U6); (2) an unpinned thread
+   * turn stays on its durable bound account while it is ready, else switches
+   * with a disclosed lane switch (Q1=A); (3) unbound/unbindable runs take the
+   * best row of the quota-aware pool; (4) an empty/exhausted pool is
+   * unavailability — the paid API-key ROUTE serves it under a permitting
+   * auth preference (Q2=A, INV-061), else a typed refusal. Harnesses with no
+   * registered rows keep the legacy default-subject ladder (unmigrated
+   * stores).
+   */
   private async preflightProfile(
     input: RunInput,
     harnessId: string,
@@ -1148,20 +1206,172 @@ export class Orchestrator {
     log: EventLog | undefined,
     defaultRoute: "local_session" | "api_key" | null,
   ): Promise<CredentialProfile | null> {
-    const profile = this.resolveCredentialProfile(input, harnessId);
-    return runProfilePreflight({
-      profile,
+    const pinned = this.resolveCredentialProfile(input, harnessId);
+    const policy = this.profilePolicy(input.repoRoot, harnessId);
+    const registry = this.config(input.repoRoot)?.global.credential_profiles ?? [];
+    const snapshots = this.deps.quotaSnapshots?.() ?? [];
+    const emit = (
+      type:
+        | "route.profile.headroom_exceeded"
+        | "route.profile.rotated"
+        | "route.profile.rotation_exhausted"
+        | "route.account.pool_selected"
+        | "route.account.lane_switch"
+        | "route.account.pool_exhausted",
+      payload: Record<string, unknown>,
+    ): void => {
+      log?.emit(type, payload);
+    };
+    if (pinned) {
+      // D-U6: strict pin. A fresh exhausted window refuses with its reset
+      // time; unknown/stale quota never refuses (D3 freshness).
+      const breach = profileHeadroomBreach(
+        snapshots,
+        harnessId,
+        pinned.profile_id,
+        policy.headroom_threshold,
+        model,
+      );
+      if (!breach) return pinned;
+      emit("route.profile.headroom_exceeded", {
+        harness_id: harnessId,
+        profile_id: pinned.profile_id,
+        action: "refuse",
+        constraint_id: breach.constraint_id,
+        used_ratio: breach.used_ratio,
+        threshold: breach.threshold,
+        resets_at: breach.resets_at,
+      });
+      throw subscriptionWindowExhausted(pinned.profile_id, harnessId, breach);
+    }
+    const pool = accountPoolRows(registry, harnessId);
+    if (pool.length === 0) {
+      if (this.nativeCredentialsDisabled(input.repoRoot, harnessId)) {
+        // No rows AND the native login is excluded: only the paid route can
+        // serve — never a silent spawn back INTO the disabled login. The
+        // admission gate already dropped subscription-only requests.
+        this.notePoolApiKeyRoute(input, harnessId);
+        emit("route.account.pool_exhausted", {
+          harness_id: harnessId,
+          reason: "the CLI login is disabled and no account is registered",
+          resets_at: null,
+          fallback: "api_key_route",
+        });
+        return null;
+      }
+      // Legacy default-subject ladder (unmigrated stores): under `rotate`, a
+      // fresh default-subject headroom breach starts on the next eligible
+      // subscription profile instead; `fail`/`ask` change nothing.
+      const breach = profileHeadroomBreach(
+        snapshots,
+        harnessId,
+        null,
+        policy.headroom_threshold,
+        model,
+      );
+      const readyProfileIds =
+        effectiveLimitAction(policy, defaultRoute) === "rotate" &&
+        breach !== null &&
+        defaultRoute === "local_session"
+          ? await this.readyProfileIdsForRotation(input, harnessId, null)
+          : new Set<string>();
+      return preflightDefaultSubject({
+        harnessId,
+        policy,
+        registry,
+        snapshots,
+        readyProfileIds,
+        defaultRoute,
+        model,
+        emit,
+      });
+    }
+    const quota = this.vendorQuotaObservations();
+    const adapter = this.deps.registry.get(harnessId);
+    const boundId = input.threadAccountBindings?.[harnessId] ?? null;
+    let boundSwitchReason: string | null = null;
+    if (boundId) {
+      // D-U1 order 2: the thread's bound account resolves BEFORE the pool —
+      // stickiness is not a pool ranking preference, so an explicit
+      // rotation_eligible list cannot evict a healthy binding.
+      const bound = pool.find((row) => row.profile_id === boundId);
+      if (bound) {
+        const verdict = await selectedProfileAvailability({
+          registry,
+          profileId: boundId,
+          harnessId,
+          probe: adapter?.probeCredentialProfile?.bind(adapter),
+          quota,
+        });
+        const breach = profileHeadroomBreach(
+          snapshots,
+          harnessId,
+          boundId,
+          policy.headroom_threshold,
+          model,
+        );
+        if (verdict === "available" && !breach) return bound;
+        boundSwitchReason = breach
+          ? `quota window exhausted${breach.resets_at ? ` (resets ${breach.resets_at})` : ""}`
+          : (verdict ?? "not ready");
+      } else {
+        boundSwitchReason = "the bound account was disabled or removed";
+      }
+    }
+    const readyProfileIds = await this.readyProfileIdsForRotation(input, harnessId, null);
+    const selection = selectFromAccountPool({
+      registry,
       harnessId,
-      policy: this.profilePolicy(input.repoRoot, harnessId),
-      registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
-      snapshots: this.deps.quotaSnapshots?.() ?? [],
-      unusable: this.deps.credentialUnusable?.() ?? [],
-      probeReady: () =>
-        this.readyProfileIdsForRotation(input, harnessId, profile, new Set(), model),
-      defaultRoute,
+      snapshots,
+      readyProfileIds,
+      headroomThreshold: policy.headroom_threshold,
       model,
-      emit: (type, payload) => log?.emit(type, payload),
     });
+    if (selection.outcome === "selected") {
+      const chosen = selection.candidate.profile;
+      if (boundId && boundId !== chosen.profile_id) {
+        // Q1=A: a lane switch is DISCLOSED, never silent (the continuity
+        // layer additionally discloses the hydration on the turn).
+        emit("route.account.lane_switch", {
+          harness_id: harnessId,
+          thread_id: input.threadId ?? null,
+          from_profile_id: boundId,
+          to_profile_id: chosen.profile_id,
+          reason: boundSwitchReason,
+        });
+      }
+      emit("route.account.pool_selected", {
+        harness_id: harnessId,
+        profile_id: chosen.profile_id,
+        quota: selection.candidate.verdict.kind,
+        ...(selection.candidate.verdict.kind === "fresh_headroom"
+          ? { headroom: selection.candidate.verdict.headroom }
+          : {}),
+      });
+      return chosen;
+    }
+    // Pool empty/exhausted = unavailability (Q2=A): the paid API-key ROUTE
+    // serves the run under a permitting preference — a route, never a row —
+    // else a typed refusal carrying the earliest known reset.
+    const preference = this.authPreferenceForHarness(input.repoRoot, harnessId, input.authPreference);
+    if (preference === "subscription") {
+      emit("route.account.pool_exhausted", {
+        harness_id: harnessId,
+        reason: selection.outcome,
+        resets_at: selection.resets_at,
+        fallback: null,
+      });
+      throw accountPoolUnavailable(harnessId, selection);
+    }
+    this.notePoolApiKeyRoute(input, harnessId);
+    emit("route.account.pool_exhausted", {
+      harness_id: harnessId,
+      reason: selection.outcome,
+      resets_at: selection.resets_at,
+      fallback: "api_key_route",
+      ...(boundId ? { from_profile_id: boundId } : {}),
+    });
+    return null;
   }
 
   /**
@@ -1345,15 +1555,22 @@ export class Orchestrator {
         dropLane(id, "credential", migrationBlock.reason);
         continue;
       }
-      // INV-135 accounts authority: with the native/CLI login excluded and no
-      // explicit pin, an unpinned run has nothing routable. Refuse an explicit
-      // request naming the setting; drop it from an auto pool — never silently
-      // fall back INTO the disabled login.
+      // INV-135 accounts authority (unified model): with the native/CLI login
+      // excluded, NO enabled account rows, and no explicit pin, an unpinned
+      // run can only be served by the paid API-key ROUTE (Q2=A). Under an
+      // explicit `subscription` preference nothing is routable — refuse an
+      // explicit request / drop an auto lane; a paid-permitting preference
+      // admits the lane and preflight forces the typed api_key route (the
+      // adapter's key refusal is the fail-loud backstop). It never silently
+      // falls back INTO the disabled login.
       if (
         this.effectiveProfileId(input, id) === null &&
-        this.nativeCredentialsDisabled(input.repoRoot, id)
+        this.nativeCredentialsDisabled(input.repoRoot, id) &&
+        accountPoolRows(this.config(input.repoRoot)?.global.credential_profiles ?? [], id)
+          .length === 0 &&
+        this.authPreferenceForHarness(input.repoRoot, id, input.authPreference) === "subscription"
       ) {
-        const why = `${id} has no routable credential: the CLI login is disabled (harnesses.${id}.native_credentials_enabled=false) and no account is pinned (--profile)`;
+        const why = `${id} has no routable credential: the CLI login is disabled (harnesses.${id}.native_credentials_enabled=false), no account is signed in, and the subscription route forbids the API-key fallback (pin an account with --profile or connect one)`;
         dropLane(id, "credential", why);
         continue;
       }
@@ -1565,11 +1782,16 @@ export class Orchestrator {
           ? profile.credential_kind === "api_key"
             ? ("managed_api_key" as const)
             : ("vendor_native" as const)
-          : routed.authRouteEstimate === "api_key"
+          : // An empty/exhausted pool forced the PAID route (Q2=A): billing
+            // classification must say so even when the default-store estimate
+            // still reads local_session.
+            this.poolApiKeyRoute(input, routed.adapter.id)
             ? ("managed_api_key" as const)
-            : routed.authRouteEstimate === "local_session"
-              ? ("vendor_native" as const)
-              : null;
+            : routed.authRouteEstimate === "api_key"
+              ? ("managed_api_key" as const)
+              : routed.authRouteEstimate === "local_session"
+                ? ("vendor_native" as const)
+                : null;
         return { ...routed, quotaAdmission: { model, profile, route } };
       }),
     );
@@ -2261,7 +2483,7 @@ export class Orchestrator {
         adapter: this.deps.registry.get(harnessId),
         credentialProfile: sessionFields.credential_profile,
         authPreference: sessionFields.auth_preference ?? "auto",
-        laneEnv: this.laneHomeEnvFor(runInput, harnessId) ?? {},
+        laneEnv: this.laneHomeEnvFor(runInput, harnessId, profileId) ?? {},
         envInheritance: envInheritance(this.config(runInput.repoRoot)),
         signal: runInput.signal,
       });
@@ -2695,6 +2917,8 @@ export class Orchestrator {
             emit: (type, payload) => log?.emit(type, payload),
             newSessionId: () => newId("ses"),
             defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
+            // D-U6: an explicit pin never rotates; pool-selected rows do.
+            pinned: runInput.credentialProfileId != null,
           });
           // A5 ordering: an exhausted pool terminalizes TYPED here, BEFORE the
           // transient gate below burns same-profile retries (limits classify
@@ -5797,7 +6021,14 @@ export class Orchestrator {
           ...sessionFields,
           ...this.harnessSpecKnobs(contract, knobs, args.intent),
           env_inheritance: envInheritance(this.config(input.repoRoot)),
-          env: (args.laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? args.fallbackHome,
+          env:
+            (args.laneRun
+              ? this.laneHomeEnvFor(
+                  input,
+                  adapter.id,
+                  sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+                )
+              : null) ?? args.fallbackHome,
         });
         const plannerAbort = new AbortController();
         spec.extra["abortSignal"] = input.signal
@@ -6639,7 +6870,14 @@ export class Orchestrator {
           // A thread lane turn spawns in its DURABLE per-lane home so the native
           // session it records is reachable for resume next turn; everything else
           // uses the disposable route-context home.
-          env: (laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? roHome.env,
+          env:
+            (laneRun
+              ? this.laneHomeEnvFor(
+                  input,
+                  adapter.id,
+                  sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+                )
+              : null) ?? roHome.env,
         });
         const reportAbort = new AbortController();
         spec.extra["abortSignal"] = input.signal
@@ -6868,6 +7106,8 @@ export class Orchestrator {
               emit: (type, payload) => log.emit(type, payload),
               newSessionId: () => newId("ses"),
               defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
+              // D-U6: an explicit pin never rotates; pool-selected rows do.
+              pinned: input.credentialProfileId != null,
             });
             // A5 ordering: same as the candidate lane — terminalize typed
             // before the transient gate burns same-profile retries. The pool
