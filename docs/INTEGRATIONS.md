@@ -212,7 +212,9 @@ missing, duplicate, regressive, dropped, unknown, malformed, or
 EOF-without-terminal frames require a scoped resnapshot. Network loss never
 changes the server-owned outcome. `GET /v2/setup/jobs` optionally filters by
 `harness`, `action`, `active`, and `limit`. `POST /v2/setup/jobs/:id/extend`
-adds the fixed 15-minute login extension. Cancel is asynchronous and
+adds the fixed 15-minute login extension to an engine-owned deadline; a job
+whose deadline is the vendor's own window (`deadlineFixed`) refuses with a
+typed 409. Cancel is asynchronous and
 resolves only after termination is proved; duplicate create returns the same
 active login instead of launching a second runner.
 `POST /v2/setup/jobs/:id/reconcile` is the sole replacement-fence recovery

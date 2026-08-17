@@ -1621,8 +1621,12 @@ probe instead — the same truth `claudexor profiles login` uses — and honestl
 skips the capability smoke, which attests only the default route; the job
 schema's success invariant is scoped accordingly.
 
-Login launch has a 10-second watchdog and a 15-minute deadline. Extend adds 15
-minutes without a cumulative limit. For a deferred `client_pty` attach, the
+Login launch has a 10-second watchdog and a 15-minute deadline where the
+ENGINE owns the window; a vendor that caps its own sign-in (Antigravity's
+sixty-second paste window) has that shorter deadline published as fixed, and
+Extend refuses it with a typed 409 until a delivered code replaces it with the
+bounded exchange grace. For engine-owned deadlines Extend adds 15 minutes
+without a cumulative limit. For a deferred `client_pty` attach, the
 journaled job deadline remains the mutable authority across extensions; the
 immutable manifest instead seals a 10-second permit window measured from the
 actual runner start, and the daemon refuses to issue that permit after the
