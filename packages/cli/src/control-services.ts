@@ -22,6 +22,7 @@ import {
 import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
 import {
   type ResourceAttachmentRef,
+  ControlAccountsMigrationRollbackRequest,
   ControlCredentialProfileCreateRequest,
   type CredentialProfile,
   ControlSettingsUpdateRequest,
@@ -29,6 +30,10 @@ import {
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
+import {
+  readAccountsMigrationFile,
+  rollbackAccountsUnifiedMigration,
+} from "./accounts-unified-migration.js";
 import { quotaControlServices } from "./quota-services.js";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
 import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
@@ -389,9 +394,25 @@ export function controlServices(
         harnessId,
         profileId,
       );
+      // Downgrade-window mirror (unified account model): the migrated row is
+      // the enable/disable AUTHORITY, but the deprecated
+      // `native_credentials_enabled` key must track it — a silent divergence
+      // would re-enable the account after a 3.5.0 downgrade.
+      const mirrorsNativeKey = readAccountsMigrationFile()[harnessId]?.row_id === profileId;
       let updated: CredentialProfile | undefined;
       updateGlobalConfig((config) => ({
         ...config,
+        ...(mirrorsNativeKey
+          ? {
+              harnesses: {
+                ...config.harnesses,
+                [harnessId]: {
+                  ...config.harnesses[harnessId],
+                  native_credentials_enabled: enabled,
+                },
+              },
+            }
+          : {}),
         credential_profiles: config.credential_profiles.map((profile) => {
           if (profile.harness_id !== harnessId || profile.profile_id !== profileId) return profile;
           updated = { ...profile, enabled };
@@ -488,6 +509,21 @@ export function controlServices(
         credentialCleanup,
         ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join("; ") } : {}),
       };
+    },
+    // POST /accounts-migration/rollback — the supported downgrade path's
+    // first step (unified account model): surgically reverses the startup
+    // migration (sessions/checkpoints/lane homes back to the engine-default
+    // keys, the auto-registered row out of the registry, its enabled state
+    // back onto the native_credentials_enabled mirror). Run BEFORE installing
+    // an engine whose canonicalizers refuse the native locator.
+    rollbackAccountsMigration: async (input: unknown) => {
+      const request = ControlAccountsMigrationRollbackRequest.parse(input ?? {});
+      const rolledBack = rollbackAccountsUnifiedMigration(
+        { threads, quota: quotaRegistry() },
+        request.harnessId,
+      );
+      bustStatusCaches();
+      return { rolledBack };
     },
     // POST /credential-profiles: the SAME ONE registration owner the CLI's
     // `profiles add` uses (profile-registration.ts) — never a second write

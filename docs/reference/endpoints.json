@@ -26,6 +26,18 @@
       "error_schema": "ControlProblem"
     },
     {
+      "method": "POST",
+      "path": "/v2/accounts-migration/rollback",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Reverse the unified-accounts startup migration (the supported downgrade path): continuity keys return to the engine default and the auto-registered row leaves the registry.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlAccountsMigrationRollbackRequest",
+      "parameters": [],
+      "response_schema": "ControlAccountsMigrationRollbackResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
       "method": "GET",
       "path": "/v2/agent-capabilities",
       "mutating": false,

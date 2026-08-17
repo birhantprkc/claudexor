@@ -997,6 +997,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 <!-- BEGIN GENERATED ENDPOINTS (node scripts/gen-endpoints-doc.mjs; do not edit by hand) -->
 - `GET /healthz`
 - `GET /v2/account-pools`
+- `POST /v2/accounts-migration/rollback`
 - `GET /v2/agent-capabilities`
 - `GET /v2/credential-profiles`
 - `POST /v2/credential-profiles`

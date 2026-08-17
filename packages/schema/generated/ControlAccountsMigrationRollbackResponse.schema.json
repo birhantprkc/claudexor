@@ -1,0 +1,63 @@
+{
+  "$ref": "#/definitions/ControlAccountsMigrationRollbackResponse",
+  "definitions": {
+    "ControlAccountsMigrationRollbackResponse": {
+      "type": "object",
+      "properties": {
+        "rolledBack": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "harness_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              },
+              "row_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The auto-registered row the rollback removed."
+              },
+              "sessions": {
+                "type": "integer",
+                "description": "Thread sessions returned to the null engine-default subject."
+              },
+              "checkpoints": {
+                "type": "integer",
+                "description": "Lane checkpoints re-seeded onto the null lane."
+              },
+              "lanes": {
+                "type": "integer",
+                "description": "Durable lane home dirs renamed back."
+              },
+              "skipped_partitions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Quarantined project partitions whose sessions could NOT be rolled back (disclosed residual: recover them and rerun the rollback before downgrading)."
+              }
+            },
+            "required": [
+              "harness_id",
+              "row_id",
+              "sessions",
+              "checkpoints",
+              "lanes",
+              "skipped_partitions"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Per-harness rollback receipts (empty when nothing was migrated)."
+        }
+      },
+      "required": [
+        "rolledBack"
+      ],
+      "additionalProperties": false,
+      "description": "Receipt for a unified-accounts migration rollback."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

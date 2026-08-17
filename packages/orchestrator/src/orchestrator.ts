@@ -314,6 +314,12 @@ export interface OrchestratorDeps {
   credentialUnusable?: () => readonly CredentialUnusableObservation[];
   /** Evidence sink for a fresh differential-probe verdict (A7). */
   recordCredentialUnusable?: (obs: CredentialUnusableObservation) => void;
+  /** Typed per-harness run refusal while that harness's unified-accounts
+   * migration is incomplete (a crash between phases): routing against
+   * half-migrated continuity state risks INV-137 silent conversation loss,
+   * so the harness refuses (explicit pool) or drops (auto pool) until the
+   * next daemon start finishes the remaining phases. Null = not blocked. */
+  accountsMigrationGate?: (harnessId: string) => { reason: string } | null;
   /** Ordered explicit reviewer panel. Unlike legacy per-family overrides this
    * preserves duplicate harness entries, so one provider can review through
    * multiple requested models in a single panel pass. */
@@ -1328,6 +1334,15 @@ export class Orchestrator {
       if (cfgEntry && cfgEntry.enabled === false) {
         const why = `${id} is disabled in settings (harnesses.${id}.enabled=false)`;
         dropLane(id, "settings", why);
+        continue;
+      }
+      // Unified-accounts migration gate: an INCOMPLETE per-harness migration
+      // record (crash between phases) refuses THIS harness's runs only —
+      // routing against half-migrated continuity state risks INV-137 silent
+      // conversation loss. Explicit pools refuse typed; auto pools drop.
+      const migrationBlock = this.deps.accountsMigrationGate?.(id) ?? null;
+      if (migrationBlock) {
+        dropLane(id, "credential", migrationBlock.reason);
         continue;
       }
       // INV-135 accounts authority: with the native/CLI login excluded and no

@@ -144,6 +144,17 @@ const operations: ControlOperationDescriptor[] = [
     "ControlCredentialProfileDeleteResponse",
     { idempotency: "natural" },
   ),
+  // The supported downgrade path of the unified-accounts startup migration:
+  // run BEFORE installing an engine whose canonicalizers refuse the migrated
+  // row's native locator. Naturally idempotent (a second call finds no record).
+  j(
+    "POST",
+    "/v2/accounts-migration/rollback",
+    "mutating",
+    "ControlAccountsMigrationRollbackRequest",
+    "ControlAccountsMigrationRollbackResponse",
+    { idempotency: "natural" },
+  ),
   j("POST", "/v2/quota", "mutating", "ControlQuotaRefreshRequest", "ControlQuotaResponse", {
     idempotency: "natural",
   }),

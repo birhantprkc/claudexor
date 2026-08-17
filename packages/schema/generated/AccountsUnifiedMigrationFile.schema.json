@@ -1,0 +1,60 @@
+{
+  "$ref": "#/definitions/AccountsUnifiedMigrationFile",
+  "definitions": {
+    "AccountsUnifiedMigrationFile": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "reserved",
+              "registry_written",
+              "continuity_migrated",
+              "completed"
+            ],
+            "description": "Crash-recoverable migration phase for one harness: reserved (id + backup persisted) → registry_written (row in config) → continuity_migrated (sessions/checkpoints/lane homes on the row id) → completed (legacy null quota subject retired)."
+          },
+          "row_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The reserved registry row id (claude-default / codex-default, deterministic -2 suffix on collision) — persisted BEFORE any other phase so a crash can never re-reserve a different id."
+          },
+          "legacy_aliases": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "Every legacy identity this row absorbed — [null] for the engine-default subject. Deletion of the row must retire the canonical id PLUS these aliases in one lifecycle operation."
+          },
+          "locator": {
+            "type": "string",
+            "description": "The exact legacy native store dir registered as the row's isolation_locator (bytes never move). Also the delete fence's exact-path allowlist entry for this row."
+          },
+          "backup_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pre-migration backup directory (config.yaml copy), the manual-recovery half of the supported downgrade path; null when the backup could not be written."
+          }
+        },
+        "required": [
+          "phase",
+          "row_id",
+          "legacy_aliases",
+          "locator",
+          "backup_ref"
+        ],
+        "additionalProperties": false,
+        "description": "Per-harness unified-accounts migration record."
+      },
+      "description": "accounts-unified.json: harness id → unified-accounts migration record."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { registerConfigDirProfile } from "./profile-registration.js";
 import {
+  ControlAccountsMigrationRollbackResponse,
   ControlCredentialProfileDeleteResponse,
   ControlCredentialProfileUpdateResponse,
   ControlCredentialProfilesResponse,
@@ -254,10 +255,45 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     }
     return 0;
   }
+  if (sub === "rollback-migration") {
+    // The supported downgrade path of the unified-accounts startup migration:
+    // sessions/checkpoints/lane homes return to the engine-default keys and
+    // the auto-registered row leaves the registry. Run BEFORE installing an
+    // engine whose canonicalizers refuse the migrated row's native locator.
+    const harness = args._[2];
+    const { addr } = await ensureDaemon();
+    const response = await controlApiFetch(addr, "/accounts-migration/rollback", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
+      body: JSON.stringify(harness ? { harnessId: harness } : {}),
+    });
+    if (!response.ok) {
+      return printUsageError(
+        json,
+        `migration rollback failed (${response.status}): ${await response.text()}`,
+      );
+    }
+    const receipt = ControlAccountsMigrationRollbackResponse.parse(await response.json());
+    if (json) printJson(receipt);
+    else if (receipt.rolledBack.length === 0) print("nothing to roll back (no migrated harness)");
+    else {
+      for (const entry of receipt.rolledBack) {
+        print(
+          `rolled back ${entry.harness_id} (row ${entry.row_id}): ${entry.sessions} sessions, ${entry.checkpoints} checkpoints, ${entry.lanes} lane homes`,
+        );
+        if (entry.skipped_partitions.length > 0) {
+          print(
+            `warning: quarantined partition(s) not rolled back: ${entry.skipped_partitions.join(", ")} — recover them and rerun before downgrading`,
+          );
+        }
+      }
+    }
+    return 0;
+  }
   if (sub !== "list") {
     return printUsageError(
       json,
-      "usage: claudexor profiles [list | add <harness> <profile-id> | login <harness> <profile-id> | enable <harness> <profile-id> | disable <harness> <profile-id> | remove <harness> <profile-id>]",
+      "usage: claudexor profiles [list | add <harness> <profile-id> | login <harness> <profile-id> | enable <harness> <profile-id> | disable <harness> <profile-id> | remove <harness> <profile-id> | rollback-migration [harness]]",
     );
   }
   const result = ControlCredentialProfilesResponse.parse(await daemonGet("/credential-profiles"));

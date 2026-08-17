@@ -4,11 +4,15 @@ import { Id, IsoTimestamp } from "./primitives.js";
 import { AuthAvailability, AuthVerification } from "./auth.js";
 
 /**
- * The credential transport a profile isolates (INV-135). `config_dir_login` is
- * a vendor-owned login living in a Claudexor-scoped config dir or HOME
- * (Claude CLAUDE_CONFIG_DIR / Codex CODEX_HOME / Cursor file-store HOME);
- * `oauth_token` and `api_key` are secret-store references. Default vendor
- * stores are NEVER a profile's isolation locator — profiles are additive.
+ * The credential transport a profile isolates (INV-135, unified account
+ * model). `config_dir_login` is a vendor-owned login living in a
+ * Claudexor-scoped config dir or HOME (Claude CLAUDE_CONFIG_DIR / Codex
+ * CODEX_HOME / Cursor file-store HOME). The Claudexor-owned LEGACY native
+ * dirs are legal locators — the startup migration registers them as the
+ * `claude-default`/`codex-default` rows without moving bytes; the vendor's
+ * ordinary host stores (~/.claude, ~/.codex) stay outside the owned root and
+ * are never a locator. `oauth_token` and `api_key` are secret-store
+ * references.
  */
 export const CredentialKind = z
   .enum(["config_dir_login", "oauth_token", "api_key"])

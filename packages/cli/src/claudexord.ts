@@ -69,6 +69,7 @@ import {
 } from "./claudexord-entry.js";
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 import { quotaSubjectUniverseFromConfig } from "./quota-subject-universe.js";
+import { accountsMigrationGate, runAccountsUnifiedMigration } from "./accounts-unified-migration.js";
 import { runStopIfRequested } from "./runtime-replacement-stop.js";
 import { threadContinuityContext } from "./thread-continuity-context.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
@@ -204,6 +205,9 @@ export async function main(): Promise<void> {
           p,
           delegationBudgetAuthority,
           quotaStore: () => quotaStoreSlot.current(),
+          // Typed per-harness refusal while a unified-accounts migration is
+          // incomplete (a crash between phases) — other harnesses keep working.
+          accountsMigrationGate,
         });
         const { threadId, turnId } = threads.assertKnownIds(p.threadId, p.turnId);
         // Plan readiness gate (QA-045 / D17): refuse an Implement whose frozen
@@ -512,6 +516,29 @@ export async function main(): Promise<void> {
         requested: () => shutdownRuntime!.requested(),
         armQuotaPolling: () => quotaPoller!.arm(),
         beginPidSnapshots: () => lifecycle!.beginPidSnapshots(),
+        migrateAccounts: () => {
+          try {
+            const receipts = runAccountsUnifiedMigration({
+              threads,
+              quota: quotaStoreSlot.current(),
+              log: (message) => logLine(logPath(), message),
+            });
+            if (receipts.length > 0) {
+              invalidateStatusProjections();
+              quotaStoreSlot.current().noteCredentialChange();
+            }
+          } catch (error) {
+            // A failed pass leaves the phase file mid-state: the affected
+            // harness refuses runs typed (accountsMigrationGate) and the next
+            // start resumes the remaining phases — never a startup crash.
+            logLine(
+              logPath(),
+              `unified-accounts migration pass failed (will resume on the next start): ${redactSecrets(
+                error instanceof Error ? error.message : String(error),
+              )}`,
+            );
+          }
+        },
         startSetup: () => setupBinding.start(),
         quarantineGhosts: () =>
           quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message)),
