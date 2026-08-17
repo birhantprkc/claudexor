@@ -307,8 +307,9 @@ function executeDarwinHelper(path: string, pid: number): ProcessHelperExecution 
  * Windows birth-time reader. Windows exposes no `/proc`, so the kernel's own
  * `GetProcessTimes` creation time is read through the absolute System32
  * PowerShell (same pinned-path discipline as the `taskkill` owner) and printed
- * as a locale-independent FILETIME. Blocking and ~sub-second, so it is opt-in
- * per lane rather than a default for every spawn.
+ * as a locale-independent FILETIME. Blocking — warm it is sub-second, but a
+ * cold PowerShell on a loaded host takes many seconds — so it is opt-in per
+ * lane rather than a default for every spawn.
  */
 export function executeWin32ProcessTimes(pid: number): ProcessHelperExecution {
   const systemRoot = process.env["SystemRoot"] || "C:\\Windows";
@@ -327,7 +328,14 @@ export function executeWin32ProcessTimes(pid: number): ProcessHelperExecution {
     ["-NoProfile", "-NonInteractive", "-NoLogo", "-Command", script],
     {
       encoding: "utf8",
-      timeout: 5_000,
+      // PowerShell COLD-STARTS well past five seconds on a loaded host — the
+      // GitHub Windows runners exceed it routinely under a parallel test run,
+      // and a user's machine under load is the same shape. An identity read
+      // that times out reports `unknown`, which every caller treats as
+      // fail-closed, so a short cap silently degrades Windows runs rather
+      // than protecting anything; the bound exists only to keep a wedged
+      // PowerShell from hanging a lane.
+      timeout: 30_000,
       maxBuffer: 64 * 1024,
       windowsHide: true,
       env: { SystemRoot: systemRoot, PATH: `${systemRoot}\\System32` },
