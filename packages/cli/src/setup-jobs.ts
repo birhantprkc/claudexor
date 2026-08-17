@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
@@ -226,9 +226,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       message,
       ...(command ? { command } : {}),
     });
-    // The transient device-code disclosure is invalid once terminal — drop the
-    // sidecar so its one-time code stops being projected (INV-062 / D-17).
+    // Both transient sidecars die with the job: the device-code disclosure
+    // (INV-062 / D-17) and the one-shot sign-in input's pasted code.
     removeSetupDeviceCodeSidecar(store.paths(jobId).runnerDeviceCode);
+    rmSync(store.paths(jobId).runnerInput, { force: true });
     logAfterMutation(jobId, message);
     return done;
   }

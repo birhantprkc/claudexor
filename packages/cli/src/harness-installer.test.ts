@@ -410,6 +410,20 @@ describe("Windows installer path (Л-24: best effort, honestly bounded)", () => 
     expect(disclosure.installLocation).toContain("LOCALAPPDATA");
   });
 
+  it("fetches the SAME bytes the disclosure named: the PowerShell URL, not the POSIX one", () => {
+    asWindows();
+    const spawn = noisySpawn(0);
+    const stdout = captureStdout();
+    const result = runHarnessInstaller("agy", { home: "/tmp/operator", spawn: spawn as never });
+    stdout.restore();
+    expect(result).toEqual({ exitCode: 0 });
+    const curlArgv = spawn.mock.calls[0]![1] as string[];
+    expect(curlArgv).toContain(AGY_INSTALL_URL_WINDOWS);
+    expect(curlArgv).not.toContain(AGY_INSTALL_URL);
+    expect(curlArgv.at(-1)).toMatch(/install\.ps1$/);
+    expect(spawn.mock.calls[1]![0]).toBe("powershell");
+  });
+
   it("refuses rather than running a POSIX script for a vendor with no Windows installer", () => {
     asWindows();
     const spawn = vi.fn();

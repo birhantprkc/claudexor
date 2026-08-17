@@ -7,7 +7,11 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { redactSecrets } from "@claudexor/util";
-import { readRunnerLoginInput, type SetupLoginManifest } from "./setup-login-protocol.js";
+import {
+  atomicPrivateJson,
+  readRunnerLoginInput,
+  type SetupLoginManifest,
+} from "./setup-login-protocol.js";
 
 export const OUTPUT_TAIL_BYTES = 4096;
 
@@ -50,6 +54,16 @@ export function watchLoginInput(
     onDelivered?.(input.value);
     try {
       child.stdin.write(`${input.value}\n`);
+      // The secret has been handed to the vendor; what stays on disk is a
+      // non-secret consumed marker, so the one-shot conflict check still
+      // refuses a second submission while the code itself stops existing.
+      atomicPrivateJson(manifest.inputPath, {
+        version: input.version,
+        jobId: manifest.jobId,
+        executionId: manifest.executionId,
+        consumed: true,
+        submittedAt: input.submittedAt,
+      });
     } catch {
       // A dead stdin means the vendor already exited; the result receipt
       // carries the real outcome.

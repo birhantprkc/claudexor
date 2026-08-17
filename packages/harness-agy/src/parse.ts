@@ -95,10 +95,10 @@ export function parseAgyEvent(obj: Json, sessionId: string): HarnessEvent[] | nu
       events.push({ type: "message", session_id: sessionId, ts, text: step.text_delta });
     }
     // user_input / checkpoint / finish / unknown / future types: recognized
-    // lifecycle no-ops beyond their usage payload below.
-
-    const usage = stepUsage(step.usage);
-    if (usage) events.push({ type: "usage", session_id: sessionId, ts, usage });
+    // lifecycle no-ops. Step usage is deliberately NOT emitted: the recorded
+    // fixtures prove the per-step usages sum EXACTLY to the terminal
+    // aggregate, so emitting both counted every token twice (sol review).
+    // The one authoritative usage event rides `result`.
     return events;
   }
 

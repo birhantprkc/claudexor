@@ -73,12 +73,19 @@ const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
   },
   agy: {
     binaryName: () => process.env.CLAUDEXOR_AGY_BIN || "agy",
-    // agy has no login subcommand: the bare interactive CLI prints the sign-in
-    // URL and waits for the pasted code. Both routes run this same command —
-    // `claudexor profiles login agy` gives it the operator's own tty, and the
-    // daemon-hosted card gives it one through the runner's pty (ptyStdin).
-    args: [],
-    displayCommand: "agy (interactive login)",
+    // agy has no login subcommand. BARE `agy` is the interactive TUI, which
+    // OPENS THE BROWSER ITSELF and stays resident after authenticating — on a
+    // daemon host that hijacks a browser nobody is watching and the runner
+    // waits forever on a process that never exits (PLAN F7; sol review). The
+    // PRINT-MODE shape is the live-proven login vehicle (PLAN F6): an
+    // unauthenticated `agy -p …` prints the sign-in URL to stderr, waits
+    // exactly 60 seconds for the pasted code on a tty stdin, completes the
+    // login, answers the command and EXITS. `/model` is the quota-free
+    // command, the same one the doctor probe uses. Both routes run this —
+    // `claudexor profiles login agy` on the operator's own tty, the card
+    // through the runner's pty (ptyStdin).
+    args: ["-p", "/model", "--output-format", "json"],
+    displayCommand: 'agy -p "/model" (sign-in via printed link + pasted code)',
   },
 };
 

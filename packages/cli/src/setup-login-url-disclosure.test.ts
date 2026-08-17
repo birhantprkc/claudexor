@@ -464,6 +464,12 @@ describe("daemon-hosted no-Terminal login modes (owner directive 2026-08-04)", (
     // The transient value never lands in the durable result receipt.
     const result = readFileSync(join(jobDir, "runner-result.json"), "utf8");
     expect(result).not.toContain("pasted-oauth-code-42");
+    // And it does not survive in its OWN sidecar either: after delivery the
+    // file is a non-secret consumed marker (still present, so a second
+    // submission still conflicts), and the code itself stops existing on disk.
+    const sidecar = readFileSync(join(jobDir, "runner-input.json"), "utf8");
+    expect(sidecar).not.toContain("pasted-oauth-code-42");
+    expect(sidecar).toContain("consumed");
   });
 
   it("an input sidecar bound to a different execution is never delivered", async () => {

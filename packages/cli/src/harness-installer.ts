@@ -267,7 +267,10 @@ export function runHarnessInstaller(
   try {
     const downloaded = spawn(
       "curl",
-      ["--fail", "--silent", "--show-error", "--location", script.url, "--output", installerPath],
+      // `url`, never `script.url`: on Windows the disclosure names the
+      // vendor's PowerShell installer, and the bytes fetched MUST be the bytes
+      // disclosed — both reviewers of the sprint triad caught the divergence.
+      ["--fail", "--silent", "--show-error", "--location", url, "--output", installerPath],
       { stdio: childStdio, env: environment },
     );
     if (downloaded.status !== 0) {

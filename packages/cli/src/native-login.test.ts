@@ -86,8 +86,10 @@ describe("native login specs", () => {
       // only from a real terminal.
       expect(nativeLoginSpec("agy", resolver)).toEqual({
         binary: "/normalized/bin/agy",
-        args: [],
-        displayCommand: "agy (interactive login)",
+        // Print mode, never the bare TUI: the TUI opens the browser ITSELF on
+        // the daemon host and never exits after authenticating.
+        args: ["-p", "/model", "--output-format", "json"],
+        displayCommand: 'agy -p "/model" (sign-in via printed link + pasted code)',
         loginMode: "url_disclosure_with_input",
         ptyStdin: true,
         // The vendor's OWN paste window, sealed so the card counts down

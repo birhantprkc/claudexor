@@ -130,26 +130,29 @@ describe("parseAgyEvent", () => {
     });
   });
 
-  it("treats lifecycle step types as recognized no-ops but keeps their usage", () => {
+  it("treats lifecycle step types as recognized no-ops and never double-counts usage", () => {
     expect(
       parseAgyEvent(
         { event: "step_update", step_update: { state: "DONE", step_type: "user_input" } },
         SID,
       ),
     ).toEqual([]);
-    const checkpoint = parseAgyEvent(
-      {
-        event: "step_update",
-        step_update: {
-          state: "DONE",
-          step_type: "checkpoint",
-          usage: { input_tokens: 5, output_tokens: 1 },
+    // Step usage is NOT emitted: the recorded fixtures prove per-step usages
+    // sum exactly to the terminal aggregate, so emitting both counted every
+    // token twice. The one usage event rides `result`.
+    expect(
+      parseAgyEvent(
+        {
+          event: "step_update",
+          step_update: {
+            state: "DONE",
+            step_type: "checkpoint",
+            usage: { input_tokens: 5, output_tokens: 1 },
+          },
         },
-      },
-      SID,
-    )!;
-    expect(checkpoint).toHaveLength(1);
-    expect(checkpoint[0].type).toBe("usage");
+        SID,
+      ),
+    ).toEqual([]);
     // A FUTURE step type stays a recognized no-op, never a dropped line.
     expect(
       parseAgyEvent(

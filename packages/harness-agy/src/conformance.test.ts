@@ -35,7 +35,9 @@ describe("agy adapter conformance fixtures", () => {
         expect(stats.started).toBe(1);
         expect(stats.toolCalls).toBeGreaterThan(0);
         expect(stats.toolResults).toBeGreaterThan(0);
-        expect(stats.usageEvents).toBeGreaterThan(0);
+        // EXACTLY one usage event — the terminal aggregate. The fixtures prove
+        // per-step usages sum to it, so a second emission doubles every token.
+        expect(stats.usageEvents).toBe(1);
         expect(stats.errors).toBe(0);
       }
       if (name === "error-auth.jsonl") {

@@ -291,8 +291,10 @@ export function createAgyAdapter(): HarnessAdapter {
 
     // INV-135: pinned routing is admitted by THIS probe (there is no default
     // store for the harness doctor to credit).
-    async probeCredentialProfile(profile) {
-      return probeAgyCredentialProfile(profile);
+    async probeCredentialProfile(profile, abortSignal) {
+      // The signal must reach the live probe: dropping it left an aborted
+      // doctor sweep waiting out the probe's own 30s timeout.
+      return probeAgyCredentialProfile(profile, undefined, abortSignal);
     },
   };
 }
