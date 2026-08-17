@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,7 @@ const setupListFilters: Array<Record<string, unknown> | undefined> = [];
 function servicesWithJobs(
   jobs: Array<Record<string, unknown>>,
   invalidationError?: Error & { status?: number },
+  onRemoveSubject?: (harness: string, subjectId: string | null) => void,
 ) {
   const setupBinding = {
     current: () => ({
@@ -36,7 +37,13 @@ function servicesWithJobs(
     },
     listThreads: () => [] as unknown[],
   };
-  const quota = { removeSubject: () => 0, noteCredentialChange };
+  const quota = {
+    removeSubject: (harness: string, subjectId: string | null) => {
+      onRemoveSubject?.(harness, subjectId);
+      return 0;
+    },
+    noteCredentialChange,
+  };
   return controlServices(
     undefined as never,
     undefined as never,
@@ -145,7 +152,7 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(1);
   });
 
-  it("delete-grade fence: never rm -rf outside the profiles tree — disclosed, not silent", async () => {
+  it("delete-grade fence: never rm -rf outside the profiles tree — typed retryable refusal, row kept (D-U4)", async () => {
     // Simulate a hand-edited registry entry whose locator escapes the
     // profiles tree while staying inside the owned root (the creation-grade
     // confinement accepts it; the DELETE fence must not).
@@ -157,16 +164,68 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
         profile.profile_id === "escape" ? { ...profile, isolation_locator: dir } : profile,
       ),
     }));
-    const receipt = (await servicesWithJobs([]).deleteCredentialProfile({
-      harnessId: "claude",
-      profileId: "escape",
-    })) as { removed: boolean; credentialCleanup: string; cleanupWarning?: string };
-    // Registry entry gone, but the owned root itself survives — the failed
-    // cleanup is disclosed as a warning, never silently ignored.
-    expect(receipt.removed).toBe(true);
-    expect(receipt.credentialCleanup).toBe("none");
-    expect(receipt.cleanupWarning).toMatch(/not inside the profiles tree/);
+    // D-U4: a failed cleanup is a TYPED RETRYABLE error, never removed:true
+    // with a warning — the row must stay registered so the removal can be
+    // retried instead of the surviving material resurrecting a ghost account.
+    await expect(
+      servicesWithJobs([]).deleteCredentialProfile({ harnessId: "claude", profileId: "escape" }),
+    ).rejects.toMatchObject({ status: 503, code: "credential_cleanup_failed", retryable: true });
+    expect(
+      loadConfig(noProjectRepoRoot()).global.credential_profiles.some(
+        (profile) => profile.profile_id === "escape",
+      ),
+    ).toBe(true);
     expect(existsSync(join(dir, "config.yaml"))).toBe(true);
+  });
+
+  it("deletes the MIGRATED row through the exact legacy-locator allowlist and retires its aliases (K.3)", async () => {
+    const { runAccountsUnifiedMigration } = await import("./accounts-unified-migration.js");
+    const { defaultNativeCodexHome } = await import("@claudexor/harness-codex");
+    const home = defaultNativeCodexHome();
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }));
+    const removedSubjects: Array<{ harness: string; subjectId: string | null }> = [];
+    const migrationStores = {
+      threads: {
+        migrateNullProfileContinuity: () => ({
+          sessions: 0,
+          checkpoints: 0,
+          skippedPartitions: [],
+        }),
+        rollbackProfileContinuity: () => ({ sessions: 0, checkpoints: 0, skippedPartitions: [] }),
+        listThreads: () => [],
+      },
+      quota: {
+        removeSubject: (harness: string, subjectId: string | null) => {
+          removedSubjects.push({ harness, subjectId });
+          return 0;
+        },
+      },
+    };
+    runAccountsUnifiedMigration(migrationStores);
+    removedSubjects.length = 0;
+    const services = servicesWithJobs([], undefined, (harness, subjectId) =>
+      removedSubjects.push({ harness, subjectId }),
+    );
+    const receipt = (await services.deleteCredentialProfile({
+      harnessId: "codex",
+      profileId: "codex-default",
+    })) as { removed: boolean; credentialCleanup: string; cleanupWarning?: string };
+    // The legacy native locator is deletable through the EXACT allowlist from
+    // the migration record — never a general native-tree deletion class.
+    expect(receipt.removed).toBe(true);
+    expect(receipt.credentialCleanup).toBe("config_dir_removed");
+    expect(receipt.cleanupWarning).toBeUndefined();
+    expect(existsSync(home)).toBe(false);
+    // One lifecycle operation retires the canonical id AND the null alias.
+    expect(removedSubjects).toEqual([
+      { harness: "codex", subjectId: "codex-default" },
+      { harness: "codex", subjectId: null },
+    ]);
+    // The migration record died with its row: a later start re-detects nothing.
+    const { readAccountsMigrationFile } = await import("./accounts-unified-migration.js");
+    expect(readAccountsMigrationFile()["codex"]).toBeUndefined();
+    expect(runAccountsUnifiedMigration(migrationStores)).toEqual([]);
   });
 
   it("clears any harness's rotation_eligible entry at the deleted profile (INV-135; F1: Active removed)", async () => {

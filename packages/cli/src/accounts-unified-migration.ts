@@ -58,6 +58,15 @@ function writeAccountsMigrationFile(file: AccountsUnifiedMigrationFile): void {
   renameSync(tmp, path);
 }
 
+/** Retire one harness's migration record (its row was deleted with its
+ * material, so a later start detects no legacy login and fabricates nothing). */
+export function removeAccountsMigrationRecord(harnessId: string): void {
+  const file = { ...readAccountsMigrationFile() };
+  if (!(harnessId in file)) return;
+  delete file[harnessId];
+  writeAccountsMigrationFile(file);
+}
+
 /**
  * Typed per-harness run refusal while this harness's migration is incomplete
  * (plan §L.3): a crash between phases must not let runs route against

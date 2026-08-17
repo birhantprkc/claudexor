@@ -424,8 +424,12 @@ export type ControlCredentialProfileCreateRequest = z.infer<
 >;
 
 /** DELETE /credential-profiles/:harness/:id — removes the registry entry and
- * the profile's OWN credential material (its scoped login dir, or its
- * namespaced secret). The default vendor store is untouchable by design. */
+ * the profile's OWN credential material (its scoped login dir or the migrated
+ * row's recorded legacy locator, or its namespaced secret). Success means the
+ * row AND its material are provably gone (D-U4): a partial cleanup failure is
+ * a typed RETRYABLE error that leaves the row registered, never a
+ * `removed: true` with a warning. The vendor's ordinary host stores stay
+ * untouchable by design. */
 export const ControlCredentialProfileDeleteResponse = z
   .object({
     profile: CredentialProfile.describe("The removed registry entry."),
@@ -436,7 +440,9 @@ export const ControlCredentialProfileDeleteResponse = z
     cleanupWarning: z
       .string()
       .optional()
-      .describe("Present when the registry entry was removed but cleanup failed (orphan left)."),
+      .describe(
+        "DEPRECATED (wire-compat only): a unified-model engine never emits it — partial cleanup is a typed retryable error instead of a removed-with-warning receipt.",
+      ),
   })
   .strict()
   .describe("Receipt for a credential-profile removal.");

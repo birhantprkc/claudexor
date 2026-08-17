@@ -32,6 +32,7 @@ import {
 } from "@claudexor/schema";
 import {
   readAccountsMigrationFile,
+  removeAccountsMigrationRecord,
   rollbackAccountsUnifiedMigration,
 } from "./accounts-unified-migration.js";
 import { quotaControlServices } from "./quota-services.js";
@@ -465,49 +466,82 @@ export function controlServices(
       }
       for (const root of laneRoots) purgeProfileLanes(root, harnessId, profileId);
       quotaRegistry().removeSubject(harnessId, profileId);
-      const entry = removeProfileFromRegistry(harnessId, profileId);
+      // Unified account model: deleting a MIGRATED row retires the canonical
+      // id PLUS its legacy aliases (the null engine-default subject and its
+      // `<harness>-default` lane homes) in the SAME lifecycle operation — a
+      // dangling alias could resume the deleted credential's session or keep
+      // charging its quota subject.
+      const migrationRecord = readAccountsMigrationFile()[harnessId];
+      const registryEntry = loadConfig(NO_PROJECT_ROOT).global.credential_profiles.find(
+        (p) => p.harness_id === harnessId && p.profile_id === profileId,
+      );
+      const migratedRow = migrationRecord?.row_id === profileId;
+      if (migratedRow) {
+        quotaRegistry().removeSubject(harnessId, null);
+        for (const root of laneRoots) purgeProfileLanes(root, harnessId, "default");
+      }
+      // D-U4 failure contract: `removed: true` ONLY when the row AND its
+      // credential material are provably gone. Material cleanup therefore runs
+      // BEFORE registry removal: a cleanup failure is a typed RETRYABLE error
+      // that leaves the row registered (a retry finishes the job) — never a
+      // `removed: true` with a warning, which the startup auto-registration
+      // would resurrect from the surviving material on the next start.
       let credentialCleanup: "config_dir_removed" | "secret_deleted" | "none" = "none";
-      const cleanupWarnings: string[] = [];
       try {
-        if (entry.credential_kind === "config_dir_login" && entry.isolation_locator) {
+        if (registryEntry?.credential_kind === "config_dir_login" && registryEntry.isolation_locator) {
           // Each member resolves through its OWN canonicalizer (the ladder
           // this used to hand-write let cursor and agy fall through to the
-          // generic one, so a member whose canonicalizer adds a rule — claude
-          // already refuses the default native dir — would silently delete
-          // against a different path than its login wrote to).
+          // generic one, so a member whose canonicalizer adds a rule would
+          // silently delete against a different path than its login wrote to).
           const dir = isConfigDirLoginHarness(harnessId)
-            ? canonicalProfileLoginDir(harnessId, entry.isolation_locator)
-            : canonicalIsolationLocator(entry.isolation_locator, "credential profile dir");
-          // Recursive deletion is fenced to a strict descendant of the profiles tree.
+            ? canonicalProfileLoginDir(harnessId, registryEntry.isolation_locator)
+            : canonicalIsolationLocator(registryEntry.isolation_locator, "credential profile dir");
+          // Recursive deletion is fenced to a strict descendant of the
+          // profiles tree — PLUS exactly the migrated row's own legacy native
+          // locator from the migration record (an exact-path allowlist, never
+          // a general "anything under native/" deletion class — K.3).
           const profilesRoot = normalizeThroughExistingAncestor(
             join(claudexorOwnedRoot(), "profiles"),
           );
-          if (!dir.startsWith(profilesRoot + sep)) {
+          const legacyAllowlisted =
+            migratedRow &&
+            migrationRecord !== undefined &&
+            dir === normalizeThroughExistingAncestor(migrationRecord.locator);
+          if (!dir.startsWith(profilesRoot + sep) && !legacyAllowlisted) {
             throw new Error(
-              `refusing to delete "${dir}": not inside the profiles tree ${profilesRoot}`,
+              `refusing to delete "${dir}": not inside the profiles tree ${profilesRoot} and not the migrated row's recorded legacy locator`,
             );
           }
           if (existsSync(dir)) {
             rmSync(dir, { recursive: true, force: true });
             credentialCleanup = "config_dir_removed";
           }
-        } else if (entry.secret_ref) {
-          secretStore.delete(entry.secret_ref);
+        } else if (registryEntry?.secret_ref) {
+          secretStore.delete(registryEntry.secret_ref);
           credentialCleanup = "secret_deleted";
         }
       } catch (err) {
-        cleanupWarnings.push(
-          `registry entry removed, but credential cleanup failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+        bustStatusCaches();
+        throw Object.assign(
+          new Error(
+            `credential cleanup failed; the account is still registered — retry the removal: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+          { status: 503, code: "credential_cleanup_failed", retryable: true },
         );
+      }
+      const entry = removeProfileFromRegistry(harnessId, profileId);
+      if (migratedRow) {
+        // The migration record dies with its row: the material is gone, so a
+        // later start detects no legacy login and fabricates nothing.
+        removeAccountsMigrationRecord(harnessId);
       }
       bustStatusCaches({ harnessId, profileId });
       return {
         profile: entry,
         removed: true,
         credentialCleanup,
-        ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join("; ") } : {}),
       };
     },
     // POST /accounts-migration/rollback — the supported downgrade path's
