@@ -265,11 +265,10 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     printJson(result);
     return 0;
   }
-  // Symmetric accounts rows (INV-135, D25): per harness, every credential
-  // profile (the Enabled toggle — the only routing control) plus the native
-  // "CLI login" row, and an informational "next up" line naming who an unpinned
-  // run would route to. The server owns native/next-up truth — this surface
-  // never re-derives it.
+  // Unified account model (INV-135): every account is a named registry row
+  // with an Enabled toggle (the only routing control); routing facts come from
+  // the server-owned accountPools projection. This surface never re-derives
+  // pool truth, and there is no separate native/CLI-login pseudo-row.
   const byHarness = new Map<string, Array<(typeof result.profiles)[number]>>();
   for (const entry of result.profiles) {
     const list = byHarness.get(entry.profile.harness_id) ?? [];
@@ -277,40 +276,26 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     byHarness.set(entry.profile.harness_id, list);
   }
   const harnessIds = [
-    ...new Set([...result.harnessAccounts.map((h) => h.harness_id), ...byHarness.keys()]),
+    ...new Set([...result.accountPools.map((pool) => pool.harness_id), ...byHarness.keys()]),
   ].sort();
   if (harnessIds.length === 0) {
-    print(
-      "no accounts (add credential_profiles entries to the global config, or log in a harness)",
-    );
+    print("no accounts (connect one with `claudexor auth login <harness>`)");
     return 0;
   }
   for (const harnessId of harnessIds) {
-    const authority = result.harnessAccounts.find((h) => h.harness_id === harnessId);
     print(`${harnessId}:`);
-    // The native "CLI login" pseudo-row: same Enabled toggle, no Delete.
-    const nativeEnabled = authority?.native_credentials_enabled ?? true;
-    const nativeState = !nativeEnabled
-      ? "disabled"
-      : authority?.native_login_detected
-        ? "logged-in"
-        : "not-logged-in";
-    print(`  CLI login [native] ${nativeState}`);
-    for (const { profile, status } of byHarness.get(harnessId) ?? []) {
+    const rows = byHarness.get(harnessId) ?? [];
+    if (rows.length === 0) print("  (no accounts)");
+    for (const { profile, status } of rows) {
       const state = profile.enabled ? status.availability : "disabled";
       print(
         `  ${profile.profile_id} [${profile.credential_kind}] ${state}${status.detail ? ` — ${status.detail}` : ""}`,
       );
     }
     // Informational: who an UNPINNED run routes to next (never a user setting).
-    const nextUp = authority?.next_up;
-    if (nextUp?.kind === "native") {
-      print(
-        nextUp.route === "api_key"
-          ? `  next up: API key [default]`
-          : `  next up: CLI login [native]`,
-      );
-    } else if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
+    const nextUp = result.accountPools.find((pool) => pool.harness_id === harnessId)?.next_up;
+    if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
+    else if (nextUp?.kind === "api_key_route") print(`  next up: API key (paid route)`);
     else if (nextUp?.kind === "none") print(`  next up: nothing routable (${nextUp.reason})`);
   }
   return 0;

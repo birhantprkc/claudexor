@@ -5,8 +5,15 @@ export * from "./routing-failure.js";
 export {
   defaultCredentialRoute,
   effectiveAuthPreference,
-  nextUpIdentity,
   probeCredentialProfileStatus,
   profileStatusAdmits,
   vendorVerifiedProfileStatus,
 } from "./credential-profiles.js";
+export {
+  accountPoolRows,
+  rankAccountPool,
+  selectFromAccountPool,
+  type PoolCandidate,
+  type PoolQuotaVerdict,
+  type PoolSelection,
+} from "./account-pool.js";

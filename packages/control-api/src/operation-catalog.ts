@@ -107,6 +107,10 @@ const operations: ControlOperationDescriptor[] = [
     ],
   }),
   j("GET", "/v2/quota", "read_only", null, "ControlQuotaResponse"),
+  // Unified account model (INV-135 rewrite): the pool-authority read. Its
+  // catalog presence is also the feature marker clients detect (absent from
+  // 3.5.0 engines), per INV-138 a generated capability, never hand-declared.
+  j("GET", "/v2/account-pools", "read_only", null, "ControlAccountPoolsResponse"),
   j("GET", "/v2/credential-profiles", "read_only", null, "ControlCredentialProfilesQueryResponse", {
     parameters: [
       queryParam({

@@ -158,6 +158,7 @@ import {
   ControlSettingsUpdateRequest,
   ControlQuotaRefreshRequest,
   ControlQuotaResponse,
+  ControlAccountPoolsResponse,
   ControlCredentialProfileCreateRequest,
   ControlCredentialProfileCreateResponse,
   ControlCredentialProfileUpdateRequest,
@@ -269,6 +270,7 @@ export interface DaemonControlApiOptions {
       updateSettings?: (patch: unknown) => Promise<unknown>;
       quota?: () => Promise<unknown>;
       refreshQuota?: (input?: ControlQuotaRefreshRequest) => Promise<unknown>;
+      accountPools?: () => Promise<unknown>;
       credentialProfiles?: (input?: { snapshot?: boolean }) => Promise<unknown>;
       runApplicability?: (input: { repoRoot: string }) => Promise<unknown>;
       createCredentialProfile?: (input: unknown) => Promise<unknown>;
@@ -1476,6 +1478,10 @@ export class DaemonControlApiServer {
     }
     if (method === "GET" && path === "/quota")
       return this.service(res, "quota", undefined, ControlQuotaResponse);
+    // Unified account model: the pool-authority read (also the feature marker
+    // clients detect through the operation catalog).
+    if (method === "GET" && path === "/account-pools")
+      return this.service(res, "accountPools", undefined, ControlAccountPoolsResponse);
     if (method === "POST" && path === "/quota") {
       let body: ControlQuotaRefreshRequest;
       try {

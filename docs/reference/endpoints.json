@@ -15,6 +15,18 @@
     },
     {
       "method": "GET",
+      "path": "/v2/account-pools",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Read the per-harness account-pool routing verdict (who an unpinned run routes to next) under the unified account model.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": "ControlAccountPoolsResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
       "path": "/v2/agent-capabilities",
       "mutating": false,
       "applicability": "global",

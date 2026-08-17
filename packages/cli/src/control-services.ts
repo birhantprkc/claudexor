@@ -368,7 +368,9 @@ export function controlServices(
     ...quotaControlServices(quotaRegistry),
     // INV-135: durable registry + live doctor projection, one probe per
     // profile; adapters without profile support report honest unknown.
-    credentialProfiles: createCredentialProfilesService(quotaRegistry),
+    // The pool-authority read (GET /v2/account-pools) shares the same cached
+    // projection so the listing and the pool verdict cannot disagree.
+    ...createCredentialProfilesService(quotaRegistry),
     // PATCH /credential-profiles/:harness/:id — the Enabled toggle of the
     // accounts symmetry (INV-135). Flips the profile's durable `enabled` in the
     // registry (one locked write) and returns the refreshed doctor projection.

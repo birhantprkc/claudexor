@@ -248,6 +248,61 @@ export const ControlNextUpIdentity = z
 export type ControlNextUpIdentity = z.infer<typeof ControlNextUpIdentity>;
 
 /**
+ * The account an UNPINNED run of a harness would route to next under the
+ * UNIFIED account model (INV-135): every account is a named registry row, so
+ * the pool verdict is either an enabled row, the policy-governed API-key
+ * ROUTE (INV-061 — a route, never a row), or nothing routable. This union is
+ * carried ONLY by `accountPools` — the legacy `ControlNextUpIdentity` stays
+ * untouched because old strict decoders throw on unknown kinds.
+ */
+export const ControlPoolNextUp = z
+  .discriminatedUnion("kind", [
+    z
+      .object({ kind: z.literal("profile"), profileId: Id })
+      .strict()
+      .describe("An enabled account row is who an unpinned run routes to next."),
+    z
+      .object({ kind: z.literal("api_key_route") })
+      .strict()
+      .describe(
+        "The account pool is empty or exhausted; the unpinned route is the policy-governed API key (INV-061) — a route, never an account row.",
+      ),
+    z
+      .object({ kind: z.literal("none"), reason: z.string() })
+      .strict()
+      .describe("An unpinned run has nothing routable, with a human reason."),
+  ])
+  .describe(
+    "Server-computed pool routing verdict for one harness's unpinned runs (unified account model).",
+  );
+export type ControlPoolNextUp = z.infer<typeof ControlPoolNextUp>;
+
+/** Per-harness POOL AUTHORITY of the unified account model: routing facts live
+ * here; account facts live on the profile rows. */
+export const ControlHarnessAccountPool = z
+  .object({
+    harness_id: Id.describe("Harness family this pool verdict belongs to."),
+    next_up: ControlPoolNextUp,
+  })
+  .strict()
+  .describe(
+    "Per-harness pool authority (unified account model): who an unpinned run routes to next.",
+  );
+export type ControlHarnessAccountPool = z.infer<typeof ControlHarnessAccountPool>;
+
+/** GET /account-pools — the pool-authority read AND the unified-accounts
+ * feature marker (its catalog presence is absent from 3.5.0 engines). */
+export const ControlAccountPoolsResponse = z
+  .object({
+    accountPools: z
+      .array(ControlHarnessAccountPool)
+      .describe("Pool routing verdict per harness, computed by the routing owner."),
+  })
+  .strict()
+  .describe("Per-harness account-pool authority under the unified account model.");
+export type ControlAccountPoolsResponse = z.infer<typeof ControlAccountPoolsResponse>;
+
+/**
  * Per-harness ACCOUNTS AUTHORITY projection (INV-135, the accounts symmetry):
  * the native "CLI login" pseudo-row state and the informational `next_up`
  * identity, computed ONCE on the server so no client re-derives the symmetry.
@@ -304,7 +359,13 @@ export const ControlCredentialProfilesResponse = z
       .array(ControlHarnessAccounts)
       .default([])
       .describe(
-        "Per-harness accounts authority (INV-135): the native CLI-login pseudo-row state and the server-computed Active identity, so no surface re-derives the accounts symmetry.",
+        "Per-harness accounts authority (INV-135): the native CLI-login pseudo-row state and the server-computed Active identity, so no surface re-derives the accounts symmetry. A unified-model engine emits [] here (the key must stay present for legacy strict clients) and carries routing facts in accountPools instead.",
+      ),
+    accountPools: z
+      .array(ControlHarnessAccountPool)
+      .default([])
+      .describe(
+        "Additive per-harness pool authority of the unified account model: routing facts (next_up incl. the api_key_route kind) live here so legacy strict next_up decoders never see unknown kinds. Old clients ignore this key.",
       ),
   })
   .strict()

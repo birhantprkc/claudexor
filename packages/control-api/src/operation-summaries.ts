@@ -17,6 +17,8 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
   "GET /v2/global/events": "Subscribe to the global cross-project event stream (SSE).",
   "GET /v2/quota": "Read cached per-profile harness quota snapshots.",
   "POST /v2/quota": "Refresh and read per-profile harness quota snapshots.",
+  "GET /v2/account-pools":
+    "Read the per-harness account-pool routing verdict (who an unpinned run routes to next) under the unified account model.",
   "GET /v2/credential-profiles": "List credential profiles per harness.",
   "POST /v2/credential-profiles": "Create a credential profile for a harness.",
   "PATCH /v2/credential-profiles/:harness/:profileId":
