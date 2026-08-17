@@ -51,24 +51,24 @@ struct HarnessFamily: RawRepresentable, Identifiable, Hashable {
     static let claude = Self(rawValue: "claude")
     static let cursor = Self(rawValue: "cursor")
     static let opencode = Self(rawValue: "opencode")
+    static let agy = Self(rawValue: "agy")
     static let raw = Self(rawValue: "raw-api")
     /// The openrouter raw-API instance (registry.ts `createRawApiAdapter({ id:
     /// "openrouter" })`): a second api-key meta-host, not a built-in family row —
     /// it renders only when its key is configured and the daemon lists it live.
     static let openrouter = Self(rawValue: "openrouter")
     static let fake = Self(rawValue: "fake")
-    static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .raw]
+    static let builtIns: [Self] = [.codex, .claude, .cursor, .opencode, .agy, .raw]
     var id: String { rawValue }
 
+    /// Human-facing family names; anything else title-cases its rawValue. The
+    /// vendor brands the PRODUCT "Antigravity" — `agy` is only its binary.
+    private static let labels = [
+        "codex": "Codex", "claude": "Claude", "cursor": "Cursor", "opencode": "OpenCode",
+        "agy": "Antigravity", "raw-api": "Raw API", "openrouter": "OpenRouter", "fake": "Fake",
+    ]
     var label: String {
-        if self == .codex { return "Codex" }
-        if self == .claude { return "Claude" }
-        if self == .cursor { return "Cursor" }
-        if self == .opencode { return "OpenCode" }
-        if self == .raw { return "Raw API" }
-        if self == .openrouter { return "OpenRouter" }
-        if self == .fake { return "Fake" }
-        return rawValue.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
+        Self.labels[rawValue] ?? rawValue.split(separator: "-").map { $0.capitalized }.joined(separator: " ")
     }
     // Vendor iconography is owned solely by `HarnessIcon` (M9-UX item 5): a real
     // brand mark where we ship one, else ONE shared generic glyph. No per-family

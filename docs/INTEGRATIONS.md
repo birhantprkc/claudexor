@@ -575,6 +575,15 @@ stdin, but do not assume resume, estimate, live steering, or structured output
 support unless the capability profile and adapter doctor output prove it for
 the active run.
 
+The Antigravity adapter is the one closed-source vendor CLI in tree: `agy`
+ships as a signed Go binary with no npm artifact and no source repository, so
+its wire shapes are pinned by fixtures rather than by reading vendor code.
+`packages/harness-agy/fixtures/manifest.yaml` says which is which: the run,
+schema-envelope and auth-error streams were RECORDED from live sessions, the
+resume stream is synthesized from those recorded shapes, and the empty-SUCCESS
+soft-deny below has no fixture at all (it is sourced to an upstream report).
+Every claim below is re-verified when the pinned vendor version moves.
+
 Discovery/manifests describe static capabilities and possible auth sources.
 Doctor output is the readiness source: UI status, routing, reviewer selection,
 and live controls must rely on doctor status, enabled intents, and smoke checks.
@@ -673,6 +682,30 @@ string; it falls back to `result` only when no complete assistant frame exists.
 No typed rate-limit path exists: transient conditions
 surface as generic `error` events — honest degradation, never invented
 status.
+
+**Antigravity CLI (`agy`)** — wire: `agy -p "<prompt>" --output-format
+stream-json --model <slug> --mode <plan|accept-edits> --add-dir <cwd>`
+(`--dangerously-skip-permissions` for full access; `--conversation <id>`
+resumes). Events: `init` → `started` (the vendor `conversation_id` is the
+resumable native session id); `step_update` with `step_type: "tool"` → a
+`tool_call` on `state: "ACTIVE"` and a `tool_result` on `state: "DONE"`
+(+ `file_change` for a writing tool) — every OTHER state, including a future
+one, is a recognized no-op, never a fabricated success; `step_update` with
+`text_delta` → a `message` narration segment (complete segments, not display
+deltas); terminal `result` → the typed final from `response`
+(`final_source: result`), or from a serialized `structured_output` envelope
+when a schema is passed — a branch no shipped path reaches today, because the
+adapter passes no `--json-schema` and the manifest declares
+`json_schema_output` false. `status: "SUCCESS"` with an EMPTY response is the
+vendor's soft-deny class (upstream #794) and surfaces as a typed `error`, not
+an empty success. A login timeout also exits 0, but it is a different shape:
+it carries `status: "ERROR"` with the failure text
+(`packages/harness-agy/fixtures/error-auth.jsonl`). `usage` carries
+input/output/cache-read tokens; `thinking_tokens` has no schema home and is
+dropped rather than folded into output. No typed rate-limit path exists. The CLI has no config-dir env var
+(upstream #155), so a named identity is a Claudexor-owned `HOME` — which also
+relocates the vendor's conversation and cache state, so one profile HOME holds
+every thread's vendor state.
 
 **OpenCode** — markerless: no typed final message; the engine's
 AnswerAssembly falls back to joining narration (the documented degradation
@@ -793,7 +826,7 @@ always preferred.
 | `CLAUDEXOR_CONFIG_DIR` | util | Relocates the whole config/state root (default `~/.claudexor/v3`; tests and CI use a disposable absolute path). |
 | `CLAUDEXOR_BUILD_SHA` | util | Build-time stamp of the engine's git commit SHA (packaging sets it); without it a dev checkout reads `git rev-parse HEAD` and packaged builds report `unknown`. Reported in the handshake build identity. |
 | `CLAUDEXOR_DISABLE_STORED_SECRETS` | secrets | Ignore v2 file-stored secret refs entirely (hermetic runs; native sessions still work). |
-| `CLAUDEXOR_CODEX_BIN` / `CLAUDEXOR_CLAUDE_BIN` / `CLAUDEXOR_CURSOR_BIN` / `CLAUDEXOR_OPENCODE_BIN` | adapters | Explicit vendor CLI binary when PATH discovery is not enough. |
+| `CLAUDEXOR_CODEX_BIN` / `CLAUDEXOR_CLAUDE_BIN` / `CLAUDEXOR_CURSOR_BIN` / `CLAUDEXOR_OPENCODE_BIN` / `CLAUDEXOR_AGY_BIN` | adapters | Explicit vendor CLI binary when PATH discovery is not enough. |
 | `CLAUDEXOR_CODEX_API_KEY` / `CLAUDEXOR_ANTHROPIC_API_KEY` / `CLAUDEXOR_CURSOR_API_KEY` | adapters | Claudexor-scoped API-key overrides (take precedence over provider env names). |
 | `CLAUDEXOR_CODEX_MODEL` | codex adapter | Default model override for the codex route. |
 | `CLAUDEXOR_CODEX_NATIVE_HOME` / `CLAUDEXOR_CLAUDE_NATIVE_DIR` | adapters | Explicit Claudexor-owned Codex profile or Claude native config directory overrides. |

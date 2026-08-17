@@ -64,6 +64,20 @@ extension GatewayClient {
         try await mutateSetupJob(jobId, action: "extend")
     }
 
+    /// One-shot sign-in input for a `url_disclosure_with_input` login: the code
+    /// the user pasted, which the daemon writes to the waiting vendor CLI's
+    /// stdin. The value is a one-time secret — it is encoded into the body and
+    /// nothing here logs it, keeps it, or repeats it in a failure (the daemon's
+    /// 409 bodies name the job state, never the value).
+    public func submitSetupJobInput(jobId: String, value: String) async throws -> SetupJob {
+        var req = setupJobRequest(jobId, suffix: "input", method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try Self.encoder.encode(SetupJobInputRequest(value: value))
+        let (data, resp) = try await session.data(for: req)
+        try Self.requireSuccess(resp, data: data)
+        return try Self.decodeSetupJob(data, expectedJobId: jobId)
+    }
+
     /// Full-snapshot setup lifecycle stream. Unknown names, malformed payloads,
     /// and buffer loss are protocol failures that force a scoped resnapshot.
     public func setupJobEvents(

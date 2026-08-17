@@ -7,6 +7,7 @@ import {
 import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { CODEX_FILE_AUTH_ARGS, defaultNativeCodexHome } from "@claudexor/harness-codex";
 import { canonicalCursorProfileHome, cursorProfilePathEnv } from "@claudexor/harness-cursor";
+import { canonicalAgyProfileHome } from "@claudexor/harness-agy";
 import { ensureDir } from "@claudexor/util";
 import { isAbsolute } from "node:path";
 
@@ -18,10 +19,17 @@ export interface NativeLoginSpec {
    * "url_disclosure" = daemon-hosted vendor login whose sign-in URL is
    * captured into the disclosure sidecar (cursor). "url_disclosure_with_input"
    * = the same plus the one-shot stdin input sidecar (claude paste-code).
-   * "terminal" = the legacy Terminal handoff (codex browser_redirect only). */
+   * "terminal" = a login driven on the operator's own tty (the codex
+   * browser_redirect fallback). */
   loginMode?: "terminal" | "device_code" | "url_disclosure" | "url_disclosure_with_input";
   /** Which app-server auth flow the device_code runner requests (device_code only). */
   appServerFlow?: "chatgptDeviceCode" | "chatgpt";
+  /** The vendor reads its pasted code only from a real terminal (agy), so the
+   * daemon-hosted runner must give stdin a tty instead of a pipe. */
+  ptyStdin?: boolean;
+  /** How long the VENDOR itself will wait for the code, when that is shorter
+   * than Claudexor's own login window. Absent = the engine's window governs. */
+  loginWindowMs?: number;
 }
 
 type LoginDefinition = Omit<NativeLoginSpec, "binary"> & { binaryName: () => string };
@@ -30,6 +38,9 @@ type LoginDefinition = Omit<NativeLoginSpec, "binary"> & { binaryName: () => str
  * = app-server browser-callback (secondary); browser_redirect = legacy Terminal
  * localhost callback (the typed fallback). */
 export type CodexLoginFlow = "device_auth" | "browser_callback" | "browser_redirect";
+
+/** The vendor's own paste window for agy: 60 seconds, no flag to extend. */
+export const AGY_LOGIN_WINDOW_MS = 60_000;
 
 const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
   codex: {
@@ -59,6 +70,22 @@ const NATIVE_LOGIN_DEFINITIONS: Record<string, LoginDefinition> = {
     binaryName: () => process.env.CLAUDEXOR_CURSOR_BIN || "cursor-agent",
     args: ["login"],
     displayCommand: "cursor-agent login",
+  },
+  agy: {
+    binaryName: () => process.env.CLAUDEXOR_AGY_BIN || "agy",
+    // agy has no login subcommand. BARE `agy` is the interactive TUI, which
+    // OPENS THE BROWSER ITSELF and stays resident after authenticating — on a
+    // daemon host that hijacks a browser nobody is watching and the runner
+    // waits forever on a process that never exits (PLAN F7; sol review). The
+    // PRINT-MODE shape is the live-proven login vehicle (PLAN F6): an
+    // unauthenticated `agy -p …` prints the sign-in URL to stderr, waits
+    // exactly 60 seconds for the pasted code on a tty stdin, completes the
+    // login, answers the command and EXITS. `/model` is the quota-free
+    // command, the same one the doctor probe uses. Both routes run this —
+    // `claudexor profiles login agy` on the operator's own tty, the card
+    // through the runner's pty (ptyStdin).
+    args: ["-p", "/model", "--output-format", "json"],
+    displayCommand: 'agy -p "/model" (sign-in via printed link + pasted code)',
   },
 };
 
@@ -107,11 +134,23 @@ export function nativeLoginSpec(
   // Terminal window. Claude's manual OAuth completion needs one line of user
   // input written back (the pasted code); cursor's login self-completes by
   // server-side polling once the URL is followed anywhere.
+  // agy takes the same paste-a-code shape as claude; the one difference is
+  // that its vendor refuses a piped stdin outright, so the runner must
+  // interpose a tty (proven 2026-08-16: with a plain pipe agy answers
+  // "authentication required", with a pty it prints the URL and consumes the
+  // pasted code).
+  const withInput = harness === "claude" || harness === "agy";
   return {
     binary: resolved,
     args: [...definition.args],
     displayCommand: definition.displayCommand,
-    loginMode: harness === "claude" ? "url_disclosure_with_input" : "url_disclosure",
+    loginMode: withInput ? "url_disclosure_with_input" : "url_disclosure",
+    // agy waits EXACTLY 60 seconds for the pasted code and offers no flag to
+    // extend it (measured across four runs, PLAN §1.2 F6). Sealing the vendor's
+    // real window instead of the engine's 15 minutes keeps the card's countdown
+    // honest and lets it re-issue the link the moment the vendor gives up
+    // (Л-23) rather than counting down against a process that already exited.
+    ...(harness === "agy" ? { ptyStdin: true, loginWindowMs: AGY_LOGIN_WINDOW_MS } : {}),
   };
 }
 
@@ -188,6 +227,25 @@ export function nativeLoginEnv(
     // Default and profile Claude stores are both Claudexor-owned (INV-067 /
     // INV-135); ordinary ~/.claude is never created, read, or mutated here.
     ensureDir(env.CLAUDE_CONFIG_DIR);
+  } else if (harness === "agy") {
+    // agy takes its whole config root from $HOME; the profile HOME IS the
+    // isolation locator. There is NO default agy credential store (owner
+    // decision Л-4), so an absent override must REFUSE: falling through would
+    // leave the daemon's own HOME in place and write a vendor token into the
+    // operator's real home directory (INV-135).
+    if (!configDirOverride) {
+      throw new Error(
+        "agy has no default credential store: an Antigravity login must target a named profile HOME (INV-135, owner decision Л-4)",
+      );
+    }
+    // No keychain is created inside the profile HOME — the vendor falls back to
+    // its file-based token there (PLAN Л-15). Pin the auto-updater so the
+    // closed binary cannot replace itself mid-login.
+    const home = canonicalAgyProfileHome(configDirOverride);
+    ensureDir(home);
+    env.AGY_CLI_DISABLE_AUTO_UPDATE = "true";
+    env.HOME = home;
+    env.USERPROFILE = home;
   } else if (harness === "cursor") {
     // url_disclosure: the CLI must print its sign-in URL instead of opening a
     // browser on the daemon host (the user may be on another device). The

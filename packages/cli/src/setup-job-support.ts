@@ -12,18 +12,32 @@ import {
   type ProcessGroupHandle,
 } from "@claudexor/core";
 import { loadConfig } from "@claudexor/config";
-import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
-import { canonicalCodexProfileHome } from "@claudexor/harness-codex";
-import { canonicalCursorProfileHome } from "@claudexor/harness-cursor";
-import type {
+import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
+import { defaultNativeCodexHome } from "@claudexor/harness-codex";
+import {
   ControlHarnessSetupHarness,
-  ControlSetupJob,
-  CredentialProfileStatus,
+  type ControlSetupJob,
+  type CredentialProfileStatus,
+  harnessHasDefaultCredentialStore,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
+import {
+  canonicalProfileLoginDir,
+  configDirLoginHarnessList,
+  isConfigDirLoginHarness,
+} from "./config-dir-login-harnesses.js";
+import { ACTIVE_SETUP_STATES } from "./setup-job-store.js";
 import type { SetupLoginRunnerState } from "./setup-login-protocol.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
+
+/** Where a harness's DEFAULT (unnamed) login lands, for the harnesses whose
+ * default store Claudexor owns. Absent = the vendor keeps its own default
+ * location, or (agy) has none at all. */
+export const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
+  codex: defaultNativeCodexHome,
+  claude: defaultNativeClaudeConfigDir,
+};
 
 export type SetupProfile = {
   guideUrl: string;
@@ -43,6 +57,10 @@ export const SETUP_PROFILES: Record<ControlHarnessSetupHarness, SetupProfile> = 
     guideUrl: "https://docs.cursor.com/en/cli/reference/authentication",
     note: "Cursor native CLI login is reused when available.",
   },
+  agy: {
+    guideUrl: "https://antigravity.google/docs/cli/install",
+    note: "Antigravity sign-in always targets one named account folder: the CLI keeps its whole state under a home directory, so every Google account you add gets its own.",
+  },
 };
 
 /**
@@ -55,10 +73,10 @@ export function resolveProfileBinding(
   profileId: string | undefined,
 ): { profileId: string; configDir: string } | null {
   if (!profileId) return null;
-  if (harness !== "claude" && harness !== "codex" && harness !== "cursor") {
+  if (!isConfigDirLoginHarness(harness)) {
     throw Object.assign(
       new Error(
-        `harness "${harness}" has no isolated config-dir login; only claude, codex, and cursor support profile logins`,
+        `harness "${harness}" has no isolated config-dir login; only ${configDirLoginHarnessList()} support profile logins`,
       ),
       { status: 400 },
     );
@@ -87,13 +105,72 @@ export function resolveProfileBinding(
       { status: 400 },
     );
   }
-  const configDir =
-    harness === "claude"
-      ? canonicalProfileConfigDir(profile.isolation_locator ?? "")
-      : harness === "codex"
-        ? canonicalCodexProfileHome(profile.isolation_locator ?? "")
-        : canonicalCursorProfileHome(profile.isolation_locator ?? "");
-  return { profileId, configDir };
+  return {
+    profileId,
+    configDir: canonicalProfileLoginDir(harness, profile.isolation_locator ?? ""),
+  };
+}
+
+/**
+ * A harness with no default credential store (agy — owner decision Л-4) can
+ * only sign in INTO a named account. Refusing at CREATE time keeps the runner
+ * from spawning a vendor login whose token would land in the daemon's own home
+ * directory, and gives the caller a 400 instead of an opaque spawn failure.
+ */
+export function assertDefaultLoginAllowed(harness: string, hasProfile: boolean): void {
+  if (hasProfile || harnessHasDefaultCredentialStore(harness)) return;
+  throw Object.assign(
+    new Error(
+      `harness "${harness}" has no default credential store: sign in from a named account (add one first, then start the login from it)`,
+    ),
+    { status: 400 },
+  );
+}
+
+/**
+ * Whether a login's deadline may be pushed out. A deadline that IS the
+ * vendor's own window cannot be: publishing a later one would promise fifteen
+ * more minutes of a login the vendor abandons after sixty seconds.
+ */
+export function assertSetupJobExtendable(
+  job: ControlSetupJob,
+): asserts job is ControlSetupJob & { deadlineAt: string } {
+  if (
+    !ACTIVE_SETUP_STATES.has(job.state) ||
+    !["launching", "awaiting_user"].includes(job.phase ?? "") ||
+    !job.deadlineAt
+  ) {
+    throw Object.assign(new Error("setup job cannot be extended"), { status: 409 });
+  }
+  if (job.deadlineFixed) {
+    throw Object.assign(
+      new Error(
+        `${job.harness} sets its own sign-in window and it cannot be extended; start a new sign-in instead`,
+      ),
+      { status: 409 },
+    );
+  }
+}
+
+/**
+ * The in-progress login a profile deletion must refuse against (INV-135 409
+ * fence). Membership is derived from the setup-harness enum's OWN options,
+ * never a hand-copied list: a harness outside the enum can have no setup jobs,
+ * so the lookup is honestly skipped instead of cast into a filter it does not
+ * satisfy. The manager is passed as a thunk so a skipped harness never
+ * resolves it.
+ */
+export function activeProfileLoginJob(
+  setupJobs: () => { list: (filter: { harness: ControlHarnessSetupHarness }) => ControlSetupJob[] },
+  harnessId: string,
+  profileId: string,
+): ControlSetupJob | undefined {
+  if (!ControlHarnessSetupHarness.options.includes(harnessId as ControlHarnessSetupHarness)) {
+    return undefined;
+  }
+  return setupJobs()
+    .list({ harness: harnessId as ControlHarnessSetupHarness })
+    .find((job) => ACTIVE_SETUP_STATES.has(job.state) && job.profileId === profileId);
 }
 
 /** INV-135 profile verification: the registry adapter's doctor probe against

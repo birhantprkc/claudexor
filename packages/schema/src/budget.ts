@@ -182,6 +182,12 @@ export const BudgetObservation = z
       .describe(
         "Canonical model ids/aliases this quota observation applies to; omitted/null means every model.",
       ),
+    applies_to_unspecified_model: z
+      .boolean()
+      .optional()
+      .describe(
+        "Whether a model-scoped observation also governs a run that names no model; carried alongside applies_to_models so the scope survives this projection.",
+      ),
     used_ratio: z.number().min(0).max(1).nullable().optional(),
     window_seconds: z.number().positive().nullable().optional(),
     resets_at: z

@@ -1,3 +1,4 @@
+import { HARNESS_COMMAND_SPECS } from "./harness-command-specs.js";
 import { REMOTE_COMMAND_SPECS } from "./remote-command-specs.js";
 import { RETRY_COMMAND_SPECS } from "./retry-command-specs.js";
 import {
@@ -231,19 +232,7 @@ export const CLI_COMMANDS: readonly CliCommandSpec[] = [
     mutability: "ops",
     stability: "stable",
   },
-  {
-    id: "harness",
-    positionalPatterns: [
-      { prefix: ["list"], min: 1, max: 1 },
-      { prefix: ["install"], min: 2, max: 2 },
-    ],
-    usageArgs: "list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
-    summary: "List harnesses, or install one pinned vendor CLI after disclosure",
-    flags: ["all", "dry-run", "yes", "json"],
-    subcommandFlags: { list: ["all"], install: ["dry-run", "yes"] },
-    mutability: "ops",
-    stability: "stable",
-  },
+  ...HARNESS_COMMAND_SPECS,
   {
     id: "models",
     positionalPatterns: [{ min: 0, max: 0 }],

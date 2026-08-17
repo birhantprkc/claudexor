@@ -17,13 +17,10 @@ import {
 import { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 export { terminateAppServerChild } from "./setup-login-child-lifecycle.js";
 import { nativeLoginEnv } from "./native-login.js";
-import {
-  C0_CONTROL_RE,
-  TERM_ESCAPE_RE,
-  boundedTail,
-  createTailBuffer,
-  watchLoginInput,
-} from "./setup-login-io.js";
+import { ptyWrappedCommand } from "./setup-login-pty.js";
+import { createOAuthUrlDetector } from "./setup-login-url.js";
+export { createOAuthUrlDetector, extractOAuthUrl } from "./setup-login-url.js";
+import { boundedTail, createTailBuffer, watchLoginInput } from "./setup-login-io.js";
 import { waitForSetupLoginPermit } from "./setup-login-permit.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
@@ -184,6 +181,17 @@ export async function runSetupLoginWorker(
       // The disclosure is best-effort context; it must never kill the login.
     }
   };
+  // A vendor that reads its code only from a terminal is wrapped here; the
+  // wrapper is transport, so the evidence verified above still covers the
+  // VENDOR binary and its sealed argv (setup-login-pty.ts).
+  const command = manifest.ptyStdin
+    ? ptyWrappedCommand(manifest.binary, manifest.args)
+    : { binary: manifest.binary, args: manifest.args };
+  if ("refusal" in command) {
+    persistFailure(manifest, now, permit.issuedAt, "spawn_failed", command.refusal);
+    return 1;
+  }
+
   // A spawn throw and a wait rejection wrote the SAME receipt, so they share
   // one catch; de-registering the hold handlers is every exit's finally.
   let result: { code: number | null; signal: NodeJS.Signals | null };
@@ -201,7 +209,7 @@ export async function runSetupLoginWorker(
           ? ["inherit", "pipe", "pipe"]
           : "inherit",
     };
-    const child = spawnProcess(manifest.binary, manifest.args, spawnOptions);
+    const child = spawnProcess(command.binary, command.args, spawnOptions);
     if (teeOutput) {
       const tee = (sink: NodeJS.WriteStream) => (chunk: Buffer) => {
         sink.write(chunk);
@@ -212,7 +220,8 @@ export async function runSetupLoginWorker(
       child.stderr?.on("data", tee(process.stderr));
     }
     if (withInput && manifest.inputPath) {
-      stopInputWatch = watchLoginInput(manifest, child, now);
+      // A tty echoes what we write, so the code would otherwise ride the tail.
+      stopInputWatch = watchLoginInput(manifest, child, now, (value) => tail.forget(value));
     }
     result = await waitForExit(child);
   } catch {
@@ -364,55 +373,6 @@ function appServerConnection(child: ChildProcess): CodexAppServerConnection {
       } catch {
         /* best-effort */
       }
-    },
-  };
-}
-
-const OAUTH_URL_SIGNATURE_RE =
-  /(oauth|authori[sz]e|login|sign[-_]?in|device|sso|verification|callback)/i;
-
-/**
- * First sign-in-shaped URL in vendor CLI output, or null. Terminal escapes are
- * stripped first; trailing prose punctuation is trimmed; a docs link in a
- * banner never qualifies.
- */
-const OAUTH_URL_SCAN_WINDOW = 8_192;
-
-export function extractOAuthUrl(text: string): string | null {
-  const plain = text.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
-  for (const match of plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)) {
-    const url = match[0].replace(/[.,;:!?]+$/, "");
-    if (OAUTH_URL_SIGNATURE_RE.test(url)) return url;
-  }
-  return null;
-}
-
-/**
- * Per-login detector. A match ending at the window's very end may be cut by a
- * chunk boundary (wave finding): it is published PROVISIONALLY, superseded by
- * a longer capture, and FINAL only once output continues past its end.
- */
-export function createOAuthUrlDetector(): { push(chunk: Buffer): string | null } {
-  let window = "";
-  let published: string | null = null;
-  let finalized = false;
-  return {
-    push(chunk) {
-      if (finalized) return null;
-      window = (window + chunk.toString("utf8")).slice(-OAUTH_URL_SCAN_WINDOW);
-      const plain = window.replace(TERM_ESCAPE_RE, "").replace(C0_CONTROL_RE, "");
-      const match = [...plain.matchAll(/https:\/\/[^\s"'<>()[\]]+/g)].find((m) =>
-        OAUTH_URL_SIGNATURE_RE.test(m[0]),
-      );
-      if (!match) return null;
-      const url = match[0].replace(/[.,;:!?]+$/, "");
-      if ((match.index ?? 0) + match[0].length < plain.length) {
-        finalized = true;
-        return url === published ? null : url;
-      }
-      if (published !== null && url.length <= published.length) return null;
-      published = url;
-      return url;
     },
   };
 }

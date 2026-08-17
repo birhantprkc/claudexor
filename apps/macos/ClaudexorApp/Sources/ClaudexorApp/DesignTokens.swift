@@ -124,6 +124,12 @@ enum Theme {
         case .claude: return Color(dark: (0.87, 0.49, 0.36), light: (0.78, 0.40, 0.26))  // Anthropic coral
         case .cursor: return Color(dark: (0.74, 0.58, 0.98), light: (0.52, 0.38, 0.88))  // violet
         case .opencode: return Color(dark: (0.70, 0.84, 0.38), light: (0.43, 0.62, 0.18))// lime
+        // Antigravity cyan. The palette's tightest neighbour pair is this vs
+        // codex teal-green, so it is pushed hard toward BLUE (b 0.92 vs 0.60)
+        // and clears AA against `surfaceRaised` in both themes (6.4:1 dark,
+        // 5.1:1 light) — the harness dot never rides hue alone anyway: every
+        // surface pairs it with the label or brand mark.
+        case .agy: return Color(dark: (0.38, 0.80, 0.92), light: (0.05, 0.47, 0.58))     // cyan
         case .raw: return Color(dark: (0.86, 0.46, 0.78), light: (0.64, 0.30, 0.58))     // magenta
         case .fake: return Color.secondary
         default: return accentSolid

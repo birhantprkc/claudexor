@@ -87,6 +87,9 @@ const CREDENTIAL_STORE_PARTS = new Set([
   ".cursor",
   ".docker",
   ".gcloud",
+  // Antigravity CLI (agy) keeps its OAuth token and vendor state here; a
+  // Claudexor-owned profile HOME contains exactly this directory.
+  ".gemini",
   ".gnupg",
   ".kube",
   ".openai",
@@ -94,6 +97,8 @@ const CREDENTIAL_STORE_PARTS = new Set([
 ]);
 
 const CREDENTIAL_FILE_BASENAMES = new Set([
+  // The agy file-based OAuth token, caught even when copied out of .gemini.
+  "antigravity-oauth-token",
   ".git-credentials",
   ".netrc",
   ".npmrc",

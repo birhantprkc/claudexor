@@ -208,6 +208,39 @@ import Testing
         #expect(observed.contains("runs in the embedded terminal where you watch it"))
     }
 
+    /// The unpinnable branch named "Cursor" outright, so an Antigravity install
+    /// asked the user to approve a paragraph about the wrong vendor — in the
+    /// most security-sensitive dialog in the app. Every vendor noun here comes
+    /// from `HarnessFamily.label`, which also keeps `agy` from reading "Agy".
+    @MainActor
+    @Test func remoteInstallDisclosureNamesTheHarnessItIsActuallyInstalling() {
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
+        let connection = RemoteConnection(id: UUID(), sshAlias: "naming-host")
+        model.remoteConnections = [connection]
+        let lease = model.beginRemoteAction(.harnessInstall, connectionID: connection.id)!
+        func observed(_ harness: String) -> String {
+            RemoteHarnessInstallSection.disclosureText(
+                RemoteHarnessInstallPrompt(
+                    lease: lease, harness: harness,
+                    command: "curl … | /bin/sh", installLocation: "~/.local/bin",
+                    pinnedVersion: nil, verification: .humanObserved),
+                model: model)
+        }
+
+        let agy = observed("agy")
+        #expect(agy.contains("Antigravity ships no pinnable npm artifact"))
+        #expect(!agy.contains("Cursor"))
+        #expect(!agy.contains("Agy"))
+
+        // The other script vendor still names itself.
+        #expect(observed("cursor").contains("Cursor ships no pinnable npm artifact"))
+
+        // Every installable harness renders its product label, never its id.
+        for harness in installableRemoteHarnesses {
+            #expect(observed(harness).contains(HarnessFamily(rawValue: harness).label))
+        }
+    }
+
     @MainActor
     @Test func staleDeviceDismissalCannotCloseTheReplacement() {
         let model = AppModel(client: nil, requestNotificationAuthorization: false)

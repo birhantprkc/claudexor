@@ -6,6 +6,81 @@ import Testing
 /// Owner dogfood: the internal profile id is DERIVED, never typed. The
 /// generator must always emit a server-valid slug, unique per harness.
 @Suite struct AccountsPresentationTests {
+    /// Antigravity registers named profiles (so it belongs in the config-dir
+    /// login set) but has NO default credential store, so it must NOT gain a
+    /// `defaultAuthReadinessRequest`: that field is what emits the default
+    /// "CLI login" row, and for agy it would be a row with nothing behind it.
+    /// The two facts are one decision, so they are pinned together.
+    @Test func antigravitySignsInAsNamedProfilesWithoutAPhantomCliLoginRow() {
+        #expect(AccountsPresentation.configDirLoginHarnessIds.contains("agy"))
+        #expect(HarnessFamily(rawValue: "agy").defaultAuthReadinessRequest == nil)
+        // Every OTHER config-dir login family keeps its native default row.
+        for id in AccountsPresentation.configDirLoginHarnessIds where id != "agy" {
+            #expect(HarnessFamily(rawValue: id).defaultAuthReadinessRequest?.source == .nativeSession)
+        }
+        // Rotation IS available to agy — it has a real vendor quota source —
+        // but with no native identity to fall back on, one profile is one
+        // account and there is nothing to rotate to until a second exists.
+        #expect(AccountsAutoBalance.capableHarnessIds.contains("agy"))
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
+    }
+
+    /// "This harness id decodes as a SetupHarness" is NOT "this harness has a
+    /// default store". A surface that offers a PROFILE-LESS login (the remote
+    /// Setup button) must gate on the store, or it posts a login the daemon
+    /// refuses — agy has no default subject at all.
+    @Test func onlyFamiliesWithADefaultStoreOfferAProfilelessLogin() {
+        #expect(!AccountsPresentation.supportsDefaultStoreLogin(.agy))
+        #expect(SetupHarness(rawValue: HarnessFamily.agy.setupHarnessId) != nil)
+        for family in [HarnessFamily.claude, .codex, .cursor] {
+            #expect(AccountsPresentation.supportsDefaultStoreLogin(family))
+        }
+        // API-key families have no native default login to start either.
+        for family in [HarnessFamily.opencode, .raw, .openrouter] {
+            #expect(!AccountsPresentation.supportsDefaultStoreLogin(family))
+        }
+    }
+
+    /// The global popover's add flow is DERIVED from the config-dir login set,
+    /// not hand-listed. The hand-listed picker offered Claude/Codex/Cursor only,
+    /// so a user who had added one Google account found no way to add the second
+    /// and no explanation — the two-account story dead-ended in the one surface
+    /// that owns adding accounts.
+    @Test func everyConfigDirLoginFamilyIsAddableAndNamedInTheCaption() {
+        let addable = AccountsPresentation.addableFamilies
+        #expect(addable.map(\.rawValue) == AccountsPresentation.configDirLoginHarnessIds)
+        #expect(addable.contains(HarnessFamily.agy))
+
+        // The caption names the PRODUCTS, in the SSOT's own order, and can
+        // never again omit a family the picker offers.
+        let caption = AccountsPresentation.addAccountCaption(family: nil)
+        for family in addable { #expect(caption.contains(family.label)) }
+        #expect(caption.contains("Antigravity"))
+        // Л-14: never the binary id.
+        #expect(!caption.contains("Agy"))
+
+        // A family-scoped host (the Harness Doctor's Manage sheet) names its
+        // one vendor instead of the whole list.
+        let scoped = AccountsPresentation.addAccountCaption(family: .agy)
+        #expect(scoped.contains("Antigravity"))
+        #expect(!scoped.contains("Cursor"))
+
+        // The form's initial selection must be a row the picker actually
+        // offers, or the control opens on nothing.
+        #expect(AccountsPresentation.configDirLoginHarnessIds
+            .contains(AccountsPresentation.defaultAddHarnessId))
+    }
+
+    /// Oxford list: a future two-family set must not read "A, or B".
+    @Test func addableFamilyListReadsAsProse() {
+        #expect(AccountsPresentation.listed([]) == "")
+        #expect(AccountsPresentation.listed(["Claude"]) == "Claude")
+        #expect(AccountsPresentation.listed(["Claude", "Codex"]) == "Claude or Codex")
+        #expect(AccountsPresentation.listed(["Antigravity", "Claude", "Codex"])
+            == "Antigravity, Claude, or Codex")
+    }
+
     @Test func accountActionNoticeClearsAndRejectsLateCompletions() {
         var notice = AccountsActionNotice()
         let first = notice.begin()

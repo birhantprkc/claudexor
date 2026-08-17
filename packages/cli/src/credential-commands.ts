@@ -17,8 +17,12 @@ import {
 } from "@claudexor/schema";
 import { streamDurableCodexLogin, terminalLoginFallback } from "./setup-login-inline.js";
 import { MANAGED_SECRET_NAMES, isManagedSecretName } from "@claudexor/secrets";
-import { canonicalProfileConfigDir } from "@claudexor/harness-claude";
-import { canonicalCursorProfileHome } from "@claudexor/harness-cursor";
+import {
+  CONFIG_DIR_LOGIN_HARNESSES,
+  canonicalProfileLoginDir,
+  configDirLoginHarnessList,
+  isConfigDirLoginHarness,
+} from "./config-dir-login-harnesses.js";
 import { type ParsedArgs, flagStr } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
 import { ensureDaemon } from "./daemon-run.js";
@@ -80,10 +84,10 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
       );
     }
     // Only harnesses with a RELOCATABLE native login may profile-login.
-    if (harness !== "claude" && harness !== "codex" && harness !== "cursor") {
+    if (!isConfigDirLoginHarness(harness)) {
       return printUsageError(
         json,
-        `harness "${harness}" has no isolated config-dir login; only claude, codex, and cursor profiles can log in here`,
+        `harness "${harness}" has no isolated config-dir login; only ${configDirLoginHarnessList()} profiles can log in here`,
       );
     }
     // D-17: codex profile login rides the SAME durable setup job as the default
@@ -134,10 +138,7 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     if (!spec) {
       return printUsageError(json, `no native login command for harness "${harness}"`);
     }
-    const configDir =
-      harness === "claude"
-        ? canonicalProfileConfigDir(profile.isolation_locator ?? "")
-        : canonicalCursorProfileHome(profile.isolation_locator ?? "");
+    const configDir = canonicalProfileLoginDir(harness, profile.isolation_locator ?? "");
     print(`running ${spec.displayCommand} into ${configDir}`);
     const child = spawnSync(spec.binary, spec.args, {
       stdio: "inherit",
@@ -166,7 +167,7 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     if (!harness || !profileId) {
       return printUsageError(
         json,
-        "usage: claudexor profiles add <claude|codex|cursor> <profile-id> [--display-name NAME]",
+        `usage: claudexor profiles add <${CONFIG_DIR_LOGIN_HARNESSES.join("|")}> <profile-id> [--display-name NAME]`,
       );
     }
     try {

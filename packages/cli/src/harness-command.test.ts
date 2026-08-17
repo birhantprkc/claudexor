@@ -66,11 +66,14 @@ describe("harnessCommand", () => {
     expect(mocks.printUsageError).not.toHaveBeenCalled();
   });
 
-  it("rejects unknown verbs with the usage error", () => {
+  it("rejects unknown verbs with the usage error, naming every installable harness", () => {
+    // Spelled out on purpose: the verb list is DERIVED from
+    // INSTALLABLE_HARNESSES in the source, so this literal is the independent
+    // oracle that catches a new installable harness missing from the usage.
     expect(harnessCommand(parseArgs(["harness", "bogus"]), false)).toBe(2);
     expect(mocks.printUsageError).toHaveBeenCalledWith(
       false,
-      "usage: claudexor harness list [--all] | install <claude|codex|cursor|opencode> [--dry-run] [--yes]",
+      "usage: claudexor harness list [--all] | install <agy|claude|codex|cursor|opencode> [--dry-run] [--yes]",
     );
   });
 

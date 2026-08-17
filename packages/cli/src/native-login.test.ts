@@ -27,7 +27,12 @@ describe("native login specs", () => {
   });
 
   it("uses the exact allowlisted vendor commands and absolute resolved binaries", () => {
-    const names = ["CLAUDEXOR_CODEX_BIN", "CLAUDEXOR_CLAUDE_BIN", "CLAUDEXOR_CURSOR_BIN"] as const;
+    const names = [
+      "CLAUDEXOR_CODEX_BIN",
+      "CLAUDEXOR_CLAUDE_BIN",
+      "CLAUDEXOR_CURSOR_BIN",
+      "CLAUDEXOR_AGY_BIN",
+    ] as const;
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     for (const name of names) delete process.env[name];
     try {
@@ -75,7 +80,30 @@ describe("native login specs", () => {
         displayCommand: "cursor-agent login",
         loginMode: "url_disclosure",
       });
+      // agy has no login subcommand at all: the bare interactive CLI prints the
+      // sign-in URL and takes the pasted code — the same shape as claude, with
+      // one difference the runner has to honor, that the vendor reads its code
+      // only from a real terminal.
+      expect(nativeLoginSpec("agy", resolver)).toEqual({
+        binary: "/normalized/bin/agy",
+        // Print mode, never the bare TUI: the TUI opens the browser ITSELF on
+        // the daemon host and never exits after authenticating.
+        args: ["-p", "/model", "--output-format", "json"],
+        displayCommand: 'agy -p "/model" (sign-in via printed link + pasted code)',
+        loginMode: "url_disclosure_with_input",
+        ptyStdin: true,
+        // The vendor's OWN paste window, sealed so the card counts down
+        // against the process rather than against the engine's 15 minutes.
+        loginWindowMs: 60_000,
+      });
+      // No other harness claims a tty: a needless wrapper process around a
+      // login that never reads stdin.
       for (const harness of ["codex", "claude", "cursor"]) {
+        expect(nativeLoginSpec(harness, resolver)?.ptyStdin).toBeUndefined();
+        // No other vendor caps its own window, so the engine's governs.
+        expect(nativeLoginSpec(harness, resolver)?.loginWindowMs).toBeUndefined();
+      }
+      for (const harness of ["codex", "claude", "cursor", "agy"]) {
         expect(isAbsolute(nativeLoginSpec(harness, resolver)?.binary ?? "")).toBe(true);
       }
     } finally {
@@ -193,5 +221,65 @@ describe("native login specs", () => {
     } finally {
       rmSync(profileHome, { recursive: true, force: true });
     }
+  });
+
+  it("points a named agy login at the profile HOME and scrubs every Google API route", () => {
+    const profiles = join(userConfigDir(), "profiles");
+    mkdirSync(profiles, { recursive: true });
+    const profileHome = realpathSync(mkdtempSync(join(profiles, "agy-login-")));
+    try {
+      // agy takes its whole config root from $HOME (no config-dir env var), so
+      // HOME/USERPROFILE ARE the isolation. A poisoned parent env must not put
+      // a metered API route or a sibling harness's store into the login.
+      const env = nativeLoginEnv(
+        "agy",
+        {
+          HOME: "/daemon/home",
+          PATH: "/custom/bin",
+          GEMINI_API_KEY: "must-scrub",
+          GOOGLE_API_KEY: "must-scrub",
+          GOOGLE_APPLICATION_CREDENTIALS: "/must/scrub.json",
+          AGY_ADC_AUTH: "must-scrub",
+          ANTHROPIC_API_KEY: "must-scrub",
+          CURSOR_API_KEY: "must-scrub",
+          CLAUDE_CONFIG_DIR: "/stale/scoped/claude",
+          CODEX_HOME: "/stale/scoped/codex",
+        },
+        profileHome,
+      );
+      expect(env).toMatchObject({
+        HOME: profileHome,
+        USERPROFILE: profileHome,
+        AGY_CLI_DISABLE_AUTO_UPDATE: "true",
+      });
+      for (const key of [
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "AGY_ADC_AUTH",
+        "ANTHROPIC_API_KEY",
+        "CURSOR_API_KEY",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+      ]) {
+        expect(env[key]).toBeUndefined();
+      }
+      expect(env.PATH).toContain("/custom/bin");
+    } finally {
+      rmSync(profileHome, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an agy login with no profile HOME instead of writing into the operator's home", () => {
+    // Owner decision Л-4: agy has NO default credential store. Falling through
+    // would leave the daemon's own HOME in place and land a vendor token in the
+    // operator's real home (INV-135).
+    expect(() => nativeLoginEnv("agy", { HOME: "/daemon/home" })).toThrow(
+      /no default credential store/,
+    );
+    // The harnesses that DO have a default store keep working unchanged.
+    expect(nativeLoginEnv("codex", { HOME: "/daemon/home" }).CODEX_HOME).toBe(
+      defaultNativeCodexHome(),
+    );
   });
 });

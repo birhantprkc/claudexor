@@ -296,6 +296,13 @@ extension AppModel {
     /// Refresh the exact credential store an AuthSheet represents. Default login
     /// sheets use the source-targeted probe; profile sheets consume the profile
     /// snapshot's own doctor result and never let default-route failure overwrite it.
+    ///
+    /// A family with NO default credential store (agy: every account is a named
+    /// profile, INV-135 / Л-4) has no source to probe at all. Reporting `false`
+    /// there announced the failure of a check that never ran — the sheet then
+    /// blamed the engine right after a successful login. The accounts/profiles
+    /// projection IS this family's readiness truth, so refresh THAT and report
+    /// its real outcome.
     @discardableResult
     func refreshCredentialReadiness(
         for family: HarnessFamily,
@@ -303,6 +310,9 @@ extension AppModel {
         after job: SetupJob?
     ) async -> Bool {
         guard let profileId else {
+            guard family.authReadinessRequest(after: job) != nil else {
+                return await refreshAccounts() == nil
+            }
             return await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
         }
         return await refreshExactCredentialProfile(

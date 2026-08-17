@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
   AuthCapabilityVerifier,
@@ -21,13 +21,14 @@ import {
   type ControlSetupJobListFilter,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
-import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
-import { defaultNativeCodexHome } from "@claudexor/harness-codex";
 import * as NativeLogin from "./native-login.js";
 import {
   SETUP_PROFILES,
   processGroupFromJob,
   profileDoctorProbe,
+  DEFAULT_STORE_OF,
+  assertDefaultLoginAllowed,
+  assertSetupJobExtendable,
   resolveProfileBinding,
   resolveSetupLoginRunnerPath,
   shellQuote,
@@ -70,10 +71,6 @@ import {
   submitSetupLoginInput,
 } from "./setup-login-completion.js";
 
-const DEFAULT_STORE_OF: Partial<Record<string, () => string>> = {
-  codex: defaultNativeCodexHome,
-  claude: defaultNativeClaudeConfigDir,
-};
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
 type NativeLoginSpec = NativeLogin.NativeLoginSpec;
@@ -229,9 +226,10 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       message,
       ...(command ? { command } : {}),
     });
-    // The transient device-code disclosure is invalid once terminal — drop the
-    // sidecar so its one-time code stops being projected (INV-062 / D-17).
+    // Both transient sidecars die with the job: the device-code disclosure
+    // (INV-062 / D-17) and the one-shot sign-in input's pasted code.
     removeSetupDeviceCodeSidecar(store.paths(jobId).runnerDeviceCode);
+    rmSync(store.paths(jobId).runnerInput, { force: true });
     logAfterMutation(jobId, message);
     return done;
   }
@@ -1052,9 +1050,13 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const executionId = randomUUID();
       const executable = captureExecutableEvidence(spec.binary);
       const authorizedCommandDigest = commandDigest(executable, spec.args);
+      // A vendor window shorter than ours governs: counting past the moment it
+      // gave up would promise a login that is already over — and it cannot be
+      // extended either, which the job says out loud so no surface offers to.
+      const vendorCapped = (spec.loginWindowMs ?? Infinity) < loginTimeoutMs;
       const { loginDeadlineAt, permitDeadlineAt, permitWaitMs } = setupLoginDeadlines(
         now(),
-        loginTimeoutMs,
+        Math.min(loginTimeoutMs, spec.loginWindowMs ?? loginTimeoutMs),
         launcherTimeoutMs,
         job.transport,
       );
@@ -1074,7 +1076,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         version: SETUP_LOGIN_PROTOCOL_VERSION,
         jobId: job.jobId,
         executionId,
-        harness: job.harness as "codex" | "claude" | "cursor",
+        harness: job.harness,
         jobDir: paths.dir,
         binary: executable.realpath,
         args: [...spec.args],
@@ -1092,8 +1094,9 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           : isUrlDisclosureLoginMode(spec.loginMode)
             ? {
                 loginMode: spec.loginMode,
+                // ptyStdin only where the vendor refuses a piped stdin.
                 ...(spec.loginMode === "url_disclosure_with_input"
-                  ? { inputPath: paths.runnerInput }
+                  ? { inputPath: paths.runnerInput, ...(spec.ptyStdin ? { ptyStdin: true } : {}) }
                   : {}),
               }
             : {}),
@@ -1115,6 +1118,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           state: "waiting_for_input",
           phase: "launching",
           deadlineAt: loginDeadlineAt,
+          ...(vendorCapped ? { deadlineFixed: true } : {}),
           startedAt: iso(),
           command: spec.displayCommand,
           authorization: {
@@ -1191,6 +1195,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         state: "waiting_for_input",
         phase: "launching",
         deadlineAt: loginDeadlineAt,
+        ...(vendorCapped ? { deadlineFixed: true } : {}),
         startedAt: iso(),
         command: spec.displayCommand,
         authorization: {
@@ -1283,6 +1288,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
       const request = ControlSetupJobCreateRequest.parse(input);
       const { harness, action } = request;
       const profileBinding = resolveProfileBinding(harness, request.profileId);
+      assertDefaultLoginAllowed(harness, profileBinding !== null);
       const binding = idempotency ? { ...idempotency, request } : undefined;
       const prior = binding ? store.resolveCreate(binding) : null;
       if (prior) return prior;
@@ -1493,13 +1499,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
         if (prior) return prior;
       }
       const job = store.status(jobId);
-      if (
-        !ACTIVE_SETUP_STATES.has(job.state) ||
-        !["launching", "awaiting_user"].includes(job.phase ?? "") ||
-        !job.deadlineAt
-      ) {
-        throw Object.assign(new Error("setup job cannot be extended"), { status: 409 });
-      }
+      assertSetupJobExtendable(job);
       const extended = update(
         jobId,
         {

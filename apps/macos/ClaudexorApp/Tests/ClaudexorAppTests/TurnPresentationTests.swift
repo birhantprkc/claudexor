@@ -245,6 +245,30 @@ import ClaudexorKit
         }
     }
 
+    /// The paste field of an `oauth_url_input` sign-in. Submit is disabled for
+    /// exactly three causes and each one says WHY (INV-134), and the lapsed
+    /// window outranks the rest: once the vendor closed it, no code the user
+    /// types can succeed, so "type it again" would be a lie on screen.
+    @Test func signInCodeSubmitNamesItsRealBlockingCause() {
+        typealias Availability = AuthSheetPresentation.SignInCodeAvailability
+        #expect(Availability(windowLapsed: false, sending: false, codeField: "PASTE-42").enabled)
+
+        let empty = Availability(windowLapsed: false, sending: false, codeField: "   \n")
+        #expect(!empty.enabled)
+        #expect(empty.blockedReason == .emptyField)
+        #expect(empty.help.contains("Paste the code"))
+
+        let sending = Availability(windowLapsed: false, sending: true, codeField: "PASTE-42")
+        #expect(sending.blockedReason == .sending)
+
+        // Lapsed wins over a filled field AND over an in-flight submission.
+        for (isSending, field) in [(false, "PASTE-42"), (true, "PASTE-42"), (false, "")] {
+            let lapsed = Availability(windowLapsed: true, sending: isSending, codeField: field)
+            #expect(lapsed.blockedReason == .windowLapsed)
+            #expect(lapsed.help.contains("new link"))
+        }
+    }
+
     @Test func namedProfileNeverExposesTheGlobalFallbackKeyPanel() {
         #expect(AuthSheetPresentation.showsGlobalApiKeyPanel(
             profileId: nil, secretName: "anthropic"))

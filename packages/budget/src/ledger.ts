@@ -35,13 +35,16 @@ export type BudgetTerminal = "budget_exhausted" | "budget_overshoot" | "cost_unv
  * model-scoped window alone cannot refuse the route. Undefined means the
  * caller supplied no model context and preserves conservative matching. */
 export function quotaConstraintAppliesToModel(
-  constraint: { applies_to_models?: string[] | null },
+  constraint: { applies_to_models?: string[] | null; applies_to_unspecified_model?: boolean },
   model?: string | null,
 ): boolean {
   const scopedModels = constraint.applies_to_models;
-  return (
-    scopedModels == null || model === undefined || (model !== null && scopedModels.includes(model))
-  );
+  if (scopedModels == null || model === undefined) return true;
+  // A source may declare that its scoped window ALSO governs the
+  // unspecified-model route; without that, a harness whose windows are all
+  // model-scoped could never refuse an exhausted account on a bare run.
+  if (model === null) return constraint.applies_to_unspecified_model === true;
+  return scopedModels.includes(model);
 }
 
 export interface CircuitThresholds {

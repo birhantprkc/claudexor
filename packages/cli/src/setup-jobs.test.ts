@@ -2293,6 +2293,40 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     expect(() => manager.create(LOGIN_REQUEST)).toThrow(/another codex login job is active/);
   });
 
+  it("refuses a default Antigravity login and never offers to extend its own window", async () => {
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg-agy");
+    // Hermetic like the claude/cursor fakes above: without this the test only
+    // passes on a host that happens to have a real `agy` on PATH.
+    const oldAgyBin = process.env.CLAUDEXOR_AGY_BIN;
+    const fakeAgy = join(root, "fake-agy");
+    writeFileSync(fakeAgy, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    chmodSync(fakeAgy, 0o700);
+    process.env.CLAUDEXOR_AGY_BIN = fakeAgy;
+    registerConfigDirProfile({ harnessId: "agy", profileId: "work" });
+    const manager = createSetupJobManager({
+      rootDir: join(root, "store-agy"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+    });
+    const AGY_LOGIN = { harness: "agy", action: "login", authRequest: "subscription" } as const;
+    // agy has NO default credential store, so a profile-less login is refused
+    // at create time rather than dropping a vendor token in the daemon's home.
+    expect(() => manager.create(AGY_LOGIN)).toThrow(/no default credential store/);
+
+    const job = manager.create({ ...AGY_LOGIN, profileId: "work" });
+    // The deadline is the VENDOR's 60s window, published as fixed so no
+    // surface offers to extend a window the vendor will not honor.
+    expect(job.deadlineFixed).toBe(true);
+    const window = Date.parse(job.deadlineAt!) - Date.parse(job.createdAt);
+    expect(window).toBeGreaterThan(0);
+    expect(window).toBeLessThanOrEqual(61_000);
+    expect(() => manager.extend({ jobId: job.jobId })).toThrow(/cannot be extended/);
+    await manager.shutdown();
+    if (oldAgyBin === undefined) delete process.env.CLAUDEXOR_AGY_BIN;
+    else process.env.CLAUDEXOR_AGY_BIN = oldAgyBin;
+  });
+
   it("binds a cursor profile login to its canonical Claudexor-owned HOME (valentine)", () => {
     process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg");
     const { profile } = registerConfigDirProfile({ harnessId: "cursor", profileId: "valentine" });
@@ -2647,6 +2681,31 @@ describe("one-shot sign-in input (url_disclosure_with_input, owner directive 202
     // The value exists ONLY in the 0600 sidecar: never in the journaled job.
     const journalled = JSON.stringify(manager.status({ jobId: job.jobId }));
     expect(journalled).not.toContain("pasted-code-7");
+    await manager.shutdown();
+  });
+
+  it("gives the token exchange its own window, so the clock cannot kill a delivered code", async () => {
+    // The vendor's window bounds how long the USER had to paste; the exchange
+    // that follows is a different thing. Without this the deadline monitor
+    // SIGKILLs the vendor mid-exchange — and against a sixty-second window the
+    // user is racing that clock, so a successful paste being cancelled is the
+    // COMMON case, not an edge one.
+    const manager = createSetupJobManager({
+      rootDir: join(root, "input-grace"),
+      platform: "darwin",
+      runnerPath: "/tmp/setup-login-runner.js",
+      openTerminal: fakeOpener,
+      loginTimeoutMs: 60_000,
+    });
+    await manager.start();
+    const job = manager.create(CLAUDE_LOGIN);
+    const before = Date.parse(job.deadlineAt!);
+    expect(before - Date.parse(job.createdAt)).toBeLessThanOrEqual(61_000);
+    const updated = manager.input({ jobId: job.jobId, value: "pasted-code-9" });
+    expect(Date.parse(updated.deadlineAt!)).toBeGreaterThan(before);
+    // And the extended deadline is no longer the vendor's own, so a surface
+    // may offer to extend it again rather than refusing.
+    expect(updated.deadlineFixed).toBe(false);
     await manager.shutdown();
   });
 

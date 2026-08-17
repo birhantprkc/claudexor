@@ -1394,6 +1394,41 @@ import Testing
         #expect(!makeSetupJob(id: "verifying", state: "running", phase: .verifying).canExtend)
     }
 
+    /// A VENDOR-owned sign-in window cannot be extended by anyone: Antigravity
+    /// waits exactly 60 s for its pasted code and offers no way to lengthen it,
+    /// so the daemon refuses the extend and the client must not offer the
+    /// button. Absent (older daemon) still means the engine owns the window.
+    @Test func vendorOwnedLoginWindowIsNotExtendable() {
+        #expect(!makeSetupJob(id: "agy-wait", state: "waiting_for_input", phase: .awaitingUser,
+                              harness: .agy, deadlineFixed: true).canExtend)
+        #expect(!makeSetupJob(id: "agy-launch", state: "waiting_for_input", phase: .launching,
+                              harness: .agy, deadlineFixed: true).canExtend)
+        #expect(makeSetupJob(id: "agy-engine-window", state: "waiting_for_input",
+                             phase: .awaitingUser, harness: .agy, deadlineFixed: false).canExtend)
+        #expect(makeSetupJob(id: "agy-legacy", state: "waiting_for_input",
+                             phase: .awaitingUser, harness: .agy).canExtend)
+    }
+
+    /// `SetupJob` decodes STRICTLY (unknown keys are fatal), so the daemon
+    /// publishing `deadlineFixed` must be a key this client knows — otherwise
+    /// every setup screen stops decoding the moment the field ships.
+    @Test func vendorWindowFlagSurvivesTheStrictWire() throws {
+        let job = makeSetupJob(id: "agy-wire", state: "waiting_for_input", phase: .awaitingUser,
+                               harness: .agy, deadlineFixed: true)
+        let data = try JSONEncoder().encode(job)
+        let wire = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(wire["deadlineFixed"] as? Bool == true)
+        let decoded = try JSONDecoder().decode(SetupJob.self, from: data)
+        #expect(decoded.deadlineFixed == true)
+        #expect(!decoded.canExtend)
+        // Absent stays absent: an older daemon's body must not gain the key.
+        let legacy = try JSONEncoder().encode(
+            makeSetupJob(id: "legacy", state: "waiting_for_input", phase: .awaitingUser))
+        let legacyWire = try #require(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        #expect(legacyWire["deadlineFixed"] == nil)
+        #expect(try JSONDecoder().decode(SetupJob.self, from: legacy).canExtend)
+    }
+
     @Test func terminationUnconfirmedIsNotSafeForCancelAndClose() {
         let unconfirmed = makeSetupJob(
             id: "uncertain", state: "failed", phase: .completed,
@@ -1923,6 +1958,77 @@ import Testing
         await #expect(throws: GatewayError.self) {
             try await client.extendSetupJob(jobId: "wanted")
         }
+    }
+
+    /// The one-shot sign-in input (`POST /v2/setup/jobs/:id/input`) must land on
+    /// the job it was typed for, carry the value as the wire body and nothing
+    /// else, and refuse a response describing a DIFFERENT job — the same
+    /// identity pin every other setup point response gets.
+    @Test func gatewaySendsSignInInputToItsOwnJobAndRejectsAForeignResponse() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RequestStubURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let client = GatewayClient(
+            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "t", session: session)
+        defer { RequestStubURLProtocol.handler = nil }
+
+        let waiting = makeSetupJob(id: "login-1", state: "waiting_for_input", phase: .awaitingUser)
+        let waitingData = try JSONEncoder().encode(waiting)
+        nonisolated(unsafe) var seen: (path: String?, method: String?, auth: String?, body: Data?)
+        RequestStubURLProtocol.handler = { request in
+            seen = (request.url?.path, request.httpMethod,
+                    request.value(forHTTPHeaderField: "Authorization"), testRequestBody(request))
+            return (Self.response(for: request), waitingData)
+        }
+
+        #expect(try await client.submitSetupJobInput(jobId: "login-1", value: "PASTE-42") == waiting)
+        #expect(seen.path == "/v2/setup/jobs/login-1/input")
+        #expect(seen.method == "POST")
+        #expect(seen.auth == "Bearer t")
+        let body = try #require(seen.body)
+        #expect(try JSONDecoder().decode(SetupJobInputRequest.self, from: body).value == "PASTE-42")
+        // The body is EXACTLY the one wire field — no job/profile echo riding along.
+        #expect(try #require(JSONSerialization.jsonObject(with: body) as? [String: Any]).count == 1)
+
+        await #expect(throws: GatewayError.self) {
+            try await client.submitSetupJobInput(jobId: "another", value: "PASTE-42")
+        }
+    }
+
+    /// A daemon refusal of the pasted code (409: wrong phase, or a value already
+    /// delivered) is DEFINITIVE server state: the reason must reach the card and
+    /// the observation must keep running, never collapse into streamLost — which
+    /// would strand the live login behind a reconnect it does not need.
+    @Test func controllerReportsSignInInputRefusalWithoutLosingTheLiveLogin() async {
+        let awaiting = makeSetupJob(id: "login", state: "waiting_for_input", phase: .awaitingUser)
+        let disclosure = SetupDeviceCodeDisclosure(
+            flow: .oauthUrlInput, verificationUrl: "https://accounts.google.com/o/oauth2/auth?x=1",
+            userCode: "")
+
+        let accepting = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting, awaiting],
+            streams: [.pending, .pending], deviceCode: disclosure)
+        let accepted = SetupLifecycleController(gateway: accepting, reconnectDelays: [.zero])
+        let disclosed = await accepted.updates()
+        await accepted.recoverActiveJob(harness: "claude")
+        #expect(await firstSnapshot(in: disclosed) { $0.deviceCode == disclosure } != nil)
+        #expect(await accepted.submitInput("PASTE-42") == nil)
+        #expect(accepting.inputCount == 1)
+        let afterAccept = await accepted.snapshot()
+        #expect(afterAccept.connection != .streamLost)
+        // The link stays on screen while the vendor finishes with the code.
+        #expect(afterAccept.deviceCode == disclosure)
+
+        let refusing = FakeSetupGateway(
+            listResult: [awaiting], snapshots: [awaiting, awaiting],
+            streams: [.pending, .pending], deviceCode: disclosure,
+            inputRefusal: GatewayError.http(
+                status: 409, body: #"{"detail":"sign-in input was already submitted for this login"}"#))
+        let refused = SetupLifecycleController(gateway: refusing, reconnectDelays: [.zero])
+        await refused.recoverActiveJob(harness: "claude")
+        #expect(await refused.submitInput("PASTE-42")
+                == "sign-in input was already submitted for this login")
+        #expect(await refused.snapshot().connection != .streamLost)
     }
 
     @Test func gatewaySetupSSEFailsVisiblyOnUnknownMalformedMismatchedEOFAndOverflow() async throws {
@@ -2564,7 +2670,8 @@ private func makeSetupCapability(
 private func makeSetupJob(id: String, state: String,
                           phase: SetupJobPhase, outcome: SetupJobOutcome? = nil,
                           terminationReconciliation: SetupTerminationReconciliation? = nil,
-                          harness: SetupHarness = .claude) -> SetupJob {
+                          harness: SetupHarness = .claude,
+                          deadlineFixed: Bool? = nil) -> SetupJob {
     let typedState = SetupJobState(rawValue: state)!
     let terminal = typedState == .succeeded || typedState == .failed || typedState == .cancelled
         || typedState == .timedOut || typedState == .interruptedUnknown || typedState == .notSupported
@@ -2579,6 +2686,7 @@ private func makeSetupJob(id: String, state: String,
     }
     return SetupJob(jobId: id, harness: harness, action: .login, state: typedState, phase: phase,
              deadlineAt: state == "waiting_for_input" ? "2099-01-01T00:00:00Z" : nil,
+             deadlineFixed: deadlineFixed,
              outcome: outcome ?? defaultOutcome, message: state, createdAt: "2026-07-13T00:00:00Z",
              startedAt: typedState == .queued ? nil : "2026-07-13T00:00:01Z",
              finishedAt: terminal ? "2026-07-13T00:00:02Z" : nil,
@@ -2614,18 +2722,23 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
     private var cancelCountStorage = 0
     private var createFailuresRemaining: Int
     private var listFailuresRemaining: Int
+    private var inputSubmissionsStorage = 0
     /// D-17: transient device-code disclosure overlaid on every snapshot GET.
     private let deviceCode: SetupDeviceCodeDisclosure?
+    /// How the daemon refuses a sign-in input submission, when it should.
+    private let inputRefusal: GatewayError?
 
     init(listResult: [SetupJob], snapshots: [SetupJob], streams: [FakeStreamResult],
          createFailures: Int = 0, listFailures: Int = 0,
-         deviceCode: SetupDeviceCodeDisclosure? = nil) {
+         deviceCode: SetupDeviceCodeDisclosure? = nil,
+         inputRefusal: GatewayError? = nil) {
         self.listResultStorage = listResult
         self.snapshots = snapshots
         self.streams = streams
         self.createFailuresRemaining = createFailures
         self.listFailuresRemaining = listFailures
         self.deviceCode = deviceCode
+        self.inputRefusal = inputRefusal
     }
 
     var calls: [String] { lock.withLock { callsStorage } }
@@ -2634,6 +2747,7 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
     var getCount: Int { calls.filter { $0.hasPrefix("get:") }.count }
     var streamCount: Int { calls.filter { $0.hasPrefix("stream:") }.count }
     var cancelCount: Int { lock.withLock { cancelCountStorage } }
+    var inputCount: Int { lock.withLock { inputSubmissionsStorage } }
 
     func createSetupJob(_ body: SetupJobCreateRequest) async throws -> SetupJob {
         try lock.withLock {
@@ -2692,6 +2806,17 @@ private final class FakeSetupGateway: SetupJobGateway, @unchecked Sendable {
 
     func extendSetupJob(jobId: String) async throws -> SetupJob { try nextSetupJob(jobId: jobId) }
 
+    /// Counts submissions only. The pasted VALUE is deliberately never stored —
+    /// a double that retains a one-time secret is the same defect in miniature.
+    func submitSetupJobInput(jobId: String, value: String) async throws -> SetupJob {
+        try lock.withLock {
+            callsStorage.append("input:\(jobId)")
+            inputSubmissionsStorage += 1
+            if let inputRefusal { throw inputRefusal }
+        }
+        return try nextSetupJob(jobId: jobId)
+    }
+
     func setupJobEvents(jobId: String, lastEventId: String) -> AsyncThrowingStream<SetupJobEvent, Error> {
         let result: FakeStreamResult = lock.withLock {
             callsStorage.append("stream:\(jobId)")
@@ -2745,6 +2870,7 @@ private struct MutationRaceGateway: SetupJobGateway {
     func setupJobSnapshot(jobId: String) async throws -> SetupJobSnapshot { SetupJobSnapshot(job: active, cursor: "cursor", sequence: 1) }
     func extendSetupJob(jobId: String) async throws -> SetupJob { active }
     func reconcileSetupJob(jobId: String) async throws -> SetupJob { active }
+    func submitSetupJobInput(jobId: String, value: String) async throws -> SetupJob { active }
 
     func cancelSetupJob(jobId: String) async throws -> SetupJob {
         await cancelGate.wait()

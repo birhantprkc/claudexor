@@ -265,7 +265,7 @@ struct AccountsSurface: View {
     var loginDisabled: (AccountRowModel) -> Bool = { _ in false }
 
     @State private var addDisplayName = ""
-    @State private var addHarnessChoice = "claude"
+    @State private var addHarnessChoice = AccountsPresentation.defaultAddHarnessId
     @State private var addError: String?
     @State private var adding = false
     @State private var pendingDelete: AccountRowModel?
@@ -465,9 +465,9 @@ struct AccountsSurface: View {
             HStack(spacing: Theme.Spacing.sm) {
                 if family == nil {
                     Picker("", selection: $addHarnessChoice) {
-                        Text("Claude").tag("claude")
-                        Text("Codex").tag("codex")
-                        Text("Cursor").tag("cursor")
+                        ForEach(AccountsPresentation.addableFamilies) { addable in
+                            Text(addable.label).tag(addable.rawValue)
+                        }
                     }
                     .labelsHidden()
                     .fixedSize()
@@ -481,7 +481,7 @@ struct AccountsSurface: View {
                 Text(err).font(.caption2).foregroundStyle(Theme.status(.negative)).textSelection(.enabled)
             }
             HStack {
-                Text("A second \(family?.label ?? "Claude, Codex, or Cursor") subscription — one click opens the official CLI login.")
+                Text(AccountsPresentation.addAccountCaption(family: family))
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button(adding ? "Adding…" : "Add & log in") { Task { await addAccount() } }
@@ -489,6 +489,9 @@ struct AccountsSurface: View {
                     .tint(Theme.accentSolid)
                     .controlSize(.small)
                     .disabled(adding)
+                    .help(adding
+                          ? "Registering the account — wait for it to finish."
+                          : "Register this account and open its official CLI login.")
             }
         }
     }

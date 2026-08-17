@@ -120,8 +120,55 @@ enum AccountsPresentation {
         "CLI login = existing vendor sign-in; named accounts = isolated profiles used by explicit pin or opt-in quota rotation."
 
     /// Harnesses whose native subscription login can be isolated as an
-    /// additive config-dir/HOME profile.
-    static let configDirLoginHarnessIds = ["claude", "codex", "cursor"]
+    /// additive config-dir/HOME profile. `agy` (Antigravity) has NO default
+    /// store, so every one of its accounts is a named profile registered here —
+    /// which is also why it must stay out of `defaultAuthReadinessRequest`
+    /// (DomainModels.swift), whose rows are the default "CLI login".
+    static let configDirLoginHarnessIds = ["agy", "claude", "codex", "cursor"]
+
+    /// The families the add-account flow may register, DERIVED from the set
+    /// above so a fifth family is one entry there and nothing else. The picker
+    /// and its caption both read this; hand-listing the vendors is what left
+    /// Antigravity addable by the daemon and unreachable in the popover.
+    static let addableFamilies: [HarnessFamily] =
+        configDirLoginHarnessIds.map(HarnessFamily.init(rawValue:))
+
+    /// The add form's initial vendor. Claude stays the common case, but the
+    /// value must be a MEMBER of the derived list — a hardcoded id that leaves
+    /// the set would select a row the picker no longer offers.
+    static var defaultAddHarnessId: String {
+        configDirLoginHarnessIds.contains(HarnessFamily.claude.rawValue)
+            ? HarnessFamily.claude.rawValue
+            : configDirLoginHarnessIds.first ?? ""
+    }
+
+    /// The add form's caption. Family-scoped hosts (the Harness Doctor's Manage
+    /// sheet) name their one vendor; the global popover lists every addable
+    /// one in the SSOT's own order, so the sentence cannot go stale.
+    static func addAccountCaption(family: HarnessFamily?) -> String {
+        let subject = family?.label ?? listed(addableFamilies.map(\.label))
+        return "A second \(subject) subscription — one click opens the official CLI login."
+    }
+
+    /// "A", "A or B", "A, B, or C" — an Oxford list, so a two-family future
+    /// does not read "A, or B".
+    static func listed(_ labels: [String]) -> String {
+        switch labels.count {
+        case 0: return ""
+        case 1: return labels[0]
+        case 2: return "\(labels[0]) or \(labels[1])"
+        default: return labels.dropLast().joined(separator: ", ") + ", or \(labels[labels.count - 1])"
+        }
+    }
+
+    /// Whether a login may target the ENGINE-DEFAULT credential store — that is,
+    /// whether a PROFILE-LESS login can succeed at all. `agy` has no default
+    /// store, so the daemon refuses every profile-less Antigravity login; a
+    /// surface that offers one must gate on THIS, never on whether the harness
+    /// id happens to decode as a `SetupHarness`.
+    static func supportsDefaultStoreLogin(_ family: HarnessFamily) -> Bool {
+        family.defaultAuthReadinessRequest?.source == .nativeSession
+    }
 
     /// Compare legal offset timestamps by their absolute instant. Equal
     /// instants and malformed future values use raw lexical order so the
@@ -363,13 +410,26 @@ enum AccountsAutoBalance {
     /// cursor adapter emits no quota snapshots or typed limit events yet, so a
     /// cursor toggle would be a knob without an observable action (INV-023) —
     /// it stays out until a vendor usage source exists.
-    static let capableHarnessIds = ["claude", "codex"]
+    /// agy qualifies on the same test: `config_dir_login` profiles plus a real
+    /// vendor quota source (`agy_command_usage`, read from the CLI's own
+    /// `/quota`), so a toggle here has an observable action to drive.
+    static let capableHarnessIds = ["claude", "codex", "agy"]
 
-    /// Harnesses eligible for the toggle: a capable family with ≥1 registered
-    /// profile (so native + profile = 2+ identities to rotate between).
+    /// Harnesses whose rotation has NO native identity to fall back on: their
+    /// accounts are all named profiles, so one profile is one identity and
+    /// there is nothing to rotate to.
+    static let harnessesWithoutNativeIdentity: Set<String> = ["agy"]
+
+    /// Harnesses eligible for the toggle: a capable family with enough
+    /// identities to rotate BETWEEN — one registered profile is enough where a
+    /// native login also exists, and two are needed where it does not.
     static func eligibleHarnessIds(profileHarnessIds: [String]) -> [String] {
-        let withProfiles = Set(profileHarnessIds)
-        return capableHarnessIds.filter { withProfiles.contains($0) }
+        var counts: [String: Int] = [:]
+        for id in profileHarnessIds { counts[id, default: 0] += 1 }
+        return capableHarnessIds.filter { harness in
+            let needed = harnessesWithoutNativeIdentity.contains(harness) ? 2 : 1
+            return (counts[harness] ?? 0) >= needed
+        }
     }
 
     /// Aggregate on/off/mixed/unavailable from each eligible harness's action.

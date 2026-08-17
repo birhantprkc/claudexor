@@ -366,6 +366,9 @@ export class QuotaRegistry {
         freshness: "fresh",
       });
     }
+    // agy is deliberately ABSENT: its adapter emits no `rate_limit` event, so
+    // an agy branch here would be a knob with no producer (INV-022/023). It
+    // joins the list in the same change that makes the adapter emit one.
     if (event.data.rate_limit && credentialRoute && ["codex", "claude"].includes(harnessId)) {
       this.upsertCooldown(harnessId, credentialRoute, event.data);
     }

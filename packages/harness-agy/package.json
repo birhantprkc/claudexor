@@ -1,0 +1,45 @@
+{
+  "name": "@claudexor/harness-agy",
+  "version": "3.4.2",
+  "license": "MIT",
+  "description": "Google Antigravity CLI adapter (agy -p --output-format stream-json).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@claudexor/core": "workspace:*",
+    "@claudexor/schema": "workspace:*",
+    "@claudexor/util": "workspace:*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/razzant/claudexor.git",
+    "directory": "packages/harness-agy"
+  },
+  "homepage": "https://github.com/razzant/claudexor#readme",
+  "bugs": {
+    "url": "https://github.com/razzant/claudexor/issues"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "yaml": "^2.6.1"
+  }
+}

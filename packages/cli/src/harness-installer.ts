@@ -11,11 +11,11 @@
  *   model/effort freshness gates verified; the opencode pin is a
  *   deterministic install target, NOT a verification claim (no recorded
  *   fixture yet — see packages/harness-opencode vendor-cli-version.ts).
- * - cursor has no npm artifact and CANNOT be pinned. Instead of pretending,
- *   the HUMAN is the verifier: the complete vendor script is downloaded first
- *   (never piped to a shell), its size and sha256 are printed, and it runs in
- *   the visible PTY the operator is watching — the same principle as
- *   interactive SSH auth.
+ * - cursor and agy have no npm artifact and CANNOT be pinned. Instead of
+ *   pretending, the HUMAN is the verifier: the complete vendor script is
+ *   downloaded first (never piped to a shell), its size and sha256 are
+ *   printed, and it runs in the visible PTY the operator is watching — the
+ *   same principle as interactive SSH auth.
  * - NOTHING executes without disclosure: the exact command and install
  *   destination print first, and execution needs a TTY confirmation or an
  *   explicit `--yes` (the macOS flow confirms against this module's own
@@ -40,8 +40,8 @@ import { composeBaseEnv } from "@claudexor/core";
 import type { PinnedVendorCliVersion } from "@claudexor/util";
 import { flagBool, type ParsedArgs } from "./args.js";
 import { print, printJson, printUsageError } from "./cli-io.js";
+import { INSTALLABLE_HARNESSES } from "./harness-command-specs.js";
 
-export const INSTALLABLE_HARNESSES = ["claude", "codex", "cursor", "opencode"] as const;
 export type InstallableHarness = (typeof INSTALLABLE_HARNESSES)[number];
 
 export function isInstallableHarness(value: string): value is InstallableHarness {
@@ -52,8 +52,8 @@ export function isInstallableHarness(value: string): value is InstallableHarness
  * SSOT (vendor-cli-version.ts there). For claude/codex that is the version
  * this release's freshness gates verified; the opencode pin is a
  * deterministic install target only — no recorded verification fixture
- * vouches for it (its vendor-cli-version.ts discloses this). Cursor is
- * absent deliberately: it ships no npm artifact (see the cursor branch
+ * vouches for it (its vendor-cli-version.ts discloses this). Cursor and agy
+ * are absent deliberately: they ship no npm artifact (see SCRIPT_INSTALLERS
  * below). */
 export type HarnessInstallVerification =
   "release_verified" | "deterministic_only" | "human_observed";
@@ -86,13 +86,60 @@ const NPM_PINS: Partial<
 };
 
 export const CURSOR_INSTALL_URL = "https://cursor.com/install";
+/**
+ * Google's official Antigravity CLI installer, as published on
+ * antigravity.google/docs/cli/install (`curl -fsSL <this url> | bash`, which
+ * Claudexor deliberately does NOT do — see the header). Verified end to end on
+ * 2026-08-16: the script fetched from this URL installed agy 1.1.13 to
+ * `~/.local/bin/agy`, which is the destination disclosed below. The vendor
+ * ships one signed Go binary and no npm package, so it takes the same
+ * human-observed path as cursor.
+ */
+export const AGY_INSTALL_URL = "https://antigravity.google/cli/install.sh";
+/** The vendor's Windows installer, from the same documentation page. */
+export const AGY_INSTALL_URL_WINDOWS = "https://antigravity.google/cli/install.ps1";
+
+/** Vendors distributed as a shell installer instead of a pinnable npm
+ * artifact. ONE branch serves both entries; the per-harness text below is the
+ * only thing that differs, so a third such vendor is a row, not a fork. */
+const SCRIPT_INSTALLERS: Record<
+  "agy" | "cursor",
+  { url: string; windowsUrl?: string; installLocation: string; pinNote: string }
+> = {
+  agy: {
+    url: AGY_INSTALL_URL,
+    // The one vendor here that publishes a Windows installer of its own; the
+    // POSIX row would otherwise be all Claudexor could honestly offer.
+    windowsUrl: AGY_INSTALL_URL_WINDOWS,
+    installLocation: "~/.local/bin (as selected by Google's Antigravity installer)",
+    pinNote:
+      "none — Antigravity ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it",
+  },
+  cursor: {
+    url: CURSOR_INSTALL_URL,
+    installLocation: "~/.local/bin (or ~/.cursor/bin, as selected by Cursor's installer)",
+    pinNote:
+      "none — Cursor ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it",
+  },
+};
+
+type ScriptInstaller = (typeof SCRIPT_INSTALLERS)[keyof typeof SCRIPT_INSTALLERS];
+
+/** Membership is asked of the TABLE, never re-typed: a third script vendor is
+ * one row, and cannot be added to the table yet fall through here. */
+function scriptInstaller(harness: InstallableHarness): ScriptInstaller | null {
+  return Object.hasOwn(SCRIPT_INSTALLERS, harness)
+    ? SCRIPT_INSTALLERS[harness as keyof typeof SCRIPT_INSTALLERS]
+    : null;
+}
 
 export interface HarnessInstallerDisclosure {
   harness: InstallableHarness;
   command: string;
   installLocation: string;
-  /** Exact vendor version the command installs; null ONLY for cursor, which
-   * has no pinnable artifact (disclosed, never faked). */
+  /** Exact vendor version the command installs; null exactly for the script
+   * vendors (cursor, agy), which have no pinnable artifact — disclosed, never
+   * faked. */
   pinnedVersion: string | null;
   /** Evidence behind the install target. Package-registry integrity verifies
    * downloaded bytes for every npm pin, but only release_verified means the
@@ -113,12 +160,24 @@ export function harnessInstallerDisclosure(
       verification: pin.verification,
     };
   }
+  const script = scriptInstaller(harness);
+  /* c8 ignore next -- every non-npm harness has a script row; this is the
+     unreachable guard that keeps the two tables honest. */
+  if (!script) throw new Error(`harness ${harness} has neither an npm pin nor a script installer`);
+  const windows = process.platform === "win32";
+  const url = windows ? (script.windowsUrl ?? script.url) : script.url;
+  const file = windows && script.windowsUrl ? "install.ps1" : "install.sh";
+  const runner =
+    windows && script.windowsUrl ? "powershell -ExecutionPolicy Bypass -File" : "/bin/sh";
   return {
     harness,
     command:
-      `curl --fail --silent --show-error --location ${CURSOR_INSTALL_URL} ` +
-      "--output <private-tmpdir>/install.sh && /bin/sh <private-tmpdir>/install.sh",
-    installLocation: "~/.local/bin (or ~/.cursor/bin, as selected by Cursor's installer)",
+      `curl --fail --silent --show-error --location ${url} ` +
+      `--output <private-tmpdir>/${file} && ${runner} <private-tmpdir>/${file}`,
+    installLocation:
+      windows && script.windowsUrl
+        ? "%LOCALAPPDATA%\\agy\\bin (as selected by Google's Antigravity installer)"
+        : script.installLocation,
     pinnedVersion: null,
     verification: "human_observed",
   };
@@ -187,35 +246,42 @@ export function runHarnessInstaller(
     );
     return { exitCode: result.status ?? 1 };
   }
-  // Cursor: download the COMPLETE vendor script before execution (`--fail`
-  // rejects HTTP error bodies), read it back and print its size + sha256 so
-  // the watching human sees exactly which bytes are about to run, and remove
-  // the private temp dir on every success/failure path.
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), "claudexor-cursor-install-"));
-  const installerPath = join(temporaryDirectory, "install.sh");
+  // Script vendors (cursor, agy): download the COMPLETE vendor script before
+  // execution (`--fail` rejects HTTP error bodies), read it back and print its
+  // size + sha256 so the watching human sees exactly which bytes are about to
+  // run, and remove the private temp dir on every success/failure path.
+  const script = scriptInstaller(harness);
+  /* c8 ignore next */
+  if (!script) return { exitCode: 1, refusal: `no installer is defined for ${harness}` };
+  const windows = process.platform === "win32";
+  const useWindowsScript = windows && script.windowsUrl !== undefined;
+  const url = useWindowsScript ? script.windowsUrl! : script.url;
+  if (windows && !useWindowsScript) {
+    return {
+      exitCode: 1,
+      refusal: `${harness} publishes no Windows installer; install it yourself and re-run \`claudexor doctor\``,
+    };
+  }
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), `claudexor-${harness}-install-`));
+  const installerPath = join(temporaryDirectory, useWindowsScript ? "install.ps1" : "install.sh");
   try {
     const downloaded = spawn(
       "curl",
-      [
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--location",
-        CURSOR_INSTALL_URL,
-        "--output",
-        installerPath,
-      ],
+      // `url`, never `script.url`: on Windows the disclosure names the
+      // vendor's PowerShell installer, and the bytes fetched MUST be the bytes
+      // disclosed — both reviewers of the sprint triad caught the divergence.
+      ["--fail", "--silent", "--show-error", "--location", url, "--output", installerPath],
       { stdio: childStdio, env: environment },
     );
     if (downloaded.status !== 0) {
       return {
         exitCode: downloaded.status ?? 1,
-        refusal: `the download of ${CURSOR_INSTALL_URL} failed (curl exit ${downloaded.status ?? "unknown"}); nothing was executed`,
+        refusal: `the download of ${url} failed (curl exit ${downloaded.status ?? "unknown"}); nothing was executed`,
       };
     }
-    let script: Buffer;
+    let payload: Buffer;
     try {
-      script = readFileSync(installerPath);
+      payload = readFileSync(installerPath);
     } catch {
       return {
         exitCode: 1,
@@ -223,23 +289,25 @@ export function runHarnessInstaller(
       };
     }
     note(
-      `cursor installer downloaded: ${script.length} bytes, ` +
-        `sha256 ${createHash("sha256").update(script).digest("hex")}`,
+      `${harness} installer downloaded: ${payload.length} bytes, ` +
+        `sha256 ${createHash("sha256").update(payload).digest("hex")}`,
     );
-    note(`running: /bin/sh ${installerPath}`);
-    const executed = spawn("/bin/sh", [installerPath], { stdio: childStdio, env: environment });
+    const runner: [string, string[]] = useWindowsScript
+      ? ["powershell", ["-ExecutionPolicy", "Bypass", "-File", installerPath]]
+      : ["/bin/sh", [installerPath]];
+    note(`running: ${runner[0]} ${runner[1].join(" ")}`);
+    const executed = spawn(runner[0], runner[1], { stdio: childStdio, env: environment });
     return { exitCode: executed.status ?? 1 };
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 }
 
-const INSTALL_USAGE =
-  "usage: claudexor harness install <claude|codex|cursor|opencode> [--dry-run] [--yes]";
+const INSTALL_USAGE = `usage: claudexor harness install <${INSTALLABLE_HARNESSES.join("|")}> [--dry-run] [--yes]`;
 
 function pinDisclosureLine(disclosure: HarnessInstallerDisclosure): string {
   if (disclosure.pinnedVersion === null) {
-    return "Version pin:      none — Cursor ships no pinnable npm artifact; the vendor script is downloaded in full, its size and sha256 print, and it runs in this terminal where you watch it";
+    return `Version pin:      ${scriptInstaller(disclosure.harness)?.pinNote ?? "none"}`;
   }
   if (disclosure.verification === "deterministic_only") {
     return `Version pin:      ${disclosure.pinnedVersion} (exact; deterministic install target — not covered by recorded verification fixtures; npm verifies its registry integrity checksum)`;

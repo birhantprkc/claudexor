@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { BudgetLedger, promptFingerprint, routeCostEvidence } from "./ledger.js";
+import {
+  BudgetLedger,
+  promptFingerprint,
+  quotaConstraintAppliesToModel,
+  routeCostEvidence,
+} from "./ledger.js";
 import { observationsFromEvent } from "./observe.js";
 import {
   attemptUsageCostSettlement,
@@ -1451,5 +1456,30 @@ describe("routing telemetry", () => {
     });
     const pick = selectHarness([cand("codex"), cand("claude")], routeContext(ledger, "economy"));
     expect(pick?.harnessId).toBe("claude");
+  });
+});
+
+describe("quotaConstraintAppliesToModel", () => {
+  const scoped = { applies_to_models: ["gemini-3.7-flash-high"] };
+
+  it("keeps a scoped window off an unspecified model by default", () => {
+    // The conservative rule: the concrete model is unknowable before spawn.
+    expect(quotaConstraintAppliesToModel(scoped, null)).toBe(false);
+    expect(quotaConstraintAppliesToModel(scoped, "claude-opus-4-6-thinking")).toBe(false);
+    expect(quotaConstraintAppliesToModel(scoped, "gemini-3.7-flash-high")).toBe(true);
+  });
+
+  it("lets a source declare that its scoped window governs the bare route too", () => {
+    // Without this, a harness whose windows are ALL model-scoped (agy) could
+    // never refuse an exhausted account on a run that names no model.
+    const declared = { ...scoped, applies_to_unspecified_model: true };
+    expect(quotaConstraintAppliesToModel(declared, null)).toBe(true);
+    // It does NOT widen the scope for a DIFFERENT concrete model.
+    expect(quotaConstraintAppliesToModel(declared, "claude-opus-4-6-thinking")).toBe(false);
+  });
+
+  it("still treats an unscoped window as vendor-wide and undefined as no context", () => {
+    expect(quotaConstraintAppliesToModel({}, null)).toBe(true);
+    expect(quotaConstraintAppliesToModel(scoped, undefined)).toBe(true);
   });
 });

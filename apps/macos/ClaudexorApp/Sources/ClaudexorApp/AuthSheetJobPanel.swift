@@ -56,7 +56,12 @@ struct AuthSheetJobPanel: View {
                         .textSelection(.enabled)
                 }
 
-                if let deadline = Self.parseDate(job.deadlineAt), job.isActive {
+                // One deadline, one clock: while the paste card is on screen the
+                // countdown lives THERE, beside the field it governs, and this
+                // panel yields rather than ticking a second copy of it.
+                if let deadline = Self.parseDate(job.deadlineAt), job.isActive,
+                   AuthSheetPresentation.jobPanelShowsDeadline(
+                       disclosureFlow: lifecycle.deviceCode?.flow, phase: job.phase) {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Label(Self.deadlineText(deadline, now: context.date), systemImage: "timer")
                             .font(.caption.monospacedDigit())

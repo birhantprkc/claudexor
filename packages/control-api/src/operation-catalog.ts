@@ -3,6 +3,7 @@ import {
   ControlOperationCatalog,
   ControlRunState,
   type ControlOperationDescriptor,
+  ControlHarnessSetupHarness,
 } from "@claudexor/schema";
 import { queryParam, resumeHeader } from "./operation-parameters.js";
 import { REMOTE_OPERATION_DRAFTS } from "./remote-operation-descriptors.js";
@@ -375,7 +376,7 @@ const operations: ControlOperationDescriptor[] = [
     parameters: [
       queryParam({
         name: "harness",
-        enum: ["codex", "claude", "cursor"],
+        enum: [...ControlHarnessSetupHarness.options],
         schemaRef: "ControlSetupJobListFilter#/properties/harness",
         description: "Filter setup jobs to one harness.",
       }),

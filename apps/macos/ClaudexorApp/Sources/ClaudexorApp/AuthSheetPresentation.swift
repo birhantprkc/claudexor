@@ -101,6 +101,119 @@ enum AuthSheetPresentation {
         }
     }
 
+    /// The `oauth_url_input` paste field's Submit availability (INV-134): a
+    /// disabled control names its real cause, and a LAPSED vendor sign-in window
+    /// is never a "type it again" state — the only act that works there is a
+    /// fresh link, so Submit stays off and says so.
+    struct SignInCodeAvailability: Equatable {
+        enum BlockedReason: Equatable {
+            case windowLapsed
+            case sending
+            case emptyField
+
+            var help: String {
+                switch self {
+                case .windowLapsed: return "The sign-in window closed. Get a new link first."
+                case .sending: return "Delivering the code to the sign-in…"
+                case .emptyField: return "Paste the code from the sign-in page first."
+                }
+            }
+        }
+
+        let blockedReason: BlockedReason?
+        var enabled: Bool { blockedReason == nil }
+
+        /// Hover help for Submit: the blocking cause while disabled, else the
+        /// plain action description.
+        var help: String {
+            blockedReason?.help ?? "Deliver this one-time code to the waiting sign-in."
+        }
+
+        /// Whitespace-only input counts as empty — the card trims before
+        /// submitting, so an untrimmed "enabled" would be a lie.
+        init(windowLapsed: Bool, sending: Bool, codeField: String) {
+            if windowLapsed {
+                blockedReason = .windowLapsed
+            } else if sending {
+                blockedReason = .sending
+            } else if codeField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                blockedReason = .emptyField
+            } else {
+                blockedReason = nil
+            }
+        }
+    }
+
+    /// Whether the sign-in deadline passing may LAPSE the card (and, per the
+    /// auto-re-issue decision, replace the link). Auto-re-issue exists for a
+    /// window that closed with nothing delivered; firing it once a code is on
+    /// its way cancels the vendor mid token-exchange and burns the one-time
+    /// code, so a delivered — or still-sending — value outranks the clock.
+    static func deadlineMayLapse(codeDelivered: Bool, sending: Bool) -> Bool {
+        !codeDelivered && !sending
+    }
+
+    /// How often the sign-in card may replace a lapsed link BY ITSELF. Л-23
+    /// keeps the automatic replacement; this bounds it. The vendor's window is
+    /// a hard 60 s, so ONE automatic link buys a full second window for exactly
+    /// the case auto-re-issue exists for — a consent screen that ran slightly
+    /// long. Past that the presses are unattended: an uncapped card hands a user
+    /// who walked away a fresh DETACHED vendor login every minute, and each new
+    /// link silently invalidates the code the previous one is still showing, so
+    /// they come back to a clean-looking field belonging to a cancelled job.
+    ///
+    /// The budget lives on the SHEET, not the card: every re-issue creates a new
+    /// job, which unmounts and rebuilds the card, so card-local state could
+    /// never count past one.
+    struct ReissueBudget: Equatable {
+        static let automaticLimit = 1
+        private(set) var automatic = 0
+
+        /// Whether an unattended replacement may still fire.
+        var armed: Bool { automatic < Self.automaticLimit }
+
+        /// A user press proves someone is watching and RE-ARMS the budget; an
+        /// unattended replacement spends it.
+        mutating func spend(automatic isAutomatic: Bool) {
+            automatic = isAutomatic ? automatic + 1 : 0
+        }
+    }
+
+    /// What a CLOSED sign-in window says. Two reachable branches, two truths:
+    /// the card promises a replacement link only when it is actually issuing
+    /// one. It is not, when the card mounts on an already-expired job and when
+    /// the automatic budget above is spent — in both the explicit button is the
+    /// only thing that still works.
+    static func lapsedWindowMessage(replacing: Bool) -> String {
+        let closed = "That sign-in window closed before a code arrived, and it cannot be extended. The link above is dead"
+        return replacing
+            ? "\(closed) — Claudexor is issuing a fresh one, and it replaces the link here as soon as it arrives."
+            : "\(closed) — get a new link below to start over."
+    }
+
+    /// The ONE cause line for every control that acts on a LAPSED sign-in link.
+    /// The URL is dead the moment the vendor's window closes, so Open/Copy are
+    /// disabled and say this rather than silently doing nothing (INV-134).
+    static let lapsedSignInLinkHelp = "This sign-in link expired. Get a new link first."
+
+    /// VoiceOver name for the disclosed sign-in link. The label DESCRIBES the
+    /// URL, never replaces it: a bare "Sign-in link" left a VoiceOver user with
+    /// no way to hear the address they were about to open, and no way to tell a
+    /// live link from an expired one.
+    static func signInLinkLabel(url: String, lapsed: Bool) -> String {
+        lapsed ? "Expired sign-in link \(url)" : "Sign-in link \(url)"
+    }
+
+    /// Whether the setup-job panel draws the deadline countdown. One fact, one
+    /// owner: while the paste card is on screen the countdown belongs THERE,
+    /// beside the field it governs, so the panel yields instead of rendering a
+    /// second clock for the same deadline.
+    static func jobPanelShowsDeadline(
+        disclosureFlow: SetupLoginDisclosureFlow?, phase: SetupJobPhase
+    ) -> Bool {
+        !(disclosureFlow == .oauthUrlInput && phase == .awaitingUser)
+    }
+
     /// What the login-disclosure card may SAY and OFFER. The card is not
     /// codex-only — a terminal-mode claude/cursor login discloses its captured
     /// `oauth_url` through the same overlay — so both answers come from the
@@ -120,6 +233,45 @@ enum AuthSheetPresentation {
         LoginDisclosureCard(
             vendor: HarnessFamily(rawValue: harness.rawValue).label,
             offersBrowserCallback: harness == .codex)
+    }
+
+    /// Hover help for the native-setup panel's Log in / Manage Login button.
+    /// It names NO Terminal: every login this sheet starts uses the `daemon`
+    /// transport, and every daemon-hosted mode (device_code, url_disclosure,
+    /// url_disclosure_with_input) is hosted in this card by construction —
+    /// packages/cli/src/setup-jobs.ts, "Daemon-hosted modes never touch
+    /// Terminal". The old text special-cased codex and promised the other
+    /// families a Terminal window that has not opened since the 2026-08-04
+    /// owner directive; a per-family branch here would only be a second guess
+    /// at a server-owned fact, so the sentence stays true for all of them.
+    static func nativeLoginHelp(family: HarnessFamily, verified: Bool) -> String {
+        verified
+            ? "Open the native \(family.label) login flow to manage the verified session."
+            : "Start the native \(family.label) sign-in — the link and any one-time code appear here in this sheet, with no Terminal window."
+    }
+
+    /// The Recheck / reconnect outcome sentence. A family with no default
+    /// credential store never runs a source-targeted probe, so it must neither
+    /// claim one completed nor blame the engine for one that never started;
+    /// what it really refreshed is its accounts projection, and it says so.
+    static func recheckStatus(
+        family: HarnessFamily,
+        profileId: String?,
+        job: SetupJob?,
+        succeeded: Bool
+    ) -> String {
+        let noDefaultStore = profileId == nil && family.authReadinessRequest(after: job) == nil
+        guard succeeded else {
+            return noDefaultStore
+                ? "Could not refresh the \(family.label) accounts. Reconnect the engine and try again."
+                : "Exact auth-readiness check failed for \(family.label). Reconnect the engine and try again."
+        }
+        if noDefaultStore {
+            return "\(family.label) keeps no default login store, so there is nothing to probe — its accounts were refreshed instead."
+        }
+        return profileId == nil
+            ? "Exact auth-readiness check completed for \(family.label)."
+            : "Account readiness refreshed for this \(family.label) profile."
     }
 
     /// D-17 audit point 8: the codex device-code `not_supported` terminal state
@@ -255,5 +407,17 @@ extension AuthSheetPresentation.PrimaryCTA {
         case .reconnect: return "Re-establish setup truth (re-snapshot the job / prove the process gone)."
         case .done: return "Close this auth sheet."
         }
+    }
+}
+
+/// Whether closing the AuthSheet needs a confirmation — pure, so the "silently
+/// abandoned a live login" cases stay unit-pinned. (Lives beside the sheet's
+/// other pure mappers rather than in the view file.)
+enum AuthSheetClosePolicy {
+    static func requiresConfirmation(job: SetupJob?, connection: SetupLifecycleConnection,
+                                     actionInFlight: Bool) -> Bool {
+        if actionInFlight { return true }
+        if job?.isActive == true || job?.blocksReplacement == true { return true }
+        return connection == .recovering || connection == .reconnecting || connection == .streamLost
     }
 }

@@ -147,7 +147,7 @@ at every wire boundary.
   `RunFacts` projection from canonical run artifacts.
 - `packages/gateway`: harness discovery and capability/intent gating (route
   selection itself lives in the budget router and orchestrator routing).
-- `packages/harness-codex|claude|cursor|opencode|raw-api|fake`: adapters that
+- `packages/harness-codex|claude|cursor|opencode|agy|raw-api|fake`: adapters that
   translate native CLI/API streams into typed `HarnessEvent`s. The `fake-*` kinds
   are deterministic offline test fixtures (incl. `fake-implement`, which writes a
   real worktree file); they are explicit-`--harness` only and never enter
@@ -1576,7 +1576,7 @@ result receipt (the journal records only THAT something was disclosed, via the
 disclosure stops projecting. Snapshot/event schemas accept the overlay for any
 active login job in `awaiting_user` — codex app-server flows carry a
 `userCode`; the daemon-hosted `url_disclosure` (cursor) and
-`url_disclosure_with_input` (claude) modes carry the captured `oauth_url` /
+`url_disclosure_with_input` (claude, agy) modes carry the captured `oauth_url` /
 `oauth_url_input` sign-in link with an empty code. For
 `url_disclosure_with_input`, the user's pasted completion value arrives via
 `POST /v2/setup/jobs/:id/input`, rides a one-shot transient
@@ -1593,9 +1593,16 @@ be observing it.
 
 The daemon writes a private runner manifest; the device-code runner is launched
 DETACHED (no Terminal, not macOS-gated), the Terminal fallback via
-`open -a Terminal`. In both the runner executes the absolute vendor binary
-without a shell, scrubs provider credentials, and atomically records
-PID/kernel-start/process-group and result sidecars. It never receives or
+`open -a Terminal`. In both the runner executes the absolute vendor binary,
+scrubs provider credentials, and atomically records
+PID/kernel-start/process-group and result sidecars. A vendor that reads its
+pasted code only from a terminal (agy) is the one exception to a bare exec: the
+runner interposes the system terminal helper it probes for (`expect`, else
+util-linux `script`), whose argv is derived from the sealed words and whose
+exit status is the vendor's own; a host with neither refuses typed and names
+the CLI route. The vendor's OWN window, when shorter than the engine's, becomes
+the job deadline and cannot be extended — delivering the pasted code raises a
+bounded exchange floor so the clock cannot cancel a sign-in that succeeded. It never receives or
 persists a vendor token or credential file. Apart from the bounded, ANSI-stripped, secret-redacted diagnostic tail a
 FAILED codex login persists, vendor output is not copied into durable logs, and the Terminal fallback stays open on the result until the
 operator presses Return. The daemon fsyncs an immutable executable/argv

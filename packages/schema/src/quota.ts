@@ -8,6 +8,7 @@ export const QuotaSource = z
     "claude_statusline",
     "claude_api_retry",
     "claude_oauth_usage",
+    "agy_command_usage",
   ])
   .describe("Machine-readable source of quota evidence, classified by schema-owned traits.");
 export type QuotaSource = z.infer<typeof QuotaSource>;
@@ -21,7 +22,7 @@ export interface QuotaSourceTraits {
   readonly vendorAuthenticated: boolean;
   /** A missing/stale primary observation from this harness creates daemon
    * refresh demand. Reactive and spool sources deliberately use null. */
-  readonly refreshDemandHarness: "claude" | "codex" | null;
+  readonly refreshDemandHarness: "claude" | "codex" | "agy" | null;
   /** At least one registered top-level quota refresher can produce this
    * source. This is independent of whether it satisfies refresh demand. */
   readonly producedByRefresher: boolean;
@@ -53,18 +54,26 @@ export const QUOTA_SOURCE_TRAITS = {
     refreshDemandHarness: "claude",
     producedByRefresher: true,
   },
+  agy_command_usage: {
+    // agy's `/quota` print-mode command is authenticated with the profile's
+    // own token, produced by a top-level refresher, and creates refresh demand
+    // for agy (its profiles only — agy has no default subject, PLAN Л-4).
+    vendorAuthenticated: true,
+    refreshDemandHarness: "agy",
+    producedByRefresher: true,
+  },
 } as const satisfies Record<QuotaSource, QuotaSourceTraits>;
 
 export function quotaSourceTraits(source: QuotaSource): QuotaSourceTraits {
   return QUOTA_SOURCE_TRAITS[source];
 }
 
-export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex"> {
+export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex" | "agy"> {
   return [
     ...new Set(
       Object.values(QUOTA_SOURCE_TRAITS)
         .map((traits) => traits.refreshDemandHarness)
-        .filter((harness): harness is "claude" | "codex" => harness !== null),
+        .filter((harness): harness is "claude" | "codex" | "agy" => harness !== null),
     ),
   ].sort();
 }
@@ -107,6 +116,16 @@ export const QuotaConstraint = z
      * list is the producer's canonical model-id/alias scope, so a
      * model-specific cap never cools a different model on the same subject. */
     applies_to_models: z.array(Id).nullable().optional(),
+    /**
+     * Whether this MODEL-SCOPED window also governs a run that names no model.
+     * Default (absent) is the conservative answer: a scoped window cannot
+     * refuse a route whose concrete model is unknowable before spawn. A source
+     * sets it when the vendor's unspecified-model route provably consumes THIS
+     * window — the case where every window is scoped, so the conservative
+     * default would leave an exhausted subscription unrefusable and its
+     * profile rotation unreachable.
+     */
+    applies_to_unspecified_model: z.boolean().optional(),
     used_ratio: z.number().min(0).max(1).nullable(),
     window_seconds: z.number().positive().nullable(),
     resets_at: z.string().datetime({ offset: true }).nullable(),
@@ -172,7 +191,7 @@ export const QuotaModelScopedExhaustion = z
   })
   .strict()
   .describe(
-    "A spent or cooling window that applies only to the named models. Without a requested model it never sets the whole subject exhausted; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
+    "A spent or cooling window that applies only to the named models. Without a requested model only a window that DECLARES it governs the unspecified-model route can exhaust the subject; when the request names a model it covers, it blocks that request too (and is then also listed in blocking_constraints). resets_at is its earliest known release instant (null = unknown).",
   );
 export type QuotaModelScopedExhaustion = z.infer<typeof QuotaModelScopedExhaustion>;
 
@@ -326,7 +345,17 @@ export function quotaSnapshotAvailability(
       });
     }
     if (release === null) continue;
-    if (scoped && (model === null || !modelScopeMatches(scope, model))) continue;
+    // The projection and the router must answer the SAME question: a scoped
+    // window that declares it governs the unspecified-model route blocks a
+    // bare run, or the Accounts card would read "available" for an account the
+    // router is already refusing.
+    if (
+      scoped &&
+      (model === null
+        ? constraint.applies_to_unspecified_model !== true
+        : !modelScopeMatches(scope, model))
+    )
+      continue;
     blocking.push(constraint.id);
     if (exhausted) sawExhausted = true;
     if (earliestRelease === null || release.at < earliestRelease.at) {

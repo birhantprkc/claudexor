@@ -21,7 +21,10 @@ struct AuthSheetAccountsPanel: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(actionInFlight)
-                    .help("Refresh default and named-account readiness")
+                    // INV-134: a disabled control names its own cause.
+                    .help(actionInFlight
+                          ? "Wait for the current action to finish."
+                          : "Refresh default and named-account readiness")
                 }
                 AccountsSurface(
                     family: family,

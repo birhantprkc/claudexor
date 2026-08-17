@@ -129,8 +129,12 @@ Brand + accent:
 Harness-family palette (functional color-coding of candidates/findings/routes):
 
 - `harness/codex` (teal), `harness/claude` (warm orange), `harness/cursor` (violet),
-  `harness/opencode` (lime), `harness/raw-api` (magenta), `harness/fake` (neutral) — each a
+  `harness/opencode` (lime), `harness/agy` (cyan), `harness/raw-api` (magenta),
+  `harness/fake` (neutral) — each a
   distinct, AA-legible hue tuned to differ from each other AND from the status palette.
+  `harness/agy` and `harness/codex` are the palette's closest pair; agy is pushed toward
+  blue and clears AA against `surface/raised` in both themes (6.4:1 dark, 5.1:1 light),
+  and no surface ever conveys harness identity by hue alone.
   Used for candidate chips, race lanes, route-proof, per-harness budget, and harness dots.
   These are the ONLY place we use multiple strong hues.
 
@@ -507,8 +511,10 @@ frequency and volume are. The contracts:
     accounts") + worst quota % + chevron — that opens a popover to manage
     accounts in-app — no commands to copy. Codex native login runs the official
     codex app-server device-code flow in-app with NO Terminal (D-17 AuthSheet
-    story below); Claude/Cursor still run the official vendor CLI in an
-    auto-opened Terminal window (the setup-job handoff below). Each popover row is one account (a
+    story below); Claude, Cursor and Antigravity run the official vendor CLI
+    daemon-hosted with no Terminal either — the sign-in link is captured into
+    the card, and the two that need a pasted code take it there (the setup-job
+    handoff below). Each popover row is one account (a
     default vendor login named for its harness and badged `CLI login`, or a registered
     credential profile): a readiness dot (ready means that exact source is
     `available + passed`, never aggregate harness health), its name, ONE compact
@@ -1080,6 +1086,24 @@ views in the shared design-system files; screens compose them.
   app-server `browser_callback` flow), never a silent fallback. The one-time
   code is transient — read from the snapshot/SSE overlay only, never persisted
   by the app.
+- **The same card's paste half (`oauth_url_input`).** A vendor that prints a
+  sign-in link and then waits for the user to paste a code back (Claude, and
+  Antigravity whose window is a hard sixty seconds) uses the SAME card: the
+  link with **Open private sign-in** / **Open in browser** / **Copy link**, a
+  single-line code field, and a countdown against the DAEMON-published
+  deadline — never an interval the app invents. Three states are explicit and
+  each disables what it must: in-flight while the code is being delivered;
+  delivered ("Waiting for … to finish the sign-in"), which retires the
+  countdown and permanently disarms the auto-reissue so a successful sign-in
+  can never be cancelled by a clock — the daemon raises a bounded exchange
+  floor for the same reason; and lapsed, which strikes the dead link and
+  disables all three link controls. The lapsed copy tells the truth per branch:
+  a replacement is promised only when one is actually being issued. The
+  automatic replacement is BOUNDED (one), so a user who walked away returns to
+  one spare sign-in rather than a fresh detached login every minute, and the
+  explicit "Get a new link" re-arms it. A window the VENDOR owns cannot be extended, so the job carries
+  that fact and the Extend control does not render — the app never offers what
+  the daemon will refuse.
 - **Thread workspace (trailing `.inspector`).** ONE panel whose identity is the
   CURRENT THREAD's workspace (D42), with three always-present tabs
   (`WorkspaceTab`: `changes`, `artifacts`, `evidence`, via the shared
@@ -1216,8 +1240,9 @@ views in the shared design-system files; screens compose them.
 - **Onboarding.** First run is native-first: explain Codex/Claude/Cursor native auth
   and expose daemon-owned native-login jobs, then offer API-key fallback
   that writes only to the local secret store. Claudexor does not broker SaaS OAuth itself: Codex native login runs the
-  official app-server device-code flow fully in-app (D-17); Claude/Cursor
-  launch their official CLI in an auto-opened Terminal. Either way Claudexor
+  official app-server device-code flow fully in-app (D-17); Claude, Cursor and
+  Antigravity run their official CLI daemon-hosted, with the sign-in link
+  surfaced in the card rather than a Terminal window. Either way Claudexor
   verifies the native session without receiving/copying/storing vendor
   session tokens or credential files. Native
   readiness is distinct from overall/API-key readiness: absent means unavailable/not-run,
