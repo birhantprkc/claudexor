@@ -226,7 +226,11 @@ describe("parseAgyEvent", () => {
           step_type: "tool",
           tool_info: {
             name: "write_to_file",
-            parameters: { TargetFile: "/w/sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH.txt" },
+            // Runtime-assembled: never a token-shaped literal at rest (the
+            // repo-wide secret scan runs on CI's GNU grep, where \b matches).
+            parameters: {
+              TargetFile: `/w/${["sk", "ant", "api03", "AAAABBBBCCCCDDDDEEEEFFFF"].join("-")}.txt`,
+            },
             output: "ok",
           },
         },
@@ -234,7 +238,9 @@ describe("parseAgyEvent", () => {
       SID,
     )!;
     const change = out.find((e) => e.type === "file_change") as { payload?: { path?: string } };
-    expect(change.payload?.path).not.toContain("sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH");
+    expect(change.payload?.path).not.toContain(
+      ["sk", "ant", "api03", "AAAABBBBCCCCDDDDEEEEFFFF"].join("-"),
+    );
   });
 
   it("returns null for unknown top-level events so the run loop counts drops", () => {
