@@ -117,3 +117,54 @@ describe("resolveAccountForRun ladder predicate (Enabled-toggle bypass fix)", ()
     expect(context.events.map((event) => event.type)).not.toContain("route.account.pool_exhausted");
   });
 });
+
+describe("explicit api_key preference (Q3=A paid election)", () => {
+  it("takes the PAID route over a HEALTHY pool of ready rows — never spends subscription quota", async () => {
+    const context = ctx({
+      registry: [profileRow({ profile_id: "a" }), profileRow({ profile_id: "b" })],
+      authPreference: "api_key",
+    });
+    await expect(resolveAccountForRun(context)).resolves.toBeNull();
+    expect(context.apiKeyRouteNoted()).toBe(true);
+    expect(context.events.map((event) => event.type)).not.toContain("route.account.pool_selected");
+    const disclosed = context.events.find((event) => event.type === "route.account.pool_exhausted");
+    expect(disclosed?.payload["fallback"]).toBe("api_key_route");
+  });
+
+  it("an explicit PIN outranks the api_key preference — the pin routes (strict pin doctrine)", async () => {
+    const pinned = profileRow({ profile_id: "a" });
+    const context = ctx({
+      registry: [pinned, profileRow({ profile_id: "b" })],
+      pinnedProfile: pinned,
+      authPreference: "api_key",
+    });
+    await expect(resolveAccountForRun(context)).resolves.toBe(pinned);
+    expect(context.apiKeyRouteNoted()).toBe(false);
+    expect(context.events).toHaveLength(0);
+  });
+});
+
+describe("bound-row A7 unusable ledger (thread stickiness)", () => {
+  it("a condemned bound row re-pools with the DISCLOSED lane switch — never re-discovered by spending an attempt", async () => {
+    const context = ctx({
+      registry: [profileRow({ profile_id: "a" }), profileRow({ profile_id: "b" })],
+      boundProfileId: "a",
+      unusable: [
+        {
+          harness_id: "claude",
+          profile_id: "a",
+          model: null,
+          code: "auth_revoked",
+          source: "vendor_poller",
+          detail: "the vendor rejected this profile's credential",
+          observed_at: "2026-01-01T00:00:00.000Z",
+          expires_at: "2099-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    await expect(resolveAccountForRun(context)).resolves.toMatchObject({ profile_id: "b" });
+    const laneSwitch = context.events.find((event) => event.type === "route.account.lane_switch");
+    expect(laneSwitch?.payload).toMatchObject({ from_profile_id: "a", to_profile_id: "b" });
+    expect(String(laneSwitch?.payload["reason"])).toMatch(/unusable \(auth_revoked\)/);
+  });
+});

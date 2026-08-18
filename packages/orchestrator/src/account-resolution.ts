@@ -28,17 +28,24 @@ import {
 
 /**
  * The ONE account-resolution owner for a run's harness (INV-135 unified
- * account model, owner decisions D-U1/D-U6/Q1/Q2), extracted from the
+ * account model, owner decisions D-U1/D-U6/Q1/Q3), extracted from the
  * orchestrator god-file (INV-124):
  *
  * 1. An explicit pin is STRICT — a fresh exhausted window OR an observed live
  *    quota block (A4: reactive cooldown / spent window, stale-but-live
  *    included) is a typed `subscription_window_exhausted` refusal, never a
  *    silent rotation.
- * 2. An unpinned thread turn stays on its durable bound account while that
- *    row is ready, else switches to the pool with a DISCLOSED lane switch.
- * 3. Unbound runs take the best row of the quota-aware pool.
- * 4. An empty/exhausted pool is the typed `credential_pool_exhausted`
+ * 2. Below the pin, an EXPLICIT `api_key` preference is the user's paid
+ *    election: it takes the disclosed API-key ROUTE before binding/pool
+ *    resolution — a healthy subscription pool must never spend subscription
+ *    quota over that explicit choice (ARCHITECTURE: explicit `api_key`
+ *    excludes native fallback).
+ * 3. An unpinned thread turn stays on its durable bound account while that
+ *    row is ready, else switches to the pool with a DISCLOSED lane switch. A
+ *    live typed `credential_unusable` observation (A7) condemns the bound row
+ *    at this composition point too.
+ * 4. Unbound runs take the best row of the quota-aware pool.
+ * 5. An empty/exhausted pool is the typed `credential_pool_exhausted`
  *    TERMINAL carrying the pool's earliest known reset (owner Q3=A: PR-A's
  *    semantics supersede Q2 — waiting for the reset is the default). The paid
  *    API-key ROUTE serves it ONLY under the EXPLICIT `api_key` preference
@@ -155,9 +162,10 @@ function poolExhaustionCandidates(ctx: AccountResolutionContext, ready: Readonly
     });
 }
 
-/** Per-run record of harnesses whose unpinned route fell to the PAID API-key
- * route because the pool was empty/exhausted under the EXPLICIT `api_key`
- * preference (Q3=A): the spec then carries auth_preference=api_key so the
+/** Per-run record of harnesses whose unpinned route took the PAID API-key
+ * route under the EXPLICIT `api_key` preference (Q3=A) — the user's paid
+ * election over a healthy pool, or the only permitted service of an
+ * empty/exhausted one: the spec then carries auth_preference=api_key so the
  * adapter can never spawn back into an exhausted or excluded native login.
  * Keyed by the run-input object. */
 export class PoolRouteFlags {
@@ -294,6 +302,22 @@ export async function resolveAccountForRun(
       emit,
     });
   }
+  // The EXPLICIT `api_key` preference is the user's paid election (Q3=A): it
+  // takes the disclosed PAID route BEFORE binding/pool resolution — a healthy
+  // subscription pool must never spend subscription quota over that explicit
+  // choice (ARCHITECTURE: explicit `api_key` excludes native fallback). Only
+  // an explicit pin outranks it (strict pin doctrine, handled above). Mirrors
+  // the exhausted-pool paid branch below: noted, disclosed, never a row.
+  if (ctx.authPreference === "api_key") {
+    ctx.notePoolApiKeyRoute();
+    emit("route.account.pool_exhausted", {
+      harness_id: harnessId,
+      reason: "explicit api_key preference excludes the subscription pool",
+      resets_at: null,
+      fallback: "api_key_route",
+    });
+    return null;
+  }
   const boundId = ctx.boundProfileId;
   let boundSwitchReason: string | null = null;
   if (boundId) {
@@ -301,7 +325,14 @@ export async function resolveAccountForRun(
     // stickiness is not a pool ranking preference, so an explicit
     // rotation_eligible list cannot evict a healthy binding.
     const bound = pool.find((row) => row.profile_id === boundId);
-    if (bound) {
+    // A7: a live typed `credential_unusable` observation condemns the BOUND
+    // row at this composition point too (this file's contract: condemned rows
+    // are refused at readiness composition, never re-discovered by spending
+    // an attempt) — the binding re-pools with the disclosed lane switch.
+    const dead = bound ? liveUnusableFor(ctx.unusable, harnessId, boundId, model) : null;
+    if (bound && dead) {
+      boundSwitchReason = `the bound account's credential is unusable (${dead.code})`;
+    } else if (bound) {
       const verdict = await selectedProfileAvailability({
         registry,
         profileId: boundId,
@@ -368,22 +399,10 @@ export async function resolveAccountForRun(
   // is the typed `credential_pool_exhausted` TERMINAL carrying the pool's
   // earliest known reset — an unpinned run under `auto` (and under explicit
   // `subscription`) WAITS for a window instead of silently taking the paid
-  // route. The paid API-key ROUTE serves the exhausted pool ONLY under the
-  // EXPLICIT `api_key` preference (INV-061's explicit opt-in form — the same
-  // principle as PR-A's kind-aware `limit_action: auto`, which resolves a
-  // metered subject to `fail`: `auto` never silently spends money) — a
-  // route, never a row, always disclosed.
-  if (ctx.authPreference === "api_key") {
-    ctx.notePoolApiKeyRoute();
-    emit("route.account.pool_exhausted", {
-      harness_id: harnessId,
-      reason: selection.outcome,
-      resets_at: selection.resets_at,
-      fallback: "api_key_route",
-      ...(boundId ? { from_profile_id: boundId } : {}),
-    });
-    return null;
-  }
+  // route (the same principle as PR-A's kind-aware `limit_action: auto`,
+  // which resolves a metered subject to `fail`: `auto` never silently spends
+  // money). The EXPLICIT `api_key` preference never reaches this point — its
+  // paid election already returned before binding/pool resolution above.
   emit("route.account.pool_exhausted", {
     harness_id: harnessId,
     reason: selection.outcome,

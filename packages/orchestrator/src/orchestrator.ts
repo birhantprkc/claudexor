@@ -987,8 +987,10 @@ export class Orchestrator {
       quotaAdmission?.model === model
         ? quotaAdmission.profile
         : await this.credentials.preflightProfile(input, harnessId, model, log, defaultRoute);
-    // Q2=A: an empty/exhausted pool rides the PAID api_key route explicitly;
-    // quotaAdmission.route carries the admission verdict.
+    // Q3=A: the PAID api_key route serves ONLY the EXPLICIT api_key
+    // preference (the user's paid election, or the sole permitted service of
+    // an empty/exhausted pool) — never silently under auto, which terminalizes
+    // typed instead; quotaAdmission.route carries the admission verdict.
     const forcedApiKeyRoute =
       profile === null &&
       (quotaAdmission?.model === model
@@ -1031,6 +1033,40 @@ export class Orchestrator {
       harnessId,
       resolvedProfileId,
     ).env;
+  }
+
+  /**
+   * INV-137: a mid-attempt credential rotation must move the spec's LANE home
+   * with it. The lane env is keyed by the RESOLVED profile (laneHomeEnvFor),
+   * so a rotated spec that kept the pre-rotation env would write the rotated
+   * row's native session into the PREVIOUS row's lane store while the session
+   * record points at the rotated row — the next turn then provisions a fresh
+   * lane for that row and its `--resume` silently starts over. Only a spec
+   * that actually RUNS in a lane home is re-keyed: an isolated envelope keeps
+   * its disposable scoped home (sessions are never retained there), and an
+   * in-place agent turn keeps the native environment (adapters derive per-row
+   * state homes from the resolved profile itself).
+   */
+  private rotatedSpecInLaneHome(
+    input: RunInput | undefined,
+    harnessId: string,
+    previous: HarnessRunSpec,
+    rotated: HarnessRunSpec,
+  ): HarnessRunSpec {
+    if (!input) return rotated;
+    const previousLane = this.laneHomeEnvFor(
+      input,
+      harnessId,
+      // The same key the spec build used (record and resume share one home).
+      previous.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+    );
+    if (!previousLane || previous.env?.["HOME"] !== previousLane["HOME"]) return rotated;
+    const rotatedLane = this.laneHomeEnvFor(
+      input,
+      harnessId,
+      rotated.credential_profile?.profile_id ?? null,
+    );
+    return rotatedLane ? { ...rotated, env: rotatedLane } : rotated;
   }
 
   /** Credential-resolution cluster (INV-135), split to orchestrator-credentials.ts. */
@@ -2654,7 +2690,9 @@ export class Orchestrator {
             break;
           }
           if (rotated) {
-            spec = rotated;
+            // INV-137: the rotated row runs in ITS OWN lane home (no-op for
+            // isolated envelopes and native-env in-place turns).
+            spec = this.rotatedSpecInLaneHome(runInput, adapter.id, spec, rotated);
             applied = appliedNow();
             errors.length = 0;
             harnessErrored = false;
@@ -6846,7 +6884,9 @@ export class Orchestrator {
               break;
             }
             if (rotated) {
-              spec = rotated;
+              // INV-137: the rotated row's session must land in ITS OWN lane
+              // home — never the previous row's lane store.
+              spec = this.rotatedSpecInLaneHome(input, adapter.id, spec, rotated);
               harnessError = null;
               continue;
             }

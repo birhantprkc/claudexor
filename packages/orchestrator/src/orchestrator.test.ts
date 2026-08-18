@@ -4615,6 +4615,118 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("mid-turn rotation re-keys the LANE home to the rotated row and the next turn resumes its session (INV-137)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-rot-lane-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-a")}'`,
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profile-b")}'`,
+        "harnesses:",
+        "  asker:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: Array<{ profile: string | null; home?: string; resume: string | null }> = [];
+      const asker = askAdapter("asker", function* () {
+        /* replaced below */
+      });
+      asker.run = async function* (spec) {
+        const ts = new Date().toISOString();
+        const profile = spec.credential_profile?.profile_id ?? null;
+        spawns.push({ profile, home: spec.env?.["HOME"], resume: spec.resume_session_id ?? null });
+        if (spawns.length === 1) {
+          yield { type: "started", session_id: spec.session_id, ts } as never;
+          yield {
+            type: "status",
+            session_id: spec.session_id,
+            ts,
+            text: "api_retry: rate limited",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          } as never;
+          yield {
+            type: "error",
+            session_id: spec.session_id,
+            ts,
+            error: "vendor rate limit exhausted",
+          } as never;
+          yield { type: "completed", session_id: spec.session_id, ts } as never;
+          return;
+        }
+        yield {
+          type: "started",
+          session_id: spec.session_id,
+          ts,
+          credential_profile_id: profile,
+          payload: { native_session_id: "nat-rot-1" },
+        } as never;
+        yield { type: "message", session_id: spec.session_id, ts, text: "4" } as never;
+        yield { type: "completed", session_id: spec.session_id, ts } as never;
+      };
+      const store: Record<string, { sessionId: string; profileId: string | null }> = {};
+      const onSessionObserved = (
+        harnessId: string,
+        nativeSessionId: string,
+        _model?: string | null,
+        profileId?: string | null,
+      ) => {
+        store[harnessId] = { sessionId: nativeSessionId, profileId: profileId ?? null };
+      };
+      const orch = () => new Orchestrator({ registry: new Map([["asker", asker]]), reviewers: [] });
+      // Turn 1: the pool selects "a"; its typed vendor limit rotates the turn
+      // onto "b" MID-ATTEMPT.
+      await orch().run({
+        repoRoot: repo,
+        prompt: "q1",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadId: "th-rot",
+        resumeSessions: {},
+        onSessionObserved,
+      });
+      const laneHomeA = join(projectRuntimeDir(repo), "lanes", "th-rot", "asker-a", "home");
+      const laneHomeB = join(projectRuntimeDir(repo), "lanes", "th-rot", "asker-b", "home");
+      expect(spawns[0]).toMatchObject({ profile: "a", home: laneHomeA });
+      // INV-137 (the fix): the rotated attempt spawns in the ROTATED row's
+      // OWN lane home — its recorded native session lands exactly where the
+      // next "b" turn will look, never in the previous row's lane store.
+      expect(spawns[1]).toMatchObject({ profile: "b", home: laneHomeB });
+      expect(store["asker"]).toEqual({ sessionId: "nat-rot-1", profileId: "b" });
+      // Turn 2 (daemon-shaped: binding + resume map point at the rotated
+      // row): the SAME lane home, and --resume reaches the recorded session.
+      await orch().run({
+        repoRoot: repo,
+        prompt: "q2",
+        mode: "ask",
+        harnesses: ["asker"],
+        threadId: "th-rot",
+        threadAccountBindings: { asker: "b" },
+        resumeSessions: { asker: store["asker"] },
+        onSessionObserved,
+      });
+      expect(spawns[2]).toMatchObject({ profile: "b", home: laneHomeB, resume: "nat-rot-1" });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("never rotates on a plain transient — typed-limit signals only (W5.4)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-transient-config-"));
