@@ -186,6 +186,29 @@ describe("unified-accounts startup migration (plan §K.6)", () => {
     ).toEqual(["codex-default", "codex-default-2"]);
   });
 
+  it("case 3 (display half): a login whose auth material carries no identity gets the harness fallback display name", () => {
+    // codex: a chatgpt-mode auth.json with NO tokens (no id_token to read an
+    // email from); claude: a .credentials.json login with NO .claude.json
+    // identity. Both must still register under the reserved id, with the
+    // display-name fallback instead of an invented identity.
+    const home = defaultNativeCodexHome();
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }));
+    const dir = defaultNativeClaudeConfigDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".credentials.json"), "{}");
+    runAccountsUnifiedMigration(stubStores().stores);
+    const rows = registryRows();
+    expect(rows.find((r) => r.harness_id === "codex")).toMatchObject({
+      profile_id: "codex-default",
+      display_name: "codex default login",
+    });
+    expect(rows.find((r) => r.harness_id === "claude")).toMatchObject({
+      profile_id: "claude-default",
+      display_name: "claude default login",
+    });
+  });
+
   it("case 4: native_credentials_enabled=false maps to enabled=false and the mirror key survives", () => {
     seedCodexLogin();
     updateGlobalConfig((config) => ({
