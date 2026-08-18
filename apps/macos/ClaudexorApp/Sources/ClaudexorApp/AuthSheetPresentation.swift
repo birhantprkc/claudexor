@@ -444,4 +444,24 @@ enum AuthSheetClosePolicy {
         if job?.isActive == true || job?.blocksReplacement == true { return true }
         return connection == .recovering || connection == .reconnecting || connection == .streamLost
     }
+
+    static func confirmationTitle(job: SetupJob?, stateUnresolved: Bool) -> String {
+        if job?.blocksReplacement == true { return "Process termination is unconfirmed" }
+        if stateUnresolved { return "Setup state is still resolving" }
+        return "Native login is still active"
+    }
+
+    static func cancellationLabel(job: SetupJob?) -> String {
+        job == nil ? "Reconnect & Cancel" : "Cancel Login"
+    }
+
+    static func confirmationMessage(job: SetupJob?, stateUnresolved: Bool) -> String {
+        if job?.blocksReplacement == true {
+            return "Keep Running closes this sheet without claiming the process stopped. Cancel asks the daemon again and closes only after termination is confirmed. Stay keeps the recovery details visible."
+        }
+        if stateUnresolved {
+            return "Claudexor cannot yet prove whether a setup job is active. Keep Running leaves any accepted job in the background. Cancel first reconciles server state and closes only after confirmed termination."
+        }
+        return "Keep Running closes this sheet while the daemon job continues. Cancel Login waits for confirmed process termination before closing."
+    }
 }

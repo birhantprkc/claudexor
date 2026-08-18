@@ -87,22 +87,15 @@ struct AuthSheet: View {
             actionInFlight: actionInFlight
         )
     }
+    // Close-confirmation copy is pure presentation (AuthSheetClosePolicy).
     private var closeConfirmationTitle: String {
-        if job?.blocksReplacement == true { return "Process termination is unconfirmed" }
-        if activeStateUnknown || actionInFlight { return "Setup state is still resolving" }
-        return "Native login is still active"
+        AuthSheetClosePolicy.confirmationTitle(
+            job: job, stateUnresolved: activeStateUnknown || actionInFlight)
     }
-    private var closeCancellationLabel: String {
-        job == nil ? "Reconnect & Cancel" : "Cancel Login"
-    }
+    private var closeCancellationLabel: String { AuthSheetClosePolicy.cancellationLabel(job: job) }
     private var closeConfirmationMessage: String {
-        if job?.blocksReplacement == true {
-            return "Keep Running closes this sheet without claiming the process stopped. Cancel asks the daemon again and closes only after termination is confirmed. Stay keeps the recovery details visible."
-        }
-        if activeStateUnknown || actionInFlight {
-            return "Claudexor cannot yet prove whether a setup job is active. Keep Running leaves any accepted job in the background. Cancel first reconciles server state and closes only after confirmed termination."
-        }
-        return "Keep Running closes this sheet while the daemon job continues. Cancel Login waits for confirmed process termination before closing."
+        AuthSheetClosePolicy.confirmationMessage(
+            job: job, stateUnresolved: activeStateUnknown || actionInFlight)
     }
 
     var body: some View {
@@ -253,40 +246,18 @@ struct AuthSheet: View {
             && AccountsPresentation.configDirLoginHarnessIds.contains(family.setupHarnessId)
     }
 
+    // The native-setup panel is pure rendering in AuthSheetNativeSetupPanel.swift.
     private var nativeSetupPanel: some View {
-        Panel {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                SectionLabel("Native setup", systemImage: "person.crop.circle")
-                // M9-UX item 4: Log in is THE filled primary; Recheck the quiet secondary.
-                HStack(spacing: Theme.Spacing.sm) {
-                    Button { Task { await runLogin() } } label: {
-                        Label(targetVerified ? "Manage Login" : "Log in", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.accentSolid)
-                    .controlSize(.large)
-                    .disabled(newSetupDisabled)
-                    .help(AuthSheetPresentation.nativeLoginHelp(
-                        family: family, verified: targetVerified))
-
-                    Button { Task { await recheck() } } label: {
-                        Label("Recheck", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(actionInFlight)
-                    .help("Run a fresh, non-cached Harness Doctor probe for installed/authenticated/routable status.")
-                    Spacer(minLength: 0)
-                }
-                // The daemon-owned "run in terminal" caveat is secondary — collapsed.
-                DisclosureRow("Advanced — run in terminal", isExpanded: $showTerminalCaveat) {
-                    Text(profileId == nil
-                        ? "Native login is daemon-owned. Completing its Terminal command is not readiness: only the exact native probe and same-harness smoke mark the session ready."
-                        : "Native login is daemon-owned and scoped to this account's own store. Its doctor probe is the verification truth; the default-route capability smoke does not apply.")
-                        .font(.caption2).foregroundStyle(.secondary).padding(.top, Theme.Spacing.xs)
-                }
-                .font(.caption)
-            }
-        }
+        AuthSheetNativeSetupPanel(
+            targetVerified: targetVerified,
+            newSetupDisabled: newSetupDisabled,
+            actionInFlight: actionInFlight,
+            profileId: profileId,
+            family: family,
+            showTerminalCaveat: $showTerminalCaveat,
+            runLogin: { Task { await runLogin() } },
+            recheck: { Task { await recheck() } }
+        )
     }
 
     // Job + connection panels live in AuthSheetJobPanel.swift (pure rendering;
@@ -317,16 +288,13 @@ struct AuthSheet: View {
     }
 
     private func apiKeyPanel(_ name: String) -> some View {
-        Panel {
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                SectionLabel("API-key fallback", systemImage: "key")
-                SecureField("\(name) key", text: $secretValue).textFieldStyle(.roundedBorder)
-                Button { Task { await storeKey(name) } } label: { Label("Store Key", systemImage: "key.fill") }
-                    .buttonStyle(.bordered)
-                    .disabled(!storeKeyAvailability.enabled)
-                    .help(storeKeyAvailability.panelHelp)
-            }
-        }
+        AuthSheetApiKeyPanel(
+            name: name,
+            secretValue: $secretValue,
+            enabled: storeKeyAvailability.enabled,
+            panelHelp: storeKeyAvailability.panelHelp,
+            storeKey: { Task { await storeKey(name) } }
+        )
     }
 
     /// W4.8: the one state-derived primary action for the footer.

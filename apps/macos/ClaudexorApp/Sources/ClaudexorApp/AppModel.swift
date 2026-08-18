@@ -141,8 +141,7 @@ final class AppModel {
     /// Per-harness POOL authority (unified account model, INV-135): the
     /// server-computed `next_up` routing verdict per harness. Account facts
     /// live on the profile rows; routing facts live HERE — nothing re-derives
-    /// the pool client-side, and the retired `harnessAccounts` pseudo-row
-    /// projection is never stored.
+    /// the pool client-side (the `harnessAccounts` pseudo-row is retired).
     var accountPools: [HarnessAccountPool] = []
     var remoteAccountPools: [ExecutionLocationID: [HarnessAccountPool]] = [:]
     /// Cached registry hydration is independent of an explicit atomic refresh:
@@ -238,10 +237,9 @@ final class AppModel {
     @ObservationIgnored var makeRuntimeTransport: @Sendable () -> RuntimeReleaseTransport = { GitHubRuntimeReleaseTransport() }
     @ObservationIgnored var didAutoCheckRuntime = false
     @ObservationIgnored var appVersionOverrideForUpdates: String? // test seam — doc at updateFlowAppVersion
-    /// Optimistic auto-balance pick (tri-state since A6) while the settings save
-    /// round-trips (owner dogfood: the control must flip INSTANTLY, not after
-    /// the daemon replies). Cleared when the save settles; a failed save snaps
-    /// back. Actions live in AppModel+CredentialProfiles.swift.
+    /// Optimistic auto-balance pick (tri-state since A6) while the settings
+    /// save round-trips (owner dogfood: the control must flip INSTANTLY).
+    /// Cleared when the save settles; a failed save snaps back.
     var autoBalanceOverride: AccountsAutoBalance.Choice?
     /// DRAFT-thread workspace mode: false => in_place (default; turns mutate the live
     /// tree), true => isolated (turns accumulate in a thread worktree, applied later via
