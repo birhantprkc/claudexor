@@ -27,7 +27,7 @@ struct AuthSheetHeader: View {
                     .font(.title3.weight(.semibold))
                 Text(profileDisplayName == nil
                      ? "Native session first; API-key fallback only through the local secret store."
-                     : "Native login for this account. The default login stays untouched.")
+                     : "Native login for this account, isolated in its own store. Other accounts stay untouched.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

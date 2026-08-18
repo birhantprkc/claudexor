@@ -28,8 +28,12 @@ public struct SetupJobCreateRequest: Codable, Sendable, Equatable {
     public let harness: SetupHarness
     public let action: SetupJobAction
     public let authRequest: AuthRequest
-    /// Target credential profile (INV-135). nil = the engine-default store; the
-    /// key is emitted ONLY when set so a default login keeps the exact legacy body.
+    /// Target credential profile (INV-135). nil = the BOOTSTRAP login (unified
+    /// account model): the engine resolves it onto the harness's
+    /// `<harness>-default` account row (cursor binds the job to that row and
+    /// reports its id; claude/codex keep the default-store job whose INV-060
+    /// capability smoke attests the same native dir the row wraps). The key is
+    /// emitted ONLY when set so a bootstrap login keeps the exact legacy body.
     public let profileId: String?
     /// D-17 codex-only login flow selection. Emitted ONLY when set so a default
     /// login keeps the exact legacy body (absent = app-server device-code).
@@ -178,8 +182,14 @@ public struct SetupJob: Codable, Sendable, Equatable {
     public let harness: SetupHarness
     public let action: SetupJobAction
     public let transport: SetupJobTransport
-    /// Target credential profile (INV-135). The server always reports it — null
-    /// for a default-store login, the profile id for a profile login.
+    /// The RESOLVED target account of the job (INV-135, unified account
+    /// model). The server always reports it: a profile login carries its row
+    /// id, and a profile-less BOOTSTRAP request may come back already bound to
+    /// the `<harness>-default` row (cursor always does — it has no default
+    /// store). null remains only for the claude/codex default-store job, whose
+    /// login the startup migration/bootstrap registers as the default row.
+    /// Clients adopt THIS value for post-login verification, never the
+    /// requested one.
     public let profileId: String?
     public let state: SetupJobState
     public let phase: SetupJobPhase

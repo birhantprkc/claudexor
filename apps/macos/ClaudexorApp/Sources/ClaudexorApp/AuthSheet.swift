@@ -54,7 +54,12 @@ struct AuthSheet: View {
     private var setupTarget: AuthSheetPresentation.SetupTarget {
         AuthSheetPresentation.setupTarget(requestedProfileId: profileId, job: job)
     }
-    private var activeJobMatchesTarget: Bool { job.map { $0.profileId == profileId } ?? true }
+    /// A family-level sheet (nil target) follows ANY job it hosts — including a
+    /// bootstrap login the engine resolved onto the `<harness>-default` row; an
+    /// explicit account target matches only its own job.
+    private var activeJobMatchesTarget: Bool {
+        job.map { profileId == nil || $0.profileId == profileId } ?? true
+    }
     private var hasActiveJob: Bool { job?.isActive == true }
     private var activeStateUnknown: Bool {
         lifecycle.connection == .recovering || lifecycle.connection == .streamLost
@@ -116,15 +121,18 @@ struct AuthSheet: View {
                         AuthSheetAccountsPanel(
                             family: family,
                             actionInFlight: actionInFlight,
-                            defaultLoginDisabled: newSetupDisabled,
+                            loginDisabled: newSetupDisabled,
+                            // Every row is a registry row (unified account
+                            // model) — drill into that exact account's login.
                             login: { row in
-                                if row.profileId == nil {
-                                    Task { await runLogin() }
-                                } else {
-                                    model.authSheetTarget = AuthSheetTarget(
-                                        family: row.family, profileId: row.profileId, autoStartLogin: true)
-                                }
+                                model.authSheetTarget = AuthSheetTarget(
+                                    family: row.family, profileId: row.profileId, autoStartLogin: true)
                             },
+                            // The empty-family bootstrap sign-in: a profile-less
+                            // login the engine resolves onto the
+                            // `<harness>-default` row (K.4).
+                            bootstrapLogin: AccountsPresentation.supportsBootstrapLogin(family)
+                                ? { Task { await runLogin() } } : nil,
                             recheck: { Task { await recheck() } }
                         )
                     }
@@ -471,10 +479,14 @@ struct AuthSheet: View {
         actionInFlight = true
         defer { actionInFlight = false }
         let matchingJob = activeJobMatchesTarget ? job : nil
+        // Follow the job's RESOLVED account: a bootstrap login the engine bound
+        // to the `<harness>-default` row rechecks that exact row, not the
+        // default store the request left unnamed.
+        let targetProfileId = matchingJob != nil ? setupTarget.profileId : profileId
         let refreshed = await model.refreshCredentialReadiness(
-            for: family, profileId: profileId, after: matchingJob)
+            for: family, profileId: targetProfileId, after: matchingJob)
         status = AuthSheetPresentation.recheckStatus(
-            family: family, profileId: profileId, job: matchingJob, succeeded: refreshed)
+            family: family, profileId: targetProfileId, job: matchingJob, succeeded: refreshed)
     }
 
     private func reconnectSetupState() async {

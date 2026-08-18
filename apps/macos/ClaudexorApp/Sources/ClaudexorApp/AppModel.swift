@@ -138,11 +138,13 @@ final class AppModel {
     /// bottom-left accounts popover (list + guided add + per-account login).
     var credentialProfiles: [CredentialProfileEntry] = []
     var remoteCredentialProfiles: [ExecutionLocationID: [CredentialProfileEntry]] = [:]
-    /// Per-harness accounts authority projection (INV-135 / V11b): native
-    /// CLI-login state + the server-computed Active identity. The accounts
-    /// surface reads Enabled/Active from HERE so nothing re-derives the symmetry.
-    var harnessAccounts: [HarnessAccounts] = []
-    var remoteHarnessAccounts: [ExecutionLocationID: [HarnessAccounts]] = [:]
+    /// Per-harness POOL authority (unified account model, INV-135): the
+    /// server-computed `next_up` routing verdict per harness. Account facts
+    /// live on the profile rows; routing facts live HERE — nothing re-derives
+    /// the pool client-side, and the retired `harnessAccounts` pseudo-row
+    /// projection is never stored.
+    var accountPools: [HarnessAccountPool] = []
+    var remoteAccountPools: [ExecutionLocationID: [HarnessAccountPool]] = [:]
     /// Cached registry hydration is independent of an explicit atomic refresh:
     /// opening Accounts, connect, and mutations use the lighter endpoint and do
     /// not put the whole surface into a foreground Refreshing state.

@@ -100,100 +100,71 @@ public struct CredentialProfileEntry: Codable, Sendable, Identifiable, Equatable
     }
 }
 
-/// Server-computed NEXT-UP identity for a harness's accounts (INV-135, F1
-/// engine cut): the identity an UNPINNED run/turn would route to next, computed
-/// from enabled + readiness + quota. INFORMATIONAL only — the engine deleted
-/// user-settable Active; the Enabled toggle is the only routing control, and a
-/// per-thread pin overrides. A discriminated union on `kind`; no surface
-/// re-derives the symmetry.
-public enum ControlNextUpIdentity: Decodable, Sendable, Equatable {
-    /// An enabled credential profile is who an unpinned run routes to next.
+/// The POOL routing verdict for one harness's UNPINNED runs (unified account
+/// model, INV-135): every account is a named registry row, so `next_up` is
+/// either an enabled row, the policy-governed API-key ROUTE (INV-061 — a
+/// route, never a row), or nothing routable. Carried ONLY by `accountPools`;
+/// the legacy per-harness `next_up` never learns new kinds. INFORMATIONAL —
+/// the Enabled toggle is the only routing control, and a per-thread pin
+/// overrides. FORWARD-COMPATIBLE by contract: a kind this build does not know
+/// decodes as `.unknown` instead of failing the whole accounts response (the
+/// legacy decoder threw on unknown kinds; that failure class dies here).
+public enum ControlPoolNextUp: Decodable, Sendable, Equatable {
+    /// An enabled account row is who an unpinned run routes to next.
     case profile(profileId: String)
-    /// The unprofiled/default credential is the next-up subject of an unpinned run.
-    case native(route: String?)
-    /// An unpinned run has nothing routable (CLI login disabled, nothing pinned).
+    /// The pool is empty/exhausted; the unpinned route is the policy-governed
+    /// API key (INV-061) — a route, never an account row.
+    case apiKeyRoute
+    /// An unpinned run has nothing routable, with a human reason.
     case none(reason: String)
+    /// A newer engine's kind this build does not know. Rendered as "no badge"
+    /// rather than a decode failure.
+    case unknown(kind: String)
 
-    enum CodingKeys: String, CodingKey { case kind, profileId, reason, route }
+    enum CodingKeys: String, CodingKey { case kind, profileId, reason }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "profile": self = .profile(profileId: try c.decode(String.self, forKey: .profileId))
-        case "native": self = .native(route: try c.decodeIfPresent(String.self, forKey: .route))
+        case "api_key_route": self = .apiKeyRoute
         case "none": self = .none(reason: try c.decode(String.self, forKey: .reason))
-        case let other:
-            throw DecodingError.dataCorrupted(.init(
-                codingPath: decoder.codingPath,
-                debugDescription: "Unknown next-up-identity kind '\(other)'"))
+        case let other: self = .unknown(kind: other)
         }
     }
 
-    /// True when the native/CLI login is the next-up identity.
-    public var isNative: Bool { if case .native = self { return true }; return false }
-    /// Effective source route when the unprofiled/default subject is next-up.
-    public var defaultRoute: String? {
-        if case .native(let route) = self { return route }
-        return nil
-    }
-    /// True when the unprofiled/default identity resolves through `route`.
-    /// Older daemons omit the route, so the caller supplies the row that owned
-    /// the legacy undifferentiated native projection.
-    public func isDefaultRoute(_ route: String, legacyFallback: Bool) -> Bool {
-        guard case .native(let selectedRoute) = self else { return false }
-        guard let selectedRoute else { return legacyFallback }
-        return selectedRoute == route
-    }
-    /// True when `id` is the next-up credential profile.
+    /// True when `id` is the next-up account row.
     public func isProfile(_ id: String) -> Bool {
         if case .profile(let profileId) = self { return profileId == id }
         return false
     }
+    /// True when the unpinned route is the policy API key (a route, not a row).
+    public var isApiKeyRoute: Bool { if case .apiKeyRoute = self { return true }; return false }
 }
 
-/// Per-harness ACCOUNTS AUTHORITY projection (INV-135, F1 engine cut): the
-/// native "CLI login" pseudo-row state and the server-computed next-up identity,
-/// computed ONCE on the server so no client re-derives the symmetry. The engine
-/// DELETED user-settable Active — there is no `active_profile_id`; `next_up` is
-/// informational (what routing would pick). Rides RAW schema field names
+/// Per-harness POOL AUTHORITY of the unified account model: routing facts live
+/// here; account facts live on the profile rows. Rides RAW schema field names
 /// (snake_case).
-public struct HarnessAccounts: Decodable, Sendable, Equatable {
+public struct HarnessAccountPool: Decodable, Sendable, Equatable {
     public let harnessId: String
-    /// Whether the native/CLI login participates in this harness's ladder.
-    public let nativeCredentialsEnabled: Bool
-    /// Whether a native/default vendor login is currently detected available.
-    public let nativeLoginDetected: Bool
-    /// Non-secret {email, plan} of the native/CLI login, projected daemon-side
-    /// from the Claudexor-owned native store (INV-067). nil when
-    /// absent/undisclosed, or when an older daemon omits the field.
-    public let identity: AccountIdentity?
-    /// The identity an unpinned run would route to next (informational).
-    public let nextUp: ControlNextUpIdentity
+    /// Who an unpinned run of this harness routes to next (informational).
+    public let nextUp: ControlPoolNextUp
 
     enum CodingKeys: String, CodingKey {
         case harnessId = "harness_id"
-        case nativeCredentialsEnabled = "native_credentials_enabled"
-        case nativeLoginDetected = "native_login_detected"
-        case identity
         case nextUp = "next_up"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        harnessId = try c.decode(String.self, forKey: .harnessId)
-        nativeCredentialsEnabled = try c.decode(Bool.self, forKey: .nativeCredentialsEnabled)
-        nativeLoginDetected = try c.decode(Bool.self, forKey: .nativeLoginDetected)
-        identity = try c.decodeIfPresent(AccountIdentity.self, forKey: .identity)
-        nextUp = try c.decode(ControlNextUpIdentity.self, forKey: .nextUp)
     }
 }
 
 public struct CredentialProfilesResponse: Decodable, Sendable {
     public let profiles: [CredentialProfileEntry]
-    /// Per-harness accounts authority (V11b). Defaults to empty so an older
-    /// daemon that omits the projection still decodes; surfaces then fall back
-    /// to client-derived state.
-    public let harnessAccounts: [HarnessAccounts]
+    /// Per-harness pool authority (unified account model): the server-computed
+    /// `next_up` routing verdicts. Defaults to empty so an older daemon that
+    /// omits the key still decodes; surfaces then render no next-up badge.
+    /// The retired `harnessAccounts` key (the "CLI login" pseudo-row) is
+    /// deliberately NOT decoded: a unified-model engine always emits `[]`
+    /// there, and no surface may re-derive rows from it.
+    public let accountPools: [HarnessAccountPool]
     /// Present only for `?snapshot=true`; omission is an older/legacy response.
     public let harnesses: [HarnessStatus]?
     public let git: WorkspaceGitCapability?
@@ -203,13 +174,13 @@ public struct CredentialProfilesResponse: Decodable, Sendable {
     public let quotaEventCursor: String?
 
     enum CodingKeys: String, CodingKey {
-        case profiles, harnessAccounts, harnesses, git, quota, quotaEventCursor
+        case profiles, accountPools, harnesses, git, quota, quotaEventCursor
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         profiles = try c.decode([CredentialProfileEntry].self, forKey: .profiles)
-        harnessAccounts = try c.decodeIfPresent([HarnessAccounts].self, forKey: .harnessAccounts) ?? []
+        accountPools = try c.decodeIfPresent([HarnessAccountPool].self, forKey: .accountPools) ?? []
         harnesses = try c.decodeIfPresent([HarnessStatus].self, forKey: .harnesses)
         git = try c.decodeIfPresent(WorkspaceGitCapability.self, forKey: .git)
         quota = try c.decodeIfPresent(ControlQuotaResponse.self, forKey: .quota)
@@ -248,13 +219,17 @@ public struct CreateCredentialProfileRequest: Encodable, Sendable, Equatable {
     }
 }
 
-/// Receipt for DELETE /v2/credential-profiles/:harness/:id. The registry entry
-/// is gone when this decodes; `cleanupWarning` discloses a failed cleanup of the
-/// profile's own credential material (scoped login dir / namespaced secret).
+/// Receipt for DELETE /v2/credential-profiles/:harness/:id. Under the unified
+/// account model (D-U4) this decodes ONLY on provable success: the registry
+/// entry AND the account's own credential material are gone. A partial cleanup
+/// failure is a typed RETRYABLE 503 (`credential_cleanup_failed`) that keeps
+/// the row registered — never `removed: true` with a warning.
 public struct DeleteCredentialProfileReceipt: Decodable, Sendable {
     public let removed: Bool
     /// config_dir_removed | secret_deleted | none.
     public let credentialCleanup: String
+    /// DEPRECATED wire-compat field: a unified-model engine never emits it;
+    /// only an older engine's removed-with-warning receipt still carries one.
     public let cleanupWarning: String?
 }
 
@@ -313,7 +288,9 @@ public extension GatewayClient {
     }
 
     /// Remove a credential profile: the daemon deletes the registry entry plus
-    /// the profile's own credential material. 409 = a login job is active.
+    /// the profile's own credential material. 409 = a login job is active;
+    /// 503 `credential_cleanup_failed` = a partial cleanup failure that kept
+    /// the row registered — retry the removal (D-U4).
     func deleteCredentialProfile(harnessId: String, profileId: String) async throws
         -> DeleteCredentialProfileReceipt {
         let harness = harnessId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? harnessId

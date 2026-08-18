@@ -3,9 +3,11 @@ import ClaudexorKit
 // MARK: - Credential profile mutations + quota rotation
 
 extension AppModel {
-    /// Toggle a credential profile's Enabled (V11b — the Enabled row of the
-    /// accounts symmetry). PATCHes the profile route, then reloads the projection
-    /// so Enabled/Active reflect wire truth. Returns a refusal string on failure.
+    /// Toggle an account row's Enabled — the ONE routing control, uniformly the
+    /// profile PATCH route for every row (unified account model; the retired
+    /// `native_credentials_enabled` settings path died with the CLI-login
+    /// pseudo-row). Reloads the projection so Enabled reflects wire truth.
+    /// Returns a refusal string on failure.
     @discardableResult
     func setProfileEnabled(harnessId: String, profileId: String, enabled: Bool) async -> String? {
         let locationID = activeExecutionLocation
@@ -22,25 +24,6 @@ extension AppModel {
             await refreshCredentialProfiles(locationID: locationID)
             return userMessage(for: error)
         }
-    }
-
-    /// Toggle the native/CLI login's participation in a harness's credential
-    /// ladder (V11b — the CLI-login row's Enabled). Drives the per-harness
-    /// `native_credentials_enabled` via the settings PATCH surface; the save
-    /// answer IS the fresh snapshot (applied inside saveSettings, #20/D1), so
-    /// only the accounts projection reloads here. Returns nil on success.
-    @discardableResult
-    func setNativeCredentialsEnabled(harnessId: String, enabled: Bool) async -> String? {
-        let locationID = activeExecutionLocation
-        accountsNextUpAuthorityFresh[locationID] = false
-        let ok = await saveSettings(SettingsUpdateRequest(
-            harnesses: [harnessId: HarnessSettingsPatch(nativeCredentialsEnabled: enabled)]))
-        if ok {
-            await refreshCredentialProfilesAfterMutation(locationID: locationID)
-        } else {
-            await refreshCredentialProfiles(locationID: locationID)
-        }
-        return ok ? nil : (settingsStatus ?? "Could not update the native login setting.")
     }
 
     /// Register a new credential profile (INV-135). On success the registry is
@@ -64,11 +47,14 @@ extension AppModel {
         }
     }
 
-    /// Remove a credential profile (INV-135): the daemon deletes the registry
-    /// entry plus the profile's own credential material (scoped login dir /
-    /// namespaced secret; the default vendor store is untouchable). Returns the
-    /// daemon's reason on refusal (409 while a login job is active) and any
-    /// cleanup warning verbatim for inline display.
+    /// Remove a credential profile (INV-135 / D-U4): success means the registry
+    /// entry AND the account's own credential material are provably gone (the
+    /// vendor's ordinary host stores stay untouchable). Returns the daemon's
+    /// reason on refusal: a 409 while a login job is active, or the typed
+    /// RETRYABLE 503 `credential_cleanup_failed` — the row stays registered so
+    /// the removal can simply be retried; that state is an error, never a
+    /// half-deleted success. An old engine's removed-with-warning receipt is
+    /// still surfaced verbatim.
     func deleteCredentialProfile(harnessId: String, profileId: String) async -> String? {
         let locationID = activeExecutionLocation
         accountsNextUpAuthorityFresh[locationID] = false
@@ -94,17 +80,32 @@ extension AppModel {
             }
             return receipt.cleanupWarning
         } catch {
-            return userMessage(for: error)
+            // The row survived; reload so the surface keeps showing it beside
+            // the refusal instead of pretending the delete settled.
+            await refreshCredentialProfiles(locationID: locationID)
+            return Self.deleteRefusalMessage(for: error) ?? userMessage(for: error)
         }
+    }
+
+    /// The typed delete-refusal mapping (D-U4): the engine's retryable
+    /// `credential_cleanup_failed` names the honest state — row kept, material
+    /// possibly partial — and the working next act (retry). nil falls back to
+    /// the generic error mapping.
+    static func deleteRefusalMessage(for error: Error) -> String? {
+        guard let problem = (error as? GatewayError)?.controlProblem,
+              problem.code == "credential_cleanup_failed"
+        else { return nil }
+        return "Couldn't remove the account's own login data, so it is still registered: \(problem.message) Try Remove again."
     }
 
     // MARK: Auto-switch-at-quota (batch-6 item b)
 
     /// The harnesses the auto-switch toggle targets: config_dir_login families
-    /// with a SECOND account registered (native login + ≥1 profile = 2+ rotatable
-    /// identities). A single-account harness cannot rotate, so it is excluded —
-    /// the old hardcoded [claude, codex] set patched harnesses that had nothing to
-    /// switch to (owner: "renders but doesn't activate").
+    /// with a SECOND account row registered (unified account model — every
+    /// identity is a row, so rotation needs ≥2 rows). A single-account harness
+    /// cannot rotate, so it is excluded — the old hardcoded [claude, codex] set
+    /// patched harnesses that had nothing to switch to (owner: "renders but
+    /// doesn't activate").
     var autoBalanceHarnessIds: [String] {
         AccountsAutoBalance.eligibleHarnessIds(
             profileHarnessIds: activeCredentialProfiles.map(\.profile.harnessId))

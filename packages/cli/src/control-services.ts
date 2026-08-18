@@ -31,6 +31,7 @@ import { StatusProjectionCache, globalConfigVersion } from "./status-projection-
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
+import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import {

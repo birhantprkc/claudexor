@@ -80,7 +80,7 @@ extension AppModel {
         // connect and feed the sessions footer/accounts surfaces — leaving them
         // presents the last daemon's registry as truth. Reconnect repopulates.
         credentialProfiles.removeAll()
-        harnessAccounts.removeAll()
+        accountPools.removeAll()
         retireAccountsRequests(at: .local)
         accountsRegistryLoadStates.removeValue(forKey: .local)
         accountsLoadTokens.removeValue(forKey: .local)

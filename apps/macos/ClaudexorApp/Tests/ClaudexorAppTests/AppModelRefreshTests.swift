@@ -31,7 +31,7 @@ struct AppModelRefreshTests {
         model.storedSecrets = [try JSONDecoder().decode(SecretInfo.self, from: Data(#"{"name":"stale","backend":"file","present":true}"#.utf8))]
         model.trustEntries = [try JSONDecoder().decode(TrustEntry.self, from: Data(#"{"repoRoot":"/tmp/project","path":"/tmp/trust.json","allowFullAccess":true,"accessDefault":"full"}"#.utf8))]
         model.credentialProfiles = [try JSONDecoder().decode(CredentialProfileEntry.self, from: Data(#"{"profile":{"profile_id":"p1","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","isolation_locator":null,"enabled":true},"status":{"availability":"available","verification":"not_run","detail":null,"last_verified_at":null}}"#.utf8))]
-        model.harnessAccounts = [try JSONDecoder().decode(HarnessAccounts.self, from: Data(#"{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}"#.utf8))]
+        model.accountPools = [try JSONDecoder().decode(HarnessAccountPool.self, from: Data(#"{"harness_id":"claude","next_up":{"kind":"profile","profileId":"p1"}}"#.utf8))]
         model.draftPrimaryHarness = "claude"
         model.draftEligiblePool = ["claude"]
         model.draftIsolatedWorkspace = true
@@ -58,7 +58,7 @@ struct AppModelRefreshTests {
         // X140 class: the account registries the sessions footer reads are wiped
         // so the last daemon's accounts are not presented as current truth.
         #expect(model.credentialProfiles.isEmpty)
-        #expect(model.harnessAccounts.isEmpty)
+        #expect(model.accountPools.isEmpty)
         #expect(model.secretBackend == "unknown")
         #expect(model.draftPrimaryHarness == "claude")
         #expect(model.draftEligiblePool == ["claude"])
@@ -648,7 +648,7 @@ struct AppModelRefreshTests {
                 profileID: "work", displayName: "Seed",
                 observedAt: "2026-08-09T00:00:00Z", profileEnabled: false))
         model.storeCredentialProfiles(
-            seed.profiles, harnessAccounts: seed.harnessAccounts, at: locationID)
+            seed.profiles, accountPools: seed.accountPools, at: locationID)
 
         let registryCalls = AppRefreshCallCounter()
         let firstArrived = AppRefreshCallCounter()
@@ -1383,7 +1383,7 @@ struct AppModelRefreshTests {
         #expect(await accounts.value == nil)
         model.suspendAccountsQuotaObserver(at: .local)
         #expect(model.liveHarnesses.first?.health == .ok)
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("accounts") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("accounts") == true)
         #expect(model.accountsNextUpAuthorityFresh[.local] == true)
     }
 
@@ -1425,7 +1425,7 @@ struct AppModelRefreshTests {
         // The newer harness owner wins its slice; the full response may still
         // update stable registry fields, and old display quota is retained.
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["incoming"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("incoming") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("incoming") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:00Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.accountsQuotaEventCursors[.local] == "seed-cursor")
@@ -1470,7 +1470,7 @@ struct AppModelRefreshTests {
         let accountsError = await accounts.value
         #expect(accountsError == nil)
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["incoming"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("incoming") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("incoming") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:02Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.accountsQuotaEventCursors[.local] == "seed-cursor")
@@ -1511,7 +1511,7 @@ struct AppModelRefreshTests {
         let accountsError = await accounts.value
         #expect(accountsError?.contains("Retry Accounts") == true)
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["seed"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("seed") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("seed") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-29T00:00:04Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.liveHarnesses.first?.version == "newer-harness")
@@ -1848,7 +1848,7 @@ struct AppModelRefreshTests {
             switch (request.httpMethod, request.url?.path, request.url?.query) {
             case ("GET", "/v2/credential-profiles", "snapshot=true"):
                 calls.increment()
-                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"ok","manifest":null,"routableIntents":["implement"],"authSources":[{"source":"native_session","availability":"available","verification":"passed"}]}],"quotaEventCursor":"quota:1","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}}"#.utf8))
+                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[],"accountPools":[{"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}}],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"ok","manifest":null,"routableIntents":["implement"],"authSources":[{"source":"native_session","availability":"available","verification":"passed"}]}],"quotaEventCursor":"quota:1","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}}"#.utf8))
             default:
                 throw AppRefreshTestError.badRequest
             }
@@ -1858,7 +1858,7 @@ struct AppModelRefreshTests {
         #expect(calls.count == 1)
         #expect(model.liveHarnesses.first?.routableIntents == ["implement"])
         #expect(model.harnessReadinessFresh == true)
-        #expect(model.harnessAccounts.first?.nextUp.isNative == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("work") == true)
         #expect(model.quotaResponse != nil)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:00Z")
         #expect(model.gitCapability?.available == true)
@@ -1879,7 +1879,7 @@ struct AppModelRefreshTests {
             switch (request.httpMethod, request.url?.path, request.url?.query) {
             case ("GET", "/v2/credential-profiles", nil):
                 calls.increment()
-                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}]}"#.utf8))
+                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[],"accountPools":[{"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}}]}"#.utf8))
             default:
                 throw AppRefreshTestError.badRequest
             }
@@ -1888,7 +1888,7 @@ struct AppModelRefreshTests {
         model.accountsNextUpAuthorityFresh[.local] = true
         #expect(await model.loadCredentialProfiles(discardOnFailure: true) == nil)
         #expect(calls.count == 1)
-        #expect(model.harnessAccounts.first?.nextUp.isNative == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("work") == true)
         // The plain response's next_up is stored only with its stable row fields.
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.activeAccountsRegistryLoadState == .loaded)
@@ -1916,7 +1916,7 @@ struct AppModelRefreshTests {
         let error = await model.refreshAccounts()
         #expect(error?.contains("incomplete") == true)
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["new-profile"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("seed") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("seed") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:01Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
         #expect(model.activeAccountsRegistryLoadState == .loaded)
@@ -1939,7 +1939,7 @@ struct AppModelRefreshTests {
             guard request.url?.path == "/v2/credential-profiles",
                   request.url?.query == "snapshot=true"
             else { throw AppRefreshTestError.badRequest }
-            let body = #"{"profiles":[],"harnessAccounts":[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":false,"next_up":{"kind":"none","reason":"Native login is unavailable"}}],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"degraded","manifest":null,"routableIntents":[],"authSources":[{"source":"native_session","availability":"unavailable","verification":"failed"}]}],"quotaEventCursor":"quota:2","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}}"#
+            let body = #"{"profiles":[],"harnessAccounts":[],"accountPools":[{"harness_id":"claude","next_up":{"kind":"none","reason":"no enabled account"}}],"git":{"status":"available","version":"git version test","detail":null,"remediation":null},"harnesses":[{"id":"claude","status":"degraded","manifest":null,"routableIntents":[],"authSources":[{"source":"native_session","availability":"unavailable","verification":"failed"}]}],"quotaEventCursor":"quota:2","quota":{"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}}"#
             return (appResponse(for: request), Data(body.utf8))
         }
 
@@ -1947,7 +1947,9 @@ struct AppModelRefreshTests {
         let source = model.authSource(for: .claude, source: .nativeSession)
         #expect(source?.availability == "unavailable")
         #expect(source?.verification == "failed")
-        #expect(AccountsPresentation.rows(model: model).first?.readiness == .unavailable)
+        // Unified account model: no pseudo-row is synthesized from doctor
+        // readiness — with zero profile rows the accounts list stays empty.
+        #expect(AccountsPresentation.rows(model: model).isEmpty)
     }
 
     @MainActor
@@ -1970,9 +1972,9 @@ struct AppModelRefreshTests {
         model.credentialProfiles = [try JSONDecoder().decode(
             CredentialProfileEntry.self,
             from: Data(#"{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","isolation_locator":null,"enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}"#.utf8))]
-        model.harnessAccounts = [try JSONDecoder().decode(
-            HarnessAccounts.self,
-            from: Data(#"{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}"#.utf8))]
+        model.accountPools = [try JSONDecoder().decode(
+            HarnessAccountPool.self,
+            from: Data(#"{"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}}"#.utf8))]
         model.quotaResponse = try JSONDecoder().decode(
             ControlQuotaResponse.self,
             from: appQuotaResponse(subjectID: "work", observedAt: "2026-08-09T00:00:00Z"))
@@ -1996,7 +1998,7 @@ struct AppModelRefreshTests {
         #expect(row?.readiness == .unknown)
         #expect(row?.verified == false)
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["work"])
-        #expect(model.harnessAccounts.first?.nextUp.isNative == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("work") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-08-09T00:00:00Z")
         #expect(model.accountsReadinessAuthorityFresh[.local] == false)
         if case .stale = model.activeAccountsQuotaDisplayState {} else {
@@ -2049,7 +2051,7 @@ struct AppModelRefreshTests {
         }
         #expect(model.activeAccountsRegistryLoadState == .loaded)
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["recovered"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("recovered") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("recovered") == true)
         #expect(model.accountsNextUpAuthorityFresh[.local] == false)
     }
 
@@ -2265,7 +2267,7 @@ struct AppModelRefreshTests {
         #expect(await older.value == nil)
 
         #expect(model.credentialProfiles.map(\.profile.profileId) == ["shared"])
-        #expect(model.harnessAccounts.first?.nextUp.isProfile("shared") == true)
+        #expect(model.accountPools.first?.nextUp.isProfile("shared") == true)
         #expect(model.quotaResponse?.refreshedAt == "2026-07-28T00:00:02Z")
         #expect(model.accountsNextUpAuthorityFresh[.local] == true)
         #expect(model.activeAccountsLoadState == .loaded)
@@ -2329,9 +2331,9 @@ struct AppModelRefreshTests {
         model.credentialProfiles = try JSONDecoder().decode(
             [CredentialProfileEntry].self,
             from: Data(#"[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null},"identity":{"email":"work@example.test","plan":"max"}}]"#.utf8))
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self,
-            from: Data(#"[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"profile","profileId":"work"}}]"#.utf8))
+        model.accountPools = try JSONDecoder().decode(
+            [HarnessAccountPool].self,
+            from: Data(#"[{"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}}]"#.utf8))
         model.quotaResponse = try JSONDecoder().decode(
             ControlQuotaResponse.self,
             from: appQuotaResponse(subjectID: "work", observedAt: "2026-07-28T00:00:04Z"))
@@ -4376,7 +4378,7 @@ struct AppModelRefreshTests {
                 profileID: "work", displayName: "Work",
                 observedAt: "2026-08-09T00:00:00Z"))
         model.storeCredentialProfiles(
-            seed.profiles, harnessAccounts: seed.harnessAccounts, at: .local)
+            seed.profiles, accountPools: seed.accountPools, at: .local)
         let patched = AppRefreshCallCounter()
         let reloaded = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in
@@ -4408,57 +4410,53 @@ struct AppModelRefreshTests {
         #expect(AccountsPresentation.rows(model: model).first?.enabled == true)
     }
 
+    /// D-U4: a partial credential cleanup is a typed RETRYABLE 503
+    /// (`credential_cleanup_failed`) that keeps the row registered — the app
+    /// surfaces it as a retryable error state, never as a removed-with-warning
+    /// success. (The retired `setNativeCredentialsEnabled` settings path died
+    /// with the CLI-login pseudo-row; every Enabled toggle is the profile
+    /// PATCH now — pinned by setProfileEnabledPatchesTheCredentialProfileRoute.)
     @MainActor
-    @Test func setNativeCredentialsEnabledPatchesTheHarnessSettingsSurface() async throws {
+    @Test func deleteCleanupFailureSurfacesRetryableErrorAndKeepsTheRow() async throws {
         defer { AppRequestStubURLProtocol.handler = nil }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [AppRequestStubURLProtocol.self]
-        let model = AppModel(client: GatewayClient(
-            baseURL: URL(string: "http://127.0.0.1:1234")!, token: "test",
-            session: URLSession(configuration: config)
-        ), requestNotificationAuthorization: false)
-
-        let patched = AppRefreshCallCounter()
-        let settingsGets = AppRefreshCallCounter()
-        let snapshot = #"{"sources":[],"routing":{"goal":"auto","paidFallback":"when_unavailable","qualityTiers":{},"primaryHarness":null,"eligibleHarnesses":[],"envInheritance":"mirror_native","authPreference":"auto"},"budget":{"paidBudgetPerRun":{"kind":"unlimited"}},"runtime":null,"harnesses":{},"interactionTimeoutMs":900000}"#
+        let model = AppModel(
+            client: appTestGateway(port: 41146), requestNotificationAuthorization: false)
+        let seed = try JSONDecoder().decode(
+            CredentialProfilesResponse.self,
+            from: appAccountsSnapshot(
+                profileID: "work", displayName: "Work",
+                observedAt: "2026-08-09T00:00:00Z"))
+        model.storeCredentialProfiles(seed.profiles, accountPools: seed.accountPools, at: .local)
+        let deleted = AppRefreshCallCounter()
+        let reloaded = AppRefreshCallCounter()
         AppRequestStubURLProtocol.handler = { request in
-            switch (request.httpMethod, request.url?.path) {
-            case ("POST", "/v2/settings"):
-                // The CLI-login toggle drives the per-harness native_credentials
-                // setting via the settings PATCH surface — never the profile route.
-                // Inline decode (no nested closure — the handler runs off-main).
-                guard let body = appTestRequestBody(request),
-                      let obj = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-                      let harnesses = obj["harnesses"] as? [String: Any],
-                      let claude = harnesses["claude"] as? [String: Any],
-                      claude["nativeCredentialsEnabled"] as? Bool == false else {
-                    throw AppRefreshTestError.badRequest
-                }
-                patched.increment()
-                // The daemon answers a save with the fresh effective snapshot
-                // (GET's shape), not the legacy v0.x {path} receipt (#20).
-                return (appResponse(for: request), Data(snapshot.utf8))
-            case ("GET", "/v2/settings"):
-                // D1 fence (#20): the save answer IS the fresh snapshot; the
-                // save path must never follow up with a GET. Counted, asserted 0.
-                settingsGets.increment()
-                return (appResponse(for: request), Data(snapshot.utf8))
-            case (_, "/v2/harnesses"):
-                return (appResponse(for: request), Data(#"{"harnesses":[]}"#.utf8))
-            case (_, "/v2/credential-profiles"):
-                return (appResponse(for: request), Data(#"{"profiles":[],"harnessAccounts":[]}"#.utf8))
-            default:
-                throw AppRefreshTestError.badRequest
+            if request.httpMethod == "DELETE",
+               request.url?.path == "/v2/credential-profiles/claude/work"
+            {
+                deleted.increment()
+                return (appResponse(for: request, status: 503), Data(
+                    #"{"code":"credential_cleanup_failed","message":"credential cleanup failed; the account is still registered — retry the removal: rm failed.","retryable":true,"fieldErrors":{},"requiredActions":[],"evidenceRefs":[]}"#.utf8))
             }
+            if request.httpMethod == "GET",
+               request.url?.path == "/v2/credential-profiles",
+               request.url?.query == nil
+            {
+                reloaded.increment()
+                return (appResponse(for: request), appAccountsSnapshot(
+                    profileID: "work", displayName: "Work",
+                    observedAt: "2026-08-09T00:00:01Z"))
+            }
+            throw AppRefreshTestError.badRequest
         }
 
-        let error = await model.setNativeCredentialsEnabled(harnessId: "claude", enabled: false)
-        #expect(error == nil)
-        #expect(patched.count == 1)
-        #expect(settingsGets.count == 0)
-        // The POST answer was APPLIED, not just decoded-and-dropped.
-        #expect(model.settingsSnapshot?.interactionTimeoutMs == 900000)
-        #expect(model.settingsSnapshot?.routing.envInheritance == "mirror_native")
+        let notice = await model.deleteCredentialProfile(harnessId: "claude", profileId: "work")
+
+        #expect(deleted.count == 1)
+        #expect(reloaded.count == 1)
+        #expect(notice?.contains("still registered") == true)
+        #expect(notice?.contains("Try Remove again") == true)
+        // The row survives the failed delete — never a half-deleted success.
+        #expect(AccountsPresentation.rows(model: model).first?.profileId == "work")
     }
 
     /// Concurrent saves are SERIALIZED (X10/X14): the second save's POST must
@@ -4724,18 +4722,18 @@ private func appAccountsSnapshot(
     displayName: String,
     observedAt: String,
     profileEnabled: Bool = true,
-    nativeEnabled: Bool = true,
     quotaEventCursor: String = "quota-snapshot-cursor"
 ) -> Data {
+    // Unified account model: the engine emits `harnessAccounts: []` for wire
+    // compat and carries the routing verdict in `accountPools`.
     Data("""
     {"profiles":[{"profile":{"profile_id":"\(profileID)","harness_id":"claude",
       "display_name":"\(displayName)","credential_kind":"config_dir_login",
       "isolation_locator":null,"enabled":\(profileEnabled)},"status":{"availability":"available",
       "verification":"passed","detail":null,"last_verified_at":null},
       "identity":{"email":"\(profileID)@example.test","plan":"max"}}],
-      "harnessAccounts":[{"harness_id":"claude",
-      "native_credentials_enabled":\(nativeEnabled),"native_login_detected":true,
-      "identity":{"email":"native@example.test","plan":"pro"},
+      "harnessAccounts":[],
+      "accountPools":[{"harness_id":"claude",
       "next_up":{"kind":"profile","profileId":"\(profileID)"}}],
       "harnesses":[{"id":"claude","status":"ok","manifest":null,
       "routableIntents":["implement"],"authSources":[{"source":"native_session",
@@ -4761,7 +4759,7 @@ private func seedAppAccounts(
             observedAt: observedAt,
             quotaEventCursor: "seed-cursor"))
     model.credentialProfiles = snapshot.profiles
-    model.harnessAccounts = snapshot.harnessAccounts
+    model.accountPools = snapshot.accountPools
     model.quotaResponse = snapshot.quota
     model.accountsNextUpAuthorityFresh[.local] = true
     model.accountsQuotaEventCursors[.local] = "seed-cursor"

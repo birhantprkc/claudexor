@@ -2505,9 +2505,13 @@ import Testing
         }
     }
 
-    // MARK: - V11b accounts authority
+    // MARK: - Account-pool authority (unified account model)
 
-    @Test func credentialProfilesResponseDecodesHarnessAccountsProjection() throws {
+    @Test func credentialProfilesResponseDecodesAccountPoolsAndIgnoresLegacyHarnessAccounts() throws {
+        // The unified-model engine emits `harnessAccounts: []` for wire compat
+        // and carries routing facts in `accountPools`. An OLD engine's populated
+        // harnessAccounts (with the retired `native` kind) must be IGNORED, not
+        // fail the decode — the pseudo-row class is retired client-side too.
         let json = #"""
         {
           "profiles": [
@@ -2519,9 +2523,13 @@ import Testing
              "identity":null}
           ],
           "harnessAccounts": [
-            {"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":true,"identity":{"email":"native@example.test","plan":"claude_pro"},"next_up":{"kind":"profile","profileId":"work"}},
-            {"harness_id":"codex","native_credentials_enabled":false,"native_login_detected":false,"identity":null,"next_up":{"kind":"none","reason":"CLI login disabled"}},
             {"harness_id":"cursor","native_credentials_enabled":true,"native_login_detected":true,"next_up":{"kind":"native"}}
+          ],
+          "accountPools": [
+            {"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}},
+            {"harness_id":"codex","next_up":{"kind":"api_key_route"}},
+            {"harness_id":"cursor","next_up":{"kind":"none","reason":"no enabled account"}},
+            {"harness_id":"agy","next_up":{"kind":"future_kind","futureField":1}}
           ],
           "quotaEventCursor": "global-epoch-1:42",
           "quota": {"snapshots":[],"absences":[],"refreshed_at":"2026-07-28T00:00:00Z"}
@@ -2530,44 +2538,45 @@ import Testing
         let response = try JSONDecoder().decode(CredentialProfilesResponse.self, from: Data(json.utf8))
         #expect(response.profiles.count == 2)
         #expect(response.profiles[1].profile.enabled == false)
-        #expect(response.harnessAccounts.count == 3)
+        #expect(response.accountPools.count == 4)
         #expect(response.quota?.refreshedAt == "2026-07-28T00:00:00Z")
         #expect(response.quotaEventCursor == "global-epoch-1:42")
 
-        // Non-secret identity projection (INV-067): decoded on both the profile
-        // entry and the native-login account row; null/absent → nil.
+        // Non-secret identity projection (INV-067): decoded on the profile
+        // entry; null/absent → nil.
         #expect(response.profiles[0].identity == AccountIdentity(email: "work@example.test", plan: "claude_max"))
         #expect(response.profiles[1].identity == nil)
 
-        let claude = response.harnessAccounts.first { $0.harnessId == "claude" }
-        #expect(claude?.nativeCredentialsEnabled == true)
-        #expect(claude?.identity == AccountIdentity(email: "native@example.test", plan: "claude_pro"))
+        let claude = response.accountPools.first { $0.harnessId == "claude" }
         #expect(claude?.nextUp.isProfile("work") == true)
         #expect(claude?.nextUp.isProfile("spare") == false)
-        #expect(claude?.nextUp.isNative == false)
+        #expect(claude?.nextUp.isApiKeyRoute == false)
 
-        let codex = response.harnessAccounts.first { $0.harnessId == "codex" }
-        #expect(codex?.nativeCredentialsEnabled == false)
-        #expect(codex?.nativeLoginDetected == false)
-        #expect(codex?.identity == nil)
-        if case .some(.none(let reason)) = codex?.nextUp {
-            #expect(reason == "CLI login disabled")
+        let codex = response.accountPools.first { $0.harnessId == "codex" }
+        #expect(codex?.nextUp.isApiKeyRoute == true)
+
+        let cursor = response.accountPools.first { $0.harnessId == "cursor" }
+        if case .some(.none(let reason)) = cursor?.nextUp {
+            #expect(reason == "no enabled account")
         } else {
-            Issue.record("expected codex next-up identity to be .none")
+            Issue.record("expected cursor pool next-up to be .none")
         }
 
-        let cursor = response.harnessAccounts.first { $0.harnessId == "cursor" }
-        #expect(cursor?.nextUp.isNative == true)
-        // cursor omits `identity` entirely — an omitted field decodes to nil.
-        #expect(cursor?.identity == nil)
+        // Forward compatibility: an unknown kind decodes as .unknown instead of
+        // failing the whole accounts response (the legacy decoder's throw-on-
+        // unknown class is dead).
+        let agy = response.accountPools.first { $0.harnessId == "agy" }
+        #expect(agy?.nextUp == .unknown(kind: "future_kind"))
+        #expect(agy?.nextUp.isProfile("work") == false)
+        #expect(agy?.nextUp.isApiKeyRoute == false)
     }
 
-    @Test func credentialProfilesResponseDefaultsHarnessAccountsWhenAbsent() throws {
-        // A pre-V11b daemon omits the projection entirely — it must still decode.
+    @Test func credentialProfilesResponseDefaultsAccountPoolsWhenAbsent() throws {
+        // An older daemon omits the pool authority entirely — it must still decode.
         let response = try JSONDecoder().decode(
             CredentialProfilesResponse.self, from: Data(#"{"profiles":[]}"#.utf8))
         #expect(response.profiles.isEmpty)
-        #expect(response.harnessAccounts.isEmpty)
+        #expect(response.accountPools.isEmpty)
         #expect(response.quotaEventCursor == nil)
     }
 

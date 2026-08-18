@@ -7,16 +7,19 @@ extension SettingsScreen {
     func nativeAuthRow(_ family: HarnessFamily) -> some View {
         let presentation = HarnessReadinessPresentation.from(
             family: family, info: model.harnessInfo(for: family))
-        // The remote path starts a PROFILE-LESS login against the engine-default
-        // store. A family that has no such store (agy: every account is a named
-        // profile) would post a request the daemon must refuse, so the button
-        // goes disabled here and names the path that does work — rather than
+        // The remote path starts a PROFILE-LESS login — the BOOTSTRAP flow of
+        // the unified account model: the engine resolves it onto the
+        // `<harness>-default` account row and the setup job reports the
+        // resolved profileId (the remote sheet's readiness refresh adopts it).
+        // A family with no bootstrap login (agy: every account is a named row)
+        // would post a request the daemon must refuse, so the button goes
+        // disabled here and names the path that does work — rather than
         // looking live and failing at the server.
         let connectionID = model.activeExecutionLocation.remoteConnectionID
         let remoteHarness = connectionID == nil
             ? nil : SetupHarness(rawValue: family.setupHarnessId)
         let remoteLoginNeedsAccount = remoteHarness != nil
-            && !AccountsPresentation.supportsDefaultStoreLogin(family)
+            && !AccountsPresentation.supportsBootstrapLogin(family)
         return HarnessReadinessCard(presentation: presentation) {
             Button {
                 if let connectionID, let harness = remoteHarness {
@@ -39,7 +42,7 @@ extension SettingsScreen {
             .disabled(remoteLoginNeedsAccount)
             .help(
                 remoteLoginNeedsAccount
-                    ? "\(family.label) has no default sign-in: every account is a named one. Add or open a \(family.label) account in Accounts to sign in on this remote location."
+                    ? "\(family.label) signs in only into a named account. Add or open a \(family.label) account in Accounts to sign in on this remote location."
                     : presentation.available
                         ? "Open \(family.label) auth details and fallback key management."
                         : "Open setup/auth actions for \(family.label).")

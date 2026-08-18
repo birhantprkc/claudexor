@@ -113,7 +113,7 @@ extension AppModel {
                   isCurrentGateway(requestClient, at: locationID)
             else { return nil }
             storeCredentialProfiles(
-                response.profiles, harnessAccounts: response.harnessAccounts,
+                response.profiles, accountPools: response.accountPools,
                 at: locationID)
             // Plain responses contain an unfenced next_up. Keep its stable row
             // fields, but never authorize routing from it.

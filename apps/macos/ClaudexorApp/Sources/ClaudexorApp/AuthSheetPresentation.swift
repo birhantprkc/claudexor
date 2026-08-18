@@ -12,14 +12,19 @@ enum AuthSheetPresentation {
 
     /// A sheet selects the target for a fresh login. Once a server-owned job is
     /// present, every continuation follows that job's exact target, including
-    /// nil (the default store); nil must never fall back to the sheet profile.
+    /// nil (the claude/codex default-store job); nil must never fall back to
+    /// the sheet profile. A profile-less REQUEST is the BOOTSTRAP sugar
+    /// (unified account model): the engine may resolve it onto the
+    /// `<harness>-default` row and report that id on the job — the sheet
+    /// follows the resolution silently, it is not a target mismatch. Only a
+    /// job whose target differs from an EXPLICITLY requested account is one.
     static func setupTarget(requestedProfileId: String?, job: SetupJob?) -> SetupTarget {
         guard let job else {
             return SetupTarget(profileId: requestedProfileId, differsFromRequested: false)
         }
         return SetupTarget(
             profileId: job.profileId,
-            differsFromRequested: job.profileId != requestedProfileId)
+            differsFromRequested: requestedProfileId != nil && job.profileId != requestedProfileId)
     }
 
     /// Auto-start is safe only after recovery positively proves that no active

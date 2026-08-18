@@ -8,7 +8,7 @@ extension AppModel {
         guard locationID != .local else { return }
 
         remoteCredentialProfiles.removeValue(forKey: locationID)
-        remoteHarnessAccounts.removeValue(forKey: locationID)
+        remoteAccountPools.removeValue(forKey: locationID)
         retireAccountsRequests(at: locationID)
         accountsRegistryLoadStates.removeValue(forKey: locationID)
         accountsLoadTokens.removeValue(forKey: locationID)

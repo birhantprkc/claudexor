@@ -6,21 +6,21 @@ import ClaudexorKit
 /// Batch-6 item b: the auto-switch toggle targets harnesses with a SECOND account
 /// and reports on/off/mixed/unavailable honestly.
 @Suite struct AccountsAutoBalanceTests {
-    @Test func eligibleRequiresASecondAccount() {
-        // claude has a profile (native + profile = 2 identities) ⇒ eligible;
-        // codex has none (only its native login) ⇒ not eligible.
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["claude"]) == ["claude"])
+    @Test func eligibleRequiresASecondAccountRow() {
+        // Unified account model: every identity is a registry row, so ONE row
+        // has nothing to rotate to and two rows make the harness eligible.
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["claude"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profileHarnessIds: ["claude", "claude"]) == ["claude"])
     }
 
     @Test func capableHarnessesAreEligibleInCanonicalOrder() {
         let ids = AccountsAutoBalance.eligibleHarnessIds(
-            profileHarnessIds: ["cursor", "codex", "claude", "codex"])
+            profileHarnessIds: ["cursor", "cursor", "codex", "claude", "claude", "codex"])
         #expect(ids == ["claude", "codex"])
     }
 
-    @Test func aHarnessWithNoNativeIdentityNeedsTwoProfiles() {
-        // agy has NO default credential store, so one profile is one identity
-        // and the toggle would have nothing to rotate to (INV-023).
+    @Test func agyFollowsTheSameTwoRowRule() {
         #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy"]).isEmpty)
         #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
     }
@@ -30,8 +30,10 @@ import ClaudexorKit
         // cursor rotates reactively under the engine's `auto` default, but it
         // has no proactive quota source yet, so the app control has not
         // admitted it — cursor stays engine-driven with no app-side knob.
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["opencode"]).isEmpty)
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["cursor"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profileHarnessIds: ["opencode", "opencode"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profileHarnessIds: ["cursor", "cursor"]).isEmpty)
     }
 
     @Test func stateAggregates() {

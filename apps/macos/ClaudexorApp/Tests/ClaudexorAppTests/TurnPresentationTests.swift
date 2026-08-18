@@ -361,6 +361,27 @@ import ClaudexorKit
         ) == .init(profileId: "work", differsFromRequested: false))
     }
 
+    /// Unified account model (K.4): a PROFILE-LESS request is the bootstrap
+    /// sugar — the engine may resolve the job onto the `<harness>-default` row
+    /// and report that id. The sheet FOLLOWS the resolution (verification and
+    /// controls target the row), and it is not presented as a target mismatch.
+    @Test func bootstrapLoginResolvesOntoItsRowWithoutAMismatch() {
+        let resolvedJob = fallbackJob(
+            harness: .cursor, state: .notSupported,
+            errorCode: .deviceAuthUnsupported, profileId: "cursor-default")
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: nil, job: resolvedJob
+        ) == .init(profileId: "cursor-default", differsFromRequested: false))
+        // A claude/codex bootstrap keeps the default-store job (null target) —
+        // still the requested flow, never a mismatch.
+        let defaultJob = fallbackJob(
+            harness: .codex, state: .notSupported,
+            errorCode: .deviceAuthUnsupported, profileId: nil)
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: nil, job: defaultJob
+        ) == .init(profileId: nil, differsFromRequested: false))
+    }
+
     @Test func primaryCTAFollowsTheCauseLadder() {
         // Unknown process state resolves before anything else.
         #expect(cta(streamLost: true) == .reconnect)
