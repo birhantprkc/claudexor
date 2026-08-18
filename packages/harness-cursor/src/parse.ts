@@ -131,8 +131,8 @@ export function createCursorParser(
     fallbackPlan: null,
     scopeModel: requestedModel ?? null,
   };
-  return (obj: Json, sessionId: string): HarnessEvent[] | null =>
-    parseCursorEventStateful(
+  return (obj: Json, sessionId: string): HarnessEvent[] | null => {
+    const out = parseCursorEventStateful(
       obj,
       sessionId,
       state,
@@ -141,6 +141,19 @@ export function createCursorParser(
       planMode,
       nativePlanMode,
     );
+    if (out) {
+      for (const ev of out) {
+        // The auth route is fixed before spawn (mirrors harness-claude). Carry
+        // it on EVERY event — the error/result branches included — so a typed
+        // rate_limit can register a cooldown: QuotaRegistry.ingest keys the
+        // reactive cooldown on the event's own credential_route, and a
+        // route-less limit event would silently never cool anything down.
+        if (credentialRoute) ev.credential_route = credentialRoute;
+        if (credentialSource) ev.credential_source = credentialSource;
+      }
+    }
+    return out;
+  };
 }
 
 /** Stateless convenience used by tests; resolves results within one call only. */

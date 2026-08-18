@@ -340,3 +340,93 @@ describe("trust config enumeration", () => {
     }
   });
 });
+
+describe("A6 limit_action serialize rule (never persist auto)", () => {
+  const withConfigDir = (fn: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-limit-action-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      fn(dir);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  /** The pre-A6 installed engine's enum: rollback must parse today's file. */
+  const baseEnumParses = (yamlText: string) => {
+    const raw = yamlParse(yamlText) as {
+      harnesses?: Record<string, { profile_policy?: { limit_action?: unknown } }>;
+    };
+    for (const harness of Object.values(raw.harnesses ?? {})) {
+      const action = harness.profile_policy?.limit_action;
+      if (action !== undefined) {
+        expect(["fail", "ask", "rotate"]).toContain(action);
+      }
+    }
+  };
+
+  it("an identity write on a config with materialized auto strips limit_action from the yaml", () => {
+    withConfigDir((dir) => {
+      // A file that already carries the materialized default (the pre-fix bug shape).
+      writeFileSync(
+        join(dir, "config.yaml"),
+        "harnesses:\n  claude:\n    profile_policy:\n      limit_action: auto\n",
+      );
+      const { path, config } = updateGlobalConfig((cfg) => cfg);
+      // The in-memory config still resolves the default...
+      expect(config.harnesses["claude"]?.profile_policy.limit_action).toBe("auto");
+      // ...but the durable file never spells it: absent means auto.
+      const written = readFileSync(path, "utf8");
+      expect(written).not.toContain("limit_action");
+      baseEnumParses(written);
+      // And the next load still resolves auto from absence.
+      const reloaded = loadConfig(dir);
+      expect(reloaded.global.harnesses["claude"]?.profile_policy.limit_action).toBe("auto");
+    });
+  });
+
+  it("explicit fail/ask/rotate round-trip untouched and stay base-enum-parseable", () => {
+    withConfigDir((dir) => {
+      const { path } = updateGlobalConfig((cfg) => ({
+        ...cfg,
+        harnesses: {
+          ...cfg.harnesses,
+          claude: {
+            ...(cfg.harnesses["claude"] ?? {
+              enabled: true,
+              native_credentials_enabled: true,
+              default_model: null,
+              effort: null,
+              max_turns: null,
+              max_rounds: null,
+              profile_policy: {
+                limit_action: "auto",
+                rotation_eligible: [],
+                headroom_threshold: 0.9,
+              },
+              tools_allow: [],
+              tools_deny: [],
+              fallback_model: null,
+              web: "auto",
+              auth_preference: "auto",
+            }),
+            profile_policy: {
+              limit_action: "rotate",
+              rotation_eligible: [],
+              headroom_threshold: 0.9,
+            },
+          },
+        },
+      }));
+      const written = readFileSync(path, "utf8");
+      expect(written).toContain("limit_action: rotate");
+      baseEnumParses(written);
+      expect(loadConfig(dir).global.harnesses["claude"]?.profile_policy.limit_action).toBe(
+        "rotate",
+      );
+    });
+  });
+});

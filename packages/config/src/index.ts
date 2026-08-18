@@ -503,6 +503,25 @@ function withConfigLock<T>(path: string, fn: () => T): T {
 }
 
 /**
+ * The A6 serialize rule: `limit_action: auto` is NEVER persisted — ABSENT
+ * means auto (the schema default), so writing the materialized default would
+ * only (a) freeze today's default spelling into the durable file and (b) break
+ * rollback: the pre-A6 installed engine parses `limit_action` with the BASE
+ * enum (fail/ask/rotate) and would refuse to boot on a config carrying the
+ * word "auto". Explicit fail/ask/rotate persist untouched.
+ */
+function stripAutoLimitActions(config: GlobalConfig): GlobalConfig {
+  const harnesses = Object.fromEntries(
+    Object.entries(config.harnesses).map(([id, harness]) => {
+      if (harness.profile_policy.limit_action !== "auto") return [id, harness];
+      const { limit_action: _auto, ...policy } = harness.profile_policy;
+      return [id, { ...harness, profile_policy: policy }];
+    }),
+  );
+  return { ...config, harnesses } as GlobalConfig;
+}
+
+/**
  * Update ~/.claudexor/v3/config.yaml with validated global settings. Sensitive
  * values are not accepted here. Locked + atomic (see withConfigLock).
  */
@@ -520,7 +539,7 @@ export function updateGlobalConfig(mutator: (config: GlobalConfig) => GlobalConf
     );
     const next = GlobalConfig.parse(mutator(current));
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeText(tmp, yamlStringify(next));
+    writeText(tmp, yamlStringify(stripAutoLimitActions(next)));
     renameSync(tmp, path);
     return { path, config: next };
   });

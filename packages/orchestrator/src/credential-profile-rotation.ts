@@ -392,9 +392,12 @@ export function planReactiveRotation(args: {
  * readiness ONLY when the predicate could actually fire (the probe spends
  * seconds), then plan a rotation and rebuild the spec on a NEW vendor session
  * under the next profile. `null` = the failure was never rotation's business
- * (fail as-is: transient machinery, plain errors). `{ poolExhausted }` = the
- * failure WAS rotation-eligible under a `rotate` policy and the pool has
- * nowhere left to go — the attempt must terminalize on this typed refusal
+ * (fail as-is: transient machinery, plain errors), or the pool ran out with
+ * NO credential evidence anywhere (the evidence gate below) so the attempt
+ * keeps its true failure. `{ poolExhausted }` = the
+ * failure WAS rotation-eligible under a `rotate` policy, the pool has
+ * nowhere left to go, and the decision carries credential evidence — the
+ * attempt must terminalize on this typed refusal
  * BEFORE the transient gate can burn same-profile retries on the
  * already-refused subject (A5 ordering: a typed vendor limit classifies as
  * retryable-transient, so falling through would retry the spent credential).
@@ -498,6 +501,21 @@ export async function rotateSpecOnTypedLimit(args: {
     const subjectLimit =
       subjectBlock ??
       (evidence.sawTypedLimit ? { resets_at: args.lastLimit?.resetsAt ?? null } : null);
+    // The pool terminal REQUIRES evidence: "credential_pool_exhausted" claims
+    // the credential layer refused the run, so either the triggering subject
+    // must carry limit/unusable evidence or some candidate row must carry
+    // headroom/cooldown/unusable evidence. A structural pre-progress death
+    // over an empty (or evidence-free) pool proves nothing about credentials —
+    // fail as-is and keep the TRUE failure (a vanilla user's crashed run must
+    // never terminalize as a pool refusal). The already-emitted
+    // `route.profile.rotation_exhausted` event stays: rotation WAS consulted
+    // and had nowhere to go; only the terminal's claim is evidence-gated.
+    const subjectEvidence = subjectLimit !== null || subjectUnusable !== null;
+    const poolEvidence = candidates.some(
+      (candidate) =>
+        candidate.headroom !== null || candidate.cooldown !== null || candidate.unusable !== null,
+    );
+    if (!subjectEvidence && !poolEvidence) return null;
     return {
       poolExhausted: credentialPoolExhausted({
         harnessId: args.harnessId,

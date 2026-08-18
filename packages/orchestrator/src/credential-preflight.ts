@@ -172,9 +172,12 @@ export async function runProfilePreflight(args: {
 
 /**
  * `profile_headroom_preflight` (W5.4): BEFORE spawn, the selected profile's
- * freshest quota windows are checked against the policy threshold. A breach
- * is always a typed event; `rotate` swaps to the next eligible profile with
- * provenance, `ask`/`fail` proceed on the selected profile — the runtime
+ * freshest quota windows are checked against the policy threshold, and the
+ * A4 cooldown reader adds observed live blocks. A breach/block is always a
+ * typed event; `rotate` swaps to the next eligible profile with provenance,
+ * `fail` REFUSES typed before spawn (release wave tier1 #4 — a documented
+ * FAIL that silently proceeded into a vendor rejection was the bug), and
+ * `ask` proceeds on the selected profile — there the runtime
  * `vendor_limit_rejected` evidence stays the terminating truth.
  */
 export function preflightCredentialProfile(args: {

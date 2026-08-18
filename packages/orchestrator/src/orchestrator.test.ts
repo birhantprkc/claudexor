@@ -4891,7 +4891,7 @@ describe("Orchestrator", () => {
     }
   });
 
-  it("a STRUCTURAL pre-progress death with an EXHAUSTED pool terminalizes typed too (A5)", async () => {
+  it("a STRUCTURAL death over an EVIDENCE-FREE pool keeps its TRUE failure (evidence-gated terminal)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-pool-structural-config-"));
     const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4914,18 +4914,69 @@ describe("Orchestrator", () => {
           events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
       });
       expect(spawns).toEqual(["solo"]);
+      // Rotation WAS consulted and had nowhere to go — the provenance event
+      // stays...
       const exhausted = events.find((e) => e.type === "route.profile.rotation_exhausted");
       expect(exhausted?.payload["reason"]).toBe("structural_pre_progress_failure");
       expect(legacyOutcome(res)).toBe("failed");
       const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
         join(res.runDir, "final", "failure.yaml"),
       );
-      // No observed limit anywhere in the pool: the reset is honestly unknown.
-      expect(failure).toMatchObject({
-        category: "harness_unavailable",
-        code: "credential_pool_exhausted",
-        resetsAt: null,
+      // ...but the TERMINAL is evidence-gated: neither the untyped death nor
+      // any candidate row carries limit/unusable evidence, so claiming
+      // "credential pool exhausted" would relabel an ordinary structural
+      // failure as a credential refusal. The true failure survives instead.
+      expect(failure?.["code"]).not.toBe("credential_pool_exhausted");
+      expect(String(failure?.["safeMessage"] ?? "")).toContain("untyped vendor refusal");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a VANILLA user's untyped pre-progress death is never pool-coded (empty registry, auto default)", async () => {
+    const repo = await initRepo();
+    // NO config at all: empty profile registry, absent limit_action (= auto).
+    const configDir = reapMk(join(tmpdir(), "claudexor-pool-vanilla-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    try {
+      const spawns: Array<string | null> = [];
+      const adapter = limitedSoloAdapter(spawns, false);
+      // A subscription-shaped default route (native session available): the
+      // A6 auto default resolves to `rotate`, so the rotation decision RUNS —
+      // and must still fail as-is over the empty, evidence-free pool.
+      adapter.doctor = async () =>
+        ConformanceReport.parse({
+          harness_id: "limited",
+          status: "ok",
+          enabled_intents: ["implement"],
+          auth_sources: [
+            { source: "native_session", availability: "available", verification: "passed" },
+          ],
+        });
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        onEvent: (event) => events.push(event.type),
       });
+      expect(spawns).toEqual([null]);
+      // The rotation decision DID run and found the pool empty — the gate we
+      // are pinning is past that point, not an earlier ineligibility exit.
+      expect(events).toContain("route.profile.rotation_exhausted");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure?.["code"]).not.toBe("credential_pool_exhausted");
+      expect(String(failure?.["safeMessage"] ?? "")).toContain("untyped vendor refusal");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;

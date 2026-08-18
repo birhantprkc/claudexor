@@ -100,6 +100,10 @@ export interface PoolExhaustionCandidate {
   rejected: string;
   headroom: { resets_at: string | null } | null;
   cooldown: { resets_at: string | null } | null;
+  /** A7: a live `credential_unusable` verdict about this row's credential —
+   * dead-credential evidence for the terminal's claim, and an exclusion from
+   * the reset fold (a dead credential's windows promise no reopen). */
+  unusable?: { code: string } | null;
 }
 
 /** Rejection labels that keep a row a POOL MEMBER for the reset fold. The
@@ -126,7 +130,9 @@ const POOL_MEMBER_REJECTIONS = new Set([
  * `resetsAt` folds the EARLIEST known reset WITHIN the pool — the first
  * instant any member reopens — including the current/default subject's own
  * observed limit (`subjectLimit`, consulted only when no candidate row already
- * carries the subject's evidence). This is deliberately the opposite of the
+ * carries the subject's evidence, and EXCLUDED entirely when the subject's
+ * credential itself was observed unusable: a dead credential's quota reset
+ * will never help, so it must not shape the pool's reopen promise). This is deliberately the opposite of the
  * ACROSS-CANDIDATES rule (`unanimousDeclaredFailure` keeps the LATEST reset:
  * every slot must reopen); here ONE reopened member is enough to retry. Same
  * honesty rule as there: a limit-evidenced member with an UNKNOWN reset makes
@@ -150,11 +156,23 @@ export function credentialPoolExhausted(args: {
    * promising a quota reset that will never help. */
   subjectUnusable?: Pick<CredentialUnusableObservation, "code"> | null;
 }): Error {
+  // A dead credential's quota windows promise no reopen: a row with a live
+  // `credential_unusable` verdict never joins the fold, whatever its label.
   const members = args.candidates.filter(
-    (c) => POOL_MEMBER_REJECTIONS.has(c.rejected) && (c.headroom !== null || c.cooldown !== null),
+    (c) =>
+      POOL_MEMBER_REJECTIONS.has(c.rejected) &&
+      !c.unusable &&
+      (c.headroom !== null || c.cooldown !== null),
   );
   const limits = members.map((c) => c.headroom?.resets_at ?? c.cooldown?.resets_at ?? null);
-  if (args.subjectLimit && !members.some((c) => c.profile_id === args.profileId)) {
+  // Same rule for the triggering subject: its own observed limit joins the
+  // fold only while its credential is not observed dead — the terminal must
+  // not promise the DEAD subject's reset as the instant the pool reopens.
+  if (
+    args.subjectLimit &&
+    !args.subjectUnusable &&
+    !members.some((c) => c.profile_id === args.profileId)
+  ) {
     limits.push(args.subjectLimit.resets_at);
   }
   const resetsAt =

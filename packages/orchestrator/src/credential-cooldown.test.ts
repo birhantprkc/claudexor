@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CredentialProfile, QuotaConstraint, QuotaSnapshot } from "@claudexor/schema";
-import { profileQuotaBlock } from "./credential-cooldown.js";
+import {
+  credentialPoolExhausted,
+  profileQuotaBlock,
+  type PoolExhaustionCandidate,
+} from "./credential-cooldown.js";
 import {
   nextEligibleProfile,
   nextUpIdentity,
@@ -243,5 +247,85 @@ describe("A4 wiring: rotation and preflight see observed live blocks", () => {
         model: null,
       }),
     ).toEqual({ kind: "profile", profileId: "b" });
+  });
+});
+
+describe("credentialPoolExhausted reset fold (dead-subject exclusion)", () => {
+  const SUBJECT_RESET = "2026-09-12T00:00:00.000Z"; // earlier than FUTURE
+  const memberRow = (
+    id: string,
+    resetsAt: string | null,
+    over: Partial<PoolExhaustionCandidate> = {},
+  ): PoolExhaustionCandidate => ({
+    profile_id: id,
+    rejected: "cooldown",
+    headroom: null,
+    cooldown: { resets_at: resetsAt },
+    unusable: null,
+    ...over,
+  });
+  const deadSubjectRow: PoolExhaustionCandidate = {
+    profile_id: "a",
+    rejected: "current",
+    headroom: null,
+    cooldown: null,
+    unusable: { code: "auth_revoked" },
+  };
+  const resetsAt = (failure: Error): string | null =>
+    (failure as Error & { resetsAt: string | null }).resetsAt;
+
+  it("a DEAD subject's own limit reset is excluded — the fold reflects only evidenced pool members", () => {
+    const failure = credentialPoolExhausted({
+      harnessId: "cursor",
+      profileId: "a",
+      reason: "vendor_limit_rejected",
+      candidates: [deadSubjectRow, memberRow("b", FUTURE)],
+      subjectLimit: { resets_at: SUBJECT_RESET },
+      subjectUnusable: { code: "auth_revoked" },
+    });
+    // The dead subject's EARLIER reset must not become the reopen promise.
+    expect(resetsAt(failure)).toBe(FUTURE);
+  });
+
+  it("a dead subject with NO evidenced members leaves the reset honestly unknown", () => {
+    const failure = credentialPoolExhausted({
+      harnessId: "cursor",
+      profileId: "a",
+      reason: "vendor_limit_rejected",
+      candidates: [deadSubjectRow],
+      subjectLimit: { resets_at: SUBJECT_RESET },
+      subjectUnusable: { code: "auth_revoked" },
+    });
+    expect(resetsAt(failure)).toBeNull();
+    expect(failure.message).toContain("observed unusable (auth_revoked)");
+  });
+
+  it("a LIVE subject's own limit still joins the fold (unchanged A5 contract)", () => {
+    const failure = credentialPoolExhausted({
+      harnessId: "cursor",
+      profileId: "a",
+      reason: "vendor_limit_rejected",
+      candidates: [memberRow("b", FUTURE)],
+      subjectLimit: { resets_at: SUBJECT_RESET },
+      subjectUnusable: null,
+    });
+    expect(resetsAt(failure)).toBe(SUBJECT_RESET);
+  });
+
+  it("a dead MEMBER-labeled row neither shapes nor poisons the fold", () => {
+    // A dead already-tried row with an UNKNOWN reset would poison the fold to
+    // null under the honesty rule; a dead credential's windows are excluded
+    // instead, so the living member's reset survives.
+    const failure = credentialPoolExhausted({
+      harnessId: "cursor",
+      profileId: null,
+      reason: "structural_pre_progress_failure",
+      candidates: [
+        memberRow("dead", null, { rejected: "already_tried", unusable: { code: "auth_revoked" } }),
+        memberRow("living", FUTURE),
+      ],
+      subjectLimit: null,
+    });
+    expect(resetsAt(failure)).toBe(FUTURE);
   });
 });

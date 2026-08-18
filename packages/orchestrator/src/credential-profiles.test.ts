@@ -1191,4 +1191,27 @@ describe("A7 differential probe wiring in rotateSpecOnTypedLimit", () => {
       unusable: { code: "auth_revoked", source: "attempt_stream" },
     });
   });
+
+  it("the DEAD subject's typed-limit reset never becomes the pool's reopen promise", async () => {
+    // Pool of one: the dead, limited subject itself. Its typed stream limit
+    // names a reset — but a dead credential's window reopening will never
+    // help, so the terminal's resetsAt stays honestly null instead of
+    // promising the dead subject's own reset.
+    const out = await rotateSpecOnTypedLimit({
+      ...base,
+      registry: [a],
+      probeReadyProfiles: async () => ready(),
+      probeCurrentSubject: async () => unusableA,
+      liveUnusable: [unusableA],
+      triedProfiles: new Set<string>(),
+      lastLimit: { retryDelayMs: null, resetsAt: "2026-09-12T00:00:00.000Z" },
+    });
+    expect(out && "poolExhausted" in out).toBe(true);
+    const failure =
+      out && "poolExhausted" in out
+        ? (out.poolExhausted as Error & { resetsAt?: string | null })
+        : null;
+    expect(failure?.resetsAt).toBeNull();
+    expect(failure?.message).toContain("observed unusable (auth_revoked)");
+  });
 });

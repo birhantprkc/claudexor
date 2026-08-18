@@ -18,9 +18,12 @@ import type { HarnessEvent } from "@claudexor/schema";
 // Deliberately NOT keyed on the bare `ActionRequiredError` wrapper: cursor
 // uses that class for other required actions too (e.g. re-login), and
 // mislabeling an auth failure as a rate limit would corrupt the typed
-// taxonomy. The limit-specific prose is what classifies.
+// taxonomy. The limit-specific prose is what classifies. Word boundaries
+// keep substrings honest: "code 4290" is not a 429, and narrative gerunds
+// ("docs about rate limiting") are prose ABOUT limits, not a limit verdict —
+// vendor limit prose says "rate limit(s)/limited", never "limiting".
 const CURSOR_VENDOR_LIMIT_RE =
-  /usage.?limits?|rate.?limit|too many requests|quota[ _-]?(?:exceeded|exhausted|reached)|(?:http|status|code)[ :/]?429|429 too many/i;
+  /\busage.?limits?\b|\brate.?limit(?:s|ed)?\b|\btoo many requests\b|\bquota[ _-]?(?:exceeded|exhausted|reached)\b|\b(?:http|status|code)[ :/]?429\b|\b429 too many\b/i;
 
 /**
  * `resets when your monthly cycle ends on M/D/YYYY` — the vendor states the

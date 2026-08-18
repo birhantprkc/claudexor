@@ -239,7 +239,11 @@ struct AccountsPopover: View {
     private func autoBalanceCaption(_ state: AccountsAutoBalance.State) -> String {
         switch state {
         case .unavailable:
-            return "Add a second account to a harness to enable auto-switch at its quota limit."
+            // Honest about the disclosed asymmetry: Cursor accounts already
+            // auto-switch reactively under the engine's kind-aware default —
+            // this control only governs harnesses with a quota source, so its
+            // absence must not read as "auto-switch is off".
+            return "Add a second Claude, Codex, or agy account to control auto-switch here; Cursor accounts already switch automatically at a vendor limit."
         case .mixed:
             return "Harnesses disagree (—) — pick a mode to set them all consistently."
         case .auto:

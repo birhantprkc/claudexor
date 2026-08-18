@@ -6855,10 +6855,14 @@ export class Orchestrator {
               defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
             });
             // A5 ordering: same as the candidate lane — terminalize typed
-            // before the transient gate burns same-profile retries.
+            // before the transient gate burns same-profile retries. The pool
+            // refusal APPENDS to the original harness error (candidate-lane
+            // parity: errors.push) instead of erasing the true failure.
             if (rotated && "poolExhausted" in rotated) {
               poolExhausted = rotated.poolExhausted;
-              harnessError = safeErrorMessage(poolExhausted);
+              harnessError = harnessError
+                ? `${harnessError}; ${safeErrorMessage(poolExhausted)}`
+                : safeErrorMessage(poolExhausted);
               break;
             }
             if (rotated) {

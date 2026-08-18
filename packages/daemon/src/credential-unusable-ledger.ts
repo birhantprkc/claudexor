@@ -22,9 +22,13 @@ const MAX_ROWS = 64;
  * Clearing contract (all three, per the design roast):
  * 1. self-expiry — every row carries `expires_at`, clamped to 24h max;
  * 2. a successful model response for the same subject (`observeEvent`);
- * 3. any credential-generation change (`noteCredentialChange`): a re-login or
- *    profile mutation invalidates every verdict reached about the old
- *    generation. Clearing is always fail-open — a lost observation costs at
+ * 3. a credential-generation change voids the verdicts about the changed
+ *    generation: a login/logout clears the WHOLE ledger
+ *    (`noteCredentialChange`, wired in claudexord's setup lifecycle), while a
+ *    control-API credential mutation (profile enable/disable/create/remove,
+ *    secret set/delete) clears PER SUBJECT (`clearSubject` /
+ *    `clearDefaultSubjects`, wired beside the daemon's status-cache busting).
+ *    Clearing is always fail-open — a lost observation costs at
  *    most one attempt rediscovering a refusal, while a stale one poisons
  *    rotation.
  */
@@ -76,10 +80,29 @@ export class CredentialUnusableLedger {
     }
   }
 
-  /** Credential generation changed (login/logout/profile mutation): every
-   * verdict about the old generation is void. */
+  /** Credential generation changed wholesale (login/logout): every verdict
+   * about the old generation is void. */
   noteCredentialChange(): void {
     this.rows.clear();
+  }
+
+  /** ONE subject's credential changed (a control-API profile or profile-secret
+   * mutation): only ITS verdicts are void, across every model scope.
+   * `profileId` null = the harness's default subject. */
+  clearSubject(harnessId: string, profileId: string | null): void {
+    for (const [k, obs] of this.rows) {
+      if (obs.harness_id === harnessId && obs.profile_id === profileId) this.rows.delete(k);
+    }
+  }
+
+  /** A bare managed secret name changed an engine-DEFAULT credential slot.
+   * WHICH harness reads that slot is adapter knowledge the daemon does not
+   * duplicate, so every default subject's verdicts are voided — fail-open by
+   * the clearing contract (costs at most one rediscovered refusal). */
+  clearDefaultSubjects(): void {
+    for (const [k, obs] of this.rows) {
+      if (obs.profile_id === null) this.rows.delete(k);
+    }
   }
 
   private prune(): void {

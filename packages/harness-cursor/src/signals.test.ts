@@ -112,6 +112,24 @@ describe("cursor vendor-limit signals (A1)", () => {
     expect(
       parseCursorStderrFailure("ActionRequiredError: Please log in again", "ses-x"),
     ).toBeNull();
+    // Word boundaries keep substrings honest: an unrelated numeric token
+    // containing 429 is not an HTTP 429...
+    expect(parseCursorStderrFailure("internal failure, code 4290 observed", "ses-x")).toBeNull();
+    // ...and narrative prose ABOUT limits (gerund) is not a limit verdict.
+    expect(
+      parseCursorStderrFailure("see the docs about rate limiting for details", "ses-x"),
+    ).toBeNull();
+  });
+
+  it("still classifies the genuine limit spellings after the word-boundary tightening", () => {
+    for (const prose of [
+      "You are being rate limited, retry later",
+      "rate limit exceeded",
+      "HTTP 429 Too Many Requests",
+      "quota exceeded for this billing cycle",
+    ]) {
+      expect(parseCursorStderrFailure(prose, "ses-x")?.rate_limit, prose).toBeTruthy();
+    }
   });
 
   it("types a vendor limit arriving as a non-success result frame (sawError path)", () => {

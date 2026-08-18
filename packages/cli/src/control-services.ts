@@ -31,19 +31,11 @@ import {
 } from "@claudexor/schema";
 import { quotaControlServices } from "./quota-services.js";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
-import {
-  StatusProjectionCache,
-  globalConfigVersion,
-  invalidateStatusProjections,
-} from "./status-projection-cache.js";
+import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
-import {
-  canonicalIsolationLocator,
-  invalidateDoctorCache,
-  normalizeThroughExistingAncestor,
-} from "@claudexor/core";
+import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import {
@@ -53,6 +45,10 @@ import {
 } from "./accounts-services.js";
 import { buildAgentCapabilityCatalog } from "./capabilities.js";
 import { commitSettingsUpdate, settingsSnapshot } from "./settings-service.js";
+import {
+  bustCredentialStatusCaches,
+  type CredentialMutationSubject,
+} from "./credential-status-invalidation.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { activeProfileLoginJob } from "./setup-job-support.js";
@@ -123,11 +119,8 @@ export function controlServices(
   const harnessesPollCache = new StatusProjectionCache<Awaited<ReturnType<typeof listHarnesses>>>({
     versionOf: globalConfigVersion,
   });
-  const bustStatusCaches = () => {
-    invalidateDoctorCache();
-    invalidateStatusProjections();
-    quotaRegistry().noteCredentialChange();
-  };
+  const bustStatusCaches = (subject?: CredentialMutationSubject) =>
+    bustCredentialStatusCaches(quotaRegistry, subject);
   const journalPartition = (partition: string): JournalManager =>
     partition === "global" ? journalManager : threads.journal(partition);
   const setupJobs = (): SetupJobManager => {
@@ -406,7 +399,7 @@ export function controlServices(
       if (!updated) {
         throw Object.assign(new Error("profile update did not persist"), { status: 500 });
       }
-      bustStatusCaches();
+      bustStatusCaches({ harnessId, profileId });
       return {
         profile: updated,
         // Same vendor overlay the listing applies: a single-profile response
@@ -486,7 +479,7 @@ export function controlServices(
           }`,
         );
       }
-      bustStatusCaches();
+      bustStatusCaches({ harnessId, profileId });
       return {
         profile: entry,
         removed: true,
@@ -505,7 +498,7 @@ export function controlServices(
         profileId: request.profileId,
         displayName: request.displayName,
       });
-      bustStatusCaches();
+      bustStatusCaches({ harnessId: request.harnessId, profileId: request.profileId });
       return {
         profile,
         status: vendorVerifiedProfileStatus(
@@ -545,7 +538,7 @@ export function controlServices(
         );
       }
       const backend = secretStore.set(name, value);
-      bustStatusCaches();
+      bustStatusCaches({ secretName: name });
       return {
         name,
         backend,
@@ -555,7 +548,7 @@ export function controlServices(
     },
     deleteSecret: async (name: string) => {
       secretStore.delete(name);
-      bustStatusCaches();
+      bustStatusCaches({ secretName: name });
       return { name, deleted: true };
     },
   };

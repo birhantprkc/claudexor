@@ -12,6 +12,7 @@ import {
   type QuotaSnapshot,
 } from "@claudexor/schema";
 import { controlServices } from "./control-services.js";
+import { credentialUnusableLedger } from "./run-orchestrator.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
 
 const gatewayMock = vi.hoisted(() => ({
@@ -629,5 +630,94 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(serialized).not.toContain("sk-ant-" + "secret-do-not-leak");
     const claudeAccounts = listing.harnessAccounts.find((h) => h.harness_id === "claude");
     expect(Object.keys(claudeAccounts?.identity ?? {}).sort()).toEqual(["email", "plan"]);
+  });
+});
+
+describe("A7 per-subject unusable-ledger clearing on control-API credential mutations", () => {
+  let dir: string;
+  let prev: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "claudexor-ledger-clear-"));
+    prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    credentialUnusableLedger.noteCredentialChange();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+    else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+    credentialUnusableLedger.noteCredentialChange();
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const observation = (harnessId: string, profileId: string | null) => ({
+    harness_id: harnessId,
+    profile_id: profileId,
+    model: null,
+    code: "auth_revoked" as const,
+    source: "attempt_stream" as const,
+    detail: null,
+    observed_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+
+  it("setSecret clears exactly the subject whose profile secret_ref it rewrote", async () => {
+    updateGlobalConfig((cfg) => ({
+      ...cfg,
+      credential_profiles: [
+        {
+          profile_id: "solo",
+          harness_id: "codex",
+          display_name: "Solo",
+          credential_kind: "api_key",
+          isolation_locator: null,
+          secret_ref: "openai:solo",
+          enabled: true,
+          created_at: null,
+        },
+      ],
+    }));
+    credentialUnusableLedger.record(observation("codex", "solo"));
+    credentialUnusableLedger.record(observation("claude", "other"));
+    const svc = services();
+    await svc.setSecret({ name: "openai:solo", value: "sk-new" });
+    const live = credentialUnusableLedger.live();
+    // The rewritten credential's verdict is void; an unrelated subject's is not.
+    expect(live.find((o) => o.harness_id === "codex" && o.profile_id === "solo")).toBeUndefined();
+    expect(live.find((o) => o.harness_id === "claude" && o.profile_id === "other")).toBeTruthy();
+  });
+
+  it("a bare managed name voids every DEFAULT subject's verdict (fail-open), named profiles keep theirs", async () => {
+    credentialUnusableLedger.record(observation("cursor", null));
+    credentialUnusableLedger.record(observation("codex", null));
+    credentialUnusableLedger.record(observation("claude", "work"));
+    const svc = services();
+    await svc.setSecret({ name: "cursor", value: "key" });
+    const live = credentialUnusableLedger.live();
+    expect(live.filter((o) => o.profile_id === null)).toEqual([]);
+    expect(live.find((o) => o.profile_id === "work")).toBeTruthy();
+  });
+
+  it("deleteSecret clears the referencing profile's subject too", async () => {
+    updateGlobalConfig((cfg) => ({
+      ...cfg,
+      credential_profiles: [
+        {
+          profile_id: "solo",
+          harness_id: "codex",
+          display_name: "Solo",
+          credential_kind: "api_key",
+          isolation_locator: null,
+          secret_ref: "openai:solo",
+          enabled: true,
+          created_at: null,
+        },
+      ],
+    }));
+    credentialUnusableLedger.record(observation("codex", "solo"));
+    const svc = services();
+    await svc.deleteSecret("openai:solo");
+    expect(credentialUnusableLedger.live()).toEqual([]);
   });
 });
