@@ -363,7 +363,7 @@ export function runAccountsUnifiedMigration(
     if (record.phase === "reserved") {
       registerMigratedRow(harnessId, record);
       record = { ...record, phase: "registry_written" };
-      writeAccountsMigrationFile({ ...readAccountsMigrationFile(), [harnessId]: record });
+      writeAccountsMigrationFile({ ...readAccountsMigrationFileStrict(), [harnessId]: record });
     }
     let continuity = { sessions: 0, checkpoints: 0, skippedPartitions: [] as string[] };
     let lanes = 0;
@@ -371,14 +371,14 @@ export function runAccountsUnifiedMigration(
       continuity = stores.threads.migrateNullProfileContinuity(harnessId, rowId);
       for (const root of laneRootsOf(stores)) lanes += migrateDefaultLanes(root, harnessId, rowId);
       record = { ...record, phase: "continuity_migrated" };
-      writeAccountsMigrationFile({ ...readAccountsMigrationFile(), [harnessId]: record });
+      writeAccountsMigrationFile({ ...readAccountsMigrationFileStrict(), [harnessId]: record });
     }
     if (record.phase === "continuity_migrated") {
       // No replay alias (§K.3): the legacy null subject is retired here; the
       // new row's subject refreshes fresh on the next quota cycle.
       stores.quota.removeSubject(harnessId, null);
       record = { ...record, phase: "completed" };
-      writeAccountsMigrationFile({ ...readAccountsMigrationFile(), [harnessId]: record });
+      writeAccountsMigrationFile({ ...readAccountsMigrationFileStrict(), [harnessId]: record });
     }
     const receipt: AccountsMigrationReceipt = {
       harness_id: harnessId,

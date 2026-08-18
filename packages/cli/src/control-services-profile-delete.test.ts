@@ -204,6 +204,10 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     };
     runAccountsUnifiedMigration(migrationStores);
     removedSubjects.length = 0;
+    // A leftover legacy-alias lane home (`<harness>-default`, e.g. recovered
+    // from a quarantined partition after the migration pass renamed the rest).
+    const rt = projectRuntimeDir(noProjectRepoRoot());
+    ensureLaneHomeEnv(rt, "th-legacy", "codex", null);
     const services = servicesWithJobs([], undefined, (harness, subjectId) =>
       removedSubjects.push({ harness, subjectId }),
     );
@@ -222,6 +226,8 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
       { harness: "codex", subjectId: "codex-default" },
       { harness: "codex", subjectId: null },
     ]);
+    // K.6: the alias's `<harness>-default` LANE dir is purged with the row.
+    expect(existsSync(join(rt, "lanes", "th-legacy", "codex-default"))).toBe(false);
     // The migration record died with its row: a later start re-detects nothing.
     const { readAccountsMigrationFile } = await import("./accounts-unified-migration.js");
     expect(readAccountsMigrationFile()["codex"]).toBeUndefined();

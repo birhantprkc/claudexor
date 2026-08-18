@@ -150,9 +150,15 @@ export function credentialProfileMutations(deps: CredentialProfileMutationDeps) 
         (row) => row.harness_id === harnessId && row.profile_id === profileId,
       );
       const migratedRow = migrationRecord?.row_id === profileId;
-      if (migratedRow) {
-        deps.quotaRegistry().removeSubject(harnessId, null);
-        for (const root of laneRoots) purgeProfileLanes(root, harnessId, "default");
+      if (migrationRecord && migratedRow) {
+        // The record's OWN alias list drives the retirement — the schema's
+        // "deletion retires these aliases" claim stays true by construction
+        // (the null alias is the engine-default subject and its
+        // `<harness>-default` lane homes).
+        for (const alias of migrationRecord.legacy_aliases) {
+          deps.quotaRegistry().removeSubject(harnessId, alias);
+          for (const root of laneRoots) purgeProfileLanes(root, harnessId, alias ?? "default");
+        }
       }
       // D-U4 failure contract: `removed: true` ONLY when the row AND its
       // credential material are provably gone. Material cleanup therefore runs

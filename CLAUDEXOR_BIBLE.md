@@ -385,7 +385,7 @@ invariant or owner decision before proceeding.
   on macOS: a disposable Claude-only child HOME whose sole host bridge is
   `Library/Keychains`; a Claudexor-owned `CLAUDE_CONFIG_DIR` selects the exact
   default or profile-specific Keychain item). Ordinary `~/.claude` is never
-  read, written, or used for   Claudexor native setup/runs. Other harnesses never
+  read, written, or used for Claudexor native setup/runs. Other harnesses never
   receive that bridge, and all writable vendor state stays scoped. Codex remains portable through
   its file-only `CODEX_HOME` seed. Cursor accounts are portable through the
   vendor's own FILE credential store inside each row's Claudexor-owned HOME;
