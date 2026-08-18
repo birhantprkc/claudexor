@@ -248,6 +248,27 @@ describe("unified-accounts startup migration (plan §K.6)", () => {
     expect(registryRows().filter((r) => r.harness_id === "codex")).toHaveLength(1);
     expect(calls2.calls.migrated).toEqual([{ harness: "codex", rowId: "codex-default" }]);
     expect(calls2.calls.removedSubjects).toEqual([{ harness: "codex", subjectId: null }]);
+
+    // Crash after continuity_migrated: only the quota retirement remains — no
+    // duplicate row, no second continuity rewrite.
+    const calls3 = stubStores();
+    writeFileSync(
+      accountsMigrationFilePath(),
+      JSON.stringify({
+        codex: {
+          phase: "continuity_migrated",
+          row_id: "codex-default",
+          legacy_aliases: [null],
+          locator: home,
+          backup_ref: null,
+        },
+      }),
+    );
+    runAccountsUnifiedMigration(calls3.stores);
+    expect(registryRows().filter((r) => r.harness_id === "codex")).toHaveLength(1);
+    expect(calls3.calls.migrated).toEqual([]);
+    expect(calls3.calls.removedSubjects).toEqual([{ harness: "codex", subjectId: null }]);
+    expect(readAccountsMigrationFile()["codex"]?.phase).toBe("completed");
   });
 
   it("case 6: the second start is byte-identical (no further config mutation, no receipts)", () => {
