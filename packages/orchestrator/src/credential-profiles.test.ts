@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { CredentialProfile } from "@claudexor/schema";
 import {
-  defaultCredentialRoute,
   effectiveAuthPreference,
   effectiveLimitAction,
   limitSubjectRoute,
   nextEligibleProfile,
-  nextUpIdentity,
   planReactiveRotation,
   preflightDefaultSubject,
   probeCredentialProfileStatus,
@@ -170,71 +168,7 @@ describe("profileStatusAdmits", () => {
   });
 });
 
-describe("defaultCredentialRoute", () => {
-  const base = {
-    status: "ok" as const,
-    routableIntents: ["implement"],
-  };
-
-  it("projects a doctor-routable API-key-only default subject", () => {
-    expect(
-      defaultCredentialRoute(
-        {
-          ...base,
-          authSources: [
-            { source: "api_key_env", availability: "available", verification: "not_run" },
-          ],
-        },
-        "auto",
-      ),
-    ).toBe("api_key");
-  });
-
-  it("follows canonical preference and API-key fallback instead of native-source presence", () => {
-    const mixed = {
-      ...base,
-      authSources: [
-        {
-          source: "native_session" as const,
-          availability: "unavailable" as const,
-          verification: "failed" as const,
-        },
-        {
-          source: "api_key_env" as const,
-          availability: "available" as const,
-          verification: "passed" as const,
-        },
-      ],
-    };
-    expect(defaultCredentialRoute(mixed, "auto")).toBe("api_key");
-    expect(defaultCredentialRoute(mixed, "api_key")).toBe("api_key");
-    expect(defaultCredentialRoute(mixed, "subscription")).toBeNull();
-
-    expect(
-      defaultCredentialRoute(
-        {
-          ...base,
-          authSources: [
-            { source: "native_session", availability: "available", verification: "passed" },
-          ],
-        },
-        "auto",
-      ),
-    ).toBe("local_session");
-  });
-
-  it("never promotes an aggregate degraded or unroutable status", () => {
-    expect(
-      defaultCredentialRoute(
-        { status: "degraded", routableIntents: ["implement"], authSources: [] },
-        "auto",
-      ),
-    ).toBeNull();
-    expect(
-      defaultCredentialRoute({ ...base, routableIntents: [], authSources: [] }, "auto"),
-    ).toBeNull();
-  });
-
+describe("effectiveAuthPreference", () => {
   it("shares run-admission preference precedence", () => {
     expect(effectiveAuthPreference("auto", "api_key", "subscription")).toBe("api_key");
     expect(effectiveAuthPreference(undefined, "auto", "subscription")).toBe("subscription");
@@ -786,112 +720,6 @@ describe("default-subject auto-balance (INV-135 owner scope)", () => {
         triedProfiles: new Set<string>(),
       }),
     ).resolves.toBeNull();
-  });
-});
-
-describe("nextUpIdentity readiness parity", () => {
-  const a = { ...work, profile_id: "a" };
-  const b = { ...work, profile_id: "b" };
-
-  it("never names an enabled but unavailable default subject", () => {
-    expect(
-      nextUpIdentity({
-        registry: [a],
-        harnessId: "claude",
-        policy,
-        snapshots: [],
-        defaultEnabled: true,
-        defaultReady: false,
-        defaultRoute: null,
-        readyProfileIds: new Set(["a"]),
-      }),
-    ).toMatchObject({ kind: "none" });
-  });
-
-  it("uses the same complete snapshot when quota rotation selects a profile", () => {
-    expect(
-      nextUpIdentity({
-        registry: [a, b],
-        harnessId: "claude",
-        policy,
-        snapshots: [snap(null, 0.95)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "local_session",
-        readyProfileIds: new Set(["b"]),
-      }),
-    ).toEqual({ kind: "profile", profileId: "b" });
-  });
-
-  it("keeps the ready default when every configured rotation target is unavailable", () => {
-    expect(
-      nextUpIdentity({
-        registry: [a, b],
-        harnessId: "claude",
-        policy,
-        snapshots: [snap(null, 0.95)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "api_key",
-        readyProfileIds: new Set(),
-      }),
-    ).toEqual({ kind: "native", route: "api_key" });
-  });
-
-  it("A6 parity: the ABSENT-policy auto default projects the SAME next_up the engine would route (INV-135)", () => {
-    // Subscription default over threshold: auto resolves rotate, so the
-    // projection names the profile the engine would rotate to.
-    expect(
-      nextUpIdentity({
-        registry: [a, b],
-        harnessId: "claude",
-        policy: autoPolicy,
-        snapshots: [snap(null, 0.95)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "local_session",
-        readyProfileIds: new Set(["b"]),
-      }),
-    ).toEqual({ kind: "profile", profileId: "b" });
-    // Metered default: auto resolves fail — the projection keeps the native
-    // identity even though the same snapshot breaches, exactly as admission
-    // would refuse to rotate.
-    expect(
-      nextUpIdentity({
-        registry: [a, b],
-        harnessId: "claude",
-        policy: autoPolicy,
-        snapshots: [snap(null, 0.95)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "api_key",
-        readyProfileIds: new Set(["b"]),
-      }),
-    ).toEqual({ kind: "native", route: "api_key" });
-  });
-
-  it("does not rotate a native-default route solely because another model family is exhausted", () => {
-    const scoped = snap(null, 1);
-    scoped.constraints[0] = {
-      ...scoped.constraints[0]!,
-      id: "weekly_scoped:Fable",
-      applies_to_models: ["fable", "claude-fable-5", "best"],
-    };
-    const input = {
-      registry: [a],
-      harnessId: "claude",
-      policy,
-      snapshots: [scoped],
-      defaultEnabled: true,
-      defaultReady: true,
-      defaultRoute: "local_session" as const,
-      readyProfileIds: new Set(["a"]),
-    };
-    expect(nextUpIdentity({ ...input, model: null })).toEqual({
-      kind: "native",
-      route: "local_session",
-    });
-    expect(nextUpIdentity(input)).toEqual({ kind: "profile", profileId: "a" });
   });
 });
 

@@ -10330,9 +10330,16 @@ describe("DaemonControlApiServer", () => {
           headers: { authorization: `Bearer ${token}` },
         });
         expect(catalog.status).toBe(200);
-        const operations = ((await catalog.json()) as { operations: Array<{ path: string }> })
-          .operations;
+        const operations = (
+          (await catalog.json()) as { operations: Array<{ path: string; id: string }> }
+        ).operations;
         expect(operations.some((op) => op.path === "/v2/account-pools")).toBe(true);
+        // The generated id is a CROSS-REPO byte contract: the Ouroboros
+        // feature detect hardcodes the literal "get:account-pools", so the
+        // generated catalog id must stay byte-exact.
+        expect(operations.find((op) => op.path === "/v2/account-pools")?.id).toBe(
+          "get:account-pools",
+        );
       },
       undefined,
       { accountPools: async () => response },

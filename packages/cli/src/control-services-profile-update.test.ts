@@ -285,6 +285,19 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(noteCredentialChange).toHaveBeenCalledTimes(3);
   });
 
+  it("reserves the profile id 'default' at registration (laneProfileSegment(null) collision)", async () => {
+    // laneProfileSegment(null) and a literal "default" row id collide on the
+    // <harness>-default lane segment that migration/deletion act on — a row
+    // named "default" could have its lanes renamed or purged as legacy state.
+    expect(() => registerConfigDirProfile({ harnessId: "claude", profileId: "default" })).toThrow(
+      /reserved for the engine's unpinned lane/,
+    );
+    await expect(
+      services().createCredentialProfile({ harnessId: "claude", profileId: "default" }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
+  });
+
   it("refuses an unknown id with a typed 404 and a missing enabled with a 400", async () => {
     const svc = services();
     await expect(

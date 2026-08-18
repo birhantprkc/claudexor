@@ -47,6 +47,18 @@ export function registerConfigDirProfile(input: RegisterProfileInput): {
       { status: 400 },
     );
   }
+  // Reserved: the unpinned lane segment is laneProfileSegment(null) =
+  // "default", so a literal "default" row would collide with the
+  // <harness>-default lane the unified-accounts migration and deletion act
+  // on — the row's lanes could be renamed or purged as legacy state.
+  if (profileId === "default") {
+    throw Object.assign(
+      new Error(
+        `profile id "default" is reserved for the engine's unpinned lane; pick another id (the bootstrap login row is "${harnessId}-default")`,
+      ),
+      { status: 400 },
+    );
+  }
   const locator = join(claudexorOwnedRoot(), "profiles", `${harnessId}-${profileId}`);
   mkdirSync(locator, { recursive: true });
   const entry: CredentialProfile = {

@@ -7,8 +7,8 @@ import {
 } from "./credential-cooldown.js";
 import {
   nextEligibleProfile,
-  nextUpIdentity,
   preflightCredentialProfile,
+  preflightDefaultSubject,
   type ProfilePolicy,
 } from "./credential-profiles.js";
 
@@ -233,20 +233,22 @@ describe("A4 wiring: rotation and preflight see observed live blocks", () => {
     });
   });
 
-  it("next_up fails the DEFAULT subject over to a profile when its own windows are cooling", () => {
+  it("the LEGACY default subject fails over to a profile when its own windows are cooling", () => {
+    // Unified model: the legacy ladder (a harness with no registered rows)
+    // rotates its cooling default onto the next eligible profile — the same
+    // A4 block evidence the pool ranking consumes for registered rows.
     expect(
-      nextUpIdentity({
-        registry: [b],
+      preflightDefaultSubject({
         harnessId: "cursor",
         policy,
+        registry: [b],
         snapshots: [cooldownSnapshot(null)],
-        defaultEnabled: true,
-        defaultReady: true,
-        defaultRoute: "local_session",
         readyProfileIds: ready("b"),
+        defaultRoute: "local_session",
         model: null,
-      }),
-    ).toEqual({ kind: "profile", profileId: "b" });
+        emit: () => {},
+      })?.profile_id,
+    ).toBe("b");
   });
 });
 
