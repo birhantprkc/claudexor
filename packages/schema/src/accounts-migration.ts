@@ -81,7 +81,10 @@ export const ControlAccountsMigrationRollbackResponse = z
               .number()
               .int()
               .describe("Thread sessions returned to the null engine-default subject."),
-            checkpoints: z.number().int().describe("Lane checkpoints re-seeded onto the null lane."),
+            checkpoints: z
+              .number()
+              .int()
+              .describe("Lane checkpoints re-seeded onto the null lane."),
             lanes: z.number().int().describe("Durable lane home dirs renamed back."),
             skipped_partitions: z
               .array(z.string())

@@ -11,7 +11,6 @@ import type {
 } from "@claudexor/schema";
 import {
   LaneCheckpoint as LaneCheckpointSchema,
-  SCHEMA_VERSION,
   Session as SessionSchema,
   Thread as ThreadSchema,
   ThreadTurn as ThreadTurnSchema,
@@ -25,11 +24,15 @@ import {
   safeProblemRequiredActions,
 } from "@claudexor/util";
 import {
+  accountBindingsFrom,
+  invalidateCredentialProfileMutation,
   findLaneCheckpoint,
   makeLaneCheckpoint,
   makeSessionRecord,
+  migrateNullProfileContinuityMutation,
+  resumeMapAutoFrom,
   resumeMapFrom,
-  staleSession,
+  rollbackProfileContinuityMutation,
   stampContinuity,
   threadLaneCheckpoints,
 } from "./thread-lane-checkpoints.js";
@@ -37,7 +40,6 @@ import { reduceThreadLifecycle, type ThreadLifecycleAction } from "./thread-life
 import { deriveThreadTitle } from "./thread-title.js";
 import {
   assertUnique,
-  coercePrimaryToPool,
   findIdempotentTurn,
   idempotencyConflict,
   parseMutation,
@@ -46,6 +48,8 @@ import {
   turnIdempotency,
   upsert,
   type ThreadMutation,
+  buildNewThread,
+  mergeThreadPatch,
 } from "./thread-store-support.js";
 import { threadWorktreeMutation } from "./thread-worktree-state.js";
 
@@ -208,36 +212,7 @@ export class ThreadStore {
         return existing;
       }
     }
-    const now = nowIso();
-    // Same invariant as updateThread: a sticky primary must be a member of a
-    // non-empty eligible pool. Enforce it at CREATE too (the create request carries
-    // primary + pool independently) so a thread is never born incoherent.
-    const eligible = input.eligibleHarnesses ?? [];
-    const primary = coercePrimaryToPool(input.primaryHarness ?? null, eligible);
-    const thread = ThreadSchema.parse({
-      schema_version: SCHEMA_VERSION,
-      id: newId("th"),
-      created_at: now,
-      updated_at: now,
-      repo: input.repoRoot ? { root: input.repoRoot, base_ref: "HEAD" } : null,
-      title: input.title ?? null,
-      // Default mode follows the scope: a no-project thread can only Ask
-      // (read-only), so it must NOT default to agent (which would 400 on the
-      // first turn for lack of a project root). A project thread defaults to agent.
-      mode: input.mode ?? (input.repoRoot ? "agent" : "ask"),
-      // An isolated workspace needs a git project for its worktree; a no-project
-      // thread is always in_place (review #6 — never persist a doomed config).
-      workspace: {
-        mode: input.repoRoot ? (input.workspace ?? "in_place") : "in_place",
-        worktree_path: null,
-        base_sha: null,
-      },
-      auth_preference: input.authPreference ?? "auto",
-      credential_profile_id: input.credentialProfileId ?? null,
-      access: input.access ?? null,
-      primary_harness: primary,
-      eligible_harnesses: eligible,
-    });
+    const thread = buildNewThread(input);
     if (creation) creation.threadId = thread.id;
     this.commit({ threads: [thread], ...(creation ? { threadCreation: creation } : {}) });
     return thread;
@@ -253,26 +228,7 @@ export class ThreadStore {
         code: `thread_${thread.state}`,
       });
     }
-    const next = ThreadSchema.parse({
-      ...thread,
-      ...(patch.title !== undefined ? { title: patch.title } : {}),
-      ...(patch.state !== undefined ? { state: patch.state } : {}),
-      ...(patch.primaryHarness !== undefined ? { primary_harness: patch.primaryHarness } : {}),
-      ...(patch.credentialProfileId !== undefined
-        ? { credential_profile_id: patch.credentialProfileId }
-        : {}),
-      ...(patch.access !== undefined ? { access: patch.access } : {}),
-      ...(patch.eligibleHarnesses !== undefined
-        ? { eligible_harnesses: patch.eligibleHarnesses }
-        : {}),
-      updated_at: nowIso(),
-    });
-    // Invariant (thread.ts contract): a sticky primary must be a member of a non-empty
-    // eligible pool. If a PATCH leaves the primary outside the pool — e.g. the user
-    // removed the primary harness from the pool — clear it to null (Auto) rather than
-    // persist an incoherent state that the UI would show as "X answers in chat" while
-    // the engine silently drops X. (An empty pool = auto, so it imposes no constraint.)
-    next.primary_harness = coercePrimaryToPool(next.primary_harness, next.eligible_harnesses);
+    const next = mergeThreadPatch(thread, patch);
     this.commit({ threads: [next] });
     return next;
   }
@@ -558,137 +514,70 @@ export class ThreadStore {
     if (threads.length > 0) this.commit({ threads });
   }
 
-  /**
-   * The thread's durable per-harness ACCOUNT BINDINGS (unified account model,
-   * D-U1 order 2): the account an UNPINNED turn stays on — derived from the
-   * lane evidence the thread already persists (its latest live session, else
-   * its latest lane checkpoint, per harness), never a second hand-maintained
-   * record. Null-profile lanes (unmigrated legacy state) bind nothing.
-   */
+  /** D-U1 order 2 / INV-137 unified-accounts readers and mutations — the
+   * derivation contracts live in thread-lane-checkpoints.ts. */
   accountBindings(threadId: string): Record<string, string> {
-    const bindings: Record<string, string> = {};
-    const freshest: Record<string, string> = {};
-    const consider = (harnessId: string, profileId: string | null, updatedAt: string): void => {
-      if (!profileId) return;
-      const seen = freshest[harnessId];
-      if (seen !== undefined && seen >= updatedAt) return;
-      freshest[harnessId] = updatedAt;
-      bindings[harnessId] = profileId;
-    };
-    for (const s of this.state.sessions) {
-      if (s.thread_id !== threadId || s.state !== "live") continue;
-      consider(s.harness_id, s.profile_id ?? null, s.updated_at);
-    }
-    for (const c of this.state.checkpoints) {
-      if (c.thread_id !== threadId) continue;
-      consider(c.harness_id, c.profile_id ?? null, c.updated_at);
-    }
-    return bindings;
+    return accountBindingsFrom(this.state.sessions, this.state.checkpoints, threadId);
   }
 
-  /**
-   * Native resume map for an UNPINNED thread turn: the latest live session per
-   * harness REGARDLESS of profile. Each entry carries its own profile, and the
-   * engine boundary (`resumeSessionForProfile`) re-verifies it against the
-   * RESOLVED account, so a pool switch away from the recorded account starts
-   * fresh instead of crossing profiles (INV-135/137).
-   */
   resumeMapAuto(threadId: string): Record<string, { sessionId: string; profileId: string | null }> {
-    const map: Record<string, { sessionId: string; profileId: string | null }> = {};
-    const freshest: Record<string, string> = {};
-    for (const s of this.state.sessions) {
-      if (s.thread_id !== threadId || s.state !== "live" || !s.native_session_id) continue;
-      const seen = freshest[s.harness_id];
-      if (seen !== undefined && seen >= s.updated_at) continue;
-      freshest[s.harness_id] = s.updated_at;
-      map[s.harness_id] = { sessionId: s.native_session_id, profileId: s.profile_id ?? null };
-    }
-    return map;
+    return resumeMapAutoFrom(this.state.sessions, threadId);
   }
 
-  /**
-   * Unified-accounts migration (INV-137 continuity, one unit with the lane-home
-   * rename): live sessions recorded under the null engine-default subject are
-   * rewritten IN PLACE onto the auto-registered row id, and every
-   * `<thread>::<harness>::default` lane checkpoint gains a row under the new
-   * lane id (the legacy row stays inert — exact-id lookups never see it).
-   * Idempotent: a second run finds no null sessions and no missing checkpoints.
-   */
   migrateNullProfileContinuity(
     harnessId: string,
     rowId: string,
   ): { sessions: number; checkpoints: number } {
-    const now = nowIso();
-    const sessions = this.state.sessions
-      .filter((s) => s.harness_id === harnessId && (s.profile_id ?? null) === null)
-      .map((s) => SessionSchema.parse({ ...s, profile_id: rowId, updated_at: now }));
-    const checkpoints: LaneCheckpoint[] = [];
-    for (const checkpoint of this.state.checkpoints) {
-      if (checkpoint.harness_id !== harnessId || (checkpoint.profile_id ?? null) !== null) {
-        continue;
-      }
-      const migrated = makeLaneCheckpoint(
-        checkpoint.thread_id,
+    return this.applyContinuityMutation(
+      migrateNullProfileContinuityMutation(
+        this.state.sessions,
+        this.state.checkpoints,
         harnessId,
         rowId,
-        checkpoint.turn_id,
-      );
-      // The row lane may already have advanced past the legacy lane (a crash
-      // between phases followed by new turns); never move it backwards.
-      if (this.state.checkpoints.some((c) => c.id === migrated.id)) continue;
-      checkpoints.push(migrated);
-    }
-    if (sessions.length > 0 || checkpoints.length > 0) this.commit({ sessions, checkpoints });
-    return { sessions: sessions.length, checkpoints: checkpoints.length };
+      ),
+    );
   }
 
-  /**
-   * The supported downgrade path's reverse of `migrateNullProfileContinuity`:
-   * sessions recorded under the migrated row id return to the null
-   * engine-default subject a 3.5.0 engine resumes, and each row-lane
-   * checkpoint re-seeds the `::default` lane id at its turn.
-   */
   rollbackProfileContinuity(
     harnessId: string,
     rowId: string,
   ): { sessions: number; checkpoints: number } {
-    const now = nowIso();
-    const sessions = this.state.sessions
-      .filter((s) => s.harness_id === harnessId && s.profile_id === rowId)
-      .map((s) => SessionSchema.parse({ ...s, profile_id: null, updated_at: now }));
-    const checkpoints: LaneCheckpoint[] = [];
-    for (const checkpoint of this.state.checkpoints) {
-      if (checkpoint.harness_id !== harnessId || checkpoint.profile_id !== rowId) continue;
-      checkpoints.push(
-        makeLaneCheckpoint(checkpoint.thread_id, harnessId, null, checkpoint.turn_id),
-      );
-    }
-    if (sessions.length > 0 || checkpoints.length > 0) this.commit({ sessions, checkpoints });
-    return { sessions: sessions.length, checkpoints: checkpoints.length };
+    return this.applyContinuityMutation(
+      rollbackProfileContinuityMutation(
+        this.state.sessions,
+        this.state.checkpoints,
+        harnessId,
+        rowId,
+      ),
+    );
+  }
+
+  private applyContinuityMutation(mutation: {
+    sessions: Session[];
+    checkpoints: LaneCheckpoint[];
+  }): {
+    sessions: number;
+    checkpoints: number;
+  } {
+    if (mutation.sessions.length > 0 || mutation.checkpoints.length > 0) this.commit(mutation);
+    return { sessions: mutation.sessions.length, checkpoints: mutation.checkpoints.length };
   }
 
   invalidateCredentialProfile(
     harnessId: string,
     profileId: string,
   ): { clearedThreads: number; invalidatedSessions: number } {
-    const now = nowIso();
-    // Thread pins predate a harness discriminator. Clear every matching scalar
-    // id rather than leave an unrunnable route after one harness profile dies.
-    const threads = this.state.threads
-      .filter((thread) => thread.credential_profile_id === profileId)
-      .map((thread) =>
-        ThreadSchema.parse({ ...thread, credential_profile_id: null, updated_at: now }),
-      );
-    const sessions = this.state.sessions
-      .filter(
-        (session) =>
-          session.harness_id === harnessId &&
-          session.profile_id === profileId &&
-          session.state === "live",
-      )
-      .map(staleSession);
-    if (threads.length > 0 || sessions.length > 0) this.commit({ threads, sessions });
-    return { clearedThreads: threads.length, invalidatedSessions: sessions.length };
+    const mutation = invalidateCredentialProfileMutation(
+      this.state.threads,
+      this.state.sessions,
+      harnessId,
+      profileId,
+    );
+    if (mutation.threads.length > 0 || mutation.sessions.length > 0) this.commit(mutation);
+    return {
+      clearedThreads: mutation.threads.length,
+      invalidatedSessions: mutation.sessions.length,
+    };
   }
 }
 

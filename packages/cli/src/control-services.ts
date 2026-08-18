@@ -1,6 +1,5 @@
 /** Bind typed control operations to daemon stores and engine entrypoints. */
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
 import {
   type OperatorDecisionRecord,
   JournalManager,
@@ -10,38 +9,28 @@ import {
   ResourceStore,
   QuotaRegistry,
 } from "@claudexor/daemon";
-import { loadConfig, updateGlobalConfig } from "@claudexor/config";
+import { loadConfig } from "@claudexor/config";
 import { listTrustService, updateTrustService } from "./trust-services.js";
 import { SecretStore, isManagedSecretName } from "@claudexor/secrets";
-import {
-  probeGitCapability,
-  purgeProfileLanes,
-  purgeThreadLanes,
-  purgeThreadWorktree,
-} from "@claudexor/workspace";
-import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
+import { probeGitCapability, purgeThreadLanes, purgeThreadWorktree } from "@claudexor/workspace";
+import { noProjectRepoRoot } from "@claudexor/util";
 import {
   type ResourceAttachmentRef,
   ControlAccountsMigrationRollbackRequest,
   ControlCredentialProfileCreateRequest,
-  type CredentialProfile,
   ControlSettingsUpdateRequest,
   type ControlRunStartRequest,
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
-import {
-  readAccountsMigrationFile,
-  removeAccountsMigrationRecord,
-  rollbackAccountsUnifiedMigration,
-} from "./accounts-unified-migration.js";
+import { rollbackAccountsUnifiedMigration } from "./accounts-unified-migration.js";
+import { credentialProfileMutations } from "./credential-profile-mutations.js";
 import { quotaControlServices } from "./quota-services.js";
 import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
 import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
-import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import {
@@ -58,15 +47,11 @@ import {
 import { createSetupJobManager } from "./setup-jobs.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { activeProfileLoginJob } from "./setup-job-support.js";
-import { canonicalProfileLoginDir, isConfigDirLoginHarness } from "./config-dir-login-harnesses.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { createRunRequirementsPreflight } from "./request-preflight.js";
 import { threadRunStartRequiresGit } from "./thread-execution-workspace.js";
 import { applyThreadDiff, type ThreadApplyOptions } from "./thread-delivery.js";
-import {
-  assertCredentialProfileCompatibility,
-  assertCredentialProfileRegistered,
-} from "./profile-compatibility.js";
+import { assertCredentialProfileCompatibility } from "./profile-compatibility.js";
 import { remoteFilesystemServices } from "./remote-filesystem.js";
 import { projectRunApplicability } from "./run-applicability.js";
 import { threadTurnServices } from "./thread-turn-services.js";
@@ -377,6 +362,7 @@ export function controlServices(
     // The pool-authority read (GET /v2/account-pools) shares the same cached
     // projection so the listing and the pool verdict cannot disagree.
     ...createCredentialProfilesService(quotaRegistry),
+<<<<<<< HEAD
     // PATCH /credential-profiles/:harness/:id — the Enabled toggle of the
     // accounts symmetry (INV-135). Flips the profile's durable `enabled` in the
     // registry (one locked write) and returns the refreshed doctor projection.
@@ -544,6 +530,19 @@ export function controlServices(
         credentialCleanup,
       };
     },
+=======
+    // PATCH + DELETE /credential-profiles/:harness/:id — the Enabled toggle
+    // (with the migrated row's native_credentials_enabled downgrade mirror)
+    // and the provable D-U4 removal, owned by credential-profile-mutations.ts.
+    ...credentialProfileMutations({
+      threads,
+      quotaRegistry,
+      secretStore,
+      bustStatusCaches,
+      activeLoginJob: (harnessId, profileId) =>
+        activeProfileLoginJob(setupJobs, harnessId, profileId),
+    }),
+>>>>>>> 98fec301 (refactor: satisfy the complexity ratchet, knip, and formatting gates)
     // POST /accounts-migration/rollback — the supported downgrade path's
     // first step (unified account model): surgically reverses the startup
     // migration (sessions/checkpoints/lane homes back to the engine-default

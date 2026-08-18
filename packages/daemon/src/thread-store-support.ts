@@ -1,13 +1,14 @@
 import type { LaneCheckpoint, Session, Thread, ThreadTurn } from "@claudexor/schema";
 import {
   LaneCheckpoint as LaneCheckpointSchema,
+  SCHEMA_VERSION,
   Session as SessionSchema,
   Thread as ThreadSchema,
   ThreadTurn as ThreadTurnSchema,
 } from "@claudexor/schema";
-import { hashJson } from "@claudexor/util";
+import { hashJson, newId, nowIso } from "@claudexor/util";
 import { idempotencyWireProjection } from "./idempotency-wire-projection.js";
-import type { CreateThreadInput, CreateTurnInput } from "./threads.js";
+import type { CreateThreadInput, CreateTurnInput, UpdateThreadInput } from "./threads.js";
 
 /**
  * Pure ThreadStore support: the journal mutation codec and the idempotency
@@ -159,4 +160,58 @@ export function assertUnique(items: Array<{ id: string }>, kind: string): void {
   if (new Set(items.map((item) => item.id)).size !== items.length) {
     throw new Error(`duplicate ${kind} id in journal projection`);
   }
+}
+
+/** Construct a NEW thread from its create input (defaults documented inline). */
+export function buildNewThread(input: CreateThreadInput): Thread {
+  const now = nowIso();
+  // A sticky primary must be a member of a non-empty eligible pool — enforce
+  // at CREATE too (the request carries primary + pool independently) so a
+  // thread is never born incoherent.
+  const eligible = input.eligibleHarnesses ?? [];
+  return ThreadSchema.parse({
+    schema_version: SCHEMA_VERSION,
+    id: newId("th"),
+    created_at: now,
+    updated_at: now,
+    repo: input.repoRoot ? { root: input.repoRoot, base_ref: "HEAD" } : null,
+    title: input.title ?? null,
+    // Default mode follows the scope: a no-project thread can only Ask
+    // (read-only), so it must NOT default to agent (which would 400 on the
+    // first turn for lack of a project root). A project thread defaults to agent.
+    mode: input.mode ?? (input.repoRoot ? "agent" : "ask"),
+    // An isolated workspace needs a git project for its worktree; a no-project
+    // thread is always in_place (review #6 — never persist a doomed config).
+    workspace: {
+      mode: input.repoRoot ? (input.workspace ?? "in_place") : "in_place",
+      worktree_path: null,
+      base_sha: null,
+    },
+    auth_preference: input.authPreference ?? "auto",
+    credential_profile_id: input.credentialProfileId ?? null,
+    access: input.access ?? null,
+    primary_harness: coercePrimaryToPool(input.primaryHarness ?? null, eligible),
+    eligible_harnesses: eligible,
+  });
+}
+
+/** Apply an UpdateThreadInput patch; a primary outside the (non-empty) pool
+ * coerces to null (Auto) rather than persisting an incoherent state. */
+export function mergeThreadPatch(thread: Thread, patch: UpdateThreadInput): Thread {
+  const next = ThreadSchema.parse({
+    ...thread,
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.state !== undefined ? { state: patch.state } : {}),
+    ...(patch.primaryHarness !== undefined ? { primary_harness: patch.primaryHarness } : {}),
+    ...(patch.credentialProfileId !== undefined
+      ? { credential_profile_id: patch.credentialProfileId }
+      : {}),
+    ...(patch.access !== undefined ? { access: patch.access } : {}),
+    ...(patch.eligibleHarnesses !== undefined
+      ? { eligible_harnesses: patch.eligibleHarnesses }
+      : {}),
+    updated_at: nowIso(),
+  });
+  next.primary_harness = coercePrimaryToPool(next.primary_harness, next.eligible_harnesses);
+  return next;
 }

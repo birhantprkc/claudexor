@@ -15,7 +15,10 @@ import type {
   CredentialProfileStatus,
   QuotaSnapshot,
 } from "@claudexor/schema";
-import { AccountIdentity as AccountIdentitySchema, estimateEffectiveAuthRoute } from "@claudexor/schema";
+import {
+  AccountIdentity as AccountIdentitySchema,
+  estimateEffectiveAuthRoute,
+} from "@claudexor/schema";
 import { loadConfig } from "@claudexor/config";
 import {
   effectiveAuthPreference,

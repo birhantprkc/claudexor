@@ -69,7 +69,11 @@ import {
 } from "./claudexord-entry.js";
 import { createDelegationDaemonBinding } from "./delegation-daemon-binding.js";
 import { quotaSubjectUniverseFromConfig } from "./quota-subject-universe.js";
-import { accountsMigrationGate, runAccountsUnifiedMigration } from "./accounts-unified-migration.js";
+import {
+  accountsMigrationGate,
+  runStartupAccountsMigration,
+} from "./accounts-unified-migration.js";
+import { threadRunResumeInputs } from "./thread-continuity-context.js";
 import { runStopIfRequested } from "./runtime-replacement-stop.js";
 import { threadContinuityContext } from "./thread-continuity-context.js";
 const NO_PROJECT_ROOT = noProjectRepoRoot();
@@ -270,15 +274,11 @@ export async function main(): Promise<void> {
         // `cancelled` + wall_clock_exceeded rather than a bare user cancel.
         const maxSeconds =
           typeof p.maxSeconds === "number" && p.maxSeconds > 0
-            ? // Defense in depth against a setTimeout 32-bit-ms overflow (the
-              // schema already caps at 7 days for the control-API path).
+            ? // setTimeout 32-bit-ms overflow defense (schema caps at 7 days).
               Math.min(p.maxSeconds, 604_800)
             : null;
-        // INV-135 selection precedence: explicit per-turn profile beats the
-        // thread's sticky profile beats the engine default — and an explicit
-        // NULL forces the default ladder past the sticky profile (release
-        // wave round-11). The winner scopes BOTH the run spec and the
-        // resume-session lookup (resume never crosses profiles).
+        // INV-135 precedence: explicit per-turn profile > thread sticky >
+        // unpinned; an explicit NULL forces unpinned (release wave round-11).
         const requestedProfileId =
           p.credentialProfileId === null
             ? null
@@ -319,36 +319,22 @@ export async function main(): Promise<void> {
                   typeof payload["harness_id"] === "string" ? payload["harness_id"] : "";
                 if (harnessId) quotaStoreSlot.current().ingest(harnessId, payload);
               }
-              // Live listeners observe only after journal + RunFacts commit.
+              // Live listeners observe only after journal + RunFacts commit;
+              // durable replay stays authoritative if publish throws.
               try {
                 bus.publish(event);
-              } catch {
-                /* durable replay remains authoritative */
-              }
+              } catch {}
             },
             onInteraction: (ctx2) => interactions.register(ctx2, p),
             interactionTimeoutMs: runConfig.global.interaction_timeout_ms,
             threadId,
             executionRoot,
             projectGitInitialization,
-            // Pinned turns resume ONLY the pin's own sessions; unpinned turns
-            // get the latest session per harness (any account) plus the
-            // thread's durable account bindings — the engine re-verifies each
-            // entry against the RESOLVED account (D-U1 order: pin → binding →
-            // pool), so resume never crosses profiles (INV-135).
-            resumeSessions: threadId
-              ? requestedProfileId
-                ? threads.resumeMap(threadId, requestedProfileId)
-                : threads.resumeMapAuto(threadId)
-              : undefined,
-            threadAccountBindings:
-              threadId && !requestedProfileId ? threads.accountBindings(threadId) : undefined,
+            ...threadRunResumeInputs(threads, threadId, requestedProfileId),
             onSessionObserved: threadId
               ? (harnessId, nativeSessionId, observedModel, profileId) => {
-                  // The EVENT's profile is the cache truth (INV-135): rotation
-                  // makes the effective profile differ from the requested one,
-                  // and a mislabeled session would resume under the wrong
-                  // account on the next turn.
+                  // The EVENT's profile is the cache truth (INV-135): the
+                  // effective account can differ from the requested one.
                   threads.recordSession(
                     threadId,
                     harnessId,
@@ -356,10 +342,8 @@ export async function main(): Promise<void> {
                     observedModel,
                     profileId ?? null,
                   );
-                  // The lane (thread, harness, effective profile) has now SEEN
-                  // this turn: its native session holds up to here (INV-137).
-                  // Keyed by the SAME effective profile as the session so the
-                  // next turn's packet math (checkpoint vs head) is exact.
+                  // The lane (thread, harness, effective profile) has SEEN
+                  // this turn (INV-137); same key as the session record.
                   if (turnId)
                     threads.recordLaneCheckpoint(threadId, harnessId, profileId ?? null, turnId);
                 }
@@ -527,29 +511,10 @@ export async function main(): Promise<void> {
         requested: () => shutdownRuntime!.requested(),
         armQuotaPolling: () => quotaPoller!.arm(),
         beginPidSnapshots: () => lifecycle!.beginPidSnapshots(),
-        migrateAccounts: () => {
-          try {
-            const receipts = runAccountsUnifiedMigration({
-              threads,
-              quota: quotaStoreSlot.current(),
-              log: (message) => logLine(logPath(), message),
-            });
-            if (receipts.length > 0) {
-              invalidateStatusProjections();
-              quotaStoreSlot.current().noteCredentialChange();
-            }
-          } catch (error) {
-            // A failed pass leaves the phase file mid-state: the affected
-            // harness refuses runs typed (accountsMigrationGate) and the next
-            // start resumes the remaining phases — never a startup crash.
-            logLine(
-              logPath(),
-              `unified-accounts migration pass failed (will resume on the next start): ${redactSecrets(
-                error instanceof Error ? error.message : String(error),
-              )}`,
-            );
-          }
-        },
+        migrateAccounts: () =>
+          runStartupAccountsMigration(threads, quotaStoreSlot.current(), (m) =>
+            logLine(logPath(), redactSecrets(m)),
+          ),
         startSetup: () => setupBinding.start(),
         quarantineGhosts: () =>
           quarantineGhostProjectsAtStartup(threads, (message) => logLine(logPath(), message)),

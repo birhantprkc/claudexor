@@ -15,6 +15,39 @@ export interface ThreadContinuitySource {
 }
 
 /**
+ * Native resume inputs for one thread run (unified account model): a PINNED
+ * turn resumes only the pin's own sessions; an UNPINNED turn gets the latest
+ * session per harness plus the thread's durable account bindings — the engine
+ * boundary re-verifies every cached session against the RESOLVED account, so
+ * resume never crosses profiles (INV-135, D-U1 order pin → binding → pool).
+ */
+export function threadRunResumeInputs(
+  threads: {
+    resumeMap(
+      threadId: string,
+      profileId: string | null,
+    ): Record<string, { sessionId: string; profileId: string | null }>;
+    resumeMapAuto(
+      threadId: string,
+    ): Record<string, { sessionId: string; profileId: string | null }>;
+    accountBindings(threadId: string): Record<string, string>;
+  },
+  threadId: string | undefined,
+  requestedProfileId: string | null,
+): {
+  resumeSessions?: Record<string, { sessionId: string; profileId: string | null }>;
+  threadAccountBindings?: Record<string, string>;
+} {
+  if (!threadId) return {};
+  if (requestedProfileId)
+    return { resumeSessions: threads.resumeMap(threadId, requestedProfileId) };
+  return {
+    resumeSessions: threads.resumeMapAuto(threadId),
+    threadAccountBindings: threads.accountBindings(threadId),
+  };
+}
+
+/**
  * Continuity facts for one thread turn (INV-137): the prior turns the engine
  * builds its delta packet from, plus every lane checkpoint of the thread.
  *

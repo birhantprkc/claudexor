@@ -94,10 +94,9 @@ export function ensureBootstrapProfile(harnessId: string): CredentialProfile {
     );
   }
   if (!isConfigDirLoginHarness(harnessId)) {
-    throw Object.assign(
-      new Error(`harness "${harnessId}" has no isolated config-dir login`),
-      { status: 400 },
-    );
+    throw Object.assign(new Error(`harness "${harnessId}" has no isolated config-dir login`), {
+      status: 400,
+    });
   }
   const locator =
     harnessId === "claude"
@@ -114,7 +113,10 @@ export function ensureBootstrapProfile(harnessId: string): CredentialProfile {
   };
   const registry = loadConfig(noProjectRepoRoot()).global.credential_profiles;
   const existing = registry.find(
-    (p) => p.harness_id === harnessId && p.isolation_locator && norm(p.isolation_locator) === norm(locator),
+    (p) =>
+      p.harness_id === harnessId &&
+      p.isolation_locator &&
+      norm(p.isolation_locator) === norm(locator),
   );
   if (existing) return existing;
   // Reserved machine id, cross-harness unique with a deterministic suffix —

@@ -58,7 +58,10 @@ function seedCodexLogin(email = "codex-owner@example.com"): string {
 function seedClaudeLogin(email = "claude-owner@example.com"): string {
   const dir = defaultNativeClaudeConfigDir();
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, ".claude.json"), JSON.stringify({ oauthAccount: { emailAddress: email } }));
+  writeFileSync(
+    join(dir, ".claude.json"),
+    JSON.stringify({ oauthAccount: { emailAddress: email } }),
+  );
   return dir;
 }
 
@@ -176,10 +179,11 @@ describe("unified-accounts startup migration (plan §K.6)", () => {
     const { stores } = stubStores();
     const receipts = runAccountsUnifiedMigration(stores);
     expect(receipts.map((r) => r.row_id)).toEqual(["codex-default-2"]);
-    expect(registryRows().map((r) => r.profile_id).sort()).toEqual([
-      "codex-default",
-      "codex-default-2",
-    ]);
+    expect(
+      registryRows()
+        .map((r) => r.profile_id)
+        .sort(),
+    ).toEqual(["codex-default", "codex-default-2"]);
   });
 
   it("case 4: native_credentials_enabled=false maps to enabled=false and the mirror key survives", () => {

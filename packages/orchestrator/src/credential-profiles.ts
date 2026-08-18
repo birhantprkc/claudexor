@@ -29,7 +29,6 @@ export {
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
   staticRotationCandidates,
-  subscriptionWindowExhausted,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
 export {

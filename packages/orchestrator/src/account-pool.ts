@@ -1,5 +1,6 @@
 import type { CredentialProfile, QuotaSnapshot } from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
+import { profileQuotaBlock } from "./credential-cooldown.js";
 import { profileHeadroomBreach } from "./credential-profile-rotation.js";
 
 /**
@@ -95,6 +96,18 @@ export function rankAccountPool(args: {
       });
       continue;
     }
+    // A4 cooldown reader: a row under an OBSERVED live block (reactive
+    // vendor-limit cooldown or spent window, stale-but-live included) ranks
+    // exhausted with its earliest known release instant — selecting it would
+    // burn an attempt to rediscover the limit the registry already holds.
+    const block = profileQuotaBlock(args.snapshots, args.harnessId, profile.profile_id, args.model);
+    if (block) {
+      candidates.push({
+        profile,
+        verdict: { kind: "exhausted", resets_at: block.resets_at },
+      });
+      continue;
+    }
     const headroom = freshModelHeadroom(
       args.snapshots,
       args.harnessId,
@@ -148,8 +161,8 @@ export function accountPoolUnavailable(
     new Error(
       exhausted
         ? `every enabled ${harnessId} account is over its quota window` +
-          `${selection.resets_at ? ` (earliest reset ${selection.resets_at})` : ""}; ` +
-          `the requested subscription route forbids the API-key fallback`
+            `${selection.resets_at ? ` (earliest reset ${selection.resets_at})` : ""}; ` +
+            `the requested subscription route forbids the API-key fallback`
         : `no enabled ${harnessId} account is signed in and the requested subscription route forbids the API-key fallback; connect an account or pin one (--profile)`,
     ),
     {
@@ -161,9 +174,7 @@ export function accountPoolUnavailable(
 }
 
 /** Select the unpinned-run account from the pool (or report why not). */
-export function selectFromAccountPool(
-  args: Parameters<typeof rankAccountPool>[0],
-): PoolSelection {
+export function selectFromAccountPool(args: Parameters<typeof rankAccountPool>[0]): PoolSelection {
   const ranked = rankAccountPool(args);
   const selectable = ranked.find((candidate) => candidate.verdict.kind !== "exhausted");
   if (selectable) return { outcome: "selected", candidate: selectable };

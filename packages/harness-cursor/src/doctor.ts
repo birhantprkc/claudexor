@@ -42,7 +42,8 @@ export async function probeCursorDoctorForAccounts(
     };
   }
   const requestedSource = spec.authSource;
-  const probeNativeRequested = requestedSource === undefined || requestedSource === "native_session";
+  const probeNativeRequested =
+    requestedSource === undefined || requestedSource === "native_session";
   // D-U3 (unified account model): a native cursor session exists ONLY inside
   // an account row's file store. Any other env would resolve the HOST
   // Keychain login, which is never read — so the probe is honestly skipped

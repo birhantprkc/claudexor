@@ -417,8 +417,7 @@ export class QuotaRegistry {
     this.noteCredentialChange();
     const removed = [...this.snapshots.values()].filter(
       (snapshot) =>
-        snapshot.subject.harness === harness &&
-        (snapshot.subject.subject_id ?? null) === subjectId,
+        snapshot.subject.harness === harness && (snapshot.subject.subject_id ?? null) === subjectId,
     ).length;
     this.journal.append(REMOVED, { harness, subject_id: subjectId });
     this.remove(harness, subjectId);

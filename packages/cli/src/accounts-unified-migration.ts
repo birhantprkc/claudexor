@@ -16,7 +16,14 @@
  * path's first step: it surgically reverses every phase (run it BEFORE
  * installing an engine whose canonicalizers refuse the native locator).
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { loadConfig, updateGlobalConfig } from "@claudexor/config";
 import { normalizeThroughExistingAncestor } from "@claudexor/core";
@@ -29,6 +36,7 @@ import type {
 } from "@claudexor/schema";
 import { AccountsUnifiedMigrationFile as MigrationFileSchema } from "@claudexor/schema";
 import { migrateDefaultLanes, rollbackProfileLanes } from "@claudexor/workspace";
+import { invalidateStatusProjections } from "./status-projection-cache.js";
 import { noProjectRepoRoot, nowIso, userConfigDir } from "@claudexor/util";
 
 /** The harnesses whose legacy default stores auto-register (cursor's host
@@ -56,6 +64,32 @@ function writeAccountsMigrationFile(file: AccountsUnifiedMigrationFile): void {
   const tmp = `${path}.tmp.${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, path);
+}
+
+/**
+ * The daemon startup wrapper: run (or crash-resume) the migration, invalidate
+ * status projections when anything changed, and NEVER crash startup — a
+ * failed pass leaves the phase file mid-state, the affected harness refuses
+ * runs typed (accountsMigrationGate), and the next start resumes the
+ * remaining phases.
+ */
+export function runStartupAccountsMigration(
+  threads: AccountsMigrationStores["threads"],
+  quota: AccountsMigrationStores["quota"] & { noteCredentialChange(): void },
+  log: (message: string) => void,
+): void {
+  try {
+    if (runAccountsUnifiedMigration({ threads, quota, log }).length > 0) {
+      invalidateStatusProjections();
+      quota.noteCredentialChange();
+    }
+  } catch (error) {
+    log(
+      `unified-accounts migration pass failed (will resume on the next start): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /** Retire one harness's migration record (its row was deleted with its
