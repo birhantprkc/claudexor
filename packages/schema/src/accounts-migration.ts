@@ -12,9 +12,9 @@ import { Id } from "./primitives.js";
  * working) until the next daemon start finishes the remaining phases.
  */
 export const AccountsMigrationPhase = z
-  .enum(["reserved", "registry_written", "continuity_migrated", "completed"])
+  .enum(["reserved", "registry_written", "continuity_migrated", "completed", "rolling_back"])
   .describe(
-    "Crash-recoverable migration phase for one harness: reserved (id + backup persisted) → registry_written (row in config) → continuity_migrated (sessions/checkpoints/lane homes on the row id) → completed (legacy null quota subject retired).",
+    "Crash-recoverable migration phase for one harness: reserved (id + backup persisted) → registry_written (row in config) → continuity_migrated (sessions/checkpoints/lane homes on the row id) → completed (legacy null quota subject retired). rolling_back marks an in-flight rollback: the startup migration never resumes it forward; re-running the rollback command finishes it.",
   );
 export type AccountsMigrationPhase = z.infer<typeof AccountsMigrationPhase>;
 

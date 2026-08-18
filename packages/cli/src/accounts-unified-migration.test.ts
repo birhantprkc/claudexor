@@ -361,13 +361,88 @@ describe("unified-accounts startup migration (plan §K.6)", () => {
     expect(before.some((s) => s.harness === "codex" && s.subject_id === null)).toBe(true);
     runAccountsUnifiedMigration(stubStores().stores);
     const after = quotaSubjectUniverseFromConfig();
-    // No null subject for migrated harnesses — the row subject covers the
-    // same store (a null duplicate would double-probe one credential).
-    expect(after.some((s) => s.subject_id === null && s.harness !== "cursor")).toBe(false);
+    // No null subject for ANY harness — the row subject covers the same
+    // store (a null duplicate would double-probe one credential), and cursor
+    // never emits a null subject at all (D-U3: no default store).
+    expect(after.some((s) => s.subject_id === null)).toBe(false);
     expect(after.some((s) => s.harness === "codex" && s.subject_id === "codex-default")).toBe(true);
     expect(after.some((s) => s.harness === "claude" && s.subject_id === "claude-default")).toBe(
       true,
     );
+  });
+
+  it("a crash mid-rollback leaves a rolling_back record: gate fires, startup never resumes forward, re-run completes", () => {
+    const home = seedCodexLogin();
+    const { stores } = stubStores();
+    runAccountsUnifiedMigration(stores);
+    // First reverse step blows up AFTER the rolling_back marker persisted.
+    const crashing: AccountsMigrationStores = {
+      ...stores,
+      threads: {
+        ...stores.threads,
+        rollbackProfileContinuity: () => {
+          throw new Error("simulated crash mid-rollback");
+        },
+      },
+    };
+    expect(() => rollbackAccountsUnifiedMigration(crashing)).toThrow(/simulated crash/);
+    expect(readAccountsMigrationFile()["codex"]?.phase).toBe("rolling_back");
+    // Restart: the typed gate fires with the re-run instruction...
+    expect(accountsMigrationGate("codex")?.reason).toContain("re-run the rollback command");
+    // ...and the startup migration never resumes a rollback FORWARD.
+    const { stores: startup, calls } = stubStores();
+    expect(runAccountsUnifiedMigration(startup)).toEqual([]);
+    expect(calls.migrated).toEqual([]);
+    expect(readAccountsMigrationFile()["codex"]?.phase).toBe("rolling_back");
+    // Re-running the rollback command finishes the job (steps idempotent).
+    const receipts = rollbackAccountsUnifiedMigration(stubStores().stores);
+    expect(receipts.map((r) => [r.harness_id, r.row_id])).toEqual([["codex", "codex-default"]]);
+    expect(readAccountsMigrationFile()).toEqual({});
+    expect(accountsMigrationGate("codex")).toBeNull();
+    expect(registryRows()).toEqual([]);
+    expect(existsSync(join(home, "auth.json"))).toBe(true); // bytes never move
+  });
+
+  it("a corrupt migration file fails the run gate CLOSED and is never overwritten by re-migration", () => {
+    seedCodexLogin();
+    mkdirSync(join(accountsMigrationFilePath(), ".."), { recursive: true });
+    writeFileSync(accountsMigrationFilePath(), "not json {{{");
+    const gate = accountsMigrationGate("codex");
+    expect(gate).not.toBeNull();
+    expect(gate?.reason).toContain("corrupt");
+    // The migration pass fails loudly instead of treating corrupt state as
+    // absent and overwriting the evidence with a fresh reservation.
+    expect(() => runAccountsUnifiedMigration(stubStores().stores)).toThrow(/corrupt/);
+    expect(readFileSync(accountsMigrationFilePath(), "utf8")).toBe("not json {{{");
+    // The lenient reader keeps projection surfaces fail-safe.
+    expect(readAccountsMigrationFile()).toEqual({});
+    // ENOENT stays an honest pass: no file, no gate.
+    rmSync(accountsMigrationFilePath(), { force: true });
+    expect(accountsMigrationGate("codex")).toBeNull();
+  });
+
+  it("crash-resume of a reserved record whose login vanished skips registration and clears the record", () => {
+    // The login disappeared between the reserved-phase crash and the restart:
+    // registering the row anyway would fabricate a cold account for nothing.
+    mkdirSync(join(accountsMigrationFilePath(), ".."), { recursive: true });
+    writeFileSync(
+      accountsMigrationFilePath(),
+      JSON.stringify({
+        codex: {
+          phase: "reserved",
+          row_id: "codex-default",
+          legacy_aliases: [null],
+          locator: join(configDir, "native", "codex"),
+          backup_ref: null,
+        },
+      }),
+    );
+    const { stores, calls } = stubStores();
+    expect(runAccountsUnifiedMigration(stores)).toEqual([]);
+    expect(registryRows()).toEqual([]);
+    expect(calls.migrated).toEqual([]);
+    expect(readAccountsMigrationFile()["codex"]).toBeUndefined();
+    expect(accountsMigrationGate("codex")).toBeNull();
   });
 
   it("writes a pre-migration config backup and records its ref", () => {

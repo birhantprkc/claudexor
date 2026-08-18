@@ -12,9 +12,10 @@
               "reserved",
               "registry_written",
               "continuity_migrated",
-              "completed"
+              "completed",
+              "rolling_back"
             ],
-            "description": "Crash-recoverable migration phase for one harness: reserved (id + backup persisted) → registry_written (row in config) → continuity_migrated (sessions/checkpoints/lane homes on the row id) → completed (legacy null quota subject retired)."
+            "description": "Crash-recoverable migration phase for one harness: reserved (id + backup persisted) → registry_written (row in config) → continuity_migrated (sessions/checkpoints/lane homes on the row id) → completed (legacy null quota subject retired). rolling_back marks an in-flight rollback: the startup migration never resumes it forward; re-running the rollback command finishes it."
           },
           "row_id": {
             "type": "string",

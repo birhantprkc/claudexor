@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DurableJournal } from "@claudexor/journal";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ThreadStore, type ThreadHeadPingSink } from "./threads.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -573,6 +573,41 @@ describe("ThreadStore", () => {
     const result = s.migrateNullProfileContinuity("codex", "codex-default");
     expect(result.checkpoints).toBe(0);
     expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn2.id);
+  });
+
+  it("re-migration advances a BEHIND row lane checkpoint left by a rollback (migrate→rollback→re-migrate)", () => {
+    // A rollback re-seeds the ::default lane but leaves the ::<rowId>
+    // checkpoint behind; new turns then advance the default lane. On
+    // re-migration the stale row checkpoint must move FORWARD to the default
+    // lane's turn — resuming it would re-inject context the lane already saw.
+    vi.useFakeTimers({ now: new Date("2026-08-18T00:00:00Z"), toFake: ["Date"] });
+    try {
+      const { s } = store();
+      const t = s.createThread({ repoRoot: "/tmp/proj" });
+      const turn1 = s.createTurn(t.id, "pre-migration turn");
+      s.recordSession(t.id, "codex", "native-default", null, null);
+      s.recordLaneCheckpoint(t.id, "codex", null, turn1.id);
+      s.migrateNullProfileContinuity("codex", "codex-default");
+      expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn1.id);
+
+      vi.advanceTimersByTime(60_000);
+      s.rollbackProfileContinuity("codex", "codex-default");
+      // The row-lane checkpoint stays behind (inert) after rollback...
+      expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn1.id);
+      // ...while the default lane advances with new turns.
+      vi.advanceTimersByTime(60_000);
+      const turn2 = s.createTurn(t.id, "post-rollback turn");
+      s.recordSession(t.id, "codex", "native-default-2", null, null);
+      s.recordLaneCheckpoint(t.id, "codex", null, turn2.id);
+
+      vi.advanceTimersByTime(60_000);
+      const result = s.migrateNullProfileContinuity("codex", "codex-default");
+      // The stale row checkpoint advanced forward to the default lane's turn.
+      expect(result.checkpoints).toBe(1);
+      expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn2.id);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rollbackProfileContinuity returns migrated sessions/checkpoints to the engine-default keys", () => {

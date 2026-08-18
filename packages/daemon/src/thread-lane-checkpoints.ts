@@ -161,7 +161,12 @@ export function resumeMapAutoFrom(
  * lane id (the legacy row stays inert — exact-id lookups never see it).
  * Idempotent: a second run finds no null sessions and no missing checkpoints.
  * A row-lane checkpoint that already exists is never moved backwards (a crash
- * between phases followed by new turns may have advanced it).
+ * between phases followed by new turns may have advanced it) — but a BEHIND
+ * row checkpoint advances forward to the ::default lane's turn: a rollback
+ * leaves the old row-lane checkpoint in place while new turns advance the
+ * default lane, and resuming the stale checkpoint on re-migration would
+ * re-inject context the lane already saw. Recency is judged by updated_at,
+ * the only ordering evidence at this layer.
  */
 export function migrateNullProfileContinuityMutation(
   sessions: readonly Session[],
@@ -177,7 +182,13 @@ export function migrateNullProfileContinuityMutation(
   for (const checkpoint of checkpoints) {
     if (checkpoint.harness_id !== harnessId || (checkpoint.profile_id ?? null) !== null) continue;
     const migrated = makeLaneCheckpoint(checkpoint.thread_id, harnessId, rowId, checkpoint.turn_id);
-    if (checkpoints.some((c) => c.id === migrated.id)) continue;
+    const existing = checkpoints.find((c) => c.id === migrated.id);
+    if (existing) {
+      const behind =
+        existing.turn_id !== checkpoint.turn_id && existing.updated_at < checkpoint.updated_at;
+      if (behind) migratedCheckpoints.push(migrated);
+      continue;
+    }
     migratedCheckpoints.push(migrated);
   }
   return { sessions: migratedSessions, checkpoints: migratedCheckpoints };

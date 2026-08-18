@@ -49,12 +49,47 @@ export function accountsMigrationFilePath(): string {
   return join(userConfigDir(), "migration", "accounts-unified.json");
 }
 
+/** Lenient read for projection/mutation consumers: any unreadable state reads
+ * as "no records" (those surfaces fail safe on their own rules). The RUN GATE
+ * and the migration itself use the strict variant below — a corrupt phase
+ * file must fail CLOSED there, never silently pass runs against unknown
+ * migration state or overwrite the evidence with a fresh reservation. */
 export function readAccountsMigrationFile(): AccountsUnifiedMigrationFile {
   try {
-    const raw = readFileSync(accountsMigrationFilePath(), "utf8");
-    return MigrationFileSchema.parse(JSON.parse(raw));
+    return readAccountsMigrationFileStrict();
   } catch {
     return {};
+  }
+}
+
+/** ENOENT/ENOTDIR = honestly no record ({}); anything else — an unreadable
+ * file, a JSON parse failure, a schema violation — THROWS a typed error so
+ * the gate and the migration fail closed instead of treating corrupt state
+ * as absent. */
+export function readAccountsMigrationFileStrict(): AccountsUnifiedMigrationFile {
+  const path = accountsMigrationFilePath();
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return {};
+    throw Object.assign(
+      new Error(`unified-accounts migration record ${path} is unreadable (${code ?? "io_error"})`),
+      { code: "accounts_migration_record_unreadable" },
+    );
+  }
+  try {
+    return MigrationFileSchema.parse(JSON.parse(raw));
+  } catch (error) {
+    throw Object.assign(
+      new Error(
+        `unified-accounts migration record ${path} is corrupt: ${
+          error instanceof Error ? error.message : String(error)
+        }; fix or remove the file before runs of migrated harnesses can proceed`,
+      ),
+      { code: "accounts_migration_record_unreadable" },
+    );
   }
 }
 
@@ -107,8 +142,23 @@ export function removeAccountsMigrationRecord(harnessId: string): void {
  * half-migrated continuity state. Complete (or absent) records never block.
  */
 export function accountsMigrationGate(harnessId: string): { reason: string } | null {
-  const record = readAccountsMigrationFile()[harnessId];
+  let record: AccountsHarnessMigration | undefined;
+  try {
+    record = readAccountsMigrationFileStrict()[harnessId];
+  } catch (error) {
+    // A CORRUPT phase file fails the gate CLOSED: runs must not route
+    // against unknown migration state (an absent file passes above via the
+    // strict reader's ENOENT branch).
+    return { reason: error instanceof Error ? error.message : String(error) };
+  }
   if (!record || record.phase === "completed") return null;
+  if (record.phase === "rolling_back") {
+    return {
+      reason:
+        `${harnessId} is blocked by an interrupted unified-accounts rollback; ` +
+        `re-run the rollback command (\`claudexor accounts-migration-rollback\`) to finish it`,
+    };
+  }
   return {
     reason:
       `${harnessId} is blocked by an incomplete unified-accounts migration ` +
@@ -259,10 +309,37 @@ export function runAccountsUnifiedMigration(
 ): AccountsMigrationReceipt[] {
   const receipts: AccountsMigrationReceipt[] = [];
   for (const harnessId of ACCOUNTS_MIGRATION_HARNESSES) {
-    const file = readAccountsMigrationFile();
+    // STRICT read: a corrupt phase file must never be treated as "no record"
+    // here — a fresh reservation would overwrite the crash evidence. The
+    // throw is caught by runStartupAccountsMigration; the run gate keeps the
+    // affected harnesses refusing typed until the file is fixed or removed.
+    const file = readAccountsMigrationFileStrict();
     let record = file[harnessId];
     const resumed = record !== undefined && record.phase !== "completed";
     if (record?.phase === "completed") continue;
+    if (record?.phase === "rolling_back") {
+      // An interrupted ROLLBACK never resumes forward — re-running the
+      // rollback command finishes it; the run gate names that instruction.
+      stores.log?.(
+        `unified-accounts migration: ${harnessId} has an interrupted rollback; ` +
+          `re-run \`claudexor accounts-migration-rollback\` to finish it`,
+      );
+      continue;
+    }
+    if (record?.phase === "reserved" && detectLegacyLogin(harnessId) === null) {
+      // Crash-resume of a RESERVED record whose login has since vanished:
+      // the reserved phase mutated nothing but the record itself, and
+      // registering a row now would fabricate a cold account for a login
+      // that no longer exists. Skip (and clear the record) — logged.
+      const remaining = { ...file };
+      delete remaining[harnessId];
+      writeAccountsMigrationFile(remaining);
+      stores.log?.(
+        `unified-accounts migration skipped: ${harnessId} reserved row "${record.row_id}" ` +
+          `has no detectable legacy login anymore; the reservation was cleared`,
+      );
+      continue;
+    }
     if (!record) {
       const detected = detectLegacyLogin(harnessId);
       if (!detected) continue;
@@ -377,12 +454,20 @@ export function rollbackAccountsUnifiedMigration(
   harnessId?: string,
 ): AccountsRollbackReceipt[] {
   const receipts: AccountsRollbackReceipt[] = [];
-  const targets = harnessId ? [harnessId] : Object.keys(readAccountsMigrationFile());
+  const targets = harnessId ? [harnessId] : Object.keys(readAccountsMigrationFileStrict());
   for (const target of targets) {
-    const file = readAccountsMigrationFile();
+    const file = readAccountsMigrationFileStrict();
     const record = file[target];
     if (!record) continue;
     const rowId = record.row_id;
+    // Phase ROLLING_BACK persists BEFORE the first reverse step: a crash
+    // mid-rollback must not leave a record whose phase claims a completed
+    // forward migration while continuity is half-reversed. The startup
+    // migration never resumes a rolling_back record forward; every reverse
+    // step below is idempotent, so re-running this command finishes the job.
+    if (record.phase !== "rolling_back") {
+      writeAccountsMigrationFile({ ...file, [target]: { ...record, phase: "rolling_back" } });
+    }
     const continuity = stores.threads.rollbackProfileContinuity(target, rowId);
     let lanes = 0;
     for (const root of laneRootsOf(stores)) lanes += rollbackProfileLanes(root, target, rowId);
@@ -407,7 +492,7 @@ export function rollbackAccountsUnifiedMigration(
         credential_profiles: config.credential_profiles.filter((p) => p !== row),
       };
     });
-    const remaining = { ...readAccountsMigrationFile() };
+    const remaining = { ...readAccountsMigrationFileStrict() };
     delete remaining[target];
     writeAccountsMigrationFile(remaining);
     receipts.push({
