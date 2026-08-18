@@ -145,7 +145,10 @@ export function claudeTerminalContextEvent(
  * - otherwise the markdown `result` is the final message (side_tool rides its
  *   WorkReport on the message payload);
  * - a side_tool report with no deliverable text still surfaces (rare).
- * Finality is stamped only for a success result.
+ * Finality is stamped only for a success result. A NON-SUCCESS result's text
+ * is failure evidence, not answer material (A3 deliverable hygiene): it rides
+ * a `status` event — visible in the timeline, typed by the entitlement/error
+ * signals alongside — and never a `message` the answer assembly could adopt.
  */
 export function claudeResultMessageEvents(
   obj: Json,
@@ -156,36 +159,57 @@ export function claudeResultMessageEvents(
   const so = obj.structured_output;
   const sideToolReport = claudeSideToolReport(so);
   if (so !== undefined && so !== null && sideToolReport === undefined) {
+    if (!successResult) {
+      return [
+        {
+          type: "status",
+          session_id: sessionId,
+          ts,
+          text: JSON.stringify(so),
+          payload: { structured_output: true, non_success_result: true },
+        },
+      ];
+    }
     return [
       {
         type: "message",
         session_id: sessionId,
         ts,
         text: JSON.stringify(so),
-        ...(successResult ? { final: true } : {}),
+        final: true,
         payload: {
           structured_output: true,
-          ...(successResult ? { final_source: "structured_output" } : {}),
+          final_source: "structured_output",
         },
       },
     ];
   }
   if (typeof obj.result === "string" && obj.result.trim()) {
+    if (!successResult) {
+      return [
+        {
+          type: "status",
+          session_id: sessionId,
+          ts,
+          text: obj.result,
+          payload: {
+            non_success_result: true,
+            ...(sideToolReport !== undefined ? { work_report_side_tool: sideToolReport } : {}),
+          },
+        },
+      ];
+    }
     return [
       {
         type: "message",
         session_id: sessionId,
         ts,
         text: obj.result,
-        ...(successResult ? { final: true } : {}),
-        ...(successResult || sideToolReport !== undefined
-          ? {
-              payload: {
-                ...(successResult ? { final_source: "result" } : {}),
-                ...(sideToolReport !== undefined ? { work_report_side_tool: sideToolReport } : {}),
-              },
-            }
-          : {}),
+        final: true,
+        payload: {
+          final_source: "result",
+          ...(sideToolReport !== undefined ? { work_report_side_tool: sideToolReport } : {}),
+        },
       },
     ];
   }

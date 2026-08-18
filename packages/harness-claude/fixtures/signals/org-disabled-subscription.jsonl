@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","model":"claude-opus-4-8","session_id":"sess-org-0000","tools":[],"mcp_servers":[]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"total_cost_usd":0}

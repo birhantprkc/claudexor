@@ -195,25 +195,44 @@ struct AccountsPopover: View {
         let state = model.autoBalanceState
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: Theme.Spacing.sm) {
-                Toggle(isOn: Binding(
-                    get: { state == .on },
-                    set: { on in Task { await model.setAutoBalance(on) } }
-                )) {
-                    Text("Auto-switch accounts at quota limit").font(.callout)
-                }
-                .toggleStyle(.switch)
-                .tint(Theme.accent)
-                // Per-harness rotate flags disagree → the aggregate is indeterminate:
-                // show "—" rather than misreporting the mixed state as off.
-                .disabled(state == .unavailable)
+                Text("Auto-switch accounts at quota limit").font(.callout)
+                // Per-harness actions disagree → the aggregate is indeterminate:
+                // show "—" (no selected segment) rather than misreporting it.
                 if state == .mixed {
                     Text("—")
                         .font(.callout.weight(.semibold)).foregroundStyle(Theme.status(.caution))
-                        .help("Harnesses disagree — turning this on sets them all to rotate.")
+                        .help("Harnesses disagree — pick a mode to set them all consistently.")
                 }
+                Spacer(minLength: Theme.Spacing.sm)
+                Picker("", selection: Binding<AccountsAutoBalance.Choice?>(
+                    get: { autoBalanceChoice(state) },
+                    set: { choice in
+                        guard let choice else { return }
+                        Task { await model.setAutoBalance(choice) }
+                    }
+                )) {
+                    Text("Off").tag(AccountsAutoBalance.Choice?.some(.fail))
+                    Text("Auto").tag(AccountsAutoBalance.Choice?.some(.auto))
+                    Text("On").tag(AccountsAutoBalance.Choice?.some(.rotate))
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .disabled(state == .unavailable)
             }
             Text(autoBalanceCaption(state))
                 .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    /// The selected segment for the aggregate state; `mixed`/`unavailable`
+    /// select nothing.
+    private func autoBalanceChoice(_ state: AccountsAutoBalance.State) -> AccountsAutoBalance.Choice? {
+        switch state {
+        case .on: return .rotate
+        case .auto: return .auto
+        case .off: return .fail
+        case .mixed, .unavailable: return nil
         }
     }
 
@@ -222,9 +241,13 @@ struct AccountsPopover: View {
         case .unavailable:
             return "Add a second account to a harness to enable auto-switch at its quota limit."
         case .mixed:
-            return "Harnesses disagree (—) — turning this on sets them all to rotate among enabled accounts."
-        case .on, .off:
+            return "Harnesses disagree (—) — pick a mode to set them all consistently."
+        case .auto:
+            return "Subscription accounts switch to another enabled account at their quota limit; metered API keys stop instead."
+        case .on:
             return "When one account hits its quota, runs continue on another enabled account of the same harness."
+        case .off:
+            return "Runs stop at a quota limit instead of switching accounts."
         }
     }
 }

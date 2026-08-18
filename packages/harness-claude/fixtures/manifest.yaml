@@ -160,3 +160,16 @@ fixtures:
   #    session_id}. Marked synthetic per docs/CHECKLISTS.md fixture rule.
   signals/compact-boundary.jsonl:
     source: synthetic
+  # SYNTHETIC — modeled frame-by-frame on the live 2026-08-17 incident
+  # (run-ea06645118d7): a native-session run whose org has subscription access
+  # disabled emits the entitlement PROSE as a plain assistant message and again
+  # as an is_error result (subtype "success"), then exits 1 — no api_retry
+  # frame ever appears, so retry-signals' typed categories never fired. Since
+  # A1 the parser types the non-success result's prose as a status event with
+  # error_category oauth_org_not_allowed; since A3 the result prose itself
+  # also rides a status event (non_success_result), never a message — a failed
+  # result's prose is failure evidence, not answer material.
+  # The raw vendor stream was not captured (the daemon stored only normalized
+  # events), hence synthetic per the docs/CHECKLISTS.md fixture rule.
+  signals/org-disabled-subscription.jsonl:
+    source: synthetic

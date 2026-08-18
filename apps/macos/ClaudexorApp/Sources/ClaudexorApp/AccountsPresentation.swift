@@ -391,28 +391,36 @@ enum AccountsPresentation {
     }
 }
 
-// MARK: - Auto-switch-at-quota (batch-6 item b)
+// MARK: - Auto-switch-at-quota (batch-6 item b; tri-state since A6)
 //
-// The accounts-popover toggle maps to each eligible harness's per-harness
-// `profile_limit_action` (rotate when on, fail when off). Only harnesses that
-// actually have a SECOND account can rotate, so the toggle targets exactly those
-// (a config_dir_login family with ≥1 registered profile: the
-// native/CLI login + ≥1 profile = 2+ rotatable identities). Pure so the target
-// set and the aggregate state are unit-tested rather than eyeballed.
+// The accounts-popover control maps to each eligible harness's per-harness
+// `profile_limit_action` (On = `rotate`, Auto = the stored kind-aware `auto`
+// default, Off = `fail`). Only harnesses that actually have a SECOND account
+// can rotate, so the control targets exactly those (a config_dir_login family
+// with ≥1 registered profile: the native/CLI login + ≥1 profile = 2+ rotatable
+// identities). Pure so the target set and the aggregate state are unit-tested
+// rather than eyeballed.
 enum AccountsAutoBalance {
-    /// Aggregate across the eligible harnesses. `mixed` = they disagree (rendered
-    /// as "—"); `unavailable` = no harness has a second account yet.
-    enum State: Equatable { case on, off, mixed, unavailable }
+    /// Aggregate across the eligible harnesses. `auto` = every harness is on the
+    /// stored kind-aware default; `mixed` = they disagree (rendered as "—");
+    /// `unavailable` = no harness has a second account yet.
+    enum State: Equatable { case on, off, auto, mixed, unavailable }
+
+    /// The user's tri-state pick (A6): Off pins `fail`, Auto restores the stored
+    /// kind-aware default (rotate for subscription subjects, fail for metered),
+    /// On pins `rotate`. Raw values are the wire `profileLimitAction` strings.
+    enum Choice: String, CaseIterable { case fail, auto, rotate }
 
     /// The rotation action is only auto-balance-capable for config_dir_login
     /// families that also have a quota/typed-limit source to trigger rotation.
-    /// Cursor profiles can register (see configDirLoginHarnessIds) but the
-    /// cursor adapter emits no quota snapshots or typed limit events yet, so a
-    /// cursor toggle would be a knob without an observable action (INV-023) —
-    /// it stays out until a vendor usage source exists.
+    /// Cursor profiles can register (see configDirLoginHarnessIds) and — since
+    /// the typed cursor vendor-limit classifier — rotate REACTIVELY under the
+    /// engine's `auto` default, but cursor still has no proactive quota source,
+    /// so this control's capable-set has not admitted it yet; cursor rotation
+    /// stays engine-driven with no app-side knob until that is revisited.
     /// agy qualifies on the same test: `config_dir_login` profiles plus a real
     /// vendor quota source (`agy_command_usage`, read from the CLI's own
-    /// `/quota`), so a toggle here has an observable action to drive.
+    /// `/quota`), so a control here has an observable action to drive.
     static let capableHarnessIds = ["claude", "codex", "agy"]
 
     /// Harnesses whose rotation has NO native identity to fall back on: their
@@ -432,11 +440,24 @@ enum AccountsAutoBalance {
         }
     }
 
-    /// Aggregate on/off/mixed/unavailable from each eligible harness's action.
+    /// Aggregate on/off/auto/mixed/unavailable from each eligible harness's
+    /// stored action. A hand-configured `ask` counts toward Off (it is not
+    /// auto-switch), matching the setter that never erases it.
     static func state(actions: [String]) -> State {
         guard !actions.isEmpty else { return .unavailable }
         if actions.allSatisfy({ $0 == "rotate" }) { return .on }
-        if actions.allSatisfy({ $0 != "rotate" }) { return .off }
+        if actions.allSatisfy({ $0 == "auto" }) { return .auto }
+        if actions.allSatisfy({ $0 == "fail" || $0 == "ask" }) { return .off }
         return .mixed
+    }
+
+    /// The wire value one harness should be patched to for a pick, or nil for
+    /// no-op. Off (`fail`) downgrades rotation — explicit `rotate` or the
+    /// kind-aware `auto` — but never erases a hand-configured `ask`; Auto and
+    /// On set their exact value everywhere (an explicit pick of a mode).
+    static func patchValue(current: String, choice: Choice) -> String? {
+        if current == choice.rawValue { return nil }
+        if choice == .fail, current == "ask" { return nil }
+        return choice.rawValue
     }
 }

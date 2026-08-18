@@ -27,7 +27,7 @@ import {
 } from "@claudexor/core";
 import { resolveSecret } from "@claudexor/secrets";
 import { CLAUDEXOR_VERSION, nowIso, redactSecrets } from "@claudexor/util";
-import { createCursorParser, parseCursorModelList } from "./parse.js";
+import { createCursorParser, parseCursorModelList, parseCursorStderrFailure } from "./parse.js";
 export { parseCursorModelList } from "./parse.js";
 import {
   cursorObservationAuthenticated,
@@ -635,12 +635,12 @@ async function* runCursor(
     yield { type: "completed", session_id: spec.session_id, ts: nowIso() };
     return;
   }
-
   const cursorParser = createCursorParser(
     route === "local_session" ? "vendor_native" : "managed_api_key",
     route === "local_session" ? "native_session" : "api_key_env",
     spec.intent === "plan",
     false,
+    spec.model_hint,
   );
   yield* deps.runCliHarness({
     bin: BIN,
@@ -650,5 +650,6 @@ async function* runCursor(
     label: "cursor-agent",
     redact: redactSecrets,
     parseEvent: stampCursorProfileEvents(profile, cursorParser),
+    parseStderrFailure: (m, s) => parseCursorStderrFailure(m, s, spec.model_hint, profile),
   });
 }

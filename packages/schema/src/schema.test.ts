@@ -1002,6 +1002,17 @@ describe("CredentialProfile validation (INV-135)", () => {
     });
     expect(distinct.success).toBe(true);
   });
+
+  it("profile_policy.limit_action: ABSENT parses to the A6 'auto' stored default; explicit values are never reinterpreted (3=A)", () => {
+    const absent = GlobalConfig.parse({ harnesses: { claude: {} } });
+    expect(absent.harnesses["claude"]?.profile_policy.limit_action).toBe("auto");
+    for (const limit_action of ["auto", "fail", "ask", "rotate"] as const) {
+      const cfg = GlobalConfig.parse({
+        harnesses: { claude: { profile_policy: { limit_action } } },
+      });
+      expect(cfg.harnesses["claude"]?.profile_policy.limit_action).toBe(limit_action);
+    }
+  });
 });
 
 describe("SetupLoginAbsolutePath (cross-platform absolute paths)", () => {

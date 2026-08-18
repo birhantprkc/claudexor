@@ -19,6 +19,12 @@ export const RunFailureCode = z
     "cost_unverifiable",
     "delegation_child_drain_timeout",
     "subscription_window_exhausted",
+    /* The WHOLE credential pool of a harness is blocked (every rotation
+     * candidate spent/cooling/ineligible, the current subject included), so a
+     * limit-triggered or structural failover has nowhere to go. resetsAt folds
+     * the EARLIEST known release inside the pool — the first instant any
+     * member reopens — or null when any member's reset is unknown. */
+    "credential_pool_exhausted",
     /* A delegated run's confinement preconditions. Each is thrown as a typed
      * error deep in the attempt loop, so it must be listed here or
      * `declaredFailure` drops it to `code: null` and the terminal states less
@@ -28,7 +34,7 @@ export const RunFailureCode = z
     "delegated_evidence_incomplete",
   ])
   .describe(
-    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence).",
+    "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, an exhausted credential rotation pool whose EARLIEST known member reset is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence).",
   );
 export type RunFailureCode = z.infer<typeof RunFailureCode>;
 

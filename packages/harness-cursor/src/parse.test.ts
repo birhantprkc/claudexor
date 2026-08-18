@@ -336,14 +336,17 @@ describe("parseCursorEvent", () => {
     expect(absent.some((event) => event.type === "usage")).toBe(false);
   });
 
-  it("an is_error result is never a typed final (sol #1)", () => {
+  it("an is_error result is never a typed final — its prose rides a status event, not a message (sol #1 + A3)", () => {
     const failed = parseCursorEvent(
       { type: "result", subtype: "error", is_error: true, result: "partial" },
       "s1",
     ) as HarnessEvent[];
-    const msg = failed.find((e) => e.type === "message");
-    expect(msg?.text).toBe("partial");
-    expect(msg?.final).toBeUndefined();
+    // A3 deliverable hygiene: no message at all — the answer assembly must
+    // never adopt a failed result's prose as answer material.
+    expect(failed.some((e) => e.type === "message")).toBe(false);
+    const status = failed.find((e) => e.payload?.["non_success_result"] === true);
+    expect(status?.type).toBe("status");
+    expect(status?.text).toBe("partial");
     expect(failed.some((e) => e.type === "error")).toBe(true);
     expect(parseCursorEvent({ type: "brand_new_event" }, "s1")).toBeNull();
   });

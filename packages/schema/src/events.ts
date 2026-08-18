@@ -1,6 +1,7 @@
 import { z } from "zod/v3";
 import { FallbackReason, Id } from "./primitives.js";
 import { AuthMode } from "./budget.js";
+import { CredentialUnusableObservation } from "./credential-profile.js";
 
 export const ControlJournalEvent = z
   .object({
@@ -66,6 +67,11 @@ export const RunEventType = z
     "route.profile.headroom_exceeded",
     "route.profile.rotated",
     "route.profile.rotation_exhausted",
+    /** A7 differential probe: on a rotation-eligible failure the CURRENT
+     * credential subject was probed (existing poller/doctor evidence only —
+     * never a quota-spending mini-run) and found UNUSABLE (dead credential,
+     * not spent quota). Payload: RouteCredentialUnusablePayload. */
+    "route.profile.credential_unusable",
     "route.transient.exhausted",
     /** A subscription->API (or harness->harness) auth switch driven by a typed
      * quota/money signal. Distinct from a plain harness rotation; never silent. */
@@ -184,6 +190,24 @@ export const OutputReadyPayload = z
   .strict()
   .describe("Validated payload of an output.ready run event.");
 export type OutputReadyPayload = z.infer<typeof OutputReadyPayload>;
+
+/**
+ * Typed payload for `route.profile.credential_unusable` (A7): the differential
+ * probe's observation plus the attempt it fired in. The rotation module
+ * validates this before stamping it onto the RunEvent payload, so the
+ * unusable verdict is always evidence-backed — code, source, and expiry come
+ * from the observation itself, never invented at emit time.
+ */
+export const RouteCredentialUnusablePayload = CredentialUnusableObservation.extend({
+  attempt_id: z
+    .string()
+    .nullable()
+    .default(null)
+    .describe("Attempt whose rotation-eligible failure triggered the probe, when known."),
+}).describe(
+  "Typed payload for route.profile.credential_unusable: the differential probe's typed observation of a dead credential, validated before being stamped onto the RunEvent payload.",
+);
+export type RouteCredentialUnusablePayload = z.infer<typeof RouteCredentialUnusablePayload>;
 
 /**
  * Typed payload for `route.fallback.*` events. The orchestrator validates this

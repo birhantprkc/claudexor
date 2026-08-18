@@ -122,6 +122,62 @@ export const CredentialProfileStatus = z
   .describe("Doctor-owned readiness projection for one credential profile; never durable config.");
 export type CredentialProfileStatus = z.infer<typeof CredentialProfileStatus>;
 
+/** Why an observed credential is unusable, in the OBSERVER's typed vocabulary:
+ * `auth_revoked` = the vendor rejected the credential itself (401/403);
+ * `capability_refused` = a typed non-retryable entitlement refusal was observed
+ * on the attempt stream (org-disabled, model-not-entitled — model-scoped when
+ * the attempt carried a model hint); `verification_failed` = the profile's own
+ * doctor probe failed verification. */
+export const CredentialUnusableCode = z
+  .enum(["auth_revoked", "capability_refused", "verification_failed"])
+  .describe(
+    "Typed reason an observed credential is unusable: vendor rejection, entitlement refusal, or a failed profile verification probe.",
+  );
+export type CredentialUnusableCode = z.infer<typeof CredentialUnusableCode>;
+
+/**
+ * ONE typed observation that a credential subject is UNUSABLE — dead as a
+ * credential, not merely quota-spent (A7 differential probe). Deliberately a
+ * bounded, self-expiring OBSERVATION, never durable config: profile readiness
+ * stays the doctor's projection (`CredentialProfileStatus`), and quota-spent
+ * evidence stays the quota registry's cooldown snapshots. The clearing
+ * contract is threefold: `expires_at` self-expiry (bounded TTL), a successful
+ * model response for the same subject, and any credential-generation change
+ * (re-login / profile mutation).
+ */
+export const CredentialUnusableObservation = z
+  .object({
+    harness_id: Id.describe("Harness family the observed subject belongs to."),
+    profile_id: Id.nullable().describe(
+      "Observed credential profile, or null for the harness's default subject.",
+    ),
+    /** Model the refusal was observed under, when the evidence cannot prove it
+     * is credential-wide (an entitlement refusal may be model-scoped). Null =
+     * the evidence condemns the credential for every model. */
+    model: z
+      .string()
+      .nullable()
+      .describe(
+        "Model hint the refusal was observed under (entitlement refusals may be model-scoped); null = credential-wide.",
+      ),
+    code: CredentialUnusableCode,
+    source: z
+      .enum(["vendor_poller", "attempt_stream", "local_probe"])
+      .describe(
+        "Where the evidence came from: the quota poller's typed absence, a typed refusal on the attempt stream, or the profile's own doctor probe.",
+      ),
+    detail: z.string().nullable().describe("Redacted human-readable evidence."),
+    observed_at: IsoTimestamp.describe("When the unusable verdict was observed."),
+    expires_at: IsoTimestamp.describe(
+      "Self-expiry instant (bounded TTL); after this the observation is ignored.",
+    ),
+  })
+  .strict()
+  .describe(
+    "A bounded, self-expiring typed observation that a credential subject is unusable (dead credential, not spent quota); never durable config.",
+  );
+export type CredentialUnusableObservation = z.infer<typeof CredentialUnusableObservation>;
+
 /**
  * NON-SECRET account identity projection (INV-067/INV-135): the email and plan
  * label derived DAEMON-SIDE from a sanctioned per-account source. Codex and

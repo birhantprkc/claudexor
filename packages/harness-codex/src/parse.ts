@@ -463,7 +463,13 @@ function applyRequiredMcpFailure(
   };
 }
 
-/** Translate Codex's stderr-only required-MCP fatal into the same typed receipt as JSON errors. */
+/**
+ * Translate Codex's stderr-only fatals into the same typed receipts as JSON
+ * errors: the required-MCP startup fatal, and (A1 cursor-parity) a vendor
+ * rate/usage-limit that reaches stderr instead of a typed `error` frame —
+ * without the typed `rate_limit` signal a stderr-shaped limit is a generic
+ * harness_error and reactive credential rotation can never fire on it.
+ */
 export function parseCodexStderrFailure(
   message: string,
   sessionId: string,
@@ -476,7 +482,9 @@ export function parseCodexStderrFailure(
     error: message,
   };
   applyRequiredMcpFailure(event, message, state);
-  return event.payload?.["mcp_servers"] ? event : null;
+  // Stderr carries no typed resets_at field; the signal stays reset-less.
+  applyCodexRateLimit(event, message, null);
+  return event.payload?.["mcp_servers"] || event.rate_limit ? event : null;
 }
 
 function escapeRegex(value: string): string {

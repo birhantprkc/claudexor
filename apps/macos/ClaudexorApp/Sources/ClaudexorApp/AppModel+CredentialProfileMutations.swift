@@ -112,34 +112,40 @@ extension AppModel {
 
     /// Aggregated auto-switch state across the eligible harnesses. `mixed` (they
     /// disagree) renders as "—"; `unavailable` (no 2nd account anywhere) disables
-    /// the toggle. Reads the per-harness `profile_limit_action` from settings.
+    /// the control. Reads the per-harness `profile_limit_action` from settings;
+    /// an ABSENT value is the engine's stored `auto` default (A6).
     var autoBalanceState: AccountsAutoBalance.State {
         if let pending = autoBalanceOverride {
             // While a save round-trips, reflect the optimistic choice — but only
             // when there is actually an eligible harness to have set.
-            return autoBalanceHarnessIds.isEmpty ? .unavailable : (pending ? .on : .off)
+            if autoBalanceHarnessIds.isEmpty { return .unavailable }
+            switch pending {
+            case .rotate: return .on
+            case .auto: return .auto
+            case .fail: return .off
+            }
         }
         let actions = autoBalanceHarnessIds.map {
-            activeSettingsSnapshot?.harnesses?[$0]?.profileLimitAction ?? "fail"
+            activeSettingsSnapshot?.harnesses?[$0]?.profileLimitAction ?? "auto"
         }
         return AccountsAutoBalance.state(actions: actions)
     }
 
-    /// Flip auto-switch for every eligible harness at once (on = rotate, off =
-    /// fail), so a mixed state resolves to a single consistent choice.
-    func setAutoBalance(_ on: Bool) async {
-        // ON sets rotate on every eligible harness. OFF only downgrades harnesses
-        // currently on "rotate" — a hand-configured "ask" is not auto-switch, so
-        // the toggle must not erase it.
+    /// Apply one tri-state pick to every eligible harness at once (On = rotate,
+    /// Auto = kind-aware default, Off = fail), so a mixed state resolves to a
+    /// single consistent choice. Off never erases a hand-configured `ask`
+    /// (see `AccountsAutoBalance.patchValue`).
+    func setAutoBalance(_ choice: AccountsAutoBalance.Choice) async {
         let patch = Dictionary(uniqueKeysWithValues: autoBalanceHarnessIds.compactMap {
             id -> (String, HarnessSettingsPatch)? in
-            let current = activeSettingsSnapshot?.harnesses?[id]?.profileLimitAction ?? "fail"
-            if on { return current == "rotate" ? nil : (id, HarnessSettingsPatch(profileLimitAction: "rotate")) }
-            return current == "rotate" ? (id, HarnessSettingsPatch(profileLimitAction: "fail")) : nil
+            let current = activeSettingsSnapshot?.harnesses?[id]?.profileLimitAction ?? "auto"
+            guard let value = AccountsAutoBalance.patchValue(current: current, choice: choice)
+            else { return nil }
+            return (id, HarnessSettingsPatch(profileLimitAction: value))
         })
         guard !patch.isEmpty else { return }
         accountsNextUpAuthorityFresh[activeExecutionLocation] = false
-        autoBalanceOverride = on
+        autoBalanceOverride = choice
         defer { autoBalanceOverride = nil }
         _ = await saveSettings(SettingsUpdateRequest(harnesses: patch))
     }

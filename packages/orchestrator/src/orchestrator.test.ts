@@ -3575,8 +3575,11 @@ describe("Orchestrator", () => {
       expect(spawns.map((s) => s.profile)).toEqual(["a", "c"]);
       // Admission probes the explicit current identity; rotation probes only
       // the statically-selectable same-kind candidate. Cross-kind b is never
-      // activated merely to discover that policy cannot select it.
-      expect(probedProfiles).toEqual(["a", "c"]);
+      // activated merely to discover that policy cannot select it. The
+      // trailing "a" is A7's SIBLING differential probe of the CURRENT
+      // subject on the rotation-eligible failure — a doctor probe, never a
+      // spawned attempt (the spawn pin above stays two runs).
+      expect(probedProfiles).toEqual(["a", "c", "a"]);
       // Failover is a NEW vendor session under the new credential.
       expect(new Set(spawns.map((s) => s.session)).size).toBe(2);
       expect(events).toContain("route.profile.rotated");
@@ -4301,7 +4304,9 @@ describe("Orchestrator", () => {
       });
       expect(legacyOutcome(res)).toBe("success");
       expect(profilesSeen).toEqual(["a", "c"]);
-      expect(probedProfiles).toEqual(["a", "c"]);
+      // Trailing "a" = A7's sibling differential probe of the current subject
+      // (doctor probe only — profilesSeen above proves no third attempt ran).
+      expect(probedProfiles).toEqual(["a", "c", "a"]);
       expect(events).toContain("route.profile.rotated");
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
@@ -4406,6 +4411,666 @@ describe("Orchestrator", () => {
       // The transient retry stays on the SAME profile; rotation never fires.
       expect(profilesSeen).toEqual(["a", "a"]);
       expect(events).not.toContain("route.profile.rotated");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("rotates STRUCTURALLY on an untyped pre-progress terminal death (A2, owner 7=A)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-structural-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:a'",
+        "  - profile_id: b",
+        "    harness_id: limited",
+        "    display_name: B",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:b'",
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          if (profilesSeen.length === 1) {
+            // UNTYPED terminal death before ANY agent output: no rate_limit,
+            // no transient signal — the incident shape (an unclassifiable
+            // vendor refusal / invalid flag / missing binary). Owner 7=A: any
+            // such pre-progress non-transient death tries the pool.
+            yield {
+              type: "error",
+              session_id: spec.session_id,
+              ts,
+              error: "ActionRequiredError: unclassifiable vendor refusal",
+            };
+            yield { type: "completed", session_id: spec.session_id, ts };
+            return;
+          }
+          writeFileSync(join(spec.cwd, "CHANGED.txt"), "made it\n");
+          yield { type: "message", session_id: spec.session_id, ts, text: "Implemented." };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "a",
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(legacyOutcome(res)).not.toBe("failed");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      // Honest provenance: the rotation names the STRUCTURAL reason — no
+      // typed vendor limit was observed, so vendor_limit_rejected would lie.
+      const rotated = events.find((e) => e.type === "route.profile.rotated");
+      expect(rotated?.payload["reason"]).toBe("structural_pre_progress_failure");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a tool_call before the death blocks the structural branch (sol amendment: side effects)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-structural-progress-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: limited",
+        "    display_name: A",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:a'",
+        "  - profile_id: b",
+        "    harness_id: limited",
+        "    display_name: B",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:b'",
+        "harnesses:",
+        "  limited:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const adapter: HarnessAdapter = {
+        id: "limited",
+        async discover() {
+          return HarnessManifest.parse({
+            id: "limited",
+            display_name: "limited",
+            kind: "local_cli",
+            provider_family: "local",
+            capabilities: { implement: true },
+            access_profiles_supported: ["workspace_write"],
+          });
+        },
+        async doctor() {
+          return ConformanceReport.parse({
+            harness_id: "limited",
+            status: "ok",
+            enabled_intents: ["implement"],
+          });
+        },
+        async probeCredentialProfile(profile) {
+          return {
+            profile_id: profile.profile_id,
+            harness_id: "limited",
+            availability: "available",
+            verification: "passed",
+            verification_source: "local_store",
+            detail: "fixture profile verified",
+            last_verified_at: new Date().toISOString(),
+          };
+        },
+        async *run(spec) {
+          const ts = new Date().toISOString();
+          profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+          yield { type: "started", session_id: spec.session_id, ts };
+          // The agent demonstrably started working (a tool call may already
+          // have external side effects) — then died untyped. The structural
+          // branch must NOT silently replay this under another credential.
+          yield {
+            type: "tool_call",
+            session_id: spec.session_id,
+            ts,
+            tool: { name: "bash", kind: "command" },
+          };
+          yield { type: "error", session_id: spec.session_id, ts, error: "untyped death" };
+          yield { type: "completed", session_id: spec.session_id, ts };
+        },
+      };
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", adapter]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "a",
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(legacyOutcome(res)).toBe("failed");
+      expect(profilesSeen).toEqual(["a"]);
+      expect(events).not.toContain("route.profile.rotated");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a typed limit whose vendor prose rides a STATUS event still rotates, and the prose never lands in answer.md (A3+A2)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-limit-prose-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:a'",
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:b'",
+        "harnesses:",
+        "  asker:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      // The post-A3 adapter shape for a limit-killed run: the vendor prose is
+      // a STATUS event (never a message), the limit is a TYPED rate_limit on
+      // the terminal error. Rotation must fire — before A3 the same prose
+      // arrived as a message, became "the deliverable", and blocked it.
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        if (profilesSeen.length === 1) {
+          yield {
+            type: "status",
+            session_id: sessionId,
+            ts,
+            text: "You've hit your usage limit. Your usage limits will reset on 9/12/2026.",
+            payload: { non_success_result: true },
+          };
+          yield {
+            type: "error",
+            session_id: sessionId,
+            ts,
+            error: "result subtype: error",
+            status: { kind: "api_retry", error_category: "rate_limit" },
+            rate_limit: { resets_at: null, retry_delay_ms: 60_000 },
+          };
+          yield { type: "completed", session_id: sessionId, ts };
+          return;
+        }
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      const askerRun = asker.run.bind(asker);
+      asker.run = (spec) => {
+        profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+        return askerRun(spec);
+      };
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        credentialProfileId: "a",
+        onEvent: (event) => events.push(event.type),
+      });
+      expect(legacyOutcome(res)).toBe("success");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      expect(events).toContain("route.profile.rotated");
+      const answer = readFileSync(join(res.runDir, "final", "answer.md"), "utf8");
+      expect(answer).toContain("4");
+      expect(answer).not.toContain("usage limit");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("rotates STRUCTURALLY in the READ-ONLY lane too (A2 lane parity)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-ro-structural-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: a",
+        "    harness_id: asker",
+        "    display_name: A",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:a'",
+        "  - profile_id: b",
+        "    harness_id: asker",
+        "    display_name: B",
+        "    credential_kind: api_key",
+        "    secret_ref: 'openai:b'",
+        "harnesses:",
+        "  asker:",
+        "    profile_policy:",
+        "      limit_action: rotate",
+        "",
+      ].join("\n"),
+    );
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        if (profilesSeen.length === 1) {
+          // Untyped pre-progress terminal death, read-only lane.
+          yield { type: "error", session_id: sessionId, ts, error: "untyped vendor refusal" };
+          yield { type: "completed", session_id: sessionId, ts };
+          return;
+        }
+        yield { type: "message", session_id: sessionId, ts, text: "4" };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      const askerRun = asker.run.bind(asker);
+      asker.run = (spec) => {
+        profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+        return askerRun(spec);
+      };
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        credentialProfileId: "a",
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(legacyOutcome(res)).toBe("success");
+      expect(profilesSeen).toEqual(["a", "b"]);
+      const rotated = events.find((e) => e.type === "route.profile.rotated");
+      expect(rotated?.payload["reason"]).toBe("structural_pre_progress_failure");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  // A5: one config shape shared by the pool-exhausted terminal tests — a
+  // single rotate-policy profile, so any rotation-eligible failure exhausts
+  // the pool immediately.
+  const soloRotateConfig = (harness: string) =>
+    [
+      "credential_profiles:",
+      "  - profile_id: solo",
+      `    harness_id: ${harness}`,
+      "    display_name: Solo",
+      "    credential_kind: api_key",
+      "    secret_ref: 'openai:solo'",
+      "harnesses:",
+      `  ${harness}:`,
+      "    profile_policy:",
+      "      limit_action: rotate",
+      "",
+    ].join("\n");
+
+  const A5_RESETS = "2099-01-01T00:00:00.000Z";
+
+  /** Implement-capable adapter that hits a typed (or untyped) terminal limit
+   * on EVERY spawn — a transient retry or a rotation would grow `spawns`. */
+  const limitedSoloAdapter = (spawns: Array<string | null>, typed: boolean): HarnessAdapter => ({
+    id: "limited",
+    async discover() {
+      return HarnessManifest.parse({
+        id: "limited",
+        display_name: "limited",
+        kind: "local_cli",
+        provider_family: "local",
+        capabilities: { implement: true },
+        access_profiles_supported: ["workspace_write"],
+      });
+    },
+    async doctor() {
+      return ConformanceReport.parse({
+        harness_id: "limited",
+        status: "ok",
+        enabled_intents: ["implement"],
+      });
+    },
+    async probeCredentialProfile(profile) {
+      return {
+        profile_id: profile.profile_id,
+        harness_id: "limited",
+        availability: "available",
+        verification: "passed",
+        verification_source: "local_store",
+        detail: "fixture profile verified",
+        last_verified_at: new Date().toISOString(),
+      };
+    },
+    async *run(spec) {
+      const ts = new Date().toISOString();
+      spawns.push(spec.credential_profile?.profile_id ?? null);
+      yield { type: "started", session_id: spec.session_id, ts };
+      yield {
+        type: "error",
+        session_id: spec.session_id,
+        ts,
+        error: typed ? "vendor rate limit exhausted" : "untyped vendor refusal",
+        ...(typed
+          ? {
+              status: { kind: "api_retry", error_category: "rate_limit" },
+              rate_limit: { resets_at: A5_RESETS, retry_delay_ms: 60_000 },
+            }
+          : {}),
+      };
+      yield { type: "completed", session_id: spec.session_id, ts };
+    },
+  });
+
+  it("a typed limit with an EXHAUSTED pool terminalizes TYPED before any transient retry (A5)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-pool-exhausted-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("limited"));
+    try {
+      const spawns: Array<string | null> = [];
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, true)]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "solo",
+        onEvent: (event) => events.push(event.type),
+      });
+      // The typed limit is retryable-transient by class — without the A5
+      // ordering the gate would burn maxRetries same-profile spawns on the
+      // subject the vendor just refused.
+      expect(spawns).toEqual(["solo"]);
+      expect(events).toContain("route.profile.rotation_exhausted");
+      expect(events).not.toContain("route.transient.retry_scheduled");
+      expect(events).not.toContain("route.transient.exhausted");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        // The stream's own typed reset is the subject's evidence in the fold.
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("a STRUCTURAL pre-progress death with an EXHAUSTED pool terminalizes typed too (A5)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-pool-structural-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("limited"));
+    try {
+      const spawns: Array<string | null> = [];
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, false)]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "solo",
+        onEvent: (event) =>
+          events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
+      });
+      expect(spawns).toEqual(["solo"]);
+      const exhausted = events.find((e) => e.type === "route.profile.rotation_exhausted");
+      expect(exhausted?.payload["reason"]).toBe("structural_pre_progress_failure");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      // No observed limit anywhere in the pool: the reset is honestly unknown.
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: null,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("the READ-ONLY lane's pool-exhausted terminal is typed too (A5 lane parity)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-ro-pool-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("asker"));
+    try {
+      const profilesSeen: Array<string | null> = [];
+      const asker = askAdapter("asker", function* (sessionId) {
+        const ts = new Date().toISOString();
+        yield { type: "started", session_id: sessionId, ts };
+        yield {
+          type: "error",
+          session_id: sessionId,
+          ts,
+          error: "vendor rate limit exhausted",
+          status: { kind: "api_retry", error_category: "rate_limit" },
+          rate_limit: { resets_at: A5_RESETS, retry_delay_ms: 60_000 },
+        };
+        yield { type: "completed", session_id: sessionId, ts };
+      });
+      const askerRun = asker.run.bind(asker);
+      asker.run = (spec) => {
+        profilesSeen.push(spec.credential_profile?.profile_id ?? null);
+        return askerRun(spec);
+      };
+      const res = await new Orchestrator({
+        registry: new Map([["asker", asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+        credentialProfileId: "solo",
+      });
+      expect(profilesSeen).toEqual(["solo"]);
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("the CONVERGENCE last-result terminal lifts the typed pool refusal (A5)", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-conv-pool-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    writeFileSync(join(configDir, "config.yaml"), soloRotateConfig("limited"));
+    try {
+      const spawns: Array<string | null> = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, true)]]),
+        reviewers: reviewers(),
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        attempts: 2,
+        credentialProfileId: "solo",
+      });
+      // One spawn per convergence attempt — never transient same-profile burns.
+      expect(spawns).toEqual(["solo", "solo"]);
+      expect(res.lifecycle).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: A5_RESETS,
+      });
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
+  it("A6 auto default: with NO profile_policy configured, a SUBSCRIPTION subject rotates and the A5 pool terminal is reachable by default users", async () => {
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-auto-default-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    // The config has NO harnesses/profile_policy section at all — the stored
+    // default is `auto` — and the pinned subject is a subscription
+    // (config_dir_login) identity, so auto resolves to rotate.
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: solo",
+        "    harness_id: limited",
+        "    display_name: Solo",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-solo"))}`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const spawns: Array<string | null> = [];
+      const events: string[] = [];
+      const res = await new Orchestrator({
+        registry: new Map([["limited", limitedSoloAdapter(spawns, true)]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "do it",
+        mode: "agent",
+        harnesses: ["limited"],
+        n: 1,
+        credentialProfileId: "solo",
+        onEvent: (event) => events.push(event.type),
+      });
+      // Rotation engaged WITHOUT any configuration: the typed limit on the
+      // solo subscription pool terminalizes typed instead of burning
+      // same-profile transient retries — the default-user path.
+      expect(spawns).toEqual(["solo"]);
+      expect(events).toContain("route.profile.rotation_exhausted");
+      expect(events).not.toContain("route.transient.retry_scheduled");
+      expect(events).not.toContain("route.transient.exhausted");
+      expect(legacyOutcome(res)).toBe("failed");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "credential_pool_exhausted",
+        resetsAt: A5_RESETS,
+      });
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;

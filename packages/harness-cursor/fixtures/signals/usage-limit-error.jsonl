@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "model": "Gemini 3.7 Flash High", "chatId": "chat-limit-0000"}
+{"type": "error", "message": "ActionRequiredError: You've hit your usage limit You've saved $567 on API model usage this month with Ultra. Switch to a different model or set a Spend Limit to continue with Gemini. Your usage limits will reset when your monthly cycle ends on 9/12/2026."}

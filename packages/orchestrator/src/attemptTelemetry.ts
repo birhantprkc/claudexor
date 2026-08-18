@@ -22,6 +22,7 @@ import {
 } from "./attemptUsageCost.js";
 import { redactSecrets } from "@claudexor/util";
 import * as belt from "./delegationToolEvidence.js";
+import * as marks from "./attemptOutputMarkers.js";
 import {
   type TransientFailureObservation,
   classifyCompletedCrash,
@@ -128,12 +129,12 @@ export interface AttemptTelemetry {
   /** Model hint the engine SENT this attempt (requested side; observedModel is
    * the disclosed side of the model x route truth). */
   requestedModel: string | null;
-  /** Adapter-declared transient failures seen during this attempt, each
-   * classified into the GH #31 typed taxonomy the retry policy gates on. */
+  /** Adapter-declared transients, classified into the GH #31 taxonomy the retry policy gates on. */
   transientFailures: TransientFailureObservation[];
-  /** TYPED vendor rate-limit signals seen during this attempt (W5.4): the
-   * rotation predicate reads these, never prose or plain transients. */
+  /** TYPED vendor rate-limit signals seen this attempt (W5.4): the rotation predicate's input. */
   rateLimits: { retryDelayMs: number | null; resetsAt: string | null }[];
+  /** A2: agent-progress / file-change markers for the structural rotation predicate. */
+  outputMarkers: marks.AttemptOutputMarkers;
   /** Delegation-belt runtime readiness (QA-024); requested=false on non-delegate attempts. */
   delegationBelt: DelegationBeltState;
   /** Browser-MCP runtime evidence (QA-040); requested=false unless the browser
@@ -207,6 +208,7 @@ export function createAttemptTelemetry(
     requestedModel,
     transientFailures: [],
     rateLimits: [],
+    outputMarkers: marks.newAttemptOutputMarkers(),
     delegationBelt: {
       requested: beltServerName !== null,
       serverName: beltServerName,
@@ -230,8 +232,7 @@ export function createAttemptTelemetry(
   };
 }
 
-/** Add one present token field to a null-aware accumulator (null stays null
- *  until a value actually arrives, so "unreported" never reads as 0). */
+/** Add one present token field to a null-aware accumulator ("unreported" never reads as 0). */
 function addToken(acc: number | null, value: number | undefined): number | null {
   return value === undefined ? acc : (acc ?? 0) + value;
 }
@@ -299,6 +300,7 @@ function bumpWebVerification(t: AttemptTelemetry, retrieval: string | undefined)
  * matching or tool-name heuristics.
  */
 export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): void {
+  marks.observeAttemptOutputMarkers(t.outputMarkers, ev);
   // Delegation belt readiness (QA-024): normalized startup/error events carry
   // typed MCP server statuses. Read THAT server's status as first-class truth;
   // a failed belt must never launder into a native-subagent success.

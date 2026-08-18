@@ -5,6 +5,9 @@ import {
   HarnessEvent,
   QuotaAbsence as QuotaAbsenceSchema,
   QuotaSnapshot as QuotaSnapshotSchema,
+  REACTIVE_COOLDOWN_SOURCE,
+  legacyV320QuotaSource,
+  vendorResetDayCooldownEnd,
   type CredentialRoute,
   type QuotaAbsence,
   type QuotaConstraint,
@@ -366,10 +369,7 @@ export class QuotaRegistry {
         freshness: "fresh",
       });
     }
-    // agy is deliberately ABSENT: its adapter emits no `rate_limit` event, so
-    // an agy branch here would be a knob with no producer (INV-022/023). It
-    // joins the list in the same change that makes the adapter emit one.
-    if (event.data.rate_limit && credentialRoute && ["codex", "claude"].includes(harnessId)) {
+    if (event.data.rate_limit && credentialRoute && harnessId in REACTIVE_COOLDOWN_SOURCE) {
       this.upsertCooldown(harnessId, credentialRoute, event.data);
     }
   }
@@ -382,15 +382,16 @@ export class QuotaRegistry {
   private recordUpsert(value: QuotaSnapshot): void {
     const snapshot = QuotaSnapshotSchema.parse(value);
     // Runtime updates share this journal with the prior installed engine during
-    // rollback. v3.2.0's strict QuotaConstraint schema predates
-    // applies_to_models. Prepare the exact current snapshot under a new record
-    // type that an older runtime safely ignores, then commit it with the
-    // established, explicitly v3.2.0-shaped upsert. Current replay applies a
-    // prepare only when its matching base follows, so a stop between the two
-    // records loses neither the prior projection nor model scope: the journal
-    // appends the pair under one recovery intent and one fsync.
+    // rollback. v3.2.0's strict schemas predate applies_to_models AND the
+    // cursor_rate_limit source. Prepare the exact current snapshot under a new
+    // record type an older runtime safely ignores, then commit it with the
+    // established v3.2.0-shaped upsert; current replay applies a prepare only
+    // when its matching base follows (one recovery intent, one fsync).
     const legacy = legacyV320Snapshot(snapshot);
-    if (snapshot.constraints.some((constraint) => constraint.applies_to_models !== undefined)) {
+    if (
+      snapshot.constraints.some((constraint) => constraint.applies_to_models !== undefined) ||
+      legacy.source !== snapshot.source
+    ) {
       this.journal.appendBatch([
         {
           type: SCOPED_PREPARED,
@@ -461,13 +462,14 @@ export class QuotaRegistry {
     const reset = event.rate_limit?.resets_at ?? null;
     const delay = event.rate_limit?.retry_delay_ms ?? null;
     const now = this.now();
+    // A day-granular vendor reset (A1 payload) bounds the cooldown at end-of-day UTC.
     const cooldownUntil =
       reset ??
+      vendorResetDayCooldownEnd(event.payload) ??
       new Date(now.getTime() + (typeof delay === "number" ? delay : 5 * 60_000)).toISOString();
-    const source = harness === "claude" ? "claude_api_retry" : "codex_rollout";
-    // The event's profile stamp scopes the cooldown to ITS subject (release
-    // wave round-11): a profiled limit must never cool the default subject
-    // down (or vice versa), and two profiles never share one quota key.
+    const source = REACTIVE_COOLDOWN_SOURCE[harness] ?? "codex_rollout";
+    // The event's profile stamp scopes the cooldown to ITS subject (round-11):
+    // a profiled limit never cools the default subject down (or vice versa).
     const profileId = event.credential_profile_id ?? null;
     const constraintId = event.rate_limit?.constraint_id
       ? `cooldown:${event.rate_limit.constraint_id}`
@@ -555,7 +557,7 @@ function legacyV320Snapshot(snapshot: QuotaSnapshot): QuotaSnapshot {
       resets_at: constraint.resets_at,
       cooldown_until: constraint.cooldown_until,
     })),
-    source: snapshot.source,
+    source: legacyV320QuotaSource(snapshot.source),
     observed_at: snapshot.observed_at,
     freshness: snapshot.freshness,
   };
@@ -579,8 +581,10 @@ function isExpiredScopedCooldown(
   constraint: QuotaConstraint,
   now: number,
 ): boolean {
+  // Every reactive cooldown source (the upsertCooldown producers), not a claude-only
+  // name check: an expired scoped sibling never hides a newer active one (Q24 generalized).
   return (
-    source === "claude_api_retry" &&
+    Object.values(REACTIVE_COOLDOWN_SOURCE).includes(source) &&
     constraint.id.startsWith("cooldown:") &&
     resetExpiredAt(constraint, now)
   );

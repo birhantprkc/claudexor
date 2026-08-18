@@ -9,9 +9,16 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ArtifactStore } from "@claudexor/artifact-store";
 import { EventLog } from "@claudexor/event-log";
-import { RunFailure, type CredentialProfile, type QuotaSnapshot } from "@claudexor/schema";
+import {
+  HarnessRunSpec,
+  RunFailure,
+  type CredentialProfile,
+  type QuotaConstraint,
+  type QuotaSnapshot,
+} from "@claudexor/schema";
 import { type CandidateRun, unanimousDeclaredFailure } from "./candidateEvidence.js";
-import { preflightCredentialProfile } from "./credential-profile-rotation.js";
+import { preflightCredentialProfile, preflightDefaultSubject } from "./credential-preflight.js";
+import { rotateSpecOnTypedLimit, type ProfilePolicy } from "./credential-profile-rotation.js";
 import { type DeclaredFailure, failTerminally } from "./runTerminalResults.js";
 
 const dirs: string[] = [];
@@ -154,5 +161,187 @@ describe("unanimousDeclaredFailure (no ranking of mixed causes)", () => {
   it("has nothing to say about an empty or untyped candidate set", () => {
     expect(unanimousDeclaredFailure([])).toBeNull();
     expect(unanimousDeclaredFailure([slot(undefined), slot(undefined)])).toBeNull();
+  });
+});
+
+// A5: the WHOLE pool refused. Within ONE pool the fold is the EARLIEST known
+// reset (one reopened member is enough to retry) — the across-candidates
+// LATEST rule above stays untouched.
+describe("credential pool exhaustion (A5)", () => {
+  const EARLY = "2099-01-01T06:00:00.000Z";
+  const MID = "2099-01-01T12:00:00.000Z";
+  const LATE = "2099-01-01T18:00:00.000Z";
+
+  const mkProfile = (id: string): CredentialProfile => ({
+    ...profile,
+    profile_id: id,
+    display_name: id,
+    isolation_locator: `/tmp/p/${id}`,
+  });
+
+  const snapshotFor = (
+    subjectId: string | null,
+    constraint: Partial<QuotaConstraint>,
+  ): QuotaSnapshot => ({
+    subject: {
+      harness: "claude",
+      credential_route: "vendor_native",
+      plan_label: null,
+      subject_id: subjectId,
+    },
+    constraints: [
+      {
+        id: "window",
+        label: "Window",
+        used_ratio: null,
+        window_seconds: null,
+        resets_at: null,
+        cooldown_until: null,
+        ...constraint,
+      } as QuotaConstraint,
+    ],
+    source: "claude_oauth_usage",
+    observed_at: new Date().toISOString(),
+    freshness: "fresh",
+  });
+
+  const rotatePolicy: ProfilePolicy = {
+    limit_action: "rotate",
+    rotation_eligible: [],
+    headroom_threshold: 0.9,
+  };
+
+  const rotateArgs = (snapshots: QuotaSnapshot[], lastResetsAt: string | null) => ({
+    spec: HarnessRunSpec.parse({
+      session_id: "se-1",
+      intent: "implement" as const,
+      prompt: "go",
+      cwd: "/repo",
+    }),
+    harnessId: "claude",
+    attemptId: "a01",
+    policy: rotatePolicy,
+    registry: [mkProfile("b"), mkProfile("c")],
+    snapshots,
+    probeReadyProfiles: async () => new Set(["b", "c"]),
+    triedProfiles: new Set<string>(),
+    markers: { sawAgentProgress: false, fileChanges: 0 },
+    sawTypedLimit: true,
+    sawRetryable: true,
+    attemptErrored: true,
+    deliverableEmpty: true,
+    lastLimit: { retryDelayMs: null, resetsAt: lastResetsAt },
+    emit: () => {},
+    newSessionId: () => "se-2",
+    defaultRouteWasVendorNative: true,
+  });
+
+  it("terminalizes with the EARLIEST reset within the pool, the default subject's own limit included", async () => {
+    // Pool: b reopens LATE, c reopens MID; the DEFAULT subject itself reopens
+    // EARLY — the registry's own evidence for the triggering subject joins the
+    // fold (and outranks the raw stream limit's unknown reset).
+    const result = await rotateSpecOnTypedLimit(
+      rotateArgs(
+        [
+          snapshotFor("b", { cooldown_until: LATE }),
+          snapshotFor("c", { cooldown_until: MID }),
+          snapshotFor(null, { cooldown_until: EARLY }),
+        ],
+        null,
+      ),
+    );
+    expect(result).toMatchObject({
+      poolExhausted: {
+        code: "credential_pool_exhausted",
+        category: "harness_unavailable",
+        resetsAt: EARLY,
+      },
+    });
+  });
+
+  it("an unknown reset anywhere in the pool makes the pool's reset unknown", async () => {
+    // The triggering subject's typed limit carried NO reset (the cursor
+    // day-granularity class) and the registry has not ingested it: the pool
+    // cannot promise a reopen time even though b's reset is known.
+    const result = await rotateSpecOnTypedLimit(
+      rotateArgs(
+        [snapshotFor("b", { cooldown_until: MID }), snapshotFor("c", { cooldown_until: LATE })],
+        null,
+      ),
+    );
+    expect(result).toMatchObject({
+      poolExhausted: { code: "credential_pool_exhausted", resetsAt: null },
+    });
+  });
+
+  it("lands in failure.yaml with its code and folded reset intact", async () => {
+    const result = await rotateSpecOnTypedLimit(
+      rotateArgs(
+        [snapshotFor("b", { cooldown_until: MID }), snapshotFor("c", { cooldown_until: LATE })],
+        EARLY,
+      ),
+    );
+    const failure = terminalFailure(
+      result && "poolExhausted" in result ? result.poolExhausted : null,
+    );
+    expect(failure.code).toBe("credential_pool_exhausted");
+    expect(failure.category).toBe("harness_unavailable");
+    // b reopens MID; the subject's own typed limit says EARLY — earliest wins.
+    expect(failure.resetsAt).toBe(EARLY);
+  });
+
+  it("preflight under rotate: an OBSERVED spent window with an empty pool refuses TYPED before spawn", () => {
+    const events: string[] = [];
+    expect(() =>
+      preflightCredentialProfile({
+        profile,
+        harnessId: "claude",
+        policy: rotatePolicy,
+        registry: [profile],
+        snapshots: [
+          snapshotFor("valentine", { used_ratio: 1, resets_at: MID, window_seconds: 604800 }),
+        ],
+        readyProfileIds: new Set(),
+        emit: (type) => events.push(type),
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "credential_pool_exhausted",
+        category: "harness_unavailable",
+        resetsAt: MID,
+      }),
+    );
+    // The refusal is a decision with provenance: the typed event precedes it.
+    expect(events).toContain("route.profile.rotation_exhausted");
+  });
+
+  it("preflight under rotate: a bare headroom breach with no alternative PROCEEDS (not proven spent)", () => {
+    const kept = preflightCredentialProfile({
+      profile,
+      harnessId: "claude",
+      policy: rotatePolicy,
+      registry: [profile],
+      snapshots: [spent], // 0.91 of the window — proximity, not exhaustion
+      readyProfileIds: new Set(),
+      emit: () => {},
+    });
+    expect(kept).toBe(profile);
+  });
+
+  it("preflight default subject: its own live block with a fully-blocked pool refuses TYPED with the earliest reset", () => {
+    expect(() =>
+      preflightDefaultSubject({
+        harnessId: "claude",
+        policy: rotatePolicy,
+        registry: [mkProfile("b")],
+        snapshots: [
+          snapshotFor(null, { cooldown_until: MID }),
+          snapshotFor("b", { cooldown_until: EARLY }),
+        ],
+        readyProfileIds: new Set(["b"]),
+        defaultRoute: "local_session",
+        emit: () => {},
+      }),
+    ).toThrowError(expect.objectContaining({ code: "credential_pool_exhausted", resetsAt: EARLY }));
   });
 });

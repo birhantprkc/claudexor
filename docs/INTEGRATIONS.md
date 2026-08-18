@@ -681,9 +681,16 @@ when the outer subtype says completed. On successful terminal `result`, the
 adapter finalizes the LAST complete assistant flush
 (`final_source: assistant_message`) rather than Cursor's concatenated `result`
 string; it falls back to `result` only when no complete assistant frame exists.
-No typed rate-limit path exists: transient conditions
-surface as generic `error` events — honest degradation, never invented
-status.
+Cursor emits no typed rate-limit frame on the wire; the adapter classifies
+the vendor's usage-limit PROSE (grounded in the recorded 2026-08-17 incident
+transcript: `ActionRequiredError: You've hit your usage limit … resets …
+on 9/12/2026`) into the typed `rate_limit` signal on stream `error` frames,
+failed results, and the stderr fatal — scoped to the run's requested model
+(operational rejection scope, never a vendor-asserted per-model quota), with
+the day-granular reset date disclosed as payload evidence rather than a
+fabricated ISO instant (the daemon's quota registry bounds the resulting
+cooldown at end-of-that-day UTC). Other transient conditions still surface as
+generic `error` events — honest degradation, never invented status.
 
 **Antigravity CLI (`agy`)** — wire: `agy -p "<prompt>" --output-format
 stream-json --model <slug> --mode <plan|accept-edits> --add-dir <cwd>`
@@ -785,10 +792,12 @@ Deliberate limits of the external/host surfaces. Each is a designed boundary
 - MCP host clients enforce their own tool-call timeouts; a multi-minute
   `claudexor_best_of` call can be cut client-side — the result trailer's runId
   keeps the run recoverable via `claudexor_inspect` / `GET /v2/runs`.
-- The cursor and opencode adapters emit no typed rate-limit/transient signals
-  yet: a detector is added only from a recorded native rate-limit transcript
-  (fail-honest, never guessed from prose), and their stream fixtures are
-  synthetic until real transcripts are captured.
+- The opencode adapter emits no typed rate-limit/transient signals yet: a
+  detector is added only from a recorded native rate-limit transcript
+  (fail-honest, never guessed from prose), and its stream fixtures are
+  synthetic until real transcripts are captured. The cursor detector cleared
+  exactly this bar with the recorded 2026-08-17 usage-limit incident
+  transcript.
 - opencode sources any configured provider key — opencode/openai/anthropic
   order — because the vendor CLI consumes provider keys directly.
 - The built-in OpenRouter raw-api instance carries a documented finite

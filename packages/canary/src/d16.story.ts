@@ -12,7 +12,14 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type Sandbox, cli, makeSandbox, readEvents, readRunFile } from "./support.js";
+import {
+  type Sandbox,
+  cli,
+  makeSandbox,
+  readEvents,
+  readRunFile,
+  runFileExists,
+} from "./support.js";
 
 let sb: Sandbox;
 beforeEach(() => {
@@ -175,6 +182,23 @@ describe("D-16 WorkReport + work_state canaries", () => {
     expect(r.code, r.stdout + r.stderr).not.toBe(0);
     const out = r.json() as { status: string };
     expect(out.status).toBe("interrupted");
+  });
+
+  it("[A3:error-prose-hygiene] a failed attempt's error prose never becomes answer.md", () => {
+    // The live incident class: a vendor limit/entitlement refusal whose PROSE
+    // arrives as a plain message on a run that then errors. The prose must not
+    // become the deliverable — before A3 it landed in answer.md, flipped
+    // deliverable_present true, and structurally blocked credential rotation.
+    const r = cli(sb, ["ask", "do the thing", "--harness", "fake-error-prose", "--json"]);
+    expect(r.code, r.stdout + r.stderr).not.toBe(0);
+    const out = r.json() as { runDir: string; status: string };
+    expect(out.status).not.toBe("succeeded");
+    if (runFileExists(out.runDir, "final/answer.md")) {
+      expect(readRunFile(out.runDir, "final/answer.md")).not.toContain("usage limit");
+    }
+    // The prose stays visible as run evidence (events), never as the answer.
+    const events = readEvents(out.runDir);
+    expect(events.some((e) => e["type"] === "run.failed")).toBe(true);
   });
 
   it("[INV-116:agent-continuation] an eligible context exhaustion on an ENVELOPED candidate triggers a one-shot continuation that completes ⇒ succeeded, exit 0", () => {

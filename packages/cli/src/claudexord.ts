@@ -42,7 +42,7 @@ import {
   recoveryBlockedPartitions,
 } from "./daemon-startup.js";
 import { assertPlanImplementReady } from "./plan-implement-readiness.js";
-import { Orchestrator } from "@claudexor/orchestrator";
+import { buildRunOrchestrator, credentialUnusableLedger } from "./run-orchestrator.js";
 import { delegationBeltForRun } from "./delegation-belt-descriptor.js";
 import { loadConfig } from "@claudexor/config";
 import { engineBuildIdentity, noProjectRepoRoot, redactSecrets } from "@claudexor/util";
@@ -50,7 +50,7 @@ import { type ResourceAttachmentRef } from "@claudexor/schema";
 import { scheduleStartupRetention } from "./retention-service.js";
 import { controlServices } from "./control-services.js";
 import { AuthReadinessService } from "@claudexor/gateway";
-import { buildGateway, buildRegistry } from "./registry.js";
+import { buildGateway } from "./registry.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 import { invalidateStatusProjections } from "./status-projection-cache.js";
 import { SetupJobStore } from "./setup-job-store.js";
@@ -200,23 +200,10 @@ export async function main(): Promise<void> {
         const repoRoot = p.scope.kind === "project" ? p.scope.root : NO_PROJECT_ROOT;
         const runConfig = loadConfig(repoRoot);
         if (noProjectAsk) mkdirSync(NO_PROJECT_ROOT, { recursive: true, mode: 0o700 });
-        const orchestrator = new Orchestrator({
-          registry: buildRegistry(),
+        const orchestrator = buildRunOrchestrator({
+          p,
           delegationBudgetAuthority,
-          routingGoal: p.routingGoal,
-          quotaSnapshots: () => quotaStoreSlot.current().read().snapshots,
-          // The absence half of the SAME projection: `auth_revoked` is how the
-          // poller reports a vendor rejecting a profile's credential, and run
-          // admission is the surface that has to act on it.
-          quotaAbsences: () => quotaStoreSlot.current().read().absences,
-          quotaEventSink: (harnessId, event) => quotaStoreSlot.current().ingest(harnessId, event),
-          reviewerPanel: p.reviewerPanel,
-          reviewerModels:
-            p.reviewerModels && typeof p.reviewerModels === "object" ? p.reviewerModels : undefined,
-          reviewerEfforts:
-            p.reviewerEfforts && typeof p.reviewerEfforts === "object"
-              ? p.reviewerEfforts
-              : undefined,
+          quotaStore: () => quotaStoreSlot.current(),
         });
         const { threadId, turnId } = threads.assertKnownIds(p.threadId, p.turnId);
         // Plan readiness gate (QA-045 / D17): refuse an Implement whose frozen
@@ -459,8 +446,10 @@ export async function main(): Promise<void> {
           // login/logout makes them stale NOW, not a TTL from now.
           invalidateStatusProjections();
           // Drop the quota absence backoff too (wave-1): a fresh login must
-          // not wait out up to 15 minutes of logged-out pacing.
+          // not wait out up to 15 minutes of logged-out pacing. The unusable-
+          // credential ledger clears with it (A7 generation-change contract).
           quotaStoreSlot.current().noteCredentialChange();
+          credentialUnusableLedger.noteCredentialChange();
         },
       }),
     );
