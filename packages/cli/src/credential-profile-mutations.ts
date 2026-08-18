@@ -37,7 +37,9 @@ export interface CredentialProfileMutationDeps {
     read(): Parameters<typeof vendorVerifiedProfileStatus>[1];
   };
   secretStore: Pick<SecretStore, "delete">;
-  bustStatusCaches: () => void;
+  /** Credential-mutation cache bust; the optional subject scopes the A7
+   * unusable-ledger clearing to exactly the credential this mutation touched. */
+  bustStatusCaches: (subject?: { harnessId: string; profileId: string }) => void;
   activeLoginJob: (harnessId: string, profileId: string) => ControlSetupJob | undefined;
 }
 
@@ -95,7 +97,7 @@ export function credentialProfileMutations(deps: CredentialProfileMutationDeps) 
       if (!updated) {
         throw Object.assign(new Error("profile update did not persist"), { status: 500 });
       }
-      deps.bustStatusCaches();
+      deps.bustStatusCaches({ harnessId, profileId });
       return {
         profile: updated,
         // Same vendor overlay the listing applies: a single-profile response
@@ -216,7 +218,7 @@ export function credentialProfileMutations(deps: CredentialProfileMutationDeps) 
         // later start detects no legacy login and fabricates nothing.
         removeAccountsMigrationRecord(harnessId);
       }
-      deps.bustStatusCaches();
+      deps.bustStatusCaches({ harnessId, profileId });
       return {
         profile: entry,
         removed: true,

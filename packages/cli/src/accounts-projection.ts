@@ -163,12 +163,14 @@ export async function accountPoolsProjection(
         next_up: { kind: "profile", profileId: selection.candidate.profile.profile_id },
       };
     }
-    // Pool exhaustion counts as unavailability for the policy-governed API-key
-    // ROUTE fallback (INV-061, owner Q2=A) — a route, never an account row.
+    // Pool exhaustion is the typed `credential_pool_exhausted` terminal at
+    // run time (owner Q3=A): the paid API-key ROUTE serves it ONLY under the
+    // EXPLICIT api_key preference — never silently under auto — so next_up
+    // advertises the paid route exactly when the runtime would take it.
     const preference = effectiveAuthPreference(h?.auth_preference, cfg.routing.auth_preference);
     const status = statusById.get(harnessId);
     const keyRouteReady =
-      preference !== "subscription" &&
+      preference === "api_key" &&
       status !== undefined &&
       estimateEffectiveAuthRoute("api_key", status.authSources) === "api_key";
     if (keyRouteReady) {
@@ -180,7 +182,7 @@ export async function accountPoolsProjection(
         kind: "none",
         reason:
           selection.outcome === "exhausted"
-            ? `every enabled account is over its quota window${selection.resets_at ? ` (earliest reset ${selection.resets_at})` : ""} and no API-key route is available`
+            ? `every enabled account is over its quota window${selection.resets_at ? ` (earliest reset ${selection.resets_at})` : ""}; unpinned runs wait for the reset (the paid API-key route requires the explicit api_key preference)`
             : "no enabled account is signed in for this harness; connect an account or pin one per-run (--profile)",
       },
     };

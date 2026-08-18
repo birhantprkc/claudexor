@@ -74,6 +74,52 @@ describe("account pool ranking (unified model, D-U1 + K.5)", () => {
     ]);
   });
 
+  it("ranks a row under an OBSERVED live cooldown exhausted with its release instant (A4)", () => {
+    // STALE on purpose: the registry keeps an aged snapshot alive exactly
+    // because its cooldown still extends into the future — a reactive
+    // vendor-limit cooldown is absolute clock truth, and selecting the row
+    // would burn an attempt rediscovering the limit.
+    const FUTURE = "2099-01-01T00:00:00.000Z";
+    const cooling: QuotaSnapshot = {
+      subject: {
+        harness: "claude",
+        credential_route: "vendor_native",
+        plan_label: null,
+        subject_id: "a",
+      },
+      constraints: [
+        {
+          id: "cooldown",
+          label: "Cooldown",
+          used_ratio: null,
+          window_seconds: null,
+          resets_at: null,
+          cooldown_until: FUTURE,
+        },
+      ],
+      source: "claude_api_retry",
+      observed_at: "2026-08-17T00:00:00Z",
+      freshness: "stale",
+    } as QuotaSnapshot;
+    const ranked = rankAccountPool({
+      ...baseArgs,
+      registry: [row("a"), row("b")],
+      snapshots: [cooling],
+      readyProfileIds: new Set(["a", "b"]),
+    });
+    expect(ranked.map((c) => [c.profile.profile_id, c.verdict.kind])).toEqual([
+      ["b", "unknown"],
+      ["a", "exhausted"],
+    ]);
+    const selection = selectFromAccountPool({
+      ...baseArgs,
+      registry: [row("a"), row("b")],
+      snapshots: [cooling],
+      readyProfileIds: new Set(["a", "b"]),
+    });
+    expect(selection.outcome === "selected" && selection.candidate.profile.profile_id).toBe("b");
+  });
+
   it("never ranks STALE quota as known headroom (D3: stale cannot authorize routing)", () => {
     const registry = [row("fresh-low"), row("stale-high")];
     const ranked = rankAccountPool({

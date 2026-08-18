@@ -26,12 +26,11 @@ import {
 import { rollbackAccountsUnifiedMigration } from "./accounts-unified-migration.js";
 import { credentialProfileMutations } from "./credential-profile-mutations.js";
 import { quotaControlServices } from "./quota-services.js";
-import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
+import { registerConfigDirProfile } from "./profile-registration.js";
 import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
-import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import {
@@ -363,175 +362,6 @@ export function controlServices(
     // The pool-authority read (GET /v2/account-pools) shares the same cached
     // projection so the listing and the pool verdict cannot disagree.
     ...createCredentialProfilesService(quotaRegistry),
-<<<<<<< HEAD
-    // PATCH /credential-profiles/:harness/:id — the Enabled toggle of the
-    // accounts symmetry (INV-135). Flips the profile's durable `enabled` in the
-    // registry (one locked write) and returns the refreshed doctor projection.
-    updateCredentialProfile: async (input: unknown) => {
-      const p = (input ?? {}) as Record<string, unknown>;
-      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
-      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
-      const enabled = typeof p["enabled"] === "boolean" ? p["enabled"] : undefined;
-      if (!harnessId || !profileId || enabled === undefined) {
-        throw Object.assign(new Error("harnessId, profileId and enabled are required"), {
-          status: 400,
-        });
-      }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
-      );
-      // Downgrade-window mirror (unified account model): the migrated row is
-      // the enable/disable AUTHORITY, but the deprecated
-      // `native_credentials_enabled` key must track it — a silent divergence
-      // would re-enable the account after a 3.5.0 downgrade.
-      const mirrorsNativeKey = readAccountsMigrationFile()[harnessId]?.row_id === profileId;
-      let updated: CredentialProfile | undefined;
-      updateGlobalConfig((config) => ({
-        ...config,
-        ...(mirrorsNativeKey
-          ? {
-              harnesses: {
-                ...config.harnesses,
-                [harnessId]: {
-                  ...config.harnesses[harnessId],
-                  native_credentials_enabled: enabled,
-                },
-              },
-            }
-          : {}),
-        credential_profiles: config.credential_profiles.map((profile) => {
-          if (profile.harness_id !== harnessId || profile.profile_id !== profileId) return profile;
-          updated = { ...profile, enabled };
-          return updated;
-        }),
-      }));
-      if (!updated) {
-        throw Object.assign(new Error("profile update did not persist"), { status: 500 });
-      }
-      bustStatusCaches({ harnessId, profileId });
-      return {
-        profile: updated,
-        // Same vendor overlay the listing applies: a single-profile response
-        // must not re-declare a revoked credential `passed` (INV-135 honesty).
-        status: vendorVerifiedProfileStatus(
-          await profileDoctorStatus(updated),
-          quotaRegistry().read(),
-        ),
-      };
-    },
-    // INV-135 deletion: registry first; scoped material cleanup is fenced and disclosed.
-    deleteCredentialProfile: async (input: unknown) => {
-      const p = (input ?? {}) as Record<string, unknown>;
-      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
-      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
-      if (!harnessId || !profileId) {
-        throw Object.assign(new Error("harnessId and profileId are required"), { status: 400 });
-      }
-      const activeLogin = activeProfileLoginJob(setupJobs, harnessId, profileId);
-      if (activeLogin) {
-        throw Object.assign(
-          new Error(
-            `a login for this account is in progress (${activeLogin.jobId}); cancel it before removing the account`,
-          ),
-          { status: 409 },
-        );
-      }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
-      );
-      threads.invalidateCredentialProfile(harnessId, profileId);
-      // INV-034 lifecycle owner (b): the deleted account's durable per-lane
-      // read-only homes must not survive to be resumed. Sweep them across every
-      // project a live thread anchors to (plus the no-project partition).
-      const laneRoots = new Set<string>([NO_PROJECT_ROOT]);
-      for (const thread of threads.listThreads()) {
-        if (thread.repo?.root) laneRoots.add(thread.repo.root);
-      }
-      for (const root of laneRoots) purgeProfileLanes(root, harnessId, profileId);
-      quotaRegistry().removeSubject(harnessId, profileId);
-      // Unified account model: deleting a MIGRATED row retires the canonical
-      // id PLUS its legacy aliases (the null engine-default subject and its
-      // `<harness>-default` lane homes) in the SAME lifecycle operation — a
-      // dangling alias could resume the deleted credential's session or keep
-      // charging its quota subject.
-      const migrationRecord = readAccountsMigrationFile()[harnessId];
-      const registryEntry = loadConfig(NO_PROJECT_ROOT).global.credential_profiles.find(
-        (p) => p.harness_id === harnessId && p.profile_id === profileId,
-      );
-      const migratedRow = migrationRecord?.row_id === profileId;
-      if (migratedRow) {
-        quotaRegistry().removeSubject(harnessId, null);
-        for (const root of laneRoots) purgeProfileLanes(root, harnessId, "default");
-      }
-      // D-U4 failure contract: `removed: true` ONLY when the row AND its
-      // credential material are provably gone. Material cleanup therefore runs
-      // BEFORE registry removal: a cleanup failure is a typed RETRYABLE error
-      // that leaves the row registered (a retry finishes the job) — never a
-      // `removed: true` with a warning, which the startup auto-registration
-      // would resurrect from the surviving material on the next start.
-      let credentialCleanup: "config_dir_removed" | "secret_deleted" | "none" = "none";
-      try {
-        if (registryEntry?.credential_kind === "config_dir_login" && registryEntry.isolation_locator) {
-          // Each member resolves through its OWN canonicalizer (the ladder
-          // this used to hand-write let cursor and agy fall through to the
-          // generic one, so a member whose canonicalizer adds a rule would
-          // silently delete against a different path than its login wrote to).
-          const dir = isConfigDirLoginHarness(harnessId)
-            ? canonicalProfileLoginDir(harnessId, registryEntry.isolation_locator)
-            : canonicalIsolationLocator(registryEntry.isolation_locator, "credential profile dir");
-          // Recursive deletion is fenced to a strict descendant of the
-          // profiles tree — PLUS exactly the migrated row's own legacy native
-          // locator from the migration record (an exact-path allowlist, never
-          // a general "anything under native/" deletion class — K.3).
-          const profilesRoot = normalizeThroughExistingAncestor(
-            join(claudexorOwnedRoot(), "profiles"),
-          );
-          const legacyAllowlisted =
-            migratedRow &&
-            migrationRecord !== undefined &&
-            dir === normalizeThroughExistingAncestor(migrationRecord.locator);
-          if (!dir.startsWith(profilesRoot + sep) && !legacyAllowlisted) {
-            throw new Error(
-              `refusing to delete "${dir}": not inside the profiles tree ${profilesRoot} and not the migrated row's recorded legacy locator`,
-            );
-          }
-          if (existsSync(dir)) {
-            rmSync(dir, { recursive: true, force: true });
-            credentialCleanup = "config_dir_removed";
-          }
-        } else if (registryEntry?.secret_ref) {
-          secretStore.delete(registryEntry.secret_ref);
-          credentialCleanup = "secret_deleted";
-        }
-      } catch (err) {
-        bustStatusCaches();
-        throw Object.assign(
-          new Error(
-            `credential cleanup failed; the account is still registered — retry the removal: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          ),
-          { status: 503, code: "credential_cleanup_failed", retryable: true },
-        );
-      }
-      const entry = removeProfileFromRegistry(harnessId, profileId);
-      if (migratedRow) {
-        // The migration record dies with its row: the material is gone, so a
-        // later start detects no legacy login and fabricates nothing.
-        removeAccountsMigrationRecord(harnessId);
-      }
-      bustStatusCaches({ harnessId, profileId });
-      return {
-        profile: entry,
-        removed: true,
-        credentialCleanup,
-      };
-    },
-=======
     // PATCH + DELETE /credential-profiles/:harness/:id — the Enabled toggle
     // (with the migrated row's native_credentials_enabled downgrade mirror)
     // and the provable D-U4 removal, owned by credential-profile-mutations.ts.
@@ -543,7 +373,6 @@ export function controlServices(
       activeLoginJob: (harnessId, profileId) =>
         activeProfileLoginJob(setupJobs, harnessId, profileId),
     }),
->>>>>>> 98fec301 (refactor: satisfy the complexity ratchet, knip, and formatting gates)
     // POST /accounts-migration/rollback — the supported downgrade path's
     // first step (unified account model): surgically reverses the startup
     // migration (sessions/checkpoints/lane homes back to the engine-default

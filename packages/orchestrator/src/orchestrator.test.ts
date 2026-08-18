@@ -3422,10 +3422,26 @@ describe("Orchestrator", () => {
       expect(refused.summary).toMatch(/native_credentials_enabled=false/);
       expect(off.seen).toHaveLength(0);
 
-      // Same exclusion under the default `auto` preference: the pool is empty,
-      // so the run rides the typed PAID API-key route (Q2=A / INV-061) — the
-      // spec carries auth_preference=api_key so the adapter can never spawn
-      // back INTO the disabled login, and the fallback is disclosed.
+      // Same exclusion under the default `auto` preference (Q3=A): auto never
+      // silently takes the paid route — the run refuses typed instead of
+      // spawning, and nothing ever falls back INTO the disabled login.
+      const autoOff = mkAsker();
+      const autoRefused = await new Orchestrator({
+        registry: new Map([["asker", autoOff.asker]]),
+        reviewers: [],
+      }).run({
+        repoRoot: repo,
+        prompt: "2+2?",
+        mode: "ask",
+        harnesses: ["asker"],
+      });
+      expect(legacyOutcome(autoRefused)).toBe("failed");
+      expect(autoOff.seen).toHaveLength(0);
+
+      // Only the EXPLICIT api_key preference opts the run onto the typed
+      // PAID route (INV-061) — the spec carries auth_preference=api_key so
+      // the adapter can never spawn back INTO the disabled login, and the
+      // fallback is disclosed.
       const paid = mkAsker();
       const paidEvents: string[] = [];
       const paidRes = await new Orchestrator({
@@ -3436,6 +3452,7 @@ describe("Orchestrator", () => {
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
+        authPreference: "api_key",
         onEvent: (event) => paidEvents.push(event.type),
       });
       expect(legacyOutcome(paidRes)).toBe("success");
@@ -3804,13 +3821,21 @@ describe("Orchestrator", () => {
         credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
-      // The pinned account hit its vendor limit: no silent rotation onto "c" —
-      // every (bounded transient-retry) attempt stays on the pin and the run
-      // fails with the typed evidence (consistent with reviewer pins).
+      // The pinned account hit its vendor limit: no silent rotation onto "c",
+      // and the attempt terminalizes TYPED (`subscription_window_exhausted`)
+      // instead of burning same-profile transient retries on the refused
+      // subject (D-U6 strict pin + the A5 ordering, preserved for pins).
       expect(legacyOutcome(res)).toBe("failed");
-      expect(spawns.length).toBeGreaterThanOrEqual(1);
-      expect(new Set(spawns)).toEqual(new Set(["a"]));
+      expect(spawns).toEqual(["a"]);
       expect(events).not.toContain("route.profile.rotated");
+      expect(events).not.toContain("route.transient.retry_scheduled");
+      const failure = new ArtifactStore(repo).readYaml<Record<string, unknown>>(
+        join(res.runDir, "final", "failure.yaml"),
+      );
+      expect(failure).toMatchObject({
+        category: "harness_unavailable",
+        code: "subscription_window_exhausted",
+      });
     } finally {
       if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
       else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
@@ -4134,13 +4159,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
         "  - profile_id: c",
         "    harness_id: limited",
         "    display_name: C",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:c'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-c"))}`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -4218,7 +4243,7 @@ describe("Orchestrator", () => {
           {
             subject: {
               harness: "limited",
-              credential_route: "managed_api_key",
+              credential_route: "vendor_native",
               plan_label: null,
               subject_id: "c",
             },
@@ -4233,7 +4258,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       // Rotating into a known-dead credential would spend a whole attempt to
@@ -4603,13 +4627,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-b"))}`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -4681,7 +4705,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).not.toBe("failed");
@@ -4706,13 +4729,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-b"))}`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -4785,7 +4808,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) =>
           events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
       });
@@ -4813,13 +4835,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: limited",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-a"))}`,
         "  - profile_id: b",
         "    harness_id: limited",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "limited-b"))}`,
         "harnesses:",
         "  limited:",
         "    profile_policy:",
@@ -4886,7 +4908,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).toBe("failed");
@@ -4910,13 +4931,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: asker",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-a"))}`,
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-b"))}`,
         "harnesses:",
         "  asker:",
         "    profile_policy:",
@@ -4969,7 +4990,6 @@ describe("Orchestrator", () => {
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
-        credentialProfileId: "a",
         onEvent: (event) => events.push(event.type),
       });
       expect(legacyOutcome(res)).toBe("success");
@@ -4996,13 +5016,13 @@ describe("Orchestrator", () => {
         "  - profile_id: a",
         "    harness_id: asker",
         "    display_name: A",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:a'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-a"))}`,
         "  - profile_id: b",
         "    harness_id: asker",
         "    display_name: B",
-        "    credential_kind: api_key",
-        "    secret_ref: 'openai:b'",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: ${JSON.stringify(join(configDir, "profiles", "asker-b"))}`,
         "harnesses:",
         "  asker:",
         "    profile_policy:",
@@ -5038,7 +5058,6 @@ describe("Orchestrator", () => {
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
-        credentialProfileId: "a",
         onEvent: (event) =>
           events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
       });
@@ -5061,8 +5080,8 @@ describe("Orchestrator", () => {
       "  - profile_id: solo",
       `    harness_id: ${harness}`,
       "    display_name: Solo",
-      "    credential_kind: api_key",
-      "    secret_ref: 'openai:solo'",
+      "    credential_kind: config_dir_login",
+      `    isolation_locator: ${JSON.stringify(join(tmpdir(), "claudexor-solo-locator", harness))}`,
       "harnesses:",
       `  ${harness}:`,
       "    profile_policy:",
@@ -5142,7 +5161,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "solo",
         onEvent: (event) => events.push(event.type),
       });
       // The typed limit is retryable-transient by class — without the A5
@@ -5186,7 +5204,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "solo",
         onEvent: (event) =>
           events.push({ type: event.type, payload: event.payload as Record<string, unknown> }),
       });
@@ -5294,7 +5311,6 @@ describe("Orchestrator", () => {
         prompt: "2+2?",
         mode: "ask",
         harnesses: ["asker"],
-        credentialProfileId: "solo",
       });
       expect(profilesSeen).toEqual(["solo"]);
       expect(legacyOutcome(res)).toBe("failed");
@@ -5329,7 +5345,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         attempts: 2,
-        credentialProfileId: "solo",
       });
       // One spawn per convergence attempt — never transient same-profile burns.
       expect(spawns).toEqual(["solo", "solo"]);
@@ -5380,7 +5395,6 @@ describe("Orchestrator", () => {
         mode: "agent",
         harnesses: ["limited"],
         n: 1,
-        credentialProfileId: "solo",
         onEvent: (event) => events.push(event.type),
       });
       // Rotation engaged WITHOUT any configuration: the typed limit on the

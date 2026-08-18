@@ -7,10 +7,33 @@ import {
 } from "./credential-cooldown.js";
 import {
   nextEligibleProfile,
-  preflightCredentialProfile,
   preflightDefaultSubject,
   type ProfilePolicy,
 } from "./credential-profiles.js";
+import { resolveAccountForRun, type AccountResolutionContext } from "./account-resolution.js";
+
+/** Strict-pin resolution context (D-U6): everything but the overrides inert. */
+function resolutionCtx(overrides: Partial<AccountResolutionContext>): AccountResolutionContext {
+  return {
+    harnessId: "cursor",
+    registry: [],
+    policy: { limit_action: "rotate", rotation_eligible: [], headroom_threshold: 0.9 },
+    snapshots: [],
+    quota: { snapshots: [], absences: [] },
+    unusable: [],
+    probe: undefined,
+    pinnedProfile: null,
+    boundProfileId: null,
+    threadId: null,
+    model: null,
+    defaultRoute: "local_session",
+    nativeCredentialsDisabled: false,
+    authPreference: "auto",
+    notePoolApiKeyRoute: () => {},
+    emit: () => {},
+    ...overrides,
+  };
+}
 
 const FUTURE = "2099-01-01T00:00:00.000Z";
 const PAST = "2020-01-01T00:00:00.000Z";
@@ -156,65 +179,47 @@ describe("A4 wiring: rotation and preflight see observed live blocks", () => {
     ).toBe("b");
   });
 
-  it("preflight rotates a pinned profile away from its live cooldown with provenance", () => {
-    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-    const next = preflightCredentialProfile({
-      profile: a,
-      harnessId: "cursor",
-      policy,
-      registry: [a, b],
-      snapshots: [cooldownSnapshot("a")],
-      readyProfileIds: ready("b"),
-      emit: (type, payload) => events.push({ type, payload }),
-    });
-    expect(next.profile_id).toBe("b");
-    expect(events.map((e) => e.type)).toEqual([
-      "route.profile.headroom_exceeded",
-      "route.profile.rotated",
-    ]);
-    expect(events[0]?.payload).toMatchObject({
-      profile_id: "a",
-      used_ratio: null,
-      constraint_id: "cooldown",
-      resets_at: FUTURE,
-    });
-    expect(events[1]?.payload).toMatchObject({ to_profile_id: "b", resets_at: FUTURE });
-  });
-
-  it("preflight under FAIL refuses a live cooldown before spawn, machine-readably", () => {
-    try {
-      preflightCredentialProfile({
-        profile: a,
-        harnessId: "cursor",
-        policy: { ...policy, limit_action: "fail" },
-        registry: [a],
-        snapshots: [cooldownSnapshot("a")],
-        readyProfileIds: ready(),
-        emit: () => {},
-      });
-      expect.unreachable("a live cooldown under fail must refuse before spawn");
-    } catch (error) {
-      expect(error).toMatchObject({
+  it("a PINNED profile's live cooldown refuses TYPED for EVERY limit_action — a pin never rotates (D-U6 + A4)", async () => {
+    for (const limit_action of ["rotate", "fail", "auto"] as const) {
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      await expect(
+        resolveAccountForRun(
+          resolutionCtx({
+            pinnedProfile: a,
+            registry: [a, b],
+            policy: { ...policy, limit_action },
+            snapshots: [cooldownSnapshot("a")],
+            emit: (type, payload) => events.push({ type, payload }),
+          }),
+        ),
+      ).rejects.toMatchObject({
         code: "subscription_window_exhausted",
         category: "harness_unavailable",
         resetsAt: FUTURE,
+      });
+      expect(events.map((e) => e.type)).toEqual(["route.profile.headroom_exceeded"]);
+      expect(events[0]?.payload).toMatchObject({
+        profile_id: "a",
+        action: "refuse",
+        constraint_id: "cooldown",
+        resets_at: FUTURE,
       });
     }
   });
 
   it("rotation_exhausted names a cooling candidate `cooldown` with its release instant, then refuses TYPED (A5)", () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-    // The pinned subject's own live block + a fully-blocked pool is hard
-    // evidence (A5 preflight split): the refusal happens BEFORE spawn instead
-    // of proceeding into a certain vendor rejection.
+    // The LEGACY default subject's own live block + a fully-blocked pool is
+    // hard evidence (A5 preflight split): the refusal happens BEFORE spawn
+    // instead of proceeding into a certain vendor rejection.
     expect(() =>
-      preflightCredentialProfile({
-        profile: a,
+      preflightDefaultSubject({
         harnessId: "cursor",
         policy,
-        registry: [a, b],
-        snapshots: [cooldownSnapshot("a"), cooldownSnapshot("b")],
+        registry: [b],
+        snapshots: [cooldownSnapshot(null), cooldownSnapshot("b")],
         readyProfileIds: ready("b"),
+        defaultRoute: "local_session",
         emit: (type, payload) => events.push({ type, payload }),
       }),
     ).toThrowError(

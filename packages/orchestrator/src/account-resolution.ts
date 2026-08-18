@@ -5,8 +5,14 @@ import type {
   CredentialUnusableObservation,
   QuotaSnapshot,
 } from "@claudexor/schema";
-import { accountPoolRows, accountPoolUnavailable, selectFromAccountPool } from "./account-pool.js";
-import { profileQuotaBlock, type QuotaBlock } from "./credential-cooldown.js";
+import { accountPoolRows, selectFromAccountPool } from "./account-pool.js";
+import {
+  credentialPoolExhausted,
+  liveUnusableFor,
+  profileQuotaBlock,
+  type PoolExhaustionCandidate,
+  type QuotaBlock,
+} from "./credential-cooldown.js";
 import { readyProfilesForRotation } from "./credential-differential.js";
 import { preflightDefaultSubject } from "./credential-preflight.js";
 import {
@@ -15,7 +21,10 @@ import {
   subscriptionWindowExhausted,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
-import { selectedProfileAvailability, type VendorQuotaObservations } from "./credential-profiles.js";
+import {
+  selectedProfileAvailability,
+  type VendorQuotaObservations,
+} from "./credential-profiles.js";
 
 /**
  * The ONE account-resolution owner for a run's harness (INV-135 unified
@@ -29,10 +38,13 @@ import { selectedProfileAvailability, type VendorQuotaObservations } from "./cre
  * 2. An unpinned thread turn stays on its durable bound account while that
  *    row is ready, else switches to the pool with a DISCLOSED lane switch.
  * 3. Unbound runs take the best row of the quota-aware pool.
- * 4. An empty/exhausted pool is unavailability: the paid API-key ROUTE serves
- *    it under a permitting preference (disclosed; never a row), else a typed
- *    refusal. Harnesses with no registered rows keep the legacy
- *    default-subject ladder (unmigrated stores).
+ * 4. An empty/exhausted pool is the typed `credential_pool_exhausted`
+ *    TERMINAL carrying the pool's earliest known reset (owner Q3=A: PR-A's
+ *    semantics supersede Q2 — waiting for the reset is the default). The paid
+ *    API-key ROUTE serves it ONLY under the EXPLICIT `api_key` preference
+ *    (disclosed; never a row) — never silently under `auto`. Harnesses with
+ *    no registered rows keep the legacy default-subject ladder (unmigrated
+ *    stores).
  */
 
 export type AccountResolutionEmit = (
@@ -97,10 +109,57 @@ function pinnedWindowBlocked(profileId: string, harnessId: string, block: QuotaB
   );
 }
 
+/**
+ * Per-candidate rejection evidence of one exhausted POOL decision, in the
+ * shape the typed `credential_pool_exhausted` terminal consumes: every
+ * subscription-kind row of the harness with its own quota evidence (fresh
+ * breach / observed live block / live dead-credential verdict), so the
+ * terminal's earliest-reset fold and its message never disagree with the
+ * ranking that refused the pool.
+ */
+function poolExhaustionCandidates(ctx: AccountResolutionContext, ready: ReadonlySet<string>) {
+  const { harnessId, registry, policy, snapshots, model } = ctx;
+  return registry
+    .filter((row) => row.harness_id === harnessId && row.credential_kind !== "api_key")
+    .map((row): PoolExhaustionCandidate => {
+      const breach = profileHeadroomBreach(
+        snapshots,
+        harnessId,
+        row.profile_id,
+        policy.headroom_threshold,
+        model,
+      );
+      const block = breach ? null : profileQuotaBlock(snapshots, harnessId, row.profile_id, model);
+      const dead = liveUnusableFor(ctx.unusable, harnessId, row.profile_id, model);
+      // Label precedence mirrors PR-A's rotationExhaustionCandidates: a
+      // not-ready row is not a POOL MEMBER, so its windows never join the
+      // earliest-reset fold (an unready row's reset promises no reopen).
+      const rejected = !row.enabled
+        ? "disabled"
+        : dead
+          ? "credential_unusable"
+          : !ready.has(row.profile_id)
+            ? "not_ready"
+            : breach
+              ? "headroom_exceeded"
+              : block
+                ? "cooldown"
+                : "not_selected";
+      return {
+        profile_id: row.profile_id,
+        rejected,
+        headroom: breach,
+        cooldown: block,
+        unusable: dead ? { code: dead.code } : null,
+      };
+    });
+}
+
 /** Per-run record of harnesses whose unpinned route fell to the PAID API-key
- * route because the pool was empty/exhausted (Q2=A): the spec then carries
- * auth_preference=api_key so the adapter can never spawn back into an
- * exhausted or excluded native login. Keyed by the run-input object. */
+ * route because the pool was empty/exhausted under the EXPLICIT `api_key`
+ * preference (Q3=A): the spec then carries auth_preference=api_key so the
+ * adapter can never spawn back into an exhausted or excluded native login.
+ * Keyed by the run-input object. */
 export class PoolRouteFlags {
   private readonly flags = new WeakMap<object, Set<string>>();
   note(runKey: object, harnessId: string): void {
@@ -144,9 +203,7 @@ export async function resolveAccountForRun(
       policy.headroom_threshold,
       model,
     );
-    const block = breach
-      ? null
-      : profileQuotaBlock(snapshots, harnessId, pinned.profile_id, model);
+    const block = breach ? null : profileQuotaBlock(snapshots, harnessId, pinned.profile_id, model);
     if (!breach && !block) return pinned;
     emit("route.profile.headroom_exceeded", {
       harness_id: harnessId,
@@ -172,9 +229,32 @@ export async function resolveAccountForRun(
   );
   if (pool.length === 0 && !hasRegisteredRows) {
     if (ctx.nativeCredentialsDisabled) {
-      // No rows AND the native login is excluded: only the paid route can
-      // serve — never a silent spawn back INTO the disabled login. The
-      // admission gate already dropped subscription-only requests.
+      // No rows AND the native login is excluded: nothing subscription-shaped
+      // can serve — never a silent spawn back INTO the disabled login. The
+      // paid route serves ONLY the EXPLICIT `api_key` preference (Q3=A);
+      // `auto`/`subscription` refuse typed (the admission gate already
+      // dropped non-api_key requests for auto pools).
+      if (ctx.authPreference !== "api_key") {
+        emit("route.account.pool_exhausted", {
+          harness_id: harnessId,
+          reason: "the CLI login is disabled and no account is registered",
+          resets_at: null,
+          fallback: null,
+        });
+        throw Object.assign(
+          new Error(
+            `no routable ${harnessId} account: the CLI login is disabled ` +
+              `(harnesses.${harnessId}.native_credentials_enabled=false), no account is ` +
+              `registered, and the paid API-key route requires the explicit api_key ` +
+              `preference — connect an account or pin one (--profile)`,
+          ),
+          {
+            code: "credential_pool_exhausted",
+            category: "harness_unavailable",
+            resetsAt: null,
+          },
+        );
+      }
       ctx.notePoolApiKeyRoute();
       emit("route.account.pool_exhausted", {
         harness_id: harnessId,
@@ -252,11 +332,12 @@ export async function resolveAccountForRun(
       boundSwitchReason = "the bound account was disabled or removed";
     }
   }
+  const readyProfileIds = await readyIds();
   const selection = selectFromAccountPool({
     registry,
     harnessId,
     snapshots,
-    readyProfileIds: await readyIds(),
+    readyProfileIds,
     headroomThreshold: policy.headroom_threshold,
     model,
   });
@@ -283,25 +364,41 @@ export async function resolveAccountForRun(
     });
     return chosen;
   }
-  // Pool empty/exhausted = unavailability (Q2=A): the paid API-key ROUTE
-  // serves the run under a permitting preference — a route, never a row —
-  // else a typed refusal carrying the earliest known reset.
-  if (ctx.authPreference === "subscription") {
+  // Pool empty/exhausted (owner Q3=A, superseding Q2=A): the PRIMARY verdict
+  // is the typed `credential_pool_exhausted` TERMINAL carrying the pool's
+  // earliest known reset — an unpinned run under `auto` (and under explicit
+  // `subscription`) WAITS for a window instead of silently taking the paid
+  // route. The paid API-key ROUTE serves the exhausted pool ONLY under the
+  // EXPLICIT `api_key` preference (INV-061's explicit opt-in form — the same
+  // principle as PR-A's kind-aware `limit_action: auto`, which resolves a
+  // metered subject to `fail`: `auto` never silently spends money) — a
+  // route, never a row, always disclosed.
+  if (ctx.authPreference === "api_key") {
+    ctx.notePoolApiKeyRoute();
     emit("route.account.pool_exhausted", {
       harness_id: harnessId,
       reason: selection.outcome,
       resets_at: selection.resets_at,
-      fallback: null,
+      fallback: "api_key_route",
+      ...(boundId ? { from_profile_id: boundId } : {}),
     });
-    throw accountPoolUnavailable(harnessId, selection);
+    return null;
   }
-  ctx.notePoolApiKeyRoute();
   emit("route.account.pool_exhausted", {
     harness_id: harnessId,
     reason: selection.outcome,
     resets_at: selection.resets_at,
-    fallback: "api_key_route",
+    fallback: null,
     ...(boundId ? { from_profile_id: boundId } : {}),
   });
-  return null;
+  throw credentialPoolExhausted({
+    harnessId,
+    // The triggering subject of a preflight pool refusal is the thread's
+    // bound row when one exists (its exhaustion is what forced the pool
+    // decision); a fresh unbound run has no subject of its own.
+    profileId: boundId,
+    reason: "profile_headroom_preflight",
+    candidates: poolExhaustionCandidates(ctx, readyProfileIds),
+    subjectLimit: null,
+  });
 }

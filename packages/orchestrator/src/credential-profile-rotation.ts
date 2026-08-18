@@ -475,9 +475,32 @@ export async function rotateSpecOnTypedLimit(args: {
    * sibling account. Pool-selected rows (unpinned runs) still rotate. */
   pinned?: boolean;
 }): Promise<HarnessRunSpec | { poolExhausted: Error } | null> {
-  if (args.pinned) return null;
   const current = args.spec.credential_profile ?? null;
   const evidence = reactiveRotationEvidence(args);
+  if (args.pinned) {
+    // Strict pin (D-U6): never rotate. A TYPED vendor limit on the pinned
+    // subject still terminalizes TYPED — `subscription_window_exhausted` with
+    // the limit's own reset — BEFORE the transient gate burns same-profile
+    // retries on the already-refused subject (the A5 ordering, preserved for
+    // pins). Anything else (structural/untyped deaths) fails as-is.
+    if (current && evidence.sawTypedLimit && rotationRetryEligible(evidence)) {
+      return {
+        poolExhausted: Object.assign(
+          new Error(
+            `credential profile "${current.profile_id}" (${args.harnessId}) hit a typed ` +
+              `vendor limit and a pinned account never rotates` +
+              `${args.lastLimit?.resetsAt ? `; resets ${args.lastLimit.resetsAt}` : ""}`,
+          ),
+          {
+            code: "subscription_window_exhausted",
+            category: "harness_unavailable",
+            resetsAt: args.lastLimit?.resetsAt ?? null,
+          },
+        ),
+      };
+    }
+    return null;
+  }
   const route = limitSubjectRoute(
     current,
     args.defaultRouteWasVendorNative === true ? "local_session" : null,

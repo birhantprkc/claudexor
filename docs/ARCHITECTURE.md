@@ -610,15 +610,21 @@ sibling with a typed `route.account.lane_switch` disclosure, never silently.
 the account (`route.account.pool_selected`): fresh model-applicable headroom
 descending, unknown/stale quota after known-positive headroom but before
 exhausted (stale quota never authorizes routing), deterministic profile-id
-tie-break. An empty or exhausted pool is unavailability
-(`route.account.pool_exhausted`): under a paid-permitting `auth_preference`
-the spec is forced onto the explicit API-key route (billing classifies it
-`managed_api_key`; the adapter's typed key refusal is the backstop), and
-under explicit `subscription` the run refuses typed with the earliest known
-reset. Harnesses with NO registered rows keep the legacy default-subject
-ladder (unmigrated stores); an excluded legacy login
-(`native_credentials_enabled: false`) can only be served by the paid route —
-nothing ever silently falls back INTO a disabled login. The resolved row
+tie-break; a row under an observed live block (a reactive vendor-limit
+cooldown or spent window — the A4 reader) ranks exhausted with its release
+instant. An empty or exhausted pool is a TYPED TERMINAL
+(`route.account.pool_exhausted`, then `credential_pool_exhausted` with the
+pool's earliest known reset — owner Q3=A): an unpinned run under `auto` or
+explicit `subscription` waits for a window instead of silently taking the
+paid route. Only the EXPLICIT `api_key` preference opts the exhausted pool
+onto the paid API-key route (billing classifies it `managed_api_key`; the
+adapter's typed key refusal is the backstop) — the same principle as the
+kind-aware `limit_action: auto`, which resolves a metered subject to `fail`:
+`auto` never silently spends money. Harnesses with NO registered rows keep
+the legacy default-subject ladder (unmigrated stores); an excluded legacy
+login (`native_credentials_enabled: false`) can only be served by the
+explicitly-requested paid route — nothing ever silently falls back INTO a
+disabled login. The resolved row
 becomes the typed `credential_profile` on every `HarnessRunSpec` the run
 builds and keys the lane's read-only home, so the resolution flows to the
 spec, preflight, continuity, and session recording. An explicit profile is

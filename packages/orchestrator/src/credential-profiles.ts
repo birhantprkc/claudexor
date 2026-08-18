@@ -22,11 +22,7 @@ export {
   staticRotationCandidates,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
-export {
-  preflightCredentialProfile,
-  preflightDefaultSubject,
-  runProfilePreflight,
-} from "./credential-preflight.js";
+export { preflightDefaultSubject } from "./credential-preflight.js";
 
 /**
  * The ONE resolve owner for credential profiles (INV-135): explicit id →

@@ -80,9 +80,11 @@ export const RunEventType = z
      * (the vendor session starts fresh; continuity hydration is disclosed on
      * the turn). Never silent. */
     "route.account.lane_switch",
-    /** Q2=A: the pool is empty or every ready row is exhausted — unavailability.
-     * `fallback: "api_key_route"` means the run rides the typed PAID route
-     * (INV-061); a null fallback precedes a typed refusal. */
+    /** Q3=A: the pool is empty or every ready row is exhausted. A null
+     * fallback precedes the typed `credential_pool_exhausted` terminal
+     * (waiting for the earliest reset is the default);
+     * `fallback: "api_key_route"` means the EXPLICIT api_key preference opted
+     * the run onto the typed PAID route (INV-061) — never silently under auto. */
     "route.account.pool_exhausted",
     "route.transient.exhausted",
     /** A subscription->API (or harness->harness) auth switch driven by a typed

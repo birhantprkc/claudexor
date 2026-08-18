@@ -380,7 +380,7 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     });
   });
 
-  it("projects the API-key ROUTE when the pool is empty and a key route is available (Q2=A)", async () => {
+  it("projects the API-key ROUTE for an empty pool ONLY under the EXPLICIT api_key preference (Q3=A)", async () => {
     gatewayMock.statuses = [
       {
         id: "claude",
@@ -398,6 +398,21 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
         reasons: [],
       },
     ];
+    // Under the default `auto` preference the paid route is never a silent
+    // next_up: the pool verdict stays an honest `none`.
+    const autoListing = ControlCredentialProfilesResponse.parse(
+      await services().credentialProfiles(),
+    );
+    expect(
+      autoListing.accountPools.find((value) => value.harness_id === "claude")?.next_up,
+    ).toMatchObject({ kind: "none" });
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: { ...(config.harnesses.claude ?? {}), auth_preference: "api_key" },
+      },
+    }));
     const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
     const claude = listing.accountPools.find((value) => value.harness_id === "claude");
     expect(claude?.next_up).toEqual({ kind: "api_key_route" });
@@ -515,9 +530,16 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     });
   });
 
-  it("projects the API-key ROUTE when every ready row is exhausted (pool exhaustion = unavailability)", async () => {
+  it("projects the API-key ROUTE for an exhausted pool only under the EXPLICIT api_key preference (Q3=A)", async () => {
     registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: { ...(config.harnesses.claude ?? {}), auth_preference: "api_key" },
+      },
+    }));
     gatewayMock.statuses = [
       {
         id: "claude",

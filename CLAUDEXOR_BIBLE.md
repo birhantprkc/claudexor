@@ -320,10 +320,15 @@ invariant or owner decision before proceeding.
 - **INV-061** Explicit `subscription` never falls back to an API key. `auto`
   is subscription-first for Codex, Claude, and Cursor: the enabled account
   rows' native sessions (the INV-135 pool) are preferred, and a paid route is
-  eligible only under the typed paid-fallback policy — including when the
-  pool is empty or every ready row's window is exhausted, where the paid
-  route is taken explicitly and disclosed, never spawned back into an
-  exhausted or excluded login. Requested/effective credential route and
+  eligible only under the typed paid-fallback policy. A registered pool that
+  is exhausted (or wholly disabled) is NOT a silent paid-fallback trigger:
+  the run terminalizes typed (`credential_pool_exhausted` + earliest reset,
+  INV-135) and the paid route serves it only under the EXPLICIT `api_key`
+  preference — taken explicitly and disclosed, never spawned back into an
+  exhausted or excluded login, never silently under `auto` (the same
+  principle as the kind-aware `limit_action: auto`, which resolves a metered
+  subject to `fail`: `auto` never silently spends money).
+  Requested/effective credential route and
   source plus the selection reason are preserved as evidence. Codex subscription
   auth uses a Claudexor-owned `CODEX_HOME` with file-only credential storage,
   never the operator's ordinary `~/.codex` or OS Keychain. Native/subscription is
@@ -830,11 +835,25 @@ invariant or owner decision before proceeding.
   (3) otherwise the quota-aware POOL of enabled+ready subscription rows
   routes the run: fresh model-applicable headroom descending, unknown/stale
   quota after known-positive headroom but before exhausted (stale quota
-  never authorizes routing — D3), deterministic profile-id tie-break.
-  An empty or exhausted pool is UNAVAILABILITY: the policy-governed API-key
-  fallback from INV-061 may serve the run as an explicit, disclosed ROUTE —
-  never a credential row, never an account count — or the run refuses typed
-  under an explicit `subscription` preference. Enabling/disabling a row
+  never authorizes routing — D3; an OBSERVED live block — a reactive
+  vendor-limit cooldown or spent window, stale-but-live included — ranks a
+  row exhausted with its release instant), deterministic profile-id
+  tie-break. The per-harness `limit_action` stored default is the kind-aware
+  `auto` — it RESOLVES at decision time to `rotate` for subscription
+  (`local_session`) subjects and `fail` for metered API-key or unknown
+  routes, while explicitly persisted `fail`/`ask`/`rotate` keep their exact
+  meaning and stored files are never rewritten (only the interpretation of
+  an ABSENT key changed) — so a pool row's typed vendor limit fails over to
+  the next ready pool sibling out of the box, never across credential kinds
+  and never for a pin. An empty or exhausted pool is a TYPED TERMINAL: the
+  run refuses `credential_pool_exhausted` (category `harness_unavailable`)
+  carrying the pool's EARLIEST known reset, before the transient machinery
+  can burn same-profile retries on an already-refused subject — waiting for
+  the window is the default. The policy-governed API-key fallback from
+  INV-061 may serve the exhausted pool ONLY over that terminal verdict and
+  ONLY under the EXPLICIT `api_key` preference — an explicit, disclosed
+  ROUTE, never a credential row, never an account count, never silently
+  under `auto`. Enabling/disabling a row
   (the toggle) is the only routing control; there is NO user-settable
   "Active" account. Accounts are SYMMETRIC: every row carries the same
   Enabled toggle and the same Delete (removal is provable — success means

@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import {
   effectiveAuthPreference,
-  effectiveLimitAction,
   observeNativeSessionEvent,
   resolveCredentialProfile,
   resumeSessionForProfile,
@@ -1378,17 +1377,18 @@ export class Orchestrator {
         dropLane(id, "credential", migrationBlock.reason);
         continue;
       }
-      // INV-135: native login excluded + no rows + no pin ⇒ only the paid
-      // route can serve (Q2=A); subscription-only requests refuse/drop here,
+      // INV-135: native login excluded + no rows + no pin ⇒ only the
+      // EXPLICITLY-requested paid route can serve (Q3=A — `auto` never
+      // silently takes the API key); everything else refuses/drops here,
       // never a silent spawn INTO the disabled login.
       if (
         this.effectiveProfileId(input, id) === null &&
         this.nativeCredentialsDisabled(input.repoRoot, id) &&
         accountPoolRows(this.config(input.repoRoot)?.global.credential_profiles ?? [], id)
           .length === 0 &&
-        this.authPreferenceForHarness(input.repoRoot, id, input.authPreference) === "subscription"
+        this.authPreferenceForHarness(input.repoRoot, id, input.authPreference) !== "api_key"
       ) {
-        const why = `${id} has no routable credential: the CLI login is disabled (harnesses.${id}.native_credentials_enabled=false), no account is signed in, and the subscription route forbids the API-key fallback (pin an account with --profile or connect one)`;
+        const why = `${id} has no routable credential: the CLI login is disabled (harnesses.${id}.native_credentials_enabled=false), no account is signed in, and the paid API-key route requires the explicit api_key preference (pin an account with --profile or connect one)`;
         dropLane(id, "credential", why);
         continue;
       }
@@ -1618,21 +1618,39 @@ export class Orchestrator {
     // particular, an opt-in default-subject rotation has to select its ready
     // profile before the budget router filters the exhausted default away.
     // The same resolved profile is reused by the first spec build below.
-    const quotaPreparedPool = await Promise.all(
+    const quotaPrepared = await Promise.all(
       pool.map(async (routed) => {
         const model = input.models?.[routed.adapter.id] ?? routed.settings?.defaultModel ?? null;
-        const profile = await this.preflightProfile(
-          input,
-          routed.adapter.id,
-          model,
-          log,
-          routed.authRouteEstimate,
-        );
+        let profile: CredentialProfile | null;
+        try {
+          profile = await this.preflightProfile(
+            input,
+            routed.adapter.id,
+            model,
+            log,
+            routed.authRouteEstimate,
+          );
+        } catch (err) {
+          // Q3=A: ONE harness's exhausted account pool must not kill an AUTO
+          // multi-harness run — the lane drops with the typed disclosure and a
+          // surviving sibling serves. An EXPLICIT pool (and the last remaining
+          // auto lane) keeps the typed `credential_pool_exhausted` terminal so
+          // its code + earliest reset reach failure.yaml intact.
+          if (
+            !explicitPool &&
+            pool.length > 1 &&
+            (err as { code?: string }).code === "credential_pool_exhausted"
+          ) {
+            dropLane(routed.adapter.id, "credential", safeErrorMessage(err));
+            return null;
+          }
+          throw err;
+        }
         const route = profile
           ? profile.credential_kind === "api_key"
             ? ("managed_api_key" as const)
             : ("vendor_native" as const)
-          : // A pool-forced PAID route (Q2=A) classifies as managed_api_key.
+          : // The explicitly-opted PAID route (Q3=A) classifies as managed_api_key.
             this.poolApiKeyRoute(input, routed.adapter.id)
             ? ("managed_api_key" as const)
             : routed.authRouteEstimate === "api_key"
@@ -1642,6 +1660,9 @@ export class Orchestrator {
                 : null;
         return { ...routed, quotaAdmission: { model, profile, route } };
       }),
+    );
+    const quotaPreparedPool = quotaPrepared.filter(
+      (routed): routed is NonNullable<typeof routed> => routed !== null,
     );
     const ordered = this.orderPool(quotaPreparedPool, input, intent, statusById, ledger, runId);
     if (ordered.length === 0) {
