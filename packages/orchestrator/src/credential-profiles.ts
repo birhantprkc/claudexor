@@ -340,7 +340,7 @@ export function nextUpIdentity(args: {
       policy.headroom_threshold,
       model,
     );
-    if (breach || profileQuotaBlock(snapshots, harnessId, null, model)) {
+    if (breach || profileQuotaBlock(snapshots, harnessId, null, defaultRoute, model)) {
       const next = nextEligibleProfile(
         registry,
         harnessId,

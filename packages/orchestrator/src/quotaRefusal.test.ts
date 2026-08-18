@@ -274,6 +274,40 @@ describe("credential pool exhaustion (A5)", () => {
     });
   });
 
+  it("an api_key sibling's stale cooldown is NEVER pool evidence for a subscription subject (member-only gate)", async () => {
+    // A subscription (native-session) subject dies structurally; the only
+    // registered identity is a METERED api_key sibling — a row rotation could
+    // never select (`credential_kind_mismatch`). Its own cooldown evidence
+    // must not let the terminal claim "the credential pool refused": the
+    // attempt keeps its TRUE failure (fail-as-is → null).
+    const metered: CredentialProfile = {
+      ...profile,
+      profile_id: "metered",
+      display_name: "metered",
+      credential_kind: "api_key",
+      isolation_locator: null,
+      secret_ref: "anthropic_key:metered",
+    };
+    const meteredCooldown: QuotaSnapshot = {
+      ...snapshotFor("metered", { cooldown_until: MID }),
+      subject: {
+        harness: "claude",
+        credential_route: "managed_api_key",
+        plan_label: null,
+        subject_id: "metered",
+      },
+    };
+    const result = await rotateSpecOnTypedLimit({
+      ...rotateArgs([meteredCooldown], null),
+      registry: [metered],
+      probeReadyProfiles: async () => new Set<string>(),
+      // STRUCTURAL death: no typed limit, so the subject carries no evidence.
+      sawTypedLimit: false,
+      sawRetryable: false,
+    });
+    expect(result).toBeNull();
+  });
+
   it("lands in failure.yaml with its code and folded reset intact", async () => {
     const result = await rotateSpecOnTypedLimit(
       rotateArgs(
