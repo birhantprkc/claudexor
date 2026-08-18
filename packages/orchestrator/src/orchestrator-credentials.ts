@@ -43,6 +43,34 @@ export interface CredentialResolutionHost {
   ): NonNullable<RunInput["authPreference"]>;
 }
 
+/**
+ * INV-137: a mid-attempt credential rotation must move the spec's LANE home
+ * with it. The lane env is keyed by the RESOLVED profile, so a rotated spec
+ * that kept the pre-rotation env would write the rotated row's native session
+ * into the PREVIOUS row's lane store while the session record points at the
+ * rotated row — the next turn then provisions a fresh lane for that row and
+ * its `--resume` silently starts over. Only a spec that actually RUNS in a
+ * lane home is re-keyed: an isolated envelope keeps its disposable scoped
+ * home (sessions are never retained there), and an in-place agent turn keeps
+ * the native environment (adapters derive per-row state homes from the
+ * resolved profile itself).
+ */
+export function rotatedSpecInLaneHome(
+  previous: HarnessRunSpec,
+  rotated: HarnessRunSpec,
+  /** The caller's lane-env resolver, keyed by the resolved account (null =
+   * this run has no lane home — non-thread one-shots). */
+  laneEnvFor: (resolvedProfileId: string | null) => Record<string, string> | null,
+  /** The spec build's pin fallback key (the run's requested profile id). */
+  requestedProfileId: string | null,
+): HarnessRunSpec {
+  // The same key the spec build used (record and resume share one home).
+  const previousLane = laneEnvFor(previous.credential_profile?.profile_id ?? requestedProfileId);
+  if (!previousLane || previous.env?.["HOME"] !== previousLane["HOME"]) return rotated;
+  const rotatedLane = laneEnvFor(rotated.credential_profile?.profile_id ?? null);
+  return rotatedLane ? { ...rotated, env: rotatedLane } : rotated;
+}
+
 export class OrchestratorCredentials {
   /** Q3=A explicit paid-route flags, keyed per run input (see PoolRouteFlags). */
   private readonly poolApiKeyRoutes = new PoolRouteFlags();
