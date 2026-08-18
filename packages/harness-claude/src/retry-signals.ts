@@ -52,6 +52,44 @@ export function claudeApiRetryEvents(
   return [event];
 }
 
+/**
+ * A1: the org-disabled entitlement failure arrives as PLAIN prose ("Your
+ * organization has disabled Claude subscription access for Claude Code · Use
+ * an Anthropic API key instead…") on the assistant/result path with exit 1 —
+ * never as an api_retry frame — so `claudeRetryCategory` never sees it and the
+ * run died as an untyped generic failure (live incident 2026-08-17,
+ * run-ea06645118d7). Classify the non-success result's prose into a typed
+ * status event with `error_category: "oauth_org_not_allowed"` so downstream
+ * consumers (attemptTelemetry → classifyStatusError → capability_refused) see
+ * a machine fact instead of prose. The message events themselves keep flowing
+ * unchanged (adapter output hygiene is a later phase).
+ *
+ * `kind: "api_retry"` is the only status kind the frozen schema carries today;
+ * consumers read only `error_category`, and a dedicated kind would be a schema
+ * change deliberately out of A1 scope.
+ */
+const CLAUDE_ORG_DISABLED_RE = /organization has disabled claude subscription access/i;
+
+export function claudeEntitlementEvents(
+  resultText: unknown,
+  successResult: boolean,
+  sessionId: string,
+  ts: string,
+): HarnessEvent[] {
+  if (successResult || typeof resultText !== "string") return [];
+  if (!CLAUDE_ORG_DISABLED_RE.test(resultText)) return [];
+  return [
+    {
+      type: "status",
+      session_id: sessionId,
+      ts,
+      text: `entitlement: ${redactSecrets(resultText).slice(0, 500)}`,
+      status: { kind: "api_retry", error_category: "oauth_org_not_allowed" },
+      payload: { entitlement_denied: true },
+    },
+  ];
+}
+
 function nonnegativeSafeIntegerOrUndef(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }

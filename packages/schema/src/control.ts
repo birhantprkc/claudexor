@@ -1550,12 +1550,12 @@ export const ControlSettingsSnapshot = z
             authPreference: AuthPreference.default("auto"),
             /** Profile-selection policy (INV-135): what happens when the
              * selected account hits its quota. Drives the app's auto-switch
-             * toggle read-back. */
+             * control read-back (tri-state since `auto` became the default). */
             profileLimitAction: z
-              .enum(["fail", "ask", "rotate"])
-              .default("fail")
+              .enum(["auto", "fail", "ask", "rotate"])
+              .default("auto")
               .describe(
-                "Profile-selection limit action: fail (stop), ask (record), rotate (auto-switch to the next eligible account).",
+                "Profile-selection limit action: auto (kind-aware default — rotate for subscription subjects, fail for metered), fail (stop), ask (record), rotate (auto-switch to the next eligible account).",
               ),
           })
           .describe("Per-harness settings."),
@@ -1605,12 +1605,12 @@ export const ControlHarnessSettingsPatch = z
       .describe("New fallback model; null clears it."),
     web: ExternalContextPolicy.optional().describe("New default web policy."),
     authPreference: AuthPreference.optional().describe("New auth route preference."),
-    /** Auto-switch accounts on quota limits (INV-135): rotate enables the
-     * profile-rotation engine for this harness; fail restores the default. */
+    /** Auto-switch accounts on quota limits (INV-135): rotate forces rotation
+     * on, fail forces it off, auto restores the kind-aware default. */
     profileLimitAction: z
-      .enum(["fail", "ask", "rotate"])
+      .enum(["auto", "fail", "ask", "rotate"])
       .optional()
-      .describe("New profile-selection limit action (fail | ask | rotate)."),
+      .describe("New profile-selection limit action (auto | fail | ask | rotate)."),
   })
   .strict()
   .describe(

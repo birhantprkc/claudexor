@@ -771,6 +771,99 @@ describe("QuotaRegistry", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it("registers a cursor vendor-limit cooldown under its own source and profile subject (A4)", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-cursor-cooldown-")));
+    const manager = new JournalManager(root);
+    const slot = manager.registerProjection(quotaProjection());
+    manager.start();
+    slot.current().ingest("cursor", {
+      type: "error",
+      session_id: "session-cursor",
+      ts: new Date().toISOString(),
+      credential_route: "vendor_native",
+      credential_profile_id: "valintine",
+      rate_limit: { resets_at: null, retry_delay_ms: null, applies_to_models: null },
+    });
+    expect(slot.current().read().snapshots).toEqual([
+      expect.objectContaining({
+        subject: expect.objectContaining({
+          harness: "cursor",
+          credential_route: "vendor_native",
+          subject_id: "valintine",
+        }),
+        source: "cursor_rate_limit",
+        constraints: [expect.objectContaining({ id: "cooldown" })],
+      }),
+    ]);
+    // The profile stamp scopes the cooldown: the default cursor subject stays
+    // uncooled by a profiled limit.
+    expect(
+      slot
+        .current()
+        .read()
+        .snapshots.filter((snapshot) => snapshot.subject.subject_id === null),
+    ).toEqual([]);
+    manager.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("bounds a day-granular vendor reset at end-of-that-day UTC instead of the 5-minute default", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-cursor-reset-day-")));
+    const now = () => new Date("2026-08-17T10:00:00.000Z");
+    const journal = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(journal, [], now);
+    registry.ingest("cursor", {
+      type: "error",
+      session_id: "session-cursor",
+      ts: "2026-08-17T10:00:00.000Z",
+      credential_route: "vendor_native",
+      payload: { cursor_vendor_limit: true, vendor_reset_day: "2026-09-12" },
+      rate_limit: { resets_at: null, retry_delay_ms: null, applies_to_models: null },
+    });
+    expect(registry.read().snapshots[0]?.constraints[0]).toMatchObject({
+      id: "cooldown",
+      resets_at: null,
+      // Next-midnight UTC covers the WHOLE vendor-named reset day; a fabricated
+      // same-day midnight would reopen the window before the vendor does.
+      cooldown_until: "2026-09-13T00:00:00.000Z",
+    });
+    journal.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("writes a v3.2.0-parseable base source for cursor cooldowns while replaying the true source", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-cursor-rollback-")));
+    const now = () => new Date("2026-08-17T10:00:00.000Z");
+    const first = new DurableJournal({ rootDir: root, partition: "global" });
+    const registry = new QuotaRegistry(first, [], now);
+    registry.ingest("cursor", {
+      type: "error",
+      session_id: "session-cursor",
+      ts: "2026-08-17T10:00:00.000Z",
+      credential_route: "vendor_native",
+      rate_limit: { resets_at: null, retry_delay_ms: null, applies_to_models: null },
+    });
+    const upserted = first.records().filter((record) => record.type === "quota.snapshot.upserted");
+    // `cursor_rate_limit` postdates v3.2.0's strict enum: the durable base
+    // record must stay parseable by a rolled-back engine, so it carries the
+    // nearest v3.2.0 source while the paired prepare preserves the truth.
+    expect(upserted).toHaveLength(1);
+    expect((upserted[0]?.payload as { source?: unknown }).source).toBe("claude_api_retry");
+    expect(
+      first.records().filter((record) => record.type === "quota.snapshot.scoped_prepared"),
+    ).toHaveLength(1);
+    first.close();
+
+    const replay = new DurableJournal({ rootDir: root, partition: "global" });
+    const recovered = new QuotaRegistry(replay, [], now);
+    expect(recovered.read().snapshots[0]).toMatchObject({
+      source: "cursor_rate_limit",
+      subject: expect.objectContaining({ harness: "cursor" }),
+    });
+    replay.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("keeps server availability out of raw journal payloads and projection signatures", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-raw-availability-")));
     const journal = new DurableJournal({ rootDir: root, partition: "global" });

@@ -370,17 +370,25 @@ export const GlobalConfig = z
             /**
              * ONE typed profile-selection policy (INV-135, W5.4): what happens
              * when the selected credential profile hits its vendor limit.
-             * Rotation is OPT-IN and rotates only on typed vendor-limit
-             * signals or proactive headroom breaches — never on ordinary
-             * network errors.
+             * `auto` is the stored default and resolves BY CREDENTIAL KIND at
+             * decision time (`effectiveLimitAction`): rotate for subscription
+             * (`local_session`) subjects, fail for metered API-key or unknown
+             * routes. This SUPERSEDES the earlier "rotation is opt-in" lock
+             * (CONCEPT-CHANGE(INV-135), owner decision 2026-08-17): a spent
+             * subscription window fails over by default, while explicitly
+             * persisted `fail`/`ask`/`rotate` values keep their exact meaning
+             * and are never rewritten — only the interpretation of an ABSENT
+             * key changed. Rotation still fires only on typed vendor-limit
+             * signals, proactive headroom breaches, or the structural
+             * pre-progress predicate — never on ordinary network errors.
              */
             profile_policy: z
               .object({
                 limit_action: z
-                  .enum(["fail", "ask", "rotate"])
-                  .default("fail")
+                  .enum(["auto", "fail", "ask", "rotate"])
+                  .default("auto")
                   .describe(
-                    "On a typed vendor limit: fail the attempt, surface a typed ask, or rotate to the next eligible profile.",
+                    "On a typed vendor limit: auto (kind-aware default — rotate for subscription subjects, fail for metered), fail the attempt, surface a typed ask, or rotate to the next eligible profile.",
                   ),
                 rotation_eligible: z
                   .array(z.string())

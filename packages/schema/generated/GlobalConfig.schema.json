@@ -413,12 +413,13 @@
                   "limit_action": {
                     "type": "string",
                     "enum": [
+                      "auto",
                       "fail",
                       "ask",
                       "rotate"
                     ],
-                    "default": "fail",
-                    "description": "On a typed vendor limit: fail the attempt, surface a typed ask, or rotate to the next eligible profile."
+                    "default": "auto",
+                    "description": "On a typed vendor limit: auto (kind-aware default — rotate for subscription subjects, fail for metered), fail the attempt, surface a typed ask, or rotate to the next eligible profile."
                   },
                   "rotation_eligible": {
                     "type": "array",

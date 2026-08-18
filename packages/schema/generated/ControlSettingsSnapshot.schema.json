@@ -342,12 +342,13 @@
               "profileLimitAction": {
                 "type": "string",
                 "enum": [
+                  "auto",
                   "fail",
                   "ask",
                   "rotate"
                 ],
-                "default": "fail",
-                "description": "Profile-selection limit action: fail (stop), ask (record), rotate (auto-switch to the next eligible account)."
+                "default": "auto",
+                "description": "Profile-selection limit action: auto (kind-aware default — rotate for subscription subjects, fail for metered), fail (stop), ask (record), rotate (auto-switch to the next eligible account)."
               }
             },
             "additionalProperties": false,

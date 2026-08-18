@@ -1,11 +1,68 @@
-import type { CredentialProfile, HarnessRunSpec, QuotaSnapshot } from "@claudexor/schema";
-import { HarnessRunSpec as HarnessRunSpecSchema } from "@claudexor/schema";
+import type {
+  CredentialProfile,
+  CredentialUnusableObservation,
+  HarnessRunSpec,
+  QuotaSnapshot,
+} from "@claudexor/schema";
+import {
+  HarnessRunSpec as HarnessRunSpecSchema,
+  RouteCredentialUnusablePayload,
+} from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
+import {
+  credentialPoolExhausted,
+  liveUnusableFor,
+  profileQuotaBlock,
+  type PoolExhaustionCandidate,
+  type QuotaBlock,
+} from "./credential-cooldown.js";
+import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
+import {
+  reactiveRotationEvidence,
+  rotationRetryEligible,
+  type RotationEvidence,
+} from "./rotation-predicate.js";
+
+export { rotationRetryEligible, type RotationEvidence } from "./rotation-predicate.js";
 
 export interface ProfilePolicy {
-  limit_action: "fail" | "ask" | "rotate";
+  limit_action: "auto" | "fail" | "ask" | "rotate";
   rotation_eligible: string[];
   headroom_threshold: number;
+}
+
+/** The typed auth route of the subject a limit decision is about: a pinned
+ * profile's credential kind, or the default subject's pre-spawn route
+ * estimate. `null` = honestly unknown (an unresolved default route). */
+export type SubjectRoute = "local_session" | "api_key" | null;
+
+/** The route of a limit decision's subject: a pinned profile decides by its
+ * own credential kind; the default subject decides by the caller's route
+ * estimate. ONE owner, so every consumer classifies the subject alike. */
+export function limitSubjectRoute(
+  profile: Pick<CredentialProfile, "credential_kind"> | null,
+  defaultRoute: SubjectRoute = null,
+): SubjectRoute {
+  if (!profile) return defaultRoute;
+  return profile.credential_kind === "api_key" ? "api_key" : "local_session";
+}
+
+/**
+ * THE effective-policy resolver (A6, owner decision 1=A): the stored default
+ * `auto` resolves BY CREDENTIAL KIND — `rotate` for subscription
+ * (`local_session`) subjects, `fail` for metered API-key or unknown routes —
+ * while explicitly persisted `fail`/`ask`/`rotate` pass through untouched
+ * (3=A: a stored value is never reinterpreted, only ABSENT changed meaning).
+ * Every `limit_action` comparison in the engine and every projection
+ * (`next_up`, Accounts) resolves through this one function, so admission and
+ * display can never disagree about what `auto` does (INV-135).
+ */
+export function effectiveLimitAction(
+  policy: Pick<ProfilePolicy, "limit_action">,
+  route: SubjectRoute,
+): "fail" | "ask" | "rotate" {
+  if (policy.limit_action !== "auto") return policy.limit_action;
+  return route === "local_session" ? "rotate" : "fail";
 }
 
 /** Typed quota evidence for a profile over its headroom bound (provenance). */
@@ -125,32 +182,30 @@ export function nextEligibleProfile(
       )
     )
       continue;
+    // Rotating INTO a subject whose own observed windows are still cooling or
+    // spent (A4) is not a failover — it burns an attempt to rediscover the
+    // limit the registry already holds, stale-but-live evidence included.
+    if (profileQuotaBlock(snapshots, harnessId, candidate.profile_id, model)) continue;
     return candidate;
   }
   return null;
 }
 
-/**
- * `rotation_retry_eligible` (sol #30): a failover retry is allowed ONLY when
- * the attempt saw a TYPED vendor limit AND produced no deliverable and no
- * workspace mutation — a partially-acted attempt never silently reruns.
- */
-export function rotationRetryEligible(input: {
-  sawTypedLimit: boolean;
-  deliverableEmpty: boolean;
-}): boolean {
-  return input.sawTypedLimit && input.deliverableEmpty;
-}
-
-type EmitFn = (
+export type EmitFn = (
   type:
     | "route.profile.headroom_exceeded"
     | "route.profile.rotated"
-    | "route.profile.rotation_exhausted",
+    | "route.profile.rotation_exhausted"
+    | "route.profile.credential_unusable",
   payload: Record<string, unknown>,
 ) => void;
 
-function emitRotationExhausted(args: {
+/** The per-candidate rejection evidence of one exhausted rotation decision:
+ * why each registered identity of the harness could not take over, with its
+ * own quota evidence (headroom breach / observed block) when it has any. ONE
+ * builder feeds both the `route.profile.rotation_exhausted` event and the
+ * typed pool-exhausted terminal, so they can never disagree. */
+function rotationExhaustionCandidates(args: {
   current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null;
   harnessId: string;
   policy: ProfilePolicy;
@@ -158,13 +213,11 @@ function emitRotationExhausted(args: {
   snapshots: readonly QuotaSnapshot[];
   readyProfileIds: ReadonlySet<string>;
   excluded?: ReadonlySet<string>;
-  attemptId?: string;
+  unusable?: readonly CredentialUnusableObservation[];
   model?: string | null;
-  reason: "profile_headroom_preflight" | "vendor_limit_rejected";
-  emit: EmitFn;
-}): void {
+}) {
   const excluded = args.excluded ?? new Set<string>();
-  const candidates = args.registry
+  return args.registry
     .filter((profile) => profile.harness_id === args.harnessId && profile.enabled)
     .map((profile) => {
       const breach = profileHeadroomBreach(
@@ -172,6 +225,25 @@ function emitRotationExhausted(args: {
         args.harnessId,
         profile.profile_id,
         args.policy.headroom_threshold,
+        args.model,
+      );
+      // Observed-limit evidence (A4): a candidate skipped because its own
+      // windows are cooling/spent says so machine-readably, with the earliest
+      // known release instant, instead of hiding behind "not_selected".
+      const block: QuotaBlock | null = profileQuotaBlock(
+        args.snapshots,
+        args.harnessId,
+        profile.profile_id,
+        args.model,
+      );
+      // A7: a candidate refused because ITS CREDENTIAL was observed dead says
+      // so typed, instead of hiding behind "not_ready" — a dead credential is
+      // not a readiness hiccup, and its quota evidence never carries a
+      // reopen promise.
+      const dead = liveUnusableFor(
+        args.unusable ?? [],
+        args.harnessId,
+        profile.profile_id,
         args.model,
       );
       const rejected =
@@ -186,18 +258,43 @@ function emitRotationExhausted(args: {
                 ? "credential_kind_mismatch"
                 : args.current === null && profile.credential_kind === "api_key"
                   ? "credential_kind_mismatch"
-                  : !args.readyProfileIds.has(profile.profile_id)
-                    ? "not_ready"
-                    : breach
-                      ? "headroom_exceeded"
-                      : "not_selected";
+                  : dead
+                    ? "credential_unusable"
+                    : !args.readyProfileIds.has(profile.profile_id)
+                      ? "not_ready"
+                      : breach
+                        ? "headroom_exceeded"
+                        : block
+                          ? "cooldown"
+                          : "not_selected";
       return {
         profile_id: profile.profile_id,
         credential_kind: profile.credential_kind,
         rejected,
         headroom: breach,
+        cooldown: block,
+        unusable: dead ? { code: dead.code, source: dead.source } : null,
+        resets_at: breach?.resets_at ?? block?.resets_at ?? null,
       };
     });
+}
+
+export function emitRotationExhausted(args: {
+  current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null;
+  harnessId: string;
+  policy: ProfilePolicy;
+  registry: readonly CredentialProfile[];
+  snapshots: readonly QuotaSnapshot[];
+  readyProfileIds: ReadonlySet<string>;
+  excluded?: ReadonlySet<string>;
+  unusable?: readonly CredentialUnusableObservation[];
+  attemptId?: string;
+  model?: string | null;
+  reason:
+    "profile_headroom_preflight" | "vendor_limit_rejected" | "structural_pre_progress_failure";
+  emit: EmitFn;
+}): PoolExhaustionCandidate[] {
+  const candidates = rotationExhaustionCandidates(args);
   args.emit("route.profile.rotation_exhausted", {
     harness_id: args.harnessId,
     attempt_id: args.attemptId,
@@ -206,199 +303,17 @@ function emitRotationExhausted(args: {
     threshold: args.policy.headroom_threshold,
     candidates,
   });
+  // The same rows feed the typed pool-exhausted terminal (A5): the event and
+  // the failure must never disagree about why each candidate was rejected.
+  return candidates;
 }
 
 /**
- * A spent subscription window, refused MACHINE-READABLY.
- *
- * The verdict a caller actually needs from this refusal is "not now, come back
- * at T" — and the only honest way to deliver T is as a field. Gluing it into
- * the sentence and shipping the terminal as `category: internal, code: null`
- * left every consumer (a surface, a scheduler, an automating host) to regex
- * the prose for a timestamp, which no contract in this repo permits. The
- * message stays human-readable; the machine reads `code` and `resetsAt`, which
- * the run terminal lifts onto `final/failure.yaml` verbatim.
- */
-function subscriptionWindowExhausted(
-  profileId: string,
-  harnessId: string,
-  breach: HeadroomBreach,
-): Error {
-  return Object.assign(
-    new Error(
-      `credential profile "${profileId}" (${harnessId}) is over its headroom threshold ` +
-        `(${breach.constraint_id} at ${Math.round(breach.used_ratio * 100)}% >= ${Math.round(breach.threshold * 100)}%; ` +
-        `limit_action=fail${breach.resets_at ? `; resets ${breach.resets_at}` : ""})`,
-    ),
-    {
-      code: "subscription_window_exhausted",
-      // Not `internal`: nothing malfunctioned. The account cannot serve this
-      // run until its window reopens, which is what harness_unavailable means.
-      category: "harness_unavailable",
-      resetsAt: breach.resets_at,
-    },
-  );
-}
-
-/**
- * `profile_headroom_preflight` (W5.4): BEFORE spawn, the selected profile's
- * freshest quota windows are checked against the policy threshold. A breach
- * is always a typed event; `rotate` swaps to the next eligible profile with
- * provenance, `ask`/`fail` proceed on the selected profile — the runtime
- * `vendor_limit_rejected` evidence stays the terminating truth.
- */
-export function preflightCredentialProfile(args: {
-  profile: CredentialProfile;
-  harnessId: string;
-  policy: ProfilePolicy;
-  registry: readonly CredentialProfile[];
-  snapshots: readonly QuotaSnapshot[];
-  readyProfileIds: ReadonlySet<string>;
-  model?: string | null;
-  emit: EmitFn;
-}): CredentialProfile {
-  const { profile, harnessId, policy, registry, snapshots, readyProfileIds, model, emit } = args;
-  const breach = profileHeadroomBreach(
-    snapshots,
-    harnessId,
-    profile.profile_id,
-    policy.headroom_threshold,
-    model,
-  );
-  if (!breach) return profile;
-  emit("route.profile.headroom_exceeded", {
-    harness_id: harnessId,
-    profile_id: profile.profile_id,
-    action: policy.limit_action,
-    constraint_id: breach.constraint_id,
-    used_ratio: breach.used_ratio,
-    threshold: breach.threshold,
-    resets_at: breach.resets_at,
-  });
-  if (policy.limit_action === "fail") {
-    // The documented FAIL action fails (release wave tier1 #4): a FRESH breach
-    // under fail refuses before spawn with the evidence, instead of silently
-    // proceeding into a vendor rejection.
-    throw subscriptionWindowExhausted(profile.profile_id, harnessId, breach);
-  }
-  if (policy.limit_action !== "rotate") return profile;
-  const next = nextEligibleProfile(
-    registry,
-    harnessId,
-    policy,
-    profile,
-    snapshots,
-    readyProfileIds,
-    new Set(),
-    model,
-  );
-  if (!next) {
-    emitRotationExhausted({
-      current: profile,
-      harnessId,
-      policy,
-      registry,
-      snapshots,
-      readyProfileIds,
-      model,
-      reason: "profile_headroom_preflight",
-      emit,
-    });
-    return profile;
-  }
-  emit("route.profile.rotated", {
-    harness_id: harnessId,
-    from_profile_id: profile.profile_id,
-    to_profile_id: next.profile_id,
-    reason: "profile_headroom_preflight",
-    constraint_id: breach.constraint_id,
-    used_ratio: breach.used_ratio,
-    resets_at: breach.resets_at,
-  });
-  return next;
-}
-
-/**
- * Default-subject start selection (INV-135, owner scope "auto-balance"): when
- * NO profile is pinned, the policy is `rotate`, and the DEFAULT store's own
- * fresh quota window is at/over the headroom bound, pick the first eligible
- * SUBSCRIPTION profile instead of spawning into a near-certain vendor limit.
- * Strictly opt-in: `fail`/`ask` keep today's default-user behavior untouched
- * (the profile engine's fail action governs PINNED profiles only — throwing
- * here would brick every default user at 90% quota). Unknown or stale usage
- * never rotates.
- */
-export function preflightDefaultSubject(args: {
-  harnessId: string;
-  policy: ProfilePolicy;
-  registry: readonly CredentialProfile[];
-  snapshots: readonly QuotaSnapshot[];
-  readyProfileIds: ReadonlySet<string>;
-  defaultRoute: "local_session" | "api_key" | null;
-  model?: string | null;
-  emit: EmitFn;
-}): CredentialProfile | null {
-  const { harnessId, policy, registry, snapshots, readyProfileIds, defaultRoute, model, emit } =
-    args;
-  if (policy.limit_action !== "rotate" || defaultRoute !== "local_session") return null;
-  const breach = profileHeadroomBreach(
-    snapshots,
-    harnessId,
-    null,
-    policy.headroom_threshold,
-    model,
-  );
-  if (!breach) return null;
-  emit("route.profile.headroom_exceeded", {
-    harness_id: harnessId,
-    profile_id: null,
-    action: policy.limit_action,
-    constraint_id: breach.constraint_id,
-    used_ratio: breach.used_ratio,
-    threshold: breach.threshold,
-    resets_at: breach.resets_at,
-  });
-  const next = nextEligibleProfile(
-    registry,
-    harnessId,
-    policy,
-    null,
-    snapshots,
-    readyProfileIds,
-    new Set(),
-    model,
-  );
-  if (!next) {
-    emitRotationExhausted({
-      current: null,
-      harnessId,
-      policy,
-      registry,
-      snapshots,
-      readyProfileIds,
-      model,
-      reason: "profile_headroom_preflight",
-      emit,
-    });
-    return null;
-  }
-  emit("route.profile.rotated", {
-    harness_id: harnessId,
-    from_profile_id: null,
-    to_profile_id: next.profile_id,
-    reason: "profile_headroom_preflight",
-    constraint_id: breach.constraint_id,
-    used_ratio: breach.used_ratio,
-    resets_at: breach.resets_at,
-  });
-  return next;
-}
-
-/**
- * Reactive failover plan (`vendor_limit_rejected`, W5.4): rotation fires ONLY
- * on the typed predicate under a `rotate` policy, marks the current profile
- * tried (at most once per attempt each), and returns the next target with
- * provenance already emitted — or null when the attempt must fail as-is.
+ * Reactive failover plan (`vendor_limit_rejected` / structural, W5.4 + A2):
+ * rotation fires ONLY on the typed evidence predicate under a `rotate`
+ * policy, marks the current profile tried (at most once per attempt each),
+ * and returns the next target with provenance already emitted — or null when
+ * the attempt must fail as-is.
  * `currentProfile: null` is the DEFAULT subject: allowed ONLY when the caller
  * proves the attempt's pre-spawn route was vendor_native (a metered default
  * hitting a limit is a budget fact, not a subscription to fail over from).
@@ -413,16 +328,25 @@ export function planReactiveRotation(args: {
   snapshots: readonly QuotaSnapshot[];
   readyProfileIds: ReadonlySet<string>;
   triedProfiles: Set<string>;
-  sawTypedLimit: boolean;
-  deliverableEmpty: boolean;
+  evidence: RotationEvidence;
   lastLimit: { retryDelayMs: number | null; resetsAt: string | null } | null;
+  unusable?: readonly CredentialUnusableObservation[];
   model?: string | null;
   emit: EmitFn;
 }): CredentialProfile | null {
-  if (!rotationRetryEligible(args)) return null;
-  if (args.policy.limit_action !== "rotate") return null;
+  if (!rotationRetryEligible(args.evidence)) return null;
+  const route = limitSubjectRoute(
+    args.currentProfile,
+    args.defaultRouteWasVendorNative === true ? "local_session" : null,
+  );
+  if (effectiveLimitAction(args.policy, route) !== "rotate") return null;
   if (args.currentProfile === null && args.defaultRouteWasVendorNative !== true) return null;
   if (args.currentProfile) args.triedProfiles.add(args.currentProfile.profile_id);
+  // Honest provenance: a structural rotation names its own reason — no typed
+  // vendor limit was observed, so `vendor_limit_rejected` would be fabricated.
+  const reason = args.evidence.sawTypedLimit
+    ? ("vendor_limit_rejected" as const)
+    : ("structural_pre_progress_failure" as const);
   const next = nextEligibleProfile(
     args.registry,
     args.harnessId,
@@ -442,9 +366,10 @@ export function planReactiveRotation(args: {
       snapshots: args.snapshots,
       readyProfileIds: args.readyProfileIds,
       excluded: args.triedProfiles,
+      unusable: args.unusable,
       attemptId: args.attemptId,
       model: args.model,
-      reason: "vendor_limit_rejected",
+      reason,
       emit: args.emit,
     });
     return null;
@@ -454,7 +379,7 @@ export function planReactiveRotation(args: {
     attempt_id: args.attemptId,
     from_profile_id: args.currentProfile?.profile_id ?? null,
     to_profile_id: next.profile_id,
-    reason: "vendor_limit_rejected",
+    reason,
     retry_delay_ms: args.lastLimit?.retryDelayMs ?? null,
     resets_at: args.lastLimit?.resetsAt ?? null,
   });
@@ -462,45 +387,148 @@ export function planReactiveRotation(args: {
 }
 
 /**
- * Shared reactive-failover step for BOTH lanes: given the attempt's typed
- * evidence, plan a rotation and rebuild the spec on a NEW vendor session
- * under the next profile — or return null when the attempt must fail as-is.
+ * Shared reactive-failover step for BOTH lanes: fold the try's lane-local
+ * facts + output markers into the typed rotation evidence, probe candidate
+ * readiness ONLY when the predicate could actually fire (the probe spends
+ * seconds), then plan a rotation and rebuild the spec on a NEW vendor session
+ * under the next profile. `null` = the failure was never rotation's business
+ * (fail as-is: transient machinery, plain errors), or the pool ran out with
+ * NO credential evidence anywhere (the evidence gate below) so the attempt
+ * keeps its true failure. `{ poolExhausted }` = the
+ * failure WAS rotation-eligible under a `rotate` policy, the pool has
+ * nowhere left to go, and the decision carries credential evidence — the
+ * attempt must terminalize on this typed refusal
+ * BEFORE the transient gate can burn same-profile retries on the
+ * already-refused subject (A5 ordering: a typed vendor limit classifies as
+ * retryable-transient, so falling through would retry the spent credential).
+ * Callers invoke this only after the try ended in a terminal error.
  */
-export function rotateSpecOnTypedLimit(args: {
+export async function rotateSpecOnTypedLimit(args: {
   spec: HarnessRunSpec;
   harnessId: string;
   attemptId: string;
   policy: ProfilePolicy;
   registry: readonly CredentialProfile[];
   snapshots: readonly QuotaSnapshot[];
-  readyProfileIds: ReadonlySet<string>;
+  /** Fresh candidate-readiness probe (readyProfileIdsForRotation); called at
+   * most once, and only for an eligible try under a `rotate` policy. */
+  probeReadyProfiles: () => Promise<ReadonlySet<string>>;
+  /** A7 SIBLING probe of the CURRENT/triggering subject (never a candidate —
+   * `staticRotationCandidates` excludes the current identity structurally):
+   * existing poller/stream/doctor evidence only, never a spawned mini-run.
+   * Fires exactly when the candidate probe fires; a typed verdict is emitted,
+   * recorded, and carried into the pool terminal's provenance. */
+  probeCurrentSubject?: () => Promise<CredentialUnusableObservation | null>;
+  /** Live typed `credential_unusable` observations for this decision epoch —
+   * candidates they condemn are refused with a typed reason. */
+  liveUnusable?: readonly CredentialUnusableObservation[];
   triedProfiles: Set<string>;
+  markers: AttemptOutputMarkers;
   sawTypedLimit: boolean;
+  sawRetryable: boolean;
+  attemptErrored: boolean;
   deliverableEmpty: boolean;
+  /** Candidate lane only: the workspace diff is non-empty. The read-only lane
+   * omits it — file_change markers are its only mutation truth. */
+  workspaceDiffNonEmpty?: boolean;
   lastLimit: { retryDelayMs: number | null; resetsAt: string | null } | null;
   emit: EmitFn;
   newSessionId: () => string;
   /** Pre-spawn route estimate for a profile-less spec: default-subject
    * rotation is allowed ONLY off a vendor_native attempt. */
   defaultRouteWasVendorNative?: boolean;
-}): HarnessRunSpec | null {
+}): Promise<HarnessRunSpec | { poolExhausted: Error } | null> {
+  const current = args.spec.credential_profile ?? null;
+  const evidence = reactiveRotationEvidence(args);
+  const route = limitSubjectRoute(
+    current,
+    args.defaultRouteWasVendorNative === true ? "local_session" : null,
+  );
+  const eligible =
+    effectiveLimitAction(args.policy, route) === "rotate" &&
+    rotationRetryEligible(evidence) &&
+    (current !== null || args.defaultRouteWasVendorNative === true);
+  if (!eligible) return null;
+  const readyProfileIds = await args.probeReadyProfiles();
+  // A7: the differential probe of the CURRENT subject rides the same eligible
+  // decision as the candidate probe — quota-spent stays A4's cooldown story,
+  // while a dead credential becomes a typed, emitted, recorded observation.
+  const subjectUnusable = (await args.probeCurrentSubject?.()) ?? null;
+  if (subjectUnusable) {
+    args.emit(
+      "route.profile.credential_unusable",
+      RouteCredentialUnusablePayload.parse({ ...subjectUnusable, attempt_id: args.attemptId }),
+    );
+  }
   const rotation = planReactiveRotation({
-    currentProfile: args.spec.credential_profile ?? null,
+    currentProfile: current,
     defaultRouteWasVendorNative: args.defaultRouteWasVendorNative,
     harnessId: args.harnessId,
     attemptId: args.attemptId,
     policy: args.policy,
     registry: args.registry,
     snapshots: args.snapshots,
-    readyProfileIds: args.readyProfileIds,
+    readyProfileIds,
     triedProfiles: args.triedProfiles,
-    sawTypedLimit: args.sawTypedLimit,
-    deliverableEmpty: args.deliverableEmpty,
+    evidence,
     lastLimit: args.lastLimit,
+    unusable: args.liveUnusable,
     model: args.spec.model_hint,
     emit: args.emit,
   });
-  if (!rotation) return null;
+  if (!rotation) {
+    // planReactiveRotation already emitted `route.profile.rotation_exhausted`;
+    // rebuild the same rows (same pure inputs, no second event) for the typed
+    // terminal. The subject's own limit joins the fold from the freshest
+    // source available: its registry block (default subject has no row), else
+    // the typed limit just observed on the stream — the registry may not have
+    // ingested it yet, and its unknown reset then honestly nulls the fold.
+    const candidates = rotationExhaustionCandidates({
+      current,
+      harnessId: args.harnessId,
+      policy: args.policy,
+      registry: args.registry,
+      snapshots: args.snapshots,
+      readyProfileIds,
+      excluded: args.triedProfiles,
+      unusable: args.liveUnusable,
+      model: args.spec.model_hint,
+    });
+    const subjectBlock =
+      current === null
+        ? profileQuotaBlock(args.snapshots, args.harnessId, null, args.spec.model_hint)
+        : null;
+    const subjectLimit =
+      subjectBlock ??
+      (evidence.sawTypedLimit ? { resets_at: args.lastLimit?.resetsAt ?? null } : null);
+    // The pool terminal REQUIRES evidence: "credential_pool_exhausted" claims
+    // the credential layer refused the run, so either the triggering subject
+    // must carry limit/unusable evidence or some candidate row must carry
+    // headroom/cooldown/unusable evidence. A structural pre-progress death
+    // over an empty (or evidence-free) pool proves nothing about credentials —
+    // fail as-is and keep the TRUE failure (a vanilla user's crashed run must
+    // never terminalize as a pool refusal). The already-emitted
+    // `route.profile.rotation_exhausted` event stays: rotation WAS consulted
+    // and had nowhere to go; only the terminal's claim is evidence-gated.
+    const subjectEvidence = subjectLimit !== null || subjectUnusable !== null;
+    const poolEvidence = candidates.some(
+      (candidate) =>
+        candidate.headroom !== null || candidate.cooldown !== null || candidate.unusable !== null,
+    );
+    if (!subjectEvidence && !poolEvidence) return null;
+    return {
+      poolExhausted: credentialPoolExhausted({
+        harnessId: args.harnessId,
+        profileId: current?.profile_id ?? null,
+        reason: evidence.sawTypedLimit
+          ? "vendor_limit_rejected"
+          : "structural_pre_progress_failure",
+        candidates,
+        subjectLimit,
+        subjectUnusable,
+      }),
+    };
+  }
   return HarnessRunSpecSchema.parse({
     ...args.spec,
     session_id: args.newSessionId(),

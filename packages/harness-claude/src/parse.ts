@@ -7,7 +7,7 @@ import {
   claudeTerminalContextEvent,
 } from "./context-signals.js";
 import { requiredMcpStartupReceipts } from "./required-mcp.js";
-import { claudeApiRetryEvents } from "./retry-signals.js";
+import { claudeApiRetryEvents, claudeEntitlementEvents } from "./retry-signals.js";
 
 type Json = any;
 
@@ -375,11 +375,15 @@ function parseClaudeEventStateful(
     // Finality is claimed ONLY for a SUCCESS result (review sol #1); an
     // `is_error:true` result (e.g. terminal_reason:"prompt_too_long", still
     // labeled subtype:"success") carries error prose, not a deliverable — it
-    // rides as a plain message and the context event below marks it. The
-    // final-message emission (structured_output / result / side_tool) lives in
-    // context-signals.ts.
+    // rides as a `status` event (A3 deliverable hygiene) and the context event
+    // below marks it. The final-message emission (structured_output / result /
+    // side_tool) lives in context-signals.ts.
     const successResult = (!obj.subtype || obj.subtype === "success") && obj.is_error !== true;
     for (const ev of claudeResultMessageEvents(obj, successResult, sessionId, ts)) out.push(ev);
+    // A1: type the org-disabled entitlement prose of a non-success result
+    // (oauth_org_not_allowed) alongside the status event carrying the prose.
+    for (const ev of claudeEntitlementEvents(obj.result, successResult, sessionId, ts))
+      out.push(ev);
     if (obj.subtype && obj.subtype !== "success") {
       // `error_max_turns` is NOT a run failure: the turn ended because it hit the
       // configured --max-turns ceiling, with all partial work already streamed

@@ -19,6 +19,7 @@ export type FakeKind =
   | "fake-timeout"
   | "fake-hang"
   | "fake-rate-limit"
+  | "fake-error-prose"
   | "fake-same-model-fallback"
   | "fake-reviewer-without-evidence"
   // D-16 WorkReport / context-signal emit knobs (drive the finalizer canaries).
@@ -38,6 +39,7 @@ export const FAKE_KINDS: FakeKind[] = [
   "fake-timeout",
   "fake-hang",
   "fake-rate-limit",
+  "fake-error-prose",
   "fake-same-model-fallback",
   "fake-reviewer-without-evidence",
   "fake-work-complete",
@@ -253,6 +255,19 @@ async function* runFake(
         abort?.addEventListener("abort", () => resolve(), { once: true });
         // No timer: without an abort this hangs forever, like the real bug.
       });
+      return;
+    }
+    case "fake-error-prose": {
+      // A3 canary fixture: a failing run whose vendor FAILURE PROSE arrives as
+      // a plain (non-final) message — the shape an unfixed/third-party adapter
+      // emits when a limit/entitlement refusal kills the run. The engine's
+      // acceptedTryOutput gate must keep this prose out of answer.md/report:
+      // an errored attempt with no typed final has NO deliverable.
+      yield ev(s, "message", {
+        text: "You've hit your usage limit. Your usage limits will reset on 9/12/2026.",
+      });
+      yield ev(s, "error", { error: "vendor refusal (exit 1)" });
+      yield ev(s, "completed", { observed_model: observedModel });
       return;
     }
     case "fake-rate-limit": {

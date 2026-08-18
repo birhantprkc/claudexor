@@ -26,9 +26,10 @@ import ClaudexorKit
     }
 
     @Test func nonCapableHarnessProfilesAreIgnored() {
-        // Only config_dir_login families with a quota/typed-limit source are
-        // capable: cursor can register a profile but has no rotation trigger
-        // yet, so its toggle would be a knob without an action (INV-023).
+        // Only config_dir_login families in the capable-set are targeted:
+        // cursor rotates reactively under the engine's `auto` default, but it
+        // has no proactive quota source yet, so the app control has not
+        // admitted it — cursor stays engine-driven with no app-side knob.
         #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["opencode"]).isEmpty)
         #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["cursor"]).isEmpty)
     }
@@ -36,8 +37,30 @@ import ClaudexorKit
     @Test func stateAggregates() {
         #expect(AccountsAutoBalance.state(actions: []) == .unavailable)
         #expect(AccountsAutoBalance.state(actions: ["rotate", "rotate"]) == .on)
+        #expect(AccountsAutoBalance.state(actions: ["auto", "auto"]) == .auto)
         #expect(AccountsAutoBalance.state(actions: ["fail", "ask"]) == .off)
         #expect(AccountsAutoBalance.state(actions: ["rotate", "fail"]) == .mixed)
+        // The A6 kind-aware default is its own aggregate state, distinct from
+        // both On and Off; disagreement with either is mixed.
+        #expect(AccountsAutoBalance.state(actions: ["auto", "rotate"]) == .mixed)
+        #expect(AccountsAutoBalance.state(actions: ["auto", "fail"]) == .mixed)
+    }
+
+    @Test func patchValueTable() {
+        // On/Auto set their exact value everywhere (including over a
+        // hand-configured ask — an explicit pick of a mode).
+        #expect(AccountsAutoBalance.patchValue(current: "auto", choice: .rotate) == "rotate")
+        #expect(AccountsAutoBalance.patchValue(current: "fail", choice: .rotate) == "rotate")
+        #expect(AccountsAutoBalance.patchValue(current: "ask", choice: .rotate) == "rotate")
+        #expect(AccountsAutoBalance.patchValue(current: "rotate", choice: .rotate) == nil)
+        #expect(AccountsAutoBalance.patchValue(current: "rotate", choice: .auto) == "auto")
+        #expect(AccountsAutoBalance.patchValue(current: "auto", choice: .auto) == nil)
+        // Off downgrades rotation (explicit rotate AND the kind-aware auto,
+        // which would rotate subscription subjects) but never erases ask.
+        #expect(AccountsAutoBalance.patchValue(current: "rotate", choice: .fail) == "fail")
+        #expect(AccountsAutoBalance.patchValue(current: "auto", choice: .fail) == "fail")
+        #expect(AccountsAutoBalance.patchValue(current: "ask", choice: .fail) == nil)
+        #expect(AccountsAutoBalance.patchValue(current: "fail", choice: .fail) == nil)
     }
 }
 

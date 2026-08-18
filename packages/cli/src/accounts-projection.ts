@@ -165,8 +165,11 @@ export async function harnessAccountsProjection(
       next_up: nextUpIdentity({
         registry: cfg.credential_profiles,
         harnessId,
+        // A6: an ABSENT policy is `auto` — nextUpIdentity resolves it through
+        // the SAME effectiveLimitAction the engine uses (INV-135 parity), so
+        // this projection can never disagree with run-time admission.
         policy: h?.profile_policy ?? {
-          limit_action: "fail",
+          limit_action: "auto",
           rotation_eligible: [],
           headroom_threshold: 0.9,
         },

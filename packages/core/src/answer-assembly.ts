@@ -70,6 +70,19 @@ export class AnswerAssembly {
 }
 
 /**
+ * A3 deliverable hygiene — the ONE policy owner of "which try output may become
+ * answer material". An ERRORED attempt that never accepted a typed final has no
+ * deliverable: its joined narration (and any adapter prose that slipped through
+ * as messages) must never become answer.md/report — the typed error/status
+ * events remain the failure's surface, and D-16 `deliverable_present` stays the
+ * one owner of "delivered". An errored attempt that DID accept a typed final
+ * (e.g. a post-final budget stop) keeps that final verbatim.
+ */
+export function acceptedTryOutput(answer: AnswerAssembly, attemptErrored: boolean): string {
+  return attemptErrored && !answer.hasFinal() ? "" : answer.machineText();
+}
+
+/**
  * Deduplicate the known "final result repeats the last streamed message" shape
  * (adjacent only). Legitimately repeated earlier messages are preserved — a
  * whole-array dedupe would silently merge real output.

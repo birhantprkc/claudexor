@@ -51,6 +51,7 @@
             "route.profile.headroom_exceeded",
             "route.profile.rotated",
             "route.profile.rotation_exhausted",
+            "route.profile.credential_unusable",
             "route.transient.exhausted",
             "route.fallback.auth_switched",
             "route.primary.diverged",

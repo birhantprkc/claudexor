@@ -266,11 +266,12 @@
               "profileLimitAction": {
                 "type": "string",
                 "enum": [
+                  "auto",
                   "fail",
                   "ask",
                   "rotate"
                 ],
-                "description": "New profile-selection limit action (fail | ask | rotate)."
+                "description": "New profile-selection limit action (auto | fail | ask | rotate)."
               }
             },
             "additionalProperties": false,

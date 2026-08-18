@@ -7,6 +7,7 @@ import type {
   ToolRef,
 } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
+import { applyCursorVendorLimit } from "./retry-signals.js";
 
 type Json = any;
 
@@ -78,6 +79,10 @@ interface CursorParserState {
    * to be a vendor-written plan file. Null when the URI was valid (unchanged
    * path) or no plan content exists anywhere (honest failure). */
   fallbackPlan: { text: string; source: string } | null;
+  /** Model identity used to scope a classified vendor-limit signal
+   * (applies_to_models): the run's REQUESTED model when the caller passed it,
+   * else the init frame's observed model. Null = unknown → account-scoped. */
+  scopeModel: string | null;
 }
 
 /**
@@ -118,14 +123,16 @@ export function createCursorParser(
   credentialSource?: AuthSourceKind,
   planMode = false,
   nativePlanMode = planMode,
+  requestedModel?: string | null,
 ): CursorEventParser {
   const state: CursorParserState = {
     pending: new Map(),
     lastCompleteAssistant: null,
     fallbackPlan: null,
+    scopeModel: requestedModel ?? null,
   };
-  return (obj: Json, sessionId: string): HarnessEvent[] | null =>
-    parseCursorEventStateful(
+  return (obj: Json, sessionId: string): HarnessEvent[] | null => {
+    const out = parseCursorEventStateful(
       obj,
       sessionId,
       state,
@@ -134,6 +141,19 @@ export function createCursorParser(
       planMode,
       nativePlanMode,
     );
+    if (out) {
+      for (const ev of out) {
+        // The auth route is fixed before spawn (mirrors harness-claude). Carry
+        // it on EVERY event — the error/result branches included — so a typed
+        // rate_limit can register a cooldown: QuotaRegistry.ingest keys the
+        // reactive cooldown on the event's own credential_route, and a
+        // route-less limit event would silently never cool anything down.
+        if (credentialRoute) ev.credential_route = credentialRoute;
+        if (credentialSource) ev.credential_source = credentialSource;
+      }
+    }
+    return out;
+  };
 }
 
 /** Stateless convenience used by tests; resolves results within one call only. */
@@ -142,6 +162,7 @@ export function parseCursorEvent(obj: Json, sessionId: string): HarnessEvent[] |
     pending: new Map(),
     lastCompleteAssistant: null,
     fallbackPlan: null,
+    scopeModel: null,
   });
 }
 
@@ -168,6 +189,11 @@ function parseCursorEventStateful(
           : typeof obj.session_id === "string"
             ? obj.session_id
             : undefined;
+    // Vendor-limit scope fallback: when the caller passed no requested model,
+    // the init frame's own model identity scopes a later classified limit.
+    if (!state.scopeModel && typeof obj.model === "string" && obj.model) {
+      state.scopeModel = obj.model;
+    }
     return [
       {
         type: "started",
@@ -413,13 +439,17 @@ function parseCursorEventStateful(
           ? obj.result
           : null;
     if (finalText?.trim()) {
-      out.push({
-        type: "message",
-        session_id: sessionId,
-        ts,
-        text: finalText,
-        ...(successResult
+      // A3 deliverable hygiene: a NON-SUCCESS result's prose is failure
+      // evidence, not answer material. It rides a `status` event (visible in
+      // the timeline, classified onto the terminal error below) and never a
+      // `message` the answer assembly could adopt as answer.md.
+      out.push(
+        successResult
           ? {
+              type: "message",
+              session_id: sessionId,
+              ts,
+              text: finalText,
               final: true,
               payload: {
                 final_source: planFallback
@@ -430,32 +460,73 @@ function parseCursorEventStateful(
                 ...(planFallback ? { plan_recovered: true } : {}),
               },
             }
-          : {}),
-      });
+          : {
+              type: "status",
+              session_id: sessionId,
+              ts,
+              text: finalText,
+              payload: { non_success_result: true },
+            },
+      );
     }
     if (obj.subtype && obj.subtype !== "success") {
-      out.push({
+      const failure: HarnessEvent = {
         type: "error",
         session_id: sessionId,
         ts,
         error: `result subtype: ${obj.subtype}`,
-      });
+      };
+      // A failed result's vendor prose rides obj.result (surfaced as a status
+      // event above, never a message); classify it onto THIS terminal error so a
+      // vendor limit stays a TYPED rate_limit signal. This branch matters
+      // because once the stream emitted any error, the run loop skips the
+      // stderr-failure callback (core/runloop.ts sawError gate).
+      applyCursorVendorLimit(
+        failure,
+        `${obj.subtype} ${typeof obj.result === "string" ? obj.result : ""}`,
+        state.scopeModel,
+      );
+      out.push(failure);
     }
     return out;
   }
 
   if (type === "error") {
-    return [
-      {
-        type: "error",
-        session_id: sessionId,
-        ts,
-        error: String(obj.message ?? obj.error ?? "cursor error"),
-      },
-    ];
+    const message = String(obj.message ?? obj.error ?? "cursor error");
+    const failure: HarnessEvent = { type: "error", session_id: sessionId, ts, error: message };
+    // Same typed vendor-limit classification as the stderr path: an `error`
+    // frame sets the run loop's sawError gate, so this branch is the only
+    // chance to type a limit that arrives as a stream error.
+    applyCursorVendorLimit(failure, message, state.scopeModel);
+    return [failure];
   }
 
   return null;
+}
+
+/**
+ * Translate cursor-agent's stderr-only vendor-limit fatal (the live incident
+ * shape: `ActionRequiredError: You've hit your usage limit …` + exit 1) into
+ * the same typed `rate_limit` error event as stream errors. The run loop calls
+ * this only when the stream itself emitted no error (sawError gate). Returns
+ * null for unclassified stderr so the generic exit-code disclosure stays
+ * authoritative.
+ */
+export function parseCursorStderrFailure(
+  message: string,
+  sessionId: string,
+  requestedModel?: string | null,
+  profile?: { profile_id: string } | null,
+): HarnessEvent | null {
+  const event: HarnessEvent = {
+    type: "error",
+    session_id: sessionId,
+    ts: nowIso(),
+    error: message,
+  };
+  if (!applyCursorVendorLimit(event, message, requestedModel ?? null)) return null;
+  if (profile) event.credential_profile_id = profile.profile_id;
+  return event;
 }
 
 function isCursorModelId(id: string): boolean {

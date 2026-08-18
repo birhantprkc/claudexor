@@ -112,6 +112,28 @@ describe("parseCodexEvent", () => {
     });
   });
 
+  it("classifies a stderr-shaped vendor rate limit into the typed rate_limit signal (A1 parity)", () => {
+    // Before A1 parseCodexStderrFailure typed ONLY the MCP-startup fatal: a
+    // vendor limit that reached stderr (instead of a JSON error frame) stayed
+    // a generic exit disclosure with no rate_limit signal, so reactive
+    // credential rotation could never fire on it.
+    const out = parseCodexStderrFailure(
+      "stream error: 429 Too Many Requests; Please try again later",
+      "s-stderr-limit",
+      undefined,
+    );
+    expect(out).toMatchObject({
+      type: "error",
+      rate_limit: { resets_at: null, retry_delay_ms: null },
+    });
+  });
+
+  it("still returns null for unclassified stderr so the generic exit disclosure stays authoritative", () => {
+    expect(
+      parseCodexStderrFailure("segmentation fault (core dumped)", "s-x", undefined),
+    ).toBeNull();
+  });
+
   it("does not relabel unrelated Codex errors as required MCP failures", () => {
     const state: CodexParseState = { requiredMcpServers: ["claudexor"] };
     const out = parseCodexEvent(

@@ -14,21 +14,28 @@ import {
 import { redactSecrets } from "@claudexor/util";
 import { estimateEffectiveAuthRoute } from "@claudexor/schema";
 import {
+  effectiveLimitAction,
   nextEligibleProfile,
   profileHeadroomBreach,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
+import { profileQuotaBlock } from "./credential-cooldown.js";
 export {
+  effectiveLimitAction,
+  limitSubjectRoute,
   nextEligibleProfile,
   planReactiveRotation,
-  preflightCredentialProfile,
-  preflightDefaultSubject,
   profileHeadroomBreach,
   rotateSpecOnTypedLimit,
   rotationRetryEligible,
   staticRotationCandidates,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
+export {
+  preflightCredentialProfile,
+  preflightDefaultSubject,
+  runProfilePreflight,
+} from "./credential-preflight.js";
 
 /**
  * The ONE resolve owner for credential profiles (INV-135): explicit id →
@@ -318,10 +325,14 @@ export function nextUpIdentity(args: {
       reason: "the default credential is not ready; refresh Accounts or run `claudexor doctor`",
     };
   }
-  // Under `rotate`, a native/default subject already over its headroom bound
-  // fails over to the next eligible enabled profile BEFORE spawn — that is who
-  // an unpinned run routes to next. `ask`/`fail` proceed on the native default.
-  if (policy.limit_action === "rotate" && defaultRoute === "local_session") {
+  // Under an EFFECTIVE `rotate` (explicit, or `auto` on a subscription route —
+  // resolved by the SAME function admission uses, so next_up can never
+  // disagree with the engine), a native/default subject already over its
+  // headroom bound — or under an OBSERVED live quota block (A4: reactive
+  // cooldown / spent window, stale-but-live included) — fails over to the next
+  // eligible enabled profile BEFORE spawn — that is who an unpinned run routes
+  // to next. Effective `ask`/`fail` proceed on the native default.
+  if (effectiveLimitAction(policy, defaultRoute) === "rotate" && defaultRoute === "local_session") {
     const breach = profileHeadroomBreach(
       snapshots,
       harnessId,
@@ -329,7 +340,7 @@ export function nextUpIdentity(args: {
       policy.headroom_threshold,
       model,
     );
-    if (breach) {
+    if (breach || profileQuotaBlock(snapshots, harnessId, null, model)) {
       const next = nextEligibleProfile(
         registry,
         harnessId,

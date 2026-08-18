@@ -236,11 +236,11 @@ final class AppModel {
     @ObservationIgnored var makeRuntimeTransport: @Sendable () -> RuntimeReleaseTransport = { GitHubRuntimeReleaseTransport() }
     @ObservationIgnored var didAutoCheckRuntime = false
     @ObservationIgnored var appVersionOverrideForUpdates: String? // test seam — doc at updateFlowAppVersion
-    /// Optimistic auto-balance toggle value while the settings save round-trips
-    /// (owner dogfood: the switch must flip INSTANTLY, not after the daemon
-    /// replies). Cleared when the save settles; a failed save snaps back.
-    /// Actions live in AppModel+CredentialProfiles.swift.
-    var autoBalanceOverride: Bool?
+    /// Optimistic auto-balance pick (tri-state since A6) while the settings save
+    /// round-trips (owner dogfood: the control must flip INSTANTLY, not after
+    /// the daemon replies). Cleared when the save settles; a failed save snaps
+    /// back. Actions live in AppModel+CredentialProfiles.swift.
+    var autoBalanceOverride: AccountsAutoBalance.Choice?
     /// DRAFT-thread workspace mode: false => in_place (default; turns mutate the live
     /// tree), true => isolated (turns accumulate in a thread worktree, applied later via
     /// "Apply thread"). Fixed at thread creation, so it's only editable in the draft.

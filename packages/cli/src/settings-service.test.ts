@@ -351,6 +351,48 @@ describe("profileLimitAction (INV-135 auto-switch toggle)", () => {
     });
     expect(untouched["codex"]?.profile_policy.limit_action).toBe("rotate");
   });
+
+  it("the wire accepts 'auto' (the A6 tri-state control's middle position) and it lands verbatim", () => {
+    const current = {
+      codex: {
+        ...applyHarnessSettingsPatches({}, { codex: { enabled: true } })["codex"]!,
+        profile_policy: {
+          limit_action: "rotate" as const,
+          rotation_eligible: ["work"],
+          headroom_threshold: 0.8,
+        },
+      },
+    };
+    const merged = applyHarnessSettingsPatches(current, {
+      codex: ControlSettingsUpdateRequest.parse({
+        harnesses: { codex: { profileLimitAction: "auto" } },
+      }).harnesses!["codex"]!,
+    });
+    expect(merged["codex"]?.profile_policy).toEqual({
+      limit_action: "auto",
+      rotation_eligible: ["work"],
+      headroom_threshold: 0.8,
+    });
+  });
+
+  it("an EXPLICITLY persisted fail survives unrelated patches — A6 never reinterprets stored values (3=A)", () => {
+    const current = {
+      codex: {
+        ...applyHarnessSettingsPatches({}, { codex: { enabled: true } })["codex"]!,
+        profile_policy: {
+          limit_action: "fail" as const,
+          rotation_eligible: [],
+          headroom_threshold: 0.9,
+        },
+      },
+    };
+    const merged = applyHarnessSettingsPatches(current, {
+      codex: ControlSettingsUpdateRequest.parse({
+        harnesses: { codex: { enabled: false } },
+      }).harnesses!["codex"]!,
+    });
+    expect(merged["codex"]?.profile_policy.limit_action).toBe("fail");
+  });
 });
 
 describe("commitSettingsUpdate atomic validate+write (A-1 TOCTOU race)", () => {

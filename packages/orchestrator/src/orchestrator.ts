@@ -2,20 +2,16 @@ import { existsSync } from "node:fs";
 import {
   effectiveAuthPreference,
   observeNativeSessionEvent,
-  preflightCredentialProfile,
-  preflightDefaultSubject,
-  probeCredentialProfileStatus,
-  profileHeadroomBreach,
-  profileStatusAdmits,
   resolveCredentialProfile,
   resumeSessionForProfile,
   rotateSpecOnTypedLimit,
+  runProfilePreflight,
   selectedProfileAvailability,
-  staticRotationCandidates,
-  vendorVerifiedProfileStatus,
   type ProfilePolicy,
   type VendorQuotaObservations,
 } from "./credential-profiles.js";
+import { currentSubjectProber, readyProfilesForRotation } from "./credential-differential.js";
+import type { TransientFailureObservation } from "./transientClassify.js";
 import { writeRunTelemetryArtifact } from "./runTelemetryWriter.js";
 import {
   buildFileBackedSynthesisInput,
@@ -64,6 +60,7 @@ import type {
   InteractionRequest,
   ModeKind,
   PaidBudget,
+  CredentialUnusableObservation,
   QuotaAbsence,
   QuotaSnapshot,
   RoutingGoal,
@@ -112,6 +109,7 @@ import {
 import { globalConfigDir, loadConfig } from "@claudexor/config";
 import type { AdapterRegistry, HarnessAdapter, InteractionChannel } from "@claudexor/core";
 import {
+  acceptedTryOutput,
   AnswerAssembly,
   CLAUDEXOR_BROWSER_ARTIFACT_SUBDIR,
   countsAsAgentProgress,
@@ -145,7 +143,13 @@ import {
 import { type BudgetDenial, budgetFailureRecord, classifyBudgetFailure } from "./budgetFailure.js";
 import { assertOutputSchemaCompiles, finalizeStructuredOutput } from "./structuredOutput.js";
 import {
-  transientRetryDelayMs,
+  dropDeltaPastBudget,
+  emitPlanProgress,
+  emitTransientExhausted,
+  emitTransientRetryPlan,
+  observeReadonlySpend,
+} from "./laneStreamEvents.js";
+import {
   promptWithEngineConstraints,
   sleep,
   redactHarnessEvent,
@@ -305,6 +309,11 @@ export interface OrchestratorDeps {
   quotaAbsences?: () => readonly QuotaAbsence[];
   /** Persist typed live quota/cooldown events into that same projection. */
   quotaEventSink?: (harnessId: string, event: HarnessEvent) => void;
+  /** Live typed `credential_unusable` observations (A7): dead-credential
+   * evidence rotation must not rediscover by spending attempts. */
+  credentialUnusable?: () => readonly CredentialUnusableObservation[];
+  /** Evidence sink for a fresh differential-probe verdict (A7). */
+  recordCredentialUnusable?: (obs: CredentialUnusableObservation) => void;
   /** Ordered explicit reviewer panel. Unlike legacy per-family overrides this
    * preserves duplicate harness entries, so one provider can review through
    * multiple requested models in a single panel pass. */
@@ -1065,7 +1074,9 @@ export class Orchestrator {
 
   private profilePolicy(repoRoot: string, harnessId: string): ProfilePolicy {
     const policy = this.config(repoRoot)?.global.harnesses?.[harnessId]?.profile_policy;
-    return policy ?? { limit_action: "fail", rotation_eligible: [], headroom_threshold: 0.9 };
+    // A6: an ABSENT policy means `auto` (kind-aware: rotate for subscription
+    // subjects, fail for metered) — resolved later by effectiveLimitAction.
+    return policy ?? { limit_action: "auto", rotation_eligible: [], headroom_threshold: 0.9 };
   }
 
   /** The quota poller's authenticated vendor evidence for THIS decision epoch,
@@ -1079,43 +1090,49 @@ export class Orchestrator {
     };
   }
 
-  /** Fresh profile readiness for one rotation decision epoch. Accounts uses
-   * the same probe wrapper + vendor overlay + admission predicate when
-   * projecting next_up. */
+  /** Fresh profile readiness for one rotation decision epoch (composition in
+   * `readyProfilesForRotation`): probe wrapper + vendor overlay + admission
+   * predicate + the A7 live-observation refusal. */
   private async readyProfileIdsForRotation(
     input: RunInput,
     harnessId: string,
     current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null,
     excluded: ReadonlySet<string> = new Set(),
+    model: string | null = null,
   ): Promise<ReadonlySet<string>> {
-    const profiles = staticRotationCandidates({
+    const adapter = this.deps.registry.get(harnessId);
+    return readyProfilesForRotation({
       registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
       harnessId,
       policy: this.profilePolicy(input.repoRoot, harnessId),
       current,
       excluded,
+      probe: adapter?.probeCredentialProfile?.bind(adapter),
+      quota: this.vendorQuotaObservations(),
+      unusable: this.deps.credentialUnusable?.() ?? [],
+      model,
     });
-    const adapter = this.deps.registry.get(harnessId);
-    const quota = this.vendorQuotaObservations();
-    const entries = await Promise.all(
-      profiles.map(async (profile) => ({
-        profile,
-        // Rotating INTO a profile the vendor has already rejected would spend a
-        // whole attempt to rediscover the 401 the poller reported a minute ago.
-        status: vendorVerifiedProfileStatus(
-          await probeCredentialProfileStatus(
-            profile,
-            adapter?.probeCredentialProfile?.bind(adapter),
-          ),
-          quota,
-        ),
-      })),
-    );
-    return new Set(
-      entries
-        .filter(({ profile, status }) => profileStatusAdmits(profile, status))
-        .map(({ profile }) => profile.profile_id),
-    );
+  }
+
+  /** A7 wiring for one reactive rotation decision: the sibling differential
+   * prober of the CURRENT subject plus this epoch's live observations. */
+  private rotationObservations(
+    adapter: HarnessAdapter,
+    spec: HarnessRunSpec,
+    transients: readonly TransientFailureObservation[],
+  ) {
+    return {
+      probeCurrentSubject: currentSubjectProber({
+        harnessId: adapter.id,
+        profile: spec.credential_profile ?? null,
+        model: spec.model_hint ?? null,
+        quota: this.vendorQuotaObservations(),
+        transients,
+        probe: adapter.probeCredentialProfile?.bind(adapter),
+        record: this.deps.recordCredentialUnusable,
+      }),
+      liveUnusable: this.deps.credentialUnusable?.() ?? [],
+    };
   }
 
   private async preflightProfile(
@@ -1126,48 +1143,18 @@ export class Orchestrator {
     defaultRoute: "local_session" | "api_key" | null,
   ): Promise<CredentialProfile | null> {
     const profile = this.resolveCredentialProfile(input, harnessId);
-    const policy = this.profilePolicy(input.repoRoot, harnessId);
-    const registry = this.config(input.repoRoot)?.global.credential_profiles ?? [];
-    const snapshots = this.deps.quotaSnapshots?.() ?? [];
-    const emit: Parameters<typeof preflightCredentialProfile>[0]["emit"] = (type, payload) =>
-      log?.emit(type, payload);
-    const breach = profileHeadroomBreach(
-      snapshots,
-      harnessId,
-      profile?.profile_id ?? null,
-      policy.headroom_threshold,
-      model,
-    );
-    const readyProfileIds =
-      policy.limit_action === "rotate" &&
-      breach !== null &&
-      (profile !== null || defaultRoute === "local_session")
-        ? await this.readyProfileIdsForRotation(input, harnessId, profile)
-        : new Set<string>();
-    if (!profile) {
-      // Unpinned runs (INV-135 auto-balance): under `rotate`, a fresh
-      // default-subject headroom breach starts on the next eligible
-      // subscription profile instead; `fail`/`ask` change nothing.
-      return preflightDefaultSubject({
-        harnessId,
-        policy,
-        registry,
-        snapshots,
-        readyProfileIds,
-        defaultRoute,
-        model,
-        emit,
-      });
-    }
-    return preflightCredentialProfile({
+    return runProfilePreflight({
       profile,
       harnessId,
-      policy,
-      registry,
-      snapshots,
-      readyProfileIds,
+      policy: this.profilePolicy(input.repoRoot, harnessId),
+      registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
+      snapshots: this.deps.quotaSnapshots?.() ?? [],
+      unusable: this.deps.credentialUnusable?.() ?? [],
+      probeReady: () =>
+        this.readyProfileIdsForRotation(input, harnessId, profile, new Set(), model),
+      defaultRoute,
       model,
-      emit,
+      emit: (type, payload) => log?.emit(type, payload),
     });
   }
 
@@ -2482,13 +2469,12 @@ export class Orchestrator {
     let cost = 0;
     let costEstimated = false;
     let harnessErrored = false;
-    // W-C4 delta flood budget (per attempt): counts forwarded delta chunks.
-    let deltaCount = 0;
-    let deltaCutoffDisclosed = false;
+    let poolExhausted: Error | null = null; // A5: typed pool-exhausted refusal
+    const deltaFlood = { count: 0, disclosed: false }; // W-C4 per-attempt delta budget
     // QA-024: emit the belt-failure disclosure event at most once per attempt.
     let beltFailureDisclosed = false;
     const errors: string[] = [];
-    const answer = new AnswerAssembly();
+    let answer = new AnswerAssembly();
     const retryPolicy = transientRetryPolicy(this.config(contract.repo.root));
     // QA-024: the delegation belt is the ONLY engine-owned extra MCP server
     // injected into an agent lane (the browser MCP rides its own field), so its
@@ -2520,6 +2506,8 @@ export class Orchestrator {
     }
     try {
       for (let nativeTry = 0; !signal?.aborted; nativeTry += 1) {
+        // A3 per-try isolation: a failed try's output never seeds the next try.
+        if (nativeTry > 0) answer = new AnswerAssembly();
         const clearFileBackedContext = stageFileBackedContext(
           envelope.worktree_path,
           fileBackedContext,
@@ -2561,27 +2549,17 @@ export class Orchestrator {
             rawPatch = captureRawPatchEnvelope(rawContextPacket !== null, rawPatch, ev);
             if (ev.type === "patch_produced") continue;
             const safeEv = redactHarnessEvent(ev);
-            // W-C4 flood guard (review sol #10): a per-character delta stream
-            // would otherwise persist/SSE one journal event PER CHUNK without
-            // bound. Delta messages are DISPLAY-only (the complete message
-            // still follows and carries the authoritative text), so past a
-            // per-attempt budget we DROP further deltas and disclose the
-            // cutoff ONCE — the final answer is unaffected.
-            if (safeEv.type === "message" && safeEv.payload?.["delta"] === true) {
-              deltaCount += 1;
-              if (deltaCount > Orchestrator.MAX_DELTAS_PER_ATTEMPT) {
-                if (!deltaCutoffDisclosed) {
-                  deltaCutoffDisclosed = true;
-                  log?.emit("harness.event", {
-                    harness_id: adapter.id,
-                    attempt_id: attemptId,
-                    type: "status",
-                    title: `live delta stream capped at ${Orchestrator.MAX_DELTAS_PER_ATTEMPT} chunks; the complete message still lands`,
-                  });
-                }
-                continue; // drop this delta; never journal past the budget
-              }
-            }
+            if (
+              dropDeltaPastBudget(
+                safeEv,
+                deltaFlood,
+                Orchestrator.MAX_DELTAS_PER_ATTEMPT,
+                (t, p) => log?.emit(t, p),
+                adapter.id,
+                attemptId,
+              )
+            )
+              continue;
             safeInvoke(onHarnessEvent, safeEv);
             // In-place turns run in the live tree under the native environment, so
             // the session they emit IS reachable for the next turn: record it. An
@@ -2609,15 +2587,7 @@ export class Orchestrator {
                 reason: "mcp_server_failed_to_start",
               });
             }
-            // Live plan checklist: forward the adapter's typed plan
-            // progress as a run event (LAST WINS; the UI renders the latest).
-            if (safeEv.plan_progress) {
-              log?.emit("plan.progress", {
-                attempt_id: attemptId,
-                harness_id: adapter.id,
-                items: safeEv.plan_progress.items,
-              });
-            }
+            emitPlanProgress((t, p) => log?.emit(t, p), adapter.id, attemptId, safeEv);
             if (safeEv.type === "usage") {
               const usage = processAttemptUsage({
                 event: safeEv,
@@ -2674,42 +2644,51 @@ export class Orchestrator {
 
         const newTransients = telemetry.transientFailures.slice(transientStart);
         const transient = newTransients.at(-1) ?? null;
-        // #31: the centralized retry gate reads the classified `retryable`, not a
-        // bare "saw any transient" boolean.
+        // #31: the centralized retry gate reads the classified `retryable` verdict.
         const sawRetryable = newTransients.some((f) => f.retryable);
         const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
         const currentDiff = await wsm.diff(envelope);
         const currentAnswer = answer.text();
         const deliverableEmpty = currentDiff.trim().length === 0 && currentAnswer.length === 0;
-        // W5.4 failover: a typed-limit hit rebuilds the spec on a NEW vendor
-        // session under the next profile with provenance (vendor_limit_rejected).
+        // W5.4 + A2 failover: a typed-limit hit OR a structural pre-progress
+        // death rebuilds the spec on a NEW session under the next profile.
         if (harnessErrored && runInput && !signal?.aborted) {
-          const rotationPolicy = this.profilePolicy(contract.repo.root, adapter.id);
-          const readyProfileIds =
-            sawTypedLimit && deliverableEmpty && rotationPolicy.limit_action === "rotate"
-              ? await this.readyProfileIdsForRotation(
-                  runInput,
-                  adapter.id,
-                  spec.credential_profile ?? null,
-                  triedProfiles,
-                )
-              : new Set<string>();
-          const rotated = rotateSpecOnTypedLimit({
+          const rotated = await rotateSpecOnTypedLimit({
             spec,
             harnessId: adapter.id,
             attemptId,
-            policy: rotationPolicy,
+            policy: this.profilePolicy(contract.repo.root, adapter.id),
             registry: this.config(contract.repo.root)?.global.credential_profiles ?? [],
             snapshots: this.deps.quotaSnapshots?.() ?? [],
-            readyProfileIds,
+            probeReadyProfiles: () =>
+              this.readyProfileIdsForRotation(
+                runInput,
+                adapter.id,
+                spec.credential_profile ?? null,
+                triedProfiles,
+                spec.model_hint ?? null,
+              ),
+            ...this.rotationObservations(adapter, spec, newTransients),
             triedProfiles,
+            markers: telemetry.outputMarkers,
             sawTypedLimit,
+            sawRetryable,
+            attemptErrored: harnessErrored,
             deliverableEmpty,
+            workspaceDiffNonEmpty: currentDiff.trim().length > 0,
             lastLimit: telemetry.rateLimits.at(-1) ?? null,
             emit: (type, payload) => log?.emit(type, payload),
             newSessionId: () => newId("ses"),
             defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
           });
+          // A5 ordering: an exhausted pool terminalizes TYPED here, BEFORE the
+          // transient gate below burns same-profile retries (limits classify
+          // as retryable) on the already-refused subject.
+          if (rotated && "poolExhausted" in rotated) {
+            poolExhausted = rotated.poolExhausted;
+            errors.push(safeErrorMessage(poolExhausted));
+            break;
+          }
           if (rotated) {
             spec = rotated;
             applied = appliedNow();
@@ -2727,25 +2706,14 @@ export class Orchestrator {
         )
           break;
 
-        const nextTry = nativeTry + 1;
-        const delayMs = transientRetryDelayMs(
-          transient?.retryDelayMs ?? null,
-          retryPolicy,
+        const delayMs = emitTransientRetryPlan(
+          (t, p) => log?.emit(t, p),
+          adapter.id,
+          attemptId,
+          transient,
           nativeTry,
+          retryPolicy,
         );
-        log?.emit("route.transient.detected", {
-          harness_id: adapter.id,
-          attempt_id: attemptId,
-          kind: transient?.kind ?? "unknown",
-          category: transient?.category ?? "unknown_harness_error",
-          native_try: nativeTry + 1,
-        });
-        log?.emit("route.transient.retry_scheduled", {
-          harness_id: adapter.id,
-          attempt_id: attemptId,
-          retry: nextTry,
-          delay_ms: delayMs,
-        });
         errors.length = 0;
         harnessErrored = false;
         await sleep(delayMs);
@@ -2753,22 +2721,28 @@ export class Orchestrator {
     } finally {
       signal?.removeEventListener("abort", onAbort);
     }
-    if (harnessErrored && telemetry.transientFailures.length > 0) {
-      log?.emit("route.transient.exhausted", {
-        harness_id: adapter.id,
-        attempt_id: attemptId,
-        category: telemetry.transientFailures.at(-1)?.category ?? "unknown_harness_error",
-        retries: retryPolicy.maxRetries,
-      });
+    // A pool-exhausted terminal is rotation's verdict, not the transient
+    // machinery's — no `route.transient.exhausted` rides along with it.
+    if (harnessErrored && !poolExhausted) {
+      emitTransientExhausted(
+        (t, p) => log?.emit(t, p),
+        adapter.id,
+        attemptId,
+        telemetry,
+        retryPolicy.maxRetries,
+      );
     }
     const attemptStreamEndedMs = Date.now();
     if (webUnsatisfied(telemetry)) {
       errors.push(webEvidenceFailure(telemetry.web));
     }
-    // D-16: remove the WorkReport transport so answer.md persists only the deliverable.
-    const unwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", workReportMode, {
-      sideToolReport: telemetry.sideToolWorkReport ?? undefined,
-    });
+    // D-16: answer.md persists only the deliverable. A3: an errored attempt
+    // with no typed final contributes no answer material (acceptedTryOutput).
+    const unwrapped = unwrapWorkReportEnvelope(
+      acceptedTryOutput(answer, harnessErrored),
+      workReportMode,
+      { sideToolReport: telemetry.sideToolWorkReport ?? undefined },
+    );
     const redacted = redactSecrets(unwrapped.deliverable);
     const candidateAnswer = redacted.trim().length > 0 ? redacted : undefined;
     const { diff, refusal: secretDiffRefusal } = await secretDiff.quarantineCandidateWorkspace(
@@ -2911,6 +2885,8 @@ export class Orchestrator {
       errors: errors.slice(0, 8),
       telemetry,
       ...(secretDiffRefusal ? { secretDiffRefusal } : {}),
+      // A5: the typed refusal survives NORMAL attempt finalization (no throw).
+      ...(poolExhausted ? { declaredFailure: declaredFailure(poolExhausted) } : {}),
       outcomeClass: finalized.outcomeClass,
       applied,
     };
@@ -5075,6 +5051,8 @@ export class Orchestrator {
           // carry their route-specific settlement from runCandidateInEnvelope.
           const failureCost = AC.attemptFailureCost(err, "attempt-error");
           const message = safeErrorMessage(err);
+          // A5: keep a TYPED refusal alive past this catch (race-lane parity).
+          const declared = declaredFailure(err);
           ledger.settle(lease.lease?.lease_id ?? "", failureCost.settlement);
           log.emit("harness.completed", {
             harness_id: adapter.id,
@@ -5112,6 +5090,7 @@ export class Orchestrator {
             errored: true,
             costEstimated: failureCost.estimated,
             errors: [message],
+            ...(declared.code ? { declaredFailure: declared } : {}),
             telemetry: createAttemptTelemetry(
               knobs.webPolicy,
               contract.external_context.web_required,
@@ -5628,6 +5607,12 @@ export class Orchestrator {
     // failure record + fires run.blocked even though the lifecycle succeeded.
     const convIsFailureTerminal = facts.lifecycle !== "succeeded" || convNeedsDecision;
     if (convIsFailureTerminal) {
+      // A5 last-result lift: the LAST attempt's typed mid-attempt refusal
+      // survives onto the terminal; budget/cancel/needs-decision outrank it.
+      const convDeclared =
+        !convNeedsDecision && facts.lifecycle === "failed" && !isBudgetTerminal(facts.reason)
+          ? lastRun?.declaredFailure
+          : undefined;
       writeFailure(store, paths, {
         phase: convNeedsDecision ? "review" : "convergence",
         category: isBudgetTerminal(facts.reason)
@@ -5636,7 +5621,9 @@ export class Orchestrator {
             ? "cancelled"
             : convNeedsDecision
               ? "policy"
-              : "internal",
+              : (convDeclared?.category ?? "internal"),
+        code: convDeclared?.code ?? null,
+        resetsAt: convDeclared?.resetsAt ?? null,
         safeMessage: convNeedsDecision
           ? `review escalated to a human decision after ${attempt} attempt(s)`
           : facts.reason === "stuck_no_progress"
@@ -6443,6 +6430,9 @@ export class Orchestrator {
       /** D-16 r8: scout ran out of context — a failed omission, never reducer
        * input; ALL-interrupted terminalizes interrupted. */
       interrupted?: boolean;
+      /** A5: the typed refusal (exhausted credential pool / spent window) this
+       * attempt died on, so the chain terminal can speak it machine-readably. */
+      declaredFailure?: ReturnType<typeof declaredFailure>;
     }
     const attempts: ReadonlyAttempt[] = [];
     const attemptTelemetries: {
@@ -6707,6 +6697,7 @@ export class Orchestrator {
           harnessErrored: true,
           webRequiredUnsatisfied: false,
         });
+        const preDeclared = declaredFailure(preparation.error);
         attempts.push({
           attemptId,
           harnessId: adapter.id,
@@ -6714,6 +6705,7 @@ export class Orchestrator {
           report: "",
           error: message,
           telemetry,
+          ...(preDeclared.code ? { declaredFailure: preDeclared } : {}), // typed pre-spawn refusal
         });
         attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry });
         if (opts.deepScan) {
@@ -6731,9 +6723,9 @@ export class Orchestrator {
         reportInteraction,
         readonlyWorkMode,
         attemptEventsPath,
-        answer,
         telemetry,
       } = preparation.value;
+      let { answer } = preparation.value;
       let spec = preparedSpec;
       const retryPolicy = transientRetryPolicy(this.config(input.repoRoot));
       let activeSessionId = spec.session_id;
@@ -6747,9 +6739,12 @@ export class Orchestrator {
       let cost = 0;
       let costEstimated = false;
       let harnessError: string | null = null;
+      let poolExhausted: Error | null = null; // A5: typed pool-exhausted refusal
       try {
         const triedProfiles = new Set<string>(); // W5.4 failover: each profile at most once
         for (let nativeTry = 0; !input.signal?.aborted; nativeTry += 1) {
+          // A3 per-try isolation: a failed try's output never seeds the next try.
+          if (nativeTry > 0) answer = new AnswerAssembly();
           const runSpec =
             nativeTry === 0
               ? spec
@@ -6796,28 +6791,19 @@ export class Orchestrator {
               log.emit("harness.event", harnessEventPayload(adapter.id, attemptId, safeEv));
               appendLine(attemptEventsPath, JSON.stringify(safeEv));
               observeAttemptTelemetry(telemetry, safeEv);
-              if (safeEv.plan_progress) {
-                log.emit("plan.progress", {
-                  attempt_id: attemptId,
-                  harness_id: adapter.id,
-                  items: safeEv.plan_progress.items,
-                });
-              }
+              emitPlanProgress((t, p) => log.emit(t, p), adapter.id, attemptId, safeEv);
               // read-only routes burn quota too (the orchestrate PLANNER is
               // the loudest) — same single owner as the agent loop.
               observeBudgetSignals(ledger, log, adapter.id, attemptId, safeEv, budgetSignalState);
               this.deps.quotaEventSink?.(adapter.id, safeEv);
-              if (safeEv.type === "usage" && safeEv.usage?.cost_usd) {
-                cost += safeEv.usage.cost_usd;
-                if (safeEv.usage.estimated) costEstimated = true;
-                log.emit("budget.observation", {
-                  harness_id: adapter.id,
-                  attempt_id: attemptId,
-                  kind: "spend",
-                  usd: safeEv.usage.cost_usd,
-                  estimated: safeEv.usage.estimated === true,
-                });
-              }
+              const spend = observeReadonlySpend(
+                safeEv,
+                (t, p) => log.emit(t, p),
+                adapter.id,
+                attemptId,
+              );
+              cost += spend.costUsd;
+              costEstimated ||= spend.estimated;
               // A TYPED final message wins verbatim over joined narration.
               answer.observe(safeEv);
               if (safeEv.type === "error")
@@ -6827,8 +6813,7 @@ export class Orchestrator {
             }
           } catch (err) {
             harnessError = safeErrorMessage(err);
-            // #31: classify the throw so the retry gate and required-actions read
-            // a typed category (watchdog timeout vs process crash).
+            // #31: classify the throw (watchdog timeout vs process crash) as typed.
             telemetry.transientFailures.push(
               classifyAdapterThrow({ errorName: err instanceof Error ? err.name : null }),
             );
@@ -6839,35 +6824,47 @@ export class Orchestrator {
           const sawRetryable = newTransients.some((f) => f.retryable);
           const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
           const reportSoFar = answer.text();
-          // W5.4 reactive failover, READ-ONLY lane (same contract as the
-          // candidate lane; typed limits only, never plain transients).
+          // W5.4 + A2 reactive failover, READ-ONLY lane (same contract as the
+          // candidate lane: typed limit or structural pre-progress death).
           if (harnessError && !input.signal?.aborted) {
-            const rotationPolicy = this.profilePolicy(input.repoRoot, adapter.id);
-            const readyProfileIds =
-              sawTypedLimit && reportSoFar.length === 0 && rotationPolicy.limit_action === "rotate"
-                ? await this.readyProfileIdsForRotation(
-                    input,
-                    adapter.id,
-                    spec.credential_profile ?? null,
-                    triedProfiles,
-                  )
-                : new Set<string>();
-            const rotated = rotateSpecOnTypedLimit({
+            const rotated = await rotateSpecOnTypedLimit({
               spec,
               harnessId: adapter.id,
               attemptId,
-              policy: rotationPolicy,
+              policy: this.profilePolicy(input.repoRoot, adapter.id),
               registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
               snapshots: this.deps.quotaSnapshots?.() ?? [],
-              readyProfileIds,
+              probeReadyProfiles: () =>
+                this.readyProfileIdsForRotation(
+                  input,
+                  adapter.id,
+                  spec.credential_profile ?? null,
+                  triedProfiles,
+                  spec.model_hint ?? null,
+                ),
+              ...this.rotationObservations(adapter, spec, newTransients),
               triedProfiles,
+              markers: telemetry.outputMarkers,
               sawTypedLimit,
+              sawRetryable,
+              attemptErrored: harnessError !== null,
               deliverableEmpty: reportSoFar.length === 0,
               lastLimit: telemetry.rateLimits.at(-1) ?? null,
               emit: (type, payload) => log.emit(type, payload),
               newSessionId: () => newId("ses"),
               defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
             });
+            // A5 ordering: same as the candidate lane — terminalize typed
+            // before the transient gate burns same-profile retries. The pool
+            // refusal APPENDS to the original harness error (candidate-lane
+            // parity: errors.push) instead of erasing the true failure.
+            if (rotated && "poolExhausted" in rotated) {
+              poolExhausted = rotated.poolExhausted;
+              harnessError = harnessError
+                ? `${harnessError}; ${safeErrorMessage(poolExhausted)}`
+                : safeErrorMessage(poolExhausted);
+              break;
+            }
             if (rotated) {
               spec = rotated;
               harnessError = null;
@@ -6883,25 +6880,14 @@ export class Orchestrator {
           )
             break;
 
-          const nextTry = nativeTry + 1;
-          const delayMs = transientRetryDelayMs(
-            transient?.retryDelayMs ?? null,
-            retryPolicy,
+          const delayMs = emitTransientRetryPlan(
+            (t, p) => log.emit(t, p),
+            adapter.id,
+            attemptId,
+            transient,
             nativeTry,
+            retryPolicy,
           );
-          log.emit("route.transient.detected", {
-            harness_id: adapter.id,
-            attempt_id: attemptId,
-            kind: transient?.kind ?? "unknown",
-            category: transient?.category ?? "unknown_harness_error",
-            native_try: nativeTry + 1,
-          });
-          log.emit("route.transient.retry_scheduled", {
-            harness_id: adapter.id,
-            attempt_id: attemptId,
-            retry: nextTry,
-            delay_ms: delayMs,
-          });
           harnessError = null;
           await sleep(delayMs);
         }
@@ -6919,19 +6905,23 @@ export class Orchestrator {
           preStreamFailureSource: "readonly-pre-stream",
         });
       }
-      if (harnessError && telemetry.transientFailures.length > 0) {
-        log.emit("route.transient.exhausted", {
-          harness_id: adapter.id,
-          attempt_id: attemptId,
-          category: telemetry.transientFailures.at(-1)?.category ?? "unknown_harness_error",
-          retries: retryPolicy.maxRetries,
-        });
+      if (harnessError && !poolExhausted) {
+        emitTransientExhausted(
+          (t, p) => log.emit(t, p),
+          adapter.id,
+          attemptId,
+          telemetry,
+          retryPolicy.maxRetries,
+        );
       }
       attemptTelemetries.push({ attemptId, harnessId: adapter.id, telemetry });
-      // D-16: remove the WorkReport transport; the deliverable is the report.
-      const roUnwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", readonlyWorkMode, {
-        sideToolReport: telemetry.sideToolWorkReport ?? undefined,
-      });
+      // D-16: the deliverable is the report. A3: an errored attempt with no
+      // typed final contributes no report material (acceptedTryOutput).
+      const roUnwrapped = unwrapWorkReportEnvelope(
+        acceptedTryOutput(answer, harnessError !== null),
+        readonlyWorkMode,
+        { sideToolReport: telemetry.sideToolWorkReport ?? undefined },
+      );
       // Trim symmetrically with the plan path: a whitespace-only answer is not
       // a delivered report (the final-artifact wrapper heading would otherwise
       // make it read as present content by construction).
@@ -6986,6 +6976,7 @@ export class Orchestrator {
           report,
           error: harnessError,
           telemetry,
+          ...(poolExhausted ? { declaredFailure: declaredFailure(poolExhausted) } : {}),
         });
         if (opts.deepScan) {
           store.writeText(
@@ -7272,14 +7263,19 @@ export class Orchestrator {
         const roCategory = dominantHarnessFailureCategory(
           attemptTelemetries.flatMap((a) => a.telemetry.transientFailures),
         );
+        // A5: the terminal already speaks with the LAST attempt's message; its
+        // typed refusal rides along machine-readably instead of reducing to it.
+        const roDeclared = webBlocked ? undefined : last?.declaredFailure;
         writeFailure(store, paths, {
           phase: "harness",
-          category: webBlocked ? "policy" : "harness_error",
+          category: webBlocked ? "policy" : (roDeclared?.category ?? "harness_error"),
+          code: roDeclared?.code ?? null,
           harnessId: last?.harnessId,
           attemptId: last?.attemptId,
           safeMessage: singleError,
           eventRefs: roEventRefs,
           runDir: paths.root,
+          resetsAt: roDeclared?.resetsAt ?? null,
           nextActions: harnessFailureNextActions(roCategory),
         });
       }

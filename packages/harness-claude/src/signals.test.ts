@@ -133,6 +133,41 @@ describe("claude D-16 signal fixtures", () => {
     expect(out?.[0]?.rate_limit).not.toHaveProperty("applies_to_models");
   });
 
+  it("org-disabled-subscription: typed oauth_org_not_allowed status; result prose is never answer material", () => {
+    const events = parseFixture("org-disabled-subscription.jsonl");
+    // A1: the plain-prose entitlement failure (live incident 2026-08-17,
+    // run-ea06645118d7) becomes a TYPED status event downstream consumers can
+    // read (attemptTelemetry → capability_refused) — no prose governance.
+    const typed = events.filter((e) => e.status?.error_category === "oauth_org_not_allowed");
+    expect(typed).toHaveLength(1);
+    expect(typed[0]?.type).toBe("status");
+    expect(typed[0]?.payload?.["entitlement_denied"]).toBe(true);
+    // A3 deliverable hygiene: the NON-SUCCESS result's prose rides a status
+    // event (timeline visibility), never a message the answer assembly could
+    // adopt; the mid-stream assistant message still flows (it is model output).
+    expect(events.filter((e) => e.type === "message")).toHaveLength(1);
+    expect(events.some((e) => e.type === "message" && e.final === true)).toBe(false);
+    const resultStatus = events.find((e) => e.payload?.["non_success_result"] === true);
+    expect(resultStatus?.type).toBe("status");
+    expect(resultStatus?.text).toContain("organization has disabled");
+  });
+
+  it("a successful result never emits the entitlement status even if prose echoes the phrase", () => {
+    const out = createClaudeParser()(
+      {
+        type: "result",
+        subtype: "success",
+        result:
+          "Report: the org message 'organization has disabled Claude subscription access' was seen in logs.",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+      "sig",
+    );
+    expect((out ?? []).some((e) => e.status?.error_category === "oauth_org_not_allowed")).toBe(
+      false,
+    );
+  });
+
   it("maps rapid_refill_breaker terminal_reason to the continuation-eligible repeated_refill cause", () => {
     const parser = createClaudeParser();
     const out = parser(

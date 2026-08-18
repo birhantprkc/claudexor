@@ -9,6 +9,7 @@ export const QuotaSource = z
     "claude_api_retry",
     "claude_oauth_usage",
     "agy_command_usage",
+    "cursor_rate_limit",
   ])
   .describe("Machine-readable source of quota evidence, classified by schema-owned traits.");
 export type QuotaSource = z.infer<typeof QuotaSource>;
@@ -62,10 +63,43 @@ export const QUOTA_SOURCE_TRAITS = {
     refreshDemandHarness: "agy",
     producedByRefresher: true,
   },
+  cursor_rate_limit: {
+    // Reactive spool evidence classified from cursor-agent's vendor-limit
+    // prose (A1/A4): cursor exposes no quota API, so no refresher can produce
+    // or refresh this source — like claude_api_retry it exists only while a
+    // typed `rate_limit` event's cooldown does.
+    vendorAuthenticated: false,
+    refreshDemandHarness: null,
+    producedByRefresher: false,
+  },
 } as const satisfies Record<QuotaSource, QuotaSourceTraits>;
 
 export function quotaSourceTraits(source: QuotaSource): QuotaSourceTraits {
   return QUOTA_SOURCE_TRAITS[source];
+}
+
+/** Harness → source label for reactive `rate_limit` cooldown evidence. This
+ * map IS the daemon's cooldown-ingest allowlist and its expiry-predicate
+ * scope: agy stays deliberately absent because its adapter emits no
+ * `rate_limit` event, and a branch with no producer is a dead knob
+ * (INV-022/023) — a harness joins in the same change that makes its adapter
+ * emit one (cursor joined with the A1 retry-signals classifier). */
+export const REACTIVE_COOLDOWN_SOURCE: Partial<Record<string, QuotaSource>> = {
+  codex: "codex_rollout",
+  claude: "claude_api_retry",
+  cursor: "cursor_rate_limit",
+};
+
+/** Durable-journal source label the strict v3.2.0 rollback runtime can parse.
+ * `cursor_rate_limit` postdates that enum, so a base upsert record carrying it
+ * would crash a rolled-back engine's replay; the base record carries the
+ * nearest v3.2.0 vocabulary instead (claude_api_retry has the same
+ * reactive-spool trait row), while the paired scoped-prepare record preserves
+ * the true source for current runtimes. `agy_command_usage` also postdates
+ * v3.2.0 but predates this mapping: remapping it now would orphan its already
+ * journaled prepare/commit hashes, so it stays a disclosed rollback residual. */
+export function legacyV320QuotaSource(source: QuotaSource): QuotaSource {
+  return source === "cursor_rate_limit" ? "claude_api_retry" : source;
 }
 
 export function quotaRefreshDemandHarnesses(): Array<"claude" | "codex" | "agy"> {

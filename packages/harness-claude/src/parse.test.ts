@@ -196,14 +196,17 @@ describe("parseClaudeEvent", () => {
     expect(out?.text?.length ?? 0).toBeLessThanOrEqual(520);
   });
 
-  it("a FAILED result is never a typed final (sol #1)", () => {
+  it("a FAILED result is never a typed final — its prose rides a status event, not a message (sol #1 + A3)", () => {
     const failed = parseClaudeEvent(
       { type: "result", subtype: "error_during_execution", result: "partial output" },
       "s1",
     ) as HarnessEvent[];
-    const msg = failed.find((e) => e.type === "message");
-    expect(msg?.text).toBe("partial output");
-    expect(msg?.final).toBeUndefined(); // NOT the authoritative answer
+    // A3 deliverable hygiene: no message at all — the answer assembly must
+    // never adopt a failed result's prose as answer material.
+    expect(failed.some((e) => e.type === "message")).toBe(false);
+    const status = failed.find((e) => e.payload?.["non_success_result"] === true);
+    expect(status?.type).toBe("status");
+    expect(status?.text).toBe("partial output");
     expect(failed.some((e) => e.type === "error")).toBe(true);
   });
 

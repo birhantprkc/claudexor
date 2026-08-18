@@ -161,11 +161,12 @@
                             "cost_unverifiable",
                             "delegation_child_drain_timeout",
                             "subscription_window_exhausted",
+                            "credential_pool_exhausted",
                             "delegated_home_unavailable",
                             "delegated_confinement_unavailable",
                             "delegated_evidence_incomplete"
                           ],
-                          "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence)."
+                          "description": "Machine-readable failure sub-code within a RunFailure category (budget-denial reasons, Delegate child-drain timeout, a spent subscription quota window whose reopen time is RunFailure.resetsAt, an exhausted credential rotation pool whose EARLIEST known member reset is RunFailure.resetsAt, and the delegated-run confinement refusals: missing scoped home, no OS-enforced boundary on this host, incomplete applied evidence)."
                         },
                         {
                           "type": "null"

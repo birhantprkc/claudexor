@@ -663,34 +663,101 @@ default harness doctor is already OK, before any adapter starts:
 intentional presence-only API-key probe may remain `not_run` (shown unknown,
 then adapter-enforced). Each harness
 may declare ONE typed `profile_policy`
-(`limit_action: fail|ask|rotate`, priority-ordered `rotation_eligible`,
-`headroom_threshold`). Two separated signals drive it (never prose, never
+(`limit_action: auto|fail|ask|rotate`, priority-ordered `rotation_eligible`,
+`headroom_threshold`). `auto` is the STORED DEFAULT and resolves by the limit
+subject's credential kind at decision time (`effectiveLimitAction`, ONE
+resolver shared by the engine and every projection): `rotate` for a
+subscription (`local_session`) subject, `fail` for a metered API-key or
+unknown route — a spent subscription window fails over out of the box, while
+a metered limit stays a budget fact. Explicitly persisted `fail`/`ask`/
+`rotate` keep their exact meaning and stored files are never rewritten; only
+the interpretation of an ABSENT key changed (this supersedes the earlier
+"rotation is opt-in" default — CONCEPT-CHANGE(INV-135)). Two separated
+signals drive it (never prose, never
 plain network errors): `profile_headroom_preflight` — before spawn, the
 selected profile's freshest quota window applicable to the effective model
-at/over the threshold emits typed
+at/over the threshold, or its own OBSERVED live block (a reactive rate-limit
+cooldown or spent window judged by the schema's availability projection —
+stale-but-live evidence included, since a cooldown instant is absolute clock
+truth), emits typed
 `route.profile.headroom_exceeded` evidence, and `rotate` swaps to the next
 eligible profile with `route.profile.rotated` provenance; and
 `vendor_limit_rejected` — a TYPED vendor rate-limit that terminated a
 no-deliverable, no-mutation try (`rotation_retry_eligible`) rotates the next
 try onto a NEW vendor session under the next profile, each profile at most
-once per attempt. Credentials never change inside a running spawn; a
-rotation INTO a spent profile is refused by the same headroom check. When no
+once per attempt. A third, STRUCTURAL branch of the same predicate
+(`structural_pre_progress_failure`) rotates a try that ended in a terminal
+NON-transient death before the agent demonstrably did any work — no typed
+limit needed and never narrowed by error-text matching; agent progress is the
+typed marker set (thinking/tool/file/patch/compaction — deliberately not
+`message`/`error`, so vendor failure prose can never block it), transient-
+retryable deaths stay with the same-profile retry machinery, and an observed
+mutation (workspace diff or any `file_change` event) blocks every branch.
+Adapters keep a failed result's prose out of answer material entirely: a
+non-success terminal result rides a `status` event, never a `message`, and an
+errored attempt with no typed final has no deliverable (`acceptedTryOutput`).
+Credentials never change inside a running spawn; a
+rotation INTO a spent or still-cooling profile is refused by the same
+headroom-plus-cooldown check. When no
 target survives (all spent/excluded/wrong-kind), the engine emits typed
 `route.profile.rotation_exhausted` with each rejected profile's reason and
-headroom evidence; the UI surfaces the exhaustion instead of implying a switch.
+headroom or cooldown evidence (with its earliest known release instant); the
+UI surfaces the exhaustion instead of implying a switch. Exhaustion is also a
+TYPED terminal: a reactive rotation-eligible failure with nowhere to go
+terminalizes the attempt on `credential_pool_exhausted` (category
+`harness_unavailable` — nothing malfunctioned) through NORMAL attempt
+finalization, BEFORE the transient gate could burn same-profile retries on the
+already-refused subject, and the run terminal lifts `code` + `resetsAt` onto
+`final/failure.yaml` in every lane (race unanimity, convergence last-result,
+read-only chain). `resetsAt` folds the EARLIEST known reset WITHIN the pool —
+the triggering subject's own observed limit included; a limit-evidenced member
+with an unknown reset makes it null — deliberately the within-pool opposite of
+the across-candidates LATEST rule. At preflight under `rotate`, the selected
+subject's OBSERVED live block with no eligible alternative refuses with the
+same typed terminal before spawn; a bare headroom breach with no alternative
+still proceeds (proximity is not proof the window is spent).
 
-The DEFAULT subject participates under the same opt-in policy (auto-balance):
-with no pinned profile and `limit_action: rotate`, a fresh default-store
-headroom breach starts the run on the next eligible SUBSCRIPTION profile
-(`route.profile.rotated` with `from_profile_id: null`), and a typed vendor
-limit on a profile-less attempt rotates only when the attempt's pre-spawn
-route estimate was `vendor_native` — a metered default hitting a limit is a
-budget fact, not a subscription to fail over from. The default subject never
-rotates into an `api_key` profile (the cross-kind BLOCK generalized).
-`fail`/`ask` leave default-user behavior untouched. The per-harness
-`limit_action` is wire-patchable as `profileLimitAction` on
-`GET/POST /v2/settings` (the app's auto-switch toggle); rotation order and
-headroom keep their stored values.
+Rotation also tells "quota spent" apart from "credential DEAD" (the A7
+differential probe): whenever a rotation-eligible failure triggers the
+candidate-readiness probe, a SIBLING probe examines the CURRENT/triggering
+subject — re-reading the quota poller's authenticated vendor observations,
+the attempt's own typed non-retryable auth/entitlement refusals, and the
+adapter's local doctor probe. It never spawns a harness or spends quota (a
+config-dir login has no cheaper liveness test than spending quota on a
+mini-run). A dead-credential verdict becomes a typed
+`route.profile.credential_unusable` run event and a bounded, self-expiring
+`CredentialUnusableObservation` in the daemon's in-memory
+`CredentialUnusableLedger` (deliberately NOT the `QuotaAbsence` channel — the
+registry hides an absence while any live snapshot covers the subject — and
+deliberately not journaled: readiness is non-durable by contract and the
+poller re-derives vendor rejections within a cycle after restart). The
+clearing contract is threefold: bounded self-expiry (24h hard cap;
+entitlement/probe verdicts expire within the hour), a served model response
+for the same subject (wired where usage events already feed the quota
+registry), and any credential-generation change (login/logout/profile
+mutation). Consumption is one composition point: `readyProfilesForRotation`
+refuses a candidate a live observation condemns (model-scoped observations
+refuse only their own model), exhaustion rows name it typed
+(`rejected: credential_unusable`, never hidden behind `not_ready`), and the
+pool-exhausted terminal carries the subject's dead-credential provenance in
+place of a quota-reset promise that would never help. The Accounts-surface
+projection of these observations is deliberately deferred (owner scope 4=A:
+run + rotation evidence now, UI as a separate issue).
+
+The DEFAULT subject participates under the same policy (auto-balance): with
+no pinned profile and a RESOLVED `rotate` (explicit, or `auto` on a
+subscription route), a fresh default-store headroom breach starts the run on
+the next eligible SUBSCRIPTION profile (`route.profile.rotated` with
+`from_profile_id: null`), and a typed vendor limit on a profile-less attempt
+rotates only when the attempt's pre-spawn route estimate was `vendor_native`
+— a metered default hitting a limit is a budget fact, not a subscription to
+fail over from (`auto` encodes exactly this: an api_key or unknown subject
+resolves to `fail`). The default subject never rotates into an `api_key`
+profile (the cross-kind BLOCK generalized). Explicit `fail`/`ask` leave
+default-user behavior untouched. The per-harness `limit_action` is
+wire-patchable as `profileLimitAction` on `GET/POST /v2/settings` (the app's
+tri-state auto-switch control: Off=`fail` / Auto / On=`rotate`); rotation
+order and headroom keep their stored values.
 
 ## 6. Main Execution Paths
 
@@ -1989,11 +2056,14 @@ serial. Both `/v2/quota` and the atomic Accounts response decorate snapshots
 with the same server-owned model-aware availability projection. Raw journal
 records and projection signatures remain undecorated, and clients never promote
 a model-scoped exhausted window into an account-wide percentage or block.
-Runtime-update rollback remains backward-readable: a scoped snapshot is first
+Runtime-update rollback remains backward-readable: a scoped snapshot — or one
+whose source postdates v3.2.0's strict enum (`cursor_rate_limit`) — is first
 prepared under a typed record that an older engine ignores, then committed by
-the established upsert using an explicit v3.2.0 field allowlist. The journal
+the established upsert using an explicit v3.2.0 field allowlist with the
+nearest v3.2.0 source label in the base. The journal
 appends that pair under one recovery intent and one fsync, so replay retains
-both records or neither. Current engines apply the exact scope only when the
+both records or neither. Current engines apply the exact scope and true source
+only when the
 matching base follows; v3.2.0 replays that base conservatively as account-wide.
 `auto` ranks by the binding `min(elapsed_fraction - used_ratio)` pacing slack,
 `quality` uses only exact user-declared `{harness,model,effort}` tiers, and
