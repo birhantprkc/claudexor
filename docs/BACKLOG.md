@@ -603,6 +603,34 @@ authoritative for each exact disposition.
   the default roots; tighten `contains()` to reject only the parent forms
   (`..`, `../…`) at the next confinement touch.
 
+## 3.6.0 formal-review advisories (2026-08-18)
+
+From the 3.6.0 formal INV-125 wave (ledger rows in
+`docs/reference/review-ledger.md`, 3.6.0 block). The first is the binding
+fix-forward follow-up to the owner's VM-acceptance waiver for this release.
+
+- **VM existing-default battery amendment (fable F1, owner-waived A-1).**
+  `scripts/real-harness-battery.mjs` still hard-asserts flat byte-identity of
+  `config.yaml`; amend it to the CHECKLISTS receipt-backed one-migration
+  contract (auto-registered `<harness>-default` rows plus the migration phase
+  file are the only allowed first-start mutations; the second and later
+  starts must be byte-identical) and update `docs/DEVELOPMENT.md`'s lane text
+  to the same contract so the two docs stop stating different contracts for
+  one lane.
+- **Daemon-launch flake disclosure row (fable F2).** The full-suite
+  machine-load flake in `packages/cli/src/daemon-launch.test.ts` (3/3 green
+  solo) is disclosed only in operator evidence; add one durable disclosure
+  row here or in FEATURES if it recurs.
+- **Pool-exhaustion diagnostics wording (sol S-1, adjudicated accepted).**
+  `credentialPoolExhausted` renders every non-structural reason as "the
+  default credentials hit a vendor limit", including pools whose candidates
+  are all `disabled`/`not_ready`/`credential_unusable`; correct the
+  human-facing sentence to name the actual candidate classes (the typed
+  terminal and pool event are already correct).
+- **3.5.0-wave ledger backfill (fable F4).** The 3.5.0 release waves'
+  findings live in PR bodies and operator plans; backfill their rows into
+  `docs/reference/review-ledger.md`.
+
 ## 3.4.2 formal-review advisories (2026-08-16)
 
 From the 3.4.2 formal initial wave (ledger rows in
