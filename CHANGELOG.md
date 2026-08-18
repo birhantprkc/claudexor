@@ -3,6 +3,27 @@
 Release history for Claudexor. The current version is declared in the root
 `package.json` (the version SSOT); tags `v*` correspond to GitHub Releases.
 
+- **v3.6.0** (2026-08-18): the unified account model (INV-135 rewrite,
+  owner-approved). Every account is a named registry row; the separate
+  "default"/"CLI login" account type is gone. A detected legacy claude/codex
+  default-store login auto-registers at daemon start as the ordinary
+  `<harness>-default` row through a crash-recoverable migration: while it is
+  incomplete the affected harness refuses runs with a typed error, and
+  `POST /v2/accounts-migration/rollback` is the supported downgrade path.
+  Unpinned runs route through a quota-aware pool of enabled+ready rows with
+  sticky, disclosed thread bindings; explicit pins stay strict (typed
+  `subscription_window_exhausted` refusal, no silent rotation); pool
+  exhaustion is a typed `credential_pool_exhausted` terminal carrying the
+  pool's earliest known reset, and the paid API-key route serves it only under
+  the explicit `api_key` preference, never silently under `auto` (owner Q3=A).
+  New wire surface is additive: the `accountPools` pool authority plus
+  `GET /v2/account-pools` (the feature marker) and the migration rollback
+  endpoint; `harnessAccounts` stays on the wire as `[]` for legacy strict
+  clients. Cursor host-Keychain logins are retired — every cursor account
+  lives in an isolated vendor file-store row, and `auth login` becomes
+  bootstrap sugar into the `<harness>-default` row. Deleting a row is provable
+  (typed retryable error on partial cleanup) and retires migrated legacy
+  aliases in the same operation. See PR #206 for the full story.
 - **v3.5.0** (2026-08-17): Google's Antigravity CLI (`agy`) becomes a
   Claudexor harness, with the thing the vendor itself does not offer — several
   Google AI Pro/Ultra subscriptions signed in side by side and rotated on

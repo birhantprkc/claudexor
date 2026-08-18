@@ -1,5 +1,37 @@
 # @claudexor/harness-cursor
 
+## 3.6.0
+
+### Minor Changes
+
+- 895967f: Unified account model (INV-135 rewrite, owner-approved). Every account is a
+  named registry row — the separate "default"/"CLI login" account type is gone.
+  A detected legacy claude/codex default-store login auto-registers at daemon
+  start as the ordinary `<harness>-default` row through a crash-recoverable
+  migration (typed per-harness run refusal while incomplete; rollback command
+  as the supported downgrade path). Unpinned runs route through a quota-aware
+  pool of enabled+ready rows with sticky, disclosed thread bindings; explicit
+  pins are strict (typed `subscription_window_exhausted` refusal, no silent
+  rotation); pool exhaustion is a typed `credential_pool_exhausted` terminal
+  carrying the pool's earliest known reset, and the paid API-key route serves
+  it only under the explicit `api_key` preference — never silently under
+  `auto` (owner Q3=A). New wire: additive `accountPools` pool
+  authority plus `GET /v2/account-pools` (the feature marker) and
+  `POST /v2/accounts-migration/rollback`; `harnessAccounts` stays on the wire
+  as `[]` for legacy strict clients. Cursor host-Keychain logins are retired:
+  every cursor account lives in an isolated vendor file-store row, and
+  `auth login` becomes bootstrap sugar into the `<harness>-default` row.
+  Deleting a row is provable (typed retryable error on partial cleanup) and
+  retires migrated legacy aliases in the same operation.
+
+### Patch Changes
+
+- Updated dependencies [895967f]
+  - @claudexor/schema@3.6.0
+  - @claudexor/core@3.6.0
+  - @claudexor/secrets@3.6.0
+  - @claudexor/util@3.6.0
+
 ## 3.5.0
 
 ### Patch Changes
