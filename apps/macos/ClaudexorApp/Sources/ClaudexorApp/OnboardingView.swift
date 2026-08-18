@@ -71,7 +71,7 @@ struct OnboardingView: View {
                 .buttonStyle(.bordered)
                 .help("Refresh harness install/auth status after running a native setup command.")
             }
-            Text("Claudexor does not broker SaaS OAuth. It reuses each CLI's native login/subscription session first, then API-key refs only as fallback.")
+            Text("Claudexor does not broker SaaS OAuth. Every account is its own named row signed in through the official vendor CLI login; API-key refs are only the fallback route.")
                 .font(.callout).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 GitReadinessCard(
