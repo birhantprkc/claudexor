@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
+import { claudexorOwnedRoot } from "@claudexor/util";
 import type { CliRunLoopOptions } from "@claudexor/core";
 import { HarnessRunSpec, type HarnessEvent } from "@claudexor/schema";
 import { QuotaRegistry } from "./quota-registry.js";
@@ -50,6 +51,21 @@ async function adapterEvents(
     prompt: "x",
     model_hint: "gemini-3.7-flash-high",
     auth_preference: "subscription",
+    // Unified account model (D-U3): every native cursor identity is a registry
+    // row — a profile-less subscription run has nothing routable, so the
+    // adapter-real replay runs under a row (whose file-store probe the injected
+    // nativeAuthOk passes; the locator must live inside the Claudexor-owned
+    // root the profile fence enforces).
+    credential_profile: {
+      profile_id: "valintine",
+      harness_id: "cursor",
+      display_name: "Valintine",
+      credential_kind: "config_dir_login",
+      isolation_locator: join(claudexorOwnedRoot(), "profiles", "cursor-valintine"),
+      secret_ref: null,
+      enabled: true,
+      created_at: null,
+    },
   });
   const events: HarnessEvent[] = [];
   for await (const event of adapter.run(spec)) events.push(event);
