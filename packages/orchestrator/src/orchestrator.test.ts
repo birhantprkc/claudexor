@@ -4056,6 +4056,72 @@ describe("Orchestrator", () => {
     }
   });
 
+  it("an UNPINNED run routes through an enabled account row when the default doctor is unavailable (row-aware admission)", async () => {
+    // After the cursor host-Keychain retirement the cursor default doctor can
+    // never be OK from rows alone (and a named-rows-only claude/codex install
+    // has a logged-out default store) — admission must overlay row readiness
+    // into the harness status for UNPINNED runs exactly the way explicit pins
+    // already do, for both the auto pool and an explicit --harness lane.
+    const repo = await initRepo();
+    const configDir = reapMk(join(tmpdir(), "claudexor-row-admission-config-"));
+    const previousConfigDir = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    const rowDir = join(configDir, "profiles", "asker-default");
+    mkdirSync(rowDir, { recursive: true });
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: asker-default",
+        "    harness_id: asker",
+        "    display_name: Default row",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${rowDir}'`,
+        "",
+      ].join("\n"),
+    );
+    try {
+      const answered: string[] = [];
+      const mkAsker = () => {
+        const adapter = askAdapter("asker", function* (sessionId) {
+          const ts = new Date().toISOString();
+          answered.push("asker");
+          yield { type: "started", session_id: sessionId, ts };
+          yield { type: "message", session_id: sessionId, ts, text: "4" };
+          yield { type: "completed", session_id: sessionId, ts };
+        });
+        // The DEFAULT store is unavailable (host logins are not used); the
+        // enabled registry row is signed in and probeable (askAdapter's
+        // probeCredentialProfile answers available/passed).
+        adapter.doctor = async () =>
+          ConformanceReport.parse({
+            harness_id: "asker",
+            status: "unavailable",
+            enabled_intents: [],
+            reasons: ["host CLI logins are not used (unified account model)"],
+          });
+        return adapter;
+      };
+      // Auto pool: no --harness, no pin — the row-bearing harness must join.
+      const auto = await new Orchestrator({
+        registry: new Map([["asker", mkAsker()]]),
+        reviewers: [],
+      }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask" });
+      expect(legacyOutcome(auto), auto.summary).toBe("success");
+      // Explicit --harness, still unpinned: the unavailable default status
+      // must not refuse while an enabled row can serve the lane.
+      const explicit = await new Orchestrator({
+        registry: new Map([["asker", mkAsker()]]),
+        reviewers: [],
+      }).run({ repoRoot: repo, prompt: "2+2?", mode: "ask", harnesses: ["asker"] });
+      expect(legacyOutcome(explicit), explicit.summary).toBe("success");
+      expect(answered).toEqual(["asker", "asker"]);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it("never rotates INTO a profile the vendor already rejected (auth_revoked)", async () => {
     const repo = await initRepo();
     const configDir = reapMk(join(tmpdir(), "claudexor-revoked-rotation-config-"));

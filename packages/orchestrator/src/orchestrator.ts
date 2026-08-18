@@ -1272,12 +1272,20 @@ export class Orchestrator {
               : `credential profile "${input.credentialProfileId}" belongs to unavailable harness(es): ${registered.map((p) => p.harness_id).join(", ")}`,
         );
       } else {
-        // Auto-pools take only doctor-OK harnesses (BIBLE §2: doctor decides
-        // readiness; a key string or degraded route is visible but not routable).
+        // Auto-pools take doctor-OK harnesses (BIBLE §2: doctor decides
+        // readiness; a key string or degraded route is visible but not
+        // routable) PLUS harnesses with enabled account rows: the default
+        // doctor only sees the default store, and a signed-in registry row is
+        // invisible to it (cursor after the host-Keychain retirement, or a
+        // named-rows-only claude/codex install). Row-bearing lanes still pass
+        // the per-lane row probe below before they are admitted.
+        const registry = this.config(input.repoRoot)?.global.credential_profiles ?? [];
         ids = statuses
           .filter(
             (s) =>
-              s.manifest?.kind !== "fake" && s.status === "ok" && s.enabledIntents.includes(intent),
+              s.manifest?.kind !== "fake" &&
+              ((s.status === "ok" && s.enabledIntents.includes(intent)) ||
+                accountPoolRows(registry, s.id).length > 0),
           )
           .map((s) => s.id);
         if (ids.length === 0) {
@@ -1415,35 +1423,67 @@ export class Orchestrator {
       // routing truth). Capability/manifest gating above still applies.
       let profileAdmitted = false;
       const profileAdapter = this.deps.registry.get(id);
-      const profileVerdict = await selectedProfileAvailability({
-        registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
-        // The EFFECTIVE account (INV-135): an explicit pin is authenticated by ITS store.
-        profileId: this.effectiveProfileId(input, id),
-        harnessId: id,
-        probe: profileAdapter?.probeCredentialProfile?.bind(profileAdapter),
-        // `verification: passed` from the local store only means a login file
-        // is present. The poller's authenticated vendor call is the only
-        // liveness evidence we have, and admission is the surface that must
-        // act on it — otherwise the run dispatches into a revoked token.
-        quota: vendorQuota,
-      });
-      if (profileVerdict !== null) {
-        if (profileVerdict === "available") {
+      const profileProbe = profileAdapter?.probeCredentialProfile?.bind(profileAdapter);
+      const explicitPin = this.effectiveProfileId(input, id);
+      // The account candidates whose readiness may overlay the default-store
+      // verdict: the explicit pin when set; otherwise — row-aware UNPINNED
+      // admission — the thread-bound row followed by the harness's enabled
+      // pool rows, consulted only when the default doctor did not already
+      // admit the lane. A signed-in registry row is invisible to the default
+      // doctor (cursor after the host-Keychain retirement, or a named-rows-
+      // only claude/codex install), so an unpinned run must be admitted on
+      // row readiness exactly the way explicit pins already are.
+      const rowCandidateIds: string[] = [];
+      if (explicitPin) {
+        rowCandidateIds.push(explicitPin);
+      } else if (status.status !== "ok") {
+        const pool = accountPoolRows(
+          this.config(input.repoRoot)?.global.credential_profiles ?? [],
+          id,
+        );
+        const bound = input.threadAccountBindings?.[id] ?? null;
+        rowCandidateIds.push(
+          ...(bound && pool.some((row) => row.profile_id === bound) ? [bound] : []),
+          ...pool.map((row) => row.profile_id).filter((rowId) => rowId !== bound),
+        );
+      }
+      let lastRowVerdict: string | null = null;
+      for (const candidateId of rowCandidateIds) {
+        const verdict = await selectedProfileAvailability({
+          registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
+          profileId: candidateId,
+          harnessId: id,
+          probe: profileProbe,
+          // `verification: passed` from the local store only means a login file
+          // is present. The poller's authenticated vendor call is the only
+          // liveness evidence we have, and admission is the surface that must
+          // act on it — otherwise the run dispatches into a revoked token.
+          quota: vendorQuota,
+        });
+        if (verdict === "available") {
           profileAdmitted = true;
-          // A valid profile restores manifest intent truth when the default store failed.
-          if (status.status !== "ok") {
-            status = {
-              ...status,
-              status: "degraded",
-              enabledIntents: capabilityIntents(manifest.capabilities),
-            };
-            statusById.set(id, status);
-          }
-        } else {
-          const why = `${id} credential profile is not ready: ${profileVerdict}`;
-          dropLane(id, "credential", why);
-          continue;
+          break;
         }
+        lastRowVerdict = verdict;
+      }
+      if (profileAdmitted) {
+        // A valid account row restores manifest intent truth when the default store failed.
+        if (status.status !== "ok") {
+          status = {
+            ...status,
+            status: "degraded",
+            enabledIntents: capabilityIntents(manifest.capabilities),
+          };
+          statusById.set(id, status);
+        }
+      } else if (explicitPin) {
+        // An explicit pin that is not ready refuses/drops the lane; a
+        // not-ready UNPINNED row merely leaves the default doctor verdict in
+        // charge (the gates below keep the refusal honest when neither a row
+        // nor a default login exists).
+        const why = `${id} credential profile is not ready: ${lastRowVerdict}`;
+        dropLane(id, "credential", why);
+        continue;
       }
       if (status.status === "unavailable" && !profileAdmitted) {
         const why = `${id} is unavailable${status.reasons.length ? `: ${status.reasons.join("; ")}` : ""}`;
