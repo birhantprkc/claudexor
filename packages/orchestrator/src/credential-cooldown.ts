@@ -66,17 +66,33 @@ export interface QuotaBlock {
  * spendable rather than cooling every model on the account. A scoped window
  * with NO model context blocks only when it declares it governs the
  * unspecified-model route.
+ *
+ * The subject KEY includes `credential_route` (final-review fix): the
+ * native-session default and the managed-api-key default of one harness BOTH
+ * carry subject_id=null, so without the route an api_key cooldown would cool
+ * the subscription session (and vice versa). `subjectRoute` speaks the
+ * callers' vocabulary (`limitSubjectRoute`); `null` = honestly unknown route —
+ * fail open to the legacy any-route match rather than unblocking on a
+ * technicality (no current caller passes null).
  */
 export function profileQuotaBlock(
   snapshots: readonly QuotaSnapshot[],
   harnessId: string,
   profileId: string | null,
+  subjectRoute: "local_session" | "api_key" | null,
   model?: string | null,
   now?: Date,
 ): QuotaBlock | null {
+  const wantRoute =
+    subjectRoute === "local_session"
+      ? "vendor_native"
+      : subjectRoute === "api_key"
+        ? "managed_api_key"
+        : null;
   for (const snapshot of snapshots) {
     if (snapshot.subject.harness !== harnessId) continue;
     if ((snapshot.subject.subject_id ?? null) !== profileId) continue;
+    if (wantRoute !== null && snapshot.subject.credential_route !== wantRoute) continue;
     const availability = quotaSnapshotAvailability(snapshot, { now, model: model ?? null });
     if (availability.state === "available") continue;
     return {
@@ -117,6 +133,29 @@ const POOL_MEMBER_REJECTIONS = new Set([
   "cooldown",
   "not_selected",
 ]);
+
+/**
+ * Whether one exhaustion row is CREDENTIAL-LAYER EVIDENCE for the pool
+ * terminal's claim (final-review fix): the fold's member labels plus
+ * `credential_unusable` — a dead credential IS a pool member whose typed
+ * verdict is evidence, even though the reset fold excludes its windows (they
+ * promise no reopen). Rows naming identities rotation could never select
+ * (`not_ready`, `not_in_rotation_policy`, `credential_kind_mismatch`) never
+ * count: an api_key sibling's stale cooldown must not let a subscription
+ * subject's structural death terminalize as "the credential pool refused".
+ */
+export function poolMemberEvidence(candidate: PoolExhaustionCandidate): boolean {
+  if (
+    !POOL_MEMBER_REJECTIONS.has(candidate.rejected) &&
+    candidate.rejected !== "credential_unusable"
+  )
+    return false;
+  return (
+    candidate.headroom !== null ||
+    candidate.cooldown !== null ||
+    (candidate.unusable ?? null) !== null
+  );
+}
 
 /**
  * The WHOLE pool refused, MACHINE-READABLY (A5).

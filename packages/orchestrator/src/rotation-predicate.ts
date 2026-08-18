@@ -27,7 +27,9 @@ import type { AttemptOutputMarkers } from "./attemptOutputMarkers.js";
 export interface RotationEvidence {
   /** A TYPED vendor rate-limit signal was observed this try (W5.4). */
   sawTypedLimit: boolean;
-  /** No answer material and (candidate lane) no workspace diff so far. */
+  /** No POLICY-ACCEPTED answer material (`acceptedTryOutput`: an errored try's
+   * mid-stream narration — e.g. a vendor refusal arriving as MESSAGE prose —
+   * never counts, for ANY adapter) and (candidate lane) no workspace diff. */
   deliverableEmpty: boolean;
   /** A workspace mutation was OBSERVED: a non-empty diff (candidate lane) or
    * any typed file_change event (both lanes — the read-only lane has no

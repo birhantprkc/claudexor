@@ -66,7 +66,7 @@ const policy: ProfilePolicy = {
 
 describe("profileQuotaBlock (A4 cooldown reader)", () => {
   it("a STALE snapshot with a live cooldown blocks, with typed evidence", () => {
-    expect(profileQuotaBlock([cooldownSnapshot("a")], "cursor", "a")).toEqual({
+    expect(profileQuotaBlock([cooldownSnapshot("a")], "cursor", "a", "local_session")).toEqual({
       blocked: true,
       constraint_id: "cooldown",
       resets_at: FUTURE,
@@ -76,7 +76,12 @@ describe("profileQuotaBlock (A4 cooldown reader)", () => {
 
   it("an expired cooldown never blocks", () => {
     expect(
-      profileQuotaBlock([cooldownSnapshot("a", { cooldown_until: PAST })], "cursor", "a"),
+      profileQuotaBlock(
+        [cooldownSnapshot("a", { cooldown_until: PAST })],
+        "cursor",
+        "a",
+        "local_session",
+      ),
     ).toBeNull();
   });
 
@@ -86,6 +91,7 @@ describe("profileQuotaBlock (A4 cooldown reader)", () => {
         [cooldownSnapshot("a", { cooldown_until: null, used_ratio: 1, resets_at: FUTURE })],
         "cursor",
         "a",
+        "local_session",
       ),
     ).toMatchObject({ kind: "exhausted", resets_at: FUTURE });
     expect(
@@ -93,22 +99,44 @@ describe("profileQuotaBlock (A4 cooldown reader)", () => {
         [cooldownSnapshot("a", { cooldown_until: null, used_ratio: 1, resets_at: null })],
         "cursor",
         "a",
+        "local_session",
       ),
     ).toBeNull();
   });
 
   it("blocks only the snapshot's own subject — never a sibling or the default", () => {
     const snapshots = [cooldownSnapshot("a")];
-    expect(profileQuotaBlock(snapshots, "cursor", "a")).not.toBeNull();
-    expect(profileQuotaBlock(snapshots, "cursor", "b")).toBeNull();
-    expect(profileQuotaBlock(snapshots, "cursor", null)).toBeNull();
-    expect(profileQuotaBlock(snapshots, "codex", "a")).toBeNull();
+    expect(profileQuotaBlock(snapshots, "cursor", "a", "local_session")).not.toBeNull();
+    expect(profileQuotaBlock(snapshots, "cursor", "b", "local_session")).toBeNull();
+    expect(profileQuotaBlock(snapshots, "cursor", null, "local_session")).toBeNull();
+    expect(profileQuotaBlock(snapshots, "codex", "a", "local_session")).toBeNull();
+  });
+
+  it("route-scoped: an api_key-route cooldown never blocks the subscription-session default of the same harness (and vice versa)", () => {
+    // Both defaults carry subject_id=null — the credential_route is the only
+    // thing separating the managed-api-key subject from the native session.
+    const apiKeyDefault: QuotaSnapshot = {
+      ...cooldownSnapshot(null),
+      subject: {
+        harness: "cursor",
+        credential_route: "managed_api_key",
+        plan_label: null,
+        subject_id: null,
+      },
+    };
+    expect(profileQuotaBlock([apiKeyDefault], "cursor", null, "local_session")).toBeNull();
+    expect(profileQuotaBlock([apiKeyDefault], "cursor", null, "api_key")).not.toBeNull();
+    const nativeDefault = cooldownSnapshot(null); // vendor_native subject
+    expect(profileQuotaBlock([nativeDefault], "cursor", null, "api_key")).toBeNull();
+    expect(profileQuotaBlock([nativeDefault], "cursor", null, "local_session")).not.toBeNull();
   });
 
   it("a Gemini-scoped cooldown never cools the grok lane on the same account", () => {
     const scoped = [cooldownSnapshot("a", { applies_to_models: ["Gemini 3.7 Flash High"] })];
-    expect(profileQuotaBlock(scoped, "cursor", "a", "grok-4.6")).toBeNull();
-    expect(profileQuotaBlock(scoped, "cursor", "a", "Gemini 3.7 Flash High")).not.toBeNull();
+    expect(profileQuotaBlock(scoped, "cursor", "a", "local_session", "grok-4.6")).toBeNull();
+    expect(
+      profileQuotaBlock(scoped, "cursor", "a", "local_session", "Gemini 3.7 Flash High"),
+    ).not.toBeNull();
   });
 
   it("fails OPEN when a display label cannot be proven to cover the routed slug", () => {
@@ -116,22 +144,26 @@ describe("profileQuotaBlock (A4 cooldown reader)", () => {
     // slug. Unprovable coverage must leave the subject spendable, never cool
     // every model on the account.
     const scoped = [cooldownSnapshot("a", { applies_to_models: ["Gemini 3.7 Flash High"] })];
-    expect(profileQuotaBlock(scoped, "cursor", "a", "gemini-3.7-flash")).toBeNull();
+    expect(
+      profileQuotaBlock(scoped, "cursor", "a", "local_session", "gemini-3.7-flash"),
+    ).toBeNull();
     // Provable containment still blocks (alias ⊂ slug).
     const alias = [cooldownSnapshot("a", { applies_to_models: ["gemini"] })];
-    expect(profileQuotaBlock(alias, "cursor", "a", "gemini-3.7-flash")).not.toBeNull();
+    expect(
+      profileQuotaBlock(alias, "cursor", "a", "local_session", "gemini-3.7-flash"),
+    ).not.toBeNull();
   });
 
   it("with no model context a scoped window blocks only when it governs the unspecified route", () => {
     const scoped = [cooldownSnapshot("a", { applies_to_models: ["Gemini 3.7 Flash High"] })];
-    expect(profileQuotaBlock(scoped, "cursor", "a", null)).toBeNull();
+    expect(profileQuotaBlock(scoped, "cursor", "a", "local_session", null)).toBeNull();
     const governing = [
       cooldownSnapshot("a", {
         applies_to_models: ["Gemini 3.7 Flash High"],
         applies_to_unspecified_model: true,
       }),
     ];
-    expect(profileQuotaBlock(governing, "cursor", "a", null)).not.toBeNull();
+    expect(profileQuotaBlock(governing, "cursor", "a", "local_session", null)).not.toBeNull();
   });
 });
 

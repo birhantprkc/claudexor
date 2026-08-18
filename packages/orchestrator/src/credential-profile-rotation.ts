@@ -12,6 +12,7 @@ import { quotaConstraintAppliesToModel } from "@claudexor/budget";
 import {
   credentialPoolExhausted,
   liveUnusableFor,
+  poolMemberEvidence,
   profileQuotaBlock,
   type PoolExhaustionCandidate,
   type QuotaBlock,
@@ -185,7 +186,16 @@ export function nextEligibleProfile(
     // Rotating INTO a subject whose own observed windows are still cooling or
     // spent (A4) is not a failover — it burns an attempt to rediscover the
     // limit the registry already holds, stale-but-live evidence included.
-    if (profileQuotaBlock(snapshots, harnessId, candidate.profile_id, model)) continue;
+    if (
+      profileQuotaBlock(
+        snapshots,
+        harnessId,
+        candidate.profile_id,
+        limitSubjectRoute(candidate),
+        model,
+      )
+    )
+      continue;
     return candidate;
   }
   return null;
@@ -234,6 +244,7 @@ function rotationExhaustionCandidates(args: {
         args.snapshots,
         args.harnessId,
         profile.profile_id,
+        limitSubjectRoute(profile),
         args.model,
       );
       // A7: a candidate refused because ITS CREDENTIAL was observed dead says
@@ -494,27 +505,35 @@ export async function rotateSpecOnTypedLimit(args: {
       unusable: args.liveUnusable,
       model: args.spec.model_hint,
     });
+    // The default subject reached here only via the vendor-native eligibility
+    // gate above, so its registry row is the SUBSCRIPTION default — never the
+    // managed-api-key default that shares subject_id=null.
     const subjectBlock =
       current === null
-        ? profileQuotaBlock(args.snapshots, args.harnessId, null, args.spec.model_hint)
+        ? profileQuotaBlock(
+            args.snapshots,
+            args.harnessId,
+            null,
+            "local_session",
+            args.spec.model_hint,
+          )
         : null;
     const subjectLimit =
       subjectBlock ??
       (evidence.sawTypedLimit ? { resets_at: args.lastLimit?.resetsAt ?? null } : null);
     // The pool terminal REQUIRES evidence: "credential_pool_exhausted" claims
     // the credential layer refused the run, so either the triggering subject
-    // must carry limit/unusable evidence or some candidate row must carry
-    // headroom/cooldown/unusable evidence. A structural pre-progress death
+    // must carry limit/unusable evidence or some POOL-MEMBER row must carry
+    // headroom/cooldown/unusable evidence (`poolMemberEvidence` — rows for
+    // identities rotation could never select, e.g. an api_key sibling under a
+    // subscription subject, never count). A structural pre-progress death
     // over an empty (or evidence-free) pool proves nothing about credentials —
     // fail as-is and keep the TRUE failure (a vanilla user's crashed run must
     // never terminalize as a pool refusal). The already-emitted
     // `route.profile.rotation_exhausted` event stays: rotation WAS consulted
     // and had nowhere to go; only the terminal's claim is evidence-gated.
     const subjectEvidence = subjectLimit !== null || subjectUnusable !== null;
-    const poolEvidence = candidates.some(
-      (candidate) =>
-        candidate.headroom !== null || candidate.cooldown !== null || candidate.unusable !== null,
-    );
+    const poolEvidence = candidates.some(poolMemberEvidence);
     if (!subjectEvidence && !poolEvidence) return null;
     return {
       poolExhausted: credentialPoolExhausted({
