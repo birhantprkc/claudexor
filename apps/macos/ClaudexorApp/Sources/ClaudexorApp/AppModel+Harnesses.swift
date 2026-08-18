@@ -313,7 +313,18 @@ extension AppModel {
             guard family.authReadinessRequest(after: job) != nil else {
                 return await refreshAccounts() == nil
             }
-            return await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
+            let refreshed = await refreshAuthReadinessAfterSetupLifecycle(for: family, job: job)
+            // A profile-less job is the BOOTSTRAP login (K.4): its credential
+            // lands on the `<harness>-default` REGISTRY row, which the exact
+            // source probe and harness refresh above never re-read — so a
+            // fresh/cold row stayed invisible ("No accounts yet") until a
+            // manual popover Refresh, right after a successful login. Re-read
+            // the registry too, through the same mutation-fenced reload the
+            // exact-profile (cursor) lane already performs.
+            if job != nil, AccountsPresentation.supportsBootstrapLogin(family) {
+                await refreshCredentialProfilesAfterMutation()
+            }
+            return refreshed
         }
         return await refreshExactCredentialProfile(
             harnessID: family.setupHarnessId, profileID: profileId) != nil

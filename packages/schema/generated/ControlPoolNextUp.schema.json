@@ -1,0 +1,63 @@
+{
+  "$ref": "#/definitions/ControlPoolNextUp",
+  "definitions": {
+    "ControlPoolNextUp": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "profile"
+            },
+            "profileId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Non-empty identifier string."
+            }
+          },
+          "required": [
+            "kind",
+            "profileId"
+          ],
+          "additionalProperties": false,
+          "description": "An enabled account row is who an unpinned run routes to next."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "api_key_route"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false,
+          "description": "The account pool is empty or exhausted; the unpinned route is the policy-governed API key (INV-061) — a route, never an account row."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "additionalProperties": false,
+          "description": "An unpinned run has nothing routable, with a human reason."
+        }
+      ],
+      "description": "Server-computed pool routing verdict for one harness's unpinned runs (unified account model)."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

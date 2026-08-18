@@ -4,7 +4,7 @@
  * index.ts (the complexity ratchet's smaller-owner rule), mirroring the
  * harness-codex/harness-claude `smoke.ts` siblings.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { providerScrubEnv, runCapture } from "@claudexor/core";
@@ -102,22 +102,9 @@ export async function cleanupCursorSmokeBase(
   }
 }
 
-export function bridgeMacLoginKeychain(home: string): void {
-  if (process.platform !== "darwin") return;
-  const realHome = process.env.HOME;
-  if (!realHome || realHome === home) return;
-  const source = join(realHome, "Library", "Keychains");
-  if (!existsSync(source)) return;
-  const targetParent = join(home, "Library");
-  const target = join(targetParent, "Keychains");
-  if (existsSync(target)) return;
-  try {
-    mkdirSync(targetParent, { recursive: true, mode: 0o700 });
-    symlinkSync(source, target, "dir");
-  } catch {
-    // The smoke will fail honestly if the OS credential bridge cannot be created.
-  }
-}
+// (bridgeMacLoginKeychain retired — owner decision D-U3: the host Keychain is
+// never read, probed, or bridged; native cursor sessions live only in
+// account-row file stores.)
 
 export async function smokeIsolatedApiKey(
   key: string | null,
@@ -128,7 +115,9 @@ export async function smokeIsolatedApiKey(
   const home = join(base, "home");
   try {
     mkdirSync(join(home, ".config"), { recursive: true, mode: 0o700 });
-    bridgeMacLoginKeychain(home);
+    // No Keychain bridge (D-U3): the key smoke proves the API route with the
+    // key alone — bridging the host Keychain could silently authenticate the
+    // smoke with the HOST login instead of the key under test.
     const env: Record<string, string | null> = {
       ...providerScrubEnv(),
       HOME: home,

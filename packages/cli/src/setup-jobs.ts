@@ -29,7 +29,7 @@ import {
   DEFAULT_STORE_OF,
   assertDefaultLoginAllowed,
   assertSetupJobExtendable,
-  resolveProfileBinding,
+  resolveLoginProfileBinding,
   resolveSetupLoginRunnerPath,
   shellQuote,
   stateMatchesDurableExecution,
@@ -1287,7 +1287,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
     create(input: unknown, idempotency?: { key: string; client: string }): ControlSetupJob {
       const request = ControlSetupJobCreateRequest.parse(input);
       const { harness, action } = request;
-      const profileBinding = resolveProfileBinding(harness, request.profileId);
+      const profileBinding = resolveLoginProfileBinding(harness, action, request.profileId);
       assertDefaultLoginAllowed(harness, profileBinding !== null);
       const binding = idempotency ? { ...idempotency, request } : undefined;
       const prior = binding ? store.resolveCreate(binding) : null;

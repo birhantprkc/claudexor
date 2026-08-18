@@ -71,10 +71,10 @@ extension AppModel {
             : (remoteCredentialProfiles[activeExecutionLocation] ?? [])
     }
 
-    var activeHarnessAccounts: [HarnessAccounts] {
+    var activeAccountPools: [HarnessAccountPool] {
         activeExecutionLocation == .local
-            ? harnessAccounts
-            : (remoteHarnessAccounts[activeExecutionLocation] ?? [])
+            ? accountPools
+            : (remoteAccountPools[activeExecutionLocation] ?? [])
     }
 
     /// Controls enumerate doctor truth, not a compiled enum. Built-ins remain

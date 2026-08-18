@@ -343,7 +343,7 @@ extension AppModel {
             if let credentialValue {
                 storeCredentialProfiles(
                     credentialValue.profiles,
-                    harnessAccounts: credentialValue.harnessAccounts,
+                    accountPools: credentialValue.accountPools,
                     at: connection.locationID)
                 accountsRegistryLoadStates[connection.locationID] = .loaded
                 accountsReadinessAuthorityFresh[connection.locationID] = true

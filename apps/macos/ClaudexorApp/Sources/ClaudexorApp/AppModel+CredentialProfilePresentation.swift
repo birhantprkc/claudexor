@@ -23,10 +23,13 @@ extension AppModel {
     /// The human ACCOUNT label for a native thread session (QA-065): resolve the
     /// session's credential `profileId` against the loaded non-secret profile
     /// registry to a display name, falling back to the raw id if the row is
-    /// absent. A nil profileId = the harness's default vendor login. Resume never
-    /// crosses profiles, so this is which account owns each resumable session.
+    /// absent. Under the unified account model every new session carries its
+    /// resolved account row id; a nil profileId is a LEGACY default-store
+    /// session recorded before the startup migration (or by an old engine).
+    /// Resume never crosses accounts, so this is which account owns each
+    /// resumable session.
     func sessionAccountLabel(harnessId: String, profileId: String?) -> String {
-        guard let profileId else { return "Default account" }
+        guard let profileId else { return "Legacy default login" }
         let name = activeCredentialProfiles.first {
             $0.profile.profileId == profileId && $0.profile.harnessId == harnessId
         }?.profile.displayName

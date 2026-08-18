@@ -199,15 +199,15 @@ extension AppModel {
         guard accountsRegistryGenerations[locationID] == generation else { return false }
         storeCredentialProfiles(
             response.profiles,
-            harnessAccounts: response.harnessAccounts,
+            accountPools: response.accountPools,
             at: locationID)
         return true
     }
 
-    /// A legacy/incomplete response cannot authoritatively replace the native
-    /// HarnessAccounts slice (older daemons omit it and decode as empty). Its
-    /// profile registry remains useful, so update that slice without erasing the
-    /// last stable native identities/Enabled values.
+    /// A legacy/incomplete response cannot authoritatively replace the pool
+    /// authority slice (older daemons omit it and decode as empty). Its
+    /// profile registry remains useful, so update that slice without erasing
+    /// the last stable pool verdicts.
     private func commitAccountsProfilesOnlyIfCurrent(
         _ profiles: [CredentialProfileEntry],
         at locationID: ExecutionLocationID,
@@ -242,15 +242,15 @@ extension AppModel {
 
     func storeCredentialProfiles(
         _ profiles: [CredentialProfileEntry],
-        harnessAccounts accounts: [HarnessAccounts],
+        accountPools pools: [HarnessAccountPool],
         at locationID: ExecutionLocationID
     ) {
         if locationID == .local {
             credentialProfiles = profiles
-            harnessAccounts = accounts
+            accountPools = pools
         } else {
             remoteCredentialProfiles[locationID] = profiles
-            remoteHarnessAccounts[locationID] = accounts
+            remoteAccountPools[locationID] = pools
         }
     }
 
@@ -447,19 +447,13 @@ extension AppModel {
         }
     }
 
-    /// The V11b per-harness accounts authority for `harnessId` (native CLI-login
-    /// state + the server-computed informational next-up identity), or nil when
-    /// the projection is absent (pre-V11b daemon) — callers then fall back to
-    /// client-derived state.
-    func harnessAccounts(for harnessId: String) -> HarnessAccounts? {
-        activeHarnessAccounts.first { $0.harnessId == harnessId }
-    }
-
-    /// The next-up identity is a separately expiring slice of HarnessAccounts.
-    /// Invalidating it never fabricates `.none` and never erases Enabled or identity.
-    func authoritativeNextUp(for harnessId: String) -> ControlNextUpIdentity? {
+    /// The pool `next_up` verdict is a separately expiring slice of the
+    /// accounts projection (unified account model: routing facts ride ONLY the
+    /// `accountPools` carrier). Invalidating it never fabricates `.none` and
+    /// never touches the profile rows' Enabled/identity facts.
+    func authoritativeNextUp(for harnessId: String) -> ControlPoolNextUp? {
         guard accountsNextUpAuthorityFresh[activeExecutionLocation] == true else { return nil }
-        return harnessAccounts(for: harnessId)?.nextUp
+        return activeAccountPools.first { $0.harnessId == harnessId }?.nextUp
     }
 
 }

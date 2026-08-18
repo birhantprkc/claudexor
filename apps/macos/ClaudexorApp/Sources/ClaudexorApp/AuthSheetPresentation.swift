@@ -12,10 +12,34 @@ enum AuthSheetPresentation {
 
     /// A sheet selects the target for a fresh login. Once a server-owned job is
     /// present, every continuation follows that job's exact target, including
-    /// nil (the default store); nil must never fall back to the sheet profile.
-    static func setupTarget(requestedProfileId: String?, job: SetupJob?) -> SetupTarget {
+    /// nil (the claude/codex default-store job); nil must never fall back to
+    /// the sheet profile. A profile-less REQUEST is the BOOTSTRAP sugar
+    /// (unified account model): the engine may resolve it onto the family's
+    /// `bootstrapProfileId` (`<harness>-default`) row and report that id on
+    /// the job — the sheet follows the resolution silently, it is not a
+    /// target mismatch. Every OTHER adoption keeps the ownership disclosure:
+    /// a job whose target differs from an EXPLICITLY requested account, and a
+    /// family sheet (nil target) hosting an ACTIVE login of someone else's
+    /// NAMED row — unless this sheet created that job itself
+    /// (`sheetCreatedJob`), in which case the user already chose it here.
+    static func setupTarget(
+        requestedProfileId: String?,
+        job: SetupJob?,
+        bootstrapProfileId: String,
+        sheetCreatedJob: Bool = false
+    ) -> SetupTarget {
         guard let job else {
             return SetupTarget(profileId: requestedProfileId, differsFromRequested: false)
+        }
+        guard let requestedProfileId else {
+            // The family sheet adopts silently only its own bootstrap
+            // resolution: nil (the claude/codex default-store job) or the
+            // `<harness>-default` row, plus jobs it started itself.
+            let bootstrapResolution =
+                job.profileId == nil || job.profileId == bootstrapProfileId
+            return SetupTarget(
+                profileId: job.profileId,
+                differsFromRequested: !bootstrapResolution && !sheetCreatedJob)
         }
         return SetupTarget(
             profileId: job.profileId,
@@ -419,5 +443,25 @@ enum AuthSheetClosePolicy {
         if actionInFlight { return true }
         if job?.isActive == true || job?.blocksReplacement == true { return true }
         return connection == .recovering || connection == .reconnecting || connection == .streamLost
+    }
+
+    static func confirmationTitle(job: SetupJob?, stateUnresolved: Bool) -> String {
+        if job?.blocksReplacement == true { return "Process termination is unconfirmed" }
+        if stateUnresolved { return "Setup state is still resolving" }
+        return "Native login is still active"
+    }
+
+    static func cancellationLabel(job: SetupJob?) -> String {
+        job == nil ? "Reconnect & Cancel" : "Cancel Login"
+    }
+
+    static func confirmationMessage(job: SetupJob?, stateUnresolved: Bool) -> String {
+        if job?.blocksReplacement == true {
+            return "Keep Running closes this sheet without claiming the process stopped. Cancel asks the daemon again and closes only after termination is confirmed. Stay keeps the recovery details visible."
+        }
+        if stateUnresolved {
+            return "Claudexor cannot yet prove whether a setup job is active. Keep Running leaves any accepted job in the background. Cancel first reconciles server state and closes only after confirmed termination."
+        }
+        return "Keep Running closes this sheet while the daemon job continues. Cancel Login waits for confirmed process termination before closing."
     }
 }

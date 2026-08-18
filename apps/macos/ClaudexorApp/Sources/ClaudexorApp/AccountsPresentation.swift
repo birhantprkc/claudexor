@@ -21,7 +21,10 @@ enum AccountReadiness: Int, Comparable {
     }
 }
 
-/// One row in the accounts popover — a registered profile or a default login.
+/// One row in the accounts popover — a registered account row (unified account
+/// model: EVERY account is a named registry row; there is no CLI-login
+/// pseudo-row, and a legacy default-store login appears as the ordinary
+/// `<harness>-default` row the engine registers).
 struct AccountRowModel: Identifiable {
     let id: String
     let displayName: String
@@ -29,28 +32,26 @@ struct AccountRowModel: Identifiable {
     let family: HarnessFamily
     let readiness: AccountReadiness
     let verified: Bool
-    /// nil => the engine-default login for `family` (the "CLI login" row); else
-    /// the credential profile.
-    let profileId: String?
+    /// The account row's registry id — every row has one (unified model).
+    let profileId: String
     let detail: String?
     let quotaGroups: [QuotaPresentation.Group]
-    /// D25 Enabled: participates in pickers + the auto-rotation pool. For a
-    /// profile row this is the wire `profile.enabled`; for the CLI-login row it
-    /// is the harness's `native_credentials_enabled` (V11b). LIVE — the toggle
-    /// PATCHes the owning surface (profile route / harness settings). This is the
-    /// ONLY routing control (the F1 engine cut deleted user-settable Active).
+    /// D25 Enabled: participates in pickers + the auto-rotation pool — the wire
+    /// `profile.enabled`, LIVE via the profile PATCH route on EVERY row (the
+    /// retired `native_credentials_enabled` settings path died with the
+    /// pseudo-row). This is the ONLY routing control.
     let enabled: Bool
-    /// Server-computed NEXT-UP (F1 engine `next_up`): true when an unpinned run of
-    /// this harness would route to THIS row next. INFORMATIONAL only — rendered
-    /// as a quiet "Next up" badge, never a control. false when the projection is
-    /// absent (older daemon) or another row is next up.
+    /// Server-computed NEXT-UP (the `accountPools` pool authority): true when
+    /// an unpinned run of this harness would route to THIS row next.
+    /// INFORMATIONAL only — rendered as a quiet "Next up" badge, never a
+    /// control. false when the projection is absent (older daemon) or another
+    /// row/route is next up.
     let nextUp: Bool
-    /// Non-secret {email, plan} of this account (INV-067), projected daemon-side
-    /// from the owning credential-profile probe or native CLI status receipt.
-    /// When present it drives the row's secondary line (`identityLine`); nil
-    /// when the source does not disclose identity or an older daemon omits it.
+    /// Non-secret {email, plan} of this account (INV-067), projected
+    /// daemon-side from the owning credential-profile probe. When present it
+    /// drives the row's secondary line (`identityLine`); nil when the source
+    /// does not disclose identity or an older daemon omits it.
     var identity: AccountIdentity? = nil
-    var isProfile: Bool { profileId != nil }
 
     /// The row's identity line: "email · plan", or whichever single field the
     /// daemon disclosed. nil falls back to the readiness detail.
@@ -74,8 +75,6 @@ struct AccountRowModel: Identifiable {
         guard verified, identityLine != nil, let detail, detail != identityLine else { return nil }
         return detail
     }
-    /// The native vendor login row (not one of Claudexor's credential profiles).
-    var isCliLogin: Bool { profileId == nil }
 
     /// The single worst usage window across the account's quota groups; drives
     /// the ONE compact quota line the popover shows per account.
@@ -116,14 +115,10 @@ struct AccountRowModel: Identifiable {
 /// Pure assembly of account rows from the model's profile + readiness + quota
 /// state, plus the trigger's worst-of aggregates.
 enum AccountsPresentation {
-    static let cliLoginLifecycleHelp =
-        "CLI login = existing vendor sign-in; named accounts = isolated profiles used by explicit pin or opt-in quota rotation."
-
-    /// Harnesses whose native subscription login can be isolated as an
-    /// additive config-dir/HOME profile. `agy` (Antigravity) has NO default
-    /// store, so every one of its accounts is a named profile registered here —
-    /// which is also why it must stay out of `defaultAuthReadinessRequest`
-    /// (DomainModels.swift), whose rows are the default "CLI login".
+    /// Harnesses whose vendor subscription login lives in an isolated
+    /// config-dir/HOME account row (the engine's config_dir_login set). Under
+    /// the unified account model every one of their accounts — including a
+    /// migrated legacy default-store login — is a named registry row.
     static let configDirLoginHarnessIds = ["agy", "claude", "codex", "cursor"]
 
     /// The families the add-account flow may register, DERIVED from the set
@@ -161,13 +156,45 @@ enum AccountsPresentation {
         }
     }
 
-    /// Whether a login may target the ENGINE-DEFAULT credential store — that is,
-    /// whether a PROFILE-LESS login can succeed at all. `agy` has no default
-    /// store, so the daemon refuses every profile-less Antigravity login; a
-    /// surface that offers one must gate on THIS, never on whether the harness
-    /// id happens to decode as a `SetupHarness`.
-    static func supportsDefaultStoreLogin(_ family: HarnessFamily) -> Bool {
+    /// Whether a PROFILE-LESS login request can succeed for `family` — the
+    /// engine's BOOTSTRAP sugar (unified account model, K.4): it resolves the
+    /// login onto the `<harness>-default` account row (cursor binds the job to
+    /// that row and the job reports the resolved profileId; claude/codex keep
+    /// the default-store job the startup migration registers as that row).
+    /// Mirrors the engine's `harnessSupportsBootstrapLogin`: claude/codex/
+    /// cursor yes; `agy` no — every Antigravity account is a named row and the
+    /// daemon refuses a profile-less agy login. A surface that offers a
+    /// profile-less login must gate on THIS, never on whether the harness id
+    /// happens to decode as a `SetupHarness`.
+    static func supportsBootstrapLogin(_ family: HarnessFamily) -> Bool {
         family.defaultAuthReadinessRequest?.source == .nativeSession
+    }
+
+    /// The reserved id of the family's BOOTSTRAP account row — the engine's
+    /// migration/bootstrap registers a profile-less login as `<harness>-default`
+    /// (contract L.3). A family sheet treats a job resolved onto this row as
+    /// its own login, never as a foreign account's.
+    static func bootstrapProfileId(for family: HarnessFamily) -> String {
+        "\(family.setupHarnessId)-default"
+    }
+
+    /// Harnesses whose pool verdict is disclosed as the API-key ROUTE line on
+    /// an accounts surface (INV-061). Only config-dir-login families qualify:
+    /// there the key is a FALLBACK behind the account rows, so an
+    /// `api_key_route` verdict discloses a real degradation ("no enabled
+    /// account is ready"). For api-key-PRIMARY families (opencode/raw-api/
+    /// openrouter) the key IS the ordinary route — a standing line would
+    /// present normality as degradation, permanently, on a surface that lists
+    /// no rows for them anyway. Pure so the family filter is unit-pinned.
+    static func apiKeyRouteDisclosureHarnessIds(
+        family: HarnessFamily?,
+        poolHarnessIds: [String],
+        isApiKeyRouteNextUp: (String) -> Bool
+    ) -> [String] {
+        let scope = family.map { [$0.setupHarnessId] } ?? poolHarnessIds
+        return scope.filter {
+            configDirLoginHarnessIds.contains($0) && isApiKeyRouteNextUp($0)
+        }
     }
 
     /// Compare legal offset timestamps by their absolute instant. Equal
@@ -196,67 +223,19 @@ enum AccountsPresentation {
         model.gateway(for: model.activeExecutionLocation) != nil
     }
 
+    /// Every row renders from the profiles list — the unified account model's
+    /// single account kind. The client synthesizes NOTHING: the engine's
+    /// startup migration/bootstrap registers a legacy default-store login as
+    /// the ordinary `<harness>-default` row, and `next_up` comes only from the
+    /// server-computed `accountPools` pool authority.
     @MainActor
     static func rows(model: AppModel) -> [AccountRowModel] {
         let groups = QuotaPresentation.groups(from: model.activeQuotaResponse?.snapshots ?? [])
         let accountsReadinessFresh = model.activeAccountsReadinessFresh
-        var rows: [AccountRowModel] = []
-
-        // Default logins: one per native-login family the doctor knows.
-        for info in model.harnesses
-        where info.family.defaultAuthReadinessRequest?.source == .nativeSession {
-            let family = info.family
-            let source = model.authSource(for: family, source: .nativeSession)
-            // V11b per-harness accounts authority for the native/CLI-login row.
-            let accounts = model.harnessAccounts(for: family.rawValue)
-            // Native doctor readiness has its own harness-projection owner. A
-            // failed full Accounts request must not stale a newer successful
-            // Harness Doctor refresh; the Accounts projection is only the
-            // fallback when no exact doctor snapshot is current.
-            let exactReadinessFresh = model.activeHarnessReadinessFresh
-            let nativeAvailability = exactReadinessFresh
-                ? source?.availability
-                : accountsReadinessFresh ? (accounts?.nativeLoginDetected == true
-                    ? "available" : "unavailable") : "unknown"
-            let nativeVerification = exactReadinessFresh
-                ? source?.verification
-                : accountsReadinessFresh && accounts != nil ? "passed" : "not_run"
-            let nativeDetail: String? = if exactReadinessFresh {
-                source?.detail
-            } else if accountsReadinessFresh, let accounts {
-                accounts.nativeLoginDetected
-                    ? "CLI login detected by the cached Accounts projection."
-                    : "No CLI login detected by the cached Accounts projection."
-            } else {
-                "Readiness is stale; refresh Accounts or Harness Doctor."
-            }
-            rows.append(AccountRowModel(
-                id: "default/\(family.rawValue)",
-                displayName: family.label,
-                harnessId: family.rawValue,
-                family: family,
-                readiness: readiness(
-                    availability: nativeAvailability,
-                    verification: nativeVerification),
-                verified: nativeAvailability == "available" && nativeVerification == "passed",
-                profileId: nil,
-                detail: nativeDetail,
-                quotaGroups: groups.filter { $0.subjectId == nil && $0.harness == family.rawValue },
-                // The native/CLI login's "Enabled" is the harness setting
-                // `native_credentials_enabled` (V11b) — LIVE via the settings
-                // PATCH surface. Absent projection => symmetrically enabled.
-                enabled: accounts?.nativeCredentialsEnabled ?? true,
-                nextUp: model.authoritativeNextUp(for: family.rawValue)?
-                    .isDefaultRoute("local_session", legacyFallback: true) ?? false,
-                identity: accounts?.identity
-            ))
-        }
-
-        // Registered profiles (additive; the default login is never touched).
-        for entry in model.activeCredentialProfiles {
+        return model.activeCredentialProfiles.map { entry in
             let availability = accountsReadinessFresh ? entry.status.availability : "unknown"
             let verification = accountsReadinessFresh ? entry.status.verification : "not_run"
-            rows.append(AccountRowModel(
+            return AccountRowModel(
                 id: "profile/\(entry.profile.harnessId)/\(entry.profile.profileId)",
                 displayName: entry.profile.displayName,
                 harnessId: entry.profile.harnessId,
@@ -274,10 +253,8 @@ enum AccountsPresentation {
                 nextUp: model.authoritativeNextUp(for: entry.profile.harnessId)?
                     .isProfile(entry.profile.profileId) ?? false,
                 identity: entry.identity
-            ))
+            )
         }
-
-        return rows
     }
 
     private static func readiness(
@@ -333,17 +310,16 @@ enum AccountsPresentation {
         rows.compactMap(\.worstPercent).max()
     }
 
-    /// The trailing control columns EVERY account row emits, in order. The set is
-    /// STABLE across row kinds (CLI-login vs profile) — a profile carries a real
-    /// trash control where the CLI-login row reserves a clear spacer of the same
-    /// width — so the Enabled toggle and Manage button stay collinear regardless
-    /// of which controls a given row actually renders (owner F8 / §2.8). Pure so
-    /// column-set stability is unit-tested rather than eyeballed.
+    /// The trailing control columns EVERY account row emits, in order. The set
+    /// is STABLE across rows — under the unified model every row is a registry
+    /// row carrying the same Enabled toggle, Manage/Log in action, and Delete —
+    /// so the controls stay collinear (owner F8 / §2.8). Pure so column-set
+    /// stability is unit-tested rather than eyeballed.
     enum AccountRowColumn: String, CaseIterable, Equatable {
         case enabled, manage, delete
     }
 
-    /// The ordered column set for a row — identical for every row kind, which is
+    /// The ordered column set for a row — identical for every row, which is
     /// exactly what keeps the trailing controls on a shared edge.
     static func columns(for row: AccountRowModel) -> [AccountRowColumn] {
         AccountRowColumn.allCases
@@ -396,10 +372,10 @@ enum AccountsPresentation {
 // The accounts-popover control maps to each eligible harness's per-harness
 // `profile_limit_action` (On = `rotate`, Auto = the stored kind-aware `auto`
 // default, Off = `fail`). Only harnesses that actually have a SECOND account
-// can rotate, so the control targets exactly those (a config_dir_login family
-// with ≥1 registered profile: the native/CLI login + ≥1 profile = 2+ rotatable
-// identities). Pure so the target set and the aggregate state are unit-tested
-// rather than eyeballed.
+// can rotate. Under the unified account model every identity is a registry
+// row — there is no native login to fall back on — so eligibility is
+// uniformly "≥2 registered rows". Pure so the target set and the aggregate
+// state are unit-tested rather than eyeballed.
 enum AccountsAutoBalance {
     /// Aggregate across the eligible harnesses. `auto` = every harness is on the
     /// stored kind-aware default; `mixed` = they disagree (rendered as "—");
@@ -423,21 +399,19 @@ enum AccountsAutoBalance {
     /// `/quota`), so a control here has an observable action to drive.
     static let capableHarnessIds = ["claude", "codex", "agy"]
 
-    /// Harnesses whose rotation has NO native identity to fall back on: their
-    /// accounts are all named profiles, so one profile is one identity and
-    /// there is nothing to rotate to.
-    static let harnessesWithoutNativeIdentity: Set<String> = ["agy"]
-
     /// Harnesses eligible for the toggle: a capable family with enough
-    /// identities to rotate BETWEEN — one registered profile is enough where a
-    /// native login also exists, and two are needed where it does not.
-    static func eligibleHarnessIds(profileHarnessIds: [String]) -> [String] {
+    /// identities to rotate BETWEEN. Every account is a registry row (unified
+    /// model) and rotation only draws from the ENABLED pool, so that uniformly
+    /// means two or more ENABLED rows — a disabled row is not a rotation
+    /// target, and counting it offered a toggle with nothing to switch to.
+    /// An absent `enabled` (nil) fails open as enabled, the same rule the
+    /// rest of the surface applies.
+    static func eligibleHarnessIds(profiles: [(harnessId: String, enabled: Bool?)]) -> [String] {
         var counts: [String: Int] = [:]
-        for id in profileHarnessIds { counts[id, default: 0] += 1 }
-        return capableHarnessIds.filter { harness in
-            let needed = harnessesWithoutNativeIdentity.contains(harness) ? 2 : 1
-            return (counts[harness] ?? 0) >= needed
+        for profile in profiles where profile.enabled != false {
+            counts[profile.harnessId, default: 0] += 1
         }
+        return capableHarnessIds.filter { (counts[$0] ?? 0) >= 2 }
     }
 
     /// Aggregate on/off/auto/mixed/unavailable from each eligible harness's

@@ -73,9 +73,14 @@ Two axes that must never share a control:
   (repair attempts stay inside that lane), N racing candidates, a planning
   council, a scout swarm, or delegated sub-runs.
 
-Accounts are symmetric citizens: the vendor CLI's own login and every added
-profile appear in one list with the same controls; the only asymmetry is
-ownership (Claudexor never mutates or deletes the vendor's own store).
+Accounts are symmetric citizens — literally one kind: every account is a
+named registry row with the same Enabled toggle and the same Remove, and an
+existing legacy default-store login is absorbed into that model as an
+ordinary row at startup (its credential bytes never move; the vendor's
+ordinary host stores are never read or mutated). An unpinned run routes
+through the quota-aware pool of enabled ready rows, an unpinned conversation
+stays sticky on its account and switches only with a disclosed lane change,
+and an explicit pin is strict — that account or a typed refusal.
 Selecting an account never narrows the harness pool; choosing a strategy
 never pins an account. Quota is read per account from the vendor's own
 surfaces, model-scoped windows and typed model-family rejections apply only to

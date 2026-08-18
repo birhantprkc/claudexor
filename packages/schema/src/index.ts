@@ -13,6 +13,7 @@ export * from "./output-schema.js";
 export * from "./output-schema-dialect.js";
 export * from "./auth.js";
 export * from "./harness-confinement.js";
+export * from "./accounts-migration.js";
 export * from "./credential-profile.js";
 export * from "./credential-profile-snapshot.js";
 export * from "./git-capability.js";

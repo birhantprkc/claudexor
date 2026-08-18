@@ -16,6 +16,7 @@ import {
   type QuotaSnapshot,
 } from "@claudexor/schema";
 import { noProjectRepoRoot, sha256 } from "@claudexor/util";
+import { readAccountsMigrationFile } from "./accounts-unified-migration.js";
 
 const SOURCE = "claude_oauth_usage" as const;
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -268,9 +269,15 @@ export async function refreshClaudeOauthUsageQuota(
     platform === "darwin"
       ? "no OAuth credential in the keychain item (no login, or the keychain tool is unavailable)"
       : "no vendor credential file in the config dir (not logged in)";
-  const candidates: Array<{ subjectId: string | null; configDir: string }> = [
-    { subjectId: null, configDir: defaultNativeClaudeConfigDir() },
-  ];
+  // The retired null subject must not resurrect on refresh: a MIGRATED
+  // harness's former default store IS its auto-registered row, which the
+  // profile loop below covers — a null duplicate would re-create the retired
+  // subject every cycle and double-probe one credential (mirrors
+  // quotaSubjectUniverseFromConfig's use of the migration record).
+  const candidates: Array<{ subjectId: string | null; configDir: string }> =
+    readAccountsMigrationFile()["claude"] === undefined
+      ? [{ subjectId: null, configDir: defaultNativeClaudeConfigDir() }]
+      : [];
   for (const profile of loadConfig(noProjectRepoRoot()).global.credential_profiles) {
     if (profile.harness_id !== "claude" || !profile.enabled) continue;
     if (profile.credential_kind !== "config_dir_login" || !profile.isolation_locator) continue;

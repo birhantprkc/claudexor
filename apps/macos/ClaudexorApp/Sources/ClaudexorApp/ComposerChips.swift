@@ -9,9 +9,10 @@ import ClaudexorKit
 /// The combined Harness + Account chip (M9-UX item 2): ONE capsule with two
 /// menu segments — the harness (logo + name) and, when a concrete harness is
 /// chosen, a compact account segment. The account segment shows the thread's
-/// pinned account or the harness's Active default; picking pins the thread via
-/// the existing thread PATCH (`setThreadCredentialProfile`). This is the
-/// PER-THREAD account override; the popover owns the global routing default.
+/// pinned account, or the stable "Automatic" (the quota-aware pool of enabled
+/// accounts); picking pins the thread via the existing thread PATCH
+/// (`setThreadCredentialProfile`). This is the PER-THREAD account override;
+/// the popover's Enabled toggles own the global pool membership.
 struct HarnessAccountChip: View {
     @Environment(AppModel.self) private var model
     let current: HarnessFamily?
@@ -83,7 +84,7 @@ struct HarnessAccountChip: View {
             model: model, harnessId: harness.rawValue, pinnedProfileId: pinnedProfileId)
         return Menu {
             Button { onPickAccount(nil) } label: {
-                Label("Automatic (harness default)", systemImage: "wand.and.stars")
+                Label("Automatic (account pool)", systemImage: "wand.and.stars")
                 if pinnedProfileId == nil { Image(systemName: "checkmark") }
             }
             if !profiles.isEmpty {
@@ -112,8 +113,8 @@ struct HarnessAccountChip: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(segment.pinned
-            ? "This thread is pinned to \(segment.label). Pick Automatic to follow the harness default (auto-balance across enabled accounts) instead."
-            : "Account for this thread: Automatic routing may rotate among enabled accounts at a quota limit. Pick a specific account to pin it to this thread.")
+            ? "This thread is pinned to \(segment.label). Pick Automatic to route through the quota-aware pool of enabled accounts instead."
+            : "Account for this thread: Automatic routes through the quota-aware pool of enabled accounts and may switch at a quota limit. Pick a specific account to pin it to this thread.")
     }
 }
 

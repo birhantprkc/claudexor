@@ -97,6 +97,61 @@ describe("Codex app-server quota source", () => {
     expect(nativeAbsence?.detail).toContain("auth login codex");
   });
 
+  it("a post-migration refresh cycle carries no null candidate — the row alone covers the migrated home", async () => {
+    // With a completed codex migration record, the retired null subject must
+    // not resurrect: only the row candidate observes the (shared) store, so
+    // one refresh cycle never double-probes it. Logged-out rows make the
+    // observation cheap (typed absence, no binary spawn).
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "claudexor-codex-mig-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      const { accountsMigrationFilePath } = await import("./accounts-unified-migration.js");
+      const { updateGlobalConfig } = await import("@claudexor/config");
+      const home = defaultNativeCodexHome();
+      mkdirSync(home, { recursive: true });
+      mkdirSync(join(accountsMigrationFilePath(), ".."), { recursive: true });
+      writeFileSync(
+        accountsMigrationFilePath(),
+        JSON.stringify({
+          codex: {
+            phase: "completed",
+            row_id: "codex-default",
+            legacy_aliases: [null],
+            locator: home,
+            backup_ref: null,
+          },
+        }),
+      );
+      updateGlobalConfig((config) => ({
+        ...config,
+        credential_profiles: [
+          {
+            profile_id: "codex-default",
+            harness_id: "codex",
+            display_name: "migrated",
+            credential_kind: "config_dir_login",
+            isolation_locator: home,
+            secret_ref: null,
+            enabled: true,
+            created_at: null,
+          },
+        ],
+      }));
+      const result = await refreshCodexQuota({ bin: "/definitely/missing/claudexor-codex" });
+      expect(result.snapshots).toEqual([]);
+      // Exactly one observation of the store — the row's; never {codex, null}.
+      expect(result.absences?.map((a) => a.subject.subject_id)).toEqual(["codex-default"]);
+      expect(result.absences?.some((a) => a.subject.subject_id === null)).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a missing Codex binary yields a transport absence claim, not a throw", async () => {
     const home = defaultNativeCodexHome();
     mkdirSync(home, { recursive: true });

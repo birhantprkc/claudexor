@@ -413,7 +413,17 @@ describe("daemon-hosted no-Terminal login modes (owner directive 2026-08-04)", (
       "exit 0",
       "",
     ].join("\n");
-    const { jobDir, manifestPath } = prepareTerminalLogin(script, "cursor", "url_disclosure");
+    // D-U3: a cursor login manifest must target an account row's file-store
+    // HOME — cursor has no default credential store any more.
+    const profileHome = join(root, "cursor-default-home");
+    mkdirSync(profileHome, { recursive: true });
+    const { jobDir, manifestPath } = prepareTerminalLogin(
+      script,
+      "cursor",
+      "url_disclosure",
+      undefined,
+      profileHome,
+    );
     const code = await runWorker(manifestPath, join(root, "native"));
     expect(code).toBe(0);
     expect(readFileSync(join(jobDir, "no-open-browser.txt"), "utf8")).toBe("1");

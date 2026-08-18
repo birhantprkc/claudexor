@@ -112,6 +112,11 @@ export interface NormalPlaneDuties {
   requested(): boolean;
   armQuotaPolling(): void;
   beginPidSnapshots(): void;
+  /** Unified-accounts startup migration (INV-135): runs FIRST on the normal
+   * plane — before setup jobs, so a login job can never race the registry
+   * write — and is crash-recoverable via its own phase file (an incomplete
+   * harness refuses runs typed until the next start finishes it). */
+  migrateAccounts(): void;
   startSetup(): Promise<void>;
   quarantineGhosts(): void;
   scheduleRetention(): void;
@@ -153,6 +158,7 @@ export function createStartupAdmissionRuntime(input: {
         `swept retired config keys from ${sweep.path}: ${sweep.removed.join(", ")}`,
       );
     }
+    input.normalPlane.migrateAccounts();
     await input.normalPlane.startSetup();
     input.normalPlane.quarantineGhosts();
     input.normalPlane.scheduleRetention();

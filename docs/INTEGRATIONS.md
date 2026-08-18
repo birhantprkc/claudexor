@@ -829,8 +829,8 @@ Deliberate limits of the external/host surfaces. Each is a designed boundary
 
 Every `CLAUDEXOR_*` variable a live surface reads (adapters, daemon, doctor,
 plugins). Provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`OPENROUTER_API_KEY`) are adapter fallbacks — native CLI login sessions are
-always preferred.
+`OPENROUTER_API_KEY`) are adapter fallbacks — the account rows' native
+subscription sessions are always preferred.
 
 | Variable | Owner | Effect |
 |---|---|---|

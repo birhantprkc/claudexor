@@ -2,16 +2,12 @@ import { existsSync } from "node:fs";
 import {
   effectiveAuthPreference,
   observeNativeSessionEvent,
-  resolveCredentialProfile,
   resumeSessionForProfile,
   rotateSpecOnTypedLimit,
-  runProfilePreflight,
   selectedProfileAvailability,
-  type ProfilePolicy,
-  type VendorQuotaObservations,
 } from "./credential-profiles.js";
-import { currentSubjectProber, readyProfilesForRotation } from "./credential-differential.js";
-import type { TransientFailureObservation } from "./transientClassify.js";
+import { OrchestratorCredentials, rotatedSpecInLaneHome } from "./orchestrator-credentials.js";
+import { accountPoolRows } from "./account-pool.js";
 import { writeRunTelemetryArtifact } from "./runTelemetryWriter.js";
 import {
   buildFileBackedSynthesisInput,
@@ -315,6 +311,9 @@ export interface OrchestratorDeps {
   credentialUnusable?: () => readonly CredentialUnusableObservation[];
   /** Evidence sink for a fresh differential-probe verdict (A7). */
   recordCredentialUnusable?: (obs: CredentialUnusableObservation) => void;
+  /** Typed per-harness run refusal while that harness's unified-accounts
+   * migration is incomplete (crash between phases; INV-137). Null = not blocked. */
+  accountsMigrationGate?: (harnessId: string) => { reason: string } | null;
   /** Ordered explicit reviewer panel. Unlike legacy per-family overrides this
    * preserves duplicate harness entries, so one provider can review through
    * multiple requested models in a single panel pass. */
@@ -453,6 +452,10 @@ export interface RunInput {
   /** Explicit credential profile for this turn (INV-135): resolved once per
    * routed harness; unknown/disabled/mismatched ids refuse, never default. */
   credentialProfileId?: string | null;
+  /** The thread's durable per-harness account bindings (D-U1 order 2),
+   * daemon-derived from the thread's own lane evidence; supplied only for
+   * unpinned thread turns — an explicit pin always wins. */
+  threadAccountBindings?: Record<string, string>;
   /**
    * Native CLI session ids to resume, keyed by harness id (the thread's vendor
    * session cache). A routed harness with an entry continues its own native
@@ -984,15 +987,26 @@ export class Orchestrator {
     const profile =
       quotaAdmission?.model === model
         ? quotaAdmission.profile
-        : await this.preflightProfile(input, harnessId, model, log, defaultRoute);
+        : await this.credentials.preflightProfile(input, harnessId, model, log, defaultRoute);
+    // Q3=A: the PAID api_key route serves ONLY the EXPLICIT api_key
+    // preference (the user's paid election, or the sole permitted service of
+    // an empty/exhausted pool) — never silently under auto, which terminalizes
+    // typed instead; quotaAdmission.route carries the admission verdict.
+    const forcedApiKeyRoute =
+      profile === null &&
+      (quotaAdmission?.model === model
+        ? quotaAdmission.route === "managed_api_key"
+        : this.credentials.poolApiKeyRoute(input, harnessId));
     return {
       // "auto" at ANY level falls through (thread turns send the thread default
       // "auto" as a per-run value; it must not shadow a configured preference).
-      auth_preference: effectiveAuthPreference(
-        input.authPreference,
-        cfg?.harnesses?.[harnessId]?.auth_preference,
-        cfg?.routing?.auth_preference,
-      ),
+      auth_preference: forcedApiKeyRoute
+        ? "api_key"
+        : effectiveAuthPreference(
+            input.authPreference,
+            cfg?.harnesses?.[harnessId]?.auth_preference,
+            cfg?.routing?.auth_preference,
+          ),
       resume_session_id: resumeSessionForProfile(input.resumeSessions?.[harnessId], profile),
       credential_profile: profile,
     };
@@ -1007,157 +1021,34 @@ export class Orchestrator {
    * Keyed by the run's REQUESTED credential profile — the same key the daemon's
    * `resumeMap` lookup uses (INV-135), so record and resume land in one home.
    */
-  private laneHomeEnvFor(input: RunInput, harnessId: string): Record<string, string> | null {
+  private laneHomeEnvFor(
+    input: RunInput,
+    harnessId: string,
+    // Keyed by the RESOLVED account (INV-135/137): the same key the recorded
+    // native session carries, so record and resume share one home.
+    resolvedProfileId: string | null,
+  ): Record<string, string> | null {
     if (!input.threadId) return null;
     return new WorkspaceManager(input.repoRoot).laneHomeEnv(
       input.threadId,
       harnessId,
-      // The lane is keyed by the EFFECTIVE account (INV-135): an explicit pin,
-      // else null resolves the same home the recorded native session lives in.
-      this.effectiveProfileId(input, harnessId),
+      resolvedProfileId,
     ).env;
   }
 
-  /**
-   * The per-harness EFFECTIVE credential profile id (INV-135 accounts
-   * authority): an explicit per-run/per-thread pin wins; else null — POOL AUTO,
-   * the native/CLI login default subject (enabled profiles route only by
-   * explicit pin or quota rotation, never as a silent Active default).
-   */
-  private effectiveProfileId(input: RunInput, _harnessId: string): string | null {
-    return input.credentialProfileId ?? null;
-  }
-
-  /** Whether the native/CLI login is EXCLUDED from this harness's credential
-   * ladder (INV-135). When excluded, a harness with no effective profile has
-   * nothing routable and must refuse — never silently fall back into it. */
-  private nativeCredentialsDisabled(repoRoot: string, harnessId: string): boolean {
-    return (
-      this.config(repoRoot)?.global.harnesses?.[harnessId]?.native_credentials_enabled === false
-    );
-  }
-
-  private resolveCredentialProfile(input: RunInput, harnessId: string): CredentialProfile | null {
-    const explicit = input.credentialProfileId ?? null;
-    const wanted = this.effectiveProfileId(input, harnessId);
-    if (!wanted) return null;
-    const registry = this.config(input.repoRoot)?.global.credential_profiles ?? [];
-    try {
-      return resolveCredentialProfile(registry, wanted, harnessId);
-    } catch (err) {
-      // With Active removed, `wanted` is always the explicit pin; keep the
-      // fail-closed guard so any future non-pin source still refuses loudly.
-      if (!explicit) {
-        throw new Error(
-          `harness "${harnessId}" credential profile "${wanted}" is unusable: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      throw err;
-    }
-  }
-
-  /** The typed effective auth route for a SELECTED credential profile
-   * (round-18 #2): adapters execute strictly by credential_kind, so routing,
-   * billing classification, model truth, and quota lookup must share this
-   * one fact — never the default store's sources or a previous default-route
-   * metric. null = no profile selected or it does not resolve here. */
-  private profileAuthRoute(input: RunInput, harnessId: string): "local_session" | "api_key" | null {
-    try {
-      const profile = this.resolveCredentialProfile(input, harnessId);
-      if (!profile) return null;
-      return profile.credential_kind === "api_key" ? "api_key" : "local_session";
-    } catch {
-      return null;
-    }
-  }
-
-  private profilePolicy(repoRoot: string, harnessId: string): ProfilePolicy {
-    const policy = this.config(repoRoot)?.global.harnesses?.[harnessId]?.profile_policy;
-    // A6: an ABSENT policy means `auto` (kind-aware: rotate for subscription
-    // subjects, fail for metered) — resolved later by effectiveLimitAction.
-    return policy ?? { limit_action: "auto", rotation_eligible: [], headroom_threshold: 0.9 };
-  }
-
-  /** The quota poller's authenticated vendor evidence for THIS decision epoch,
-   * read once so every profile in the epoch is judged against one observation
-   * set. This is what makes profile readiness at admission mean the same thing
-   * it means on the Accounts card (INV-135 honesty). */
-  private vendorQuotaObservations(): VendorQuotaObservations {
-    return {
-      snapshots: this.deps.quotaSnapshots?.() ?? [],
-      absences: this.deps.quotaAbsences?.() ?? [],
-    };
-  }
-
-  /** Fresh profile readiness for one rotation decision epoch (composition in
-   * `readyProfilesForRotation`): probe wrapper + vendor overlay + admission
-   * predicate + the A7 live-observation refusal. */
-  private async readyProfileIdsForRotation(
-    input: RunInput,
-    harnessId: string,
-    current: Pick<CredentialProfile, "profile_id" | "credential_kind"> | null,
-    excluded: ReadonlySet<string> = new Set(),
-    model: string | null = null,
-  ): Promise<ReadonlySet<string>> {
-    const adapter = this.deps.registry.get(harnessId);
-    return readyProfilesForRotation({
-      registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
-      harnessId,
-      policy: this.profilePolicy(input.repoRoot, harnessId),
-      current,
-      excluded,
-      probe: adapter?.probeCredentialProfile?.bind(adapter),
-      quota: this.vendorQuotaObservations(),
-      unusable: this.deps.credentialUnusable?.() ?? [],
-      model,
-    });
-  }
-
-  /** A7 wiring for one reactive rotation decision: the sibling differential
-   * prober of the CURRENT subject plus this epoch's live observations. */
-  private rotationObservations(
-    adapter: HarnessAdapter,
-    spec: HarnessRunSpec,
-    transients: readonly TransientFailureObservation[],
-  ) {
-    return {
-      probeCurrentSubject: currentSubjectProber({
-        harnessId: adapter.id,
-        profile: spec.credential_profile ?? null,
-        model: spec.model_hint ?? null,
-        quota: this.vendorQuotaObservations(),
-        transients,
-        probe: adapter.probeCredentialProfile?.bind(adapter),
-        record: this.deps.recordCredentialUnusable,
-      }),
-      liveUnusable: this.deps.credentialUnusable?.() ?? [],
-    };
-  }
-
-  private async preflightProfile(
-    input: RunInput,
-    harnessId: string,
-    model: string | null,
-    log: EventLog | undefined,
-    defaultRoute: "local_session" | "api_key" | null,
-  ): Promise<CredentialProfile | null> {
-    const profile = this.resolveCredentialProfile(input, harnessId);
-    return runProfilePreflight({
-      profile,
-      harnessId,
-      policy: this.profilePolicy(input.repoRoot, harnessId),
-      registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
-      snapshots: this.deps.quotaSnapshots?.() ?? [],
-      unusable: this.deps.credentialUnusable?.() ?? [],
-      probeReady: () =>
-        this.readyProfileIdsForRotation(input, harnessId, profile, new Set(), model),
-      defaultRoute,
-      model,
-      emit: (type, payload) => log?.emit(type, payload),
-    });
-  }
+  /** Credential-resolution cluster (INV-135), split to orchestrator-credentials.ts. */
+  private readonly credentials = new OrchestratorCredentials({
+    // Accessor functions: the field initializer runs before the constructor
+    // assigns this.deps, so every read defers to call time.
+    config: (repoRoot) => this.config(repoRoot),
+    registry: () => this.deps.registry,
+    quotaSnapshots: () => this.deps.quotaSnapshots?.() ?? [],
+    quotaAbsences: () => this.deps.quotaAbsences?.() ?? [],
+    credentialUnusable: () => this.deps.credentialUnusable?.() ?? [],
+    recordCredentialUnusable: (obs) => this.deps.recordCredentialUnusable?.(obs),
+    authPreferenceForHarness: (repoRoot, harnessId, runPreference) =>
+      this.authPreferenceForHarness(repoRoot, harnessId, runPreference),
+  });
 
   /**
    * Resolve candidate adapters: explicit `--harness`, else available real harnesses, then
@@ -1239,12 +1130,20 @@ export class Orchestrator {
               : `credential profile "${input.credentialProfileId}" belongs to unavailable harness(es): ${registered.map((p) => p.harness_id).join(", ")}`,
         );
       } else {
-        // Auto-pools take only doctor-OK harnesses (BIBLE §2: doctor decides
-        // readiness; a key string or degraded route is visible but not routable).
+        // Auto-pools take doctor-OK harnesses (BIBLE §2: doctor decides
+        // readiness; a key string or degraded route is visible but not
+        // routable) PLUS harnesses with enabled account rows: the default
+        // doctor only sees the default store, and a signed-in registry row is
+        // invisible to it (cursor after the host-Keychain retirement, or a
+        // named-rows-only claude/codex install). Row-bearing lanes still pass
+        // the per-lane row probe below before they are admitted.
+        const registry = this.config(input.repoRoot)?.global.credential_profiles ?? [];
         ids = statuses
           .filter(
             (s) =>
-              s.manifest?.kind !== "fake" && s.status === "ok" && s.enabledIntents.includes(intent),
+              s.manifest?.kind !== "fake" &&
+              ((s.status === "ok" && s.enabledIntents.includes(intent)) ||
+                accountPoolRows(registry, s.id).length > 0),
           )
           .map((s) => s.id);
         if (ids.length === 0) {
@@ -1306,7 +1205,7 @@ export class Orchestrator {
     };
     // One observation set for the whole admission pass, so two lanes cannot be
     // judged against different vendor epochs.
-    const vendorQuota = this.vendorQuotaObservations();
+    const vendorQuota = this.credentials.vendorQuotaObservations();
     for (const id of ids) {
       const adapter = this.deps.registry.get(id);
       if (!adapter) {
@@ -1331,15 +1230,24 @@ export class Orchestrator {
         dropLane(id, "settings", why);
         continue;
       }
-      // INV-135 accounts authority: with the native/CLI login excluded and no
-      // explicit pin, an unpinned run has nothing routable. Refuse an explicit
-      // request naming the setting; drop it from an auto pool — never silently
-      // fall back INTO the disabled login.
+      // Incomplete unified-accounts migration refuses THIS harness only.
+      const migrationBlock = this.deps.accountsMigrationGate?.(id) ?? null;
+      if (migrationBlock) {
+        dropLane(id, "credential", migrationBlock.reason);
+        continue;
+      }
+      // INV-135: native login excluded + no rows + no pin ⇒ only the
+      // EXPLICITLY-requested paid route can serve (Q3=A — `auto` never
+      // silently takes the API key); everything else refuses/drops here,
+      // never a silent spawn INTO the disabled login.
       if (
-        this.effectiveProfileId(input, id) === null &&
-        this.nativeCredentialsDisabled(input.repoRoot, id)
+        this.credentials.effectiveProfileId(input, id) === null &&
+        this.credentials.nativeCredentialsDisabled(input.repoRoot, id) &&
+        accountPoolRows(this.config(input.repoRoot)?.global.credential_profiles ?? [], id)
+          .length === 0 &&
+        this.authPreferenceForHarness(input.repoRoot, id, input.authPreference) !== "api_key"
       ) {
-        const why = `${id} has no routable credential: the CLI login is disabled (harnesses.${id}.native_credentials_enabled=false) and no account is pinned (--profile)`;
+        const why = `${id} has no routable credential: the CLI login is disabled (harnesses.${id}.native_credentials_enabled=false), no account is signed in, and the paid API-key route requires the explicit api_key preference (pin an account with --profile or connect one)`;
         dropLane(id, "credential", why);
         continue;
       }
@@ -1374,35 +1282,67 @@ export class Orchestrator {
       // routing truth). Capability/manifest gating above still applies.
       let profileAdmitted = false;
       const profileAdapter = this.deps.registry.get(id);
-      const profileVerdict = await selectedProfileAvailability({
-        registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
-        // The EFFECTIVE account (INV-135): an explicit pin is authenticated by ITS store.
-        profileId: this.effectiveProfileId(input, id),
-        harnessId: id,
-        probe: profileAdapter?.probeCredentialProfile?.bind(profileAdapter),
-        // `verification: passed` from the local store only means a login file
-        // is present. The poller's authenticated vendor call is the only
-        // liveness evidence we have, and admission is the surface that must
-        // act on it — otherwise the run dispatches into a revoked token.
-        quota: vendorQuota,
-      });
-      if (profileVerdict !== null) {
-        if (profileVerdict === "available") {
+      const profileProbe = profileAdapter?.probeCredentialProfile?.bind(profileAdapter);
+      const explicitPin = this.credentials.effectiveProfileId(input, id);
+      // The account candidates whose readiness may overlay the default-store
+      // verdict: the explicit pin when set; otherwise — row-aware UNPINNED
+      // admission — the thread-bound row followed by the harness's enabled
+      // pool rows, consulted only when the default doctor did not already
+      // admit the lane. A signed-in registry row is invisible to the default
+      // doctor (cursor after the host-Keychain retirement, or a named-rows-
+      // only claude/codex install), so an unpinned run must be admitted on
+      // row readiness exactly the way explicit pins already are.
+      const rowCandidateIds: string[] = [];
+      if (explicitPin) {
+        rowCandidateIds.push(explicitPin);
+      } else if (status.status !== "ok") {
+        const pool = accountPoolRows(
+          this.config(input.repoRoot)?.global.credential_profiles ?? [],
+          id,
+        );
+        const bound = input.threadAccountBindings?.[id] ?? null;
+        rowCandidateIds.push(
+          ...(bound && pool.some((row) => row.profile_id === bound) ? [bound] : []),
+          ...pool.map((row) => row.profile_id).filter((rowId) => rowId !== bound),
+        );
+      }
+      let lastRowVerdict: string | null = null;
+      for (const candidateId of rowCandidateIds) {
+        const verdict = await selectedProfileAvailability({
+          registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
+          profileId: candidateId,
+          harnessId: id,
+          probe: profileProbe,
+          // `verification: passed` from the local store only means a login file
+          // is present. The poller's authenticated vendor call is the only
+          // liveness evidence we have, and admission is the surface that must
+          // act on it — otherwise the run dispatches into a revoked token.
+          quota: vendorQuota,
+        });
+        if (verdict === "available") {
           profileAdmitted = true;
-          // A valid profile restores manifest intent truth when the default store failed.
-          if (status.status !== "ok") {
-            status = {
-              ...status,
-              status: "degraded",
-              enabledIntents: capabilityIntents(manifest.capabilities),
-            };
-            statusById.set(id, status);
-          }
-        } else {
-          const why = `${id} credential profile is not ready: ${profileVerdict}`;
-          dropLane(id, "credential", why);
-          continue;
+          break;
         }
+        lastRowVerdict = verdict;
+      }
+      if (profileAdmitted) {
+        // A valid account row restores manifest intent truth when the default store failed.
+        if (status.status !== "ok") {
+          status = {
+            ...status,
+            status: "degraded",
+            enabledIntents: capabilityIntents(manifest.capabilities),
+          };
+          statusById.set(id, status);
+        }
+      } else if (explicitPin) {
+        // An explicit pin that is not ready refuses/drops the lane; a
+        // not-ready UNPINNED row merely leaves the default doctor verdict in
+        // charge (the gates below keep the refusal honest when neither a row
+        // nor a default login exists).
+        const why = `${id} credential profile is not ready: ${lastRowVerdict}`;
+        dropLane(id, "credential", why);
+        continue;
       }
       if (status.status === "unavailable" && !profileAdmitted) {
         const why = `${id} is unavailable${status.reasons.length ? `: ${status.reasons.join("; ")}` : ""}`;
@@ -1487,7 +1427,7 @@ export class Orchestrator {
           // A selected profile's credential_kind IS the route (round-18 #2);
           // the default store's sources apply only to profile-less runs.
           authRouteEstimate:
-            this.profileAuthRoute(input, id) ??
+            this.credentials.profileAuthRoute(input, id) ??
             estimateEffectiveAuthRoute(
               this.authPreferenceForHarness(input.repoRoot, id, input.authPreference),
               status.authSources,
@@ -1537,27 +1477,51 @@ export class Orchestrator {
     // particular, an opt-in default-subject rotation has to select its ready
     // profile before the budget router filters the exhausted default away.
     // The same resolved profile is reused by the first spec build below.
-    const quotaPreparedPool = await Promise.all(
+    const quotaPrepared = await Promise.all(
       pool.map(async (routed) => {
         const model = input.models?.[routed.adapter.id] ?? routed.settings?.defaultModel ?? null;
-        const profile = await this.preflightProfile(
-          input,
-          routed.adapter.id,
-          model,
-          log,
-          routed.authRouteEstimate,
-        );
+        let profile: CredentialProfile | null;
+        try {
+          profile = await this.credentials.preflightProfile(
+            input,
+            routed.adapter.id,
+            model,
+            log,
+            routed.authRouteEstimate,
+          );
+        } catch (err) {
+          // Q3=A: ONE harness's exhausted account pool must not kill an AUTO
+          // multi-harness run — the lane drops with the typed disclosure and a
+          // surviving sibling serves. An EXPLICIT pool (and the last remaining
+          // auto lane) keeps the typed `credential_pool_exhausted` terminal so
+          // its code + earliest reset reach failure.yaml intact.
+          if (
+            !explicitPool &&
+            pool.length > 1 &&
+            (err as { code?: string }).code === "credential_pool_exhausted"
+          ) {
+            dropLane(routed.adapter.id, "credential", safeErrorMessage(err));
+            return null;
+          }
+          throw err;
+        }
         const route = profile
           ? profile.credential_kind === "api_key"
             ? ("managed_api_key" as const)
             : ("vendor_native" as const)
-          : routed.authRouteEstimate === "api_key"
+          : // The explicitly-opted PAID route (Q3=A) classifies as managed_api_key.
+            this.credentials.poolApiKeyRoute(input, routed.adapter.id)
             ? ("managed_api_key" as const)
-            : routed.authRouteEstimate === "local_session"
-              ? ("vendor_native" as const)
-              : null;
+            : routed.authRouteEstimate === "api_key"
+              ? ("managed_api_key" as const)
+              : routed.authRouteEstimate === "local_session"
+                ? ("vendor_native" as const)
+                : null;
         return { ...routed, quotaAdmission: { model, profile, route } };
       }),
+    );
+    const quotaPreparedPool = quotaPrepared.filter(
+      (routed): routed is NonNullable<typeof routed> => routed !== null,
     );
     const ordered = this.orderPool(quotaPreparedPool, input, intent, statusById, ledger, runId);
     if (ordered.length === 0) {
@@ -2247,7 +2211,7 @@ export class Orchestrator {
         adapter: this.deps.registry.get(harnessId),
         credentialProfile: sessionFields.credential_profile,
         authPreference: sessionFields.auth_preference ?? "auto",
-        laneEnv: this.laneHomeEnvFor(runInput, harnessId) ?? {},
+        laneEnv: this.laneHomeEnvFor(runInput, harnessId, profileId) ?? {},
         envInheritance: envInheritance(this.config(runInput.repoRoot)),
         signal: runInput.signal,
       });
@@ -2660,18 +2624,18 @@ export class Orchestrator {
             spec,
             harnessId: adapter.id,
             attemptId,
-            policy: this.profilePolicy(contract.repo.root, adapter.id),
+            policy: this.credentials.profilePolicy(contract.repo.root, adapter.id),
             registry: this.config(contract.repo.root)?.global.credential_profiles ?? [],
             snapshots: this.deps.quotaSnapshots?.() ?? [],
             probeReadyProfiles: () =>
-              this.readyProfileIdsForRotation(
+              this.credentials.readyProfileIdsForRotation(
                 runInput,
                 adapter.id,
                 spec.credential_profile ?? null,
                 triedProfiles,
                 spec.model_hint ?? null,
               ),
-            ...this.rotationObservations(adapter, spec, newTransients),
+            ...this.credentials.rotationObservations(adapter, spec, newTransients),
             triedProfiles,
             markers: telemetry.outputMarkers,
             sawTypedLimit,
@@ -2688,6 +2652,8 @@ export class Orchestrator {
             emit: (type, payload) => log?.emit(type, payload),
             newSessionId: () => newId("ses"),
             defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
+            // D-U6: an explicit pin never rotates; pool-selected rows do.
+            pinned: runInput.credentialProfileId != null,
           });
           // A5 ordering: an exhausted pool terminalizes TYPED here, BEFORE the
           // transient gate below burns same-profile retries (limits classify
@@ -2698,7 +2664,14 @@ export class Orchestrator {
             break;
           }
           if (rotated) {
-            spec = rotated;
+            // INV-137: the rotated row runs in ITS OWN lane home (no-op for
+            // isolated envelopes and native-env in-place turns).
+            spec = rotatedSpecInLaneHome(
+              spec,
+              rotated,
+              (id) => this.laneHomeEnvFor(runInput, adapter.id, id),
+              runInput.credentialProfileId ?? null,
+            );
             applied = appliedNow();
             errors.length = 0;
             harnessErrored = false;
@@ -3501,7 +3474,7 @@ export class Orchestrator {
             appliedAttemptFacts(
               harnessHome,
               slot.routed.adapterAccess,
-              this.effectiveProfileId(input, adapter.id),
+              this.credentials.effectiveProfileId(input, adapter.id),
             ),
           ),
         );
@@ -3534,7 +3507,7 @@ export class Orchestrator {
           applied: appliedAttemptFacts(
             harnessHome,
             slot.routed.adapterAccess,
-            this.effectiveProfileId(input, adapter.id),
+            this.credentials.effectiveProfileId(input, adapter.id),
           ),
         };
       } finally {
@@ -5079,7 +5052,7 @@ export class Orchestrator {
               appliedAttemptFacts(
                 harnessHome,
                 routed.adapterAccess,
-                this.effectiveProfileId(input, adapter.id),
+                this.credentials.effectiveProfileId(input, adapter.id),
               ),
             ),
           );
@@ -5087,7 +5060,7 @@ export class Orchestrator {
             applied: appliedAttemptFacts(
               harnessHome,
               routed.adapterAccess,
-              this.effectiveProfileId(input, adapter.id),
+              this.credentials.effectiveProfileId(input, adapter.id),
             ),
             attemptId,
             harnessId: adapter.id,
@@ -5790,7 +5763,14 @@ export class Orchestrator {
           ...sessionFields,
           ...this.harnessSpecKnobs(contract, knobs, args.intent),
           env_inheritance: envInheritance(this.config(input.repoRoot)),
-          env: (args.laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? args.fallbackHome,
+          env:
+            (args.laneRun
+              ? this.laneHomeEnvFor(
+                  input,
+                  adapter.id,
+                  sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+                )
+              : null) ?? args.fallbackHome,
         });
         const plannerAbort = new AbortController();
         spec.extra["abortSignal"] = input.signal
@@ -6231,7 +6211,7 @@ export class Orchestrator {
 
   private routeBillingKnowledge(input: RunInput, harnessId: string): "metered" | "unknown" {
     // A selected profile's credential_kind decides billing (round-18 #2).
-    const profileRoute = this.profileAuthRoute(input, harnessId);
+    const profileRoute = this.credentials.profileAuthRoute(input, harnessId);
     if (profileRoute) return profileRoute === "api_key" ? "metered" : "unknown";
     // Deps-closure site: no selected route exists yet, so the RESOLVED
     // preference (per-run > per-harness config > global) speaks — never the
@@ -6632,7 +6612,14 @@ export class Orchestrator {
           // A thread lane turn spawns in its DURABLE per-lane home so the native
           // session it records is reachable for resume next turn; everything else
           // uses the disposable route-context home.
-          env: (laneRun ? this.laneHomeEnvFor(input, adapter.id) : null) ?? roHome.env,
+          env:
+            (laneRun
+              ? this.laneHomeEnvFor(
+                  input,
+                  adapter.id,
+                  sessionFields.credential_profile?.profile_id ?? input.credentialProfileId ?? null,
+                )
+              : null) ?? roHome.env,
         });
         const reportAbort = new AbortController();
         spec.extra["abortSignal"] = input.signal
@@ -6843,18 +6830,18 @@ export class Orchestrator {
               spec,
               harnessId: adapter.id,
               attemptId,
-              policy: this.profilePolicy(input.repoRoot, adapter.id),
+              policy: this.credentials.profilePolicy(input.repoRoot, adapter.id),
               registry: this.config(input.repoRoot)?.global.credential_profiles ?? [],
               snapshots: this.deps.quotaSnapshots?.() ?? [],
               probeReadyProfiles: () =>
-                this.readyProfileIdsForRotation(
+                this.credentials.readyProfileIdsForRotation(
                   input,
                   adapter.id,
                   spec.credential_profile ?? null,
                   triedProfiles,
                   spec.model_hint ?? null,
                 ),
-              ...this.rotationObservations(adapter, spec, newTransients),
+              ...this.credentials.rotationObservations(adapter, spec, newTransients),
               triedProfiles,
               markers: telemetry.outputMarkers,
               sawTypedLimit,
@@ -6867,6 +6854,8 @@ export class Orchestrator {
               emit: (type, payload) => log.emit(type, payload),
               newSessionId: () => newId("ses"),
               defaultRouteWasVendorNative: routed.authRouteEstimate === "local_session",
+              // D-U6: an explicit pin never rotates; pool-selected rows do.
+              pinned: input.credentialProfileId != null,
             });
             // A5 ordering: same as the candidate lane — terminalize typed
             // before the transient gate burns same-profile retries. The pool
@@ -6880,7 +6869,14 @@ export class Orchestrator {
               break;
             }
             if (rotated) {
-              spec = rotated;
+              // INV-137: the rotated row's session must land in ITS OWN lane
+              // home — never the previous row's lane store.
+              spec = rotatedSpecInLaneHome(
+                spec,
+                rotated,
+                (id) => this.laneHomeEnvFor(input, adapter.id, id),
+                input.credentialProfileId ?? null,
+              );
               harnessError = null;
               continue;
             }

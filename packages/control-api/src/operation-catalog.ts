@@ -107,6 +107,10 @@ const operations: ControlOperationDescriptor[] = [
     ],
   }),
   j("GET", "/v2/quota", "read_only", null, "ControlQuotaResponse"),
+  // Unified account model (INV-135 rewrite): the pool-authority read. Its
+  // catalog presence is also the feature marker clients detect (absent from
+  // 3.5.0 engines), per INV-138 a generated capability, never hand-declared.
+  j("GET", "/v2/account-pools", "read_only", null, "ControlAccountPoolsResponse"),
   j("GET", "/v2/credential-profiles", "read_only", null, "ControlCredentialProfilesQueryResponse", {
     parameters: [
       queryParam({
@@ -138,6 +142,17 @@ const operations: ControlOperationDescriptor[] = [
     "mutating",
     null,
     "ControlCredentialProfileDeleteResponse",
+    { idempotency: "natural" },
+  ),
+  // The supported downgrade path of the unified-accounts startup migration:
+  // run BEFORE installing an engine whose canonicalizers refuse the migrated
+  // row's native locator. Naturally idempotent (a second call finds no record).
+  j(
+    "POST",
+    "/v2/accounts-migration/rollback",
+    "mutating",
+    "ControlAccountsMigrationRollbackRequest",
+    "ControlAccountsMigrationRollbackResponse",
     { idempotency: "natural" },
   ),
   j("POST", "/v2/quota", "mutating", "ControlQuotaRefreshRequest", "ControlQuotaResponse", {

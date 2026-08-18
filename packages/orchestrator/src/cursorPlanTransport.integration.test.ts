@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -95,6 +95,21 @@ describe("Cursor Plan validated transport composition", () => {
 
     const previousConfig = process.env.CLAUDEXOR_CONFIG_DIR;
     process.env.CLAUDEXOR_CONFIG_DIR = configDir;
+    // Unified account model (D-U3): a cursor run routes through an account
+    // row's file store — pin one so the plan transport composes under it.
+    writeFileSync(
+      join(configDir, "config.yaml"),
+      [
+        "credential_profiles:",
+        "  - profile_id: work",
+        "    harness_id: cursor",
+        "    display_name: Work",
+        "    credential_kind: config_dir_login",
+        `    isolation_locator: '${join(configDir, "profiles", "cursor-work")}'`,
+        "",
+      ].join("\n"),
+    );
+    mkdirSync(join(configDir, "profiles", "cursor-work"), { recursive: true });
     let result;
     try {
       const registry = new Map<string, HarnessAdapter>([["cursor", adapter]]);
@@ -103,6 +118,7 @@ describe("Cursor Plan validated transport composition", () => {
         prompt: "Create a read-only implementation plan.",
         mode: "plan",
         harnesses: ["cursor"],
+        credentialProfileId: "work",
       });
     } finally {
       if (previousConfig === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;

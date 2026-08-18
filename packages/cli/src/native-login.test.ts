@@ -187,8 +187,9 @@ describe("native login specs", () => {
     };
     expect(nativeLoginEnv("codex", source).CODEX_HOME).toBe(defaultNativeCodexHome());
     expect(nativeLoginEnv("claude", source).CLAUDE_CONFIG_DIR).toBe(defaultNativeClaudeConfigDir());
-    expect(nativeLoginEnv("cursor", source).HOME).toBe("/daemon/home");
-    expect(nativeLoginEnv("cursor", source).CURSOR_API_KEY).toBeUndefined();
+    // D-U3: cursor has no default store — a login without a row's file-store
+    // HOME would land in the HOST Keychain, so it refuses instead.
+    expect(() => nativeLoginEnv("cursor", source)).toThrow(/no default credential store/);
   });
 
   it("pins a named Cursor login to its own file store without changing the default route", () => {
@@ -214,10 +215,10 @@ describe("native login specs", () => {
         NO_OPEN_BROWSER: "1",
       });
       expect(env.CURSOR_API_KEY).toBeUndefined();
-      expect(nativeLoginEnv("cursor", { HOME: "/daemon/home" }).HOME).toBe("/daemon/home");
-      expect(
-        nativeLoginEnv("cursor", { HOME: "/daemon/home" }).AGENT_CLI_CREDENTIAL_STORE,
-      ).toBeUndefined();
+      // D-U3: an overrideless cursor login refuses (no host-Keychain target).
+      expect(() => nativeLoginEnv("cursor", { HOME: "/daemon/home" })).toThrow(
+        /no default credential store/,
+      );
     } finally {
       rmSync(profileHome, { recursive: true, force: true });
     }

@@ -1,6 +1,5 @@
 /** Bind typed control operations to daemon stores and engine entrypoints. */
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { join, sep } from "node:path";
+import { mkdirSync, realpathSync } from "node:fs";
 import {
   type OperatorDecisionRecord,
   JournalManager,
@@ -10,32 +9,28 @@ import {
   ResourceStore,
   QuotaRegistry,
 } from "@claudexor/daemon";
-import { loadConfig, updateGlobalConfig } from "@claudexor/config";
+import { loadConfig } from "@claudexor/config";
 import { listTrustService, updateTrustService } from "./trust-services.js";
 import { SecretStore, isManagedSecretName } from "@claudexor/secrets";
-import {
-  probeGitCapability,
-  purgeProfileLanes,
-  purgeThreadLanes,
-  purgeThreadWorktree,
-} from "@claudexor/workspace";
-import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
+import { probeGitCapability, purgeThreadLanes, purgeThreadWorktree } from "@claudexor/workspace";
+import { noProjectRepoRoot } from "@claudexor/util";
 import {
   type ResourceAttachmentRef,
+  ControlAccountsMigrationRollbackRequest,
   ControlCredentialProfileCreateRequest,
-  type CredentialProfile,
   ControlSettingsUpdateRequest,
   type ControlRunStartRequest,
   RunScope,
   TERMINAL_LIFECYCLES,
 } from "@claudexor/schema";
+import { rollbackAccountsUnifiedMigration } from "./accounts-unified-migration.js";
+import { credentialProfileMutations } from "./credential-profile-mutations.js";
 import { quotaControlServices } from "./quota-services.js";
-import { registerConfigDirProfile, removeProfileFromRegistry } from "./profile-registration.js";
+import { registerConfigDirProfile } from "./profile-registration.js";
 import { StatusProjectionCache, globalConfigVersion } from "./status-projection-cache.js";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import { profileDoctorStatus } from "./accounts-projection.js";
 import { createRetentionRunner } from "./retention-service.js";
-import { canonicalIsolationLocator, normalizeThroughExistingAncestor } from "@claudexor/core";
 import { AuthReadinessService } from "@claudexor/gateway";
 import { buildGateway, harnessModels } from "./registry.js";
 import {
@@ -52,15 +47,11 @@ import {
 import { createSetupJobManager } from "./setup-jobs.js";
 import { SetupJobStore } from "./setup-job-store.js";
 import { activeProfileLoginJob } from "./setup-job-support.js";
-import { canonicalProfileLoginDir, isConfigDirLoginHarness } from "./config-dir-login-harnesses.js";
 import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
 import { createRunRequirementsPreflight } from "./request-preflight.js";
 import { threadRunStartRequiresGit } from "./thread-execution-workspace.js";
 import { applyThreadDiff, type ThreadApplyOptions } from "./thread-delivery.js";
-import {
-  assertCredentialProfileCompatibility,
-  assertCredentialProfileRegistered,
-} from "./profile-compatibility.js";
+import { assertCredentialProfileCompatibility } from "./profile-compatibility.js";
 import { remoteFilesystemServices } from "./remote-filesystem.js";
 import { projectRunApplicability } from "./run-applicability.js";
 import { threadTurnServices } from "./thread-turn-services.js";
@@ -368,124 +359,34 @@ export function controlServices(
     ...quotaControlServices(quotaRegistry),
     // INV-135: durable registry + live doctor projection, one probe per
     // profile; adapters without profile support report honest unknown.
-    credentialProfiles: createCredentialProfilesService(quotaRegistry),
-    // PATCH /credential-profiles/:harness/:id — the Enabled toggle of the
-    // accounts symmetry (INV-135). Flips the profile's durable `enabled` in the
-    // registry (one locked write) and returns the refreshed doctor projection.
-    updateCredentialProfile: async (input: unknown) => {
-      const p = (input ?? {}) as Record<string, unknown>;
-      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
-      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
-      const enabled = typeof p["enabled"] === "boolean" ? p["enabled"] : undefined;
-      if (!harnessId || !profileId || enabled === undefined) {
-        throw Object.assign(new Error("harnessId, profileId and enabled are required"), {
-          status: 400,
-        });
-      }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
+    // The pool-authority read (GET /v2/account-pools) shares the same cached
+    // projection so the listing and the pool verdict cannot disagree.
+    ...createCredentialProfilesService(quotaRegistry),
+    // PATCH + DELETE /credential-profiles/:harness/:id — the Enabled toggle
+    // (with the migrated row's native_credentials_enabled downgrade mirror)
+    // and the provable D-U4 removal, owned by credential-profile-mutations.ts.
+    ...credentialProfileMutations({
+      threads,
+      quotaRegistry,
+      secretStore,
+      bustStatusCaches,
+      activeLoginJob: (harnessId, profileId) =>
+        activeProfileLoginJob(setupJobs, harnessId, profileId),
+    }),
+    // POST /accounts-migration/rollback — the supported downgrade path's
+    // first step (unified account model): surgically reverses the startup
+    // migration (sessions/checkpoints/lane homes back to the engine-default
+    // keys, the auto-registered row out of the registry, its enabled state
+    // back onto the native_credentials_enabled mirror). Run BEFORE installing
+    // an engine whose canonicalizers refuse the native locator.
+    rollbackAccountsMigration: async (input: unknown) => {
+      const request = ControlAccountsMigrationRollbackRequest.parse(input ?? {});
+      const rolledBack = rollbackAccountsUnifiedMigration(
+        { threads, quota: quotaRegistry() },
+        request.harnessId,
       );
-      let updated: CredentialProfile | undefined;
-      updateGlobalConfig((config) => ({
-        ...config,
-        credential_profiles: config.credential_profiles.map((profile) => {
-          if (profile.harness_id !== harnessId || profile.profile_id !== profileId) return profile;
-          updated = { ...profile, enabled };
-          return updated;
-        }),
-      }));
-      if (!updated) {
-        throw Object.assign(new Error("profile update did not persist"), { status: 500 });
-      }
-      bustStatusCaches({ harnessId, profileId });
-      return {
-        profile: updated,
-        // Same vendor overlay the listing applies: a single-profile response
-        // must not re-declare a revoked credential `passed` (INV-135 honesty).
-        status: vendorVerifiedProfileStatus(
-          await profileDoctorStatus(updated),
-          quotaRegistry().read(),
-        ),
-      };
-    },
-    // INV-135 deletion: registry first; scoped material cleanup is fenced and disclosed.
-    deleteCredentialProfile: async (input: unknown) => {
-      const p = (input ?? {}) as Record<string, unknown>;
-      const harnessId = typeof p["harnessId"] === "string" ? p["harnessId"] : "";
-      const profileId = typeof p["profileId"] === "string" ? p["profileId"] : "";
-      if (!harnessId || !profileId) {
-        throw Object.assign(new Error("harnessId and profileId are required"), { status: 400 });
-      }
-      const activeLogin = activeProfileLoginJob(setupJobs, harnessId, profileId);
-      if (activeLogin) {
-        throw Object.assign(
-          new Error(
-            `a login for this account is in progress (${activeLogin.jobId}); cancel it before removing the account`,
-          ),
-          { status: 409 },
-        );
-      }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
-      );
-      threads.invalidateCredentialProfile(harnessId, profileId);
-      // INV-034 lifecycle owner (b): the deleted account's durable per-lane
-      // read-only homes must not survive to be resumed. Sweep them across every
-      // project a live thread anchors to (plus the no-project partition).
-      const laneRoots = new Set<string>([NO_PROJECT_ROOT]);
-      for (const thread of threads.listThreads()) {
-        if (thread.repo?.root) laneRoots.add(thread.repo.root);
-      }
-      for (const root of laneRoots) purgeProfileLanes(root, harnessId, profileId);
-      quotaRegistry().removeSubject(harnessId, profileId);
-      const entry = removeProfileFromRegistry(harnessId, profileId);
-      let credentialCleanup: "config_dir_removed" | "secret_deleted" | "none" = "none";
-      const cleanupWarnings: string[] = [];
-      try {
-        if (entry.credential_kind === "config_dir_login" && entry.isolation_locator) {
-          // Each member resolves through its OWN canonicalizer (the ladder
-          // this used to hand-write let cursor and agy fall through to the
-          // generic one, so a member whose canonicalizer adds a rule — claude
-          // already refuses the default native dir — would silently delete
-          // against a different path than its login wrote to).
-          const dir = isConfigDirLoginHarness(harnessId)
-            ? canonicalProfileLoginDir(harnessId, entry.isolation_locator)
-            : canonicalIsolationLocator(entry.isolation_locator, "credential profile dir");
-          // Recursive deletion is fenced to a strict descendant of the profiles tree.
-          const profilesRoot = normalizeThroughExistingAncestor(
-            join(claudexorOwnedRoot(), "profiles"),
-          );
-          if (!dir.startsWith(profilesRoot + sep)) {
-            throw new Error(
-              `refusing to delete "${dir}": not inside the profiles tree ${profilesRoot}`,
-            );
-          }
-          if (existsSync(dir)) {
-            rmSync(dir, { recursive: true, force: true });
-            credentialCleanup = "config_dir_removed";
-          }
-        } else if (entry.secret_ref) {
-          secretStore.delete(entry.secret_ref);
-          credentialCleanup = "secret_deleted";
-        }
-      } catch (err) {
-        cleanupWarnings.push(
-          `registry entry removed, but credential cleanup failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      bustStatusCaches({ harnessId, profileId });
-      return {
-        profile: entry,
-        removed: true,
-        credentialCleanup,
-        ...(cleanupWarnings.length > 0 ? { cleanupWarning: cleanupWarnings.join("; ") } : {}),
-      };
+      bustStatusCaches();
+      return { rolledBack };
     },
     // POST /credential-profiles: the SAME ONE registration owner the CLI's
     // `profiles add` uses (profile-registration.ts) — never a second write

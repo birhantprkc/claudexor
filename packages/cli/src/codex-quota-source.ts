@@ -13,6 +13,7 @@ import {
 } from "@claudexor/harness-codex";
 import type { QuotaAbsence, QuotaConstraint, QuotaSnapshot } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
+import { readAccountsMigrationFile } from "./accounts-unified-migration.js";
 
 const CODEX_BIN = process.env.CLAUDEXOR_CODEX_BIN || "codex";
 
@@ -64,9 +65,14 @@ export async function refreshCodexQuota(
 /** The default native home plus every enabled codex config_dir_login profile,
  * resolved to its scoped CODEX_HOME (the profile's isolation_locator dir). */
 function codexQuotaCandidates(): Array<{ subjectId: string | null; home: string }> {
-  const candidates: Array<{ subjectId: string | null; home: string }> = [
-    { subjectId: null, home: defaultNativeCodexHome() },
-  ];
+  // A MIGRATED harness has no null subject (its former default home IS the
+  // auto-registered row the profile loop covers): probing it again would
+  // resurrect the retired subject every refresh cycle and double-probe one
+  // credential (mirrors quotaSubjectUniverseFromConfig's migration-record use).
+  const candidates: Array<{ subjectId: string | null; home: string }> =
+    readAccountsMigrationFile()["codex"] === undefined
+      ? [{ subjectId: null, home: defaultNativeCodexHome() }]
+      : [];
   for (const profile of loadConfig(noProjectRepoRoot()).global.credential_profiles) {
     if (profile.harness_id !== "codex" || !profile.enabled) continue;
     if (profile.credential_kind !== "config_dir_login" || !profile.isolation_locator) continue;

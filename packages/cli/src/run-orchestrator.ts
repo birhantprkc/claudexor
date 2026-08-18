@@ -24,11 +24,15 @@ export function buildRunOrchestrator(args: {
   p: ReturnType<typeof normalizeRunStartRequest>;
   delegationBudgetAuthority: OrchestratorDeps["delegationBudgetAuthority"];
   quotaStore: () => QuotaRegistry;
+  /** Typed per-harness refusal while a unified-accounts migration is
+   * incomplete (a crash between phases) — other harnesses keep working. */
+  accountsMigrationGate?: OrchestratorDeps["accountsMigrationGate"];
 }): Orchestrator {
   const { p, quotaStore } = args;
   return new Orchestrator({
     registry: buildRegistry(),
     delegationBudgetAuthority: args.delegationBudgetAuthority,
+    accountsMigrationGate: args.accountsMigrationGate,
     routingGoal: p.routingGoal,
     quotaSnapshots: () => quotaStore().read().snapshots,
     // The absence half of the SAME projection: `auth_revoked` is how the

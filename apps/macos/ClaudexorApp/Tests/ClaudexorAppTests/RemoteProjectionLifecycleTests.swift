@@ -99,7 +99,7 @@ import Testing
 
         for locationID in [locationA, locationB] {
             model.remoteCredentialProfiles[locationID] = []
-            model.remoteHarnessAccounts[locationID] = []
+            model.remoteAccountPools[locationID] = []
             model.remoteHarnesses[locationID] = []
             model.remoteSettingsSnapshots[locationID] = settings
             model.remoteQuotaResponses[locationID] = quota
@@ -119,7 +119,7 @@ import Testing
         model.discardRemoteDaemonProjections(at: locationA)
 
         #expect(model.remoteCredentialProfiles[locationA] == nil)
-        #expect(model.remoteHarnessAccounts[locationA] == nil)
+        #expect(model.remoteAccountPools[locationA] == nil)
         #expect(model.remoteHarnesses[locationA] == nil)
         #expect(model.remoteSettingsSnapshots[locationA] == nil)
         #expect(model.remoteQuotaResponses[locationA] == nil)
@@ -132,7 +132,7 @@ import Testing
         #expect(model.runApplicabilityProjections[locationA] == nil)
 
         #expect(model.remoteCredentialProfiles[locationB] != nil)
-        #expect(model.remoteHarnessAccounts[locationB] != nil)
+        #expect(model.remoteAccountPools[locationB] != nil)
         #expect(model.remoteHarnesses[locationB] != nil)
         #expect(model.remoteSettingsSnapshots[locationB] == settings)
         #expect(model.remoteQuotaResponses[locationB] == quota)

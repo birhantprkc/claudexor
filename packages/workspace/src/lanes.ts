@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { WorkspaceError } from "@claudexor/core";
 import { ensureDir, projectRuntimeDir } from "@claudexor/util";
@@ -190,6 +190,48 @@ export function purgeProfileLanes(
     }
   }
   return removed;
+}
+
+/**
+ * Unified-accounts migration (INV-137, one unit with the session/checkpoint
+ * rewrite): every `<thread>/<harness>-default` lane home — the null
+ * engine-default subject's durable read-only home — is RENAMED to the
+ * auto-registered row's lane dir so recorded native sessions stay reachable
+ * once unpinned turns resolve to that row. Idempotent: an already-renamed (or
+ * already-advanced) row lane leaves the legacy dir untouched and inert.
+ */
+export function migrateDefaultLanes(projectRoot: string, harnessId: string, rowId: string): number {
+  return renameLanes(projectRoot, `${harnessId}-default`, `${harnessId}-${rowId}`);
+}
+
+/** The supported downgrade path's reverse of `migrateDefaultLanes`. */
+export function rollbackProfileLanes(
+  projectRoot: string,
+  harnessId: string,
+  rowId: string,
+): number {
+  return renameLanes(projectRoot, `${harnessId}-${rowId}`, `${harnessId}-default`);
+}
+
+function renameLanes(projectRoot: string, fromSeg: string, toSeg: string): number {
+  assertSafeSegment("lane", fromSeg);
+  assertSafeSegment("lane", toSeg);
+  const root = lanesRootDir(projectRuntimeDir(projectRoot));
+  let renamed = 0;
+  for (const threadId of safeReaddir(root)) {
+    const from = join(root, threadId, fromSeg);
+    const to = join(root, threadId, toSeg);
+    if (!from.startsWith(root + sep) || !to.startsWith(root + sep)) continue;
+    if (!existsSync(from) || existsSync(to)) continue;
+    try {
+      renameSync(from, to);
+      renamed += 1;
+    } catch {
+      /* best-effort: an unrenamed lane degrades to a fresh session, disclosed
+       * by the continuity layer — never a crash of the migration pass */
+    }
+  }
+  return renamed;
 }
 
 /**

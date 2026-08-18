@@ -39,6 +39,12 @@ import {
   type ProjectPartitionsPreparation,
 } from "./project-partition-preparation.js";
 import { listProjectThreadsResilient } from "./project-thread-listing.js";
+import {
+  applyProfileContinuityAcross,
+  invalidateCredentialProfileAcross,
+  type ProfileContinuityResult,
+} from "./partition-accounts.js";
+import { removeProjectFromPartitions } from "./project-remove.js";
 
 export type { ProjectPartitionsPreparation } from "./project-partition-preparation.js";
 export class ProjectPartitions implements CommandAuthority {
@@ -249,82 +255,13 @@ export class ProjectPartitions implements CommandAuthority {
     id: string,
     activeRunRoots: ReadonlySet<string>,
   ): import("@claudexor/schema").ControlProjectRemoveReceipt {
-    const registry = this.projects.current();
-    const project = registry.get(id);
-    if (!project) {
-      throw Object.assign(new Error(`no such project: ${id}`), {
-        code: "project_not_found",
-        status: 404,
-      });
-    }
     this.partitions.sync();
-    const entry = this.partitions.get(id);
-    if (entry) {
-      if (!entry.manager.ready()) {
-        throw Object.assign(
-          new Error(`project ${id} partition requires journal recovery before it can be removed`),
-          { code: "journal_recovery_required", status: 409 },
-        );
-      }
-      const blocking = entry.threads
-        .current()
-        .listThreads()
-        .filter((thread) => thread.state !== "purged");
-      if (blocking.length > 0) {
-        throw Object.assign(
-          new Error(
-            `project ${id} still has ${blocking.length} thread(s); trash and purge them before removing it`,
-          ),
-          { code: "project_has_threads", status: 409 },
-        );
-      }
-    }
-    if (activeRunRoots.has(project.root)) {
-      throw Object.assign(
-        new Error(
-          `project ${id} has a live or queued run; wait for it to finish before removing it`,
-        ),
-        { code: "project_has_active_run", status: 409 },
-      );
-    }
-    const archivedPartitionPath = entry ? entry.manager.archivePartition() : null;
-    try {
-      registry.unregister(id);
-    } catch (unregisterError) {
-      // Archive succeeded but the durable registry rejected the unregister: the
-      // project is now archived-but-registered. Roll the archive back into the
-      // active tree so the two views stay consistent, then surface the original
-      // unregister failure. If the rollback ITSELF fails we cannot restore
-      // consistency — disclose the partial state honestly with a typed error
-      // rather than pretend the remove succeeded (Ф2 finding 4).
-      if (entry && archivedPartitionPath) {
-        try {
-          entry.manager.restoreArchivedPartition(archivedPartitionPath);
-        } catch (rollbackError) {
-          throw Object.assign(
-            new Error(
-              `project ${id} could not be removed: its journal partition was archived to ${archivedPartitionPath}, the registry unregister failed, and the archive could not be rolled back (${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}); the project is archived-but-registered and needs manual reconciliation`,
-            ),
-            { code: "project_remove_partial", status: 500, archivedPartitionPath },
-          );
-        }
-      }
-      throw unregisterError;
-    }
-    this.partitions.delete(id);
-    return {
-      projectId: project.id,
-      root: project.root,
-      registryRemoved: true,
-      journalPartitionArchived: archivedPartitionPath !== null,
-      archivedPartitionPath,
-      artifactsRetained: true,
-      // W2: `activeRunRoots` was snapshotted by the caller via an async daemon
-      // IPC job-list read BEFORE this synchronous removal. A run that starts in
-      // the window between that snapshot and this point is not fenced — disclose
-      // it honestly rather than implying an atomic guarantee we cannot make.
-      activeRunCheck: "snapshot",
-    };
+    return removeProjectFromPartitions(
+      this.projects.current(),
+      this.partitions,
+      id,
+      activeRunRoots,
+    );
   }
 
   journal(partition: string): JournalManager {
@@ -391,18 +328,32 @@ export class ProjectPartitions implements CommandAuthority {
     return this.requireThreadStore(id).updateThread(id, patch);
   }
 
+  /** Unified-accounts continuity steps (contract: partition-accounts.ts). */
+  migrateNullProfileContinuity(harnessId: string, rowId: string): ProfileContinuityResult {
+    return applyProfileContinuityAcross(this.continuityHosts(), (store) =>
+      store.migrateNullProfileContinuity(harnessId, rowId),
+    );
+  }
+
+  rollbackProfileContinuity(harnessId: string, rowId: string): ProfileContinuityResult {
+    return applyProfileContinuityAcross(this.continuityHosts(), (store) =>
+      store.rollbackProfileContinuity(harnessId, rowId),
+    );
+  }
+
+  private continuityHosts(): { stores: ThreadStore[]; skippedPartitions: string[] } {
+    this.partitions.sync();
+    return {
+      stores: this.threadStores(),
+      skippedPartitions: [...this.partitions.entries()]
+        .filter(([, entry]) => !entry.manager.ready())
+        .map(([id]) => id),
+    };
+  }
+
   invalidateCredentialProfile(harnessId: string, profileId: string) {
     this.assertCredentialProfileInvalidationReady();
-    return this.threadStores().reduce(
-      (total, store) => {
-        const result = store.invalidateCredentialProfile(harnessId, profileId);
-        return {
-          clearedThreads: total.clearedThreads + result.clearedThreads,
-          invalidatedSessions: total.invalidatedSessions + result.invalidatedSessions,
-        };
-      },
-      { clearedThreads: 0, invalidatedSessions: 0 },
-    );
+    return invalidateCredentialProfileAcross(this.threadStores(), harnessId, profileId);
   }
 
   assertCredentialProfileInvalidationReady(): void {
@@ -469,6 +420,14 @@ export class ProjectPartitions implements CommandAuthority {
     profileId: string | null = null,
   ): Record<string, { sessionId: string; profileId: string | null }> {
     return this.requireThreadStore(id).resumeMap(id, profileId);
+  }
+
+  resumeMapAuto(id: string): Record<string, { sessionId: string; profileId: string | null }> {
+    return this.requireThreadStore(id).resumeMapAuto(id);
+  }
+
+  accountBindings(id: string): Record<string, string> {
+    return this.requireThreadStore(id).accountBindings(id);
   }
 
   recordSession(

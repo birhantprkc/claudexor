@@ -26,8 +26,8 @@ import Testing
     }
 
     @Test func badgesCarryOptionalHelpAsTypedPresentationData() {
-        let badge = AlignedRowBadge("CLI login", help: "Existing vendor sign-in")
-        #expect(badge.help == "Existing vendor sign-in")
+        let badge = AlignedRowBadge("claude", help: "Harness family badge")
+        #expect(badge.help == "Harness family badge")
         #expect(AlignedRowBadge("claude").help == nil)
     }
 }

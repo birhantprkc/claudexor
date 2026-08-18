@@ -13,7 +13,7 @@ import type {
 } from "@claudexor/schema";
 import { withQuotaAvailability } from "@claudexor/schema";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
-import { harnessAccountsProjection, profileAccountProjection } from "./accounts-projection.js";
+import { accountPoolsProjection, profileAccountProjection } from "./accounts-projection.js";
 import { buildGateway, harnessModels } from "./registry.js";
 import { delegationCapabilityFor } from "./delegation-capability.js";
 
@@ -57,7 +57,9 @@ export async function projectHarnessStatuses(statuses: readonly HarnessStatus[])
 
 /** One server-owned Accounts response builder. The opt-in form refreshes quota
  * first and then derives next_up from that exact returned response; no client
- * can accidentally pair a newer quota card with an older routing identity. */
+ * can accidentally pair a newer quota card with an older routing identity.
+ * Returns the listing service plus the pool-authority read
+ * (`GET /v2/account-pools`) so both share one cached projection. */
 export function createCredentialProfilesService(quotaRegistry: () => QuotaRegistry) {
   const projectProfiles = () => {
     const profiles = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
@@ -75,7 +77,10 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
     const out = withVendorVerification(await projectProfiles(), quota);
     return {
       profiles: out,
-      harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, quota.snapshots, {
+      // Unified account model: the legacy carrier stays PRESENT and empty for
+      // strict old clients; routing facts ride accountPools.
+      harnessAccounts: [],
+      accountPools: await accountPoolsProjection(NO_PROJECT_ROOT, quota.snapshots, {
         profiles: out,
       }),
     };
@@ -83,7 +88,7 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
   const pollCache = new StatusProjectionCache<Awaited<ReturnType<typeof buildPollResponse>>>({
     versionOf: globalConfigVersion,
   });
-  return async (input?: { snapshot?: boolean }) => {
+  const credentialProfiles = async (input?: { snapshot?: boolean }) => {
     if (input?.snapshot === true) {
       const [probed, accountStatuses, git, fencedQuota] = await Promise.all([
         projectProfiles(),
@@ -95,9 +100,6 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
         quotaRegistry().refreshWithCursor(),
       ]);
       const statuses = accountStatuses.map((receipt) => receipt.status);
-      const accountIdentities = new Map(
-        accountStatuses.map((receipt) => [receipt.status.id, receipt.identity] as const),
-      );
       const rawQuota = fencedQuota.response;
       const out = withVendorVerification(probed, rawQuota);
       // The explicit refresh proved the live state — drop the stale poll
@@ -106,10 +108,10 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
       pollCache.invalidate();
       return {
         profiles: out,
-        harnessAccounts: await harnessAccountsProjection(NO_PROJECT_ROOT, rawQuota.snapshots, {
+        harnessAccounts: [],
+        accountPools: await accountPoolsProjection(NO_PROJECT_ROOT, rawQuota.snapshots, {
           profiles: out,
           statuses,
-          accountIdentities,
         }),
         harnesses: await projectHarnessStatuses(statuses),
         git,
@@ -119,6 +121,10 @@ export function createCredentialProfilesService(quotaRegistry: () => QuotaRegist
     }
     return pollCache.read(buildPollResponse);
   };
+  const accountPools = async () => ({
+    accountPools: (await pollCache.read(buildPollResponse)).accountPools,
+  });
+  return { credentialProfiles, accountPools };
 }
 
 /**

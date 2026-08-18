@@ -6,23 +6,34 @@ import ClaudexorKit
 /// Batch-6 item b: the auto-switch toggle targets harnesses with a SECOND account
 /// and reports on/off/mixed/unavailable honestly.
 @Suite struct AccountsAutoBalanceTests {
-    @Test func eligibleRequiresASecondAccount() {
-        // claude has a profile (native + profile = 2 identities) ⇒ eligible;
-        // codex has none (only its native login) ⇒ not eligible.
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["claude"]) == ["claude"])
+    @Test func eligibleRequiresASecondEnabledAccountRow() {
+        // Unified account model: every identity is a registry row, so ONE row
+        // has nothing to rotate to and two ENABLED rows make the harness
+        // eligible. Rotation only draws from the enabled pool: two rows with
+        // one disabled leave nothing to switch to, so the toggle stays off.
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("claude", true)]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("claude", true), ("claude", true)]) == ["claude"])
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("claude", true), ("claude", false)]).isEmpty)
+        // An absent `enabled` fails open (the same rule as everywhere else).
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("claude", nil), ("claude", true)]) == ["claude"])
     }
 
     @Test func capableHarnessesAreEligibleInCanonicalOrder() {
-        let ids = AccountsAutoBalance.eligibleHarnessIds(
-            profileHarnessIds: ["cursor", "codex", "claude", "codex"])
+        let ids = AccountsAutoBalance.eligibleHarnessIds(profiles: [
+            ("cursor", true), ("cursor", true), ("codex", true),
+            ("claude", true), ("claude", true), ("codex", true),
+        ])
         #expect(ids == ["claude", "codex"])
     }
 
-    @Test func aHarnessWithNoNativeIdentityNeedsTwoProfiles() {
-        // agy has NO default credential store, so one profile is one identity
-        // and the toggle would have nothing to rotate to (INV-023).
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy"]).isEmpty)
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
+    @Test func agyFollowsTheSameTwoRowRule() {
+        #expect(AccountsAutoBalance.eligibleHarnessIds(profiles: [("agy", true)]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("agy", true), ("agy", true)]) == ["agy"])
     }
 
     @Test func nonCapableHarnessProfilesAreIgnored() {
@@ -30,8 +41,10 @@ import ClaudexorKit
         // cursor rotates reactively under the engine's `auto` default, but it
         // has no proactive quota source yet, so the app control has not
         // admitted it — cursor stays engine-driven with no app-side knob.
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["opencode"]).isEmpty)
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["cursor"]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("opencode", true), ("opencode", true)]).isEmpty)
+        #expect(AccountsAutoBalance.eligibleHarnessIds(
+            profiles: [("cursor", true), ("cursor", true)]).isEmpty)
     }
 
     @Test func stateAggregates() {

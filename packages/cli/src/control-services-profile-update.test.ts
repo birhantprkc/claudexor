@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -240,6 +240,35 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(noteCredentialChange).toHaveBeenCalledTimes(2);
   });
 
+  it("mirrors native_credentials_enabled for ANY row at the harness default store — migration record or not", async () => {
+    // A bootstrap row (ensureBootstrapProfile) sits at the exact default
+    // native dir BEFORE any migration record exists. Disabling it must update
+    // the deprecated downgrade-window mirror too, or the legacy
+    // default-subject ladder (and a downgraded 3.5.0 engine) would silently
+    // route back into the same account's store.
+    const { ensureBootstrapProfile } = await import("./profile-registration.js");
+    const { readAccountsMigrationFile } = await import("./accounts-unified-migration.js");
+    const row = ensureBootstrapProfile("codex");
+    expect(readAccountsMigrationFile()["codex"]).toBeUndefined();
+    const svc = services();
+    await svc.updateCredentialProfile({
+      harnessId: "codex",
+      profileId: row.profile_id,
+      enabled: false,
+    });
+    const cfg = loadConfig(noProjectRepoRoot()).global;
+    expect(cfg.harnesses["codex"]?.native_credentials_enabled).toBe(false);
+    expect(cfg.credential_profiles.find((p) => p.profile_id === row.profile_id)?.enabled).toBe(
+      false,
+    );
+    // An ordinary profiles-tree row never touches the mirror.
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    await svc.updateCredentialProfile({ harnessId: "claude", profileId: "work", enabled: false });
+    expect(
+      loadConfig(noProjectRepoRoot()).global.harnesses["claude"]?.native_credentials_enabled,
+    ).not.toBe(false);
+  });
+
   it("re-arms quota polling after profile creation and quota-relevant settings", async () => {
     const svc = services();
     await svc.createCredentialProfile({ harnessId: "claude", profileId: "new-account" });
@@ -256,6 +285,19 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(noteCredentialChange).toHaveBeenCalledTimes(3);
   });
 
+  it("reserves the profile id 'default' at registration (laneProfileSegment(null) collision)", async () => {
+    // laneProfileSegment(null) and a literal "default" row id collide on the
+    // <harness>-default lane segment that migration/deletion act on — a row
+    // named "default" could have its lanes renamed or purged as legacy state.
+    expect(() => registerConfigDirProfile({ harnessId: "claude", profileId: "default" })).toThrow(
+      /reserved for the engine's unpinned lane/,
+    );
+    await expect(
+      services().createCredentialProfile({ harnessId: "claude", profileId: "default" }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
+  });
+
   it("refuses an unknown id with a typed 404 and a missing enabled with a 400", async () => {
     const svc = services();
     await expect(
@@ -266,47 +308,37 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     ).rejects.toMatchObject({ status: 400 });
   });
 
-  it("projects per-harness accounts authority: next_up native default, enabled profile still native, disabled-CLI-login none (F1)", async () => {
+  it("projects the pool verdict per harness: ready row selected, disabled row none, legacy carrier empty (unified model)", async () => {
     registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     const svc = services();
 
-    // Default: CLI login enabled, no quota breach → an unpinned run routes to
-    // the native login, so next_up is native. Active is gone; the field is
-    // purely informational.
+    // Row registered but not yet ready (probe unknown) → nothing routable and
+    // no API-key route → none. The legacy harnessAccounts carrier stays
+    // PRESENT and EMPTY for strict old clients.
     const base = ControlCredentialProfilesResponse.parse(await svc.credentialProfiles());
-    const claudeBase = base.harnessAccounts.find((h) => h.harness_id === "claude");
-    expect(claudeBase).toBeDefined();
-    expect(claudeBase).not.toHaveProperty("active_profile_id");
-    expect(claudeBase).not.toHaveProperty("active_identity");
-    expect(claudeBase?.native_credentials_enabled).toBe(true);
-    expect(claudeBase?.next_up).toEqual({ kind: "native", route: "local_session" });
-    expect(gatewayMock.calls.at(-1)?.fresh).toBe(true);
+    expect(base.harnessAccounts).toEqual([]);
+    const claudeBase = base.accountPools.find((pool) => pool.harness_id === "claude");
+    expect(claudeBase?.next_up.kind).toBe("none");
 
-    // An enabled profile does NOT become an auto-default: unpinned runs still
-    // route to the native login (profiles route only by explicit pin / rotation).
-    const withProfile = ControlCredentialProfilesResponse.parse(await svc.credentialProfiles());
-    expect(withProfile.harnessAccounts.find((h) => h.harness_id === "claude")?.next_up).toEqual({
-      kind: "native",
-      route: "local_session",
+    // A ready enabled row IS the unpinned route (unified model: unpinned
+    // routing = quota-aware pool; there is no separate native default).
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    updateGlobalConfig((config) => ({ ...config })); // bump the projection cache version
+    const ready = ControlCredentialProfilesResponse.parse(await svc.credentialProfiles());
+    expect(ready.accountPools.find((pool) => pool.harness_id === "claude")?.next_up).toEqual({
+      kind: "profile",
+      profileId: "work",
     });
 
-    // Disable the CLI login → an unpinned run has nothing routable (next_up none).
-    updateGlobalConfig((config) => ({
-      ...config,
-      harnesses: {
-        claude: {
-          ...(config.harnesses.claude ?? {}),
-          native_credentials_enabled: false,
-        },
-      } as never,
-    }));
+    // Disabling the row (the only routing control) empties the pool → none.
+    await svc.updateCredentialProfile({ harnessId: "claude", profileId: "work", enabled: false });
     const none = ControlCredentialProfilesResponse.parse(await svc.credentialProfiles());
-    const claudeNone = none.harnessAccounts.find((h) => h.harness_id === "claude");
-    expect(claudeNone?.native_credentials_enabled).toBe(false);
-    expect(claudeNone?.next_up.kind).toBe("none");
+    expect(none.accountPools.find((pool) => pool.harness_id === "claude")?.next_up.kind).toBe(
+      "none",
+    );
   });
 
-  it("does not project an enabled default as next_up when fresh doctor truth is unavailable", async () => {
+  it("projects none when no account row exists, regardless of default-store doctor truth", async () => {
     gatewayMock.statuses = [
       {
         id: "claude",
@@ -319,34 +351,36 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
       },
     ];
     const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
-    const claude = listing.harnessAccounts.find((value) => value.harness_id === "claude");
-    expect(claude?.native_credentials_enabled).toBe(true);
-    expect(claude?.native_login_detected).toBe(false);
+    expect(listing.harnessAccounts).toEqual([]);
+    const claude = listing.accountPools.find((value) => value.harness_id === "claude");
     expect(claude?.next_up).toMatchObject({ kind: "none" });
   });
 
-  it("returns one opt-in snapshot whose rows and next_up share one fresh doctor read", async () => {
+  it("returns one opt-in snapshot whose rows and pool verdict share one fresh doctor read", async () => {
     gatewayMock.calls = [];
     const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
       await services().credentialProfiles({ snapshot: true }),
     );
     expect(gatewayMock.calls).toEqual([{ cwd: noProjectRepoRoot(), fresh: true }]);
     expect(snapshot.harnesses.map((status) => status.id)).toEqual(["claude"]);
+    expect(snapshot.harnessAccounts).toEqual([]);
     expect(
-      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
-    ).toEqual({ kind: "native", route: "local_session" });
+      snapshot.accountPools.find((value) => value.harness_id === "claude")?.next_up,
+    ).toMatchObject({ kind: "none" });
     expect(snapshot.git.status).toBe("missing");
     expect(snapshot.quota.refreshed_at).toBe("2026-07-28T00:00:00Z");
     const { quotaEventCursor, ...unfenced } = snapshot;
     expect(quotaEventCursor).toBe("quota-fence-default");
     expect(() => ControlCredentialProfilesSnapshotResponse.parse(unfenced)).toThrow();
+    // Old-wire bodies without accountPools still parse (additive default []).
     expect(ControlCredentialProfilesResponse.parse({ profiles: [], harnessAccounts: [] })).toEqual({
       profiles: [],
       harnessAccounts: [],
+      accountPools: [],
     });
   });
 
-  it("projects the API-key fallback route instead of naming an unavailable CLI login", async () => {
+  it("projects the API-key ROUTE for an empty pool ONLY under the EXPLICIT api_key preference (Q3=A)", async () => {
     gatewayMock.statuses = [
       {
         id: "claude",
@@ -364,10 +398,24 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
         reasons: [],
       },
     ];
+    // Under the default `auto` preference the paid route is never a silent
+    // next_up: the pool verdict stays an honest `none`.
+    const autoListing = ControlCredentialProfilesResponse.parse(
+      await services().credentialProfiles(),
+    );
+    expect(
+      autoListing.accountPools.find((value) => value.harness_id === "claude")?.next_up,
+    ).toMatchObject({ kind: "none" });
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: { ...(config.harnesses.claude ?? {}), auth_preference: "api_key" },
+      },
+    }));
     const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
-    const claude = listing.harnessAccounts.find((value) => value.harness_id === "claude");
-    expect(claude?.native_login_detected).toBe(false);
-    expect(claude?.next_up).toEqual({ kind: "native", route: "api_key" });
+    const claude = listing.accountPools.find((value) => value.harness_id === "claude");
+    expect(claude?.next_up).toEqual({ kind: "api_key_route" });
   });
 
   it("derives next_up and returns quota from one refreshed snapshot epoch", async () => {
@@ -412,12 +460,13 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(snapshot.quota.refreshed_at).toBe(refreshedQuota.refreshed_at);
     expect(refreshedQuota.snapshots.every((quota) => !("availability" in quota))).toBe(true);
     expect(snapshot.quotaEventCursor).toBe("quota-fence-exact");
-    expect(
-      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
-    ).toEqual({ kind: "profile", profileId: "work" });
+    expect(snapshot.accountPools.find((value) => value.harness_id === "claude")?.next_up).toEqual({
+      kind: "profile",
+      profileId: "work",
+    });
   });
 
-  it("next_up skips an unready rotation target and matches the next ready profile", async () => {
+  it("pool selection skips an unready row and picks the next ready one", async () => {
     registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     registerConfigDirProfile({ harnessId: "claude", profileId: "spare" });
     gatewayMock.profileReadinessById = {
@@ -447,14 +496,50 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
       await services({ refreshedQuota }).credentialProfiles({ snapshot: true }),
     );
-    expect(
-      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
-    ).toEqual({ kind: "profile", profileId: "spare" });
+    expect(snapshot.accountPools.find((value) => value.harness_id === "claude")?.next_up).toEqual({
+      kind: "profile",
+      profileId: "spare",
+    });
   });
 
-  it("keeps an API-key default on quota breach instead of changing payment class", async () => {
+  it("a NON-EMPTY rotation_eligible list filters next_up to rows the runtime would select", async () => {
+    // Both rows are ready, but the explicit rotation policy names only
+    // "spare": advertising "work" would promise an account the runtime's
+    // staticRotationCandidates filter never picks.
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    registerConfigDirProfile({ harnessId: "claude", profileId: "spare" });
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: {
+          ...(config.harnesses.claude ?? {}),
+          profile_policy: {
+            limit_action: "rotate",
+            rotation_eligible: ["spare"],
+            headroom_threshold: 0.9,
+          },
+        },
+      },
+    }));
+    const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
+    expect(listing.accountPools.find((pool) => pool.harness_id === "claude")?.next_up).toEqual({
+      kind: "profile",
+      profileId: "spare",
+    });
+  });
+
+  it("projects the API-key ROUTE for an exhausted pool only under the EXPLICIT api_key preference (Q3=A)", async () => {
     registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: { ...(config.harnesses.claude ?? {}), auth_preference: "api_key" },
+      },
+    }));
     gatewayMock.statuses = [
       {
         id: "claude",
@@ -472,22 +557,8 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
         reasons: [],
       },
     ];
-    updateGlobalConfig((config) => ({
-      ...config,
-      harnesses: {
-        ...config.harnesses,
-        claude: {
-          ...(config.harnesses.claude ?? {}),
-          profile_policy: {
-            limit_action: "rotate",
-            rotation_eligible: ["work"],
-            headroom_threshold: 0.9,
-          },
-        },
-      },
-    }));
     const refreshedQuota = ControlQuotaResponse.parse({
-      snapshots: [quotaSnapshot(null, 0.95)],
+      snapshots: [quotaSnapshot("work", 0.95)],
       absences: [],
       refreshed_at: "2026-07-28T01:02:03Z",
     });
@@ -495,9 +566,9 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     const snapshot = ControlCredentialProfilesSnapshotResponse.parse(
       await services({ refreshedQuota }).credentialProfiles({ snapshot: true }),
     );
-    expect(
-      snapshot.harnessAccounts.find((value) => value.harness_id === "claude")?.next_up,
-    ).toEqual({ kind: "native", route: "api_key" });
+    expect(snapshot.accountPools.find((value) => value.harness_id === "claude")?.next_up).toEqual({
+      kind: "api_key_route",
+    });
   });
 
   it("fails the complete snapshot when its quota epoch cannot refresh", async () => {
@@ -510,23 +581,14 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     ).rejects.toBe(error);
   });
 
-  it("projects the non-secret {email, plan} identity from each account's OWN owned store (INV-067)", async () => {
+  it("projects the non-secret {email, plan} identity from each row's OWN owned store (INV-067)", async () => {
     const { profile } = registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     const svc = services();
-    // The profile's OWN isolation-locator store discloses one identity …
+    // The profile's OWN isolation-locator store discloses its identity.
     writeFileSync(
       join(profile.isolation_locator ?? "", ".claude.json"),
       JSON.stringify({
         oauthAccount: { emailAddress: "work@example.test", organizationType: "claude_max" },
-      }),
-    );
-    // … and the Claudexor-owned NATIVE claude store discloses another.
-    const nativeDir = join(dir, "native", "claude", "default");
-    mkdirSync(nativeDir, { recursive: true });
-    writeFileSync(
-      join(nativeDir, ".claude.json"),
-      JSON.stringify({
-        oauthAccount: { emailAddress: "native@example.test", organizationType: "claude_pro" },
       }),
     );
 
@@ -534,20 +596,12 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
 
     const profileEntry = listing.profiles.find((p) => p.profile.profile_id === "work");
     expect(profileEntry?.identity).toEqual({ email: "work@example.test", plan: "claude_max" });
-
-    const claudeAccounts = listing.harnessAccounts.find((h) => h.harness_id === "claude");
-    expect(claudeAccounts?.identity).toEqual({ email: "native@example.test", plan: "claude_pro" });
-
-    // A harness with no readable native store projects null, never an error.
-    const codexAccounts = listing.harnessAccounts.find((h) => h.harness_id === "codex");
-    expect(codexAccounts?.identity ?? null).toBeNull();
   });
 
-  it("projects default and named Cursor emails from the Accounts-only probe receipts", async () => {
+  it("projects named Cursor emails from the Accounts-only probe receipts", async () => {
     registerConfigDirProfile({ harnessId: "cursor", profileId: "work" });
     gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
     gatewayMock.profileIdentities = { work: { email: "work-cursor@example.test" } };
-    gatewayMock.accountIdentities = { cursor: { email: "default-cursor@example.test" } };
     gatewayMock.statuses = [
       {
         id: "cursor",
@@ -569,9 +623,6 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(listing.profiles.find((entry) => entry.profile.profile_id === "work")?.identity).toEqual(
       { email: "work-cursor@example.test" },
     );
-    expect(
-      listing.harnessAccounts.find((entry) => entry.harness_id === "cursor")?.identity,
-    ).toEqual({ email: "default-cursor@example.test" });
   });
 
   it("keeps Cursor identity beside a vendor readiness error instead of hiding either", async () => {
@@ -609,15 +660,14 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     });
   });
 
-  it("never lets a token-bearing native store leak beyond {email, plan}", async () => {
+  it("never lets a token-bearing store leak beyond {email, plan}", async () => {
+    const { profile } = registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     const svc = services();
-    const nativeDir = join(dir, "native", "claude", "default");
-    mkdirSync(nativeDir, { recursive: true });
     writeFileSync(
-      join(nativeDir, ".claude.json"),
+      join(profile.isolation_locator ?? "", ".claude.json"),
       JSON.stringify({
         oauthAccount: {
-          emailAddress: "native@example.test",
+          emailAddress: "work@example.test",
           organizationType: "claude_max",
           accountUuid: "uuid-secret-do-not-leak",
         },
@@ -628,8 +678,8 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     const serialized = JSON.stringify(listing);
     expect(serialized).not.toContain("uuid-secret-do-not-leak");
     expect(serialized).not.toContain("sk-ant-" + "secret-do-not-leak");
-    const claudeAccounts = listing.harnessAccounts.find((h) => h.harness_id === "claude");
-    expect(Object.keys(claudeAccounts?.identity ?? {}).sort()).toEqual(["email", "plan"]);
+    const entry = listing.profiles.find((p) => p.profile.profile_id === "work");
+    expect(Object.keys(entry?.identity ?? {}).sort()).toEqual(["email", "plan"]);
   });
 });
 

@@ -17,8 +17,13 @@ import {
   type QuotaSnapshot,
 } from "@claudexor/schema";
 import { type CandidateRun, unanimousDeclaredFailure } from "./candidateEvidence.js";
-import { preflightCredentialProfile, preflightDefaultSubject } from "./credential-preflight.js";
-import { rotateSpecOnTypedLimit, type ProfilePolicy } from "./credential-profile-rotation.js";
+import { preflightDefaultSubject } from "./credential-preflight.js";
+import {
+  profileHeadroomBreach,
+  rotateSpecOnTypedLimit,
+  type ProfilePolicy,
+} from "./credential-profile-rotation.js";
+import { resolveAccountForRun, subscriptionWindowExhausted } from "./account-resolution.js";
 import { type DeclaredFailure, failTerminally } from "./runTerminalResults.js";
 
 const dirs: string[] = [];
@@ -62,20 +67,11 @@ const spent: QuotaSnapshot = {
 };
 
 function refusal(): unknown {
-  try {
-    preflightCredentialProfile({
-      profile,
-      harnessId: "claude",
-      policy: { limit_action: "fail", rotation_eligible: [], headroom_threshold: 0.9 },
-      registry: [profile],
-      snapshots: [spent],
-      readyProfileIds: new Set(),
-      emit: () => {},
-    });
-  } catch (error) {
-    return error;
-  }
-  throw new Error("preflightCredentialProfile did not refuse a breached headroom under fail");
+  // The strict-pin refusal path (D-U6): a fresh breach of the pinned
+  // account's window becomes the typed subscription_window_exhausted error.
+  const breach = profileHeadroomBreach([spent], "claude", profile.profile_id, 0.9, null);
+  if (!breach) throw new Error("fixture snapshot did not breach the headroom threshold");
+  return subscriptionWindowExhausted(profile.profile_id, "claude", breach);
 }
 
 function terminalFailure(error: unknown): RunFailure {
@@ -324,42 +320,55 @@ describe("credential pool exhaustion (A5)", () => {
     expect(failure.resetsAt).toBe(EARLY);
   });
 
-  it("preflight under rotate: an OBSERVED spent window with an empty pool refuses TYPED before spawn", () => {
+  it("a PINNED subject's OBSERVED spent window refuses TYPED before spawn — a pin never rotates (D-U6 + A4)", async () => {
     const events: string[] = [];
-    expect(() =>
-      preflightCredentialProfile({
-        profile,
+    await expect(
+      resolveAccountForRun({
         harnessId: "claude",
-        policy: rotatePolicy,
         registry: [profile],
+        policy: rotatePolicy,
         snapshots: [
           snapshotFor("valentine", { used_ratio: 1, resets_at: MID, window_seconds: 604800 }),
         ],
-        readyProfileIds: new Set(),
+        quota: { snapshots: [], absences: [] },
+        unusable: [],
+        probe: undefined,
+        pinnedProfile: profile,
+        boundProfileId: null,
+        threadId: null,
+        model: null,
+        defaultRoute: "local_session",
+        nativeCredentialsDisabled: false,
+        authPreference: "auto",
+        notePoolApiKeyRoute: () => {},
         emit: (type) => events.push(type),
       }),
-    ).toThrowError(
-      expect.objectContaining({
-        code: "credential_pool_exhausted",
-        category: "harness_unavailable",
-        resetsAt: MID,
-      }),
-    );
-    // The refusal is a decision with provenance: the typed event precedes it.
-    expect(events).toContain("route.profile.rotation_exhausted");
+    ).rejects.toMatchObject({
+      code: "subscription_window_exhausted",
+      category: "harness_unavailable",
+      resetsAt: MID,
+    });
+    // The refusal is a decision with provenance: the typed event precedes it,
+    // and the pool is never consulted for a pin.
+    expect(events).toEqual(["route.profile.headroom_exceeded"]);
   });
 
-  it("preflight under rotate: a bare headroom breach with no alternative PROCEEDS (not proven spent)", () => {
-    const kept = preflightCredentialProfile({
-      profile,
+  it("legacy default subject under rotate: a bare headroom breach with no alternative PROCEEDS (not proven spent)", () => {
+    const kept = preflightDefaultSubject({
       harnessId: "claude",
       policy: rotatePolicy,
-      registry: [profile],
-      snapshots: [spent], // 0.91 of the window — proximity, not exhaustion
+      registry: [],
+      snapshots: [
+        // 0.91 of the DEFAULT subject's window — proximity, not exhaustion.
+        snapshotFor(null, { used_ratio: 0.91, resets_at: RESETS_AT, window_seconds: 604800 }),
+      ],
       readyProfileIds: new Set(),
+      defaultRoute: "local_session",
       emit: () => {},
     });
-    expect(kept).toBe(profile);
+    // null = keep the default subject: the run proceeds and the vendor is
+    // the truth (a bare breach never becomes a pool terminal).
+    expect(kept).toBeNull();
   });
 
   it("preflight default subject: its own live block with a fully-blocked pool refuses TYPED with the earliest reset", () => {

@@ -176,7 +176,9 @@ struct PacketVUiTruthsTests {
     @Test func sessionAccountLabelResolvesProfileNameWithFallbacks() {
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         // nil profile = the harness's default vendor login.
-        #expect(model.sessionAccountLabel(harnessId: "claude", profileId: nil) == "Default account")
+        // Unified account model: new sessions always carry their resolved row
+        // id; a nil profileId is a legacy pre-migration (or old-engine) session.
+        #expect(model.sessionAccountLabel(harnessId: "claude", profileId: nil) == "Legacy default login")
         // Unknown profile (registry not loaded) falls back to the raw id, visibly.
         #expect(model.sessionAccountLabel(harnessId: "claude", profileId: "work") == "work")
     }

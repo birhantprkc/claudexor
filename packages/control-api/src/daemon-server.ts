@@ -158,6 +158,9 @@ import {
   ControlSettingsUpdateRequest,
   ControlQuotaRefreshRequest,
   ControlQuotaResponse,
+  ControlAccountPoolsResponse,
+  ControlAccountsMigrationRollbackRequest,
+  ControlAccountsMigrationRollbackResponse,
   ControlCredentialProfileCreateRequest,
   ControlCredentialProfileCreateResponse,
   ControlCredentialProfileUpdateRequest,
@@ -269,6 +272,8 @@ export interface DaemonControlApiOptions {
       updateSettings?: (patch: unknown) => Promise<unknown>;
       quota?: () => Promise<unknown>;
       refreshQuota?: (input?: ControlQuotaRefreshRequest) => Promise<unknown>;
+      accountPools?: () => Promise<unknown>;
+      rollbackAccountsMigration?: (input: unknown) => Promise<unknown>;
       credentialProfiles?: (input?: { snapshot?: boolean }) => Promise<unknown>;
       runApplicability?: (input: { repoRoot: string }) => Promise<unknown>;
       createCredentialProfile?: (input: unknown) => Promise<unknown>;
@@ -1476,6 +1481,10 @@ export class DaemonControlApiServer {
     }
     if (method === "GET" && path === "/quota")
       return this.service(res, "quota", undefined, ControlQuotaResponse);
+    // Unified account model: the pool-authority read (also the feature marker
+    // clients detect through the operation catalog).
+    if (method === "GET" && path === "/account-pools")
+      return this.service(res, "accountPools", undefined, ControlAccountPoolsResponse);
     if (method === "POST" && path === "/quota") {
       let body: ControlQuotaRefreshRequest;
       try {
@@ -1540,6 +1549,21 @@ export class DaemonControlApiServer {
           profileId: decodeURIComponent(profileMutateMatch[2] as string),
         },
         ControlCredentialProfileDeleteResponse,
+      );
+    }
+    // Unified-accounts migration rollback (the supported downgrade path).
+    if (method === "POST" && path === "/accounts-migration/rollback") {
+      let body: ControlAccountsMigrationRollbackRequest;
+      try {
+        body = ControlAccountsMigrationRollbackRequest.parse(await this.readBody(req));
+      } catch (err) {
+        return this.requestError(res, err);
+      }
+      return this.service(
+        res,
+        "rollbackAccountsMigration",
+        body,
+        ControlAccountsMigrationRollbackResponse,
       );
     }
     // (legacy /auth alias removed: it duplicated GET /harnesses byte-for-byte)

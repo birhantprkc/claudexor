@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DurableJournal } from "@claudexor/journal";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ThreadStore, type ThreadHeadPingSink } from "./threads.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -496,6 +496,136 @@ describe("ThreadStore", () => {
       claude: { sessionId: "native-a2", profileId: "a" },
     });
     expect(s.sessionsForThread(t.id)).toHaveLength(3);
+  });
+
+  it("accountBindings/resumeMapAuto: the thread's own lane evidence binds unpinned turns (D-U1 order 2)", () => {
+    const { s } = store();
+    const t = s.createThread({ repoRoot: "/tmp/proj" });
+    const turn = s.createTurn(t.id, "turn");
+    // No evidence yet: nothing binds.
+    expect(s.accountBindings(t.id)).toEqual({});
+    expect(s.resumeMapAuto(t.id)).toEqual({});
+    // A null-profile lane (unmigrated legacy state) binds nothing.
+    s.recordSession(t.id, "claude", "native-null", null, null);
+    expect(s.accountBindings(t.id)).toEqual({});
+    // The latest LIVE session per harness is the binding; the auto resume map
+    // carries each entry's own profile for engine-boundary re-verification.
+    s.recordSession(t.id, "codex", "native-a", null, "codex-a");
+    s.recordSession(t.id, "codex", "native-b", null, "codex-b");
+    expect(s.accountBindings(t.id)["codex"]).toBe("codex-b");
+    expect(s.resumeMapAuto(t.id)["codex"]).toEqual({
+      sessionId: "native-b",
+      profileId: "codex-b",
+    });
+    // A lane checkpoint alone (read-only lane that never emitted a session id)
+    // also binds its harness.
+    s.recordLaneCheckpoint(t.id, "cursor", "cursor-work", turn.id);
+    expect(s.accountBindings(t.id)["cursor"]).toBe("cursor-work");
+    // Another thread's evidence never leaks in.
+    const other = s.createThread({ repoRoot: "/tmp/other" });
+    expect(s.accountBindings(other.id)).toEqual({});
+  });
+
+  it("unified-accounts migration rewrites null sessions/checkpoints onto the row id as ONE unit (INV-137)", () => {
+    const { root, journal, s } = store();
+    const t = s.createThread({ repoRoot: "/tmp/proj" });
+    const turn = s.createTurn(t.id, "first turn");
+    s.recordSession(t.id, "codex", "native-default", null, null);
+    s.recordLaneCheckpoint(t.id, "codex", null, turn.id);
+    // A pinned session of another profile must NOT be touched.
+    s.recordSession(t.id, "codex", "native-work", null, "work");
+    // Another harness's null session must NOT be touched either.
+    s.recordSession(t.id, "claude", "native-claude", null, null);
+
+    const result = s.migrateNullProfileContinuity("codex", "codex-default");
+    expect(result).toEqual({ sessions: 1, checkpoints: 1 });
+    // The null session moved IN PLACE (no duplicate row): resume under the
+    // migrated row id finds it, the null key no longer does.
+    expect(s.resumeMap(t.id, "codex-default")).toEqual({
+      codex: { sessionId: "native-default", profileId: "codex-default" },
+    });
+    expect(s.resumeMap(t.id)).toEqual({ claude: { sessionId: "native-claude", profileId: null } });
+    expect(s.resumeMap(t.id, "work")).toEqual({
+      codex: { sessionId: "native-work", profileId: "work" },
+    });
+    expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn.id);
+    // A second run finds nothing left to migrate (restart idempotency).
+    expect(s.migrateNullProfileContinuity("codex", "codex-default")).toEqual({
+      sessions: 0,
+      checkpoints: 0,
+    });
+    // The rewrite is journaled: a restart replays the migrated state.
+    const reloaded = reload(root, journal);
+    expect(reloaded.resumeMap(t.id, "codex-default")).toEqual({
+      codex: { sessionId: "native-default", profileId: "codex-default" },
+    });
+  });
+
+  it("migration never moves an already-advanced row lane checkpoint backwards", () => {
+    const { s } = store();
+    const t = s.createThread({ repoRoot: "/tmp/proj" });
+    const turn1 = s.createTurn(t.id, "legacy turn");
+    const turn2 = s.createTurn(t.id, "row-lane turn");
+    s.recordLaneCheckpoint(t.id, "codex", null, turn1.id);
+    // The row lane already exists and has advanced past the legacy lane
+    // (a crash between phases followed by new turns).
+    s.recordLaneCheckpoint(t.id, "codex", "codex-default", turn2.id);
+    const result = s.migrateNullProfileContinuity("codex", "codex-default");
+    expect(result.checkpoints).toBe(0);
+    expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn2.id);
+  });
+
+  it("re-migration advances a BEHIND row lane checkpoint left by a rollback (migrate→rollback→re-migrate)", () => {
+    // A rollback re-seeds the ::default lane but leaves the ::<rowId>
+    // checkpoint behind; new turns then advance the default lane. On
+    // re-migration the stale row checkpoint must move FORWARD to the default
+    // lane's turn — resuming it would re-inject context the lane already saw.
+    vi.useFakeTimers({ now: new Date("2026-08-18T00:00:00Z"), toFake: ["Date"] });
+    try {
+      const { s } = store();
+      const t = s.createThread({ repoRoot: "/tmp/proj" });
+      const turn1 = s.createTurn(t.id, "pre-migration turn");
+      s.recordSession(t.id, "codex", "native-default", null, null);
+      s.recordLaneCheckpoint(t.id, "codex", null, turn1.id);
+      s.migrateNullProfileContinuity("codex", "codex-default");
+      expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn1.id);
+
+      vi.advanceTimersByTime(60_000);
+      s.rollbackProfileContinuity("codex", "codex-default");
+      // The row-lane checkpoint stays behind (inert) after rollback...
+      expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn1.id);
+      // ...while the default lane advances with new turns.
+      vi.advanceTimersByTime(60_000);
+      const turn2 = s.createTurn(t.id, "post-rollback turn");
+      s.recordSession(t.id, "codex", "native-default-2", null, null);
+      s.recordLaneCheckpoint(t.id, "codex", null, turn2.id);
+
+      vi.advanceTimersByTime(60_000);
+      const result = s.migrateNullProfileContinuity("codex", "codex-default");
+      // The stale row checkpoint advanced forward to the default lane's turn.
+      expect(result.checkpoints).toBe(1);
+      expect(s.laneCheckpoint(t.id, "codex", "codex-default")).toBe(turn2.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rollbackProfileContinuity returns migrated sessions/checkpoints to the engine-default keys", () => {
+    const { s } = store();
+    const t = s.createThread({ repoRoot: "/tmp/proj" });
+    const turn = s.createTurn(t.id, "turn");
+    s.recordSession(t.id, "codex", "native-default", null, null);
+    s.recordLaneCheckpoint(t.id, "codex", null, turn.id);
+    s.migrateNullProfileContinuity("codex", "codex-default");
+
+    const result = s.rollbackProfileContinuity("codex", "codex-default");
+    expect(result.sessions).toBe(1);
+    // A 3.5.0 engine resumes exactly what it recorded before the migration.
+    expect(s.resumeMap(t.id)).toEqual({
+      codex: { sessionId: "native-default", profileId: null },
+    });
+    expect(s.resumeMap(t.id, "codex-default")).toEqual({});
+    expect(s.laneCheckpoint(t.id, "codex", null)).toBe(turn.id);
   });
 
   it("assertKnownIds fails loudly on bogus, foreign, and thread-less turn ids (socket-caller fence)", () => {

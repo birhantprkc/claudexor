@@ -72,6 +72,20 @@ export const RunEventType = z
      * never a quota-spending mini-run) and found UNUSABLE (dead credential,
      * not spent quota). Payload: RouteCredentialUnusablePayload. */
     "route.profile.credential_unusable",
+    /** Unified account model (D-U1): an unpinned run's pool selection — the
+     * quota-aware pool of enabled+ready rows picked this account. */
+    "route.account.pool_selected",
+    /** Q1=A disclosed lane switch: the thread's bound account became
+     * disabled/deleted/revoked/exhausted and the run moved to a pool sibling
+     * (the vendor session starts fresh; continuity hydration is disclosed on
+     * the turn). Never silent. */
+    "route.account.lane_switch",
+    /** Q3=A: the pool is empty or every ready row is exhausted. A null
+     * fallback precedes the typed `credential_pool_exhausted` terminal
+     * (waiting for the earliest reset is the default);
+     * `fallback: "api_key_route"` means the EXPLICIT api_key preference opted
+     * the run onto the typed PAID route (INV-061) — never silently under auto. */
+    "route.account.pool_exhausted",
     "route.transient.exhausted",
     /** A subscription->API (or harness->harness) auth switch driven by a typed
      * quota/money signal. Distinct from a plain harness rotation; never silent. */

@@ -19,8 +19,10 @@ import {
   type ControlSetupJob,
   type CredentialProfileStatus,
   harnessHasDefaultCredentialStore,
+  harnessSupportsBootstrapLogin,
 } from "@claudexor/schema";
 import { noProjectRepoRoot } from "@claudexor/util";
+import { ensureBootstrapProfile } from "./profile-registration.js";
 import {
   canonicalProfileLoginDir,
   configDirLoginHarnessList,
@@ -109,6 +111,37 @@ export function resolveProfileBinding(
     profileId,
     configDir: canonicalProfileLoginDir(harness, profile.isolation_locator ?? ""),
   };
+}
+
+/**
+ * The login-request binding under the unified account model (K.4): an explicit
+ * profileId resolves as before; a profile-less LOGIN request is the bootstrap
+ * sugar. Cursor has no default store (D-U3 — the host Keychain is never read),
+ * so its login auto-binds to the isolated `cursor-default` bootstrap row and
+ * the job response exposes the resolved profileId. Claude/codex keep the
+ * default-store job (its INV-060 capability smoke attests exactly the native
+ * dir the bootstrap row wraps), with the row ensured up front BEST-EFFORT so
+ * the account is visible — cold, with a Sign-in affordance — even when the
+ * login is later cancelled or fails (a registration failure, e.g. an
+ * env-overridden native home outside the owned root, never blocks the login;
+ * the startup migration registers the row after the login lands).
+ */
+export function resolveLoginProfileBinding(
+  harness: ControlHarnessSetupHarness,
+  action: string,
+  requestedProfileId: string | undefined,
+): { profileId: string; configDir: string } | null {
+  const explicit = resolveProfileBinding(harness, requestedProfileId);
+  if (explicit || action !== "login" || !harnessSupportsBootstrapLogin(harness)) return explicit;
+  if (!harnessHasDefaultCredentialStore(harness)) {
+    return resolveProfileBinding(harness, ensureBootstrapProfile(harness).profile_id);
+  }
+  try {
+    ensureBootstrapProfile(harness);
+  } catch {
+    /* best-effort accounting only */
+  }
+  return null;
 }
 
 /**

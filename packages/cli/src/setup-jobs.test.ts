@@ -27,7 +27,10 @@ import type {
   HarnessRunSpec,
 } from "@claudexor/schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadConfig } from "@claudexor/config";
+import { defaultNativeClaudeConfigDir } from "@claudexor/harness-claude";
 import { defaultNativeCodexHome } from "@claudexor/harness-codex";
+import { noProjectRepoRoot } from "@claudexor/util";
 import {
   atomicPrivateJson,
   readLoginManifest,
@@ -36,7 +39,11 @@ import {
   SETUP_LOGIN_PROTOCOL_VERSION,
 } from "./setup-login-protocol.js";
 import { registerConfigDirProfile } from "./profile-registration.js";
-import { resolveProfileBinding, resolveSetupLoginRunnerPath } from "./setup-job-support.js";
+import {
+  resolveLoginProfileBinding,
+  resolveProfileBinding,
+  resolveSetupLoginRunnerPath,
+} from "./setup-job-support.js";
 import { createSetupJobManager } from "./setup-jobs.js";
 
 let root: string;
@@ -2325,6 +2332,48 @@ describe("setup jobs for credential profiles (INV-135)", () => {
     await manager.shutdown();
     if (oldAgyBin === undefined) delete process.env.CLAUDEXOR_AGY_BIN;
     else process.env.CLAUDEXOR_AGY_BIN = oldAgyBin;
+  });
+
+  it("resolveLoginProfileBinding (K.4): claude/codex profile-less logins stay unbound with a best-effort bootstrap row, cursor binds to cursor-default, explicit ids pass through", () => {
+    process.env.CLAUDEXOR_CONFIG_DIR = join(root, "cfg-login-binding");
+    const registry = () => loadConfig(noProjectRepoRoot()).global.credential_profiles;
+
+    // (a) codex profile-less login: null binding (the default-store job runs
+    // as before) plus a best-effort cold bootstrap row at the exact native
+    // dir the job targets.
+    expect(resolveLoginProfileBinding("codex", "login", undefined)).toBeNull();
+    expect(registry()).toContainEqual(
+      expect.objectContaining({
+        profile_id: "codex-default",
+        harness_id: "codex",
+        isolation_locator: defaultNativeCodexHome(),
+      }),
+    );
+
+    // A bootstrap-registration failure never blocks the login: a plain FILE
+    // squatting the claude native dir makes ensureBootstrapProfile's mkdir
+    // throw, yet the binding is still the ordinary null default-store branch
+    // and no half-registered row appears.
+    const claudeDir = defaultNativeClaudeConfigDir();
+    mkdirSync(join(claudeDir, ".."), { recursive: true });
+    writeFileSync(claudeDir, "not a directory");
+    expect(resolveLoginProfileBinding("claude", "login", undefined)).toBeNull();
+    expect(registry().some((p) => p.harness_id === "claude")).toBe(false);
+
+    // (b) cursor has no default store (D-U3): the profile-less login
+    // auto-binds to the isolated cursor-default bootstrap row.
+    const cursorBinding = resolveLoginProfileBinding("cursor", "login", undefined);
+    expect(cursorBinding?.profileId).toBe("cursor-default");
+    const cursorRow = registry().find((p) => p.harness_id === "cursor");
+    expect(cursorBinding?.configDir).toBe(realpathSync(cursorRow!.isolation_locator!));
+
+    // (c) an explicit profile id resolves exactly as before — no bootstrap
+    // sugar, the binding is the registered profile's own scoped home.
+    const { profile } = registerConfigDirProfile({ harnessId: "codex", profileId: "work" });
+    expect(resolveLoginProfileBinding("codex", "login", "work")).toEqual({
+      profileId: "work",
+      configDir: realpathSync(profile.isolation_locator!),
+    });
   });
 
   it("binds a cursor profile login to its canonical Claudexor-owned HOME (valentine)", () => {

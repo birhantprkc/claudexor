@@ -1,8 +1,15 @@
-import type { ContinuityDisclosure, LaneCheckpoint, Session, ThreadTurn } from "@claudexor/schema";
+import type {
+  ContinuityDisclosure,
+  LaneCheckpoint,
+  Session,
+  Thread,
+  ThreadTurn,
+} from "@claudexor/schema";
 import {
   ContinuityDisclosure as ContinuityDisclosureSchema,
   LaneCheckpoint as LaneCheckpointSchema,
   Session as SessionSchema,
+  Thread as ThreadSchema,
   ThreadTurn as ThreadTurnSchema,
 } from "@claudexor/schema";
 import { newId, nowIso } from "@claudexor/util";
@@ -89,6 +96,158 @@ export function resumeMapFrom(
     }
   }
   return map;
+}
+
+/**
+ * The thread's durable per-harness ACCOUNT BINDINGS (unified account model,
+ * D-U1 order 2): the account an UNPINNED turn stays on — derived from the
+ * lane evidence the thread already persists (its latest live session, else
+ * its latest lane checkpoint, per harness), never a second hand-maintained
+ * record. Null-profile lanes (unmigrated legacy state) bind nothing.
+ */
+export function accountBindingsFrom(
+  sessions: readonly Session[],
+  checkpoints: readonly LaneCheckpoint[],
+  threadId: string,
+): Record<string, string> {
+  const bindings: Record<string, string> = {};
+  const freshest: Record<string, string> = {};
+  const consider = (harnessId: string, profileId: string | null, updatedAt: string): void => {
+    if (!profileId) return;
+    const seen = freshest[harnessId];
+    if (seen !== undefined && seen >= updatedAt) return;
+    freshest[harnessId] = updatedAt;
+    bindings[harnessId] = profileId;
+  };
+  for (const s of sessions) {
+    if (s.thread_id !== threadId || s.state !== "live") continue;
+    consider(s.harness_id, s.profile_id ?? null, s.updated_at);
+  }
+  for (const c of checkpoints) {
+    if (c.thread_id !== threadId) continue;
+    consider(c.harness_id, c.profile_id ?? null, c.updated_at);
+  }
+  return bindings;
+}
+
+/**
+ * Native resume map for an UNPINNED thread turn: the latest live session per
+ * harness REGARDLESS of profile. Each entry carries its own profile, and the
+ * engine boundary (`resumeSessionForProfile`) re-verifies it against the
+ * RESOLVED account, so a pool switch away from the recorded account starts
+ * fresh instead of crossing profiles (INV-135/137).
+ */
+export function resumeMapAutoFrom(
+  sessions: readonly Session[],
+  threadId: string,
+): Record<string, { sessionId: string; profileId: string | null }> {
+  const map: Record<string, { sessionId: string; profileId: string | null }> = {};
+  const freshest: Record<string, string> = {};
+  for (const s of sessions) {
+    if (s.thread_id !== threadId || s.state !== "live" || !s.native_session_id) continue;
+    const seen = freshest[s.harness_id];
+    if (seen !== undefined && seen >= s.updated_at) continue;
+    freshest[s.harness_id] = s.updated_at;
+    map[s.harness_id] = { sessionId: s.native_session_id, profileId: s.profile_id ?? null };
+  }
+  return map;
+}
+
+/**
+ * Unified-accounts migration mutation (INV-137, one unit with the lane-home
+ * rename): live sessions recorded under the null engine-default subject are
+ * rewritten IN PLACE onto the auto-registered row id, and every
+ * `<thread>::<harness>::default` lane checkpoint gains a row under the new
+ * lane id (the legacy row stays inert — exact-id lookups never see it).
+ * Idempotent: a second run finds no null sessions and no missing checkpoints.
+ * A row-lane checkpoint that already exists is never moved backwards (a crash
+ * between phases followed by new turns may have advanced it) — but a BEHIND
+ * row checkpoint advances forward to the ::default lane's turn: a rollback
+ * leaves the old row-lane checkpoint in place while new turns advance the
+ * default lane, and resuming the stale checkpoint on re-migration would
+ * re-inject context the lane already saw. Recency is judged by updated_at,
+ * the only ordering evidence at this layer.
+ */
+export function migrateNullProfileContinuityMutation(
+  sessions: readonly Session[],
+  checkpoints: readonly LaneCheckpoint[],
+  harnessId: string,
+  rowId: string,
+): { sessions: Session[]; checkpoints: LaneCheckpoint[] } {
+  const now = nowIso();
+  const migratedSessions = sessions
+    .filter((s) => s.harness_id === harnessId && (s.profile_id ?? null) === null)
+    .map((s) => SessionSchema.parse({ ...s, profile_id: rowId, updated_at: now }));
+  const migratedCheckpoints: LaneCheckpoint[] = [];
+  for (const checkpoint of checkpoints) {
+    if (checkpoint.harness_id !== harnessId || (checkpoint.profile_id ?? null) !== null) continue;
+    const migrated = makeLaneCheckpoint(checkpoint.thread_id, harnessId, rowId, checkpoint.turn_id);
+    const existing = checkpoints.find((c) => c.id === migrated.id);
+    if (existing) {
+      const behind =
+        existing.turn_id !== checkpoint.turn_id && existing.updated_at < checkpoint.updated_at;
+      if (behind) migratedCheckpoints.push(migrated);
+      continue;
+    }
+    migratedCheckpoints.push(migrated);
+  }
+  return { sessions: migratedSessions, checkpoints: migratedCheckpoints };
+}
+
+/**
+ * The supported downgrade path's reverse of the migration mutation: sessions
+ * recorded under the migrated row id return to the null engine-default
+ * subject a legacy engine resumes, and each row-lane checkpoint re-seeds the
+ * `::default` lane id at its turn.
+ */
+export function rollbackProfileContinuityMutation(
+  sessions: readonly Session[],
+  checkpoints: readonly LaneCheckpoint[],
+  harnessId: string,
+  rowId: string,
+): { sessions: Session[]; checkpoints: LaneCheckpoint[] } {
+  const now = nowIso();
+  const rolledSessions = sessions
+    .filter((s) => s.harness_id === harnessId && s.profile_id === rowId)
+    .map((s) => SessionSchema.parse({ ...s, profile_id: null, updated_at: now }));
+  const rolledCheckpoints: LaneCheckpoint[] = [];
+  for (const checkpoint of checkpoints) {
+    if (checkpoint.harness_id !== harnessId || checkpoint.profile_id !== rowId) continue;
+    rolledCheckpoints.push(
+      makeLaneCheckpoint(checkpoint.thread_id, harnessId, null, checkpoint.turn_id),
+    );
+  }
+  return { sessions: rolledSessions, checkpoints: rolledCheckpoints };
+}
+
+/**
+ * Credential-profile deletion mutation (INV-135): clear every matching scalar
+ * thread pin (pins predate a harness discriminator, so any harness's pin at
+ * the id clears rather than leave an unrunnable route) and stale the deleted
+ * account's live sessions.
+ */
+export function invalidateCredentialProfileMutation(
+  threads: readonly Thread[],
+  sessions: readonly Session[],
+  harnessId: string,
+  profileId: string,
+): { threads: Thread[]; sessions: Session[] } {
+  const now = nowIso();
+  return {
+    threads: threads
+      .filter((thread) => thread.credential_profile_id === profileId)
+      .map((thread) =>
+        ThreadSchema.parse({ ...thread, credential_profile_id: null, updated_at: now }),
+      ),
+    sessions: sessions
+      .filter(
+        (session) =>
+          session.harness_id === harnessId &&
+          session.profile_id === profileId &&
+          session.state === "live",
+      )
+      .map(staleSession),
+  };
 }
 
 /** Mark a session row stale (its profile was deleted): drop the resumable id. */

@@ -107,7 +107,6 @@ export type CursorDefaultRouteInput = {
   env: EnvMap;
   authPreference: AuthPreference;
   abortSignal: AbortSignal | undefined;
-  bridgeNativeSession: boolean;
   /** Set only for API-key profiles: overrides the default key lookup (INV-062 transient). */
   cursorApiKey?: (env?: EnvMap) => string | null;
 };
@@ -115,8 +114,9 @@ export type CursorDefaultRouteInput = {
 /**
  * INV-135 strict profile routing for a run: named native profiles use Cursor's
  * own file credential store; API-key profiles keep their existing smoked route.
- * Neither path receives the default host-Keychain bridge. Without a profile the
- * caller-supplied default resolver runs the engine-default credential ladder.
+ * The host Keychain is never bridged or read (owner decision D-U3): without a
+ * profile the caller-supplied default resolver can only select the API-key
+ * route — an unprofiled cursor run has no native session to find.
  */
 export async function resolveCursorRunRoute(
   spec: {
@@ -146,7 +146,6 @@ export async function resolveCursorRunRoute(
     env: spec.env,
     authPreference: profile ? "api_key" : spec.auth_preference,
     abortSignal,
-    bridgeNativeSession: profile === null,
     ...(keyOverride === null ? {} : { cursorApiKey: () => keyOverride }),
   });
 }

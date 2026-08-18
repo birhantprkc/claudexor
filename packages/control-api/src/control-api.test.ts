@@ -4314,7 +4314,13 @@ describe("DaemonControlApiServer", () => {
           headers: { authorization: `Bearer ${token}` },
         });
         expect(legacy.status).toBe(200);
-        expect(await legacy.json()).toEqual({ profiles: [], harnessAccounts: [] });
+        // The unified account model adds the additive accountPools key (old
+        // clients ignore it); harnessAccounts stays present for strict clients.
+        expect(await legacy.json()).toEqual({
+          profiles: [],
+          harnessAccounts: [],
+          accountPools: [],
+        });
 
         const snapshot = await apiFetch(`${base}/credential-profiles?snapshot=true`, {
           headers: { authorization: `Bearer ${token}` },
@@ -10298,6 +10304,45 @@ describe("DaemonControlApiServer", () => {
           return response;
         },
       },
+    );
+  });
+
+  it("serves the account-pool authority read (the unified-accounts feature marker)", async () => {
+    const { daemon } = fakeDaemon();
+    const response = {
+      accountPools: [
+        { harness_id: "claude", next_up: { kind: "profile", profileId: "claude-default" } },
+        { harness_id: "codex", next_up: { kind: "api_key_route" } },
+        { harness_id: "cursor", next_up: { kind: "none", reason: "no enabled account" } },
+      ],
+    };
+    await withDaemonServer(
+      daemon,
+      async (base) => {
+        const read = await apiFetch(`${base}/account-pools`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(read.status).toBe(200);
+        expect(await read.json()).toEqual(response);
+        // The operation is discoverable in the catalog: this is the feature
+        // marker old engines lack, so its presence must be generated truth.
+        const catalog = await apiFetch(`${base}/operations`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        expect(catalog.status).toBe(200);
+        const operations = (
+          (await catalog.json()) as { operations: Array<{ path: string; id: string }> }
+        ).operations;
+        expect(operations.some((op) => op.path === "/v2/account-pools")).toBe(true);
+        // The generated id is a CROSS-REPO byte contract: the Ouroboros
+        // feature detect hardcodes the literal "get:account-pools", so the
+        // generated catalog id must stay byte-exact.
+        expect(operations.find((op) => op.path === "/v2/account-pools")?.id).toBe(
+          "get:account-pools",
+        );
+      },
+      undefined,
+      { accountPools: async () => response },
     );
   });
 

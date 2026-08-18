@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { registerConfigDirProfile } from "./profile-registration.js";
 import {
+  ControlAccountsMigrationRollbackResponse,
   ControlCredentialProfileDeleteResponse,
   ControlCredentialProfileUpdateResponse,
   ControlCredentialProfilesResponse,
@@ -254,10 +255,45 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     }
     return 0;
   }
+  if (sub === "rollback-migration") {
+    // The supported downgrade path of the unified-accounts startup migration:
+    // sessions/checkpoints/lane homes return to the engine-default keys and
+    // the auto-registered row leaves the registry. Run BEFORE installing an
+    // engine whose canonicalizers refuse the migrated row's native locator.
+    const harness = args._[2];
+    const { addr } = await ensureDaemon();
+    const response = await controlApiFetch(addr, "/accounts-migration/rollback", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${addr.token}`, "content-type": "application/json" },
+      body: JSON.stringify(harness ? { harnessId: harness } : {}),
+    });
+    if (!response.ok) {
+      return printUsageError(
+        json,
+        `migration rollback failed (${response.status}): ${await response.text()}`,
+      );
+    }
+    const receipt = ControlAccountsMigrationRollbackResponse.parse(await response.json());
+    if (json) printJson(receipt);
+    else if (receipt.rolledBack.length === 0) print("nothing to roll back (no migrated harness)");
+    else {
+      for (const entry of receipt.rolledBack) {
+        print(
+          `rolled back ${entry.harness_id} (row ${entry.row_id}): ${entry.sessions} sessions, ${entry.checkpoints} checkpoints, ${entry.lanes} lane homes`,
+        );
+        if (entry.skipped_partitions.length > 0) {
+          print(
+            `warning: quarantined partition(s) not rolled back: ${entry.skipped_partitions.join(", ")} — recover them and rerun before downgrading`,
+          );
+        }
+      }
+    }
+    return 0;
+  }
   if (sub !== "list") {
     return printUsageError(
       json,
-      "usage: claudexor profiles [list | add <harness> <profile-id> | login <harness> <profile-id> | enable <harness> <profile-id> | disable <harness> <profile-id> | remove <harness> <profile-id>]",
+      "usage: claudexor profiles [list | add <harness> <profile-id> | login <harness> <profile-id> | enable <harness> <profile-id> | disable <harness> <profile-id> | remove <harness> <profile-id> | rollback-migration [harness]]",
     );
   }
   const result = ControlCredentialProfilesResponse.parse(await daemonGet("/credential-profiles"));
@@ -265,11 +301,10 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     printJson(result);
     return 0;
   }
-  // Symmetric accounts rows (INV-135, D25): per harness, every credential
-  // profile (the Enabled toggle — the only routing control) plus the native
-  // "CLI login" row, and an informational "next up" line naming who an unpinned
-  // run would route to. The server owns native/next-up truth — this surface
-  // never re-derives it.
+  // Unified account model (INV-135): every account is a named registry row
+  // with an Enabled toggle (the only routing control); routing facts come from
+  // the server-owned accountPools projection. This surface never re-derives
+  // pool truth, and there is no separate native/CLI-login pseudo-row.
   const byHarness = new Map<string, Array<(typeof result.profiles)[number]>>();
   for (const entry of result.profiles) {
     const list = byHarness.get(entry.profile.harness_id) ?? [];
@@ -277,40 +312,26 @@ export async function profilesCommand(args: ParsedArgs, json: boolean): Promise<
     byHarness.set(entry.profile.harness_id, list);
   }
   const harnessIds = [
-    ...new Set([...result.harnessAccounts.map((h) => h.harness_id), ...byHarness.keys()]),
+    ...new Set([...result.accountPools.map((pool) => pool.harness_id), ...byHarness.keys()]),
   ].sort();
   if (harnessIds.length === 0) {
-    print(
-      "no accounts (add credential_profiles entries to the global config, or log in a harness)",
-    );
+    print("no accounts (connect one with `claudexor auth login <harness>`)");
     return 0;
   }
   for (const harnessId of harnessIds) {
-    const authority = result.harnessAccounts.find((h) => h.harness_id === harnessId);
     print(`${harnessId}:`);
-    // The native "CLI login" pseudo-row: same Enabled toggle, no Delete.
-    const nativeEnabled = authority?.native_credentials_enabled ?? true;
-    const nativeState = !nativeEnabled
-      ? "disabled"
-      : authority?.native_login_detected
-        ? "logged-in"
-        : "not-logged-in";
-    print(`  CLI login [native] ${nativeState}`);
-    for (const { profile, status } of byHarness.get(harnessId) ?? []) {
+    const rows = byHarness.get(harnessId) ?? [];
+    if (rows.length === 0) print("  (no accounts)");
+    for (const { profile, status } of rows) {
       const state = profile.enabled ? status.availability : "disabled";
       print(
         `  ${profile.profile_id} [${profile.credential_kind}] ${state}${status.detail ? ` — ${status.detail}` : ""}`,
       );
     }
     // Informational: who an UNPINNED run routes to next (never a user setting).
-    const nextUp = authority?.next_up;
-    if (nextUp?.kind === "native") {
-      print(
-        nextUp.route === "api_key"
-          ? `  next up: API key [default]`
-          : `  next up: CLI login [native]`,
-      );
-    } else if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
+    const nextUp = result.accountPools.find((pool) => pool.harness_id === harnessId)?.next_up;
+    if (nextUp?.kind === "profile") print(`  next up: ${nextUp.profileId}`);
+    else if (nextUp?.kind === "api_key_route") print(`  next up: API key (paid route)`);
     else if (nextUp?.kind === "none") print(`  next up: nothing routable (${nextUp.reason})`);
   }
   return 0;

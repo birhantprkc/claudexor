@@ -6,39 +6,37 @@ import Testing
 /// Owner dogfood: the internal profile id is DERIVED, never typed. The
 /// generator must always emit a server-valid slug, unique per harness.
 @Suite struct AccountsPresentationTests {
-    /// Antigravity registers named profiles (so it belongs in the config-dir
-    /// login set) but has NO default credential store, so it must NOT gain a
-    /// `defaultAuthReadinessRequest`: that field is what emits the default
-    /// "CLI login" row, and for agy it would be a row with nothing behind it.
-    /// The two facts are one decision, so they are pinned together.
-    @Test func antigravitySignsInAsNamedProfilesWithoutAPhantomCliLoginRow() {
+    /// Unified account model: every identity is a registry row, so rotation
+    /// eligibility is uniformly "two or more ENABLED rows" — for agy AND for
+    /// the families that used to count a native login as the second identity.
+    /// A disabled row is not a rotation target, so it never counts.
+    @Test func autoBalanceEligibilityUniformlyNeedsTwoEnabledAccountRows() {
         #expect(AccountsPresentation.configDirLoginHarnessIds.contains("agy"))
-        #expect(HarnessFamily(rawValue: "agy").defaultAuthReadinessRequest == nil)
-        // Every OTHER config-dir login family keeps its native default row.
-        for id in AccountsPresentation.configDirLoginHarnessIds where id != "agy" {
-            #expect(HarnessFamily(rawValue: id).defaultAuthReadinessRequest?.source == .nativeSession)
-        }
-        // Rotation IS available to agy — it has a real vendor quota source —
-        // but with no native identity to fall back on, one profile is one
-        // account and there is nothing to rotate to until a second exists.
         #expect(AccountsAutoBalance.capableHarnessIds.contains("agy"))
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy"]).isEmpty)
-        #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: ["agy", "agy"]) == ["agy"])
+        for harness in AccountsAutoBalance.capableHarnessIds {
+            #expect(AccountsAutoBalance.eligibleHarnessIds(
+                profiles: [(harness, true)]).isEmpty)
+            #expect(AccountsAutoBalance.eligibleHarnessIds(
+                profiles: [(harness, true), (harness, true)]) == [harness])
+            #expect(AccountsAutoBalance.eligibleHarnessIds(
+                profiles: [(harness, true), (harness, false)]).isEmpty)
+        }
     }
 
     /// "This harness id decodes as a SetupHarness" is NOT "this harness has a
-    /// default store". A surface that offers a PROFILE-LESS login (the remote
-    /// Setup button) must gate on the store, or it posts a login the daemon
-    /// refuses — agy has no default subject at all.
-    @Test func onlyFamiliesWithADefaultStoreOfferAProfilelessLogin() {
-        #expect(!AccountsPresentation.supportsDefaultStoreLogin(.agy))
+    /// bootstrap login". A surface that offers a PROFILE-LESS login (the remote
+    /// Setup button) must gate on the engine's bootstrap sugar — which resolves
+    /// the login onto the `<harness>-default` row — or it posts a login the
+    /// daemon refuses: agy signs in only into a named row.
+    @Test func onlyBootstrapFamiliesOfferAProfilelessLogin() {
+        #expect(!AccountsPresentation.supportsBootstrapLogin(.agy))
         #expect(SetupHarness(rawValue: HarnessFamily.agy.setupHarnessId) != nil)
         for family in [HarnessFamily.claude, .codex, .cursor] {
-            #expect(AccountsPresentation.supportsDefaultStoreLogin(family))
+            #expect(AccountsPresentation.supportsBootstrapLogin(family))
         }
-        // API-key families have no native default login to start either.
+        // API-key families have no vendor login to bootstrap either.
         for family in [HarnessFamily.opencode, .raw, .openrouter] {
-            #expect(!AccountsPresentation.supportsDefaultStoreLogin(family))
+            #expect(!AccountsPresentation.supportsBootstrapLogin(family))
         }
     }
 
@@ -100,21 +98,25 @@ import Testing
     }
 
     @MainActor
-    @Test func enabledActionReturnsBothProfileAndCliLoginRefusals() async {
+    @Test func enabledActionRidesTheProfilePatchRouteForEveryRow() async {
+        // Unified account model: EVERY row's Enabled toggle is the profile
+        // PATCH (the retired native_credentials_enabled settings path died
+        // with the pseudo-row), so every refusal is the PATCH route's.
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        let profile = AccountRowModel(
+        let row = AccountRowModel(
             id: "profile/claude/work", displayName: "Work", harnessId: "claude",
             family: .claude, readiness: .unknown, verified: false, profileId: "work",
             detail: nil, quotaGroups: [], enabled: true, nextUp: false)
-        let cliLogin = AccountRowModel(
-            id: "default/claude", displayName: "Claude", harnessId: "claude",
-            family: .claude, readiness: .unknown, verified: false, profileId: nil,
-            detail: nil, quotaGroups: [], enabled: true, nextUp: false)
+        let migrated = AccountRowModel(
+            id: "profile/claude/claude-default", displayName: "claude default login",
+            harnessId: "claude", family: .claude, readiness: .unknown, verified: false,
+            profileId: "claude-default", detail: nil, quotaGroups: [], enabled: true,
+            nextUp: false)
 
-        #expect(await AccountsSurface.setEnabled(profile, to: false, model: model)
+        #expect(await AccountsSurface.setEnabled(row, to: false, model: model)
             == "Engine offline — reconnect to change the account.")
-        #expect(await AccountsSurface.setEnabled(cliLogin, to: false, model: model)
-            == "Engine offline: reconnect before saving settings.")
+        #expect(await AccountsSurface.setEnabled(migrated, to: false, model: model)
+            == "Engine offline — reconnect to change the account.")
     }
 
     @Test func crossGroupResetOrderingUsesAbsoluteInstantsAndStableFallbacks() {
@@ -151,39 +153,31 @@ import Testing
     @MainActor
     @Test func accountReadinessRequiresExactPassedSourceVerification() throws {
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .claude, health: .ok, version: "1", auth: "api key ready",
-            intents: ["implement"])]
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available",
-                verification: "failed", detail: "session expired"),
-        ]
+        func seed(availability: String, verification: String, detail: String? = nil) throws {
+            let json = """
+            [{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
+              "credential_kind":"config_dir_login","enabled":true},
+              "status":{"availability":"\(availability)","verification":"\(verification)",
+              "detail":\(detail.map { "\"\($0)\"" } ?? "null"),"last_verified_at":null}}]
+            """
+            model.credentialProfiles = try JSONDecoder().decode(
+                [CredentialProfileEntry].self, from: Data(json.utf8))
+        }
+
+        try seed(availability: "available", verification: "failed", detail: "session expired")
         var row = try #require(AccountsPresentation.rows(model: model).first)
         #expect(row.readiness == .unavailable)
         #expect(!row.verified)
 
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available",
-                verification: "not_run"),
-        ]
+        try seed(availability: "available", verification: "not_run")
         row = try #require(AccountsPresentation.rows(model: model).first)
         #expect(row.readiness == .unknown)
 
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "unavailable",
-                verification: "not_run"),
-        ]
+        try seed(availability: "unavailable", verification: "not_run")
         row = try #require(AccountsPresentation.rows(model: model).first)
         #expect(row.readiness == .unavailable)
 
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available",
-                verification: "passed"),
-        ]
+        try seed(availability: "available", verification: "passed")
         row = try #require(AccountsPresentation.rows(model: model).first)
         #expect(row.readiness == .ready)
         #expect(row.verified)
@@ -247,15 +241,15 @@ import Testing
             try JSONDecoder().decode(CredentialProfileEntry.self, from: Data(json.utf8)),
         ]
         let row = try #require(AccountsPresentation.rows(model: model).first)
-        #expect(row.isProfile)
+        #expect(row.profileId == "work")
         #expect(!row.enabled)
     }
 
     @MainActor
-    @Test func cliLoginRowDefaultsEnabledWithoutProjectionAndIsNotDeletable() throws {
-        // The native vendor login is a symmetric row: never a credential profile
-        // (so never Claudexor's to delete). With no V11b projection present it
-        // defaults to enabled, and nextUp is false (client-fallback path).
+    @Test func everyRowRendersFromTheProfilesListAndNothingIsSynthesized() throws {
+        // Unified account model: doctor knowledge of a harness must NOT
+        // fabricate a "CLI login" pseudo-row — with zero profile rows the list
+        // is empty, and with rows every one is a registry row.
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         model.liveHarnesses = [HarnessInfo(
             family: .claude, health: .ok, version: "1", auth: "session ready",
@@ -264,26 +258,31 @@ import Testing
             .nativeSession: HarnessAuthSource(
                 source: "native_session", availability: "available", verification: "passed"),
         ]
-        let row = try #require(AccountsPresentation.rows(model: model).first { $0.isCliLogin })
-        #expect(row.enabled)
-        #expect(row.nextUp == false)
-        #expect(!row.isProfile)
-        #expect(row.profileId == nil)
+        #expect(AccountsPresentation.rows(model: model).isEmpty)
+
+        // The migrated legacy login is the ordinary `claude-default` row.
+        let profilesJSON = """
+        [{"profile":{"profile_id":"claude-default","harness_id":"claude",
+          "display_name":"claude default login","credential_kind":"config_dir_login","enabled":true},
+          "status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}},
+         {"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
+          "credential_kind":"config_dir_login","enabled":false},
+          "status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]
+        """
+        model.credentialProfiles = try JSONDecoder().decode(
+            [CredentialProfileEntry].self, from: Data(profilesJSON.utf8))
+        let rows = AccountsPresentation.rows(model: model)
+        #expect(rows.map(\.profileId) == ["claude-default", "work"])
+        // Enabled is the wire `profile.enabled` on every row — including the
+        // migrated one, whose toggle rides the same profile PATCH route.
+        #expect(rows.map(\.enabled) == [true, false])
     }
 
     @MainActor
-    @Test func nextUpProfileAndCliEnabledBindToServerProjection() throws {
-        // F1 engine cut: the informational next-up hint and the CLI-login Enabled
-        // state come from the server accounts projection (`next_up`), not client
-        // pin state — and there is no user-settable Active any more.
+    @Test func nextUpBindsToTheAccountPoolsAuthority() throws {
+        // The routing verdict rides ONLY the `accountPools` carrier — the
+        // legacy harnessAccounts projection is never consulted.
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .claude, health: .ok, version: "1", auth: "session ready",
-            intents: ["implement"])]
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available", verification: "passed"),
-        ]
         let profilesJSON = """
         [{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
           "credential_kind":"config_dir_login","enabled":true},
@@ -294,114 +293,101 @@ import Testing
         """
         model.credentialProfiles = try JSONDecoder().decode(
             [CredentialProfileEntry].self, from: Data(profilesJSON.utf8))
-        // Projection: routing would pick "work" next; the native login is DISABLED.
-        let accountsJSON = """
-        [{"harness_id":"claude","native_credentials_enabled":false,
-          "native_login_detected":true,"next_up":{"kind":"profile","profileId":"work"}}]
-        """
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self, from: Data(accountsJSON.utf8))
+        model.accountPools = try JSONDecoder().decode(
+            [HarnessAccountPool].self,
+            from: Data(#"[{"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}}]"#.utf8))
         model.accountsNextUpAuthorityFresh[.local] = true
 
-        let rows = AccountsPresentation.rows(model: model)
-        let cli = try #require(rows.first { $0.isCliLogin })
-        #expect(cli.enabled == false)     // driven by native_credentials_enabled
-        #expect(cli.nextUp == false)      // a profile is next up, not the native login
-        let work = try #require(rows.first { $0.profileId == "work" })
-        #expect(work.nextUp == true)
-        let spare = try #require(rows.first { $0.profileId == "spare" })
-        #expect(spare.nextUp == false)
+        var rows = AccountsPresentation.rows(model: model)
+        #expect(rows.first { $0.profileId == "work" }?.nextUp == true)
+        #expect(rows.first { $0.profileId == "spare" }?.nextUp == false)
+
+        // Expired authority never fabricates a verdict.
+        model.accountsNextUpAuthorityFresh[.local] = false
+        rows = AccountsPresentation.rows(model: model)
+        #expect(rows.allSatisfy { !$0.nextUp })
     }
 
     @MainActor
-    @Test func nativeNextUpMarksTheCliLoginRow() throws {
+    @Test func unknownNextUpKindIsToleratedAndMarksNoRow() throws {
+        // Forward compatibility: a newer engine's pool kind decodes as
+        // `.unknown` — the accounts response survives and no row shows the
+        // badge (the legacy throw-on-unknown decoder class is dead).
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .claude, health: .ok, version: "1", auth: "session ready",
-            intents: ["implement"])]
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available", verification: "passed"),
-        ]
-        let profilesJSON = """
-        [{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
-          "credential_kind":"config_dir_login","enabled":true},
-          "status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]
-        """
         model.credentialProfiles = try JSONDecoder().decode(
-            [CredentialProfileEntry].self, from: Data(profilesJSON.utf8))
-        // Projection: routing would pick the native/CLI login next.
-        let accountsJSON = """
-        [{"harness_id":"claude","native_credentials_enabled":true,
-          "native_login_detected":true,"next_up":{"kind":"native","route":"local_session"}}]
-        """
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self, from: Data(accountsJSON.utf8))
+            [CredentialProfileEntry].self,
+            from: Data(#"[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]"#.utf8))
+        model.accountPools = try JSONDecoder().decode(
+            [HarnessAccountPool].self,
+            from: Data(#"[{"harness_id":"claude","next_up":{"kind":"quantum_route","extra":42}}]"#.utf8))
         model.accountsNextUpAuthorityFresh[.local] = true
 
-        let rows = AccountsPresentation.rows(model: model)
-        let cli = try #require(rows.first { $0.isCliLogin })
-        #expect(cli.enabled == true)
-        #expect(cli.nextUp == true)
-        let work = try #require(rows.first { $0.profileId == "work" })
-        #expect(work.nextUp == false)
-    }
-
-    @MainActor
-    @Test func apiKeyRouteUsesTheExistingRouteLabelWithoutCreatingAnAccount() throws {
-        let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .raw, health: .ok, version: "1", auth: "key ready",
-            intents: ["implement"], routableIntents: ["implement"])]
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self,
-            from: Data(#"[{"harness_id":"raw-api","native_credentials_enabled":true,"native_login_detected":false,"next_up":{"kind":"native","route":"api_key"}}]"#.utf8))
-        model.accountsNextUpAuthorityFresh[.local] = true
-
-        #expect(AccountsPresentation.rows(model: model).isEmpty)
-        #expect(AccountsPresentation.composerAccountSegment(
-            model: model, harnessId: "raw-api", pinnedProfileId: nil
-        ).label == "Automatic")
-    }
-
-    @MainActor
-    @Test func apiKeyFallbackDoesNotMarkTheCliLoginRowAsNextUp() throws {
-        let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .claude, health: .ok, version: "1", auth: "key ready",
-            intents: ["implement"])]
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "unavailable", verification: "failed"),
-        ]
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self,
-            from: Data(#"[{"harness_id":"claude","native_credentials_enabled":true,"native_login_detected":false,"next_up":{"kind":"native","route":"api_key"}}]"#.utf8))
-        model.accountsNextUpAuthorityFresh[.local] = true
-
-        let cli = try #require(AccountsPresentation.rows(model: model).first { $0.isCliLogin })
-        #expect(cli.nextUp == false)
+        #expect(model.accountPools.first?.nextUp == .unknown(kind: "quantum_route"))
+        let row = try #require(AccountsPresentation.rows(model: model).first)
+        #expect(row.nextUp == false)
         #expect(AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil
         ).label == "Automatic")
     }
 
     @MainActor
-    @Test func identityLineBindsToTheDaemonProjectionAndFallsBackToDetail() throws {
-        // INV-067: the row's secondary line is the daemon-projected {email, plan}
-        // ("email · plan") when disclosed, sourced from the wire — the profile
-        // entry's `identity` and the native account row's `identity`. When absent
-        // the row falls back to the readiness detail.
+    @Test func apiKeyRouteIsARouteNeverAnAccountRow() throws {
+        // INV-061: the pool's api_key_route verdict adds NO row and marks no
+        // row as next up; the unpinned composer segment stays "Automatic".
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
         model.liveHarnesses = [HarnessInfo(
-            family: .claude, health: .ok, version: "1", auth: "session ready",
+            family: .claude, health: .ok, version: "1", auth: "key ready",
             intents: ["implement"])]
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available", verification: "passed"),
-        ]
+        model.credentialProfiles = try JSONDecoder().decode(
+            [CredentialProfileEntry].self,
+            from: Data(#"[{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work","credential_kind":"config_dir_login","enabled":false},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]"#.utf8))
+        model.accountPools = try JSONDecoder().decode(
+            [HarnessAccountPool].self,
+            from: Data(#"[{"harness_id":"claude","next_up":{"kind":"api_key_route"}}]"#.utf8))
+        model.accountsNextUpAuthorityFresh[.local] = true
+
+        let rows = AccountsPresentation.rows(model: model)
+        #expect(rows.count == 1)
+        #expect(rows.allSatisfy { !$0.nextUp })
+        #expect(model.authoritativeNextUp(for: "claude")?.isApiKeyRoute == true)
+        #expect(AccountsPresentation.composerAccountSegment(
+            model: model, harnessId: "claude", pinnedProfileId: nil
+        ).label == "Automatic")
+    }
+
+    @Test func apiKeyRouteDisclosureIsLimitedToConfigDirLoginFamilies() {
+        // The popover's api_key_route line explains a DEGRADATION: a
+        // config-dir-login family whose enabled rows cannot serve the next
+        // unpinned run. For api-key-PRIMARY families (opencode/raw-api/
+        // openrouter) the key IS the ordinary route — no standing line.
+        let pools = ["claude", "openrouter", "opencode", "raw-api"]
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: nil, poolHarnessIds: pools, isApiKeyRouteNextUp: { _ in true })
+            == ["claude"])
+        // No api_key_route verdict → no line at all.
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: nil, poolHarnessIds: pools, isApiKeyRouteNextUp: { _ in false })
+            .isEmpty)
+        // A family-scoped host (the AuthSheet) follows the same rule.
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: .claude, poolHarnessIds: [], isApiKeyRouteNextUp: { $0 == "claude" })
+            == ["claude"])
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: .openrouter, poolHarnessIds: [], isApiKeyRouteNextUp: { _ in true })
+            .isEmpty)
+    }
+
+    @MainActor
+    @Test func identityLineBindsToTheDaemonProjectionAndFallsBackToDetail() throws {
+        // INV-067: the row's secondary line is the daemon-projected {email, plan}
+        // ("email · plan") when disclosed, sourced from the profile entry's
+        // `identity` on the wire. When absent the row falls back to the
+        // readiness detail.
+        let model = AppModel(client: nil, requestNotificationAuthorization: false)
         // "work" discloses both fields; "plan-only" discloses just the plan;
-        // "bare" discloses nothing and must fall back to its status detail.
+        // "bare" discloses nothing and must fall back to its status detail;
+        // the migrated `cursor-default` row keeps its verified readiness
+        // reachable from status-marker help without an extra visible line.
         let profilesJSON = """
         [{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
           "credential_kind":"config_dir_login","enabled":true},
@@ -418,21 +404,16 @@ import Testing
          {"profile":{"profile_id":"failed","harness_id":"claude","display_name":"Failed",
           "credential_kind":"config_dir_login","enabled":true},
           "status":{"availability":"unavailable","verification":"failed","detail":"login expired","last_verified_at":null},
-          "identity":{"email":"old@example.test"}}]
+          "identity":{"email":"old@example.test"}},
+         {"profile":{"profile_id":"cursor-default","harness_id":"cursor",
+          "display_name":"cursor default login","credential_kind":"config_dir_login","enabled":true},
+          "status":{"availability":"available","verification":"passed","detail":"Cursor session verified in the profile store","last_verified_at":null},
+          "identity":{"email":"cursor@example.test"}}]
         """
         model.credentialProfiles = try JSONDecoder().decode(
             [CredentialProfileEntry].self, from: Data(profilesJSON.utf8))
-        let accountsJSON = """
-        [{"harness_id":"claude","native_credentials_enabled":true,
-          "native_login_detected":true,"identity":{"email":"native@example.test","plan":"claude_pro"},
-          "next_up":{"kind":"native","route":"local_session"}}]
-        """
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self, from: Data(accountsJSON.utf8))
 
         let rows = AccountsPresentation.rows(model: model)
-        let cli = try #require(rows.first { $0.isCliLogin })
-        #expect(cli.identityLine == "native@example.test · claude_pro")
         let work = try #require(rows.first { $0.profileId == "work" })
         #expect(work.identityLine == "work@example.test · claude_max")
         #expect(work.secondaryLines == ["work@example.test · claude_max"])
@@ -446,30 +427,11 @@ import Testing
         let failed = try #require(rows.first { $0.profileId == "failed" })
         #expect(failed.secondaryLines == ["old@example.test", "login expired"])
         #expect(failed.hiddenReadinessDetail == nil)
-    }
-
-    @MainActor
-    @Test func cursorIdentityKeepsVerifiedReadinessReachableWithoutAnExtraLine() throws {
-        let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .cursor, health: .ok, version: "1", auth: "session ready",
-            authSources: [HarnessAuthSource(
-                source: "native_session", availability: "available",
-                verification: "passed", detail: "Native Cursor session verified")],
-            intents: ["implement"])]
-        model.harnessAccounts = try JSONDecoder().decode(
-            [HarnessAccounts].self,
-            from: Data(#"[{"harness_id":"cursor","native_credentials_enabled":true,"native_login_detected":true,"identity":{"email":"cursor@example.test"},"next_up":{"kind":"native","route":"local_session"}}]"#.utf8))
-
-        let row = try #require(AccountsPresentation.rows(model: model).first)
-        #expect(row.identityLine == "cursor@example.test")
-        #expect(row.secondaryLines == ["cursor@example.test"])
-        #expect(row.hiddenReadinessDetail == "Native Cursor session verified")
-    }
-
-    @Test func cliLoginBadgeExplainsLifecycleAndRouting() {
-        #expect(AccountsPresentation.cliLoginLifecycleHelp ==
-            "CLI login = existing vendor sign-in; named accounts = isolated profiles used by explicit pin or opt-in quota rotation.")
+        let cursorDefault = try #require(rows.first { $0.profileId == "cursor-default" })
+        #expect(cursorDefault.identityLine == "cursor@example.test")
+        #expect(cursorDefault.secondaryLines == ["cursor@example.test"])
+        #expect(cursorDefault.hiddenReadinessDetail
+            == "Cursor session verified in the profile store")
     }
 
     @MainActor
@@ -523,27 +485,23 @@ import Testing
     }
 
     @MainActor
-    @Test func accountRowColumnSetIsStableAcrossRowKinds() throws {
-        // §1 presentation contract: every row kind emits the SAME ordered trailing
+    @Test func accountRowColumnSetIsStableAcrossRows() throws {
+        // §1 presentation contract: every row emits the SAME ordered trailing
         // column set, which is exactly what keeps the Enabled toggle collinear.
         let model = AppModel(client: nil, requestNotificationAuthorization: false)
-        model.liveHarnesses = [HarnessInfo(
-            family: .claude, health: .ok, version: "1", auth: "session ready",
-            intents: ["implement"])]
-        model.exactAuthSources[.claude] = [
-            .nativeSession: HarnessAuthSource(
-                source: "native_session", availability: "available", verification: "passed"),
-        ]
         model.credentialProfiles = try JSONDecoder().decode([CredentialProfileEntry].self, from: Data("""
-        [{"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
+        [{"profile":{"profile_id":"claude-default","harness_id":"claude",
+          "display_name":"claude default login","credential_kind":"config_dir_login","enabled":true},
+          "status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}},
+         {"profile":{"profile_id":"work","harness_id":"claude","display_name":"Work",
           "credential_kind":"config_dir_login","enabled":true},
           "status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}]
         """.utf8))
         let rows = AccountsPresentation.rows(model: model)
-        let cli = try #require(rows.first { $0.isCliLogin })
-        let profile = try #require(rows.first { $0.isProfile })
-        #expect(AccountsPresentation.columns(for: cli) == AccountsPresentation.columns(for: profile))
-        #expect(AccountsPresentation.columns(for: cli) == [.enabled, .manage, .delete])
+        let migrated = try #require(rows.first { $0.profileId == "claude-default" })
+        let profile = try #require(rows.first { $0.profileId == "work" })
+        #expect(AccountsPresentation.columns(for: migrated) == AccountsPresentation.columns(for: profile))
+        #expect(AccountsPresentation.columns(for: migrated) == [.enabled, .manage, .delete])
     }
 
     @MainActor
@@ -565,10 +523,9 @@ import Testing
         #expect(seg.pinned == false)
         #expect(seg.label == "Automatic")
 
-        // Projection: the native CLI login is next up.
-        model.harnessAccounts = try JSONDecoder().decode([HarnessAccounts].self, from: Data("""
-        [{"harness_id":"claude","native_credentials_enabled":true,
-          "native_login_detected":true,"next_up":{"kind":"native","route":"local_session"}}]
+        // Pool verdict: a specific row is next up — Automatic stays stable.
+        model.accountPools = try JSONDecoder().decode([HarnessAccountPool].self, from: Data("""
+        [{"harness_id":"claude","next_up":{"kind":"profile","profileId":"work"}}]
         """.utf8))
         model.accountsNextUpAuthorityFresh[.local] = true
         seg = AccountsPresentation.composerAccountSegment(
@@ -576,17 +533,16 @@ import Testing
         #expect(seg.pinned == false)
         #expect(seg.label == "Automatic")
 
-        // The same unprofiled/default identity may honestly route through an
-        // API key when the native source is unavailable or config requests it.
-        model.harnessAccounts = try JSONDecoder().decode([HarnessAccounts].self, from: Data("""
-        [{"harness_id":"claude","native_credentials_enabled":true,
-          "native_login_detected":false,"next_up":{"kind":"native","route":"api_key"}}]
+        // The unpinned route may honestly be the policy API key (INV-061) —
+        // still the one stable Automatic choice, never a fake account name.
+        model.accountPools = try JSONDecoder().decode([HarnessAccountPool].self, from: Data("""
+        [{"harness_id":"claude","next_up":{"kind":"api_key_route"}}]
         """.utf8))
         seg = AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil)
         #expect(seg.label == "Automatic")
 
-        // A thread pin overrides the default and resolves to the profile's name.
+        // A thread pin overrides the pool and resolves to the profile's name.
         seg = AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: "work")
         #expect(seg.pinned == true)

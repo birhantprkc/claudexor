@@ -52,6 +52,38 @@ describe("Claude official statusline quota source", () => {
     await expect(refreshClaudeStatuslineQuota()).resolves.toEqual({ snapshots: [snapshot] });
   });
 
+  it("re-stamps the spool snapshot onto the migrated row id (no null-subject resurrection)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claudexor-claude-statusline-mig-"));
+    roots.push(root);
+    process.env.CLAUDEXOR_CONFIG_DIR = root;
+    // Spool written by the statusline collector BEFORE (or after) migration
+    // stamps subject_id: null — the default store's session.
+    ingestClaudeStatuslineQuota({
+      rate_limits: { five_hour: { used_percentage: 25, resets_at: 1_800_000_000 } },
+    });
+    const { accountsMigrationFilePath } = await import("./accounts-unified-migration.js");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    mkdirSync(join(accountsMigrationFilePath(), ".."), { recursive: true });
+    writeFileSync(
+      accountsMigrationFilePath(),
+      JSON.stringify({
+        claude: {
+          phase: "completed",
+          row_id: "claude-default",
+          legacy_aliases: [null],
+          locator: join(root, "native", "claude", "default"),
+          backup_ref: null,
+        },
+      }),
+    );
+    // Post-migration refresh: the default store IS the migrated row, so the
+    // snapshot carries the row id — never {claude, null} again.
+    const result = await refreshClaudeStatuslineQuota();
+    expect(result.snapshots).toHaveLength(1);
+    expect(result.snapshots[0]?.subject.subject_id).toBe("claude-default");
+    expect(result.snapshots.some((s) => s.subject.subject_id === null)).toBe(false);
+  });
+
   it("stays unknown when the official subscriber fields are absent or invalid", () => {
     expect(parseClaudeStatuslineQuota({ model: { id: "claude" } })).toBeNull();
     expect(
