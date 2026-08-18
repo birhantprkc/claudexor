@@ -1,7 +1,7 @@
 import type { CredentialProfile, QuotaSnapshot } from "@claudexor/schema";
 import { quotaConstraintAppliesToModel } from "@claudexor/budget";
 import { profileQuotaBlock } from "./credential-cooldown.js";
-import { profileHeadroomBreach } from "./credential-profile-rotation.js";
+import { limitSubjectRoute, profileHeadroomBreach } from "./credential-profile-rotation.js";
 
 /**
  * Quota-aware ACCOUNT POOL of the unified account model (INV-135 rewrite,
@@ -100,8 +100,16 @@ export function rankAccountPool(args: {
     // A4 cooldown reader: a row under an OBSERVED live block (reactive
     // vendor-limit cooldown or spent window, stale-but-live included) ranks
     // exhausted with its earliest known release instant — selecting it would
-    // burn an attempt to rediscover the limit the registry already holds.
-    const block = profileQuotaBlock(args.snapshots, args.harnessId, profile.profile_id, args.model);
+    // burn an attempt to rediscover the limit the registry already holds. The
+    // block is read route-scoped (the row's own credential kind), so an
+    // api-key sibling's window can never cool a subscription row.
+    const block = profileQuotaBlock(
+      args.snapshots,
+      args.harnessId,
+      profile.profile_id,
+      limitSubjectRoute(profile),
+      args.model,
+    );
     if (block) {
       candidates.push({
         profile,

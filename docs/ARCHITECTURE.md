@@ -738,7 +738,9 @@ selected profile's freshest quota window applicable to the effective model
 at/over the threshold, or its own OBSERVED live block (a reactive rate-limit
 cooldown or spent window judged by the schema's availability projection —
 stale-but-live evidence included, since a cooldown instant is absolute clock
-truth), emits typed
+truth, and matched by the FULL subject key including `credential_route`, so
+the api-key default and the native-session default of one harness never
+conflate on their shared `subject_id=null`), emits typed
 `route.profile.headroom_exceeded` evidence, and `rotate` swaps to the next
 eligible profile with `route.profile.rotated` provenance; and
 `vendor_limit_rejected` — a TYPED vendor rate-limit that terminated a
@@ -754,7 +756,10 @@ retryable deaths stay with the same-profile retry machinery, and an observed
 mutation (workspace diff or any `file_change` event) blocks every branch.
 Adapters keep a failed result's prose out of answer material entirely: a
 non-success terminal result rides a `status` event, never a `message`, and an
-errored attempt with no typed final has no deliverable (`acceptedTryOutput`).
+errored attempt with no typed final has no deliverable (`acceptedTryOutput`) —
+the in-loop rotation evidence reads this same policy owner, so refusal prose
+that legitimately flows as mid-stream `message` events (the claude
+org-disabled incident shape) can never suppress failover on any adapter.
 Credentials never change inside a running spawn; a
 rotation INTO a spent or still-cooling profile is refused by the same
 headroom-plus-cooldown check. When no
@@ -764,7 +769,11 @@ headroom or cooldown evidence (with its earliest known release instant); the
 UI surfaces the exhaustion instead of implying a switch. Exhaustion is also a
 TYPED terminal: a reactive rotation-eligible failure with nowhere to go
 terminalizes the attempt on `credential_pool_exhausted` (category
-`harness_unavailable` — nothing malfunctioned) through NORMAL attempt
+`harness_unavailable` — nothing malfunctioned) only when the triggering
+subject or a POOL-MEMBER row carries limit/unusable evidence — rows for
+identities rotation could never select (wrong kind, outside policy, not
+ready) never count, and an evidence-free structural death keeps its TRUE
+failure — through NORMAL attempt
 finalization, BEFORE the transient gate could burn same-profile retries on the
 already-refused subject, and the run terminal lifts `code` + `resetsAt` onto
 `final/failure.yaml` in every lane (race unanimity, convergence last-result,

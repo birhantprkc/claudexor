@@ -17,8 +17,9 @@ import { readyProfilesForRotation } from "./credential-differential.js";
 import { preflightDefaultSubject } from "./credential-preflight.js";
 import {
   effectiveLimitAction,
+  limitSubjectRoute,
   profileHeadroomBreach,
-  subscriptionWindowExhausted,
+  type HeadroomBreach,
   type ProfilePolicy,
 } from "./credential-profile-rotation.js";
 import {
@@ -94,6 +95,40 @@ export interface AccountResolutionContext {
   emit: AccountResolutionEmit;
 }
 
+/**
+ * A spent subscription window on an EXPLICITLY PINNED account, refused
+ * MACHINE-READABLY (D-U6: a pin is strict — never a silent rotation). Homed
+ * beside its A4 sibling `pinnedWindowBlocked` in the pinned-lane owner.
+ *
+ * The verdict a caller actually needs from this refusal is "not now, come back
+ * at T" — and the only honest way to deliver T is as a field. Gluing it into
+ * the sentence and shipping the terminal as `category: internal, code: null`
+ * left every consumer (a surface, a scheduler, an automating host) to regex
+ * the prose for a timestamp, which no contract in this repo permits. The
+ * message stays human-readable; the machine reads `code` and `resetsAt`, which
+ * the run terminal lifts onto `final/failure.yaml` verbatim.
+ */
+export function subscriptionWindowExhausted(
+  profileId: string,
+  harnessId: string,
+  breach: HeadroomBreach,
+): Error {
+  return Object.assign(
+    new Error(
+      `credential profile "${profileId}" (${harnessId}) is over its headroom threshold ` +
+        `(${breach.constraint_id} at ${Math.round(breach.used_ratio * 100)}% >= ${Math.round(breach.threshold * 100)}%; ` +
+        `a pinned account never rotates${breach.resets_at ? `; resets ${breach.resets_at}` : ""})`,
+    ),
+    {
+      code: "subscription_window_exhausted",
+      // Not `internal`: nothing malfunctioned. The account cannot serve this
+      // run until its window reopens, which is what harness_unavailable means.
+      category: "harness_unavailable",
+      resetsAt: breach.resets_at,
+    },
+  );
+}
+
 /** The strict pin's refusal for an OBSERVED live block (A4): same typed code
  * and category as the headroom form — a consumer asks "when can I come back",
  * not which detector fired — with the block's own evidence in the prose. */
@@ -136,7 +171,9 @@ function poolExhaustionCandidates(ctx: AccountResolutionContext, ready: Readonly
         policy.headroom_threshold,
         model,
       );
-      const block = breach ? null : profileQuotaBlock(snapshots, harnessId, row.profile_id, model);
+      const block = breach
+        ? null
+        : profileQuotaBlock(snapshots, harnessId, row.profile_id, limitSubjectRoute(row), model);
       const dead = liveUnusableFor(ctx.unusable, harnessId, row.profile_id, model);
       // Label precedence mirrors PR-A's rotationExhaustionCandidates: a
       // not-ready row is not a POOL MEMBER, so its windows never join the
@@ -211,7 +248,15 @@ export async function resolveAccountForRun(
       policy.headroom_threshold,
       model,
     );
-    const block = breach ? null : profileQuotaBlock(snapshots, harnessId, pinned.profile_id, model);
+    const block = breach
+      ? null
+      : profileQuotaBlock(
+          snapshots,
+          harnessId,
+          pinned.profile_id,
+          limitSubjectRoute(pinned),
+          model,
+        );
     if (!breach && !block) return pinned;
     emit("route.profile.headroom_exceeded", {
       harness_id: harnessId,
@@ -287,7 +332,8 @@ export async function resolveAccountForRun(
     const readyProfileIds =
       effectiveLimitAction(policy, ctx.defaultRoute) === "rotate" &&
       ctx.defaultRoute === "local_session" &&
-      (breach !== null || profileQuotaBlock(snapshots, harnessId, null, model) !== null)
+      (breach !== null ||
+        profileQuotaBlock(snapshots, harnessId, null, ctx.defaultRoute, model) !== null)
         ? await readyIds()
         : new Set<string>();
     return preflightDefaultSubject({
@@ -349,7 +395,9 @@ export async function resolveAccountForRun(
       );
       // A4: an observed live block on the bound row (reactive cooldown /
       // spent window) unbinds it exactly like a fresh breach would.
-      const block = breach ? null : profileQuotaBlock(snapshots, harnessId, boundId, model);
+      const block = breach
+        ? null
+        : profileQuotaBlock(snapshots, harnessId, boundId, limitSubjectRoute(bound), model);
       if (verdict === "available" && !breach && !block) return bound;
       boundSwitchReason =
         breach || block

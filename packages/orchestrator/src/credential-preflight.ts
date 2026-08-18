@@ -60,8 +60,10 @@ export function preflightDefaultSubject(args: {
     model,
   );
   // Same A4 cooldown reader as the pinned lane: the default subject's own
-  // observed live block (reactive cooldown / spent window) rotates too.
-  const block = breach ? null : profileQuotaBlock(snapshots, harnessId, null, model);
+  // observed live block (reactive cooldown / spent window) rotates too. The
+  // guard above pins `defaultRoute === "local_session"`, so the block is read
+  // for the SUBSCRIPTION default subject only.
+  const block = breach ? null : profileQuotaBlock(snapshots, harnessId, null, defaultRoute, model);
   if (!breach && !block) return null;
   emit("route.profile.headroom_exceeded", {
     harness_id: harnessId,
@@ -98,7 +100,7 @@ export function preflightDefaultSubject(args: {
     // Same A5 preflight split as the pinned lane: the DEFAULT subject's own
     // observed live block with no eligible alternative refuses typed before
     // spawn; a bare headroom breach proceeds (not proven spent).
-    const hard = block ?? profileQuotaBlock(snapshots, harnessId, null, model);
+    const hard = block ?? profileQuotaBlock(snapshots, harnessId, null, defaultRoute, model);
     if (hard) {
       throw credentialPoolExhausted({
         harnessId,

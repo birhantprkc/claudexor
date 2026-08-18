@@ -201,6 +201,7 @@ import {
   unrecoveredToolErrors,
   webUnsatisfied,
 } from "./attemptTelemetry.js";
+import { newAttemptOutputMarkers } from "./attemptOutputMarkers.js";
 import * as delegateFailure from "./delegationFailure.js";
 import * as secretDiff from "./secretDiff.js";
 import { dominantHarnessFailureCategory, harnessFailureNextActions } from "./harnessFailure.js";
@@ -2470,8 +2471,11 @@ export class Orchestrator {
     }
     try {
       for (let nativeTry = 0; !signal?.aborted; nativeTry += 1) {
-        // A3 per-try isolation: a failed try's output never seeds the next try.
-        if (nativeTry > 0) answer = new AnswerAssembly();
+        // A3 per-try isolation: neither output nor progress markers leak across tries.
+        if (nativeTry > 0) {
+          answer = new AnswerAssembly();
+          telemetry.outputMarkers = newAttemptOutputMarkers();
+        }
         const clearFileBackedContext = stageFileBackedContext(
           envelope.worktree_path,
           fileBackedContext,
@@ -2612,8 +2616,7 @@ export class Orchestrator {
         const sawRetryable = newTransients.some((f) => f.retryable);
         const sawTypedLimit = telemetry.rateLimits.length > rateLimitStart;
         const currentDiff = await wsm.diff(envelope);
-        const currentAnswer = answer.text();
-        const deliverableEmpty = currentDiff.trim().length === 0 && currentAnswer.length === 0;
+        const deliverableEmpty = currentDiff.trim().length === 0 && answer.text().length === 0;
         // W5.4 + A2 failover: a typed-limit hit OR a structural pre-progress
         // death rebuilds the spec on a NEW session under the next profile.
         if (harnessErrored && runInput && !signal?.aborted) {
@@ -2638,7 +2641,12 @@ export class Orchestrator {
             sawTypedLimit,
             sawRetryable,
             attemptErrored: harnessErrored,
-            deliverableEmpty,
+            // Rotation evidence reads the POLICY-accepted try output: refusal
+            // prose arriving as mid-stream MESSAGE events (claude org-disabled)
+            // is no deliverable; the transient gate keeps RAW deliverableEmpty.
+            deliverableEmpty:
+              currentDiff.trim().length === 0 &&
+              acceptedTryOutput(answer, harnessErrored).length === 0,
             workspaceDiffNonEmpty: currentDiff.trim().length > 0,
             lastLimit: telemetry.rateLimits.at(-1) ?? null,
             emit: (type, payload) => log?.emit(type, payload),
@@ -6730,8 +6738,12 @@ export class Orchestrator {
       try {
         const triedProfiles = new Set<string>(); // W5.4 failover: each profile at most once
         for (let nativeTry = 0; !input.signal?.aborted; nativeTry += 1) {
-          // A3 per-try isolation: a failed try's output never seeds the next try.
-          if (nativeTry > 0) answer = new AnswerAssembly();
+          // A3 per-try isolation (candidate-lane parity): neither a failed try's
+          // output nor its progress markers leak into the next try's evidence.
+          if (nativeTry > 0) {
+            answer = new AnswerAssembly();
+            telemetry.outputMarkers = newAttemptOutputMarkers();
+          }
           const runSpec =
             nativeTry === 0
               ? spec
@@ -6835,7 +6847,9 @@ export class Orchestrator {
               sawTypedLimit,
               sawRetryable,
               attemptErrored: harnessError !== null,
-              deliverableEmpty: reportSoFar.length === 0,
+              // Same policy owner as the candidate lane: an errored try's
+              // narration is not a report; the transient gate keeps reportSoFar.
+              deliverableEmpty: acceptedTryOutput(answer, harnessError !== null).length === 0,
               lastLimit: telemetry.rateLimits.at(-1) ?? null,
               emit: (type, payload) => log.emit(type, payload),
               newSessionId: () => newId("ses"),
