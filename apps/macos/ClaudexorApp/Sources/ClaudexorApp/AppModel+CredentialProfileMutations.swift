@@ -101,14 +101,17 @@ extension AppModel {
     // MARK: Auto-switch-at-quota (batch-6 item b)
 
     /// The harnesses the auto-switch toggle targets: config_dir_login families
-    /// with a SECOND account row registered (unified account model — every
-    /// identity is a row, so rotation needs ≥2 rows). A single-account harness
+    /// with a SECOND ENABLED account row registered (unified account model —
+    /// every identity is a row, rotation draws only from the enabled pool, so
+    /// it needs ≥2 enabled rows). A harness whose extra rows are disabled
     /// cannot rotate, so it is excluded — the old hardcoded [claude, codex] set
     /// patched harnesses that had nothing to switch to (owner: "renders but
     /// doesn't activate").
     var autoBalanceHarnessIds: [String] {
         AccountsAutoBalance.eligibleHarnessIds(
-            profileHarnessIds: activeCredentialProfiles.map(\.profile.harnessId))
+            profiles: activeCredentialProfiles.map {
+                (harnessId: $0.profile.harnessId, enabled: $0.profile.enabled)
+            })
     }
 
     /// Aggregated auto-switch state across the eligible harnesses. `mixed` (they

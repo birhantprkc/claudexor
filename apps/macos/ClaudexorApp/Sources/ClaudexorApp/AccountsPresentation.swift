@@ -170,6 +170,33 @@ enum AccountsPresentation {
         family.defaultAuthReadinessRequest?.source == .nativeSession
     }
 
+    /// The reserved id of the family's BOOTSTRAP account row — the engine's
+    /// migration/bootstrap registers a profile-less login as `<harness>-default`
+    /// (contract L.3). A family sheet treats a job resolved onto this row as
+    /// its own login, never as a foreign account's.
+    static func bootstrapProfileId(for family: HarnessFamily) -> String {
+        "\(family.setupHarnessId)-default"
+    }
+
+    /// Harnesses whose pool verdict is disclosed as the API-key ROUTE line on
+    /// an accounts surface (INV-061). Only config-dir-login families qualify:
+    /// there the key is a FALLBACK behind the account rows, so an
+    /// `api_key_route` verdict discloses a real degradation ("no enabled
+    /// account is ready"). For api-key-PRIMARY families (opencode/raw-api/
+    /// openrouter) the key IS the ordinary route — a standing line would
+    /// present normality as degradation, permanently, on a surface that lists
+    /// no rows for them anyway. Pure so the family filter is unit-pinned.
+    static func apiKeyRouteDisclosureHarnessIds(
+        family: HarnessFamily?,
+        poolHarnessIds: [String],
+        isApiKeyRouteNextUp: (String) -> Bool
+    ) -> [String] {
+        let scope = family.map { [$0.setupHarnessId] } ?? poolHarnessIds
+        return scope.filter {
+            configDirLoginHarnessIds.contains($0) && isApiKeyRouteNextUp($0)
+        }
+    }
+
     /// Compare legal offset timestamps by their absolute instant. Equal
     /// instants and malformed future values use raw lexical order so the
     /// projection remains deterministic rather than depending on group order.
@@ -374,10 +401,16 @@ enum AccountsAutoBalance {
 
     /// Harnesses eligible for the toggle: a capable family with enough
     /// identities to rotate BETWEEN. Every account is a registry row (unified
-    /// model), so that uniformly means two or more registered rows.
-    static func eligibleHarnessIds(profileHarnessIds: [String]) -> [String] {
+    /// model) and rotation only draws from the ENABLED pool, so that uniformly
+    /// means two or more ENABLED rows — a disabled row is not a rotation
+    /// target, and counting it offered a toggle with nothing to switch to.
+    /// An absent `enabled` (nil) fails open as enabled, the same rule the
+    /// rest of the surface applies.
+    static func eligibleHarnessIds(profiles: [(harnessId: String, enabled: Bool?)]) -> [String] {
         var counts: [String: Int] = [:]
-        for id in profileHarnessIds { counts[id, default: 0] += 1 }
+        for profile in profiles where profile.enabled != false {
+            counts[profile.harnessId, default: 0] += 1
+        }
         return capableHarnessIds.filter { (counts[$0] ?? 0) >= 2 }
     }
 

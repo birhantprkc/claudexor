@@ -2689,6 +2689,46 @@ struct AppModelRefreshTests {
         #expect(model.exactAuthSources[.claude] == nil)
     }
 
+    /// A terminal profile-less job is the BOOTSTRAP login (claude/codex):
+    /// its credential lands on the `<harness>-default` REGISTRY row. The
+    /// readiness-only refresh left that row invisible — the accounts panel
+    /// said "No accounts yet" right after a SUCCESSFUL login, until a manual
+    /// popover Refresh. The nil-profileId refresh must re-read the registry
+    /// too, so the row appears in the presentation rows.
+    @MainActor
+    @Test func terminalBootstrapLoginRefreshesTheProfilesRegistry() async throws {
+        defer { AppRequestStubURLProtocol.handler = nil }
+        let model = AppModel(
+            client: appTestGateway(port: 41147), requestNotificationAuthorization: false)
+        let registryCalls = AppRefreshCallCounter()
+        AppRequestStubURLProtocol.handler = { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v2/harnesses/claude/auth-readiness"):
+                return (appResponse(for: request), Data(
+                    #"{"harnessId":"claude","authRequest":"subscription","requestedSource":"native_session","observedAt":"2026-08-18T00:00:00Z","readiness":{"source":"native_session","availability":"available","verification":"passed","detail":"Native session verified"}}"#.utf8))
+            case ("GET", "/v2/harnesses"):
+                return (appResponse(for: request), appHarnessSnapshot(version: "1", status: "ok"))
+            case ("GET", "/v2/credential-profiles"):
+                registryCalls.increment()
+                return (appResponse(for: request), Data(
+                    #"{"profiles":[{"profile":{"profile_id":"claude-default","harness_id":"claude","display_name":"claude default login","credential_kind":"config_dir_login","enabled":true},"status":{"availability":"available","verification":"passed","detail":null,"last_verified_at":null}}],"harnessAccounts":[]}"#.utf8))
+            default:
+                throw AppRefreshTestError.badRequest
+            }
+        }
+
+        let job = SetupJob(
+            jobId: "bootstrap-1", harness: .claude, action: .login,
+            state: .succeeded, phase: .completed, message: "Login verified",
+            createdAt: "2026-08-18T00:00:00Z", profileId: nil)
+        #expect(model.activeCredentialProfiles.isEmpty)
+        #expect(await model.refreshCredentialReadiness(
+            for: .claude, profileId: nil, after: job))
+        #expect(registryCalls.count == 1)
+        #expect(AccountsPresentation.rows(model: model).map(\.profileId)
+            == ["claude-default"])
+    }
+
     @MainActor
     @Test func rawAPISetupAndAPIKeyReadinessNeverUseRetiredRawHarnessId() async throws {
         #expect(HarnessFamily.raw.setupHarnessId == "raw-api")

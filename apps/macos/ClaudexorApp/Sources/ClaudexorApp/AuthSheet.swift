@@ -23,6 +23,10 @@ struct AuthSheet: View {
     @State private var lastRefreshedTerminalJobId: String?
     @State private var didAutoStartLogin = false
     @State private var showTerminalCaveat = false
+    /// Jobs THIS sheet created (fresh logins and their restarts). A family
+    /// sheet adopting one of these never shows the ownership disclosure — the
+    /// user chose the login here; an adopted foreign named-row job keeps it.
+    @State private var sheetStartedJobIds: Set<String> = []
     /// Bounded automatic sign-in-link replacements (see `ReissueBudget`).
     @State private var reissues = AuthSheetPresentation.ReissueBudget()
 
@@ -52,7 +56,11 @@ struct AuthSheet: View {
     private var nativeHarness: SetupHarness? { SetupHarness(rawValue: family.setupHarnessId) }
     private var job: SetupJob? { lifecycle.job }
     private var setupTarget: AuthSheetPresentation.SetupTarget {
-        AuthSheetPresentation.setupTarget(requestedProfileId: profileId, job: job)
+        AuthSheetPresentation.setupTarget(
+            requestedProfileId: profileId,
+            job: job,
+            bootstrapProfileId: AccountsPresentation.bootstrapProfileId(for: family),
+            sheetCreatedJob: job.map { sheetStartedJobIds.contains($0.jobId) } ?? false)
     }
     /// A family-level sheet (nil target) follows ANY job it hosts — including a
     /// bootstrap login the engine resolved onto the `<harness>-default` row; an
@@ -412,7 +420,19 @@ struct AuthSheet: View {
         guard let controller else { return }
         actionInFlight = true
         defer { actionInFlight = false }
+        let previousJobId = job?.jobId
         await controller.start(harness: family.setupHarnessId, action: "login", profileId: profileId)
+        await recordSheetStartedJob(previousJobId: previousJobId)
+    }
+
+    /// Remember a job this sheet just created (`setupTarget` suppresses the
+    /// ownership disclosure only for these and the bootstrap resolution). A
+    /// refused start keeps the prior job in the snapshot — comparing against
+    /// the pre-start id keeps a foreign adopted job from being claimed.
+    private func recordSheetStartedJob(previousJobId: String?) async {
+        guard let started = await controller?.snapshot().job,
+              started.jobId != previousJobId else { return }
+        sheetStartedJobIds.insert(started.jobId)
     }
 
     /// D-17 audit point 8: the first-class Terminal fallback for the codex
@@ -425,6 +445,7 @@ struct AuthSheet: View {
         defer { actionInFlight = false }
         await controller.start(harness: family.setupHarnessId, action: "login",
                                profileId: job.profileId, loginFlow: .browserRedirect)
+        await recordSheetStartedJob(previousJobId: job.jobId)
     }
 
     /// Replace the live login: the D-17 browser-callback opt-in (codex orgs that
@@ -446,6 +467,7 @@ struct AuthSheet: View {
         }
         await controller.start(harness: family.setupHarnessId, action: "login",
                                profileId: job.profileId, loginFlow: loginFlow)
+        await recordSheetStartedJob(previousJobId: job.jobId)
     }
 
     /// Hand the pasted one-time code to the waiting login job: straight to the

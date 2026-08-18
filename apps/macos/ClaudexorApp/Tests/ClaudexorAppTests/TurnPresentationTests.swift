@@ -347,17 +347,17 @@ import ClaudexorKit
             harness: .codex, state: .notSupported,
             errorCode: .deviceAuthUnsupported, profileId: "work")
         #expect(AuthSheetPresentation.setupTarget(
-            requestedProfileId: "other", job: profileJob
+            requestedProfileId: "other", job: profileJob, bootstrapProfileId: "codex-default"
         ) == .init(profileId: "work", differsFromRequested: true))
 
         let defaultJob = fallbackJob(
             harness: .codex, state: .notSupported,
             errorCode: .deviceAuthUnsupported, profileId: nil)
         #expect(AuthSheetPresentation.setupTarget(
-            requestedProfileId: "work", job: defaultJob
+            requestedProfileId: "work", job: defaultJob, bootstrapProfileId: "codex-default"
         ) == .init(profileId: nil, differsFromRequested: true))
         #expect(AuthSheetPresentation.setupTarget(
-            requestedProfileId: "work", job: nil
+            requestedProfileId: "work", job: nil, bootstrapProfileId: "codex-default"
         ) == .init(profileId: "work", differsFromRequested: false))
     }
 
@@ -370,7 +370,7 @@ import ClaudexorKit
             harness: .cursor, state: .notSupported,
             errorCode: .deviceAuthUnsupported, profileId: "cursor-default")
         #expect(AuthSheetPresentation.setupTarget(
-            requestedProfileId: nil, job: resolvedJob
+            requestedProfileId: nil, job: resolvedJob, bootstrapProfileId: "cursor-default"
         ) == .init(profileId: "cursor-default", differsFromRequested: false))
         // A claude/codex bootstrap keeps the default-store job (null target) —
         // still the requested flow, never a mismatch.
@@ -378,8 +378,29 @@ import ClaudexorKit
             harness: .codex, state: .notSupported,
             errorCode: .deviceAuthUnsupported, profileId: nil)
         #expect(AuthSheetPresentation.setupTarget(
-            requestedProfileId: nil, job: defaultJob
+            requestedProfileId: nil, job: defaultJob, bootstrapProfileId: "codex-default"
         ) == .init(profileId: nil, differsFromRequested: false))
+    }
+
+    /// The bootstrap suppression must not swallow OWNERSHIP: a family sheet
+    /// (nil target) that adopts an active login of someone else's NAMED row
+    /// keeps the disclosure — only the family's own bootstrap resolution and
+    /// jobs this sheet created itself are silent.
+    @Test func familySheetDisclosesAForeignNamedRowsLoginButNotItsOwn() {
+        let foreignJob = fallbackJob(
+            harness: .claude, state: .notSupported,
+            errorCode: .deviceAuthUnsupported, profileId: "work")
+        // Adopted from the server, not created here: the ownership note stays.
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: nil, job: foreignJob, bootstrapProfileId: "claude-default"
+        ) == .init(profileId: "work", differsFromRequested: true))
+        // The SAME job started by this sheet is the user's own choice here.
+        #expect(AuthSheetPresentation.setupTarget(
+            requestedProfileId: nil, job: foreignJob, bootstrapProfileId: "claude-default",
+            sheetCreatedJob: true
+        ) == .init(profileId: "work", differsFromRequested: false))
+        // And the family's bootstrap row id is the reserved `<harness>-default`.
+        #expect(AccountsPresentation.bootstrapProfileId(for: .claude) == "claude-default")
     }
 
     @Test func primaryCTAFollowsTheCauseLadder() {

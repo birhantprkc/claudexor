@@ -34,9 +34,10 @@ struct SidebarFooter: View {
 }
 
 /// The in-effect credential-profile line: which account the next turn will use
-/// (the thread/draft pin, else the harness default), shown next to its harness.
-/// Truth from the wire (thread/draft sticky); hidden
-/// when there is no resolved harness.
+/// (a thread/draft pin names its account; unpinned threads follow the
+/// quota-aware pool of enabled accounts and render the stable "Automatic"),
+/// shown next to its harness. Truth from the wire (thread/draft sticky);
+/// hidden when there is no resolved harness.
 struct FooterProfileRow: View {
     @Environment(AppModel.self) private var model
 
@@ -327,11 +328,14 @@ struct AccountsSurface: View {
 
     /// Harnesses whose pool verdict says the next UNPINNED run rides the policy
     /// API-key ROUTE (INV-061) — a route, never an account row, so it cannot be
-    /// a "Next up" badge and is disclosed as its own quiet line instead.
+    /// a "Next up" badge and is disclosed as its own quiet line instead. The
+    /// pure helper limits this to config-dir-login families: for api-key-primary
+    /// ones the key is the ordinary route, not a degradation to announce.
     private var apiKeyRouteDisclosures: [String] {
-        let scope = family.map { [$0.setupHarnessId] }
-            ?? model.activeAccountPools.map(\.harnessId)
-        return scope.filter { model.authoritativeNextUp(for: $0)?.isApiKeyRoute == true }
+        AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: family,
+            poolHarnessIds: model.activeAccountPools.map(\.harnessId),
+            isApiKeyRouteNextUp: { model.authoritativeNextUp(for: $0)?.isApiKeyRoute == true })
     }
 
     var body: some View {

@@ -7,15 +7,19 @@ import Testing
 /// generator must always emit a server-valid slug, unique per harness.
 @Suite struct AccountsPresentationTests {
     /// Unified account model: every identity is a registry row, so rotation
-    /// eligibility is uniformly "two or more rows" — for agy AND for the
-    /// families that used to count a native login as the second identity.
-    @Test func autoBalanceEligibilityUniformlyNeedsTwoAccountRows() {
+    /// eligibility is uniformly "two or more ENABLED rows" — for agy AND for
+    /// the families that used to count a native login as the second identity.
+    /// A disabled row is not a rotation target, so it never counts.
+    @Test func autoBalanceEligibilityUniformlyNeedsTwoEnabledAccountRows() {
         #expect(AccountsPresentation.configDirLoginHarnessIds.contains("agy"))
         #expect(AccountsAutoBalance.capableHarnessIds.contains("agy"))
         for harness in AccountsAutoBalance.capableHarnessIds {
-            #expect(AccountsAutoBalance.eligibleHarnessIds(profileHarnessIds: [harness]).isEmpty)
             #expect(AccountsAutoBalance.eligibleHarnessIds(
-                profileHarnessIds: [harness, harness]) == [harness])
+                profiles: [(harness, true)]).isEmpty)
+            #expect(AccountsAutoBalance.eligibleHarnessIds(
+                profiles: [(harness, true), (harness, true)]) == [harness])
+            #expect(AccountsAutoBalance.eligibleHarnessIds(
+                profiles: [(harness, true), (harness, false)]).isEmpty)
         }
     }
 
@@ -349,6 +353,28 @@ import Testing
         #expect(AccountsPresentation.composerAccountSegment(
             model: model, harnessId: "claude", pinnedProfileId: nil
         ).label == "Automatic")
+    }
+
+    @Test func apiKeyRouteDisclosureIsLimitedToConfigDirLoginFamilies() {
+        // The popover's api_key_route line explains a DEGRADATION: a
+        // config-dir-login family whose enabled rows cannot serve the next
+        // unpinned run. For api-key-PRIMARY families (opencode/raw-api/
+        // openrouter) the key IS the ordinary route — no standing line.
+        let pools = ["claude", "openrouter", "opencode", "raw-api"]
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: nil, poolHarnessIds: pools, isApiKeyRouteNextUp: { _ in true })
+            == ["claude"])
+        // No api_key_route verdict → no line at all.
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: nil, poolHarnessIds: pools, isApiKeyRouteNextUp: { _ in false })
+            .isEmpty)
+        // A family-scoped host (the AuthSheet) follows the same rule.
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: .claude, poolHarnessIds: [], isApiKeyRouteNextUp: { $0 == "claude" })
+            == ["claude"])
+        #expect(AccountsPresentation.apiKeyRouteDisclosureHarnessIds(
+            family: .openrouter, poolHarnessIds: [], isApiKeyRouteNextUp: { _ in true })
+            .isEmpty)
     }
 
     @MainActor
