@@ -156,6 +156,30 @@ function sameLocator(a: string | null | undefined, b: string): boolean {
   }
 }
 
+/** The harness's exact Claudexor-owned default native store dir, or null for
+ * harnesses without one (D-U3: cursor has no default store; agy is named-only). */
+export function defaultNativeStoreLocator(harnessId: string): string | null {
+  if (harnessId === "claude") return defaultNativeClaudeConfigDir();
+  if (harnessId === "codex") return defaultNativeCodexHome();
+  return null;
+}
+
+/**
+ * The ONE structural "this row IS the harness's default native store" rule,
+ * shared by the delete fence and the `native_credentials_enabled` downgrade
+ * mirror: true when the locator resolves to the harness's exact
+ * defaultNative*Dir() — the same rule the startup migration matches rows by.
+ * Bootstrap rows (ensureBootstrapProfile) sit at this locator BEFORE any
+ * migration record exists, so record presence must never be the only key.
+ */
+export function locatorIsDefaultNativeStore(
+  harnessId: string,
+  locator: string | null | undefined,
+): boolean {
+  const native = defaultNativeStoreLocator(harnessId);
+  return native !== null && sameLocator(locator, native);
+}
+
 /** Reserved machine id (§L.3): `<harness>-default`, deterministic `-2`, `-3`…
  * suffix on collision. CROSS-HARNESS unique — the wire's scalar
  * `credentialProfileId` must never match rows of two harnesses. */

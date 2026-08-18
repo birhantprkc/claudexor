@@ -228,6 +228,54 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     expect(runAccountsUnifiedMigration(migrationStores)).toEqual([]);
   });
 
+  it("deletes a BOOTSTRAP row at the native locator without a migration record (cancelled-login recovery)", async () => {
+    // ensureBootstrapProfile registers claude-default/codex-default with the
+    // native dir as locator BEFORE any migration record exists (a cancelled
+    // login leaves exactly this cold row). The delete fence keys on the
+    // structural default-store rule, not on record presence — the row must
+    // not be stuck behind a typed 503 forever.
+    const { ensureBootstrapProfile } = await import("./profile-registration.js");
+    const { readAccountsMigrationFile } = await import("./accounts-unified-migration.js");
+    const row = ensureBootstrapProfile("codex");
+    expect(row.profile_id).toBe("codex-default");
+    const locator = row.isolation_locator as string;
+    expect(existsSync(locator)).toBe(true);
+    expect(readAccountsMigrationFile()["codex"]).toBeUndefined();
+    const receipt = (await servicesWithJobs([]).deleteCredentialProfile({
+      harnessId: "codex",
+      profileId: "codex-default",
+    })) as { removed: boolean; credentialCleanup: string };
+    expect(receipt.removed).toBe(true);
+    expect(receipt.credentialCleanup).toBe("config_dir_removed");
+    expect(existsSync(locator)).toBe(false);
+    expect(loadConfig(noProjectRepoRoot()).global.credential_profiles).toHaveLength(0);
+  });
+
+  it("still refuses a hand-written row at an arbitrary path outside the profiles tree and the default store", async () => {
+    // The structural allowlist is the harness's EXACT default native dir —
+    // registry contents never become general rm -rf authority: a hand-written
+    // locator elsewhere in the owned root keeps the typed retryable refusal.
+    registerConfigDirProfile({ harnessId: "codex", profileId: "handmade" });
+    const outside = join(dir, "native", "codex-imposter");
+    mkdirSync(outside, { recursive: true });
+    const { updateGlobalConfig } = await import("@claudexor/config");
+    updateGlobalConfig((config) => ({
+      ...config,
+      credential_profiles: config.credential_profiles.map((profile) =>
+        profile.profile_id === "handmade" ? { ...profile, isolation_locator: outside } : profile,
+      ),
+    }));
+    await expect(
+      servicesWithJobs([]).deleteCredentialProfile({ harnessId: "codex", profileId: "handmade" }),
+    ).rejects.toMatchObject({ status: 503, code: "credential_cleanup_failed", retryable: true });
+    expect(existsSync(outside)).toBe(true);
+    expect(
+      loadConfig(noProjectRepoRoot()).global.credential_profiles.some(
+        (profile) => profile.profile_id === "handmade",
+      ),
+    ).toBe(true);
+  });
+
   it("clears any harness's rotation_eligible entry at the deleted profile (INV-135; F1: Active removed)", async () => {
     registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     const { updateGlobalConfig } = await import("@claudexor/config");

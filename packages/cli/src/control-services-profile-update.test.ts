@@ -240,6 +240,35 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     expect(noteCredentialChange).toHaveBeenCalledTimes(2);
   });
 
+  it("mirrors native_credentials_enabled for ANY row at the harness default store — migration record or not", async () => {
+    // A bootstrap row (ensureBootstrapProfile) sits at the exact default
+    // native dir BEFORE any migration record exists. Disabling it must update
+    // the deprecated downgrade-window mirror too, or the legacy
+    // default-subject ladder (and a downgraded 3.5.0 engine) would silently
+    // route back into the same account's store.
+    const { ensureBootstrapProfile } = await import("./profile-registration.js");
+    const { readAccountsMigrationFile } = await import("./accounts-unified-migration.js");
+    const row = ensureBootstrapProfile("codex");
+    expect(readAccountsMigrationFile()["codex"]).toBeUndefined();
+    const svc = services();
+    await svc.updateCredentialProfile({
+      harnessId: "codex",
+      profileId: row.profile_id,
+      enabled: false,
+    });
+    const cfg = loadConfig(noProjectRepoRoot()).global;
+    expect(cfg.harnesses["codex"]?.native_credentials_enabled).toBe(false);
+    expect(cfg.credential_profiles.find((p) => p.profile_id === row.profile_id)?.enabled).toBe(
+      false,
+    );
+    // An ordinary profiles-tree row never touches the mirror.
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    await svc.updateCredentialProfile({ harnessId: "claude", profileId: "work", enabled: false });
+    expect(
+      loadConfig(noProjectRepoRoot()).global.harnesses["claude"]?.native_credentials_enabled,
+    ).not.toBe(false);
+  });
+
   it("re-arms quota polling after profile creation and quota-relevant settings", async () => {
     const svc = services();
     await svc.createCredentialProfile({ harnessId: "claude", profileId: "new-account" });

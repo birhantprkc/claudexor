@@ -16,6 +16,7 @@ import { claudexorOwnedRoot, noProjectRepoRoot } from "@claudexor/util";
 import { purgeProfileLanes } from "@claudexor/workspace";
 import { vendorVerifiedProfileStatus } from "@claudexor/orchestrator";
 import {
+  locatorIsDefaultNativeStore,
   readAccountsMigrationFile,
   removeAccountsMigrationRecord,
 } from "./accounts-unified-migration.js";
@@ -57,12 +58,20 @@ export function credentialProfileMutations(deps: CredentialProfileMutationDeps) 
           status: 400,
         });
       }
-      assertCredentialProfileRegistered(
-        loadConfig(NO_PROJECT_ROOT).global.credential_profiles,
-        harnessId,
-        profileId,
+      const registry = loadConfig(NO_PROJECT_ROOT).global.credential_profiles;
+      assertCredentialProfileRegistered(registry, harnessId, profileId);
+      // The downgrade-window mirror keys on the STRUCTURAL rule (the row's
+      // locator IS the harness default store), not on migration-record
+      // presence alone: a bootstrap row (ensureBootstrapProfile) sits at the
+      // native dir before any record exists, and a silent mirror divergence
+      // would re-enable that account after a downgrade — or let the legacy
+      // default-subject ladder route back into a disabled row's store.
+      const registryRow = registry.find(
+        (row) => row.harness_id === harnessId && row.profile_id === profileId,
       );
-      const mirrorsNativeKey = readAccountsMigrationFile()[harnessId]?.row_id === profileId;
+      const mirrorsNativeKey =
+        readAccountsMigrationFile()[harnessId]?.row_id === profileId ||
+        locatorIsDefaultNativeStore(harnessId, registryRow?.isolation_locator ?? null);
       let updated: CredentialProfile | undefined;
       updateGlobalConfig((config) => ({
         ...config,
@@ -163,16 +172,20 @@ export function credentialProfileMutations(deps: CredentialProfileMutationDeps) 
             ? canonicalProfileLoginDir(harnessId, registryEntry.isolation_locator)
             : canonicalIsolationLocator(registryEntry.isolation_locator, "credential profile dir");
           // Recursive deletion is fenced to a strict descendant of the
-          // profiles tree — PLUS exactly the migrated row's own legacy native
-          // locator from the migration record (an exact-path allowlist, never
-          // a general "anything under native/" deletion class — K.3).
+          // profiles tree — PLUS exactly the harness's own default native
+          // store dir (an exact-path allowlist, never a general "anything
+          // under native/" deletion class — K.3). The structural rule covers
+          // both the migrated row (whose record holds that locator) and a
+          // bootstrap row registered at the native dir BEFORE any migration
+          // record exists (a cancelled login must stay removable — K.4).
           const profilesRoot = normalizeThroughExistingAncestor(
             join(claudexorOwnedRoot(), "profiles"),
           );
           const legacyAllowlisted =
-            migratedRow &&
-            migrationRecord !== undefined &&
-            dir === normalizeThroughExistingAncestor(migrationRecord.locator);
+            (migratedRow &&
+              migrationRecord !== undefined &&
+              dir === normalizeThroughExistingAncestor(migrationRecord.locator)) ||
+            locatorIsDefaultNativeStore(harnessId, dir);
           if (!dir.startsWith(profilesRoot + sep) && !legacyAllowlisted) {
             throw new Error(
               `refusing to delete "${dir}": not inside the profiles tree ${profilesRoot} and not the migrated row's recorded legacy locator`,
