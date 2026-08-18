@@ -140,11 +140,20 @@ export async function accountPoolsProjection(
         },
       };
     }
+    // next_up must never advertise a row the runtime would not select: a
+    // NON-EMPTY rotation_eligible list restricts the runtime's candidates
+    // (staticRotationCandidates), so the projection applies the same filter.
+    const rotationEligible = h?.profile_policy?.rotation_eligible ?? [];
+    const ready = readyProfiles.get(harnessId) ?? new Set<string>();
+    const eligibleReady =
+      rotationEligible.length > 0
+        ? new Set([...ready].filter((id) => rotationEligible.includes(id)))
+        : ready;
     const selection = selectFromAccountPool({
       registry: cfg.credential_profiles,
       harnessId,
       snapshots: quotaSnapshots,
-      readyProfileIds: readyProfiles.get(harnessId) ?? new Set(),
+      readyProfileIds: eligibleReady,
       headroomThreshold: h?.profile_policy?.headroom_threshold ?? 0.9,
       model: h?.default_model ?? null,
     });

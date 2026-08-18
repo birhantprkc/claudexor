@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { QuotaRefreshResult } from "@claudexor/daemon";
 import { QuotaSnapshot as QuotaSnapshotSchema, type QuotaSnapshot } from "@claudexor/schema";
 import { ensureDir, readJsonSafe, sha256, userConfigDir, writeJson } from "@claudexor/util";
+import { readAccountsMigrationFile } from "./accounts-unified-migration.js";
 
 const SOURCE = "claude_statusline" as const;
 export const CLAUDE_STATUSLINE_MANAGED_ARG = "managed-v2";
@@ -77,7 +78,20 @@ export async function refreshClaudeStatuslineQuota(): Promise<QuotaRefreshResult
   const parsed = readJsonSafe(claudeStatuslineSnapshotPath());
   const snapshot = QuotaSnapshotSchema.safeParse(parsed);
   if (!snapshot.success) throw new Error("Claude statusline quota is not available");
-  return { snapshots: [snapshot.data] };
+  // The statusline hook observes the DEFAULT store's session; after the
+  // unified-accounts migration that store IS the migrated row, so its spool
+  // snapshot is re-stamped onto the row id — a null-subject snapshot would
+  // resurrect the retired engine-default subject every refresh cycle.
+  // Read-side re-stamping also covers spool files written before migration.
+  const migrated = readAccountsMigrationFile()["claude"];
+  const data =
+    migrated !== undefined && snapshot.data.subject.subject_id === null
+      ? QuotaSnapshotSchema.parse({
+          ...snapshot.data,
+          subject: { ...snapshot.data.subject, subject_id: migrated.row_id },
+        })
+      : snapshot.data;
+  return { snapshots: [data] };
 }
 
 export async function runClaudeStatuslineCollector(

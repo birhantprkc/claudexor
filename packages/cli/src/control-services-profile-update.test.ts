@@ -474,6 +474,34 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
     });
   });
 
+  it("a NON-EMPTY rotation_eligible list filters next_up to rows the runtime would select", async () => {
+    // Both rows are ready, but the explicit rotation policy names only
+    // "spare": advertising "work" would promise an account the runtime's
+    // staticRotationCandidates filter never picks.
+    registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
+    registerConfigDirProfile({ harnessId: "claude", profileId: "spare" });
+    gatewayMock.profileReadiness = { availability: "available", verification: "passed" };
+    updateGlobalConfig((config) => ({
+      ...config,
+      harnesses: {
+        ...config.harnesses,
+        claude: {
+          ...(config.harnesses.claude ?? {}),
+          profile_policy: {
+            limit_action: "rotate",
+            rotation_eligible: ["spare"],
+            headroom_threshold: 0.9,
+          },
+        },
+      },
+    }));
+    const listing = ControlCredentialProfilesResponse.parse(await services().credentialProfiles());
+    expect(listing.accountPools.find((pool) => pool.harness_id === "claude")?.next_up).toEqual({
+      kind: "profile",
+      profileId: "spare",
+    });
+  });
+
   it("projects the API-key ROUTE when every ready row is exhausted (pool exhaustion = unavailability)", async () => {
     registerConfigDirProfile({ harnessId: "claude", profileId: "work" });
     gatewayMock.profileReadiness = { availability: "available", verification: "passed" };

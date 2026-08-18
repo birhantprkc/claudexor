@@ -157,6 +157,70 @@ describe("claude oauth/usage quota source (W5.3, INV-062)", () => {
     expect(nativeAbsence?.detail).toContain("401");
   });
 
+  it("a post-migration refresh cycle produces no null subject and never double-probes the migrated store", async () => {
+    // The retired engine-default subject must not resurrect on refresh: a
+    // migrated harness's former default store IS its auto-registered row, so
+    // exactly ONE candidate (the row) probes that store.
+    const { mkdirSync, writeFileSync: writeSync } = await import("node:fs");
+    const dir = (await import("node:fs")).mkdtempSync(join(tmpdir(), "claudexor-oauth-mig-"));
+    const prev = process.env.CLAUDEXOR_CONFIG_DIR;
+    process.env.CLAUDEXOR_CONFIG_DIR = dir;
+    try {
+      const { accountsMigrationFilePath } = await import("./accounts-unified-migration.js");
+      const { defaultNativeClaudeConfigDir } = await import("@claudexor/harness-claude");
+      const { updateGlobalConfig } = await import("@claudexor/config");
+      const nativeDir = defaultNativeClaudeConfigDir();
+      mkdirSync(nativeDir, { recursive: true });
+      mkdirSync(join(accountsMigrationFilePath(), ".."), { recursive: true });
+      writeSync(
+        accountsMigrationFilePath(),
+        JSON.stringify({
+          claude: {
+            phase: "completed",
+            row_id: "claude-default",
+            legacy_aliases: [null],
+            locator: nativeDir,
+            backup_ref: null,
+          },
+        }),
+      );
+      updateGlobalConfig((config) => ({
+        ...config,
+        credential_profiles: [
+          {
+            profile_id: "claude-default",
+            harness_id: "claude",
+            display_name: "migrated",
+            credential_kind: "config_dir_login",
+            isolation_locator: nativeDir,
+            secret_ref: null,
+            enabled: true,
+            created_at: null,
+          },
+        ],
+      }));
+      const probedDirs: string[] = [];
+      const result = await refreshClaudeOauthUsageQuota({
+        readCredential: async (configDir) => {
+          probedDirs.push(configDir);
+          return { accessToken: "tok", subscriptionType: "max" };
+        },
+        fetchUsage: async () => LIVE_USAGE,
+        now: () => new Date("2026-08-18T00:00:00Z"),
+      });
+      // One probe of the migrated store — the row's, never a null duplicate.
+      const { canonicalProfileConfigDir } = await import("@claudexor/harness-claude");
+      expect(probedDirs).toEqual([canonicalProfileConfigDir(nativeDir)]);
+      expect(result.snapshots.map((s) => s.subject.subject_id)).toEqual(["claude-default"]);
+      expect(result.snapshots.some((s) => s.subject.subject_id === null)).toBe(false);
+      expect(result.absences ?? []).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDEXOR_CONFIG_DIR;
+      else process.env.CLAUDEXOR_CONFIG_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("claims a refresh_failed absence when an HTTP-200 body carries no parseable quota windows (BACKLOG Q-a)", async () => {
     // An endpoint that answers 200 but with a body that maps to zero quota
     // windows must yield a typed absence, not silent emptiness — the registry
