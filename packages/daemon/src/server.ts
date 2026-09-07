@@ -4,6 +4,7 @@ import {
   ControlRunStartRequest,
   resolveRunReviewRequested,
   normalizeCancelReasonCode,
+  isTerminalLifecycle,
   type CancelReasonCode,
 } from "@claudexor/schema";
 import { RpcFollowers } from "./rpc-followers.js";
@@ -84,6 +85,8 @@ export interface DaemonOptions extends RuntimeReplacementAuthority {
    * used to drop pending interactions so a dead run never advertises
    * waiting_on_user. */
   onRunTerminal?: (runId: string, threadId?: string) => void;
+  /** Best-effort observer after a durable terminal; it must not throw. */
+  onCommandTerminal?: (record: JobRecord) => void;
   /** Called when a job that carried a pre-created thread turn (params.turnId)
    * settles failure-shaped WITHOUT ever binding a run — i.e. the refusal
    * happened before the run materialized (trust gate, preflight validation).
@@ -339,7 +342,14 @@ export class DaemonServer {
         // under the same key still conflicts inside find().
         const replay = findAcceptedCommand(this.opts.commands, envelope);
         if (replay) return commandAcceptanceReceipt(replay, true);
-        const request = this.admitDelegatedRequest(rawRequest, operation);
+        // Journal-owned belt admission spans retries/processes; ordinary
+        // parentRunId alone never establishes delegated lineage.
+        const request = admitDelegatedRequest(
+          rawRequest,
+          operation,
+          this.allRecords(),
+          this.opts.delegationAuthority,
+        );
         const delegatedFrom = delegatedParentOf(request);
         const accepted = this.acceptCommand(
           request,
@@ -455,21 +465,6 @@ export class DaemonServer {
     });
   }
 
-  /**
-   * Atomic daemon-side admission for belt children. Every belt process has its
-   * own local ledger, so the durable daemon journal is the only place that can
-   * enforce the max-eight count across retries/attempts/processes. Ordinary
-   * parentRunId lineage never enters this rule.
-   */
-  private admitDelegatedRequest(request: unknown, operation?: string): unknown {
-    return admitDelegatedRequest(
-      request,
-      operation,
-      this.allRecords(),
-      this.opts.delegationAuthority,
-    );
-  }
-
   private allRecords(): JobRecord[] {
     return commandStores(this.opts.commands).flatMap((store) => store.records());
   }
@@ -481,7 +476,11 @@ export class DaemonServer {
   private updateRecord(record: JobRecord, patch: Partial<JobRecord>): JobRecord {
     const store = commandStoreForId(this.opts.commands, record.id);
     if (!store) throw new Error(`command authority lost job ${record.id}`);
-    return store.update(record.id, patch);
+    const next = store.update(record.id, patch);
+    if (isTerminalLifecycle(next.state) && !isTerminalLifecycle(record.state)) {
+      this.opts.onCommandTerminal?.(next);
+    }
+    return next;
   }
 
   private threadIdOf(rec: JobRecord): string | undefined {

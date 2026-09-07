@@ -262,6 +262,109 @@
       "error_schema": "ControlProblem"
     },
     {
+      "method": "POST",
+      "path": "/v2/model-operations",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Accept one idempotent model generation without an agent run.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlModelOperationCreateRequest",
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/:id",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Inspect dispatch, outcome and response custody for the same operation.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/:id/ack",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Acknowledge the exact result digest and release temporary model bytes.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlModelOperationAckRequest",
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/:id/control",
+      "mutating": true,
+      "applicability": "global",
+      "summary": "Cancel an existing model operation; settled results remain settled.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlModelOperationControlRequest",
+      "parameters": [],
+      "response_schema": "ControlModelOperationDetail",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/:id/result",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Read exact model response bytes without acknowledging delivery.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": null,
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-sources",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "List raw model transports, independent of agent harnesses.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [],
+      "response_schema": "ControlModelSourcesResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-sources/:id/models",
+      "mutating": false,
+      "applicability": "global",
+      "summary": "Read a selected account's raw model catalog and context evidence.",
+      "auth": "loopback_bearer",
+      "request_schema": null,
+      "parameters": [
+        {
+          "name": "credentialProfileId",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": null,
+          "description": "Pin a managed profile; omitted selects the engine's Auto account."
+        },
+        {
+          "name": "requestedModel",
+          "in": "query",
+          "required": false,
+          "repeatable": false,
+          "enum": null,
+          "schema_ref": "ModelCallRequest#/properties/model",
+          "description": "Select one account able to serve this model using the inference pool criteria; omitted discovers one account without a model constraint."
+        }
+      ],
+      "response_schema": "ControlModelCatalogResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
       "method": "GET",
       "path": "/v2/operations",
       "mutating": false,

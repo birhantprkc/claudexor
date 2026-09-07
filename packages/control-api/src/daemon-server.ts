@@ -82,6 +82,7 @@ import { handleRecoveryRoute } from "./recovery-routes.js";
 import { handleJournalEventRoute } from "./journal-event-routes.js";
 import { handleMaintenanceRoute, type MaintenanceRouteServices } from "./maintenance-routes.js";
 import { handleResourceRoute, type ResourceRouteServices } from "./resource-routes.js";
+import { handleModelRoute, type ModelRouteServices } from "./model-routes.js";
 import {
   handleArtifactServeRoute,
   listArtifacts,
@@ -231,6 +232,7 @@ export interface DaemonControlApiOptions {
   servingMode?: () => ControlServingMode;
   bus?: { subscribe(listener: (event: { run_id: string }) => void): () => void };
   services?: DeliveryCommandServices &
+    Partial<ModelRouteServices> &
     Partial<ResourceRouteServices> &
     Partial<MaintenanceRouteServices> &
     Partial<ProjectRouteServices> & {
@@ -721,36 +723,17 @@ export class DaemonControlApiServer {
       return this.json(res, protocol.status, protocol.body, protocol.contentType);
     }
     const path = protocol.path;
-    if (
-      await handleResourceRoute(
-        {
-          services: this.opts.services,
-          readBody: (request) => this.readBody(request),
-          json: (response, status, body) => this.json(response, status, body),
-          requestError: (response, error, fallback) => this.requestError(response, error, fallback),
-        },
-        method,
-        path,
-        req,
-        res,
-      )
-    )
-      return;
-    if (
-      await handleMaintenanceRoute(
-        {
-          services: this.opts.services,
-          readBody: (request) => this.readBody(request),
-          json: (response, status, body) => this.json(response, status, body),
-          requestError: (response, error, fallback) => this.requestError(response, error, fallback),
-        },
-        method,
-        path,
-        req,
-        res,
-      )
-    )
-      return;
+    const dataRoutes = {
+      services: this.opts.services,
+      readBody: (request: IncomingMessage) => this.readBody(request),
+      json: (response: ServerResponse, status: number, body: unknown) =>
+        this.json(response, status, body),
+      requestError: (response: ServerResponse, error: unknown, fallback?: 400 | 500) =>
+        this.requestError(response, error, fallback),
+    };
+    for (const route of [handleResourceRoute, handleModelRoute, handleMaintenanceRoute]) {
+      if (await route(dataRoutes, method, path, req, res)) return;
+    }
     if (
       await handleProjectRoute(
         {

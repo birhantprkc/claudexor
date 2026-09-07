@@ -100,59 +100,38 @@ Release verification is wrapped by:
 pnpm release:verify
 ```
 
-It runs Node/schema checks, Swift build/test checks, and local (unsigned)
-app packaging. Public CI artifacts are fail-closed: all Apple signing and
-notary secrets must be present, and both the app and DMG are signed,
-notarized, stapled, and validated. App packaging also asserts that the separately bundled
-setup-login runner exists and can start under the bundled Node, and that the
-Windows closure carries the adjacent ConPTY helper its bounded probe resolves; a daemon-only
-bundle is incomplete.
+This is the portable Node/schema/documentation gate. Native platform checks run
+in GitHub CI; `pnpm release:verify:macos` adds optional local Swift and unsigned
+app checks. Installed-vendor fixture/model freshness is diagnostic by default;
+`pnpm release:verify:vendors` opts into strict comparison when the relevant
+vendor CLIs are available. A missing local vendor CLI is not a contribution
+blocker.
 
-The workflow has two explicit manual modes. `candidate` accepts only a full
-40-character commit SHA and builds/signs/notarizes/attests without publishing.
-After review, `publish` accepts only an annotated stable tag on the exact
-`origin/main` commit plus a base64 signed review attestation. The workflow
-verifies its Ed25519 signature against the pinned public release-review key
-before reading any review claims, then recomputes the commit tree and
-validates the current schemaVersion 7 payload. It binds the candidate
-SHA/tree/version, exact `pnpm release:verify` receipt, sealed evidence
-manifest/diff/wave, and exactly two operator-attested reviewer reports. The
-sealer recomputes every evidence and report digest and requires the metadata
-to bind the exact packet identity, approved distinct model families, actual
-model slugs/labels and harnesses, exact ISO start/finish intervals, full scope,
-and non-blocking verdicts. The v7 attestation
-seals the final confirmation pair; the initial review and adjudication remain
-ledgered evidence. Panel composition and wave discipline
-live only in `docs/CHECKLISTS.md`. Historical signed schemas 2 through 6 remain
-cryptographically verifiable as archives but fail current semantic publish
-validation.
-Only after that authority check does the workflow promote the candidate run's
-DMG, ZIP, and SBOM byte-for-byte instead of rebuilding the app; publish
-generates only the signed runtime manifest, review attestation, and final
-checksum set around those accepted bytes.
-Missing signing/notary/npm credentials fail; there is no unsigned or
-GitHub-only release fallback. npm
-packages publish in dependency order with `--provenance`; a retry skips an
-already-published package only when npm's signed SLSA provenance proves it was
-built by this repository's release workflow on this exact tag and candidate
-commit and its subject digest matches the published bytes (builds are not
-byte-reproducible across CI runs, so local re-pack identity is required only
-for fresh publishes); anything else is a version collision and fails. npm's
-post-publish version and attestation endpoints are eventually consistent, so
-both are polled with a bounded 10-minute window before failing loudly. The GitHub Release is a draft until macOS and npm complete,
-uploads only absent assets, rejects differing same-name bytes, and becomes
-public as the final mutation. The workflow never edits a published release and
-does not claim platform-enforced immutability. Version bumps still go through
-changesets (`pnpm changeset` + `pnpm version-packages`, fixed lockstep group).
-The decoded review attestation is an envelope with a `schemaVersion`, pinned
-`keyId`, `algorithm: "Ed25519"`, signed `payload`, and base64 `signature`; the
-signature covers the schemaVersion, so the two contracts cannot be replayed
-into each other. Schema 1, unsigned, unknown-key, and tampered inputs are
-rejected.
+The workflow has two manual modes. `candidate` accepts a full commit SHA and
+builds/signs/notarizes/attests without publishing. `publish` accepts an annotated
+stable tag on exact `origin/main`, the successful candidate run id, a
+`review_url` reference to the full independent report and dispositions, and
+`review_confirmed: true` from the responsible maintainer. GitHub authenticates
+the dispatcher; the confirmation attests that they read and checked the review
+of this exact candidate, not that CI can measure review quality. The reference
+may be a PR or private CI artifact, without publishing private user dialogue or
+using a credential-bearing URL. The release protocol lives in CHECKLISTS.
+Historical signed review artifacts remain readable but are not publish inputs;
+their version-specific waiver switches are retired.
 
-The `publish` mode also carries a second signed input, the OWNER-SIGNED
-runtime-update manifest (D-2), transported the same way as the review
-attestation (base64 workflow-dispatch input). The candidate run builds the
+Publish promotes the candidate DMG, ZIP, SBOM and runtime archives byte-for-byte,
+never rebuilding accepted app or engine bytes. Runtime manifests remain signed
+independently, as described below. Missing signing/notary/npm credentials fail;
+there is no unsigned or GitHub-only fallback. npm packages publish in dependency
+order with provenance. An existing package is accepted only when its signed npm
+provenance binds this repository's release workflow, exact tag/commit and published
+digest; a collision fails. Eventual-consistency reads are bounded. The GitHub
+Release stays draft until all publication checks pass, rejects differing
+same-name assets, and becomes public as the final mutation. Published releases
+are never edited. Versions still use changesets and the fixed lockstep group.
+
+The `publish` mode carries the OWNER-SIGNED runtime-update manifest (D-2),
+transported as a base64 workflow-dispatch input. The candidate run builds the
 engine-runtime closure and an UNSIGNED `runtime-manifest.json`; on a trusted
 machine the owner signs it offline against the exact promoted-artifact digest:
 
@@ -166,8 +145,8 @@ pnpm sign:runtime-manifest \
   --out         runtime-manifest.signed.json
 ```
 
-The private key is a dedicated OFFLINE Ed25519 key (SEPARATE from the
-review-attestation key, never on CI); the signer refuses any unstamped/
+The private key is the dedicated OFFLINE runtime-update Ed25519 key (never on
+CI); the signer refuses any unstamped/
 placeholder field and self-verifies. Publish also takes the `candidate_run_id`
 input (the candidate workflow run whose artifact is promoted): it downloads that
 run's EXACT closure bytes (never a publish rebuild, A-5), verifies their build
@@ -176,13 +155,14 @@ the signed manifest ONLY if its signature verifies against the pinned
 `release/runtime-update-authority.json`, its `sha256` byte-matches the promoted
 tarball, and its non-secret fields equal the candidate's unsigned manifest. A
 wrong or expired (14-day artifact retention) run id fails the download.
-Candidate runs publish nothing signed; only publish ships the signed manifest.
+Only publish ships the signed runtime manifest; the candidate app is signed
+separately for testing and exact-byte promotion.
 Rotate the key by minting a new keypair, bumping its `keyId`, and shipping the
 new public half in a signed DMG.
 
 The engine closure is also the supported host-embedding payload. Do not add a
 second embed archive or trust root: `scripts/build-runtime-closure.mjs`
-materializes contained package links from the already-gated app resources and
+materializes contained package links from the shared engine-resource stage and
 emits a regular-file/directory-only tarball for extractors without POSIX
 symlink semantics. It rejects escaping links, special files, and `.node`
 addons. The closure includes both top-level `claudexord.bundle.cjs` and
@@ -201,7 +181,7 @@ smoke; feature support must not be inferred from portable extraction alone,
 and local Windows harness installation remains typed-unsupported until its own
 bounded support contract exists.
 
-The `publish` mode carries a THIRD signed input, `remote_runtime_manifest_b64`:
+The `publish` mode also carries `remote_runtime_manifest_b64`:
 the OWNER-SIGNED four-target SSH runtime manifest, transported the same way.
 The candidate run builds the four remote runtime archives
 (`claudexor-remote-runtime-<v>-{linux-x64,linux-arm64,darwin-x64,darwin-arm64}.tar.gz`)
@@ -238,127 +218,11 @@ with the candidate's unsigned manifest), regenerates the remote SBOM
 deterministically from the promoted unsigned manifest, `cmp`s it against the
 provenance-verified candidate SBOM, and ships the CANDIDATE bytes (A-5).
 
-Package versions 3.8.0, 3.9.0, and 3.9.7 each have an owner-authorized release
-exception. A publish
-dispatch may set `skip_custom_ed25519: true` only for those exact versions and
-only when `review_attestation_b64`, `runtime_manifest_b64`, and
-`remote_runtime_manifest_b64` are all empty. The candidate remains the exact
-twelve-asset, provenance-attested internal set above. The final GitHub Release
-then omits `REVIEW_ATTESTATION.json`, `runtime-manifest.json`, and
-`remote-runtime-manifest.json`; it must never copy either unsigned candidate
-manifest under the canonical release name. This leaves the existing app engine
-update and first-time remote bootstrap unavailable for those versions while
-their
-client verifiers stay fail-closed. DMG/ZIP signing and notarization, npm
-publication, SBOMs, GitHub artifact provenance, and npm provenance are
-unchanged. The 3.9.0 exception is the owner decision of 2026-08-28 for the
-quota-throttling/cursor-belt release (no attestation wave is run for it). The
-3.9.7 exception is the owner decision of 2026-09-04 to publish the #263/#252
-quota-pacing fix (five operator review waves, PR #264) from the operator host,
-where the offline signing keys and the macOS full gate are not available;
-3.9.6 was prepared and tagged but never published. The
-verifier rejects this waiver for every other version, and the
-default `false` path retains the normal schema-v7 and signed-manifest gates.
-
-Package versions 3.8.1, 3.8.2, 3.9.1, and 3.9.2 each have a separate,
-one-release owner waiver for the Cursor review attestation. The 3.8.1 exception
-covered unavailable Cursor Fable and Sol provider lanes; the 3.8.2 exception
-avoids repeating a full-context review already completed during its release
-work in a different execution setup; the 3.9.1 exception is the owner's
-2026-08-30 acceleration decision after the exact Fable slot disappeared from
-the live Cursor subagent catalog; and the 3.9.2 exception is the owner's same-day
-decision to accelerate the live OAuth quota-refresh repair after its independent
-correctness, scope, and security reviews plus the full release gate completed.
-A publish may set `waive_cursor_review: true` only for those exact versions,
-with `review_attestation_b64` empty and both owner-signed runtime
-manifest inputs present and validly base64-encoded. This waiver omits only
-`REVIEW_ATTESTATION.json`; the candidate run, exact tag and SHA, artifact
-provenance, signed runtime and remote-runtime manifests, SBOMs, signing,
-notarization, npm provenance, and all remaining publication checks are
-unchanged. It is an explicit exception, not a substitute review report, and
-the normal schema-v7 contract remains fail-closed for every other release.
-
-The review process itself (panel composition, sealed packet contents, the
-blocker contract, wave discipline) is defined ONCE, in `docs/CHECKLISTS.md`
-(Release review protocol) — this file only covers the attestation transport.
-Do not hand-author the attestation JSON. Run
-`scripts/seal-owner-review-attestation.mjs` with the gate receipt
-(`scripts/run-full-gate-receipt.mjs` runs `pnpm release:verify` and seals
-it), the external sealed evidence directory, the external operator review
-artifacts directory, the external 0600 private key, the tracked
-`release/review-attestation-authority.json`, and a new external output path.
-The artifacts directory holds exactly two reviewer directories (`01-reviewer-1/`,
-`02-reviewer-2/`), each written by the operator after the independent reviewer
-completed: `report.md` (the reviewer's complete markdown report) and an
-exact-shape `metadata.json` binding the neutral slot, `model_family`, actual
-`model` slug/label, nonempty `harness`, the
-candidate SHA and tree, the packet manifest digest, the review wave UUID, the
-`sha256:`-prefixed diff digest, exact ISO start/finish, a `pass|warn`
-verdict, the mandatory `review_scope: "full"`, and the report's SHA-256.
-The family is declared explicitly, not inferred from a release-only slug
-catalog. Available observed-model telemetry and run references belong in
-the report; a requested slug or unidentified Auto route does not establish
-an approved family.
-
-```json
-{
-  "slot": "reviewer-1",
-  "model_family": "grok-4.6",
-  "model": "cursor-grok-4.6-xhigh",
-  "harness": "cursor",
-  "candidate_sha": "<40-character SHA>",
-  "candidate_tree": "<40-character tree SHA>",
-  "packet_manifest_sha256": "<64-character digest>",
-  "review_wave_id": "<UUID-v4>",
-  "diff_sha256": "sha256:<64-character digest>",
-  "started_at": "2026-08-30T12:00:00.000Z",
-  "completed_at": "2026-08-30T12:10:00.000Z",
-  "verdict": "pass",
-  "review_scope": "full",
-  "report_sha256": "<64-character digest>"
-}
-```
-
-```bash
-node scripts/run-full-gate-receipt.mjs <external-gate-dir>
-
-node scripts/seal-owner-review-attestation.mjs \
-  --full-gate-receipt <external-gate-dir>/full-gate-receipt.json \
-  --evidence-dir <sealed-evidence-dir> \
-  --review-artifacts <operator-review-artifacts-dir> \
-  --private-key ~/.claudexor/release-authority/v2.0.0/review-attestation-private.pem \
-  --authority release/review-attestation-authority.json \
-  --out <attestation.json> \
-  --base64-out <attestation.b64>
-```
-
-The signer executes only receipt-bound candidate verifier bytes after the exact
-full gate passes. That gate writes a tiny self-contained verifier and a copy of
-the packaged app's self-contained `claudexor.bundle.cjs` beside the receipt in
-an output directory outside the candidate and evidence/artifact trees, with
-both byte digests in the receipt. The sealer never executes the
-copied CLI; it travels only as receipt-bound bytes. The sealer imports only
-the verified verifier bytes, recomputes every evidence and artifact digest,
-and refuses a missing, extra, malformed, or mismatched metadata field, a
-non-overlapping pair, duplicate families or report bytes, or any verdict
-outside `pass|warn`. Verdicts, model identity, intervals, and scope are
-operator-attested metadata (see the owner amendment in `docs/CHECKLISTS.md`);
-the digest and packet-identity bindings are what the sealer proves mechanically,
-not vendor model identity. A failed
-frozen slot is not retried in place: rerun it with fresh artifacts and a
-fresh wave. The earlier fixed-panel and packet-split release protocols are
-retired, not fallback paths; native harness sessions are eligible under the
-current protocol. Schemas 2-6 stay signature-verifiable only for
-already-sealed historical evidence. Never put raw transcripts, the private
-key, or secrets in the repository or workflow input.
-
-Release review is cumulative and SHA-bound. First commit a clean candidate,
-then freeze its exact tree. The panel reviews that frozen SHA against the
-checklists and docs as described in `docs/CHECKLISTS.md` (Release review
-protocol). Any tracked mutation makes every result stale and starts a new
-freeze. Staged-diff review is not release authority, so the old per-commit
-script and hook installer have been removed rather than retained as a
-competing workflow.
+Historical release exceptions and signed review envelopes remain archival
+facts of their original commits. They cannot authorize a new release. Current
+publication always requires both validly signed runtime manifests; the
+signature-reading helpers and test vectors preserve historical review evidence
+without making its old panel or sealing ceremony a current gate.
 
 RESTART `claudexord` AFTER REBUILDING: the daemon loads the engine at start
 and serves that build until stopped — a long-lived daemon silently runs
@@ -566,9 +430,10 @@ positive promise instead of relying on a one-time documentation cleanup.
   Claude setup-token are separate secret-store/env routes with separate typed
   source evidence.
 - Browser MCP is an exact production dependency of `@claudexor/core`. App
-  packaging uses `pnpm deploy --legacy --prod` to place that pinned runtime
-  beside the daemon and runs its help entrypoint under the app's bundled Node
-  with an empty environment. Do not restore runtime `npx`, `@latest`, or a
+  packaging uses shared-lockfile `pnpm deploy --prod` with a hoisted dependency
+  layout to preserve transitive imports after archive link materialization. It
+  places that pinned runtime beside the daemon and runs its help entrypoint under
+  the app's bundled Node with an empty environment. Do not restore runtime `npx`, `@latest`, or a
   package-manager override.
 - Diffs come from git in the target workspace or envelope.
 - Files and typed artifacts are the source of truth; terminal text and UI rows

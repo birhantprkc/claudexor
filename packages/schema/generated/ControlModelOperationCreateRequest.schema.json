@@ -1,0 +1,40 @@
+{
+  "$ref": "#/definitions/ControlModelOperationCreateRequest",
+  "definitions": {
+    "ControlModelOperationCreateRequest": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "resourceId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Non-empty identifier string."
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "resourceId",
+            "sha256",
+            "sizeBytes"
+          ],
+          "additionalProperties": false,
+          "description": "Digest-bound model-purpose resource; never an Agent attachment."
+        }
+      },
+      "required": [
+        "request"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

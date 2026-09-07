@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Historical signed-review tooling. Current releases use the independent
+// report/disposition and maintainer confirmation in verify-release-input.mjs.
 /** Seal schema-v7 evidence from a frozen two-model-family owner review wave. */
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { execFileSync } from "node:child_process";

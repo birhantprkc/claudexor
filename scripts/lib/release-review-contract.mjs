@@ -1,8 +1,8 @@
 /**
- * Publishing contract for two full-context owner reviews by distinct approved
- * model families on any harness (owner decision 2026-08-30).
- * Historical schemas remain verifiable as signed archive bytes, but only
- * schema v7 can authorize publication.
+ * Historical signed-review contracts (schemas 2-7). Their original identity,
+ * family and timing checks remain available for reading archived evidence.
+ * They are NOT current publication authority: verify-release-input.mjs uses
+ * only the generic ref syntax helper below and requires maintainer confirmation.
  */
 import { createPublicKey, verify } from "node:crypto";
 import { relative, resolve, sep } from "node:path";

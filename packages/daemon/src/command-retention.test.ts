@@ -15,6 +15,24 @@ function rec(over: Partial<JobRecord> & { id: string }): JobRecord {
 const HOUR = 3_600_000;
 
 describe("prunableCommandIds retention (A6)", () => {
+  it("retains model receipts and excludes them from the cap without exempting delivery", () => {
+    const model = rec({
+      id: "model",
+      params: {
+        kind: "model",
+        request: {
+          resourceId: "res-model",
+          sha256: `sha256:${"a".repeat(64)}`,
+          sizeBytes: 1,
+        },
+      },
+    });
+    const delivery = rec({ id: "delivery-old" });
+    const agent = rec({ id: "agent-new", createdAt: "2026-07-02T00:00:00.000Z" });
+    const now = Date.parse("2026-07-10T00:00:00.000Z");
+    expect(prunableCommandIds([model, agent], 1, 0, now)).toEqual([]);
+    expect(prunableCommandIds([model, delivery, agent], 1, 0, now)).toEqual(["delivery-old"]);
+  });
   it("prunes expired clean successes beyond the cap, oldest first", () => {
     const now = Date.parse("2026-07-10T00:00:00.000Z");
     const records = [

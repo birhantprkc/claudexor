@@ -1,0 +1,44 @@
+{
+  "$ref": "#/definitions/ControlModelSourcesResponse",
+  "definitions": {
+    "ControlModelSourcesResponse": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Non-empty identifier string."
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "User-supplied string that must contain visible content, not just whitespace."
+              },
+              "credentialHarness": {
+                "$ref": "#/definitions/ControlModelSourcesResponse/properties/sources/items/properties/id"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "credentialHarness"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "sources"
+      ],
+      "additionalProperties": false,
+      "description": "Available raw model transports, distinct from agent harness inventory."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -118,6 +118,40 @@ afterEach(() => {
 });
 
 describe("build-runtime-closure", () => {
+  it("consumes the common resource stage without an app bundle", () => {
+    const app = fakeAppBundle(work, { internalLink: true });
+    const resources = join(app, "Contents", "Resources");
+    const out = join(work, "resource-out");
+    execFileSync(
+      process.execPath,
+      [script, "--resources", resources, "--version", version, "--out", out],
+      { env: { ...process.env, CLAUDEXOR_BUILD_SHA: FAKE_BUILD_SHA } },
+    );
+    const extracted = join(work, "resource-extracted");
+    mkdirSync(extracted);
+    execFileSync("tar", [
+      "-xzf",
+      join(out, `claudexor-runtime-${version}.tar.gz`),
+      "-C",
+      extracted,
+    ]);
+    for (const name of [
+      "claudexord.bundle.cjs",
+      "claudexor.bundle.cjs",
+      "setup-login-runner.cjs",
+      "native/claudexor-process-identity",
+    ]) {
+      expect(readFileSync(join(extracted, name))).toEqual(readFileSync(join(resources, name)));
+    }
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [script, "--resources", resources, "--app-bundle", app, "--version", version, "--out", out],
+        { stdio: "pipe" },
+      ),
+    ).toThrow();
+  });
+
   it("emits a tarball plus a manifest whose sha256 matches the tarball", () => {
     const app = fakeAppBundle(work, { withNode: true });
     const out = join(work, "out");
@@ -249,6 +283,17 @@ describe("build-runtime-closure", () => {
     const out = join(work, "out");
     expect(() => run(app, out)).toThrow(/claudexor\.bundle\.cjs/);
   });
+
+  it.each([false, true])(
+    "refuses a universal closure without its Darwin helper (Windows helper: %s)",
+    (win32Conpty) => {
+      const app = fakeAppBundle(work, { win32Conpty });
+      rmSync(join(app, "Contents", "Resources", "native", "claudexor-process-identity"));
+      expect(() => run(app, join(work, "out"))).toThrow(
+        /requires the native\/claudexor-process-identity file/,
+      );
+    },
+  );
 
   it("refuses a --version that does not match the generated CLAUDEXOR_VERSION", () => {
     const app = fakeAppBundle(work);

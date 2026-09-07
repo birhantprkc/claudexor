@@ -12,28 +12,23 @@ on:
         description: Full 40-character SHA for candidate; stable vMAJOR.MINOR.PATCH tag for publish
         required: true
         type: string
-      review_attestation_b64:
-        description: Base64 signed schema-v7 full-context owner-review attestation (two-model-family panel); required for publish unless an exact version-scoped v3.8.0, v3.8.1, v3.8.2, v3.9.0, v3.9.1, v3.9.2, or v3.9.7 waiver applies
+      review_url:
+        description: Reference to the complete independent review report and disposition (PR or CI artifact); required for publish
         required: false
         type: string
-      waive_cursor_review:
-        description: Version-scoped owner waiver for the v3.8.1, v3.8.2, v3.9.1, or v3.9.2 Cursor review attestation only; requires an empty review attestation and both signed runtime manifests
+      review_confirmed:
+        description: I am responsible for this release and have read the independent review, checked its findings and accepted the exact candidate
         required: false
         type: boolean
         default: false
       runtime_manifest_b64:
-        description: Base64 owner-signed runtime-update manifest (D-2); required for every publish except the exact v3.8.0, v3.9.0, or v3.9.7 waiver
+        description: Base64 owner-signed runtime-update manifest (D-2); required for publish
         required: false
         type: string
       remote_runtime_manifest_b64:
-        description: Base64 owner-signed four-target SSH runtime manifest; required for every publish except the exact v3.8.0, v3.9.0, or v3.9.7 waiver
+        description: Base64 owner-signed four-target SSH runtime manifest; required for publish
         required: false
         type: string
-      skip_custom_ed25519:
-        description: Version-scoped owner waiver for the exact v3.8.0, v3.9.0, or v3.9.7 publish only; requires all three custom Ed25519 inputs to be empty
-        required: false
-        type: boolean
-        default: false
       candidate_run_id:
         description: The candidate workflow run id whose exact artifact bytes publish promotes (A-5); required only for publish
         required: false
@@ -45,11 +40,10 @@ permissions:
 env:
   RELEASE_MODE_INPUT: ${{ inputs.mode }}
   RELEASE_REF_INPUT: ${{ inputs.ref }}
-  REVIEW_ATTESTATION_B64_INPUT: ${{ inputs.review_attestation_b64 }}
-  WAIVE_CURSOR_REVIEW_INPUT: ${{ inputs.waive_cursor_review }}
+  REVIEW_URL_INPUT: ${{ inputs.review_url }}
+  REVIEW_CONFIRMED_INPUT: ${{ inputs.review_confirmed }}
   RUNTIME_MANIFEST_B64_INPUT: ${{ inputs.runtime_manifest_b64 }}
   REMOTE_RUNTIME_MANIFEST_B64_INPUT: ${{ inputs.remote_runtime_manifest_b64 }}
-  SKIP_CUSTOM_ED25519_INPUT: ${{ inputs.skip_custom_ed25519 }}
   CANDIDATE_RUN_ID_INPUT: ${{ inputs.candidate_run_id }}
 
 concurrency:
@@ -293,8 +287,6 @@ jobs:
           echo "CLAUDEXOR_REQUIRE_WIN32_CONPTY_HELPER=1" >> "$GITHUB_ENV"
 
       - name: Revalidate reviewed release authority
-        env:
-          REVIEW_ATTESTATION_PATH: ${{ runner.temp }}/review-attestation.json
         run: |
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           if [ "$RELEASE_MODE_INPUT" = publish ]; then
@@ -393,6 +385,15 @@ jobs:
           pnpm canary
           pnpm release:verify:swift
           node scripts/verify-version-parity.mjs "$VERSION"
+
+      - name: Build shared engine resources before app packaging
+        if: needs.prepare.outputs.mode == 'candidate'
+        shell: bash
+        run: |
+          set -euo pipefail
+          resources="$RUNNER_TEMP/engine-resources"
+          bash scripts/build-engine-resources.sh "$resources"
+          echo "CLAUDEXOR_ENGINE_RESOURCES=$resources" >> "$GITHUB_ENV"
 
       - name: Build signed DMG and ZIP
         if: needs.prepare.outputs.mode == 'candidate'
@@ -661,10 +662,13 @@ jobs:
             cp "$cand" "$tarball"
             cp "candidate-assets/runtime-manifest.json" "$manifest"
           else
-            # Candidate builds straight from the signed+verified app bundle, so the
-            # update unit is byte-identical to the closure the gates smoke-tested.
+            # Both consumers use the shared stage. Signing/notarization must not
+            # mutate engine bytes after staging; compare every closure entry.
+            for entry in claudexord.bundle.cjs claudexor.bundle.cjs setup-login-runner.cjs browser-mcp-runtime native; do
+              diff -r "$CLAUDEXOR_ENGINE_RESOURCES/$entry" "apps/macos/dist/bundle.noindex/Claudexor.app/Contents/Resources/$entry"
+            done
             node scripts/build-runtime-closure.mjs \
-              --app-bundle apps/macos/dist/bundle.noindex/Claudexor.app \
+              --resources "$CLAUDEXOR_ENGINE_RESOURCES" \
               --version "$VERSION" \
               --out "$closure" \
               --win32-conpty-sha256 "$CLAUDEXOR_WIN32_CONPTY_SHA256"
@@ -772,39 +776,31 @@ jobs:
           fi
           cp "$RUNNER_TEMP/runtime-closure/claudexor-runtime-$VERSION.tar.gz" "$assets/"
           cp "$RUNNER_TEMP/remote-runtimes"/claudexor-remote-runtime-"$VERSION"-*.tar.gz "$assets/"
-          # D-2/A-5: candidate keeps the UNSIGNED manifest in its internal
-          # artifact (owner normally signs it offline). Publish either ships
-          # only the OWNER-SIGNED manifest after fail-closed verification
-          # against the PROMOTED candidate closure. The v3.8.0/v3.9.0/v3.9.7 waiver
-          # omits both runtime manifests; the v3.8.1/v3.8.2/v3.9.1/v3.9.2 review-only waiver
-          # still requires and ships both owner-signed manifests.
+          # Candidate manifests are unsigned; publish verifies both offline
+          # runtime signatures against these exact promoted archive bytes.
           if [ "$RELEASE_MODE_INPUT" = publish ]; then
-            if [ "$SKIP_CUSTOM_ED25519_INPUT" != true ]; then
-              signed="$RUNNER_TEMP/runtime-manifest.signed.json"
-              printf '%s' "$RUNTIME_MANIFEST_B64_INPUT" | base64 -d > "$signed"
-              node scripts/verify-signed-runtime-manifest.mjs \
-                --signed "$signed" \
-                --unsigned "$RUNNER_TEMP/runtime-closure/runtime-manifest.json" \
-                --tarball "$RUNNER_TEMP/runtime-closure/claudexor-runtime-$VERSION.tar.gz" \
-                --version "$VERSION" \
-                --expected-build-sha "$PREPARED_SHA"
-              cp "$signed" "$assets/runtime-manifest.json"
-            fi
+            signed="$RUNNER_TEMP/runtime-manifest.signed.json"
+            printf '%s' "$RUNTIME_MANIFEST_B64_INPUT" | base64 -d > "$signed"
+            node scripts/verify-signed-runtime-manifest.mjs \
+              --signed "$signed" \
+              --unsigned "$RUNNER_TEMP/runtime-closure/runtime-manifest.json" \
+              --tarball "$RUNNER_TEMP/runtime-closure/claudexor-runtime-$VERSION.tar.gz" \
+              --version "$VERSION" \
+              --expected-build-sha "$PREPARED_SHA"
+            cp "$signed" "$assets/runtime-manifest.json"
           else
             cp "$RUNNER_TEMP/runtime-closure/runtime-manifest.json" "$assets/"
           fi
           if [ "$RELEASE_MODE_INPUT" = publish ]; then
-            if [ "$SKIP_CUSTOM_ED25519_INPUT" != true ]; then
-              remote_signed="$RUNNER_TEMP/remote-runtime-manifest.signed.json"
-              printf '%s' "$REMOTE_RUNTIME_MANIFEST_B64_INPUT" | base64 -d > "$remote_signed"
-              node scripts/verify-signed-remote-runtime-manifest.mjs \
-                --signed "$remote_signed" \
-                --unsigned "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" \
-                --assets-dir "$RUNNER_TEMP/remote-runtimes" \
-                --version "$VERSION" \
-                --expected-build-sha "$PREPARED_SHA"
-              cp "$remote_signed" "$assets/remote-runtime-manifest.json"
-            fi
+            remote_signed="$RUNNER_TEMP/remote-runtime-manifest.signed.json"
+            printf '%s' "$REMOTE_RUNTIME_MANIFEST_B64_INPUT" | base64 -d > "$remote_signed"
+            node scripts/verify-signed-remote-runtime-manifest.mjs \
+              --signed "$remote_signed" \
+              --unsigned "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" \
+              --assets-dir "$RUNNER_TEMP/remote-runtimes" \
+              --version "$VERSION" \
+              --expected-build-sha "$PREPARED_SHA"
+            cp "$remote_signed" "$assets/remote-runtime-manifest.json"
           else
             cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"
           fi
@@ -823,23 +819,6 @@ jobs:
             GITHUB_SHA="$PREPARED_SHA" node scripts/generate-remote-runtime-sbom.mjs \
               "$RUNNER_TEMP/remote-runtimes" "$VERSION" \
               > "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"
-          fi
-          if [ "$RELEASE_MODE_INPUT" = publish ] && [ "$SKIP_CUSTOM_ED25519_INPUT" != true ] && [ "$WAIVE_CURSOR_REVIEW_INPUT" != true ]; then
-            cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"
-          fi
-          if [ "$WAIVE_CURSOR_REVIEW_INPUT" = true ]; then
-            test ! -e "$assets/REVIEW_ATTESTATION.json" || {
-              echo "::error::waive_cursor_review must omit REVIEW_ATTESTATION.json from final publish assets"
-              exit 1
-            }
-          fi
-          if [ "$SKIP_CUSTOM_ED25519_INPUT" = true ]; then
-            for name in REVIEW_ATTESTATION.json runtime-manifest.json remote-runtime-manifest.json; do
-              test ! -e "$assets/$name" || {
-                echo "::error::skip_custom_ed25519 must omit $name from final publish assets"
-                exit 1
-              }
-            done
           fi
           (cd "$assets" && shasum -a 256 * > SHA256SUMS)
 
@@ -1157,28 +1136,11 @@ jobs:
           name: Claudexor-${{ needs.prepare.outputs.version }}-release-assets
           path: release-assets
       - name: Revalidate downloaded release authority and digests
-        env:
-          REVIEW_ATTESTATION_PATH: ${{ runner.temp }}/expected-review-attestation.json
         run: |
           set -euo pipefail
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git fetch --no-tags origin "refs/tags/$RELEASE_REF_INPUT:refs/tags/$RELEASE_REF_INPUT"
           node scripts/verify-release-input.mjs
-          if [ "$SKIP_CUSTOM_ED25519_INPUT" = true ]; then
-            for name in REVIEW_ATTESTATION.json runtime-manifest.json remote-runtime-manifest.json; do
-              test ! -e "release-assets/$name" || {
-                echo "::error::waived custom Ed25519 asset unexpectedly present: $name"
-                exit 1
-              }
-            done
-          elif [ "$WAIVE_CURSOR_REVIEW_INPUT" = true ]; then
-            test ! -e "release-assets/REVIEW_ATTESTATION.json" || {
-              echo "::error::waive_cursor_review requires REVIEW_ATTESTATION.json to be absent"
-              exit 1
-            }
-          else
-            cmp "$RUNNER_TEMP/expected-review-attestation.json" release-assets/REVIEW_ATTESTATION.json
-          fi
           (cd release-assets && shasum -a 256 -c SHA256SUMS)
       - name: Verify GitHub provenance
         env:

@@ -29,6 +29,7 @@ import {
 } from "./credential-profile-rotation.js";
 import {
   selectedProfileAvailability,
+  vendorCredentialObservation,
   type VendorQuotaObservations,
 } from "./credential-profiles.js";
 
@@ -91,7 +92,7 @@ export interface AccountResolutionContext {
   boundProfileId: string | null;
   threadId: string | null;
   model: string | null;
-  /** Reviewer-only model incompatibility exclusions for this selection epoch. */
+  /** Model incompatibility exclusions for this unpinned selection epoch. */
   excludedProfileIds?: ReadonlySet<string>;
   /** Default-route estimate of the legacy unprofiled ladder (no-rows harnesses). */
   defaultRoute: "local_session" | "api_key" | null;
@@ -197,7 +198,10 @@ function poolExhaustionCandidates(ctx: AccountResolutionContext, ready: Readonly
       const block = breach
         ? null
         : profileQuotaBlock(snapshots, harnessId, row.profile_id, limitSubjectRoute(row), model);
-      const dead = liveUnusableFor(ctx.unusable, harnessId, row.profile_id, model);
+      const vendor = vendorCredentialObservation(ctx.quota, harnessId, row.profile_id);
+      const dead =
+        liveUnusableFor(ctx.unusable, harnessId, row.profile_id, model) ??
+        (vendor?.outcome === "revoked" ? { code: "auth_revoked" } : null);
       // Label precedence mirrors PR-A's rotationExhaustionCandidates: a
       // not-ready row is not a POOL MEMBER, so its windows never join the
       // earliest-reset fold (an unready row's reset promises no reopen).
@@ -413,7 +417,9 @@ export async function resolveAccountForRun(
     // are refused at readiness composition, never re-discovered by spending
     // an attempt) — the binding re-pools with the disclosed lane switch.
     const dead = bound ? liveUnusableFor(ctx.unusable, harnessId, boundId, model) : null;
-    if (bound && dead) {
+    if (ctx.excludedProfileIds?.has(boundId)) {
+      boundSwitchReason = "the bound account does not support the requested model";
+    } else if (bound && dead) {
       boundSwitchReason = `the bound account's credential is unusable (${dead.code})`;
     } else if (bound) {
       const verdict = await selectedProfileAvailability({

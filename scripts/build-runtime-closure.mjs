@@ -6,8 +6,8 @@
  * engine-owned resources listed in CLOSURE_ENTRIES. The reviewed CLI bundle is
  * included so an embedding host can invoke exact operational commands from the
  * same signed closure. Node, UI resources, and icons remain app-owned; a Node
- * bump ships a new DMG. We build the tarball from the already-signed,
- * already-verified app bundle. Internal package links
+ * bump ships a new DMG. The independent engine-resource stage is the source;
+ * --app-bundle remains available to verify an assembled app. Internal package links
  * are materialized as regular files/directories and links escaping their
  * closure entry are refused. The resulting single archive can be unpacked by
  * hosts without POSIX symlink semantics.
@@ -219,8 +219,11 @@ function main() {
   const appBundle = options["app-bundle"];
   const version = options.version;
   const outDir = options.out;
-  if (!appBundle || !version || !outDir) {
-    fail("usage: build-runtime-closure.mjs --app-bundle DIR --version X.Y.Z --out DIR");
+  const resourceRoot = options.resources;
+  if (Boolean(appBundle) === Boolean(resourceRoot) || !version || !outDir) {
+    fail(
+      "usage: build-runtime-closure.mjs (--resources DIR | --app-bundle DIR) --version X.Y.Z --out DIR",
+    );
   }
   if (!isSemver(version)) fail(`--version '${version}' is not a valid semver`);
 
@@ -229,9 +232,9 @@ function main() {
     fail(`--version ${version} does not match the generated CLAUDEXOR_VERSION ${generated}`);
   }
 
-  const resources = resolve(appBundle, "Contents/Resources");
+  const resources = resourceRoot ? resolve(resourceRoot) : resolve(appBundle, "Contents/Resources");
   if (!existsSync(resources) || !statSync(resources).isDirectory()) {
-    fail(`app bundle has no Contents/Resources: ${resources}`);
+    fail(`engine resource directory is missing: ${resources}`);
   }
   for (const entry of CLOSURE_ENTRIES) {
     const path = join(resources, entry);
@@ -241,6 +244,16 @@ function main() {
     if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
       fail(`closure entry must be a regular file or directory: Contents/Resources/${entry}`);
     }
+  }
+  // This universal update also serves Darwin. Linux-only resources (or a
+  // Windows helper alone) must not be published as that complete closure.
+  const darwinHelper = join(resources, "native", "claudexor-process-identity");
+  if (
+    !existsSync(darwinHelper) ||
+    !lstatSync(darwinHelper).isFile() ||
+    statSync(darwinHelper).size === 0
+  ) {
+    fail("universal runtime closure requires the native/claudexor-process-identity file");
   }
   const expectedWin32ConptySha256 = options["win32-conpty-sha256"];
   const win32ConptyHelper = join(resources, "native", "claudexor-conpty-helper.exe");
@@ -298,7 +311,7 @@ function main() {
       const bundleText = readFileSync(join(staged, bundle), "utf8");
       if (!bundleText.includes(buildSha)) {
         throw new Error(
-          `${bundle} is not stamped with build sha ${buildSha}: run build-app.sh with the ` +
+          `${bundle} is not stamped with build sha ${buildSha}: run build-engine-resources.sh with the ` +
             "esbuild CLAUDEXOR_BUILD_SHA define (bundled + downloaded closures must be stamped identically)",
         );
       }

@@ -54,7 +54,38 @@ const publishReleaseJob = jobBody(release, "publish-release");
 errors.push(...windowsPrLegFindings(ci));
 errors.push(...windowsConptyCustodyFindings(release));
 errors.push(...windowsConptyBuildFindings(win32ConptyBuild));
-const staleAttestationSchemaPattern = /schema-v[23456]/;
+const engineResourcesStep = stepBody(
+  packageMacosJob,
+  "Build shared engine resources before app packaging",
+);
+const appBuilder = readFileSync("apps/macos/scripts/build-app.sh", "utf8");
+const resourceBuilder = readFileSync("scripts/build-engine-resources.sh", "utf8");
+if (
+  !engineResourcesStep.includes("bash scripts/build-engine-resources.sh") ||
+  !engineResourcesStep.includes("CLAUDEXOR_ENGINE_RESOURCES=") ||
+  packageMacosJob.indexOf("Build shared engine resources") >
+    packageMacosJob.indexOf("Build signed DMG and ZIP") ||
+  !appBuilder.includes('ditto "$ENGINE_RESOURCES" "$APP/Contents/Resources"') ||
+  appBuilder.includes("pnpm exec esbuild") ||
+  !resourceBuilder.includes(
+    'codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$helper"',
+  ) ||
+  !packageMacosJob.includes('diff -r "$CLAUDEXOR_ENGINE_RESOURCES/$entry"')
+) {
+  errors.push(
+    "engine resources must build/sign once before app packaging and be compared before closure publication",
+  );
+}
+const macosPr = jobBody(ci, "swift");
+if (
+  !macosPr.includes("bash scripts/build-engine-resources.sh") ||
+  !macosPr.includes("process-identity.test.ts") ||
+  !ci.includes('if [ "$MACOS_RESULT" != "success" ]')
+) {
+  errors.push(
+    "ci.yml: required macOS CI must build/probe the independent engine stage and test native identity",
+  );
+}
 const exactPromotionPairedNeedles = [
   [
     "SBOM license-input prepared-SHA binding",
@@ -76,10 +107,12 @@ for (const [label, pattern] of [
   ["workflow has publish mode", /publish/],
   ["review attestation is verified", /verify-release-input\.mjs/],
   [
-    // validateReleaseAttestation rejects any non-v7 attestation, so the
-    // workflow_dispatch input must document the schema owners actually sign.
-    "attestation input is documented as a schema-v7 full-context owner-review attestation",
-    /review_attestation_b64:\s*\n\s*description:[^\n]*schema-v7 full-context owner-review attestation/,
+    "independent review reference is exposed",
+    /review_url:\s*\n\s*description:[^\n]*independent review/,
+  ],
+  [
+    "responsible maintainer confirms review",
+    /review_confirmed:\s*\n\s*description:[^\n]*responsible/,
   ],
   ["npm provenance is mandatory", /--provenance/],
   [
@@ -96,8 +129,8 @@ for (const [label, pattern] of [
   ],
   ["engine runtime update closure is built (M7)", /build-runtime-closure\.mjs/],
   [
-    "runtime closure is built from the signed app bundle",
-    /build-runtime-closure\.mjs\s+\\\s*\n\s*--app-bundle apps\/macos\/dist\/bundle\.noindex\/Claudexor\.app/,
+    "runtime closure is built from the common engine-resource stage",
+    /build-runtime-closure\.mjs\s+\\\s*\n\s*--resources "\$CLAUDEXOR_ENGINE_RESOURCES"/,
   ],
   [
     "runtime manifest digest is self-verified before upload",
@@ -126,22 +159,6 @@ for (const [label, pattern] of [
     // transported exactly like the engine runtime manifest.
     "signed remote runtime manifest input is documented for publish",
     /remote_runtime_manifest_b64:\s*\n\s*description:[^\n]*owner-signed four-target SSH runtime manifest/,
-  ],
-  [
-    "the v3.8.0/v3.9.0/v3.9.7 custom Ed25519 waiver is an explicit boolean defaulting false",
-    /skip_custom_ed25519:\s*\n\s*description:[^\n]*v3\.8\.0, v3\.9\.0, or v3\.9\.7 publish only[^\n]*\n\s*required:\s*false\n\s*type:\s*boolean\n\s*default:\s*false/,
-  ],
-  [
-    "the v3.8.1/v3.8.2/v3.9.1/v3.9.2 Cursor review waiver is an explicit boolean defaulting false",
-    /waive_cursor_review:\s*\n\s*description:[^\n]*v3\.8\.1, v3\.8\.2, v3\.9\.1, or v3\.9\.2 Cursor review attestation only[^\n]*\n\s*required:\s*false\n\s*type:\s*boolean\n\s*default:\s*false/,
-  ],
-  [
-    "custom Ed25519 waiver input is projected into one shell-only environment variable",
-    /SKIP_CUSTOM_ED25519_INPUT:\s*\$\{\{\s*inputs\.skip_custom_ed25519\s*\}\}/,
-  ],
-  [
-    "Cursor review waiver input is projected into one shell-only environment variable",
-    /WAIVE_CURSOR_REVIEW_INPUT:\s*\$\{\{\s*inputs\.waive_cursor_review\s*\}\}/,
   ],
   [
     "publish verifies the owner-signed remote runtime manifest",
@@ -389,12 +406,6 @@ for (const [label, broken, expectedFinding] of exactPromotionMutationCases) {
     errors.push(`release-workflow-check self-test: failed to reject ${label}`);
   }
 }
-for (const staleVersion of ["schema-v2", "schema-v3", "schema-v4", "schema-v5", "schema-v6"]) {
-  const expected = "release.yml: stale schema-v2/v3/v4/v5/v6 attestation wording is forbidden";
-  if (!staleAttestationFindings(`${release}\n# ${staleVersion}`).includes(expected)) {
-    errors.push(`release-workflow-check self-test: failed to reject ${staleVersion}`);
-  }
-}
 if (!/^\s+ref:\s*\$\{\{\s*github\.sha\s*\}\}\s*$/m.test(prepareJob)) {
   errors.push(
     "release.yml: prepare checkout must use the immutable workflow-dispatch github.sha (never hardcoded main)",
@@ -560,7 +571,7 @@ for (const [label, mutated] of [
   ["Windows agy acceptance ordered before native fixture build", delayedWindowsFixtureCi],
   [
     "Windows matrix removed from required aggregate",
-    ci.replace("    needs: [build-test, windows-test]", "    needs: [build-test]"),
+    ci.replace("    needs: [build-test, windows-test, swift]", "    needs: [build-test, swift]"),
   ],
 ]) {
   if (mutated === ci || windowsPrLegFindings(mutated).length === 0) {
@@ -582,19 +593,6 @@ if (!(uploadAssets >= 0 && uploadAssets < afterAssets && afterAssets < publishDr
 if (/gh\s+release\s+delete-asset/.test(publishReleaseJob)) {
   errors.push("release.yml: retry flow must never delete unexpected remote assets");
 }
-for (const [label, pattern] of [
-  [
-    "waived publish revalidates that all three custom Ed25519 documents are absent",
-    /if \[ "\$SKIP_CUSTOM_ED25519_INPUT" = true \]; then\n\s*for name in REVIEW_ATTESTATION\.json runtime-manifest\.json remote-runtime-manifest\.json; do\n\s*test ! -e "release-assets\/\$name"/,
-  ],
-  [
-    "normal publish still byte-compares the verified review attestation",
-    /else\n\s*cmp "\$RUNNER_TEMP\/expected-review-attestation\.json" release-assets\/REVIEW_ATTESTATION\.json\n\s*fi/,
-  ],
-]) {
-  if (!pattern.test(publishReleaseJob)) errors.push(`release.yml: ${label}`);
-}
-
 const coreManifest = JSON.parse(readFileSync("packages/core/package.json", "utf8"));
 if (
   coreManifest.bin?.["claudexor-process-identity"] !== "./dist/native/claudexor-process-identity"
@@ -644,71 +642,17 @@ for (const [label, pattern] of [
 }
 
 const verifier = readFileSync("scripts/verify-release-input.mjs", "utf8");
-if (!/validateReleaseAttestation\(attestation, reviewAuthority/.test(verifier)) {
-  errors.push("verify-release-input.mjs: signed review authority is not checked before publish");
-}
-if (!/candidateVersion:\s*version/.test(verifier)) {
-  errors.push("verify-release-input.mjs: review runtime version is not bound to package.json");
-}
-for (const [label, pattern] of [
-  [
-    "waiver rejects non-boolean environment values",
-    /skipCustomEd25519Input\s*!==\s*"true"\s*&&\s*skipCustomEd25519Input\s*!==\s*"false"/,
-  ],
-  ["waiver is publish-only", /skipCustomEd25519\s*&&\s*mode\s*!==\s*"publish"/],
-  [
-    "waiver requires all three custom Ed25519 inputs to be empty",
-    /skipCustomEd25519\s*&&\s*customEd25519Inputs\.some\(\(value\)\s*=>\s*value\s*!==\s*""\)/,
-  ],
-  [
-    "waiver is permanently pinned to the exact package versions 3.8.0, 3.9.0, and 3.9.7",
-    /skipCustomEd25519\s*&&\s*!\["3\.8\.0",\s*"3\.9\.0",\s*"3\.9\.7"\]\.includes\(version\)/,
-  ],
-  [
-    "Cursor review waiver is permanently pinned to package versions 3.8.1, 3.8.2, 3.9.1, and 3.9.2",
-    /waiveCursorReview\s*&&\s*!\["3\.8\.1",\s*"3\.8\.2",\s*"3\.9\.1",\s*"3\.9\.2"\]\.includes\(version\)/,
-  ],
-  [
-    "Cursor review waiver requires an empty review input",
-    /waiveCursorReview\s*&&\s*reviewAttestationInput\s*!==\s*""/,
-  ],
-  [
-    "Cursor review waiver still requires both runtime manifests",
-    /waiveCursorReview\s*&&[\s\S]*?runtimeManifestInput\s*===\s*""[\s\S]*?remoteRuntimeManifestInput\s*===\s*""/,
-  ],
-  [
-    "Cursor review waiver cannot combine with the custom Ed25519 waiver",
-    /skipCustomEd25519\s*&&\s*waiveCursorReview/,
-  ],
-  [
-    "normal publish still verifies the signed schema-v7 review attestation",
-    /if\s*\(mode\s*===\s*"publish"\s*&&\s*!skipCustomEd25519\s*&&\s*!waiveCursorReview\)/,
-  ],
-]) {
-  if (!pattern.test(verifier)) errors.push(`verify-release-input.mjs: ${label}`);
-}
-const fullGateRunner = readFileSync("scripts/run-full-gate-receipt.mjs", "utf8");
 if (
-  !/process\.argv\.length !== 3/.test(fullGateRunner) ||
-  !/pathIsWithin\(candidateRoot, outDir\)/.test(fullGateRunner) ||
-  !/buildReleaseReviewRuntimeArtifacts/.test(fullGateRunner) ||
-  !/reviewRuntimeArtifacts/.test(fullGateRunner)
+  !verifier.includes('process.env.REVIEW_CONFIRMED_INPUT !== "true"') ||
+  !verifier.includes("process.env.REVIEW_URL_INPUT")
 ) {
   errors.push(
-    "run-full-gate-receipt.mjs: gate must require OUT_DIR and bind verifier plus packaged CLI artifacts",
+    "verify-release-input.mjs: publish must require independent review and maintainer confirmation",
   );
 }
-const reviewSealer = readFileSync("scripts/seal-owner-review-attestation.mjs", "utf8");
-for (const [label, pattern] of [
-  [
-    "imports only receipt-verified verifier bytes",
-    /readVerifiedReleaseReviewRuntime[\s\S]*data:text\/javascript/,
-  ],
-  ["pins the owner-approved operator reviewer panel", /OWNER_REVIEW_PANEL/],
-  ["checks actual operator reviewer overlap", /validateReviewerOverlap/],
-  ["binds each reviewer report by digest", /report_sha256/],
-]) {
-  if (!pattern.test(reviewSealer)) errors.push(`seal-owner-review-attestation.mjs: ${label}`);
+for (const retired of ["review_attestation_b64:", "waive_cursor_review:", "skip_custom_ed25519:"]) {
+  if (release.includes(retired))
+    errors.push(`release.yml: retired review/publication input ${retired}`);
 }
 if (!/GITHUB_REF[\s\S]*refs\/tags\/\$\{tag\}/.test(verifier)) {
   errors.push(
@@ -751,7 +695,6 @@ for (const [label, pattern] of [
 ]) {
   if (pattern.test(release)) errors.push(`release.yml: ${label}`);
 }
-errors.push(...staleAttestationFindings(release));
 
 for (const [label, pattern] of [
   ["manual tag input is required", /workflow_dispatch:[\s\S]*?tag:[\s\S]*?required:\s*true/],
@@ -811,9 +754,9 @@ if (
 }
 
 const directInputs = [...release.matchAll(/\$\{\{\s*inputs\.[^}]+\}\}/g)].map((match) => match[0]);
-if (directInputs.length !== 8) {
+if (directInputs.length !== 7) {
   errors.push(
-    `release.yml: expected exactly eight input projections into workflow env, got ${directInputs.length}`,
+    `release.yml: expected exactly seven input projections into workflow env, got ${directInputs.length}`,
   );
 }
 if (errors.length) {
@@ -929,28 +872,13 @@ function exactCandidateAppPromotionErrors(job) {
     assembleStep,
   );
   requirePattern(
-    "the custom Ed25519 waiver must keep the unsigned engine manifest candidate-only",
-    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then\n\s*if \[ "\$SKIP_CUSTOM_ED25519_INPUT" != true \]; then[\s\S]*?cp "\$signed" "\$assets\/runtime-manifest\.json"\n\s*fi\n\s*else\n\s*cp "\$RUNNER_TEMP\/runtime-closure\/runtime-manifest\.json" "\$assets\/"/,
+    "unsigned engine manifest stays candidate-only",
+    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then[\s\S]*?cp "\$signed" "\$assets\/runtime-manifest\.json"\n\s*else\n\s*cp "\$RUNNER_TEMP\/runtime-closure\/runtime-manifest\.json" "\$assets\/"/,
     assembleStep,
   );
   requirePattern(
-    "the custom Ed25519 waiver must keep the unsigned remote manifest candidate-only",
-    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then\n\s*if \[ "\$SKIP_CUSTOM_ED25519_INPUT" != true \]; then[\s\S]*?cp "\$remote_signed" "\$assets\/remote-runtime-manifest\.json"\n\s*fi\n\s*else\n\s*cp "\$RUNNER_TEMP\/remote-runtimes\/remote-runtime-manifest\.json" "\$assets\/"/,
-    assembleStep,
-  );
-  requirePattern(
-    "the custom Ed25519 waiver must omit all three custom Ed25519 documents from final assets",
-    /if \[ "\$SKIP_CUSTOM_ED25519_INPUT" = true \]; then\n\s*for name in REVIEW_ATTESTATION\.json runtime-manifest\.json remote-runtime-manifest\.json; do\n\s*test ! -e "\$assets\/\$name"/,
-    assembleStep,
-  );
-  requirePattern(
-    "normal publish must still assemble the signed review attestation",
-    /if \[ "\$RELEASE_MODE_INPUT" = publish \] && \[ "\$SKIP_CUSTOM_ED25519_INPUT" != true \] && \[ "\$WAIVE_CURSOR_REVIEW_INPUT" != true \]; then\n\s*cp "\$RUNNER_TEMP\/review-attestation\.json" "\$assets\/REVIEW_ATTESTATION\.json"/,
-    assembleStep,
-  );
-  requirePattern(
-    "v3.8.1/v3.8.2/v3.9.1/v3.9.2 review waiver must omit only the review attestation asset",
-    /if \[ "\$WAIVE_CURSOR_REVIEW_INPUT" = true \]; then\n\s*test ! -e "\$assets\/REVIEW_ATTESTATION\.json"/,
+    "unsigned remote manifest stays candidate-only",
+    /if \[ "\$RELEASE_MODE_INPUT" = publish \]; then[\s\S]*?cp "\$remote_signed" "\$assets\/remote-runtime-manifest\.json"\n\s*else\n\s*cp "\$RUNNER_TEMP\/remote-runtimes\/remote-runtime-manifest\.json" "\$assets\/"/,
     assembleStep,
   );
   requirePattern(
@@ -1015,7 +943,6 @@ function exactCandidateAppPromotionErrors(job) {
     'cp "$RUNNER_TEMP/remote-runtimes/remote-runtime-manifest.json" "$assets/"',
     'cp "candidate-assets/Claudexor-remote-runtime-$VERSION.spdx.json" "$assets/"',
     '> "$assets/Claudexor-remote-runtime-$VERSION.spdx.json"',
-    'cp "$RUNNER_TEMP/review-attestation.json" "$assets/REVIEW_ATTESTATION.json"',
   ].sort();
   if (JSON.stringify(assembledAssetWrites) !== JSON.stringify(expectedAssembledAssetWrites)) {
     findings.push(
@@ -1097,7 +1024,7 @@ function windowsPrLegFindings(workflow) {
   }
   requirePattern(
     "required build-test aggregate must depend on and reject a failed Windows matrix",
-    /needs:\s*\[build-test, windows-test\][\s\S]*?WINDOWS_RESULT:[\s\S]*?\[ "\$WINDOWS_RESULT" != "success" \]/,
+    /needs:\s*\[build-test, windows-test, swift\][\s\S]*?WINDOWS_RESULT:[\s\S]*?\[ "\$WINDOWS_RESULT" != "success" \]/,
     gate,
   );
   return findings;
@@ -1333,11 +1260,4 @@ function replaceLastOccurrence(text, needle, replacement) {
   return index < 0
     ? text
     : `${text.slice(0, index)}${replacement}${text.slice(index + needle.length)}`;
-}
-
-function staleAttestationFindings(workflow) {
-  // The attestation is schema v7; stale v2-v6 wording must never return.
-  return staleAttestationSchemaPattern.test(workflow)
-    ? ["release.yml: stale schema-v2/v3/v4/v5/v6 attestation wording is forbidden"]
-    : [];
 }
