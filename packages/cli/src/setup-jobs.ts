@@ -71,6 +71,7 @@ import {
   submitSetupLoginInput,
 } from "./setup-login-completion.js";
 import { setupRunnerFailureOutcome } from "./setup-runner-outcome.js";
+import { hasUnconfirmedSetupTermination } from "./setup-job-reducer.js";
 
 const NO_PROJECT_ROOT = noProjectRepoRoot();
 const LOGIN_EXTENSION_MS = 15 * 60_000;
@@ -1361,10 +1362,7 @@ export function createSetupJobManager(opts: SetupJobManagerOptions = {}) {
           { status: 409 },
         );
       }
-      const replacementFence = jobs.findLast(
-        (job) =>
-          job.outcome?.reason === "termination_unconfirmed" && !job.terminationReconciliation,
-      );
+      const replacementFence = jobs.findLast(hasUnconfirmedSetupTermination);
       if (replacementFence) {
         return binding ? store.bindCreate(replacementFence.jobId, binding) : replacementFence;
       }

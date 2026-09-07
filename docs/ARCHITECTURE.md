@@ -1669,7 +1669,8 @@ explicit cancel is the only killer). A hung participant cannot immortalize the
 daemon whichever trigger asked it to die. Runtime replacement uses a separate
 internal socket operation: in one synchronous event-loop turn the daemon checks
 its queued/running/in-flight command authority, the composition root checks the
-active setup authority, and only an idle result enters `beginShutdown`, whose
+setup authority, including terminal jobs whose process termination remains
+unconfirmed, and only an idle result enters `beginShutdown`, whose
 synchronous prefix fences setup, Control API, and daemon admission before any
 shutdown await. Busy is a retryable `runtime_replacement_busy`; unreadable or
 missing authority is `runtime_activity_unknown`; either refusal leaves the
@@ -3143,7 +3144,8 @@ require that exact pair to equal the signed manifest → claim one process-sessi
 lifecycle lease shared with steady daemon reconciliation before the first async
 install step → advisory idle probe (cheap early deferral) → daemon-atomic
 runtime-replacement admission (`claudexord --stop`: synchronously prove no
-queued/running run or active setup job and fence every ingress; busy/unknown
+queued/running run, active setup job, or unreconciled setup termination and fence
+every ingress; busy/unknown
 refuses without stopping; the request names the freshly observed serving
 version/build SHA and writer-lease owner) → identity-proven termination
 confirmation with no-successor proof (never a raw kill) → ATOMIC `current.json`

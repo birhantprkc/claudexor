@@ -160,12 +160,19 @@ export function reduceSetupJob(current: ControlSetupJob, rawNext: unknown): Cont
   return next;
 }
 
+/** A terminal label is not proof that its process stopped. The journaled
+ * empty-group reconciliation is the only release of this replacement fence. */
+export function hasUnconfirmedSetupTermination(
+  job: Pick<ControlSetupJob, "outcome" | "terminationReconciliation">,
+): boolean {
+  return job.outcome?.reason === "termination_unconfirmed" && !job.terminationReconciliation;
+}
+
 function assertTerminalReconciliation(current: ControlSetupJob, next: ControlSetupJob): void {
   if (
     current.state !== "failed" ||
     current.phase !== "completed" ||
-    current.outcome?.reason !== "termination_unconfirmed" ||
-    current.terminationReconciliation ||
+    !hasUnconfirmedSetupTermination(current) ||
     next.terminationReconciliation?.status !== "empty"
   ) {
     throw new SetupTransitionError("terminal setup jobs are immutable outside reconciliation");
