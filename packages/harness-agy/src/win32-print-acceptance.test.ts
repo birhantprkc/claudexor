@@ -37,6 +37,17 @@ interface AcceptanceSummary {
   workerPid: number;
   observedPids: number[];
   error?: string;
+  inAppDiagnostics?: {
+    runnerPid: number;
+    workerPid?: number;
+    helperPid?: number;
+    vendorPid?: number;
+    runnerExit?: { code: number | null; signal: NodeJS.Signals | null };
+    runnerClosed?: boolean;
+    stdoutBytes?: number;
+    stderrBytes?: number;
+    codeEchoObserved?: boolean;
+  };
   paths: {
     config: string;
     evidenceB: string;
@@ -134,7 +145,11 @@ describe.skipIf(process.platform !== "win32")("Win32 agy acceptance", () => {
           summary = JSON.parse(readFileSync(resultPath, "utf8")) as AcceptanceSummary;
         }
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`${message}; stage=${summary?.stage ?? "not_started"}`);
+        // Capture typed facts before finally kills the tree and deletes its
+        // sidecars. Never include the pasted input, OAuth URL, or raw output.
+        throw new Error(
+          `${message}; stage=${summary?.stage ?? "not_started"}; inApp=${JSON.stringify(inAppTimeoutDiagnostics(root, summary))}`,
+        );
       }
       if (existsSync(resultPath)) {
         summary = JSON.parse(readFileSync(resultPath, "utf8")) as AcceptanceSummary;
@@ -298,6 +313,43 @@ interface CollectedChild {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+}
+
+function inAppTimeoutDiagnostics(root: string, summary: AcceptanceSummary | null) {
+  const diagnostics = summary?.inAppDiagnostics;
+  const [input, state, receipt] = [
+    "runner-input.json",
+    "runner-state.json",
+    "runner-result.json",
+  ].map((name) => {
+    const path = join(root, "in-app-job", name);
+    try {
+      return { exists: true, value: JSON.parse(readFileSync(path, "utf8")) };
+    } catch {
+      return { exists: existsSync(path), value: null };
+    }
+  });
+  return {
+    ...diagnostics,
+    processes: (["runnerPid", "workerPid", "helperPid", "vendorPid"] as const).map((role) => {
+      const pid = diagnostics?.[role];
+      return { role, pid: pid ?? null, alive: pid ? pidAlive(pid) : null };
+    }),
+    input: {
+      exists: input!.exists,
+      readable: input!.value !== null,
+      consumed: input!.value?.consumed === true,
+    },
+    state: { exists: state!.exists, stage: state!.value?.stage ?? null },
+    receipt: {
+      exists: receipt!.exists,
+      readable: receipt!.value !== null,
+      commandStarted: receipt!.value?.commandStarted ?? null,
+      exitCode: receipt!.value?.exitCode ?? null,
+      signal: receipt!.value?.signal ?? null,
+      errorCode: receipt!.value?.errorCode ?? null,
+    },
+  };
 }
 
 async function collect(child: ChildProcess): Promise<CollectedChild> {
