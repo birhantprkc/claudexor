@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -36,14 +37,16 @@ for (const key of PROVIDER_KEYS) process.env[key] = "must-be-scrubbed";
 
 const observedPids = new Set([process.pid]);
 let stage = "starting";
+let inAppDiagnostics;
 let summary = { ok: false, stage, workerPid: process.pid, observedPids: [...observedPids] };
 const checkpoint = (next) => {
   stage = next;
   writeFileSync(
-    resultPath,
-    `${JSON.stringify({ ok: false, stage, workerPid: process.pid, observedPids: [...observedPids] })}\n`,
+    `${resultPath}.tmp`,
+    `${JSON.stringify({ ok: false, stage, workerPid: process.pid, observedPids: [...observedPids], inAppDiagnostics })}\n`,
     "utf8",
   );
+  renameSync(`${resultPath}.tmp`, resultPath);
 };
 checkpoint(stage);
 try {
@@ -269,10 +272,24 @@ try {
     });
     if (!inAppRunner.pid) throw new Error("in-app runner PID was not assigned");
     const inAppRunnerPid = inAppRunner.pid;
+    inAppDiagnostics = {
+      runnerPid: inAppRunnerPid,
+      runnerClosed: false,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      codeEchoObserved: false,
+    };
     inAppPids.add(inAppRunnerPid);
     observedPids.add(inAppRunnerPid);
     checkpoint("in_app_runner_started");
-    const inAppFinished = collectChild(inAppRunner);
+    const inAppFinished = collectChild(inAppRunner, (observation) => {
+      Object.assign(inAppDiagnostics, observation);
+      try {
+        checkpoint(stage);
+      } catch {
+        // Diagnostic I/O must not interrupt child output or lifecycle events.
+      }
+    });
     let awaitingPermit;
     await Promise.race([
       waitFor(
@@ -292,6 +309,7 @@ try {
       }),
     ]);
     const inAppWorkerPid = awaitingPermit?.processGroup?.pgid ?? 0;
+    inAppDiagnostics.workerPid = inAppWorkerPid;
     assert(inAppWorkerPid > 0, "in-app worker state omitted its exact PID");
     assert(
       awaitingPermit?.processGroup?.leader?.pid === inAppWorkerPid,
@@ -362,6 +380,7 @@ try {
     );
     const inAppHelperPid = helperProcess.pid;
     const inAppVendorPid = vendorProcess.pid;
+    Object.assign(inAppDiagnostics, { helperPid: inAppHelperPid, vendorPid: inAppVendorPid });
     for (const processRow of descendantProcesses(processSnapshot.rows, inAppWorkerPid)) {
       inAppPids.add(processRow.pid);
       observedPids.add(processRow.pid);
@@ -486,6 +505,7 @@ try {
     workerPid: process.pid,
     observedPids: [...observedPids],
     error: error instanceof Error ? error.message : String(error),
+    inAppDiagnostics,
   };
   process.exitCode = 1;
 } finally {
@@ -694,18 +714,24 @@ function waitForChild(child) {
   });
 }
 
-function collectChild(child) {
+function collectChild(child, observe) {
   if (!child.stdout || !child.stderr) throw new Error("child output pipes were not created");
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => {
     stdout += chunk.toString("utf8");
+    observe({ stdoutBytes: Buffer.byteLength(stdout), codeEchoObserved: stdout.includes("CODE:") });
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
+    observe({ stderrBytes: Buffer.byteLength(stderr) });
   });
   return new Promise((resolveChild, rejectChild) => {
     child.once("error", rejectChild);
-    child.once("close", (code, signal) => resolveChild({ code, signal, stdout, stderr }));
+    child.once("exit", (code, signal) => observe({ runnerExit: { code, signal } }));
+    child.once("close", (code, signal) => {
+      observe({ runnerClosed: true });
+      resolveChild({ code, signal, stdout, stderr });
+    });
   });
 }
