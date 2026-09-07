@@ -1,5 +1,15 @@
 # @claudexor/harness-cursor
 
+## 3.10.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/core@3.10.0
+  - @claudexor/schema@3.10.0
+  - @claudexor/secrets@3.10.0
+  - @claudexor/util@3.10.0
+
 ## 3.9.8
 
 ### Patch Changes

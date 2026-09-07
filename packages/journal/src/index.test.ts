@@ -7,7 +7,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,20 +48,37 @@ function overwrite(path: string, mutate: (bytes: Buffer) => void): Buffer {
 }
 
 describe("DurableJournal", () => {
-  it("keeps a healthy partition readable when a compacted snapshot cannot fit one frame", () => {
-    const journal = openJournal();
-    const internals = journal as unknown as {
-      entries: Array<{ time: string; type: string; payload: unknown }>;
-    };
-    internals.entries.push({
-      time: "2026-01-01T00:00:00.000Z",
-      type: "large.logical.history",
-      payload: { bytes: randomBytes(18 * 1024 * 1024).toString("base64") },
-    });
-    expect(journal.compact()).toBeNull();
-    expect(journal.state().status).toBe("ready");
-    journal.close();
-  });
+  it.each([
+    [18, "base64 envelope"],
+    [24, "compressed output"],
+  ] as const)(
+    "keeps acknowledged history appendable when the %s-record %s exceeds the frame cap",
+    (count, _boundary) => {
+      const journal = openJournal();
+      journal.appendBatch(
+        Array.from({ length: count }, (_, index) => ({
+          type: "large.logical.history",
+          payload: { index, bytes: randomBytes(768 * 1024).toString("base64") },
+        })),
+      );
+      const before = createHash("sha256").update(readFileSync(journal.path)).digest("hex");
+      const cursor = journal.currentCursor();
+      expect(journal.compact()).toBeNull();
+      expect(createHash("sha256").update(readFileSync(journal.path)).digest("hex")).toBe(before);
+      expect(journal.state().status).toBe("ready");
+      expect(journal.sequenceAfter(cursor)).toBe(count);
+      expect(journal.append("after.failed.compaction", { retained: true }).seq).toBe(count + 1);
+      journal.close();
+
+      const reopened = openJournal();
+      expect(reopened.records().map((record) => record.seq)).toEqual(
+        Array.from({ length: count + 1 }, (_, index) => index + 1),
+      );
+      expect(reopened.records(count)[0]?.payload).toEqual({ retained: true });
+      expect(reopened.state().status).toBe("ready");
+      reopened.close();
+    },
+  );
 
   it("keeps a ready journal when compacted snapshot serialization hits the string limit", () => {
     const journal = openJournal();

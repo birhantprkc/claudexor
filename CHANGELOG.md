@@ -4,6 +4,25 @@ Release and candidate history for Claudexor. The current version is declared
 in the root `package.json` (the version SSOT); published versions are available
 on GitHub Releases.
 
+- **v3.10.0** (2026-09-07): adds caller-owned Codex model operations using the
+  same managed accounts as Agents. Applications retain their system prompts,
+  conversation history and tool execution; the engine preserves exact payloads,
+  one-generation operation identity, recoverable results and explicit ACK.
+  Codex is the implemented Models source; Claude, Cursor and other harnesses
+  remain available for Agents. Explicit output caps and temperature are not
+  supported by this route, and cash cost stays unknown without a provider
+  receipt. Model catalogs remain account-specific and required before dispatch;
+  retained compact receipts preserve idempotency and still grow with history.
+  Reduces redundant journal startup copying and validation without deleting
+  history or disabling compaction. Runtime replacement now respects unconfirmed
+  setup termination. A setup failure recorded before process-group evidence can
+  leave replacement and further login for that harness deferred indefinitely:
+  Reconcile, Cancel and restart cannot clear that historical record, and automatic
+  recovery of this case is deferred. Contributor release review no longer
+  requires named model brands, overlapping runs or signed review attestations;
+  runtime signatures, platform CI and exact candidate-byte promotion remain.
+  Thanks to Praxis Relay and CLIProxyAPI for the model-transport research and
+  design references; neither is embedded as another relay service.
 - **v3.9.8** (2026-09-05): ordinary Agent work now defaults to no internal
   model review, independently of executor selection. Explicit panels and
   review opt-in, Best-of, and requested review cycles remain available;

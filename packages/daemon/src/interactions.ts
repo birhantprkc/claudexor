@@ -106,7 +106,7 @@ export class InteractionStore {
   }
 
   private replay(): void {
-    for (const record of this.journal.records()) {
+    for (const record of this.journal.records(0, [REQUESTED, RESOLVED])) {
       if (record.type === REQUESTED) {
         const value = PendingInteractionSchema.parse(record.payload);
         const key = interactionKey(value.runId, value.interactionId);

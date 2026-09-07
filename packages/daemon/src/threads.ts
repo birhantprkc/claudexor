@@ -143,7 +143,7 @@ export class ThreadStore {
   }
 
   private replay(): void {
-    for (const record of this.journal.records()) {
+    for (const record of this.journal.records(0, [UPSERTED])) {
       if (record.type === UPSERTED) this.apply(parseMutation(record.payload));
     }
     this.validateProjection();

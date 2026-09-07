@@ -1,5 +1,15 @@
 # @claudexor/schema
 
+## 3.10.0
+
+### Minor Changes
+
+- Add caller-owned Codex model operations through managed accounts shared with Agents, with exact model payloads, durable single-generation identity, result acknowledgement and typed outcome/cost evidence. Keep system prompts, conversation history and tool execution with the caller. Preserve unconfirmed setup termination during runtime replacement; a pre-permit failure without recorded process evidence remains unreconcilable and is disclosed rather than introducing a new journal format. Simplify contributor release review while retaining signed runtime manifests and exact candidate promotion.
+
+### Patch Changes
+
+- @claudexor/util@3.10.0
+
 ## 3.9.8
 
 ### Patch Changes

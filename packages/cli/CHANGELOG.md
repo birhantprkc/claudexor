@@ -1,5 +1,39 @@
 # @claudexor/cli
 
+## 3.10.0
+
+### Minor Changes
+
+- Add caller-owned Codex model operations through managed accounts shared with Agents, with exact model payloads, durable single-generation identity, result acknowledgement and typed outcome/cost evidence. Keep system prompts, conversation history and tool execution with the caller. Preserve unconfirmed setup termination during runtime replacement; a pre-permit failure without recorded process evidence remains unreconcilable and is disclosed rather than introducing a new journal format. Simplify contributor release review while retaining signed runtime manifests and exact candidate promotion.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies [dd518f0]
+  - @claudexor/control-api@3.10.0
+  - @claudexor/core@3.10.0
+  - @claudexor/daemon@3.10.0
+  - @claudexor/harness-codex@3.10.0
+  - @claudexor/schema@3.10.0
+  - @claudexor/journal@3.10.0
+  - @claudexor/delivery@3.10.0
+  - @claudexor/gateway@3.10.0
+  - @claudexor/harness-agy@3.10.0
+  - @claudexor/harness-claude@3.10.0
+  - @claudexor/harness-cursor@3.10.0
+  - @claudexor/harness-fake@3.10.0
+  - @claudexor/harness-opencode@3.10.0
+  - @claudexor/harness-raw-api@3.10.0
+  - @claudexor/orchestrator@3.10.0
+  - @claudexor/review@3.10.0
+  - @claudexor/workspace@3.10.0
+  - @claudexor/acp-server@3.10.0
+  - @claudexor/config@3.10.0
+  - @claudexor/mcp-server@3.10.0
+  - @claudexor/artifact-store@3.10.0
+  - @claudexor/secrets@3.10.0
+  - @claudexor/util@3.10.0
+
 ## 3.9.8
 
 ### Patch Changes

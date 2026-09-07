@@ -1,5 +1,12 @@
 # @claudexor/journal
 
+## 3.10.0
+
+### Patch Changes
+
+- dd518f0: Reduce journal startup work by selecting projection record types before copying payloads and validating run-event projections once during creation. Stop compression at the existing frame output limit while preserving full history, recovery checks, and compaction maintenance.
+  - @claudexor/util@3.10.0
+
 ## 3.9.8
 
 ### Patch Changes

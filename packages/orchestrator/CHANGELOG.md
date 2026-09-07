@@ -1,5 +1,26 @@
 # @claudexor/orchestrator
 
+## 3.10.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/core@3.10.0
+  - @claudexor/schema@3.10.0
+  - @claudexor/context@3.10.0
+  - @claudexor/delivery@3.10.0
+  - @claudexor/gateway@3.10.0
+  - @claudexor/review@3.10.0
+  - @claudexor/workspace@3.10.0
+  - @claudexor/arbitration@3.10.0
+  - @claudexor/budget@3.10.0
+  - @claudexor/config@3.10.0
+  - @claudexor/event-log@3.10.0
+  - @claudexor/policy@3.10.0
+  - @claudexor/synthesis@3.10.0
+  - @claudexor/artifact-store@3.10.0
+  - @claudexor/util@3.10.0
+
 ## 3.9.8
 
 ### Patch Changes
