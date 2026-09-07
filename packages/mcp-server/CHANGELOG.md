@@ -1,5 +1,13 @@
 # @claudexor/mcp-server
 
+## 3.10.0
+
+### Patch Changes
+
+- Updated dependencies
+  - @claudexor/schema@3.10.0
+  - @claudexor/util@3.10.0
+
 ## 3.9.8
 
 ### Patch Changes
