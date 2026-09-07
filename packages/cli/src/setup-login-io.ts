@@ -49,6 +49,7 @@ export function watchLoginInput(
   } = {},
 ): () => void {
   let delivered = false;
+  let stopped = false;
   const timer = setInterval(() => {
     if (delivered || !manifest.inputPath || !child.stdin || child.stdin.destroyed) return;
     const input = readRunnerLoginInput(manifest.inputPath, manifest.jobId, manifest.executionId);
@@ -58,15 +59,25 @@ export function watchLoginInput(
     try {
       if (options.windowsConpty) {
         // Server-era ConPTY parsers have shipped bugs around chunked Win32
-        // input-mode sequences. Keep each complete KEY_EVENT_RECORD in its
-        // own pipe write instead of presenting one concatenated CSI stream.
-        for (const record of encodeWindowsConptyLine(input.value)) child.stdin.write(record);
+        // input-mode sequences. Wait for each complete record's write callback:
+        // consecutive write() calls can otherwise coalesce through _writev.
+        const stdin = child.stdin;
+        const records = encodeWindowsConptyLine(input.value).values();
+        const writeNext = (error?: Error | null): void => {
+          if (error || stopped || stdin.destroyed) return;
+          const record = records.next();
+          if (!record.done) stdin.write(record.value, writeNext);
+        };
+        // Writable reports a failed write both to its callback and as an
+        // error event. The callback stops delivery; the runner owns the result.
+        stdin.once("error", () => undefined);
+        writeNext();
       } else {
         child.stdin.write(`${input.value}\n`);
       }
-      // The secret has been handed to the vendor; what stays on disk is a
-      // non-secret consumed marker, so the one-shot conflict check still
-      // refuses a second submission while the code itself stops existing.
+      // Delivery has been claimed, not acknowledged by the vendor. Keep only
+      // the consumed marker while the remaining writes complete, so a second
+      // submission still conflicts and the secret no longer exists on disk.
       atomicPrivateJson(manifest.inputPath, {
         version: input.version,
         jobId: manifest.jobId,
@@ -81,7 +92,10 @@ export function watchLoginInput(
   }, INPUT_POLL_MS);
   timer.unref?.();
   void now;
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 function encodeWindowsConptyLine(value: string): string[] {

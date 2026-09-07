@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -26,7 +26,7 @@ const profile = (changes: Record<string, unknown> = {}) =>
     harness_id: "codex",
     display_name: "Work",
     credential_kind: "config_dir_login",
-    isolation_locator: join(process.env.CLAUDEXOR_CONFIG_DIR!, "profiles", "work"),
+    isolation_locator: join(realpathSync(process.env.CLAUDEXOR_CONFIG_DIR!), "profiles", "work"),
     ...changes,
   });
 
