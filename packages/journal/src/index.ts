@@ -212,10 +212,12 @@ export class DurableJournal {
     }
   }
 
-  records<T = unknown>(afterSeq = 0): JournalRecord<T>[] {
+  /** Select exact types before copying payloads; sequence numbers and cursors
+   * still belong to the complete journal. Omit types to read every record. */
+  records<T = unknown>(afterSeq = 0, types?: readonly string[]): JournalRecord<T>[] {
     this.assertReadable();
     return this.entries
-      .filter((record) => record.seq > afterSeq)
+      .filter((record) => record.seq > afterSeq && (!types || types.includes(record.type)))
       .map((record) => ({ ...record, payload: cloneJson(record.payload) as T }));
   }
 

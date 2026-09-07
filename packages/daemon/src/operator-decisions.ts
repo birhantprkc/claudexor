@@ -34,7 +34,7 @@ export class OperatorDecisionStore {
   private readonly byKey = new Map<string, { requestDigest: string; runId: string }>();
 
   constructor(private readonly journal: DurableJournal) {
-    for (const entry of journal.records()) {
+    for (const entry of journal.records(0, [RECORDED])) {
       if (entry.type !== RECORDED) continue;
       const mutation = parseMutation(entry.payload);
       this.apply(mutation);
