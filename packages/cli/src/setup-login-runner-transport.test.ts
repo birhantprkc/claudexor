@@ -1,11 +1,13 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Writable } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProcessGroupService, type ProcessIdentityReader } from "@claudexor/core";
 import { runSetupLoginWorker } from "./setup-login-runner.js";
 import { CONPTY_HELPER_PROTOCOL, type TerminalTransportResolution } from "./setup-login-pty.js";
+import { watchLoginInput } from "./setup-login-io.js";
 import {
   SETUP_LOGIN_PROTOCOL_VERSION,
   atomicPrivateJson,
@@ -13,6 +15,7 @@ import {
   commandDigest,
   readRunnerDeviceCode,
   readRunnerResult,
+  readLoginManifest,
   sealLoginManifest,
 } from "./setup-login-protocol.js";
 
@@ -23,8 +26,109 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   rmSync(root, { recursive: true, force: true });
 });
+
+describe("ConPTY one-shot input write completion", () => {
+  it("issues one completed record write at a time without queued _writev batching", async () => {
+    const { stdin, batches, callbacks, stop, onDelivered, inputPath } = prepareInputWatch();
+    try {
+      expect(onDelivered).toHaveBeenCalledExactlyOnceWith("A");
+      expect(JSON.parse(readFileSync(inputPath, "utf8"))).toMatchObject({ consumed: true });
+      expect(readFileSync(inputPath, "utf8")).not.toContain('"value"');
+      while (callbacks.length > 0) {
+        callbacks.shift()!();
+        await new Promise<void>((done) => setImmediate(done));
+      }
+      expect(batches).toEqual([
+        ["\u001b[231;0;65;1;0;1_"],
+        ["\u001b[231;0;65;0;0;1_"],
+        ["\u001b[13;28;13;1;0;1_"],
+        ["\u001b[13;28;13;0;0;1_"],
+      ]);
+      vi.advanceTimersByTime(900);
+      expect(batches).toHaveLength(4);
+      expect(onDelivered).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+      stdin.destroy();
+    }
+  });
+
+  it.each(["error", "cancel"] as const)(
+    "stops unsent records after %s without replaying input",
+    async (reason) => {
+      const { stdin, batches, callbacks, stop, onDelivered, inputPath } = prepareInputWatch();
+      try {
+        if (reason === "cancel") stop();
+        callbacks.shift()!(reason === "error" ? new Error("fixture write failed") : undefined);
+        await new Promise<void>((done) => setImmediate(done));
+        vi.advanceTimersByTime(900);
+        expect(batches).toHaveLength(1);
+        expect(callbacks).toHaveLength(0);
+        expect(onDelivered).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(readFileSync(inputPath, "utf8"))).toMatchObject({ consumed: true });
+        expect(readFileSync(inputPath, "utf8")).not.toContain('"value"');
+      } finally {
+        stop();
+        stdin.destroy();
+      }
+    },
+  );
+
+  it("preserves the ordinary non-Windows single LF write", () => {
+    const { stdin, batches, callbacks, stop } = prepareInputWatch(false);
+    try {
+      expect(batches).toEqual([["A\n"]]);
+      callbacks.shift()!();
+      vi.advanceTimersByTime(900);
+      expect(batches).toEqual([["A\n"]]);
+    } finally {
+      stop();
+      stdin.destroy();
+    }
+  });
+});
+
+function prepareInputWatch(windowsConpty = true) {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const prepared = prepareManifest();
+  atomicPrivateJson(prepared.inputPath, {
+    version: SETUP_LOGIN_PROTOCOL_VERSION,
+    jobId: prepared.jobId,
+    executionId: prepared.executionId,
+    value: "A",
+    submittedAt: new Date().toISOString(),
+  });
+  const batches: string[][] = [];
+  const callbacks: Array<(error?: Error | null) => void> = [];
+  const onDelivered = vi.fn();
+  // A real Writable owns buffering/_writev. Only physical completion is held,
+  // as it can be for a Windows pipe; no cork or fake batching is introduced.
+  const stdin = new Writable({
+    write(chunk, _encoding, callback) {
+      expect(onDelivered).toHaveBeenCalledExactlyOnceWith("A");
+      batches.push([chunk.toString("utf8")]);
+      callbacks.push(callback);
+    },
+    writev(chunks, callback) {
+      batches.push(chunks.map(({ chunk }) => chunk.toString("utf8")));
+      callbacks.push(callback);
+    },
+  });
+  const stop = watchLoginInput(
+    readLoginManifest(prepared.manifestPath),
+    { stdin } as ChildProcess,
+    () => new Date(),
+    {
+      windowsConpty,
+      onDelivered,
+    },
+  );
+  vi.advanceTimersByTime(300);
+  return { stdin, batches, callbacks, stop, onDelivered, inputPath: prepared.inputPath };
+}
 
 describe("setup-login runner ConPTY integration", () => {
   it.each([
