@@ -56,6 +56,24 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Build Linux engine resources without platform helper substitutes
+        if: matrix.node-version == '24.16.0'
+        shell: bash
+        env:
+          CLAUDEXOR_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          resources="$RUNNER_TEMP/linux-engine-resources"
+          bash scripts/build-engine-resources.sh "$resources"
+          test ! -e "$resources/native"
+          node "$resources/claudexord.bundle.cjs" --probe
+          node "$resources/claudexor.bundle.cjs" help --json
+
+          # Exercise the archive's materialized layout, not only deploy links.
+          browser="$RUNNER_TEMP/linux-materialized-browser"
+          node --input-type=module -e 'import { copyTreeMaterialized } from "./scripts/lib/remote-runtime-archive.mjs"; copyTreeMaterialized(process.argv[1], process.argv[2]);' "$resources/browser-mcp-runtime" "$browser"
+          node "$browser/dist/browser-mcp-launcher.js" --help
+
       - name: Typecheck (packages + tests + scripts)
         run: pnpm typecheck && pnpm typecheck:tests
 
@@ -164,7 +182,7 @@ jobs:
   # matrix fails or is cancelled, and a skipped required check never reports.
   build-test-gate:
     name: build-test
-    needs: [build-test, windows-test]
+    needs: [build-test, windows-test, swift]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -174,6 +192,7 @@ jobs:
         env:
           MATRIX_RESULT: ${{ needs.build-test.result }}
           WINDOWS_RESULT: ${{ needs.windows-test.result }}
+          MACOS_RESULT: ${{ needs.swift.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -183,6 +202,10 @@ jobs:
           fi
           if [ "$WINDOWS_RESULT" != "success" ]; then
             echo "::error::Windows lane result is '$WINDOWS_RESULT' (expected 'success')."
+            exit 1
+          fi
+          if [ "$MACOS_RESULT" != "success" ]; then
+            echo "::error::macOS lane result is '$MACOS_RESULT' (expected 'success')."
             exit 1
           fi
 
@@ -272,6 +295,13 @@ jobs:
           packages/cli/src/setup-login-pty.test.ts
           packages/cli/src/setup-login-runner-transport.test.ts
           packages/journal/src/index.test.ts
+          packages/harness-codex/src/model-auth.test.ts
+          packages/harness-codex/src/model.test.ts
+          packages/harness-codex/src/responses.test.ts
+          packages/daemon/src/model-operations.test.ts
+          packages/daemon/src/resource-store.model.test.ts
+          packages/daemon/src/command-retention.test.ts
+          packages/control-api/src/model-routes.test.ts
 
   swift:
     runs-on: macos-26
@@ -279,6 +309,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build and probe engine resources independently of the app
+        shell: bash
+        env:
+          CLAUDEXOR_BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          resources="$RUNNER_TEMP/engine-resources"
+          bash scripts/build-engine-resources.sh "$resources"
+          node "$resources/claudexord.bundle.cjs" --probe
+          node "$resources/claudexor.bundle.cjs" help --json
+          pnpm vitest run packages/core/src/process-identity.test.ts packages/schema/src/platform-auth-policy.test.ts
 
       - name: Swift tests (ClaudexorKit)
         working-directory: apps/macos/ClaudexorKit

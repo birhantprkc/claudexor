@@ -1,7 +1,10 @@
 import type { JobRecord } from "./server.js";
+import { isModelOperation } from "@claudexor/schema";
 
 export function productCommandRecords(records: readonly JobRecord[]): JobRecord[] {
-  return records.filter(({ id }) => !id.startsWith("delivery-"));
+  return records.filter(
+    ({ id, params }) => !id.startsWith("delivery-") && !isModelOperation(params),
+  );
 }
 
 /** A terminal run that still needs a human decision: its lifecycle SUCCEEDED
@@ -26,7 +29,12 @@ export function prunableCommandIds(
   retentionMs: number,
   now: number,
 ): string[] {
-  const terminal = records.filter((record) => !["running", "queued"].includes(record.state));
+  // Model bodies have their own custody lifetime. Their compact receipts and
+  // idempotency keys survive it, and must not consume Agent history capacity.
+  // Delivery commands retain their existing age/cap policy.
+  const terminal = records.filter(
+    (record) => !isModelOperation(record.params) && !["running", "queued"].includes(record.state),
+  );
   if (terminal.length <= cap) return [];
   return terminal
     .filter((record) => {

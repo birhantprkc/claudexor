@@ -4,6 +4,11 @@
     "ControlUploadCreateRequest": {
       "type": "object",
       "properties": {
+        "purpose": {
+          "type": "string",
+          "const": "model",
+          "description": "Model-operation payload, never an Agent attachment; absent preserves attachment semantics."
+        },
         "kind": {
           "type": "string",
           "enum": [

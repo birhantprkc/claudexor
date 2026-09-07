@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+export { createCodexModelAdapter } from "./model.js";
 import { codexTranscriptModel, codexTranscriptRateLimits } from "./transcript.js";
 import { resolveSecret } from "@claudexor/secrets";
 import { tmpdir } from "node:os";

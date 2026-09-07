@@ -1,0 +1,137 @@
+{
+  "$ref": "#/definitions/ControlModelCatalogResponse",
+  "definitions": {
+    "ControlModelCatalogResponse": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty identifier string."
+        },
+        "credentialProfileId": {
+          "$ref": "#/definitions/ControlModelCatalogResponse/properties/source"
+        },
+        "accountFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "ISO-8601 timestamp string."
+        },
+        "provenance": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "User-supplied string that must contain visible content, not just whitespace."
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/definitions/ControlModelCatalogResponse/properties/provenance"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "isDefault": {
+                "type": "boolean"
+              },
+              "contextWindow": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxContextWindow": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxOutputTokens": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inputModalities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "reasoningEfforts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "defaultReasoningEffort": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "supportedOptions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "isDefault",
+              "contextWindow",
+              "maxContextWindow",
+              "maxOutputTokens",
+              "inputModalities",
+              "reasoningEfforts",
+              "defaultReasoningEffort",
+              "supportedOptions"
+            ],
+            "additionalProperties": false,
+            "description": "Model metadata from the selected raw transport; CLI compaction and usable-window policies are not capacity."
+          }
+        }
+      },
+      "required": [
+        "source",
+        "credentialProfileId",
+        "accountFingerprint",
+        "observedAt",
+        "provenance",
+        "models"
+      ],
+      "additionalProperties": false,
+      "description": "Exact-profile model discovery, not a global CLI alias list or an inference entitlement guarantee."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

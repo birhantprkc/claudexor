@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Run the full deterministic release gate (`pnpm release:verify`) and write
+ * Historical signed-review tooling, not a current publication prerequisite.
+ * Run the deterministic release gate (`pnpm release:verify`) and write
  * the hash-bound receipt the release attestation embeds: before/after git
  * identity (candidate must be clean and UNCHANGED by the gate), exit code,
  * and stdout/stderr digests. The receipt is the ONLY input the sealer trusts

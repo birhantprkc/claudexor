@@ -34,6 +34,21 @@ Claudexor is also not a digital entity. It has no personality, no memory
 identity, no self-modification doctrine. It is a tool developed BY external
 agents, and its immune system exists to constrain those agents' sessions.
 
+## Caller-Owned Model Use
+
+An application that already owns its reasoning loop can use a connected account
+for a model generation without delegating an agent session. Its system prompt,
+conversation and tool execution remain its own; Claudexor translates the model
+exchange and reports what happened. This reuses the account and control plane
+instead of embedding another relay or importing the person's ordinary CLI login.
+
+Model content and authorization are distinct responsibilities. The caller's model
+payload keeps its supplied content, including examples that resemble credentials;
+the adapter's own authorization never enters that payload. Temporary exchange
+bytes support result recovery, while compact receipts retain operation identity.
+The calling application remains responsible for conversation history. This narrow
+content boundary does not change the protections on Agent tasks and attachments.
+
 ## One Conversation, Many Executors
 
 Continuity is the flagship concept. A Thread is ONE conversation owned by
@@ -348,8 +363,12 @@ operator state is therefore not silently promoted into reviewer context.
 
 Rejected alternative: per-commit blocking review of the repository's own
 commits. It was tried and retired — it optimized for ceremony over
-convergence; the release-cycle protocol with sealed packets and one
-confirmation wave replaced it.
+convergence; a complete independent review with evidence-backed dispositions and a
+responsible maintainer's confirmation replaced it. Model brands, signatures over
+operator-authored review metadata, and execution timing do not establish review
+quality. Platform checks are automated in CI without requiring contributors to
+own every supported platform; the integrity of shipped artifacts remains a
+separate, mechanically verified contract.
 
 ## Non-Goals
 

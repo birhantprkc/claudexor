@@ -1,0 +1,316 @@
+{
+  "$ref": "#/definitions/ModelCallRequest",
+  "definitions": {
+    "ModelCallRequest": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Non-empty identifier string."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "User-supplied string that must contain visible content, not just whitespace."
+        },
+        "account": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "auto"
+                },
+                "preferredProfileId": {
+                  "$ref": "#/definitions/ModelCallRequest/properties/source",
+                  "description": "Non-empty identifier string."
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "pin"
+                },
+                "profileId": {
+                  "$ref": "#/definitions/ModelCallRequest/properties/source"
+                }
+              },
+              "required": [
+                "mode",
+                "profileId"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "description": "Auto keeps a usable prior account; pin never selects another account."
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string",
+                "enum": [
+                  "system",
+                  "developer",
+                  "user",
+                  "assistant",
+                  "tool"
+                ]
+              },
+              "content": {
+                "anyOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": {}
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "tool_call_id": {
+                "$ref": "#/definitions/ModelCallRequest/properties/source",
+                "description": "Non-empty identifier string."
+              },
+              "tool_calls": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "$ref": "#/definitions/ModelCallRequest/properties/source"
+                    },
+                    "type": {
+                      "type": "string",
+                      "const": "function"
+                    },
+                    "function": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "$ref": "#/definitions/ModelCallRequest/properties/model"
+                        },
+                        "arguments": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "arguments"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type",
+                    "function"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "nativeContinuation": {
+                "type": "object",
+                "properties": {
+                  "route": {
+                    "type": "object",
+                    "properties": {
+                      "source": {
+                        "$ref": "#/definitions/ModelCallRequest/properties/source"
+                      },
+                      "credentialProfileId": {
+                        "$ref": "#/definitions/ModelCallRequest/properties/source"
+                      },
+                      "accountFingerprint": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "source",
+                      "credentialProfileId",
+                      "accountFingerprint",
+                      "model"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Selected route at dispatch; a result records the actually observed model, or null."
+                  },
+                  "format": {
+                    "$ref": "#/definitions/ModelCallRequest/properties/model"
+                  },
+                  "payload": {}
+                },
+                "required": [
+                  "route",
+                  "format"
+                ],
+                "additionalProperties": false,
+                "description": "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay."
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "additionalProperties": false,
+            "description": "Caller-owned conversation message. Text, content blocks, and tool arguments are not redacted or rewritten."
+          },
+          "minItems": 1
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "function"
+              },
+              "function": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "$ref": "#/definitions/ModelCallRequest/properties/model"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parameters": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "strict": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "parameters"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "type",
+              "function"
+            ],
+            "additionalProperties": false,
+            "description": "A caller-executed function; the model transport never executes it or rewrites its JSON schema."
+          },
+          "default": []
+        },
+        "toolChoice": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "auto",
+                "none",
+                "required"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "function"
+                },
+                "function": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "$ref": "#/definitions/ModelCallRequest/properties/model"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "type",
+                "function"
+              ],
+              "additionalProperties": false
+            }
+          ],
+          "default": "auto"
+        },
+        "options": {
+          "type": "object",
+          "properties": {
+            "reasoningEffort": {
+              "$ref": "#/definitions/ModelCallRequest/properties/model",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "serviceTier": {
+              "$ref": "#/definitions/ModelCallRequest/properties/model",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "parallelToolCalls": {
+              "type": "boolean"
+            },
+            "cacheKey": {
+              "$ref": "#/definitions/ModelCallRequest/properties/model",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "maxOutputTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "temperature": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference.",
+          "default": {}
+        }
+      },
+      "required": [
+        "source",
+        "model",
+        "account",
+        "messages"
+      ],
+      "additionalProperties": false,
+      "description": "One model generation request, stored only in a model-purpose payload outside the command journal."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

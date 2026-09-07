@@ -245,6 +245,48 @@ describe("explicit api_key preference (Q3=A paid election)", () => {
 });
 
 describe("bound-row A7 unusable ledger (thread stickiness)", () => {
+  it("excludes a model-incompatible binding before probing it again", async () => {
+    const probes: string[] = [];
+    const context = ctx({
+      registry: [profileRow({ profile_id: "a" }), profileRow({ profile_id: "b" })],
+      boundProfileId: "a",
+      excludedProfileIds: new Set(["a"]),
+      probe: async (profile) => {
+        probes.push(profile.profile_id);
+        return {
+          profile_id: profile.profile_id,
+          harness_id: profile.harness_id,
+          availability: "available",
+          verification: "passed",
+          verification_source: "local_store",
+          detail: "test profile ready",
+          last_verified_at: null,
+        };
+      },
+    });
+    await expect(resolveAccountForRun(context)).resolves.toMatchObject({ profile_id: "b" });
+    expect(probes).toEqual(["b"]);
+    expect(
+      context.events.find((event) => event.type === "route.account.lane_switch")?.payload,
+    ).toMatchObject({
+      from_profile_id: "a",
+      to_profile_id: "b",
+      reason: "the bound account does not support the requested model",
+    });
+  });
+
+  it("never turns an explicit pin into Auto through unpinned exclusions", async () => {
+    const pinned = profileRow({ profile_id: "a" });
+    const context = ctx({
+      registry: [pinned, profileRow({ profile_id: "b" })],
+      pinnedProfile: pinned,
+      boundProfileId: "a",
+      excludedProfileIds: new Set(["a"]),
+    });
+    await expect(resolveAccountForRun(context)).resolves.toBe(pinned);
+    expect(context.events).toEqual([]);
+  });
+
   it("a condemned bound row re-pools with the DISCLOSED lane switch — never re-discovered by spending an attempt", async () => {
     const context = ctx({
       registry: [profileRow({ profile_id: "a" }), profileRow({ profile_id: "b" })],

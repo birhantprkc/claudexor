@@ -87,6 +87,8 @@ invariant or operator decision before proceeding.
   system (gates, canaries, reviews) is designed to constrain those external
   agents' sessions, not a self. verify: review question on any
   agency-flavored feature proposal.
+  A raw model operation is a separate engine capability, not another agent or
+  conversation mode: its caller owns the system prompt, history and tools.
 
 ## 2. Harnesses Are Not Roles
 
@@ -119,6 +121,17 @@ invariant or operator decision before proceeding.
   deep-scan, delegation). No control that selects an account may narrow the
   harness pool; no strategy knob may pin an account. verify: composer and
   accounts UI review; schema separation of routing vs strategy fields.
+- **INV-014** A model operation performs at most one provider generation.
+  Adapters may prepare managed authorization and discover the exact account's
+  model catalog beforehand, but never retry generation, switch the model,
+  compact the conversation or execute tools. The existing command journal,
+  idempotency, cancellation and shutdown own its lifecycle; no second scheduler
+  or attempt journal is introduced. Status and result reads recover that same
+  operation, and an unknown dispatch outcome is never a never-sent/free claim.
+  Native continuation is retained exactly and bound to its actual account and
+  model. Context metadata comes from that route, not CLI compaction policy;
+  absent limits and costs remain unknown. verify: model-operations,
+  model-routes and harness-codex model/responses tests.
 
 ## 3. Schema Is The Contract
 
@@ -345,6 +358,12 @@ invariant or operator decision before proceeding.
   run may still use a verified API route. verify: adapter auth
   isolation tests; setup capability receipts; routing paid-fallback tests;
   onboarding native-first + composer route-disclosure review question.
+  Raw model calls and Agent runs use the same managed profile. The official
+  CLI owns authorization refresh and persistence; the model adapter reads only
+  current transient access material from that profile. No ambient host login,
+  copied auth store or independent refresh mechanism is introduced. Model
+  account Auto keeps a suitable preferred profile then uses the existing pool;
+  pin never rotates or falls back to an API credential.
 - **INV-062** Raw secrets must not appear in run params, the command journal, task
   contracts, events, summaries, patches, PR text, logs, or docs. The PROMPT
   is included: a secret-like value inside the prompt text is hard-blocked at
@@ -353,6 +372,12 @@ invariant or operator decision before proceeding.
   prompts are durable artifacts and there is deliberately NO bypass flag.
   verify: secret-scan CI step; redaction tests; inline-secret rejection
   tests; canary `[INV-062:prompt-secret-block]`.
+  Model-purpose request/response resources are the narrow content boundary:
+  caller-supplied conversation bytes pass without secret-like-text filtering,
+  just as on a model API. They cannot be used as ordinary Agent attachments.
+  This is not a general bypass flag. Engine OAuth and control credentials are
+  never injected into that content, and the journal retains only compact
+  identities, digests, state, usage and cost evidence, never the conversation.
 - **INV-063** Scoped harness homes/config dirs stay outside every mutation
   worktree, in the external per-project runtime namespace, so `git add -A`
   can never capture auth files, plugin downloads, sqlite logs, or transcripts
@@ -362,6 +387,12 @@ invariant or operator decision before proceeding.
   authority. Upload streams to a temporary file, finalize fsyncs and atomically
   publishes digest-bound immutable bytes, and run/turn requests accept only the
   returned resource IDs. verify: resource-store and control-api upload tests.
+  Model resources use the same upload/blob owner with atomic, replayable
+  finalization. Request bytes are released when the operation terminates;
+  response bytes after explicit digest-bound acknowledgement, or 30 days from
+  readiness if unacknowledged. The compact command receipt survives cleanup:
+  repeat retrieval cannot turn into another generation. Existing maintenance
+  reclaims crash residue; the caller retains conversation history.
 - **INV-065** Every selected lane must declare finite MIME, byte/count and
   transport support for every mandatory attachment. Mixed pools fail before
   enqueue when any selected lane cannot receive the same bytes; adapters verify
@@ -739,47 +770,25 @@ invariant or operator decision before proceeding.
   hand edit). Known failure class this guards: god-files absorbing every
   fix because appending is cheapest. verify:
   `scripts/complexity-ratchet.mjs` in CI.
-- **INV-125** Release tags additionally pass the owner-review gate: ONE
-  parallel full-context wave on the frozen candidate SHA with EXACTLY two
-  independent required reviewers from DISTINCT model families chosen from
-  {`grok-4.6`, `fable-5`, `opus-5`, `gpt-5.6-sol`, `kimi-k3`}.
-  Any harness, including operator subagents or native harness sessions, may
-  execute either neutral slot (`reviewer-1`, `reviewer-2`); vendor-specific
-  slugs and tiers do not require an amendment. This is the operator's
-  2026-08-30 amendment to the former Cursor-only Fable/Sol panel.
-  Slot artifacts are the reviewer's complete report plus exact-shape metadata
-  — declared model family, actual model slug/label and harness, ISO
-  start/finish intervals, verdict, the mandatory
-  `review_scope: "full"`, report SHA-256 — sealed against the packet; real
-  execution overlap stays mandatory; the two reports must be distinct.
-  These are operator-attested identity and execution statements, not a claim
-  that the signature independently proves vendor identity. Preserve available
-  observed-model and run evidence in the report; a requested model or an
-  unidentified Auto route cannot establish an approved family.
-  Each reviewer receives the same complete Git-visible candidate,
-  complete diff, sealed evidence, user dialogue and operator decisions, test and
-  gate receipts, and internet access;
-  packet splitting and unlisted model families cannot satisfy the gate. Then: ONE adjudication under INV-139; ONE batched
-  correction commit; ONE parallel confirmation wave in the same full context,
-  focused on the correction delta. Any tracked mutation re-freezes the
-  candidate. A blocking, missing, malformed, or incomplete
-  required verdict cannot be sealed. Rounds beyond confirmation require an
-  explicit operator decision. The signed schema-v7 operator-review attestation
-  (`owner-review-two-model-families-v1`) binds
-  the candidate SHA/tree/version, exact full-gate receipt, sealed evidence
-  manifest, diff and wave, and both reviewers' model families, concrete models,
-  harnesses, execution
-  intervals, review scopes, report and metadata digests, and non-blocking
-  verdicts. Additional critics remain advisory; any two compliant distinct-family
-  reports may be selected for the signed pair. Schema v2-v6
-  attestations remain
-  cryptographically verifiable only as historical records and are rejected as
-  current publish input.
-  A whole-tree immune scan (docs-vs-code, dead surface,
-  invariants-vs-tree) is a mandatory pre-release checklist step.
-  verify: `scripts/seal-owner-review-attestation.mjs` (panel + round
-  constraints); `verify-release-input.mjs`; CHECKLISTS Release + Review
-  Protocol sections.
+- **INV-125** Repository releases require a complete independent adversarial
+  review of the exact candidate and a disposition of every finding. The
+  responsible maintainer, including an explicitly authorized coding agent,
+  reads the report, verifies accepted findings, and confirms release readiness.
+  Any independent human or AI reviewer may provide the report; no model brand,
+  family pair, concurrent execution interval, or signed review attestation is
+  required. Review covers the complete candidate and accepted intent, not only
+  isolated snippets. Corrections receive focused tests and delta review; another
+  full wave needs a material architectural or authority change, and a third full
+  wave needs an explicit owner checkpoint. Reviewer preference never overrides
+  INV-139. The ordinary PR or CI evidence contains the report and disposition;
+  private user dialogue stays in the private review packet. Publication binds
+  the confirmed candidate to successful CI and promotes those exact artifact
+  bytes. Platform checks belong in CI; local macOS and Cursor sessions are not
+  contributor prerequisites. Historical signed reviews remain verifiable as
+  archives, not current publication authority. Runtime-update signatures,
+  archive identity/checksums, and Apple signing/notarization remain enforced.
+  verify: `scripts/verify-release-input.mjs`; `scripts/release-workflow-check.mjs`;
+  CHECKLISTS Release + Review Protocol sections.
 - **INV-138** Derived surfaces are generated, never hand-maintained:
   operation catalogs, endpoint docs, capability/parity matrices,
   per-subject refresher lists, and similar projections are produced from a

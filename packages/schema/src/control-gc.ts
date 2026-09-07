@@ -22,6 +22,12 @@ export const ControlGcRequest = z
       .boolean()
       .default(false)
       .describe("Report what WOULD be deleted without touching disk."),
+    model_payload_report: z
+      .boolean()
+      .optional()
+      .describe(
+        "Include exact model-purpose resource cleanup outcomes. Cleanup itself always runs; opt-in keeps older strict receipt readers compatible.",
+      ),
     data_root_report: z
       .boolean()
       .optional()
@@ -100,6 +106,16 @@ export const ControlGcReceipt = z
       .optional()
       .describe(
         "Names of top-level entries in the Claudexor-owned data root that the engine does not own and will never touch (advisory only — nothing here is ever deleted). The full sorted list. Present ONLY when the request opted in via data_root_report; ABSENT (not empty) when the request did not opt in, the scan failed, or the serving daemon predates the feature; a scan failure is disclosed in errors instead.",
+      ),
+    model_payloads: z
+      .object({
+        released: z.array(z.string()),
+        errors: z.array(z.string()),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Model resource identifiers released (or would be under dry_run), plus cleanup failures; present only when model_payload_report was requested.",
       ),
   })
   .strict()

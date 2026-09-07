@@ -1,0 +1,419 @@
+{
+  "$ref": "#/definitions/ModelCallResult",
+  "definitions": {
+    "ModelCallResult": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "incomplete",
+            "failed",
+            "unknown"
+          ]
+        },
+        "message": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "system",
+                    "developer",
+                    "user",
+                    "assistant",
+                    "tool"
+                  ]
+                },
+                "content": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": {}
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "tool_call_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Non-empty identifier string."
+                },
+                "tool_calls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_call_id"
+                      },
+                      "type": {
+                        "type": "string",
+                        "const": "function"
+                      },
+                      "function": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "pattern": "\\S",
+                            "description": "User-supplied string that must contain visible content, not just whitespace."
+                          },
+                          "arguments": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "arguments"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "type",
+                      "function"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "nativeContinuation": {
+                  "type": "object",
+                  "properties": {
+                    "route": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_call_id"
+                        },
+                        "credentialProfileId": {
+                          "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_call_id"
+                        },
+                        "accountFingerprint": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "model": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "credentialProfileId",
+                        "accountFingerprint",
+                        "model"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Selected route at dispatch; a result records the actually observed model, or null."
+                    },
+                    "format": {
+                      "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name"
+                    },
+                    "payload": {}
+                  },
+                  "required": [
+                    "route",
+                    "format"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay."
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ],
+              "additionalProperties": false,
+              "description": "Caller-owned conversation message. Text, content blocks, and tool arguments are not redacted or rewritten."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Caller-owned conversation message. Text, content blocks, and tool arguments are not redacted or rewritten."
+        },
+        "route": {
+          "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/nativeContinuation/properties/route"
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "input_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "output_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "cached_input_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "cache_write_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "reasoning_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "description": "Provider-reported counters for one generation; missing counters remain null."
+        },
+        "cost": {
+          "type": "object",
+          "properties": {
+            "knowledge": {
+              "type": "string",
+              "enum": [
+                "exact",
+                "estimated",
+                "unknown"
+              ],
+              "description": "Quality of incremental-cash cost evidence for an operation."
+            },
+            "billing": {
+              "type": "string",
+              "enum": [
+                "proven_zero",
+                "subscription_entitlement",
+                "metered",
+                "unknown"
+              ],
+              "description": "What is actually known about incremental billing; a native credential route alone never proves entitlement or zero cost."
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provenance": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "estimatedUsd": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "cashUsd": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "valuationUsd": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "valuationKnowledge": {
+              "$ref": "#/definitions/ModelCallResult/properties/cost/properties/knowledge",
+              "default": "unknown",
+              "description": "Quality of incremental-cash cost evidence for an operation."
+            }
+          },
+          "required": [
+            "knowledge",
+            "billing",
+            "source",
+            "provenance"
+          ],
+          "additionalProperties": false,
+          "description": "Incremental cash and token valuation are independent; subscription credentials alone never invent a cash receipt."
+        },
+        "appliedOptions": {
+          "type": "object",
+          "properties": {
+            "reasoningEffort": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "serviceTier": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "parallelToolCalls": {
+              "type": "boolean"
+            },
+            "cacheKey": {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/tool_calls/items/properties/function/properties/name",
+              "description": "User-supplied string that must contain visible content, not just whitespace."
+            },
+            "maxOutputTokens": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "temperature": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference."
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "message": {
+                  "type": "string"
+                },
+                "retryable": {
+                  "type": "boolean"
+                },
+                "fieldErrors": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "default": {}
+                },
+                "requiredActions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "default": []
+                },
+                "evidenceRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "default": []
+                },
+                "context": {
+                  "type": "object",
+                  "additionalProperties": {},
+                  "default": {},
+                  "description": "Typed route-specific recovery context; never a duplicate error message."
+                }
+              },
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "message",
+        "route",
+        "usage",
+        "cost",
+        "appliedOptions",
+        "problem"
+      ],
+      "additionalProperties": false,
+      "description": "One provider outcome; completed means a terminal response, never an EOF or a partial tool argument."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -41,6 +41,20 @@ agent. Ouroboros owns its tasks, memory, review, and final integration.
 Claudexor runs the connected coding harnesses and returns durable execution
 evidence. [See Ouroboros in action](https://ouroboros-agent.ai/).
 
+Embedding callers can also make a single model request through a managed Codex
+subscription, using the same account as Agents. The caller supplies its own
+system prompt and tools and executes those tools itself. This is a typed engine
+operation, not a public OpenAI-compatible server or a second agent loop. Model
+catalogs and context limits are account-specific; subscription access does not
+guarantee zero incremental charges or enable provider-paid credits. See
+[model operations](docs/ARCHITECTURE.md#caller-owned-model-operations) for the
+transport, retention and unsupported-parameter contract.
+
+Thanks to [Praxis Relay](https://github.com/josephsteuerjr/praxis-relay) and
+[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) for prior work exploring
+subscription-backed model transports. They informed this design; neither runs as
+an embedded relay or owns credentials in this integration.
+
 If you use Claudexor — or you are an agent whose human does — a
 [star](https://github.com/razzant/claudexor/stargazers) is the one-click way
 to say it works.
@@ -786,8 +800,9 @@ pnpm docs:check   # docs-truth gate: endpoints, mode ids, CLI flags vs source
 pnpm knip         # dead exports/files gate
 ```
 
-`pnpm release:verify` runs Node/schema checks, Swift tests/build, and local
-app ZIP/DMG packaging for smoke. Final GitHub Release assets are built by the
+`pnpm release:verify` runs the portable Node/schema gate; native platform and
+packaging checks run in CI. See [Development](docs/DEVELOPMENT.md#development-commands)
+for the optional local macOS gate. Final GitHub Release assets are built by the
 `Release` GitHub Actions workflow in `candidate` mode for an exact full SHA,
 then in `publish` mode for the reviewed annotated tag. Do not upload stale
 local `apps/macos/dist` artifacts.

@@ -1,5 +1,5 @@
 import type { CredentialUnusableObservation, QuotaSnapshot } from "@claudexor/schema";
-import { quotaSnapshotAvailability } from "@claudexor/schema";
+import { ControlProblem, quotaSnapshotAvailability } from "@claudexor/schema";
 
 /**
  * THE live-observation matcher (A7): does a typed `credential_unusable`
@@ -219,24 +219,53 @@ export function credentialPoolExhausted(args: {
       ? limits.reduce((earliest, at) => (Date.parse(at) < Date.parse(earliest) ? at : earliest))
       : null;
   const subject = args.profileId ? `profile "${args.profileId}"` : "the default credentials";
-  return Object.assign(
-    new Error(
-      `credential pool exhausted for "${args.harnessId}": ${subject} hit ${
-        args.reason === "structural_pre_progress_failure"
-          ? "a terminal pre-progress failure"
-          : "a vendor limit"
-      } and none of ${args.candidates.length} registered candidate(s) can take over` +
-        (args.subjectUnusable
-          ? `; the subject's credential itself was observed unusable (${args.subjectUnusable.code})`
-          : "") +
-        (resetsAt ? `; earliest pool reset ${resetsAt}` : ""),
+  // Compact typed causes, not a claim inferred from "pool exhausted" prose.
+  // Disabled/model-incompatible rows cannot become usable by quota or login.
+  const poolCauses = [
+    ...new Set(
+      args.candidates
+        .filter(
+          (candidate) =>
+            ![
+              "disabled",
+              "model_incompatible",
+              "not_in_rotation_policy",
+              "credential_kind_mismatch",
+            ].includes(candidate.rejected),
+        )
+        .map((candidate) =>
+          candidate.unusable?.code === "auth_revoked"
+            ? "auth"
+            : !candidate.unusable &&
+                POOL_MEMBER_REJECTIONS.has(candidate.rejected) &&
+                (candidate.headroom || candidate.cooldown)
+              ? "quota"
+              : "unavailable",
+        ),
     ),
-    {
-      code: "credential_pool_exhausted",
-      // Not `internal`: nothing malfunctioned. No account in the pool can
-      // serve this run until a window reopens (harness_unavailable).
-      category: "harness_unavailable",
-      resetsAt,
-    },
+  ];
+  const error = new Error(
+    `credential pool exhausted for "${args.harnessId}": ${subject} hit ${
+      args.reason === "structural_pre_progress_failure"
+        ? "a terminal pre-progress failure"
+        : "a vendor limit"
+    } and none of ${args.candidates.length} registered candidate(s) can take over` +
+      (args.subjectUnusable
+        ? `; the subject's credential itself was observed unusable (${args.subjectUnusable.code})`
+        : "") +
+      (resetsAt ? `; earliest pool reset ${resetsAt}` : ""),
   );
+  return Object.assign(error, {
+    code: "credential_pool_exhausted",
+    // Not `internal`: nothing malfunctioned. No account in the pool can
+    // serve this run until a window reopens (harness_unavailable).
+    category: "harness_unavailable",
+    resetsAt,
+    problem: ControlProblem.parse({
+      code: "credential_pool_exhausted",
+      message: error.message,
+      retryable: false,
+      context: { poolCauses, resetsAt },
+    }),
+  });
 }

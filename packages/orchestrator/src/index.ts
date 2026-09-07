@@ -7,5 +7,9 @@ export {
   probeCredentialProfileStatus,
   profileStatusAdmits,
   vendorVerifiedProfileStatus,
+  vendorCredentialObservation,
+  resolveCredentialProfile,
 } from "./credential-profiles.js";
 export { selectFromAccountPool } from "./account-pool.js";
+export { resolveAccountForRun } from "./account-resolution.js";
+export { differentialSubjectVerdict } from "./credential-differential.js";

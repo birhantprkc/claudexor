@@ -9,6 +9,11 @@
           "minLength": 1,
           "description": "Non-empty identifier string."
         },
+        "purpose": {
+          "type": "string",
+          "const": "model",
+          "description": "Immutable model-operation purpose; absent means a legacy or ordinary attachment."
+        },
         "kind": {
           "type": "string",
           "enum": [

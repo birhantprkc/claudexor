@@ -46,18 +46,17 @@ steps:
 pnpm release:verify:node
 ```
 
-On macOS, `pnpm release:verify` additionally runs the Swift and local app
-packaging checks. CI remains authoritative for signed/notarized artifacts.
+The same portable gate is available as `pnpm release:verify`. Platform-specific
+Swift, native-helper, and packaging checks run in CI. On macOS,
+`pnpm release:verify:macos` additionally exercises the local app; contributors
+need neither a Mac nor a Cursor installation to open a PR.
 
-Review authority is the cumulative diff on an exact, clean, committed and
-frozen candidate SHA, reviewed under the Owner-review release protocol in
-[`docs/CHECKLISTS.md`](docs/CHECKLISTS.md) (the distinct-family
-full-context reviewer pair that protocol defines, any harness, one wave plus one
-confirmation wave under
-the owner's decision, sealed schema-v7 attestation — Bible INV-125); any tracked
-mutation invalidates the evidence
-and requires a new freeze. Claudexor intentionally has no per-commit review
-hook or staged-diff review authority.
+Review authority is the cumulative diff on an exact candidate under the
+[Release review protocol](docs/CHECKLISTS.md#release-review-protocol-inv-125inv-139):
+a complete independent report, dispositions, and confirmation by the responsible
+maintainer. No model-brand pair, timing overlap, or review signature is required.
+Changes after review need testing and review of the affected delta, not a
+ceremonial restart of unchanged evidence. There is no per-commit review hook.
 
 Reviewer findings are hypotheses, not patches to apply on trust. Reproduce an
 accepted issue, trace its root and canonical owner, search sibling surfaces,
@@ -67,8 +66,8 @@ candidate and evidence so architecture stays visible; do not trade that context
 for many tiny batches.
 
 **External contributors:** the CI gate suite above is what your PR must pass.
-The maintainer runs the frozen-SHA owner-review wave; contributors are not
-expected to run or pay for it.
+The maintainer owns release review and confirmation; contributors are not
+expected to buy particular subscriptions or fund release review.
 
 Contributions are accepted under the repository's MIT license
 (inbound = outbound); by opening a PR you license your change under MIT.

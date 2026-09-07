@@ -1179,6 +1179,64 @@ Runs one selected compatible harness read-only with `intent: audit` and writes
 
 ## 7. Control API
 
+### Caller-owned model operations
+
+The engine also accepts one raw model generation independently of Agent Runs.
+`ModelAdapter` in core and the model-operation schemas define caller-owned
+messages, function tools, tool choice, generation options, account selection,
+native continuation and the observed result. The caller keeps its system prompt,
+conversation, tool execution and cognitive loop. No Run, Thread, plan, workspace,
+review loop, model fallback or internal compaction is created for this capability.
+
+The Codex transport lives in `harness-codex`. It uses a selected managed ChatGPT
+profile, the official CLI for an expired-token refresh, and the raw account's
+model catalog. In-process refresh work is serialized by canonical managed home;
+cancelled callers cannot release another caller past a still-live refresh. Each
+caller rereads current authorization. Selection hands its exact-profile catalog
+to this operation's invocation, which rechecks the current account fingerprint;
+no catalog or credentials are cached across operations. Unknown fingerprints
+retain fresh discovery and cannot authorize native continuation reuse.
+Its single inference POST follows a durable dispatch receipt.
+Responses SSE is translated structurally, including image blocks, original tool
+IDs and complete native output items. Unknown model/window/usage/cash remains
+unknown; `maxOutputTokens` and `temperature` are explicit unsupported options,
+not silently dropped. CLI compaction percentages do not reduce catalog capacity.
+Other installed harnesses remain Agent capabilities, not raw model sources.
+
+`ModelOperations` uses the existing daemon command store, idempotency lookup,
+queue capacity, cancellation and terminal boundary. Models and Agents share the
+regular slots described in [Main Execution Paths](#6-main-execution-paths); a
+running model generation occupies one until it settles or is cancelled. Model commands do not appear
+as Agent Runs. The journal contains content hashes and resource references, not
+the full conversation. A model-purpose upload uses `ResourceStore`'s atomic
+finalization; its contents are not filtered for secret-like text, and it cannot
+be resolved as an ordinary Agent attachment. Engine authorization never enters
+the model payload. This narrow content boundary is INV-062, not a general bypass.
+
+Result GET returns exact digest-bound bytes without acknowledging them. A client
+accepts custody before ACK; a lost local reply is recovered using the same
+operation identity. Request bytes are released at terminal state, response bytes
+after ACK, and unacknowledged responses after 30 days from readiness. Existing
+maintenance reclaims crash residue. Redundant uploads on an idempotent create are
+released without touching another live command's input. Compact model receipts
+and idempotency bindings are excluded from Agent history age/cap pruning, so an expired or
+acknowledged result cannot accidentally trigger another generation. A provider
+refusal, an operation that never dispatched and an unknown outcome after engine
+death are separate facts. A crash after response bytes are published but before
+the command's terminal journal commit retains an unknown outcome; uncommitted
+bytes cannot certify a completed response and are reclaimed as crash residue.
+
+The operation catalog and generated endpoint reference below are the wire SSOT.
+Account Auto reuses the existing compatible pool, preferring the prior suitable
+profile; explicit pin never rotates. A failed quota observation feeds that same
+pool's existing quota owner, without a second retry planner or account store.
+Pool refusal is projected from typed per-account causes: an all-quota pool is
+`subscription_window_exhausted`, an all-authentication pool is `auth_required`,
+and a mixed, unknown, empty or disabled pool remains unavailable with its compact
+`poolCause` evidence. The generic `credential_pool_exhausted` code alone does not
+prove quota exhaustion. Catalog polling obeys the same current quota admission
+without starting a generation.
+
 The daemon is the durable scheduler. `DaemonServer` requires an injected durable
 command authority and has no in-memory command-record fallback. The HTTP control API is a live viewport and
 artifact/delivery facade. Every implemented operation is declared once as a
@@ -1237,6 +1295,13 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/harnesses/:id/auth-readiness`
 - `GET /v2/harnesses/:id/models`
 - `POST /v2/maintenance/gc`
+- `POST /v2/model-operations`
+- `GET /v2/model-operations/:id`
+- `POST /v2/model-operations/:id/ack`
+- `POST /v2/model-operations/:id/control`
+- `GET /v2/model-operations/:id/result`
+- `GET /v2/model-sources`
+- `GET /v2/model-sources/:id/models`
 - `GET /v2/operations`
 - `GET /v2/projects`
 - `POST /v2/projects`
@@ -2565,45 +2630,15 @@ as last-wins `plan.progress` run events and projected on the run detail as
 `planProgress`; per-candidate evidence cards are projected on the run
 detail as `candidates` from attempt/review/decision artifacts.
 
-Repository release review is cumulative and SHA-bound. The panel reviews the
-exact clean committed candidate against the checklists and docs; any tracked
-mutation invalidates every result and starts a new freeze. The formal pair
-uses neutral slots `reviewer-1` and `reviewer-2` with distinct owner-approved
-model families on any harness (INV-125). The signed schemaVersion-7 attestation
-(protocol `owner-review-two-model-families-v1`) binds
-the candidate SHA/tree/version, the exact full-gate receipt, the sealed
-evidence manifest/diff/wave, and both reviewer entries. Each slot's artifact
-directory (`NN-<slot>/`) carries `report.md` plus an exact-shape
-`metadata.json` whose fields are operator-attested: the declared model family,
-actual model slug/label and harness, exact ISO
-start/finish intervals that must genuinely overlap, a
-`pass|warn` verdict, the mandatory `review_scope: "full"`, and the report's
-SHA-256. The sealer does not launch any review CLI; it recomputes every
-digest and refuses anything missing, extra, malformed, or mismatched.
-Schemas v2-v6 are archival only:
-already-sealed attestations stay signature-verifiable for their releases,
-never as new publish input. The operational protocol — panel composition, wave
-discipline, blocker contract, and round bound — is defined ONCE in
-`docs/CHECKLISTS.md` (Release review protocol); this map does not restate it. The old per-commit
-staged-diff hook, bypass log, and installer are removed so they cannot compete
-with or be mistaken for release authority. Product command `claudexor review
---diff <file>` remains a normal engine capability; it is not this repository's
-release attestation.
-
-After exact `pnpm release:verify` passes, the gate builds a small
-self-contained verifier from tracked candidate sources and copies the packaged
-app's self-contained CLI, binding both byte digests into its receipt. The
-sealer never executes that copied CLI — it travels only as
-receipt-bound bytes — and the sealer imports only the receipt-verified
-verifier bytes rather than mutable workspace `dist`. The sealer re-verifies
-the sealed evidence packet against the candidate SHA/tree, the exact
-base..candidate diff byte-for-byte, the byte-identical receipt inside the
-packet, every reviewer artifact digest, and the interval overlap before
-signing. The slot metadata itself — model family, concrete model, harness,
-intervals, verdict, scope — remains operator-attested, not independent vendor
-identity proof. Available observed-model telemetry and run references stay in
-the reports; requested slugs and unidentified Auto routes cannot establish an
-approved family. The current owner amendment is in `docs/CHECKLISTS.md`.
+Repository release review is independent of the product's internal review
+engine. Current publication accepts a reference to the complete independent
+report and dispositions plus the responsible maintainer's confirmation, and
+binds the release to its exact successful CI candidate. The protocol is defined
+in [CHECKLISTS](CHECKLISTS.md#release-review-protocol-inv-125inv-139); no local
+per-commit hook, named model pair, timing overlap or signed review envelope is
+required. Historical signature contracts remain readable through the archived
+review verification helpers. Product reviewer selection, cross-family gates,
+arbitration and delivery rules above remain unchanged.
 
 Runtime resilience is typed. Adapters translate native transient failures
 (network lookup failures, stream disconnects, retryable HTTP statuses, timeouts)
@@ -3034,8 +3069,12 @@ resources: the bundled daemon, the setup-login runner, the Browser MCP
 deployment, the native process-identity helper, and the reviewed operator CLI
 used by embedding hosts. App-owned Node, UI, and icons stay outside the
 closure, so a Node bump ships a new signed DMG.
-Each release also publishes a **signed** `runtime-manifest.json` built straight
-from the signed app bundle by `scripts/build-runtime-closure.mjs`. The builder materializes
+Each release also publishes a **signed** `runtime-manifest.json`. The independent
+`scripts/build-engine-resources.sh` stage bundles the engine; on Darwin, it signs
+native helpers before both the app and `scripts/build-runtime-closure.mjs` consume
+that same tree. Linux stages omit Darwin helpers and cannot produce the universal
+update closure. The app does not re-sign those helpers; CI compares every engine
+entry after app signing/notarization. The closure builder materializes
 internal package links into regular files/directories, rejects links escaping
 their closure entry, special files, and `.node` addons, and suppresses macOS
 AppleDouble sidecars. The shipped file bytes therefore come from the exact app
@@ -3094,7 +3133,7 @@ the operator's global daemon uses its own `CLAUDEXOR_CONFIG_DIR` rather than
 replacing another owner's process.
 
 **Signed-manifest authority (D-2).** The manifest is signed by a DEDICATED
-offline Ed25519 runtime-update key, SEPARATE from the review-attestation key and
+offline Ed25519 runtime-update key, separate from historical review keys and
 pinned in `release/runtime-update-authority.json`. There is ONE canonical
 manifest contract — the release-tooling mirror
 `scripts/lib/runtime-manifest-contract.mjs` and the in-package TS contract
@@ -3126,10 +3165,11 @@ pinned key, its `sha256` byte-matches the promoted tarball, and its non-secret
 fields equal the candidate's unsigned manifest — so the shipped closure is
 byte-for-byte the reviewed one. A wrong or expired (14-day retention)
 `candidate_run_id` fails the download. `scripts/release-workflow-check.mjs`
-enforces this wiring; the two authority files (review vs runtime-update) can
-never be the same key. The same A-5 boundary covers the release application:
+enforces this wiring. Runtime-update signing remains separate from the archived
+review-signature authority; archived review signatures cannot authorize current
+publication. The same A-5 boundary covers the release application:
 publish verifies and promotes the candidate DMG, ZIP, and SBOM byte-for-byte;
-only the signed runtime manifest, review attestation, and final checksum set are
+only the signed runtime manifests and final checksum set are
 created by the publish run.
 
 **Install flow.** One click (bottom-left chip → Install) runs
@@ -3205,7 +3245,7 @@ the closure.
   signature fail-closed → compare `version` to the running engine and gate on
   `minAppVersion` → surface "Update available → vX.Y.Z" with an Install action.
   There is no background update timer.
-- **Build-sha stamping (QA-002).** `build-app.sh` stamps `CLAUDEXOR_BUILD_SHA`
+- **Build-sha stamping (QA-002).** `build-engine-resources.sh` stamps `CLAUDEXOR_BUILD_SHA`
   into the esbuild daemon and CLI bundles via `--define`, and
   `build-runtime-closure.mjs` embeds the SAME sha in the manifest and refuses to
   ship either unstamped bundle, so
