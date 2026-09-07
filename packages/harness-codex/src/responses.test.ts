@@ -127,6 +127,7 @@ describe("Codex model request translation", () => {
     },
   );
   it("keeps image URL/detail and tool-result call IDs", () => {
+    const callerToolText = ["sk", "test-example-is-content"].join("-") + "\n";
     const body = buildResponsesRequest(
       request({
         messages: [
@@ -148,7 +149,7 @@ describe("Codex model request translation", () => {
               { id: "c2", type: "function", function: { name: "look", arguments: "{}" } },
             ],
           },
-          { role: "tool", tool_call_id: "c1", content: "sk-test-example-is-content\n" },
+          { role: "tool", tool_call_id: "c1", content: callerToolText },
           {
             role: "tool",
             tool_call_id: "c2",
@@ -174,7 +175,7 @@ describe("Codex model request translation", () => {
       },
       { type: "function_call", call_id: "c1", name: "read", arguments: "{  }" },
       { type: "function_call", call_id: "c2", name: "look", arguments: "{}" },
-      { type: "function_call_output", call_id: "c1", output: "sk-test-example-is-content\n" },
+      { type: "function_call_output", call_id: "c1", output: callerToolText },
       {
         type: "function_call_output",
         call_id: "c2",

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -53,7 +53,7 @@ async function fixture(
   invoke?: ModelAdapter["invoke"],
   history: { maxHistory?: number; idempotencyRetentionMs?: number } = {},
 ) {
-  const root = mkdtempSync(join(tmpdir(), "cx-mo-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cx-mo-")));
   let clock = new Date();
   const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
   const store = new CommandStore(journal, () => clock);
