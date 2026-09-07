@@ -20,7 +20,7 @@ class FakeHandle implements SetupLifecycleHandle {
     this.events.push(`start:${this.generation}`);
   }
 
-  list(): readonly unknown[] {
+  list(): ReturnType<SetupLifecycleHandle["list"]> {
     return [];
   }
 

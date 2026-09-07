@@ -1,8 +1,12 @@
 import { JournalRecoveryRequiredError } from "@claudexor/journal";
+import type { ControlSetupJob } from "@claudexor/schema";
+import { hasUnconfirmedSetupTermination } from "./setup-job-reducer.js";
 
 export interface SetupLifecycleHandle {
   start(): Promise<void>;
-  list(filter: { active: true }): readonly unknown[];
+  list(filter: {
+    active: boolean;
+  }): ReadonlyArray<Pick<ControlSetupJob, "outcome" | "terminationReconciliation">>;
   beginDrain(): void;
   shutdown(): Promise<void>;
 }
@@ -79,7 +83,11 @@ export class SetupLifecycleBinding<TStore, THandle extends SetupLifecycleHandle>
    * or recovery-blocked generation throws so the caller fails closed as
    * activity-unknown rather than treating absence as idle. */
   hasActiveWork(): boolean {
-    return this.current().list({ active: true }).length > 0;
+    const setup = this.current();
+    return (
+      setup.list({ active: true }).length > 0 ||
+      setup.list({ active: false }).some(hasUnconfirmedSetupTermination)
+    );
   }
 
   beginDrain(): void {

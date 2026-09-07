@@ -46,6 +46,8 @@ import {
   resolveSetupLoginRunnerPath,
 } from "./setup-job-support.js";
 import { createSetupJobManager } from "./setup-jobs.js";
+import { SetupLifecycleBinding } from "./setup-lifecycle-binding.js";
+import { DaemonRuntimeShutdown } from "./daemon-runtime-shutdown.js";
 
 let root: string;
 let codexBinary: string;
@@ -1545,14 +1547,36 @@ describe("setup jobs", () => {
       processGroups: group.service,
       monitorPollMs: 1,
     });
-    await manager.start();
+    const binding = new SetupLifecycleBinding(
+      { current: () => manager._store, generation: () => 1 },
+      () => manager,
+    );
+    await binding.start();
+    const stopped: string[] = [];
+    const runtime = new DaemonRuntimeShutdown({
+      setup: binding,
+      daemon: { stop: async () => void stopped.push("daemon") },
+      control: () => ({ stop: async () => void stopped.push("control") }),
+      journal: { close: () => manager._store.journal.close() },
+      forceExit: () => undefined,
+    });
+    const expectReplacementBusy = () => {
+      expect(() => runtime.beginRuntimeReplacement()).toThrowError(
+        expect.objectContaining({ code: "runtime_replacement_busy" }),
+      );
+      expect(runtime.requested()).toBe(false);
+      expect(stopped).toEqual([]);
+      expect(manager._supervisorHealth().state).toBe("healthy");
+    };
     const job = manager.create(LOGIN_REQUEST);
+    expectReplacementBusy();
     writeRunnerStateV2(manager, job.jobId, leader);
     await waitForPhase(manager, job.jobId, "awaiting_user");
     group.setObserved(knownLeader(21, "darwin:1710000001:000021"));
     const result = await manager.cancel({ jobId: job.jobId });
     expect(result.outcome?.reason).toBe("termination_unconfirmed");
     expect(group.signals).toEqual([]);
+    expectReplacementBusy();
     expect(manager.create(LOGIN_REQUEST).jobId).toBe(job.jobId);
     expect(() => manager.reconcile({ jobId: job.jobId })).toThrow(/not proven empty/);
     group.setObserved({ status: "missing", pid: leader.pid, platform: "darwin" });
@@ -1562,8 +1586,16 @@ describe("setup jobs", () => {
       terminationReconciliation: { status: "empty" },
     });
     expect(manager.reconcile({ jobId: job.jobId })).toEqual(reconciled);
-    expect(manager.create(LOGIN_REQUEST).jobId).not.toBe(job.jobId);
-    await manager.shutdown();
+    expect(binding.hasActiveWork()).toBe(false);
+    const next = manager.create(LOGIN_REQUEST);
+    expect(next.jobId).not.toBe(job.jobId);
+    expectReplacementBusy();
+    await manager.cancel({ jobId: next.jobId });
+    expect(binding.hasActiveWork()).toBe(false);
+    const stopping = runtime.beginRuntimeReplacement();
+    expect(runtime.requested()).toBe(true);
+    expect(stopped).toEqual(["control", "daemon"]);
+    await stopping;
   });
 
   it.each(["cancel", "timeout"] as const)(
