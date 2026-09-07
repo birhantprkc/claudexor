@@ -499,31 +499,38 @@ describe("ThreadStore", () => {
   });
 
   it("accountBindings/resumeMapAuto: the thread's own lane evidence binds unpinned turns (D-U1 order 2)", () => {
-    const { s } = store();
-    const t = s.createThread({ repoRoot: "/tmp/proj" });
-    const turn = s.createTurn(t.id, "turn");
-    // No evidence yet: nothing binds.
-    expect(s.accountBindings(t.id)).toEqual({});
-    expect(s.resumeMapAuto(t.id)).toEqual({});
-    // A null-profile lane (unmigrated legacy state) binds nothing.
-    s.recordSession(t.id, "claude", "native-null", null, null);
-    expect(s.accountBindings(t.id)).toEqual({});
-    // The latest LIVE session per harness is the binding; the auto resume map
-    // carries each entry's own profile for engine-boundary re-verification.
-    s.recordSession(t.id, "codex", "native-a", null, "codex-a");
-    s.recordSession(t.id, "codex", "native-b", null, "codex-b");
-    expect(s.accountBindings(t.id)["codex"]).toBe("codex-b");
-    expect(s.resumeMapAuto(t.id)["codex"]).toEqual({
-      sessionId: "native-b",
-      profileId: "codex-b",
-    });
-    // A lane checkpoint alone (read-only lane that never emitted a session id)
-    // also binds its harness.
-    s.recordLaneCheckpoint(t.id, "cursor", "cursor-work", turn.id);
-    expect(s.accountBindings(t.id)["cursor"]).toBe("cursor-work");
-    // Another thread's evidence never leaks in.
-    const other = s.createThread({ repoRoot: "/tmp/other" });
-    expect(s.accountBindings(other.id)).toEqual({});
+    vi.useFakeTimers({ now: new Date("2026-09-07T00:00:00Z"), toFake: ["Date"] });
+    try {
+      const { s } = store();
+      const t = s.createThread({ repoRoot: "/tmp/proj" });
+      const turn = s.createTurn(t.id, "turn");
+      // No evidence yet: nothing binds.
+      expect(s.accountBindings(t.id)).toEqual({});
+      expect(s.resumeMapAuto(t.id)).toEqual({});
+      // A null-profile lane (unmigrated legacy state) binds nothing.
+      s.recordSession(t.id, "claude", "native-null", null, null);
+      expect(s.accountBindings(t.id)).toEqual({});
+      // The latest LIVE session per harness is the binding; the auto resume map
+      // carries each entry's own profile for engine-boundary re-verification.
+      s.recordSession(t.id, "codex", "native-a", null, "codex-a");
+      // The contract is the latest timestamp, not insertion order for ties.
+      vi.setSystemTime(Date.now() + 1);
+      s.recordSession(t.id, "codex", "native-b", null, "codex-b");
+      expect(s.accountBindings(t.id)["codex"]).toBe("codex-b");
+      expect(s.resumeMapAuto(t.id)["codex"]).toEqual({
+        sessionId: "native-b",
+        profileId: "codex-b",
+      });
+      // A lane checkpoint alone (read-only lane that never emitted a session id)
+      // also binds its harness.
+      s.recordLaneCheckpoint(t.id, "cursor", "cursor-work", turn.id);
+      expect(s.accountBindings(t.id)["cursor"]).toBe("cursor-work");
+      // Another thread's evidence never leaks in.
+      const other = s.createThread({ repoRoot: "/tmp/other" });
+      expect(s.accountBindings(other.id)).toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("unified-accounts migration rewrites null sessions/checkpoints onto the row id as ONE unit (INV-137)", () => {

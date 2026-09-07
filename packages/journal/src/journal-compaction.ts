@@ -58,7 +58,8 @@ export function compactJournalFile(input: {
   if (Buffer.byteLength(serialized, "utf8") > MAX_COMPACTED_LOGICAL_BYTES) return null;
   let compressed: Buffer;
   try {
-    compressed = gzipSync(Buffer.from(serialized));
+    // Stop producing a snapshot once it cannot fit the existing frame cap.
+    compressed = gzipSync(Buffer.from(serialized), { maxOutputLength: MAX_PAYLOAD_BYTES });
   } catch (error) {
     if (isCompactionCapacityError(error)) return null;
     throw error;

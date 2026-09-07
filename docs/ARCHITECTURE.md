@@ -204,7 +204,16 @@ at every wire boundary.
   a time. Replay bounds decompressed output, and opportunistic compaction leaves
   the existing frames untouched when a replacement cannot be materialized within
   that bound, so a large valid history remains readable and startup stays ready.
+  Compression also stops at the existing frame output cap; the base64/JSON
+  envelope is checked separately. Constructor and prepared-activation maintenance
+  triggers remain active. Projection reads can select exact record types before
+  payload copying without changing full-history reads, sequence numbers or cursors.
 - `packages/daemon`: durable local queue (Unix socket on POSIX, named pipe on win32) and journal projections for commands, projects, and threads.
+  Project projections select their own record types; run-event history is validated
+  once per projection creation through its descriptor. Direct RunEventStore
+  construction still validates by default. Preparation and post-open activation
+  retain their content/path identity checks; startup still performs synchronous
+  work proportional to journal history.
 - `packages/cli`: thin command surface plus local host-integration lifecycle
   (`claudexor plugin`) for generated Claude Code/Codex/Cursor/OpenCode
   skill/MCP artifacts and command artifacts where hosts support them. Plugin

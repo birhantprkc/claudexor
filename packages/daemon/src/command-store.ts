@@ -150,7 +150,7 @@ export class CommandStore {
   }
 
   private replay(): void {
-    for (const entry of this.journal.records()) {
+    for (const entry of this.journal.records(0, [ACCEPTED, UPDATED, PRUNED])) {
       if (entry.type === ACCEPTED) {
         const payload = entry.payload as AcceptedCommand;
         validateRecord(payload.record);
@@ -258,7 +258,7 @@ export class CommandStore {
 
   private durableTerminalEvents(): Map<string, RunEvent> {
     const terminals = new Map<string, RunEvent>();
-    for (const entry of this.journal.records()) {
+    for (const entry of this.journal.records(0, ["run.event"])) {
       if (entry.type !== "run.event") continue;
       const event = RunEventSchema.parse(entry.payload);
       if (
