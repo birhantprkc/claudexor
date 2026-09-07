@@ -48,13 +48,15 @@ describe.skipIf(process.platform !== "win32")("Win32 ConPTY helper integration",
     expect(result.code).toBe(0);
     expect(result.signal).toBeNull();
     expect(result.stderr).toMatch(new RegExp(`^${protocol}\\tstarted\\t[1-9][0-9]*\\r?\\n$`));
-    const decoded = stripTerminalEscapes(result.stdout)
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("ARG\t"))
-      .map((line) => {
-        const fields = line.split("\t");
-        return decodeUtf16Hex(fields[3] ?? "");
-      });
+    // Real console output expands tabs and wraps long hex fields at the viewport.
+    const frames = stripTerminalEscapes(result.stdout).replace(/[\r\n]/g, "");
+    const decoded = [...frames.matchAll(/ARG\|(\d+)\|(\d+)\|([0-9A-F]*)\|END/g)].map(
+      (fields, index) => {
+        expect(Number(fields[1])).toBe(index);
+        expect(fields[3]!.length).toBe(Number(fields[2]) * 4);
+        return decodeUtf16Hex(fields[3]!);
+      },
+    );
     expect(decoded).toEqual([fixture, "--argv", ...values]);
   });
 
@@ -238,8 +240,8 @@ function parseConsoleState(
   windowVisible: boolean;
   coninAvailable: boolean;
 } {
-  const match = new RegExp(`^${label}\\t([0-9]+)\\t([01])\\t([01])\\t([01])\\r?\\n?$`).exec(
-    stripTerminalEscapes(output),
+  const match = new RegExp(`^${label}\\|([0-9]+)\\|([01])\\|([01])\\|([01])\\|END$`).exec(
+    stripTerminalEscapes(output).trim(),
   );
   if (!match) throw new Error(`invalid ${label} console state`);
   return {
@@ -271,7 +273,7 @@ async function observeWorkerTreePids(child: ChildProcessWithoutNullStreams): Pro
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       const worker = /WORKER\t([1-9][0-9]*)\t([1-9][0-9]*)/.exec(stdout);
-      const vendor = /PIDS\t([1-9][0-9]*)\t([1-9][0-9]*)/.exec(stdout);
+      const vendor = /PIDS\|([1-9][0-9]*)\|([1-9][0-9]*)\|END/.exec(stdout);
       if (!worker || !vendor) return;
       clearTimeout(timer);
       resolvePids({

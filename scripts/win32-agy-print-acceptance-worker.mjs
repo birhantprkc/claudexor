@@ -589,7 +589,7 @@ function readEvidence(home) {
 }
 
 function parsePidLine(output) {
-  const match = /PIDS\t([1-9][0-9]*)\t([1-9][0-9]*)/.exec(output);
+  const match = /PIDS\|([1-9][0-9]*)\|([1-9][0-9]*)\|END/.exec(output);
   if (!match) throw new Error("hanging fake agy did not disclose exact PIDs");
   return { vendor: Number(match[1]), descendant: Number(match[2]) };
 }
