@@ -26,11 +26,7 @@ const profile = (changes: Record<string, unknown> = {}) =>
     harness_id: "codex",
     display_name: "Work",
     credential_kind: "config_dir_login",
-    isolation_locator: join(
-      realpathSync.native(process.env.CLAUDEXOR_CONFIG_DIR!),
-      "profiles",
-      "work",
-    ),
+    isolation_locator: join(realpathSync(process.env.CLAUDEXOR_CONFIG_DIR!), "profiles", "work"),
     ...changes,
   });
 
