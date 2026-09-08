@@ -9,6 +9,9 @@ on GitHub Releases.
   login retains its terminal. Ambiguous authentication timeouts remain probe
   failures, and failed quota refreshes remain visible alongside stale data.
   Existing freshness windows, account routing and polling cadence are unchanged.
+  Windows interactive login now binds child standard streams to the pseudoconsole
+  instead of inherited parent pipes; native fixtures require the exact submitted
+  input before reporting success.
 - **v3.10.0** (2026-09-07): adds caller-owned Codex model operations using the
   same managed accounts as Agents. Applications retain their system prompts,
   conversation history and tool execution; the engine preserves exact payloads,
