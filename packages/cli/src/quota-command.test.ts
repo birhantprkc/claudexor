@@ -72,7 +72,9 @@ describe("quotaCommand", () => {
     );
 
     expect(await quotaCommand(parseArgs([]), false)).toBe(0);
-    expect(mocks.print).toHaveBeenCalledWith("codex/work: no snapshot — not_logged_in (no login)");
+    expect(mocks.print).toHaveBeenCalledWith(
+      "codex/work: no fresh snapshot — not_logged_in (no login)",
+    );
   });
 
   it("passes absences through --json", async () => {

@@ -288,8 +288,8 @@ export function subjectCoverSets(active: readonly QuotaSnapshot[]): {
 
 /** Pure absence fold for one cycle (V11a semantics): preserved out-of-scope
  * rows first, then first-claim-wins claims, then `no_source` for uncovered
- * in-scope universe subjects. Gap-representation claims ("deliberately not
- * asked": rate_limited and its skip siblings) are silenced only by a FRESH
+ * in-scope universe subjects. Failed, skipped, or paced refresh claims are
+ * silenced only by a FRESH
  * snapshot — a stale one is exactly the state the gap row explains, and
  * dropping the row there would let a stale spent window read as exhausted
  * downstream. */

@@ -2064,7 +2064,9 @@ executable image (`.exe`/`.com`) resolves, so an npm `.cmd`/shell shim is
 refused with the install advisory rather than launched through `cmd.exe`.
 Terminal-stdin setup wraps that exact image with the adjacent ConPTY helper
 only after its real `--probe` succeeds; doctor/quota print probes instead use
-a detached, console-free runner with ignored stdin. Their bounded reaper
+a detached, console-free runner with piped stdin closed immediately. A null
+device is insufficient because the vendor treats character devices as interactive
+input. Their bounded reaper
 and passive registry retain normal cancellation and unconfirmed-child custody.
 An ordinary daemon
 stop/restart no longer terminates an awaiting-user login runner (that regression
@@ -2459,10 +2461,10 @@ exponential ladder and the vendor's Retry-After when one was sent — kept in
 daemon-private pacer state, never the quota journal (a throttled poll is
 pacing evidence, not an exhausted window), so a daemon restart is not a 429
 amplifier; a credential change resets only the demand backoff, never the
-floor. A suppressed poll never falls silent: gap-representation absences
-(`rate_limited`, `probe_skipped_rate_limited`, `poll_paced`) are silenced
-only by a FRESH snapshot — stale last-known data and the "not re-asked" fact
-stay visible together — and while a lane's floor is active every universe
+floor. Failed or suppressed refreshes remain explained alongside stale data:
+refresh-gap absences (`refresh_failed`, `rate_limited`,
+`probe_skipped_rate_limited`, `poll_paced`) are silenced only by a FRESH snapshot.
+While a lane's floor is active every universe
 subject of that vendor lacking fresh cover and a stored row is stated as a
 derived `poll_paced` row (a live projection, never journaled), so an
 exhaustion reader that skips stale snapshots stays fail-open instead of

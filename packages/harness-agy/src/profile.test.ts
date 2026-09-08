@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { EventEmitter } from "node:events";
+import { spawnSync } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -143,6 +144,20 @@ describe("agy profile route and vendor probe", () => {
     expect(probed).toBe(false);
   });
 
+  it("keeps the vendor's ambiguous headless auth timeout unknown", async () => {
+    const { home } = fixture(
+      '#!/bin/sh\necho \'{"status":"ERROR","error":"authentication failed or timed out"}\'\nexit 1\n',
+    );
+    const status = await probeAgyCredentialProfile(profile(home), {
+      runModelProbe: defaultAgyModelProbe,
+    });
+    expect(status).toMatchObject({
+      availability: "unknown",
+      verification: "not_run",
+      detail: "authentication failed or timed out",
+    });
+  });
+
   it("keeps a recoverable keychain-tool miss on the vendor fallback path", async () => {
     const { home } = fixture("#!/bin/sh\nexit 0\n");
     let probed = false;
@@ -207,22 +222,45 @@ printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"ok","u
     expect(events.map((event) => event.type)).toEqual(["error", "completed"]);
   });
 
-  it("gives print probes neither stdin tty nor /dev/tty, leaving the browser sentinel untouched", async () => {
-    const { root, home } = fixture(`#!/bin/sh
-if [ -t 0 ] || ( : </dev/tty ) 2>/dev/null; then
-  touch "$BROWSER_SENTINEL"
-  printf '%s\n' '{"status":"ERROR","error":"interactive branch"}'
-else
-  printf '%s\n' '{"status":"SUCCESS","command":{"data":{"id":"gemini-3.7-flash-high"}}}'
-fi
+  it.each(["/model", "/quota"] as const)(
+    "gives %s EOF without a character device or controlling tty",
+    async (command) => {
+      const { root, home, bin } = fixture(`#!/usr/bin/env node
+const fs = require("node:fs");
+const characterDevice = fs.fstatSync(0).isCharacterDevice();
+let interactive = characterDevice;
+try { const fd = fs.openSync("/dev/tty", "r"); fs.closeSync(fd); interactive = true; } catch {}
+if (interactive) fs.writeFileSync(process.env.BROWSER_SENTINEL, "opened");
+const eof = fs.readSync(0, Buffer.alloc(1), 0, 1, null) === 0;
+console.log(JSON.stringify({characterDevice, interactive, eof}));
 `);
-    const sentinel = join(root, "browser-spawned");
-    const result = await defaultAgyModelProbe(
-      agyProfileRunEnv(home, { BROWSER_SENTINEL: sentinel }),
-    );
-    expect(result.kind).toBe("authenticated");
-    expect(existsSync(sentinel)).toBe(false);
-  });
+      const sentinel = join(root, "browser-spawned");
+      const control = spawnSync(bin, [], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, BROWSER_SENTINEL: join(root, "control-browser") },
+        encoding: "utf8",
+        timeout: 5_000,
+      });
+      expect(control.status).toBe(0);
+      expect(JSON.parse(control.stdout)).toEqual({
+        characterDevice: true,
+        interactive: true,
+        eof: true,
+      });
+      const result = await runAgyPrintCommand(
+        bin,
+        command,
+        agyProfileRunEnv(home, { BROWSER_SENTINEL: sentinel }),
+      );
+      expect(result).toMatchObject({ kind: "completed", code: 0 });
+      expect(JSON.parse(result.stdout)).toEqual({
+        characterDevice: false,
+        interactive: false,
+        eof: true,
+      });
+      expect(existsSync(sentinel)).toBe(false);
+    },
+  );
 
   it("uses the exact console-free Windows spawn shape", () => {
     expect(agyPrintSpawnOptions("win32", {})).toMatchObject({
@@ -257,6 +295,7 @@ fi
       const stderr = new PassThrough();
       const child = Object.assign(new EventEmitter(), {
         pid: undefined,
+        stdin: new PassThrough(),
         stdout,
         stderr,
         kill: () => {
@@ -290,6 +329,7 @@ fi
     let kills = 0;
     const child = Object.assign(new EventEmitter(), {
       pid: undefined,
+      stdin: new PassThrough(),
       stdout,
       stderr,
       kill: () => {
@@ -327,6 +367,7 @@ fi
     const controller = new AbortController();
     const child = Object.assign(new EventEmitter(), {
       pid: undefined,
+      stdin: new PassThrough(),
       stdout,
       stderr,
       kill: () => {
@@ -358,6 +399,7 @@ fi
     const stderr = new PassThrough();
     const child = Object.assign(new EventEmitter(), {
       pid: 42_424,
+      stdin: new PassThrough(),
       stdout,
       stderr,
       kill: () => true,
@@ -428,6 +470,9 @@ describe("shared agy print classifier", () => {
     ).toBe("unauthenticated");
     expect(
       completed('{"status":"ERROR","error":"authentication service network unavailable"}').kind,
+    ).toBe("probe_failed");
+    expect(
+      completed('{"status":"ERROR","error":"authentication failed or timed out"}', 1).kind,
     ).toBe("probe_failed");
   });
 

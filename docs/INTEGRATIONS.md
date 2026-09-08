@@ -815,8 +815,10 @@ not add a profile path to the host user's search list. It never
 bridges the host Keychain or copies credential bytes. On Windows the vendor
 credential is OS-user-scoped, so Claudexor permits one enabled binding and does
 not claim per-HOME Google identity isolation. Doctor `/model` and quota
-`/quota` share one bounded, console-free print runner and exact auth-response
-classifier; local token-file presence is not readiness.
+`/quota` share one bounded, console-free print runner with piped stdin closed
+immediately. These checks cannot enter interactive sign-in; explicit managed
+login retains its terminal input. Ambiguous authentication timeouts are probe
+failures, not credential revocation. Local token-file presence is not readiness.
 
 **OpenCode** — markerless: no typed final message; the engine's
 AnswerAssembly falls back to joining narration (the documented degradation

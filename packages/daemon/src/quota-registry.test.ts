@@ -2725,85 +2725,96 @@ describe("QuotaRegistry gap-absence honesty (suppressed polls stay stated)", () 
     subject_id: subjectId,
   });
 
-  it("a gap row coexists with a STALE snapshot but is silenced by a FRESH one", async () => {
-    // The stale spent window is exactly the state the gap row explains: an
-    // exhaustion reader that skips stale snapshots must still see an absence
-    // (fail-open), or "spent + silence" would read as window exhausted.
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-gap-stale-")));
-    const journal = new DurableJournal({ rootDir: root, partition: "global" });
-    let nowMs = Date.parse("2026-08-28T00:00:00.000Z");
-    const a = subjectOf("claude", "acc-a");
-    const b = subjectOf("claude", "acc-b");
-    let cycle = 0;
-    const registry = new QuotaRegistry(
-      journal,
-      [
-        {
-          vendor: "claude",
-          refresh: async () => {
-            cycle += 1;
-            if (cycle === 1) {
-              // Both probed: two fresh snapshots.
+  it.each([
+    { harness: "claude", source: "claude_oauth_usage", reason: "probe_skipped_rate_limited" },
+    { harness: "claude", source: "claude_oauth_usage", reason: "refresh_failed" },
+    { harness: "codex", source: "codex_app_server", reason: "refresh_failed" },
+    { harness: "agy", source: "agy_command_usage", reason: "refresh_failed" },
+  ] as const)(
+    "$harness $reason coexists with stale data until a fresh reading",
+    async ({ harness, source, reason }) => {
+      // The stale spent window is exactly the state the gap row explains: an
+      // exhaustion reader that skips stale snapshots must still see an absence
+      // (fail-open), or "spent + silence" would read as window exhausted.
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-gap-stale-")));
+      const journal = new DurableJournal({ rootDir: root, partition: "global" });
+      let nowMs = Date.parse("2026-08-28T00:00:00.000Z");
+      const a = subjectOf(harness, "acc-a");
+      const b = subjectOf(harness, "acc-b");
+      const snapshot = (id: string, used: number) => ({
+        ...quotaSnapshot(harness, id, used),
+        source,
+        observed_at: new Date(nowMs).toISOString(),
+      });
+      let cycle = 0;
+      const registry = new QuotaRegistry(
+        journal,
+        [
+          {
+            vendor: harness,
+            refresh: async () => {
+              cycle += 1;
+              if (cycle === 1 || cycle === 4) {
+                // Both probed: two fresh snapshots.
+                return {
+                  snapshots: [snapshot("acc-a", 1), snapshot("acc-b", 0.4)],
+                };
+              }
+              // A refreshes; B reports a failed or skipped quota observation.
               return {
-                snapshots: [
+                snapshots: [snapshot("acc-a", 1)],
+                absences: [
                   {
-                    ...quotaSnapshot("claude", "acc-a", 1),
-                    observed_at: new Date(nowMs).toISOString(),
-                  },
-                  {
-                    ...quotaSnapshot("claude", "acc-b", 0.4),
+                    subject: b,
+                    reason,
+                    detail: "current quota reading unavailable",
                     observed_at: new Date(nowMs).toISOString(),
                   },
                 ],
               };
-            }
-            // Later cycle: A re-probed fresh; B's probe 429-skipped.
-            return {
-              snapshots: [
-                {
-                  ...quotaSnapshot("claude", "acc-a", 1),
-                  observed_at: new Date(nowMs).toISOString(),
-                },
-              ],
-              absences: [
-                {
-                  subject: b,
-                  reason: "probe_skipped_rate_limited" as const,
-                  detail: "sibling probe hit the vendor rate limit",
-                  observed_at: new Date(nowMs).toISOString(),
-                },
-              ],
-            };
+            },
           },
-        },
-      ],
-      () => new Date(nowMs),
-      () => [a, b],
-    );
+        ],
+        () => new Date(nowMs),
+        () => [a, b],
+      );
 
-    await registry.refresh();
-    // B has a FRESH snapshot: no absence row for B (fresh cover silences).
-    expect(registry.read().absences).toEqual([]);
+      await registry.refresh();
+      // B has a FRESH snapshot: no absence row for B (fresh cover silences).
+      expect(registry.read().absences).toEqual([]);
+      nowMs += 1_000;
+      await registry.refresh();
+      expect(registry.read().absences).toEqual([]);
 
-    // 10 minutes on: B's snapshot is STALE; the new cycle re-freshens A and
-    // claims B's probe skip. The gap row must be visible ALONGSIDE B's stale
-    // snapshot, never dropped for stale cover.
-    nowMs += 10 * 60_000;
-    await registry.refresh();
-    const view = registry.read();
-    expect(
-      view.snapshots.map((snapshot) => [snapshot.subject.subject_id, snapshot.freshness]),
-    ).toEqual([
-      ["acc-a", "fresh"],
-      ["acc-b", "stale"],
-    ]);
-    expect(view.absences.map((absence) => [absence.subject.subject_id, absence.reason])).toEqual([
-      ["acc-b", "probe_skipped_rate_limited"],
-    ]);
+      // 10 minutes on: B's snapshot is STALE; the new cycle re-freshens A and
+      // claims B's probe skip. The gap row must be visible ALONGSIDE B's stale
+      // snapshot, never dropped for stale cover.
+      nowMs += 10 * 60_000;
+      const refreshed = await registry.refresh();
+      const view = registry.read();
+      expect(refreshed.absences).toEqual(view.absences);
+      expect(
+        view.snapshots.map((snapshot) => [snapshot.subject.subject_id, snapshot.freshness]),
+      ).toEqual([
+        ["acc-a", "fresh"],
+        ["acc-b", "stale"],
+      ]);
+      expect(view.absences.map((absence) => [absence.subject.subject_id, absence.reason])).toEqual([
+        ["acc-b", reason],
+      ]);
+      expect(view.absences[0]).toMatchObject({
+        detail: "current quota reading unavailable",
+        observed_at: new Date(nowMs).toISOString(),
+      });
+      nowMs += 1_000;
+      await registry.refresh();
+      expect(registry.read().snapshots.every((entry) => entry.freshness === "fresh")).toBe(true);
+      expect(registry.read().absences).toEqual([]);
 
-    journal.close();
-    rmSync(root, { recursive: true, force: true });
-  });
+      journal.close();
+      rmSync(root, { recursive: true, force: true });
+    },
+  );
 
   it("derives stable poll_paced rows for a floor-suppressed vendor's unstated subjects, restart included", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-gap-paced-")));

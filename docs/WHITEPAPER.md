@@ -109,7 +109,8 @@ never implicitly pins an account, while an explicit reviewer-slot pin does.
 Quota is read per account from the vendor's own
 surfaces, model-scoped windows and typed model-family rejections apply only to
 their declared aliases, advisory warnings do not become cooldowns, absence is
-typed and explained, and unknown never renders as zero.
+typed and explained, and unknown never renders as zero. A failed refresh remains
+explainable alongside stale last-known data without presenting it as a fresh observation.
 
 A routing goal answers to the same line. Quality routing compares declared,
 comparable options — a named harness, model, and effort for the intent at
@@ -256,7 +257,9 @@ config-directory-scoped versus OS-user-scoped; Windows Antigravity therefore
 allows one enabled binding instead of presenting several labels for one vendor
 Keychain identity. Readiness is always a live
 doctor projection in the exact environment a run will use, never a stored
-assertion. Raw secrets never become artifacts — prompts included.
+assertion. Antigravity account checks use non-interactive input so they cannot
+start a sign-in ceremony; explicit login retains its terminal. Raw secrets never
+become artifacts — prompts included.
 
 Login is run through Claudexor rather than the bare vendor CLI so the session
 lands in the Claudexor-scoped store the runs actually read. Codex login

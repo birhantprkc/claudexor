@@ -62,8 +62,7 @@ function printQuota(value: ReturnType<typeof ControlQuotaResponse.parse>): void 
       );
     }
   }
-  // Every registered subject reports either a snapshot above or a typed absence
-  // here — absence is stated, never silent emptiness (zen: absence ≠ empty).
+  // Typed observation gaps may accompany stale snapshots printed above.
   for (const absence of value.absences) {
     const subject = `${absence.subject.harness}/${absence.subject.subject_id ?? "default"}`;
     const retryAfter =
@@ -71,6 +70,6 @@ function printQuota(value: ReturnType<typeof ControlQuotaResponse.parse>): void 
         ? ""
         : ` retry-after=${Math.ceil(absence.retry_after_ms / 1000)}s`;
     const detail = absence.detail ? ` (${absence.detail})` : "";
-    print(`${subject}: no snapshot — ${absence.reason}${retryAfter}${detail}`);
+    print(`${subject}: no fresh snapshot — ${absence.reason}${retryAfter}${detail}`);
   }
 }
