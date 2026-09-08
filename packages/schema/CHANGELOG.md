@@ -1,5 +1,12 @@
 # @claudexor/schema
 
+## 3.10.1
+
+### Patch Changes
+
+- Keep Antigravity model and quota checks non-interactive by closing piped input instead of using a null device. Preserve ambiguous authentication timeouts as probe failures and expose failed refreshes alongside stale quota data.
+  - @claudexor/util@3.10.1
+
 ## 3.10.0
 
 ### Minor Changes

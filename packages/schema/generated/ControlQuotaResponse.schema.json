@@ -271,7 +271,7 @@
                   "poll_paced",
                   "credential_profile_ambiguous"
                 ],
-                "description": "Why a registered subject has no quota snapshot, in the source's own vocabulary."
+                "description": "Why a registered subject has no fresh quota snapshot, in the source's own vocabulary."
               },
               "detail": {
                 "type": [
@@ -295,10 +295,10 @@
               "observed_at"
             ],
             "additionalProperties": false,
-            "description": "A registered subject's typed missing-snapshot — absence is stated, never inferred."
+            "description": "A registered subject's typed quota observation gap; may accompany stale last-known data."
           },
           "default": [],
-          "description": "Every registered subject reports either a snapshot or a typed absence — absence is never silent emptiness (zen: absence ≠ empty)."
+          "description": "Every registered subject reports a snapshot or a typed absence; a refresh gap may coexist with a stale last-known snapshot."
         },
         "refreshed_at": {
           "anyOf": [

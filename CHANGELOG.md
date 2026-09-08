@@ -4,6 +4,11 @@ Release and candidate history for Claudexor. The current version is declared
 in the root `package.json` (the version SSOT); published versions are available
 on GitHub Releases.
 
+- **v3.10.1** (2026-09-08): Antigravity model and quota checks use closed pipe
+  input so a failed silent-auth check cannot open interactive sign-in. Explicit
+  login retains its terminal. Ambiguous authentication timeouts remain probe
+  failures, and failed quota refreshes remain visible alongside stale data.
+  Existing freshness windows, account routing and polling cadence are unchanged.
 - **v3.10.0** (2026-09-07): adds caller-owned Codex model operations using the
   same managed accounts as Agents. Applications retain their system prompts,
   conversation history and tool execution; the engine preserves exact payloads,

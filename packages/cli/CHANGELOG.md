@@ -1,5 +1,35 @@
 # @claudexor/cli
 
+## 3.10.1
+
+### Patch Changes
+
+- Keep Antigravity model and quota checks non-interactive by closing piped input instead of using a null device. Preserve ambiguous authentication timeouts as probe failures and expose failed refreshes alongside stale quota data.
+- Updated dependencies
+  - @claudexor/harness-agy@3.10.1
+  - @claudexor/schema@3.10.1
+  - @claudexor/acp-server@3.10.1
+  - @claudexor/config@3.10.1
+  - @claudexor/control-api@3.10.1
+  - @claudexor/core@3.10.1
+  - @claudexor/daemon@3.10.1
+  - @claudexor/delivery@3.10.1
+  - @claudexor/gateway@3.10.1
+  - @claudexor/harness-claude@3.10.1
+  - @claudexor/harness-codex@3.10.1
+  - @claudexor/harness-cursor@3.10.1
+  - @claudexor/harness-fake@3.10.1
+  - @claudexor/harness-opencode@3.10.1
+  - @claudexor/harness-raw-api@3.10.1
+  - @claudexor/mcp-server@3.10.1
+  - @claudexor/orchestrator@3.10.1
+  - @claudexor/review@3.10.1
+  - @claudexor/workspace@3.10.1
+  - @claudexor/artifact-store@3.10.1
+  - @claudexor/journal@3.10.1
+  - @claudexor/secrets@3.10.1
+  - @claudexor/util@3.10.1
+
 ## 3.10.0
 
 ### Minor Changes

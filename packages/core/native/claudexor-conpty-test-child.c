@@ -270,7 +270,8 @@ static int run_fake_agy(int argc, wchar_t **argv) {
   wchar_t *home = environment_value(L"HOME");
   if (home == NULL) return 81;
   const char *command = wcscmp(argv[2], L"/model") == 0 ? "model" : "quota";
-  int interactive = conin_available();
+  int interactive = GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR ||
+                    conin_available();
   int hanging = !interactive &&
                 marker_exists(home, L".claudexor-agy-fake-hang");
   int stdin_eof = interactive ? 0 : stdin_is_eof_without_blocking();

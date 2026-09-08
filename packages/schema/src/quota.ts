@@ -218,18 +218,22 @@ export const QuotaAbsenceReason = z
      * persisted registry contains several. No row was selected or probed. */
     "credential_profile_ambiguous",
   ])
-  .describe("Why a registered subject has no quota snapshot, in the source's own vocabulary.");
+  .describe(
+    "Why a registered subject has no fresh quota snapshot, in the source's own vocabulary.",
+  );
 export type QuotaAbsenceReason = z.infer<typeof QuotaAbsenceReason>;
 
-/** Gap-representation absence reasons: "this cycle deliberately did not ask"
- * (the vendor throttled the poll, a sibling's 429 short-circuited it, or
- * pacing paused the lane). Unlike credential-state reasons they may coexist
- * with a STALE snapshot — the stale data stays visible as last-known while
- * the gap row keeps downstream exhaustion readers fail-open (a stale spent
- * window plus a gap row means "not re-asked", never "window exhausted"). A
- * FRESH snapshot still silences them like every other reason. */
+/** Refresh-gap reasons may coexist with a STALE snapshot: the last-known
+ * data stays visible alongside a failed, skipped, or paced refresh.
+ * A FRESH snapshot still silences these reasons. Credential rejection
+ * and platform ambiguity retain their separate evidence-retirement rules. */
 export const QUOTA_GAP_ABSENCE_REASONS: ReadonlySet<QuotaAbsenceReason> =
-  new Set<QuotaAbsenceReason>(["rate_limited", "probe_skipped_rate_limited", "poll_paced"]);
+  new Set<QuotaAbsenceReason>([
+    "refresh_failed",
+    "rate_limited",
+    "probe_skipped_rate_limited",
+    "poll_paced",
+  ]);
 
 export const QuotaAbsence = z
   .object({
@@ -244,7 +248,9 @@ export const QuotaAbsence = z
     retry_after_ms: z.number().int().nonnegative().optional(),
   })
   .strict()
-  .describe("A registered subject's typed missing-snapshot — absence is stated, never inferred.");
+  .describe(
+    "A registered subject's typed quota observation gap; may accompany stale last-known data.",
+  );
 export type QuotaAbsence = z.infer<typeof QuotaAbsence>;
 
 export const QuotaAvailabilityState = z
@@ -332,7 +338,7 @@ export const ControlQuotaResponse = z
       .array(QuotaAbsence)
       .default([])
       .describe(
-        "Every registered subject reports either a snapshot or a typed absence — absence is never silent emptiness (zen: absence ≠ empty).",
+        "Every registered subject reports a snapshot or a typed absence; a refresh gap may coexist with a stale last-known snapshot.",
       ),
     refreshed_at: z.string().datetime({ offset: true }).nullable(),
     /** Additive disclosure: present only on refresh responses that skipped at

@@ -308,11 +308,10 @@ export class QuotaRegistry {
     return { response, quotaEventCursor, scoped: scope !== null };
   }
 
-  /** Aggregate one cycle's snapshots + absence claims against the subject
-   * universe (V11a): a fresh-or-stale snapshot from ANY source means no
-   * absence; else the first refresher-claimed absence wins; neither =>
-   * "no_source". Identity is (harness, subject_id); route/source never split
-   * a subject.
+  /** Fold claims against (harness, subject_id): fresh snapshots silence
+   * refresh gaps; stale snapshots retain their explanations. Other claims
+   * keep their existing precedence and retirement rules; no evidence yields
+   * "no_source". Route/source never split a subject.
    *
    * `scope` (a vendor-lane cycle) rebuilds only that vendor's rows plus every
    * REFRESHERLESS harness's rows (those can only ever be `no_source`, and
@@ -362,12 +361,9 @@ export class QuotaRegistry {
     });
   }
 
-  /** Absences whose subject is not (any longer) covered by an active snapshot —
-   * a snapshot arriving via ingest between cycles silences its absence at once.
-   * Gap honesty for suppressed polls: a GAP-representation row is silenced
-   * only by a FRESH snapshot (stale last-known data and the "not re-asked"
-   * fact stay visible together), and a floor-suppressed vendor's unstated
-   * subjects gain DERIVED `poll_paced` rows (see derivePollPacedRows). */
+  /** Refresh gaps coexist with stale snapshots and are silenced by fresh ones.
+   * Other absences require no active snapshot. Floor-suppressed subjects gain
+   * derived `poll_paced` rows (see derivePollPacedRows). */
   private activeAbsences(now: number): QuotaAbsence[] {
     const { covered, freshCovered } = subjectCoverSets(this.activeSnapshots(now));
     const rows = this.absences.filter(

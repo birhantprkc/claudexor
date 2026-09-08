@@ -233,15 +233,17 @@ esac
     expect(out.absences?.[0]).toMatchObject({ reason: "auth_revoked" });
   });
 
-  it("does not classify a generic authentication-word infrastructure error as logout", async () => {
-    const { bin } = scaffold({
-      token: false,
-      script:
-        '#!/bin/sh\necho \'{"status":"ERROR","error":"authentication service network unavailable"}\'\n',
-    });
-    const out = await refresh({ bin });
-    expect(out.absences?.[0]).toMatchObject({ reason: "refresh_failed" });
-  });
+  it.each(["authentication service network unavailable", "authentication failed or timed out"])(
+    "does not classify %s as logout",
+    async (error) => {
+      const { bin } = scaffold({
+        token: false,
+        script: `#!/bin/sh\necho '${JSON.stringify({ status: "ERROR", error })}'\nexit 1\n`,
+      });
+      const out = await refresh({ bin });
+      expect(out.absences?.[0]).toMatchObject({ reason: "refresh_failed" });
+    },
+  );
 
   it("bounds the profile fan-out to 3 concurrent vendor probes", async () => {
     // Several accounts stay the point of the feature, but a large registry

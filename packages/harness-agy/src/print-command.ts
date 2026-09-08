@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessByStdio, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { extname, isAbsolute } from "node:path";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import {
   composeBaseEnv,
   defaultProcessGroupService,
@@ -73,8 +73,8 @@ export function agyPrintSpawnOptions(
     detached: true,
     windowsHide: platform === "win32",
     // On Windows CREATE_NO_WINDOW still exposes a windowless CONIN$. A real
-    // DETACHED_PROCESS prevents console inheritance; ignored stdin gives print
-    // mode immediate EOF without exposing an input descriptor.
+    // DETACHED_PROCESS prevents console inheritance; the runner immediately
+    // closes piped stdin instead of exposing the NUL character device.
   };
 }
 
@@ -146,7 +146,7 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Bounded print-mode owner for `/model` and `/quota`. The child has no stdin
+ * Bounded print-mode owner for `/model` and `/quota`. The child gets pipe EOF
  * and no controlling terminal: POSIX starts a new session; Windows uses
  * DETACHED_PROCESS because CREATE_NO_WINDOW still exposes a windowless
  * CONIN$. Child exit is completion authority; descendant-held pipes receive
@@ -180,12 +180,16 @@ export async function runAgyPrintCommand(
     };
   }
 
-  let child: ChildProcessByStdio<null, Readable, Readable>;
+  let child: ChildProcessByStdio<Writable, Readable, Readable>;
   try {
     child = (options.spawnProcess ?? spawn)(resolved, ["-p", command, "--output-format", "json"], {
       ...agyPrintSpawnOptions(platform, env),
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    // /dev/null is a character device, which agy treats as interactive input.
+    // Match ordinary harness runs: pipe EOF, with early-exit EPIPE handled.
+    child.stdin.on("error", () => {});
+    child.stdin.end();
   } catch (error) {
     return {
       kind: "failed",
@@ -406,7 +410,6 @@ export type AgyPrintClassification =
 
 const RECOGNIZED_AUTH_REJECTIONS = [
   "authentication required",
-  "authentication failed or timed out",
   "not authenticated",
   "login required",
   "credential revoked",
@@ -414,6 +417,8 @@ const RECOGNIZED_AUTH_REJECTIONS = [
   "token revoked",
   "token expired",
 ] as const;
+// "authentication failed or timed out" also covers failed silent-auth network
+// checks with a valid token; it is probe_failed, not credential-rejection proof.
 
 function vendorError(envelope: Record<string, unknown>): string | null {
   const error = envelope["error"];
