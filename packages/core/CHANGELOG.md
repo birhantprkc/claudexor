@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- Bind Windows interactive-login child standard handles to ConPTY instead of inherited parent pipes, with console-input and exact submitted-input checks.
 - Updated dependencies
   - @claudexor/schema@3.10.1
   - @claudexor/util@3.10.1
