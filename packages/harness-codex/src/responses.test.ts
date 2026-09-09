@@ -69,7 +69,7 @@ function stream(value: string, chunkSize = 5): Response {
 }
 
 describe("Codex model request translation", () => {
-  it("uses own instructions and preserves developer/system order and literal content", () => {
+  it("preserves every instruction role, message order and literal content", () => {
     const value = request({
       messages: [
         { role: "system", content: "SYSTEM\n\u0000raw" },
@@ -78,22 +78,65 @@ describe("Codex model request translation", () => {
         { role: "system", content: "late system" },
       ],
     });
+    const original = structuredClone(value);
     const body = buildResponsesRequest(value, route);
-    expect(body.instructions).toBe("SYSTEM\n\u0000raw");
+    expect(value).toEqual(original);
+    expect(body.instructions).toBe("");
     expect(body.input).toEqual([
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "SYSTEM\n\u0000raw" }],
+      },
       {
         type: "message",
         role: "developer",
         content: [{ type: "input_text", text: "higher guidance" }],
       },
       { type: "message", role: "user", content: [{ type: "input_text", text: "user" }] },
-      { type: "message", role: "system", content: [{ type: "input_text", text: "late system" }] },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "late system" }],
+      },
     ]);
     expect(body).toMatchObject({
       store: false,
       stream: true,
       include: ["reasoning.encrypted_content"],
     });
+  });
+  it("keeps a full multipart system context as separate unchanged text parts", () => {
+    // Production-shaped regression input, not a provider limit or model policy.
+    const parts = [
+      "Governance\r\n" + "a".repeat(886_352),
+      "Identity 🐍\u0000" + "b".repeat(34_393),
+      "History\u2028" + "c".repeat(524_690),
+    ];
+    const value = request({
+      messages: [
+        { role: "system", content: parts.map((text) => ({ type: "text", text })) },
+        { role: "system", content: "Further caller instructions" },
+        { role: "user", content: "Привет" },
+      ],
+    });
+    const original = structuredClone(value);
+    const body = buildResponsesRequest(value, route);
+    expect(value).toEqual(original);
+    expect(body.instructions).toBe("");
+    expect(body.input).toEqual([
+      {
+        type: "message",
+        role: "developer",
+        content: parts.map((text) => ({ type: "input_text", text })),
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Further caller instructions" }],
+      },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Привет" }] },
+    ]);
   });
   it.each(["auto", "none", "required", { type: "function", function: { name: "inspect" } }])(
     "preserves tool choice %j and schemas",
@@ -187,6 +230,8 @@ describe("Codex model request translation", () => {
     const body = buildResponsesRequest(
       request({
         messages: [
+          { role: "system", content: "system priority" },
+          { role: "developer", content: "developer guidance" },
           {
             role: "assistant",
             content: "not duplicated",
@@ -205,6 +250,16 @@ describe("Codex model request translation", () => {
       route,
     );
     expect(body.input).toEqual([
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "system priority" }],
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "developer guidance" }],
+      },
       ...nativeItems,
       { type: "function_call_output", call_id: "call_original", output: "result" },
     ]);
