@@ -3,6 +3,7 @@ import { JournalRecoveryRequiredError } from "@claudexor/journal";
 import { commandProjection, type CommandStore } from "./command-store.js";
 import { interactionProjection, type InteractionStore } from "./interactions.js";
 import { JournalManager, type JournalProjectionSlot } from "./journal-manager.js";
+import type { JournalManagerOptions } from "./journal-manager-lifecycle.js";
 import { recoveryFrom } from "./journal-recovery-files.js";
 import { operatorDecisionProjection, type OperatorDecisionStore } from "./operator-decisions.js";
 import type { ProjectStore } from "./projects.js";
@@ -47,6 +48,7 @@ export class ProjectPartitionCollection extends Map<string, ProjectPartitionEntr
     private readonly rootDir: string,
     private readonly projects: JournalProjectionSlot<ProjectStore>,
     private readonly headPing?: ThreadHeadPingSink,
+    private readonly requestMaintenance?: JournalManagerOptions["requestMaintenance"],
   ) {
     super();
   }
@@ -69,7 +71,12 @@ export class ProjectPartitionCollection extends Map<string, ProjectPartitionEntr
   ensure(projectId: string): ProjectPartitionEntry {
     const existing = this.get(projectId);
     if (existing) return existing;
-    const entry = createProjectPartition(this.rootDir, `project:${projectId}`, this.headPing);
+    const entry = createProjectPartition(
+      this.rootDir,
+      `project:${projectId}`,
+      this.headPing,
+      this.requestMaintenance,
+    );
     entry.manager.start();
     this.set(projectId, entry);
     return entry;
@@ -97,6 +104,7 @@ export function prepareProjectPartitions(input: {
   rootDir: string;
   projects: JournalProjectionSlot<ProjectStore>;
   headPing?: ThreadHeadPingSink;
+  requestMaintenance?: JournalManagerOptions["requestMaintenance"];
 }): PreparedProjectPartitions {
   let projects: ReturnType<ProjectStore["list"]>;
   try {
@@ -122,7 +130,12 @@ export function prepareProjectPartitions(input: {
   const partitions: ProjectPartitionPreparationEntry[] = [];
   for (const project of projects) {
     const partition = `project:${project.id}`;
-    const value = createProjectPartition(input.rootDir, partition, input.headPing);
+    const value = createProjectPartition(
+      input.rootDir,
+      partition,
+      input.headPing,
+      input.requestMaintenance,
+    );
     const preparation = value.manager.prepare();
     entries.set(project.id, value);
     partitions.push({
@@ -168,6 +181,7 @@ export function refreshProjectPartitionsPreparation(input: {
   rootDir: string;
   projects: JournalProjectionSlot<ProjectStore>;
   headPing?: ThreadHeadPingSink;
+  requestMaintenance?: JournalManagerOptions["requestMaintenance"];
   previous: ProjectPartitionsPreparation;
   entries: ProjectPartitionCollection;
 }): ProjectPartitionsPreparation {
@@ -195,7 +209,12 @@ export function refreshProjectPartitionsPreparation(input: {
     const partition = `project:${project.id}`;
     let entry = input.entries.get(project.id);
     if (!entry) {
-      entry = createProjectPartition(input.rootDir, partition, input.headPing);
+      entry = createProjectPartition(
+        input.rootDir,
+        partition,
+        input.headPing,
+        input.requestMaintenance,
+      );
       entry.manager.prepare();
       input.entries.set(project.id, entry);
     }
@@ -230,6 +249,7 @@ export function activatePreparedProjectPartitions(input: {
   rootDir: string;
   projects: JournalProjectionSlot<ProjectStore>;
   headPing?: ThreadHeadPingSink;
+  requestMaintenance?: JournalManagerOptions["requestMaintenance"];
   receipt: ProjectPartitionsPreparation;
   entries: ProjectPartitionCollection;
   resetReceipt(receipt: ProjectPartitionsPreparation): void;
@@ -261,8 +281,9 @@ function createProjectPartition(
   rootDir: string,
   partition: string,
   headPing?: ThreadHeadPingSink,
+  requestMaintenance?: JournalManagerOptions["requestMaintenance"],
 ): ProjectPartitionEntry {
-  const manager = new JournalManager(rootDir, { partition });
+  const manager = new JournalManager(rootDir, { partition, requestMaintenance });
   const value: ProjectPartitionEntry = {
     manager,
     commands: manager.registerProjection(commandProjection()),

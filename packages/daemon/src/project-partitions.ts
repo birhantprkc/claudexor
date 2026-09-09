@@ -10,6 +10,7 @@ import { isEphemeralRunScope } from "@claudexor/schema";
 import { hashJson, isClaudexorOwnedRuntimePath } from "@claudexor/util";
 import type { CommandStore } from "./command-store.js";
 import type { JournalManager, JournalProjectionSlot } from "./journal-manager.js";
+import type { JournalManagerOptions } from "./journal-manager-lifecycle.js";
 import type { InteractionStore } from "./interactions.js";
 import {
   type OperatorDecisionRecord,
@@ -61,8 +62,14 @@ export class ProjectPartitions implements CommandAuthority {
     private readonly globalThreads: JournalProjectionSlot<ThreadStore>,
     /** Global-partition `thread.head.updated` sink, threaded into every project ThreadStore. */
     private readonly headPing?: ThreadHeadPingSink,
+    private readonly requestMaintenance?: JournalManagerOptions["requestMaintenance"],
   ) {
-    this.partitions = new ProjectPartitionCollection(rootDir, projects, headPing);
+    this.partitions = new ProjectPartitionCollection(
+      rootDir,
+      projects,
+      headPing,
+      requestMaintenance,
+    );
   }
 
   prepare(): ProjectPartitionsPreparation {
@@ -71,6 +78,7 @@ export class ProjectPartitions implements CommandAuthority {
       rootDir: this.rootDir,
       projects: this.projects,
       headPing: this.headPing,
+      requestMaintenance: this.requestMaintenance,
     });
     this.partitions.clear();
     for (const [id, entry] of prepared.entries) this.partitions.set(id, entry);
@@ -98,6 +106,7 @@ export class ProjectPartitions implements CommandAuthority {
       rootDir: this.rootDir,
       projects: this.projects,
       headPing: this.headPing,
+      requestMaintenance: this.requestMaintenance,
       previous: this.preparationResult,
       entries: this.partitions,
     });
@@ -110,6 +119,7 @@ export class ProjectPartitions implements CommandAuthority {
       rootDir: this.rootDir,
       projects: this.projects,
       headPing: this.headPing,
+      requestMaintenance: this.requestMaintenance,
       receipt: this.preparationResult,
       entries: this.partitions,
       resetReceipt: (receipt) => (this.preparationResult = receipt),

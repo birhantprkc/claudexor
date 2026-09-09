@@ -1,27 +1,27 @@
+import { recoverJournal } from "./journal-recovery.js";
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fchmodSync,
-  fstatSync,
-  ftruncateSync,
-  fsyncSync,
-  openSync,
-} from "node:fs";
-import { join } from "node:path";
-import { ensureCanonicalPrivateDirectory } from "@claudexor/util";
+import { closeSync, fstatSync, lstatSync, renameSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { ensureCanonicalPrivateDirectory, fsyncDirectory } from "@claudexor/util";
 import { prepareAppendBatch } from "./append-batch.js";
-import { ZERO_HASH, replayFrames, type JournalRecord } from "./frame-codec.js";
-import { compactJournalFile } from "./journal-compaction.js";
+import { ZERO_HASH, type JournalRecord } from "./frame-codec.js";
+import { prepareJournalCompaction, type JournalCompactionResult } from "./journal-compaction.js";
+import {
+  prepareBackgroundCompaction,
+  sameBoundary,
+  type CompactionBoundary,
+} from "./journal-background-compaction.js";
 import {
   appendAndSync,
   ensurePrivateFile,
-  readDescriptor,
+  sameJournalFile,
+  openJournalWriter,
+  reopenOriginalWriter,
   readIntent,
   removeFile,
   writeIntent,
 } from "./journal-files.js";
-import { cursorError, encodeCursor, JournalCursorError } from "./journal-cursor.js";
+import { sequenceAfterCursor, encodeCursor, JournalCursorError } from "./journal-cursor.js";
 import { journalPartitionDirectory } from "./journal-partition.js";
 import {
   fingerprintPreparedJournal,
@@ -29,21 +29,17 @@ import {
   type JournalPreparationReceipt,
   type PreparedJournalInspection,
 } from "./read-only-preparation.js";
-export type { JournalRecord } from "./frame-codec.js";
-export type { JournalPreparationReceipt } from "./read-only-preparation.js";
+export type { JournalRecord, JournalPreparationReceipt };
 export { JournalCursorError } from "./journal-cursor.js";
 export { journalPartitionDirectory } from "./journal-partition.js";
-export type JournalRecoveryLocation =
-  { kind: "byte"; byteOffset: number } | { kind: "cursor"; epoch: string; seq: number };
-
-export type JournalRecoveryState =
-  | { status: "ready"; discardedTailBytes: number }
-  | {
-      status: "recovery_required";
-      location: JournalRecoveryLocation;
-      reason: string;
-      discardedTailBytes: number;
-    };
+export { JournalRecoveryRequiredError, JournalAppendUncertainError };
+export type { JournalRecoveryLocation, JournalRecoveryState } from "./journal-recovery-state.js";
+import {
+  JournalRecoveryRequiredError,
+  JournalAppendUncertainError,
+  journalRecoveryAt,
+  type JournalRecoveryState,
+} from "./journal-recovery-state.js";
 export interface DurableJournalOptions {
   rootDir: string;
   partition: string;
@@ -51,43 +47,11 @@ export interface DurableJournalOptions {
   epochFactory?: () => string;
   appendAndSync?: (fd: number, bytes: Buffer) => void;
   compactionThresholdBytes?: number;
+  /** The daemon opts into after-admission maintenance; standalone callers keep inline compaction. */
+  deferCompaction?: boolean;
 }
 
 const PREPARED_JOURNAL = Symbol("prepared-journal");
-
-export class JournalRecoveryRequiredError extends Error {
-  readonly code: string = "journal_recovery_required";
-  readonly status = 503;
-  readonly retryable = false;
-  readonly requiredActions = ["inspect_recovery", "export_recovery", "quarantine_partition"];
-  readonly evidenceRefs: string[] = [];
-  readonly recovery: Extract<JournalRecoveryState, { status: "recovery_required" }>;
-
-  constructor(recovery: Extract<JournalRecoveryState, { status: "recovery_required" }>) {
-    const safe = Object.freeze({ ...recovery, location: Object.freeze({ ...recovery.location }) });
-    const where =
-      safe.location.kind === "byte"
-        ? `byte ${safe.location.byteOffset}`
-        : `cursor ${safe.location.epoch}:${safe.location.seq}`;
-    super(`journal partition requires recovery at ${where}: ${safe.reason}`);
-    this.name = "JournalRecoveryRequiredError";
-    this.recovery = safe;
-  }
-}
-
-export class JournalAppendUncertainError extends JournalRecoveryRequiredError {
-  override readonly code = "journal_append_uncertain";
-
-  constructor(
-    recovery: Extract<JournalRecoveryState, { status: "recovery_required" }>,
-    options?: ErrorOptions,
-  ) {
-    super(recovery);
-    this.name = "JournalAppendUncertainError";
-    if (options?.cause !== undefined)
-      Object.defineProperty(this, "cause", { value: options.cause });
-  }
-}
 
 /** Single-writer, checksummed journal. A returned append has reached fsync. */
 export class DurableJournal {
@@ -97,7 +61,11 @@ export class DurableJournal {
   private readonly now: () => Date;
   private readonly appendFrame: (fd: number, bytes: Buffer) => void;
   private fd = -1;
-  private readonly entries: JournalRecord[] = [];
+  private entries: JournalRecord[] = [];
+  private background: {
+    controller: AbortController;
+    promise: Promise<JournalCompactionResult["receipt"] | null>;
+  } | null = null;
   private epoch: string;
   private nextSeq = 1;
   private previousFrameHash = ZERO_HASH;
@@ -223,6 +191,7 @@ export class DurableJournal {
 
   close(): void {
     if (this.closed) return;
+    this.background?.controller.abort();
     this.closed = true;
     this.closeWriter();
   }
@@ -257,9 +226,10 @@ export class DurableJournal {
 
   /** Atomically replace physical frames with one checksummed compressed frame. */
   compact(): { beforeBytes: number; afterBytes: number; records: number } | null {
+    this.background?.controller.abort();
     this.assertReadable();
     this.assertWritable();
-    const result = compactJournalFile({
+    const result = prepareJournalCompaction({
       path: this.path,
       partition: this.options.partition,
       entries: this.entries,
@@ -267,42 +237,83 @@ export class DurableJournal {
       now: this.now,
     });
     if (!result) return null;
-    closeSync(this.fd);
-    this.fd = -1;
-    this.writable = false;
-    this.fd = openSync(this.path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
-    this.writable = true;
-    this.entries.length = 0;
-    for (const record of result.records) this.entries.push(record);
-    this.epoch = result.epoch;
-    this.nextSeq = result.nextSeq;
-    this.previousFrameHash = result.previousFrameHash;
-    this.knownFileBytes = result.knownFileBytes;
-    return result.receipt;
+    try {
+      this.installCompaction(result);
+      return result.receipt;
+    } finally {
+      rmSync(result.path, { force: true });
+    }
+  }
+
+  /** Automatic maintenance preserves logical epoch/seq cursors, including ACKed
+   * appends during preparation. The first caller's signal owns a shared flight. */
+  compactInBackground(options: {
+    stagingDir: string;
+    signal?: AbortSignal;
+  }): Promise<JournalCompactionResult["receipt"] | null> {
+    if (this.background) return this.background.promise;
+    this.assertReadable();
+    this.assertWritable();
+    if (options.signal?.aborted) return Promise.resolve(null);
+    if (!this.atCompactionThreshold() || this.entries.length === 0) return Promise.resolve(null);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    const entries = this.entries;
+    const fd = this.fd;
+    const epoch = this.epoch;
+    const identity = fstatSync(fd);
+    const current = (): CompactionBoundary => {
+      controller.signal.throwIfAborted();
+      this.assertReadable();
+      this.assertWritable();
+      if (this.entries !== entries || this.fd !== fd || this.epoch !== epoch)
+        throw new Error("journal compaction generation changed");
+      return {
+        count: entries.length,
+        nextSeq: this.nextSeq,
+        previousFrameHash: this.previousFrameHash,
+        knownFileBytes: this.knownFileBytes,
+      };
+    };
+    const promise = prepareBackgroundCompaction({
+      stagingDir: options.stagingDir,
+      signal: controller.signal,
+      partition: this.options.partition,
+      epoch,
+      time: this.now().toISOString(),
+      entries,
+      prefix: current(),
+      current,
+      install: (candidate, boundary) => {
+        if (!sameBoundary(current(), boundary)) return false;
+        const actual = fstatSync(fd);
+        const path = lstatSync(this.path);
+        if (
+          !sameJournalFile(identity, actual, boundary.knownFileBytes) ||
+          !sameJournalFile(identity, path, boundary.knownFileBytes) ||
+          readIntent(this.intentPath())
+        )
+          throw new JournalRecoveryRequiredError(
+            this.requireRecovery(
+              boundary.knownFileBytes,
+              "journal changed outside its single writer during compaction",
+            ),
+          );
+        this.installCompaction(candidate);
+        return true;
+      },
+    }).finally(() => {
+      options.signal?.removeEventListener("abort", abort);
+      if (this.background?.promise === promise) this.background = null;
+    });
+    this.background = { controller, promise };
+    return promise;
   }
 
   sequenceAfter(cursor: string | null | undefined): number {
     this.assertReadable();
-    if (!cursor) return 0;
-    if (!/^[A-Za-z0-9_-]{1,4096}$/.test(cursor)) throw cursorError("malformed");
-    let value: unknown;
-    try {
-      value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    } catch {
-      throw cursorError("malformed");
-    }
-    if (!isRecord(value) || Object.keys(value).sort().join(",") !== "e,p,s,v" || value.v !== 1) {
-      throw cursorError("unsupported");
-    }
-    if (value.p !== this.options.partition || value.e !== this.epoch)
-      throw cursorError("stale epoch");
-    if (!Number.isSafeInteger(value.s) || Number(value.s) < 0 || Number(value.s) >= this.nextSeq) {
-      throw cursorError("ahead of the durable partition");
-    }
-    if (encodeCursor(value.p as string, value.e as string, value.s as number) !== cursor) {
-      throw cursorError("not canonically encoded");
-    }
-    return value.s as number;
+    return sequenceAfterCursor(cursor, this.options.partition, this.epoch, this.nextSeq);
   }
 
   cursorFor(record: Pick<JournalRecord, "partition" | "epoch" | "seq">): string {
@@ -365,57 +376,29 @@ export class DurableJournal {
   }
 
   private recover(): void {
-    let bytes = readDescriptor(this.fd);
-    let discardedBytes = 0;
+    let result: ReturnType<typeof recoverJournal>;
     try {
-      const intent = readIntent(this.intentPath());
-      if (intent) {
-        const prefix = replayFrames(bytes.subarray(0, intent.offset), this.options.partition);
-        if (
-          intent.offset > bytes.length ||
-          bytes.length > intent.offset + intent.length ||
-          prefix.error ||
-          prefix.incompleteOffset !== null
-        ) {
-          this.requireRecovery(intent.offset, "append intent does not match the journal prefix");
-          return;
-        }
-        discardedBytes = bytes.length - intent.offset;
-        if (discardedBytes > 0) {
-          ftruncateSync(this.fd, intent.offset);
-          fsyncSync(this.fd);
-          bytes = bytes.subarray(0, intent.offset);
-        }
-        removeFile(this.intentPath());
-      }
+      result = recoverJournal(this.fd, this.options.partition, this.intentPath());
     } catch (error) {
-      this.requireRecovery(0, `append intent is malformed: ${String(error)}`);
+      if (!(error instanceof JournalRecoveryRequiredError)) throw error;
+      this.recovery = error.recovery;
       return;
     }
-    const decoded = replayFrames(bytes, this.options.partition);
-    if (decoded.incompleteOffset !== null) {
-      this.requireRecovery(decoded.incompleteOffset, "unexplained suffix without append intent");
-      return;
-    }
-    if (decoded.error) {
-      this.requireRecovery(decoded.error.offset, decoded.error.reason);
-      return;
-    }
-    for (const record of decoded.records) this.entries.push(record);
+    this.entries = result.records;
     const last = this.entries.at(-1);
     if (last) {
       this.epoch = last.epoch;
       this.nextSeq = last.seq + 1;
       this.previousFrameHash = last.frameHash;
     }
-    this.knownFileBytes = bytes.length;
-    if (discardedBytes > 0) {
-      this.recovery = { status: "ready", discardedTailBytes: discardedBytes };
+    this.knownFileBytes = result.knownFileBytes;
+    if (result.discardedBytes > 0) {
+      this.recovery = { status: "ready", discardedTailBytes: result.discardedBytes };
       this.append("journal.recovery_tail_discarded", {
         recoveryId: randomUUID(),
-        discardedBytes,
-        validBytes: bytes.length,
-        originalBytes: bytes.length + discardedBytes,
+        discardedBytes: result.discardedBytes,
+        validBytes: result.knownFileBytes,
+        originalBytes: result.knownFileBytes + result.discardedBytes,
         detectedAt: this.now().toISOString(),
       });
     }
@@ -426,19 +409,60 @@ export class DurableJournal {
   }
 
   private openWriter(): void {
-    this.fd = openSync(this.path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
-    const stat = fstatSync(this.fd);
-    if (!stat.isFile() || stat.nlink !== 1) throw new Error("journal file is not privately owned");
-    if ((stat.mode & 0o777) !== 0o600) {
-      fchmodSync(this.fd, 0o600);
-      fsyncSync(this.fd);
-    }
+    this.fd = openJournalWriter(this.path);
     this.writable = true;
   }
 
   private compactAtThreshold(): void {
-    const threshold = this.options.compactionThresholdBytes ?? 8 * 1024 * 1024;
-    if (this.recovery.status === "ready" && this.knownFileBytes >= threshold) this.compact();
+    if (
+      !this.options.deferCompaction &&
+      this.recovery.status === "ready" &&
+      this.atCompactionThreshold()
+    )
+      this.compact();
+  }
+
+  private atCompactionThreshold(): boolean {
+    return this.knownFileBytes >= (this.options.compactionThresholdBytes ?? 8 * 1024 * 1024);
+  }
+
+  /** One physical install owner for both producers; no serialization or await. */
+  private installCompaction(result: JournalCompactionResult): void {
+    const original = fstatSync(this.fd);
+    if (result.knownFileBytes >= this.knownFileBytes)
+      throw new Error("compaction did not reclaim bytes");
+    let renamed = false;
+    let closed = false;
+    const fd = this.fd;
+    this.fd = -1;
+    this.writable = false;
+    try {
+      closeSync(fd);
+      closed = true;
+      renameSync(result.path, this.path);
+      renamed = true;
+      fsyncDirectory(dirname(this.path));
+      this.openWriter();
+    } catch (error) {
+      this.closeWriter();
+      if (closed && !renamed) {
+        this.fd = reopenOriginalWriter(this.path, original);
+        this.writable = this.fd >= 0;
+      }
+      if (!this.writable)
+        throw new JournalRecoveryRequiredError(
+          this.requireRecovery(
+            0,
+            `journal compaction install failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      throw error;
+    }
+    this.entries = result.records;
+    this.epoch = result.epoch;
+    this.nextSeq = result.nextSeq;
+    this.previousFrameHash = result.previousFrameHash;
+    this.knownFileBytes = result.knownFileBytes;
   }
 
   private closeWriter(): void {
@@ -474,14 +498,9 @@ export class DurableJournal {
     byteOffset: number,
     reason: string,
   ): Extract<JournalRecoveryState, { status: "recovery_required" }> {
-    const value = {
-      status: "recovery_required" as const,
-      location: { kind: "byte" as const, byteOffset },
-      reason,
-      discardedTailBytes: 0,
-    };
-    this.recovery = value;
-    return value;
+    this.recovery = journalRecoveryAt(byteOffset, reason);
+    this.background?.controller.abort();
+    return this.recovery;
   }
 
   private assertReadable(): void {
@@ -502,8 +521,4 @@ export class DurableJournal {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

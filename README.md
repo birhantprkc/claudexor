@@ -357,16 +357,19 @@ is ordinary `claudexor plan`.
 plan in parallel (round 1, harness-native read-only planner transport, each in
 its own lane on a thread turn; Cursor uses native Ask so its final WorkReport
 remains available), the drafts land as file-backed run artifacts
-(`council/draft-<harness>.md`), and then the PRIMARY runs one merge iteration that
-POINTS at the draft files by absolute path (never embedding their full text) and
+(`council/draft-<harness>.md`), and then an admitted member runs one merge iteration that
+points at the draft and attempt evidence files by absolute path (never embedding their full text) and
 synthesizes ONE unified plan. The tagged `## Open Questions` parser runs on the
 MERGE output only, so you always answer a single question set — the downstream
 readiness/freeze/Implement flow is byte-for-byte identical to a solo plan.
 `--n 2..4` sets the member count (default: distinct available harnesses, up to 3,
 primary first); `--n` on a plan is legal ONLY with `--council`. Degradation is
 honest: a failed member is disclosed (event + `council/membership.yaml`) and the
-merge proceeds with the survivors (one survivor still merges — it normalizes the
-format and extracts the questions); every member failing is a typed failure. Run
+merge proceeds with the usable inputs (one input still merges). A useful draft
+with a contradictory `completed` plus `required_inputs` report is retained as
+explicitly unverified input, while its original attempt remains failed. The
+merger prefers an accepted draft's lane, then an eligible unverified lane; no
+eligible input is a typed failure. The final plan must still pass its own checks. Run
 detail carries a `council` projection (membership + per-member status + who
 merged). Council is the plan critique path — the standalone "plan review" entity
 was retired in v3.

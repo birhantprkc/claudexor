@@ -45,9 +45,9 @@ struct RunOutcomeSection: View {
                          accessory: council.degraded
                             ? AnyView(Text("degraded").font(.caption.weight(.medium))
                                 .foregroundStyle(Theme.status(.caution))
-                                .help("Fewer council members drafted than requested."))
+                                .help("Fewer drafts were accepted than requested. A failed member may retain an unverified draft; inspect its error detail."))
                             : nil)
-            Text("\(council.drafted) of \(council.requested) member\(council.requested == 1 ? "" : "s") drafted"
+            Text("\(council.drafted) of \(council.requested) drafts accepted"
                  + (council.mergedBy.map { " · merged by \($0)" } ?? " · merge did not complete"))
                 .font(.caption).foregroundStyle(.secondary)
             ForEach(council.members) { member in

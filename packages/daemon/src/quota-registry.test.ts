@@ -990,6 +990,48 @@ describe("QuotaRegistry", () => {
     }
   });
 
+  it.each([false, true])(
+    "keeps original sequence adjacency after type filtering (compacted=%s)",
+    (compacted) => {
+      for (const gap of [false, true]) {
+        const root = realpathSync.native(mkdtempSync(join(tmpdir(), "quota-filter-gap-")));
+        const base = quotaSnapshot("claude", null, 0.2);
+        const scoped = {
+          ...base,
+          constraints: base.constraints.map((constraint) => ({
+            ...constraint,
+            applies_to_models: ["fable"],
+          })),
+        };
+        const journal = new DurableJournal({ rootDir: root, partition: "global" });
+        journal.append("unrelated.history", { text: "padding ".repeat(2048) });
+        journal.appendBatch([
+          {
+            type: "quota.snapshot.scoped_prepared",
+            payload: { version: 1, base_hash: hashJson(base), snapshot: scoped },
+          },
+          ...(gap ? [{ type: "unknown.future.record", payload: { survives: true } }] : []),
+          { type: "quota.snapshot.upserted", payload: base },
+        ]);
+        if (compacted) expect(journal.compact()).not.toBeNull();
+        journal.close();
+        const replay = new DurableJournal({ rootDir: root, partition: "global" });
+        const recovered = new QuotaRegistry(replay, [], () => new Date("2026-07-28T00:00:01.000Z"));
+        const constraint = recovered.read().snapshots[0]!.constraints[0]!;
+        if (gap) expect(constraint).not.toHaveProperty("applies_to_models");
+        else expect(constraint.applies_to_models).toEqual(["fable"]);
+        expect(replay.records().some((record) => record.type === "unknown.future.record")).toBe(
+          gap,
+        );
+        expect(replay.records().map((record) => record.seq)).toEqual(
+          gap ? [1, 2, 3, 4] : [1, 2, 3],
+        );
+        replay.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("lets a later unscoped commit replace a previously scoped snapshot on replay", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "claudexor-quota-unscoped-replace-")));
     const now = () => new Date("2026-07-28T00:00:01.000Z");

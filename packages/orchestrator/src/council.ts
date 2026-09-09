@@ -1,4 +1,6 @@
 import type { CouncilMember, CouncilProjection } from "@claudexor/schema";
+import type { CouncilMergeInput } from "./council-input.js";
+import { PLAN_WORK_REPORT_GUIDANCE } from "./plan-prompt.js";
 
 /**
  * Council plan strategy (INV-031 / D31): N harnesses draft plans in parallel,
@@ -42,13 +44,14 @@ export function councilDraftRelPath(harnessId: string): string {
  * demands one unified plan ending with the SAME tagged `## Open Questions`
  * block the solo planPrompt uses — so the engine parser runs on the merge
  * output only and produces the shape-identical final/questions.json. */
-export function councilMergePrompt(
-  goal: string,
-  drafts: { harnessId: string; absPath: string }[],
-): string {
-  const pointerLines = drafts.map((d) => `- ${d.harnessId}: ${d.absPath}`);
+export function councilMergePrompt(goal: string, drafts: CouncilMergeInput[]): string {
+  const pointerLines = drafts.map(
+    (d) =>
+      `- ${d.harnessId} (${d.unverified ? "UNVERIFIED" : "ordinary"}): ${d.absPath}\n  Attempt evidence: ${d.evidencePath}${d.error ? `\n  Original error: ${d.error}` : ""}`,
+  );
   return [
     `You are MERGING ${drafts.length} independent draft plan(s) into ONE unified plan. You are planning, NOT implementing. Work read-only; do not write files or output full implementations.`,
+    PLAN_WORK_REPORT_GUIDANCE,
     ``,
     `## Goal`,
     goal,
@@ -56,7 +59,7 @@ export function councilMergePrompt(
     `## Draft plans to merge (read each file before merging)`,
     ...pointerLines,
     ``,
-    `Read every draft above. Reconcile their approaches: keep what is strongest, resolve contradictions explicitly, and drop redundancy. Produce a SINGLE coherent plan — not a list of the drafts.`,
+    `Read every draft AND its attempt evidence above. UNVERIFIED inputs came from failed attempts; their reported completed state is not proof of completion. Use their ideas at your discretion, considering the original error and required inputs. Resolve missing inputs from the other available material when possible; report those that remain in your own Open Questions and WorkReport as appropriate. Do not mechanically union all drafts' required_inputs. Reconcile their approaches, resolve contradictions explicitly, and drop redundancy. Produce a SINGLE coherent plan.`,
     ``,
     `## Required output (markdown)`,
     `1. Approach — 2-3 sentences on the merged approach.`,
@@ -116,5 +119,5 @@ export function councilDegradationNote(projection: CouncilProjection): string {
   const failed = projection.members.filter((m) => m.status === "failed");
   const failedNote =
     failed.length > 0 ? ` (failed: ${failed.map((m) => m.harnessId).join(", ")})` : "";
-  return `council degraded to ${projection.drafted} of ${projection.requested} member(s)${failedNote}`;
+  return `council degraded to ${projection.drafted} of ${projection.requested} contract-accepted draft(s)${failedNote}`;
 }

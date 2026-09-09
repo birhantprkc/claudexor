@@ -715,17 +715,17 @@ async function daemonRun(
     if (exitCodeForState(status) === 0) {
       // Plan runs: server-derived readiness (D17) + interactive answer loop.
       if (p.mode === "plan") {
-        // Council disclosure (INV-031): membership + merge, projected by the
-        // server (never a client re-derivation).
         if (p.council) {
           const council = await fetchCouncil(addr, started.runId);
           if (council) {
             print(
-              `  council: merged by ${council.mergedBy ?? "(none)"} from ${council.drafted} of ${council.requested} member(s)${council.degraded ? " (degraded)" : ""}`,
+              `  council: merged by ${council.mergedBy ?? "(none)"}; ${council.drafted} of ${council.requested} contract-accepted draft(s)${council.degraded ? " (degraded)" : ""}`,
             );
             const failed = council.members.filter((m) => m.status === "failed");
             if (failed.length > 0) {
-              print(`  council failures: ${failed.map((m) => m.harnessId).join(", ")}`);
+              print(
+                `  council failures: ${failed.map((m) => `${m.harnessId}: ${m.error ?? "draft failed"}`).join("; ")}`,
+              );
             }
           }
         }

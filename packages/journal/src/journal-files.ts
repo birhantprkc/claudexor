@@ -3,6 +3,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   lstatSync,
@@ -11,6 +12,7 @@ import {
   renameSync,
   rmSync,
   writeSync,
+  type Stats,
 } from "node:fs";
 import { dirname } from "node:path";
 import { fsyncDirectory } from "@claudexor/util";
@@ -19,6 +21,46 @@ export interface AppendIntent {
   v: 1;
   offset: number;
   length: number;
+}
+
+export function sameJournalFile(expected: Stats, actual: Stats, bytes = expected.size): boolean {
+  return (
+    actual.isFile() &&
+    actual.nlink === 1 &&
+    actual.dev === expected.dev &&
+    actual.ino === expected.ino &&
+    actual.size === bytes
+  );
+}
+
+export function openJournalWriter(path: string): number {
+  const fd = openSync(path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("journal file is not privately owned");
+    if ((stat.mode & 0o777) !== 0o600) {
+      fchmodSync(fd, 0o600);
+      fsyncSync(fd);
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+/** A failed rename may resume only the exact original canonical file. */
+export function reopenOriginalWriter(path: string, original: Stats): number {
+  let fd = -1;
+  try {
+    if (!sameJournalFile(original, lstatSync(path))) return -1;
+    fd = openJournalWriter(path);
+    if (sameJournalFile(original, fstatSync(fd))) return fd;
+  } catch {
+    /* the caller enters its typed recovery path */
+  }
+  if (fd >= 0) closeSync(fd);
+  return -1;
 }
 
 export function appendAndSync(fd: number, bytes: Buffer): void {

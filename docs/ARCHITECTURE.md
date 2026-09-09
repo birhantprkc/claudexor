@@ -205,15 +205,18 @@ at every wire boundary.
   the existing frames untouched when a replacement cannot be materialized within
   that bound, so a large valid history remains readable and startup stays ready.
   Compression also stops at the existing frame output cap; the base64/JSON
-  envelope is checked separately. Constructor and prepared-activation maintenance
-  triggers remain active. Projection reads can select exact record types before
-  payload copying without changing full-history reads, sequence numbers or cursors.
+  envelope is checked separately. Library constructor and prepared-activation
+  triggers remain synchronous by default. The daemon opts into deferred
+  maintenance and streams compaction after normal admission; see the lifecycle
+  section below. Projection reads select exact record types before payload copying
+  without changing full-history reads, sequence numbers or cursors.
 - `packages/daemon`: durable local queue (Unix socket on POSIX, named pipe on win32) and journal projections for commands, projects, and threads.
   Project projections select their own record types; run-event history is validated
   once per projection creation through its descriptor. Direct RunEventStore
   construction still validates by default. Preparation and post-open activation
-  retain their content/path identity checks; startup still performs synchronous
-  work proportional to journal history.
+  retain their content/path identity checks; required replay still performs
+  synchronous work proportional to journal history, while automatic compaction
+  runs separately after admission.
 - `packages/cli`: thin command surface plus local host-integration lifecycle
   (`claudexor plugin`) for generated Claude Code/Codex/Cursor/OpenCode
   skill/MCP artifacts and command artifacts where hosts support them. Plugin
@@ -1593,10 +1596,12 @@ optionally `--n 2..4`) turns it into a multi-harness draft-then-merge: round 1
 runs N members as parallel planner attempts (each the SAME vendor-native
 read-only planner spawn the solo loop drives, in its own lane on a thread turn;
 Cursor uses native read-only Ask so the final-message WorkReport remains available), whose
-drafts land as file-backed artifacts (`council/draft-<harness>.md`). The primary
-then runs ONE merge iteration (intent `synthesize`) whose prompt POINTS at the
-draft files by absolute path — like the frozen-plan brief, full text never rides
-the prompt bubble — and produces a single unified plan. The `## Open Questions`
+drafts land as file-backed artifacts (`council/draft-<harness>.md`). Each input
+also has `attempts/<attemptId>/council-input.yaml` with its attempt outcome, WorkReport
+evidence and draft reference. One admitted member then runs ONE merge iteration
+(intent `synthesize`), preferring the first accepted draft in primary-first order.
+Its prompt points at both files by absolute path; full draft text never rides
+the prompt bubble. The `## Open Questions`
 parser runs on the MERGE output only, so `final/plan.md` + `final/questions.json`
 are shape-identical to a solo plan and the readiness/freeze/Implement flow above
 is unchanged. Council owns no new state machine: it is round-1 attempts plus a
@@ -1604,9 +1609,18 @@ merge attempt, with a `council/membership.yaml` projection served on
 `ControlRunDetail.council` (requested/drafted/degraded/mergedBy + per-member
 role and status) and mirrored on the MCP run/read structured results so a host
 can machine-verify the roster without reading local artifacts. Degradation is
-disclosed, not silent — a failed member is
-carried on the projection and the merge proceeds with survivors (one survivor
-still merges); all members failing is a typed failure. Council shares the
+disclosed, not silent. A nonempty draft whose otherwise valid WorkReport says
+`completed` with nonempty `required_inputs` may reach the merger as explicitly
+UNVERIFIED input, with its original report and failure preserved. Real harness,
+required-web, cancellation and terminal context failures are not eligible for
+this retention path. The planner attempt stays failed and cannot become a
+successful draft merely because the same lane later merges. `drafted` counts
+contract-accepted draft inputs; `degraded` also discloses unverified input.
+If no accepted draft survives, the first eligible unverified lane may merge;
+zero eligible inputs remains a typed failure. The existing merger decides how
+to use the ideas and resolve contradictory or missing information. Its own
+WorkReport and final-plan checks remain unchanged, and a failed merge never
+substitutes a draft as the final plan. Council shares the
 explicit-lane admission rule with Best-of: an explicitly named member that is
 unavailable (including one with no doctor manifest) fails the run loudly at
 routing preflight before any draft, rather than vanishing while a healthier
@@ -1622,6 +1636,12 @@ FLAG refused off `mode=plan`, and `--n` on a plan is legal only with it (shared
 `packages/orchestrator/src/planRun.ts` (round orchestration) and
 `packages/orchestrator/src/council.ts` (member selection, merge prompt,
 projection).
+
+Plan-only WorkReport guidance applies to solo, draft and merge prompts:
+completion describes preparation of the assigned plan, not its future
+implementation. Questions about future implementation may remain in a complete
+plan; `required_inputs` records information genuinely needed to produce the
+current assigned result. The engine never clears that list to force completion.
 
 ### Event streaming contract (snapshot-then-subscribe)
 
@@ -1801,6 +1821,34 @@ discloses `servingMode` (`normal`/`recovery_only`; absent means a pre-fix
 daemon, treated as normal); the macOS app maps `recovery_only` to its
 existing Connecting loop — no adoption, no hydration, no reconciliation, no
 fallback launch — until admission opens.
+
+Automatic journal compaction is cancellable maintenance after normal admission.
+Every daemon-owned JournalManager opts into `deferCompaction` and requests one
+attempt after its generation opens or recovers. A process-local pending set and
+one in-flight promise serialize global and project partitions; new partitions
+use the same callback. There is no maintenance job, persisted retry state, or
+manual upkeep requirement. The existing byte threshold remains unchanged.
+
+`compactInBackground({stagingDir, signal?})` captures an immutable logical prefix,
+streams individual records through asynchronous gzip with bounded output, then
+re-encodes the acknowledged tail against the new physical hash chain. Preparation
+writes one private candidate under `daemon/journal-compaction/`, outside the
+partition directory. Appends continue through the existing intent/fsync-before-ACK
+writer. Publication catches up every acknowledged batch, validates the current
+writer/file identity and generation, and uses the same short close/rename/reopen
+installer as synchronous compaction. Full logical history, sequence numbers and
+the current epoch survive this background rewrite, so live journal cursors keep
+their suffix without a compaction-induced resnapshot.
+
+The public `compact()` still returns a receipt or null immediately and creates a
+new epoch on success; default library construction/activation keeps that behavior.
+Explicit synchronous compaction cancels any background candidate before proceeding.
+Close, quarantine and generation replacement likewise prevent late publication.
+Shutdown fences and aborts maintenance at its synchronous start and drains candidate
+cleanup before journals close. Capacity/no-reclaim results preserve the original
+file, while uncertain installation follows the existing recovery-required path.
+Record serialization and the final filesystem metadata operations remain
+synchronous; this is not a hard realtime latency guarantee.
 
 Termination, local and remote runtime replacement, and the real-harness
 battery consume the same strict owner classification. They recheck the exact
@@ -2708,7 +2756,10 @@ Canonical project output lives under
 events.jsonl
 context/task.yaml
 context/context_pack.yaml?
-attempts/aNN/attempt.yaml
+attempts/aNN/attempt.yaml       (Agent candidate evidence)
+attempts/pNN/council-input.yaml? (Council planner input evidence)
+council/draft-<harness>.md?
+council/membership.yaml?
 attempts/aNN/patch.diff
 reviews/*.yaml
 reviews/*-reviewers/reviewer-progress.jsonl

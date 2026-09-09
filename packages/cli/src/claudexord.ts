@@ -7,6 +7,7 @@ import {
   operatorDecisionProjection,
   runEventProjection,
   JournalManager,
+  JournalMaintenance,
   DaemonServer,
   InteractionRegistry,
   ProjectPartitions,
@@ -85,6 +86,9 @@ export async function main(): Promise<void> {
   let releaseWriterLease = true;
   let lifecycle: ReturnType<typeof armDaemonLifecycle> | null = null;
   let quotaPoller: ReturnType<typeof createDaemonQuotaPoller> | null = null;
+  const journalMaintenance = new JournalMaintenance(daemonDir(), (message) =>
+    logLine(logPath(), redactSecrets(message)),
+  );
   try {
     const token = ensureToken();
 
@@ -95,7 +99,9 @@ export async function main(): Promise<void> {
     const bus = new RunEventBus();
     const { authority: delegationBudgetAuthority, bind: bindDelegationDaemon } =
       createDelegationDaemonBinding();
-    const journalManager = new JournalManager(daemonDir());
+    const journalManager = new JournalManager(daemonDir(), {
+      requestMaintenance: journalMaintenance.request,
+    });
     const commandStoreSlot = journalManager.registerProjection(commandProjection());
     const interactionStoreSlot = journalManager.registerProjection(interactionProjection());
     const operatorDecisionStoreSlot = journalManager.registerProjection(
@@ -148,6 +154,7 @@ export async function main(): Promise<void> {
       runEventStoreSlot,
       threadStoreSlot,
       threadHeadPing,
+      journalMaintenance.request,
     );
     const partitionsPreparation = threads.prepare();
     const startupBlockedPartitions = recoveryBlockedPartitions({
@@ -233,9 +240,10 @@ export async function main(): Promise<void> {
     let control: DaemonControlApiServer | null = null;
     shutdownRuntime = new DaemonRuntimeShutdown({
       daemon: {
-        stop: () => {
+        stop: async () => {
+          const maintenanceDrain = journalMaintenance.stop();
           models.close();
-          return server.stop();
+          await Promise.all([server.stop(), maintenanceDrain]);
         },
       },
       setup: setupBinding,
@@ -308,6 +316,7 @@ export async function main(): Promise<void> {
             logPath: logPath(),
             shuttingDown: () => shutdownRuntime!.requested(),
           }),
+        armJournalMaintenance: () => journalMaintenance.arm(),
       },
     });
     services.recoveryQuarantinePartition = wrapQuarantineWithReopen(
@@ -370,6 +379,7 @@ export async function main(): Promise<void> {
     }
     throw error;
   } finally {
+    await journalMaintenance.stop();
     quotaPoller?.stop();
     startupDiagnostics.close();
     // Drops only the live writer claim; the barrier itself persists (D1).

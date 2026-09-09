@@ -36,8 +36,22 @@ describe("councilDraftRelPath", () => {
 describe("councilMergePrompt", () => {
   it("points at draft FILES by absolute path and keeps the tagged Open Questions block", () => {
     const prompt = councilMergePrompt("build X", [
-      { harnessId: "claude", absPath: "/runs/r1/council/draft-claude.md" },
-      { harnessId: "codex", absPath: "/runs/r1/council/draft-codex.md" },
+      {
+        attemptId: "p01",
+        harnessId: "claude",
+        absPath: "/runs/r1/council/draft-claude.md",
+        evidencePath: "/runs/r1/attempts/p01/council-input.yaml",
+        unverified: false,
+        error: null,
+      },
+      {
+        attemptId: "p02",
+        harnessId: "codex",
+        absPath: "/runs/r1/council/draft-codex.md",
+        evidencePath: "/runs/r1/attempts/p02/council-input.yaml",
+        unverified: true,
+        error: "contradictory report",
+      },
     ]);
     expect(prompt).toContain("/runs/r1/council/draft-claude.md");
     expect(prompt).toContain("/runs/r1/council/draft-codex.md");
@@ -45,6 +59,9 @@ describe("councilMergePrompt", () => {
     expect(prompt).toContain("## Open Questions");
     expect(prompt).toContain("[single]");
     expect(prompt).toContain("build X");
+    expect(prompt).toContain("codex (UNVERIFIED)");
+    expect(prompt).toContain("/runs/r1/attempts/p02/council-input.yaml");
+    expect(prompt).toContain("Original error: contradictory report");
   });
 });
 

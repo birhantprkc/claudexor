@@ -1146,9 +1146,12 @@ views in the shared design-system files; screens compose them.
   Three server-projected facts render as quiet Outcome receipts, each a
   projection of a typed run/DTO field (never UI-invented):
   - **Council** — a Plan run drafted by a council (D31) shows its membership
-    receipt (`CouncilInfo`): how many harnesses drafted in parallel and which
-    primary merged them into the one plan + one question set. A member that was
-    unavailable is disclosed, not silently dropped or self-duplicated.
+    receipt (`CouncilInfo`): how many draft inputs passed the report contract and
+    which member merged them into the one plan + one question set. Failed members
+    retain their error detail, including a producer-supplied reference when an
+    unverified draft was preserved for the merger. A degraded receipt covers
+    missing accepted drafts or unverified input; it never promotes a failed
+    planner to successful merely because that lane later merged.
   - **Subscription valuation** — the token-valued cost of native-subscription
     work (`valuationUsd`), shown beside billed cash in the turn receipt as a
     quiet `≈ $Y sub` element (separate from the `Cash: $X` spend the cap

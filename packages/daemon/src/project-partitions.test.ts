@@ -1,3 +1,4 @@
+import type { DurableJournal } from "@claudexor/journal";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,10 +32,10 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function fixture() {
+function fixture(requestMaintenance?: (journal: DurableJournal) => void) {
   const root = realpathSync(reapMk(join(tmpdir(), "claudexor-project-partitions-")));
   roots.push(root);
-  const manager = new JournalManager(root);
+  const manager = new JournalManager(root, { requestMaintenance });
   const commands = manager.registerProjection(commandProjection());
   const interactions = manager.registerProjection(interactionProjection());
   const decisions = manager.registerProjection(operatorDecisionProjection());
@@ -58,11 +59,45 @@ function fixture() {
       runEvents,
       threads,
       headPing,
+      requestMaintenance,
     ),
   };
 }
 
 describe("ProjectPartitions", () => {
+  it("wires maintenance into new, prepared and reopened project managers", () => {
+    const request = vi.fn<(journal: DurableJournal) => void>();
+    const f = fixture(request);
+    const projectRoot = join(f.root, "project");
+    mkdirSync(projectRoot);
+    const project = f.partitions.registerProject({
+      root: projectRoot,
+      idempotencyKey: "new",
+      clientId: "test",
+    });
+    expect(request.mock.calls.map(([journal]) => journal.options.partition)).toEqual([
+      "global",
+      `project:${project.id}`,
+    ]);
+    const old = request.mock.calls[1]![0];
+    expect(old.options.deferCompaction).toBe(true);
+    f.partitions.close();
+    f.manager.close();
+    expect(() => old.state()).toThrow(/closed/);
+    const reopened = fixtureAt(f.root, request);
+    reopened.partitions.prepare();
+    const before = request.mock.calls.length;
+    reopened.partitions.activatePrepared();
+    expect(request).toHaveBeenCalledTimes(before);
+    reopened.partitions.recoverAfterStartup();
+    const next = request.mock.calls.at(-1)![0];
+    expect(next).not.toBe(old);
+    expect(next.options.partition).toBe(`project:${project.id}`);
+    expect(next.options.deferCompaction).toBe(true);
+    reopened.partitions.close();
+    reopened.manager.close();
+  });
+
   it("persists idempotent delivery receipts and rejects key reuse for another request", () => {
     const f = fixture();
     const input = {
@@ -654,8 +689,8 @@ describe("ProjectPartitions", () => {
   });
 });
 
-function fixtureAt(root: string) {
-  const manager = new JournalManager(root);
+function fixtureAt(root: string, requestMaintenance?: (journal: DurableJournal) => void) {
+  const manager = new JournalManager(root, { requestMaintenance });
   const commands = manager.registerProjection(commandProjection());
   const interactions = manager.registerProjection(interactionProjection());
   const decisions = manager.registerProjection(operatorDecisionProjection());
@@ -673,6 +708,8 @@ function fixtureAt(root: string) {
       decisions,
       runEvents,
       threads,
+      undefined,
+      requestMaintenance,
     ),
   };
 }
