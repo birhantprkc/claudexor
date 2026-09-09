@@ -5,6 +5,7 @@ import {
   existsSync,
   fchmodSync,
   fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -67,6 +68,44 @@ export function appendAndSync(fd: number, bytes: Buffer): void {
   let offset = 0;
   while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
   fsyncSync(fd);
+}
+
+/** Truncate only an already validated pending suffix. Windows append handles
+ * lack FILE_WRITE_DATA, required by NtSetInformationFile's EOF operation. */
+export function truncatePendingSuffix(
+  fd: number,
+  path: string,
+  offset: number,
+  bytes: number,
+): void {
+  if (process.platform !== "win32") {
+    ftruncateSync(fd, offset);
+    fsyncSync(fd);
+    return;
+  }
+  const original = fstatSync(fd);
+  const recoveryFd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
+  try {
+    if (
+      !sameJournalFile(original, fstatSync(fd), bytes) ||
+      !sameJournalFile(original, fstatSync(recoveryFd), bytes) ||
+      !sameJournalFile(original, lstatSync(path), bytes)
+    ) {
+      throw new Error("journal identity changed before pending suffix recovery");
+    }
+    ftruncateSync(recoveryFd, offset);
+    fsyncSync(recoveryFd);
+    if (
+      !sameJournalFile(original, fstatSync(fd), offset) ||
+      !sameJournalFile(original, fstatSync(recoveryFd), offset) ||
+      !sameJournalFile(original, lstatSync(path), offset)
+    ) {
+      throw new Error("journal identity changed during pending suffix recovery");
+    }
+  } finally {
+    // A close failure must also leave the intent in place and refuse readiness.
+    closeSync(recoveryFd);
+  }
 }
 
 export function ensurePrivateFile(path: string): void {

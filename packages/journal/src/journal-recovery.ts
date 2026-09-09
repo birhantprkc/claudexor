@@ -1,12 +1,12 @@
-import { ftruncateSync, fsyncSync } from "node:fs";
 import { replayFrames, type JournalRecord } from "./frame-codec.js";
-import { readDescriptor, readIntent, removeFile } from "./journal-files.js";
+import { readDescriptor, readIntent, removeFile, truncatePendingSuffix } from "./journal-files.js";
 import { JournalRecoveryRequiredError, journalRecoveryAt } from "./journal-recovery-state.js";
 
 /** Recover only the original canonical file. A compaction candidate is never
  * consulted as recovery authority. Returns decoded ACK history for its writer. */
 export function recoverJournal(
   fd: number,
+  path: string,
   partition: string,
   intentPath: string,
 ): {
@@ -30,8 +30,7 @@ export function recoverJournal(
       }
       discardedBytes = bytes.length - intent.offset;
       if (discardedBytes > 0) {
-        ftruncateSync(fd, intent.offset);
-        fsyncSync(fd);
+        truncatePendingSuffix(fd, path, intent.offset, bytes.length);
         bytes = bytes.subarray(0, intent.offset);
       }
       removeFile(intentPath);

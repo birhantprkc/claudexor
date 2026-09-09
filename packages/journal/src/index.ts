@@ -378,7 +378,7 @@ export class DurableJournal {
   private recover(): void {
     let result: ReturnType<typeof recoverJournal>;
     try {
-      result = recoverJournal(this.fd, this.options.partition, this.intentPath());
+      result = recoverJournal(this.fd, this.path, this.options.partition, this.intentPath());
     } catch (error) {
       if (!(error instanceof JournalRecoveryRequiredError)) throw error;
       this.recovery = error.recovery;

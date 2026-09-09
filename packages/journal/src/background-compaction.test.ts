@@ -1,5 +1,7 @@
 import { randomBytes, createHash } from "node:crypto";
 import {
+  existsSync,
+  constants,
   fsyncSync,
   mkdirSync,
   mkdtempSync,
@@ -28,6 +30,12 @@ const hooks = vi.hoisted(() => ({
   rename: undefined as (() => void) | undefined,
   open: undefined as (() => void) | undefined,
   writer: -1,
+  writerFlags: 0,
+  recoveryTracking: false,
+  recoveryFault: "" as "" | "open" | "identity" | "truncate" | "flush" | "close",
+  recoveryFd: -1,
+  recoveryEvents: [] as string[],
+  recoveryFlags: [] as number[],
 }));
 vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
@@ -78,10 +86,75 @@ vi.mock("node:fs", async (original) => {
   return {
     ...fs,
     openSync: (...args: Parameters<typeof fs.openSync>) => {
-      if (String(args[0]).endsWith("journal.bin")) hooks.open?.();
+      const journal = String(args[0]).endsWith("journal.bin");
+      const flags = typeof args[1] === "number" ? args[1] : 0;
+      const append = (flags & fs.constants.O_APPEND) !== 0;
+      const recovery =
+        journal && hooks.recoveryTracking && !append && (flags & fs.constants.O_RDWR) !== 0;
+      if (journal) hooks.open?.();
+      if (recovery) {
+        hooks.recoveryEvents.push("open");
+        hooks.recoveryFlags.push(flags);
+        if (hooks.recoveryFault === "open") throw new Error("injected recovery open failure");
+      }
       const fd = fs.openSync(...args);
-      if (String(args[0]).endsWith("journal.bin")) hooks.writer = fd;
+      if (journal && append) {
+        hooks.writer = fd;
+        hooks.writerFlags = flags;
+      }
+      if (recovery) hooks.recoveryFd = fd;
       return fd;
+    },
+    fstatSync: (...args: Parameters<typeof fs.fstatSync>) => {
+      const stat = fs.fstatSync(...args);
+      if (args[0] !== hooks.recoveryFd || hooks.recoveryFault !== "identity") return stat;
+      return new Proxy(stat, {
+        get(target, key) {
+          if (key === "ino")
+            return typeof target.ino === "bigint" ? target.ino + 1n : target.ino + 1;
+          const value = Reflect.get(target, key);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    ftruncateSync: (fd: number, length?: number) => {
+      if (hooks.recoveryTracking) {
+        hooks.recoveryEvents.push("truncate");
+        expect(fd).toBe(hooks.recoveryFd);
+        if (hooks.recoveryFault === "truncate")
+          throw new Error("injected recovery truncate failure");
+      }
+      fs.ftruncateSync(fd, length);
+    },
+    fsyncSync: (fd: number) => {
+      if (hooks.recoveryTracking && fd === hooks.recoveryFd) {
+        hooks.recoveryEvents.push("flush");
+        if (hooks.recoveryFault === "flush") throw new Error("injected recovery flush failure");
+      }
+      fs.fsyncSync(fd);
+    },
+    writeSync: (...args: Parameters<typeof fs.writeSync>) => {
+      if (hooks.recoveryTracking && args[0] === hooks.writer) {
+        expect(hooks.recoveryFd).toBe(-1);
+        expect(hooks.writerFlags & fs.constants.O_APPEND).not.toBe(0);
+        hooks.recoveryEvents.push("append");
+      }
+      return fs.writeSync(...args);
+    },
+    closeSync: (fd: number) => {
+      fs.closeSync(fd);
+      if (hooks.recoveryTracking && fd === hooks.recoveryFd) {
+        hooks.recoveryEvents.push("close");
+        hooks.recoveryFd = -1;
+        if (hooks.recoveryFault === "close") throw new Error("injected recovery close failure");
+      }
+    },
+    rmSync: (...args: Parameters<typeof fs.rmSync>) => {
+      if (hooks.recoveryTracking && String(args[0]).endsWith("append.pending.json")) {
+        expect(hooks.recoveryFd).toBe(-1);
+        hooks.recoveryEvents.push("remove-intent");
+      }
+      fs.rmSync(...args);
     },
     renameSync: (...args: Parameters<typeof fs.renameSync>) => {
       if (String(args[0]).endsWith(".compact")) {
@@ -103,6 +176,11 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const key of ["stream", "sync", "close", "rename", "open"] as const) hooks[key] = undefined;
+  hooks.recoveryTracking = false;
+  hooks.recoveryFault = "";
+  hooks.recoveryFd = -1;
+  hooks.recoveryEvents = [];
+  hooks.recoveryFlags = [];
   for (const journal of journals.splice(0)) journal.close();
   vi.restoreAllMocks();
   rmSync(root, { recursive: true, force: true });
@@ -401,4 +479,164 @@ describe("streamed compaction", () => {
       expect(readdirSync(stagingDir)).toEqual([]);
     },
   );
+});
+
+/** Exercise the Windows-only descriptor branch on every developer platform;
+ * the same tests also run against real Windows filesystem handles in CI. */
+function windowsRecovery<T>(run: () => T): T {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  hooks.recoveryTracking = true;
+  try {
+    return run();
+  } finally {
+    hooks.recoveryTracking = false;
+    Object.defineProperty(process, "platform", platform);
+  }
+}
+
+function crashedJournal(tailBytes?: number) {
+  let crash = false;
+  const journal = fixture(0, {
+    appendAndSync: (fd, bytes) => {
+      writeSync(
+        fd,
+        bytes,
+        0,
+        crash ? Math.min(tailBytes ?? bytes.length, bytes.length) : bytes.length,
+      );
+      fsyncSync(fd);
+      if (crash) throw new Error("simulated crash before append ACK");
+    },
+  });
+  journal.append("acknowledged", { retained: "prefix" });
+  const retained = logical(journal.records());
+  const prefix = readFileSync(journal.path);
+  const cursor = journal.currentCursor();
+  crash = true;
+  expect(() =>
+    journal.appendBatch([
+      { type: "unacknowledged", payload: "one" },
+      { type: "unacknowledged", payload: "two" },
+    ]),
+  ).toThrow(JournalAppendUncertainError);
+  const intentPath = join(journal.partitionDir, "append.pending.json");
+  const pending = readFileSync(intentPath);
+  const before = readFileSync(journal.path);
+  journal.close();
+  return { path: journal.path, intentPath, prefix, pending, before, retained, cursor };
+}
+
+describe("Windows pending suffix descriptor", () => {
+  it("truncates the validated suffix, closes before removing intent and retains append-at-EOF", () => {
+    const seed = crashedJournal();
+    const replay = windowsRecovery(() => fixture(0));
+    expect(hooks.recoveryFlags).toEqual([constants.O_RDWR | constants.O_NOFOLLOW]);
+    expect(hooks.recoveryEvents).toEqual([
+      "open",
+      "truncate",
+      "flush",
+      "close",
+      "remove-intent",
+      "append",
+      "remove-intent",
+    ]);
+    expect(hooks.recoveryFd).toBe(-1);
+    expect(logical(replay.records()).slice(0, 1)).toEqual(seed.retained);
+    expect(replay.records().map((row) => row.type)).toEqual([
+      "acknowledged",
+      "journal.recovery_tail_discarded",
+    ]);
+    expect(replay.sequenceAfter(seed.cursor)).toBe(1);
+    expect(replay.append("after.recovery", { at: "new EOF" }).seq).toBe(3);
+    expect(existsSync(seed.intentPath)).toBe(false);
+    replay.close();
+    const restarted = fixture(0);
+    expect(restarted.records().map((row) => row.type)).toEqual([
+      "acknowledged",
+      "journal.recovery_tail_discarded",
+      "after.recovery",
+    ]);
+    expect(readFileSync(seed.path).subarray(0, seed.prefix.length)).toEqual(seed.prefix);
+  });
+
+  it("uses no nonappend descriptor for a zero-byte interrupted append", () => {
+    const seed = crashedJournal(0);
+    const replay = windowsRecovery(() => fixture(0));
+    expect(hooks.recoveryFlags).toEqual([]);
+    expect(hooks.recoveryEvents).toEqual(["remove-intent"]);
+    expect(logical(replay.records())).toEqual(seed.retained);
+    expect(replay.append("after.empty.recovery", true).seq).toBe(2);
+  });
+
+  it("keeps read-only preparation inert until explicit activation", () => {
+    const seed = crashedJournal(3);
+    const prepared = windowsRecovery(() =>
+      DurableJournal.prepare({
+        rootDir: join(root, "journal"),
+        partition: "global",
+        deferCompaction: true,
+      }),
+    );
+    journals.push(prepared);
+    expect(hooks.recoveryEvents).toEqual([]);
+    expect(readFileSync(seed.path)).toEqual(seed.before);
+    expect(readFileSync(seed.intentPath)).toEqual(seed.pending);
+    windowsRecovery(() => prepared.activatePrepared());
+    expect(hooks.recoveryEvents).toEqual([
+      "open",
+      "truncate",
+      "flush",
+      "close",
+      "remove-intent",
+      "append",
+      "remove-intent",
+    ]);
+    expect(prepared.state()).toEqual({ status: "ready", discardedTailBytes: 3 });
+    expect(prepared.append("after.activation", true).seq).toBe(3);
+  });
+
+  it.each(["open", "identity", "truncate", "flush", "close"] as const)(
+    "%s failure retains intent and refuses readiness without leaking the recovery handle",
+    (fault) => {
+      const seed = crashedJournal();
+      hooks.recoveryFault = fault;
+      const refused = windowsRecovery(() => fixture(0));
+      expect(refused.state().status).toBe("recovery_required");
+      expect(() => refused.append("must.not.ack", true)).toThrow(JournalRecoveryRequiredError);
+      expect(readFileSync(seed.intentPath)).toEqual(seed.pending);
+      expect(hooks.recoveryEvents).not.toContain("remove-intent");
+      expect(hooks.recoveryFd).toBe(-1);
+      expect(readFileSync(seed.path)).toEqual(
+        ["flush", "close"].includes(fault) ? seed.prefix : seed.before,
+      );
+      if (fault !== "open") expect(hooks.recoveryEvents.at(-1)).toBe("close");
+      refused.close();
+      hooks.recoveryFault = "";
+      const recovered = windowsRecovery(() => fixture(0));
+      expect(recovered.state().status).toBe("ready");
+      expect(recovered.records().filter((row) => row.type === "unacknowledged")).toEqual([]);
+      expect(logical(recovered.records()).slice(0, 1)).toEqual(seed.retained);
+      expect(recovered.append("after.retry", true).type).toBe("after.retry");
+    },
+  );
+
+  it("does not open a recovery descriptor for malformed intent or corrupt prefix", () => {
+    const seed = crashedJournal();
+    writeFileSync(seed.intentPath, "{}", { mode: 0o600 });
+    const malformed = windowsRecovery(() => fixture(0));
+    expect(malformed.state().status).toBe("recovery_required");
+    expect(hooks.recoveryEvents).toEqual([]);
+    expect(readFileSync(seed.path)).toEqual(seed.before);
+    malformed.close();
+    writeFileSync(seed.intentPath, seed.pending);
+    const corrupt = Buffer.from(seed.before);
+    corrupt[0] = corrupt[0]! ^ 0xff;
+    writeFileSync(seed.path, corrupt);
+    const refused = windowsRecovery(() => fixture(0));
+    expect(refused.state().status).toBe("recovery_required");
+    expect(hooks.recoveryEvents).toEqual([]);
+    expect(readFileSync(seed.path)).toEqual(corrupt);
+    expect(readFileSync(seed.intentPath)).toEqual(seed.pending);
+  });
 });
