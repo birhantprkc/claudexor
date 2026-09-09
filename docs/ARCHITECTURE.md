@@ -1206,6 +1206,16 @@ to this operation's invocation, which rechecks the current account fingerprint;
 no catalog or credentials are cached across operations. Unknown fingerprints
 retain fresh discovery and cannot authorize native continuation reuse.
 Its single inference POST follows a durable dispatch receipt.
+The caller's canonical instruction messages retain their roles and ordered text
+parts in Ouroboros history. Codex's provider-specific wire projection maps each
+canonical `system` message to the high-priority `developer` role because this
+subscription backend rejects `system` messages in `input`; existing
+`developer`, `user`, `assistant` and tool messages keep their roles and order.
+Callers that intentionally provide both canonical `system` and `developer` roles
+should expect those two roles to share the provider's `developer` level on this
+route; the canonical distinction remains available in the caller's history.
+The separate string-valued `instructions` field is always empty on this route,
+and its field limit remains distinct from the model's token capacity.
 Responses SSE is translated structurally, including image blocks, original tool
 IDs and complete native output items. Unknown model/window/usage/cash remains
 unknown; `maxOutputTokens` and `temperature` are explicit unsupported options,

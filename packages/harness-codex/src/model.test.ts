@@ -228,8 +228,10 @@ describe("single-generation Codex adapter", () => {
   });
   it("dispatches exactly one POST with honest identity and returns native tools", async () => {
     const fixture = setup();
+    const originalRequest = structuredClone(fixture.request);
     const result = await fixture.adapter.invoke(fixture.request, fixture.context);
     expect(ModelCallResult.safeParse(result).success).toBe(true);
+    expect(fixture.request).toEqual(originalRequest);
     expect(result).toMatchObject({
       outcome: "completed",
       route: { source: "codex", credentialProfileId: "work", model: "model-one" },
@@ -248,7 +250,14 @@ describe("single-generation Codex adapter", () => {
     expect(sentHeaders.get("originator")).toBe("claudexor");
     expect(sentHeaders.get("ChatGPT-Account-ID")).toBe("account-one");
     expect(JSON.parse(init!.body as string)).toMatchObject({
-      instructions: "Own SYSTEM and BIBLE",
+      instructions: "",
+      input: expect.arrayContaining([
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "Own SYSTEM and BIBLE" }],
+        },
+      ]),
       model: "model-one",
       tool_choice: "required",
     });
