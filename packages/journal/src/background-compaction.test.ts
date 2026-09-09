@@ -110,8 +110,13 @@ vi.mock("node:fs", async (original) => {
       if (args[0] !== hooks.recoveryFd || hooks.recoveryFault !== "identity") return stat;
       return new Proxy(stat, {
         get(target, key) {
-          if (key === "ino")
-            return typeof target.ino === "bigint" ? target.ino + 1n : target.ino + 1;
+          if (key === "ino") {
+            // Windows inode numbers can exceed exact Number precision: +1 may be a no-op.
+            const different =
+              typeof target.ino === "bigint" ? target.ino + 1n : target.ino === 0 ? 1 : 0;
+            expect(different).not.toBe(target.ino);
+            return different;
+          }
           const value = Reflect.get(target, key);
           return typeof value === "function" ? value.bind(target) : value;
         },
