@@ -207,7 +207,8 @@ describe("journal maintenance generations", () => {
     await setImmediate();
     await maintenance.stop();
     expect(() => old.state()).toThrow(/closed/);
-    expect(readFileSync(join(archive, "journal.bin"))).toEqual(before);
+    // Compare the complete bytes without expanding a multi-MiB Buffer into matcher entries.
+    expect(readFileSync(join(archive, "journal.bin")).equals(before)).toBe(true);
   });
 
   it("cleans only owned crash candidates after arm, preserving all other files", async () => {
