@@ -121,6 +121,7 @@ export interface NormalPlaneDuties {
   startSetup(): Promise<void>;
   quarantineGhosts(): void;
   scheduleRetention(): void;
+  armJournalMaintenance(): void;
 }
 
 /** D5 stage 4, single-flight: the startup path runs it with the frozen
@@ -163,6 +164,7 @@ export function createStartupAdmissionRuntime(input: {
     await input.normalPlane.startSetup();
     input.normalPlane.quarantineGhosts();
     input.normalPlane.scheduleRetention();
+    input.normalPlane.armJournalMaintenance();
   };
 
   let admissionCompletion: Promise<DaemonServingMode> | null = null;

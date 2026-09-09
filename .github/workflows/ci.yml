@@ -295,6 +295,10 @@ jobs:
           packages/cli/src/setup-login-pty.test.ts
           packages/cli/src/setup-login-runner-transport.test.ts
           packages/journal/src/index.test.ts
+          packages/journal/src/background-compaction.test.ts
+          packages/journal/src/background-capacity.test.ts
+          packages/daemon/src/journal-maintenance.test.ts
+          packages/control-api/src/journal-background.test.ts
           packages/harness-codex/src/model-auth.test.ts
           packages/harness-codex/src/model.test.ts
           packages/harness-codex/src/responses.test.ts

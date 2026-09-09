@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, openSync, renameSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, constants, openSync, rmSync } from "node:fs";
 import { gzipSync } from "node:zlib";
-import { fsyncDirectory } from "@claudexor/util";
 import { encodeJournalPayload } from "./append-batch.js";
 import {
   COMPACTED_SNAPSHOT,
@@ -19,6 +17,7 @@ import {
 import { appendAndSync } from "./journal-files.js";
 
 export interface JournalCompactionResult {
+  path: string;
   receipt: { beforeBytes: number; afterBytes: number; records: number };
   records: JournalRecord[];
   epoch: string;
@@ -27,7 +26,8 @@ export interface JournalCompactionResult {
   knownFileBytes: number;
 }
 
-export function compactJournalFile(input: {
+/** Prepare a fsynced candidate. Only DurableJournal installs canonical bytes. */
+export function prepareJournalCompaction(input: {
   path: string;
   partition: string;
   entries: readonly JournalRecord[];
@@ -37,11 +37,7 @@ export function compactJournalFile(input: {
   if (input.entries.length === 0) return null;
   let logical: CompactedRecord[];
   try {
-    logical = input.entries.map((record) => ({
-      time: record.time,
-      type: record.type,
-      payload: cloneJson(record.payload),
-    }));
+    logical = input.entries.map((record) => logicalRecord(record, cloneJson(record.payload)));
   } catch (error) {
     if (isCompactionCapacityError(error)) return null;
     throw error;
@@ -64,56 +60,28 @@ export function compactJournalFile(input: {
     if (isCompactionCapacityError(error)) return null;
     throw error;
   }
-  // A base64 representation plus its JSON envelope is always larger than the
-  // compressed bytes, so this snapshot cannot fit the frame payload. Avoid
-  // creating an unnecessarily large string before returning the no-op.
-  if (compressed.length > MAX_PAYLOAD_BYTES) return null;
-  // Base64 and payload JSON are also materialization steps. Keep them inside
-  // the same capacity boundary so an otherwise readable journal remains the
-  // authoritative file when either conversion hits a runtime limit.
-  let payload: CompactedSnapshotPayload;
-  let payloadBytes: Buffer;
-  try {
-    payload = {
-      version: 1,
-      count: logical.length,
-      encoding: "gzip-base64",
-      data: compressed.toString("base64"),
-    };
-    payloadBytes = encodeJournalPayload(payload);
-  } catch (error) {
-    if (isCompactionCapacityError(error)) return null;
-    throw error;
-  }
-  if (payloadBytes.length > MAX_PAYLOAD_BYTES) return null;
   const epoch = randomUUID();
-  const header: FrameHeader = {
+  const snapshot = encodeCompactionSnapshot({
     partition: input.partition,
     epoch,
-    seq: 1,
-    previousFrameHash: ZERO_HASH,
     time: input.now().toISOString(),
-    type: COMPACTED_SNAPSHOT,
-    logicalSpan: logical.length,
-  };
-  const frame = encodeFrame(header, payloadBytes);
-  if (frame.length >= input.knownFileBytes) return null;
-  const frameHash = frame.subarray(frame.length - HASH_BYTES).toString("hex");
-  // Materialize the replacement records before the rename. If cloning a
-  // payload fails, the existing journal must remain the authoritative file.
+    count: logical.length,
+    compressed,
+  });
+  if (!snapshot || snapshot.frame.length >= input.knownFileBytes) return null;
+  const { frame, frameHash } = snapshot;
   let records: JournalRecord[];
   try {
-    records = logical.map((record, index) => ({
-      partition: input.partition,
-      epoch,
-      seq: index + 1,
-      previousFrameHash: index === 0 ? ZERO_HASH : frameHash,
-      frameHash,
-      time: record.time,
-      type: record.type,
-      payload: cloneJson(record.payload),
-      byteOffset: 0,
-    }));
+    records = logical.map((record, index) =>
+      compactedJournalRecord(
+        record,
+        input.partition,
+        epoch,
+        index,
+        frameHash,
+        cloneJson(record.payload),
+      ),
+    );
   } catch (error) {
     if (isCompactionCapacityError(error)) return null;
     throw error;
@@ -121,13 +89,17 @@ export function compactJournalFile(input: {
   const temp = `${input.path}.${randomUUID()}.compact`;
   const tempFd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   try {
-    appendAndSync(tempFd, frame);
-  } finally {
-    closeSync(tempFd);
+    try {
+      appendAndSync(tempFd, frame);
+    } finally {
+      closeSync(tempFd);
+    }
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
   }
-  renameSync(temp, input.path);
-  fsyncDirectory(dirname(input.path));
   return {
+    path: temp,
     receipt: {
       beforeBytes: input.knownFileBytes,
       afterBytes: frame.length,
@@ -141,7 +113,70 @@ export function compactJournalFile(input: {
   };
 }
 
-function isCompactionCapacityError(error: unknown): boolean {
+export function logicalRecord(record: CompactedRecord, payload = record.payload): CompactedRecord {
+  return { time: record.time, type: record.type, payload };
+}
+
+/** Both producers share the versioned envelope and existing materialization caps. */
+export function encodeCompactionSnapshot(input: {
+  partition: string;
+  epoch: string;
+  time: string;
+  count: number;
+  compressed: Buffer;
+}): { frame: Buffer; frameHash: string } | null {
+  if (input.compressed.length > MAX_PAYLOAD_BYTES) return null;
+  let payload: CompactedSnapshotPayload;
+  let payloadBytes: Buffer;
+  try {
+    payload = {
+      version: 1,
+      count: input.count,
+      encoding: "gzip-base64",
+      data: input.compressed.toString("base64"),
+    };
+    payloadBytes = encodeJournalPayload(payload);
+  } catch (error) {
+    if (isCompactionCapacityError(error)) return null;
+    throw error;
+  }
+  if (payloadBytes.length > MAX_PAYLOAD_BYTES) return null;
+  const header: FrameHeader = {
+    partition: input.partition,
+    epoch: input.epoch,
+    seq: 1,
+    previousFrameHash: ZERO_HASH,
+    time: input.time,
+    type: COMPACTED_SNAPSHOT,
+    logicalSpan: input.count,
+  };
+  const frame = encodeFrame(header, payloadBytes);
+  const frameHash = frame.subarray(frame.length - HASH_BYTES).toString("hex");
+  return { frame, frameHash };
+}
+
+export function compactedJournalRecord(
+  record: CompactedRecord,
+  partition: string,
+  epoch: string,
+  index: number,
+  frameHash: string,
+  payload = record.payload,
+): JournalRecord {
+  return {
+    partition,
+    epoch,
+    seq: index + 1,
+    previousFrameHash: index === 0 ? ZERO_HASH : frameHash,
+    frameHash,
+    time: record.time,
+    type: record.type,
+    payload,
+    byteOffset: 0,
+  };
+}
+
+export function isCompactionCapacityError(error: unknown): boolean {
   if (
     error instanceof RangeError &&
     (error.message === "Invalid string length" ||
@@ -153,7 +188,9 @@ function isCompactionCapacityError(error: unknown): boolean {
     typeof error === "object" &&
     error !== null &&
     "code" in error &&
-    (error.code === "ERR_BUFFER_TOO_LARGE" || error.code === "ERR_STRING_TOO_LONG")
+    (error.code === "ERR_BUFFER_TOO_LARGE" ||
+      error.code === "ERR_STRING_TOO_LONG" ||
+      error.code === "journal_compaction_capacity")
   );
 }
 

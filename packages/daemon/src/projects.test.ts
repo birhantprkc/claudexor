@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DurableJournal } from "@claudexor/journal";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ProjectStore } from "./projects.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -30,6 +30,28 @@ function fixture() {
 }
 
 describe("ProjectStore", () => {
+  it("selects registry record types before copies while retaining mixed full history", () => {
+    const f = fixture();
+    const project = f.store.register({
+      root: f.firstRoot,
+      idempotencyKey: "filter",
+      clientId: "test",
+    });
+    f.journal.append("unknown.future.history", { text: "unrelated ".repeat(2048) });
+    f.store.relink(project.id, f.secondRoot);
+    const records = vi.spyOn(f.journal, "records");
+    const replay = new ProjectStore(f.journal);
+    expect(records).toHaveBeenCalledWith(0, [
+      "project.registered",
+      "project.relinked",
+      "project.unregistered",
+    ]);
+    expect(replay.list()).toEqual(f.store.list());
+    records.mockRestore();
+    expect(f.journal.records().map((record) => record.seq)).toEqual([1, 2, 3]);
+    f.journal.close();
+  });
+
   it("starts empty, registers idempotently, and survives restart without v1 import", () => {
     const f = fixture();
     expect(f.store.list()).toEqual([]);

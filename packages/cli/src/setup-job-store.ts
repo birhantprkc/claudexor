@@ -282,7 +282,11 @@ export class SetupJobStore {
 
   private rebuild(): void {
     if (this.journal.state().status === "recovery_required") return;
-    for (const record of this.journal.records<SetupJournalPayload>()) {
+    for (const record of this.journal.records<SetupJournalPayload>(0, [
+      "setup.job.saved",
+      "setup.job.create_bound",
+      "setup.job.log",
+    ])) {
       if (record.type === "setup.job.log") {
         if (
           typeof record.payload?.jobId !== "string" ||

@@ -27,7 +27,7 @@ export class ThreadHeadPingEmitter {
   }
 
   private replay(): void {
-    for (const record of this.journal.records()) {
+    for (const record of this.journal.records(0, [UPDATED])) {
       if (record.type !== UPDATED) continue;
       const ping = ThreadHeadPing.safeParse(record.payload);
       if (!ping.success) continue;

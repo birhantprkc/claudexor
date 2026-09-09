@@ -286,12 +286,50 @@ describe("unwrapWorkReportEnvelope", () => {
     };
     const r = unwrapWorkReportEnvelope(JSON.stringify(bad), ACTIVE);
     expect(r.contractViolation).toMatch(/completed work_report must not list required_inputs/);
+    expect(r.workReport).toBeNull();
+    expect(r.reportProblem).toEqual({
+      kind: "completed_with_required_inputs",
+      reported: bad.work_report,
+    });
   });
 
   it("enforces needs_input ⇒ ≥1 required_input", () => {
     const bad = { work_report: { state: "needs_input", required_inputs: [] }, output: "x" };
     const r = unwrapWorkReportEnvelope(JSON.stringify(bad), ACTIVE);
     expect(r.contractViolation).toMatch(/needs_input work_report must list at least one/);
+    expect(r.reportProblem).toBeUndefined();
+  });
+
+  it("never attaches the salvage marker to malformed reports or invalid output slots", () => {
+    const contradictory = { ...completed, required_inputs: needsInput.required_inputs };
+    for (const raw of [
+      "not JSON",
+      "[]",
+      JSON.stringify({ work_report: contradictory }),
+      JSON.stringify({ work_report: contradictory, output: {} }),
+      JSON.stringify({ work_report: { state: "unknown" }, output: "useful text" }),
+    ]) {
+      const result = unwrapWorkReportEnvelope(raw, ACTIVE);
+      expect(result.contractViolation).not.toBeNull();
+      expect(result.reportProblem).toBeUndefined();
+    }
+  });
+
+  it("redacts the retained contradictory claim before handing it to evidence writers", () => {
+    const secret = "sk-" + "aB3dEf9h".repeat(6);
+    const result = unwrapWorkReportEnvelope(
+      JSON.stringify({
+        output: "useful plan",
+        work_report: {
+          state: "completed",
+          required_inputs: [{ kind: "context", locator: secret, description: `See ${secret}` }],
+        },
+      }),
+      ACTIVE,
+    );
+    expect(result.workReport).toBeNull();
+    expect(result.reportProblem?.kind).toBe("completed_with_required_inputs");
+    expect(JSON.stringify(result.reportProblem)).not.toContain(secret);
   });
 
   it("does not let a prototype-pollution output key escape the envelope", () => {

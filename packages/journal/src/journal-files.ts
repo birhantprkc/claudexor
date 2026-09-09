@@ -3,7 +3,9 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
   fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -11,6 +13,7 @@ import {
   renameSync,
   rmSync,
   writeSync,
+  type Stats,
 } from "node:fs";
 import { dirname } from "node:path";
 import { fsyncDirectory } from "@claudexor/util";
@@ -21,10 +24,88 @@ export interface AppendIntent {
   length: number;
 }
 
+export function sameJournalFile(expected: Stats, actual: Stats, bytes = expected.size): boolean {
+  return (
+    actual.isFile() &&
+    actual.nlink === 1 &&
+    actual.dev === expected.dev &&
+    actual.ino === expected.ino &&
+    actual.size === bytes
+  );
+}
+
+export function openJournalWriter(path: string): number {
+  const fd = openSync(path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("journal file is not privately owned");
+    if ((stat.mode & 0o777) !== 0o600) {
+      fchmodSync(fd, 0o600);
+      fsyncSync(fd);
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+/** A failed rename may resume only the exact original canonical file. */
+export function reopenOriginalWriter(path: string, original: Stats): number {
+  let fd = -1;
+  try {
+    if (!sameJournalFile(original, lstatSync(path))) return -1;
+    fd = openJournalWriter(path);
+    if (sameJournalFile(original, fstatSync(fd))) return fd;
+  } catch {
+    /* the caller enters its typed recovery path */
+  }
+  if (fd >= 0) closeSync(fd);
+  return -1;
+}
+
 export function appendAndSync(fd: number, bytes: Buffer): void {
   let offset = 0;
   while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset);
   fsyncSync(fd);
+}
+
+/** Truncate only an already validated pending suffix. Windows append handles
+ * lack FILE_WRITE_DATA, required by NtSetInformationFile's EOF operation. */
+export function truncatePendingSuffix(
+  fd: number,
+  path: string,
+  offset: number,
+  bytes: number,
+): void {
+  if (process.platform !== "win32") {
+    ftruncateSync(fd, offset);
+    fsyncSync(fd);
+    return;
+  }
+  const original = fstatSync(fd);
+  const recoveryFd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
+  try {
+    if (
+      !sameJournalFile(original, fstatSync(fd), bytes) ||
+      !sameJournalFile(original, fstatSync(recoveryFd), bytes) ||
+      !sameJournalFile(original, lstatSync(path), bytes)
+    ) {
+      throw new Error("journal identity changed before pending suffix recovery");
+    }
+    ftruncateSync(recoveryFd, offset);
+    fsyncSync(recoveryFd);
+    if (
+      !sameJournalFile(original, fstatSync(fd), offset) ||
+      !sameJournalFile(original, fstatSync(recoveryFd), offset) ||
+      !sameJournalFile(original, lstatSync(path), offset)
+    ) {
+      throw new Error("journal identity changed during pending suffix recovery");
+    }
+  } finally {
+    // A close failure must also leave the intent in place and refuse readiness.
+    closeSync(recoveryFd);
+  }
 }
 
 export function ensurePrivateFile(path: string): void {

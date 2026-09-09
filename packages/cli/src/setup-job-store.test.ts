@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DurableJournal } from "@claudexor/journal";
 import type { ControlSetupJob } from "@claudexor/schema";
 import { SetupJobStore } from "./setup-job-store.js";
@@ -63,6 +63,28 @@ afterEach(() => {
 });
 
 describe("SetupJobStore global-journal authority", () => {
+  it("rebuilds saved, binding and log records from mixed history without copying unrelated payloads", () => {
+    const journal = new DurableJournal({ rootDir: join(root, "journal"), partition: "global" });
+    const first = new SetupJobStore(root, { journal });
+    first.create(job("setup-filtered"));
+    first.appendLog("setup-filtered", "hello");
+    const binding = { key: "second-binding", client: "test", request: { purpose: "replay" } };
+    first.bindCreate("setup-filtered", binding);
+    journal.append("unknown.large.history", { text: "unrelated ".repeat(2048) });
+    const records = vi.spyOn(journal, "records");
+    const replay = new SetupJobStore(root, { journal });
+    expect(records).toHaveBeenCalledWith(0, [
+      "setup.job.saved",
+      "setup.job.create_bound",
+      "setup.job.log",
+    ]);
+    expect(replay.status("setup-filtered")).toEqual(first.status("setup-filtered"));
+    expect(replay.resolveCreate(binding)?.jobId).toBe("setup-filtered");
+    records.mockRestore();
+    expect(journal.records().at(-1)?.type).toBe("unknown.large.history");
+    journal.close();
+  });
+
   it("persists create idempotency bindings across restart and rejects changed requests", () => {
     const request = { harness: "codex", action: "login", authRequest: "subscription" };
     const store = new SetupJobStore(root);

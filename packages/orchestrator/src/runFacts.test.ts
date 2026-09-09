@@ -1314,6 +1314,38 @@ describe("RunFacts canonical artifact projection (GH #29)", () => {
     ]);
   });
 
+  it("an unverified Council source never becomes a deliverable in the fallback roster", () => {
+    const { store, paths, log, ctx } = runFixture([], "plan");
+    rmSync(join(paths.finalDir, "telemetry.yaml"));
+    store.writeText(join(paths.root, "council", "draft-planner-a.md"), "Useful unverified source");
+    store.writeYaml(join(paths.attemptsDir, "p01", "attempt.yaml"), {
+      status: "failed",
+      draft_path: "council/draft-planner-a.md",
+      report_problem: { kind: "completed_with_required_inputs" },
+    });
+    log.emit("council.started", { requested: 1, members: ["planner-a"] });
+    log.emit("council.member.failed", {
+      attempt_id: "p01",
+      harness_id: "planner-a",
+      error: "contradictory report",
+      unverified_draft_path: "council/draft-planner-a.md",
+    });
+    const facts = buildRunFacts(ctx, makeOutcomeFacts("failed", { reason: "harness_failed" }));
+    expect(facts.participants).toEqual({
+      planners: 1,
+      attempts: [
+        {
+          attempt_id: "p01",
+          harness_id: "planner-a",
+          role: "planner",
+          status: "failed",
+          deliverable_present: false,
+        },
+      ],
+    });
+    expect(facts.deliverable.present).toBe(false);
+  });
+
   it("takes blocker ids only from the terminal winner while retaining the run-wide reviewer roster", () => {
     const { store, paths, ctx } = runFixture([]);
     const outcome = makeOutcomeFacts("succeeded", { review: "approved" });

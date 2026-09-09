@@ -224,10 +224,6 @@ describe("DurableJournal", () => {
     reopened.close();
   });
 
-  // Windows refuses `rename` over a path whose target is held open (the live
-  // journal handle lacks FILE_SHARE_DELETE), so the POSIX atomic-replace
-  // rewrite these cases depend on cannot run there. That gap is the journal
-  // writer's own, older than this lane, and is tracked separately.
   it("addresses partition entries with the platform separator, not a literal slash", () => {
     // Read-only preparation walks the partition and keys its file map by path.
     // A `${dir}/${name}` key never matched the `join()`-built path the caller
@@ -253,57 +249,51 @@ describe("DurableJournal", () => {
 
   const itPosixReplace = it.runIf(process.platform !== "win32");
 
-  itPosixReplace(
-    "discards a complete first frame when a batch stops before its second frame",
-    () => {
-      const crashed = openJournal((fd, batch) => {
-        const secondFrameOffset = batch.indexOf(batch.subarray(0, 8), 8);
-        expect(secondFrameOffset).toBeGreaterThan(0);
-        writeSync(fd, batch, 0, secondFrameOffset);
-        fsyncSync(fd);
-        throw new Error("simulated stop between batch frames");
-      });
-      expect(() =>
-        crashed.appendBatch([
-          { type: "quota.snapshot.scoped_prepared", payload: { id: "scope" } },
-          { type: "quota.snapshot.upserted", payload: { id: "base" } },
-        ]),
-      ).toThrow(JournalAppendUncertainError);
-      crashed.close();
+  it("discards a complete first frame when a batch stops before its second frame", () => {
+    const crashed = openJournal((fd, batch) => {
+      const secondFrameOffset = batch.indexOf(batch.subarray(0, 8), 8);
+      expect(secondFrameOffset).toBeGreaterThan(0);
+      writeSync(fd, batch, 0, secondFrameOffset);
+      fsyncSync(fd);
+      throw new Error("simulated stop between batch frames");
+    });
+    expect(() =>
+      crashed.appendBatch([
+        { type: "quota.snapshot.scoped_prepared", payload: { id: "scope" } },
+        { type: "quota.snapshot.upserted", payload: { id: "base" } },
+      ]),
+    ).toThrow(JournalAppendUncertainError);
+    crashed.close();
 
-      const recovered = openJournal();
-      expect(recovered.state()).toMatchObject({ status: "ready" });
-      expect(recovered.records().map((record) => record.type)).toEqual([
-        "journal.recovery_tail_discarded",
-      ]);
-      recovered.close();
-    },
-  );
+    const recovered = openJournal();
+    expect(recovered.state()).toMatchObject({ status: "ready" });
+    expect(recovered.records().map((record) => record.type)).toEqual([
+      "journal.recovery_tail_discarded",
+    ]);
+    recovered.close();
+  });
 
-  itPosixReplace(
-    "discards an incomplete EOF frame, fsyncs an audit record, and stays replayable",
-    () => {
-      const crashed = openJournal((fd, frame) => {
-        writeSync(fd, frame, 0, 3);
-        fsyncSync(fd);
-        throw new Error("simulated partial append");
-      });
-      expect(() => crashed.append("setup.job.saved", { id: "one" })).toThrow(
-        JournalAppendUncertainError,
-      );
-      crashed.close();
+  it("discards an incomplete EOF frame, fsyncs an audit record, and stays replayable", () => {
+    const crashed = openJournal((fd, frame) => {
+      writeSync(fd, frame, 0, 3);
+      fsyncSync(fd);
+      throw new Error("simulated partial append");
+    });
+    expect(() => crashed.append("setup.job.saved", { id: "one" })).toThrow(
+      JournalAppendUncertainError,
+    );
+    crashed.close();
 
-      const recovered = openJournal();
-      expect(recovered.state()).toEqual({ status: "ready", discardedTailBytes: 3 });
-      expect(recovered.records().map((record) => record.type)).toEqual([
-        "journal.recovery_tail_discarded",
-      ]);
-      recovered.close();
-      const restarted = openJournal();
-      expect(restarted.records()[0]?.type).toBe("journal.recovery_tail_discarded");
-      restarted.close();
-    },
-  );
+    const recovered = openJournal();
+    expect(recovered.state()).toEqual({ status: "ready", discardedTailBytes: 3 });
+    expect(recovered.records().map((record) => record.type)).toEqual([
+      "journal.recovery_tail_discarded",
+    ]);
+    recovered.close();
+    const restarted = openJournal();
+    expect(restarted.records()[0]?.type).toBe("journal.recovery_tail_discarded");
+    restarted.close();
+  });
 
   it.each([
     ["complete frame checksum", (bytes: Buffer) => (bytes[Math.floor(bytes.length / 2)] ^= 1)],

@@ -22,6 +22,7 @@ import {
   unwrapWorkReportEnvelope,
   webEvidenceFailure,
   type AttemptOutcomeClass,
+  type UnwrappedAnswer,
   type WorkReportEnvelopeMode,
 } from "./attemptFinalize.js";
 import {
@@ -54,6 +55,9 @@ export interface PlannerAttemptOutcome {
   status: "success" | "failed" | "blocked";
   outcomeClass: AttemptOutcomeClass;
   error: string | null;
+  /** Original harness failure before a report-contract failure is overlaid. */
+  harnessFailedBeforeReport: boolean;
+  reportProblem?: UnwrappedAnswer["reportProblem"];
   text: string | null;
   telemetry: AttemptTelemetry | null;
   budgetDenied: boolean;
@@ -135,6 +139,7 @@ export async function runPlannerAttempt(
       status: "failed",
       outcomeClass: "clean",
       error: lease.reason ?? "budget lease denied",
+      harnessFailedBeforeReport: false,
       text: null,
       telemetry: null,
       budgetDenied: true,
@@ -183,6 +188,7 @@ export async function runPlannerAttempt(
       status: "failed",
       outcomeClass: "clean",
       error: `planner attempt setup failed: ${safeErrorMessage(preparation.error)}`,
+      harnessFailedBeforeReport: true,
       text: null,
       telemetry: null,
       budgetDenied: false,
@@ -282,15 +288,14 @@ export async function runPlannerAttempt(
   const planUnwrapped = unwrapWorkReportEnvelope(answer.machineText() ?? "", planWorkMode, {
     sideToolReport: telemetry.sideToolWorkReport ?? undefined,
   });
-  const planText = redactSecrets(planUnwrapped.deliverable).trim();
+  const planText = redactSecrets(planUnwrapped.deliverable);
+  const hasPlanText = planText.trim().length > 0;
+  const harnessFailedBeforeReport = harnessError !== null;
   const webBlocked = webUnsatisfied(telemetry);
   if (!harnessError && webBlocked) harnessError = webEvidenceFailure(telemetry.web);
-  harnessError ??= unrecoveredToolErrorFailure(
-    unrecoveredToolErrors(telemetry),
-    planText.length > 0,
-  );
+  harnessError ??= unrecoveredToolErrorFailure(unrecoveredToolErrors(telemetry), hasPlanText);
   const finalized = finalizeAttempt({
-    deliverableEvidence: planText.length > 0,
+    deliverableEvidence: hasPlanText,
     harnessErrored: harnessError !== null && !webBlocked,
     workReport: planUnwrapped.workReport,
     workReportSource: planUnwrapped.source,
@@ -328,7 +333,9 @@ export async function runPlannerAttempt(
       status: webBlocked ? "blocked" : "failed",
       outcomeClass: finalized.outcomeClass,
       error: attemptError,
-      text: null,
+      harnessFailedBeforeReport,
+      reportProblem: planUnwrapped.reportProblem,
+      text: hasPlanText ? planText : null,
       telemetry,
       budgetDenied: false,
     };
@@ -346,6 +353,8 @@ export async function runPlannerAttempt(
     status: "success",
     outcomeClass: finalized.outcomeClass,
     error: null,
+    harnessFailedBeforeReport,
+    reportProblem: planUnwrapped.reportProblem,
     text,
     telemetry,
     budgetDenied: false,

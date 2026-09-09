@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DurableJournal } from "@claudexor/journal";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ThreadHeadPingEmitter } from "./thread-head-ping.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
@@ -23,6 +23,22 @@ function journalAt(root: string): DurableJournal {
 }
 
 describe("ThreadHeadPingEmitter", () => {
+  it("selects only head pings from mixed history without changing revisions", () => {
+    const root = realpathSync.native(reapMk(join(tmpdir(), "head-filter-")));
+    const journal = journalAt(root);
+    const first = new ThreadHeadPingEmitter(journal);
+    first.ping({ threadId: "th-a", projectId: null });
+    journal.append("unknown.future.history", { text: "unrelated ".repeat(2048) });
+    first.ping({ threadId: "th-a", projectId: null });
+    const records = vi.spyOn(journal, "records");
+    const replay = new ThreadHeadPingEmitter(journal);
+    expect(records).toHaveBeenCalledWith(0, ["thread.head.updated"]);
+    expect(replay.revision("th-a")).toBe(2);
+    records.mockRestore();
+    expect(journal.records().map((record) => record.seq)).toEqual([1, 2, 3]);
+    journal.close();
+  });
+
   it("emits monotonic per-thread revisions as content-free journal records", () => {
     const root = realpathSync(reapMk(join(tmpdir(), "claudexor-head-ping-")));
     const journal = journalAt(root);

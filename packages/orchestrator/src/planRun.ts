@@ -25,14 +25,16 @@ import {
   councilMergePrompt,
   resolveCouncilWidth,
 } from "./council.js";
+import { stageCouncilDraft, type CouncilMergeInput } from "./council-input.js";
 import type { OrchestratorResult, RoutedAdapter, RunInput } from "./orchestrator.js";
 import type { PlannerAttemptArgs, PlannerAttemptOutcome } from "./plannerAttempt.js";
-/**
- * Council plan strategy (INV-031 / D31) + the shared plan-run finalize/failure
- * tails, extracted from orchestrator.ts so the god-file does not absorb the new
- * behavior (complexity ratchet). FREE functions that receive the few orchestrator
- * methods they need via `PlanRunDeps`; every other collaborator is a module import.
- */
+type PlanAttemptSummary = Pick<
+  PlannerAttemptOutcome,
+  "attemptId" | "harnessId" | "status" | "error"
+> & {
+  outcomeClass?: AttemptOutcomeClass;
+};
+/** Council orchestration and shared solo/Council finalize/failure tails. */
 export interface PlanRunDeps {
   /** One planner spawn (native plan mode, read-only) — the SAME machinery the
    * solo plan loop drives; council reuses it per member + for the merge. */
@@ -64,8 +66,7 @@ export interface PlanRunDeps {
  * prompt POINTS at the surviving draft files by absolute path — the tagged
  * Open-Questions parser then runs on the MERGE output only, producing the
  * same final artifacts a solo plan produces (downstream unchanged). A failed
- * member is disclosed and the merge proceeds with survivors; ALL members
- * failing is a typed failure.
+ * member stays failed; its narrowly eligible unverified text may still be input.
  */
 export async function runCouncilPlan(
   deps: PlanRunDeps,
@@ -86,13 +87,7 @@ export async function runCouncilPlan(
   },
 ): Promise<OrchestratorResult> {
   const { input, contract, taskId, runId, store, paths, log, ledger, adapters, roHome } = args;
-  const planAttempts: {
-    attemptId: string;
-    harnessId: string;
-    status: "success" | "failed" | "blocked";
-    outcomeClass?: AttemptOutcomeClass;
-    error: string | null;
-  }[] = [];
+  const planAttempts: PlanAttemptSummary[] = [];
   const attemptTelemetries: {
     attemptId: string;
     harnessId: string;
@@ -107,13 +102,14 @@ export async function runCouncilPlan(
     requested,
     members: memberAdapters.map((a) => a.adapter.id),
   });
-  let drafts: { harnessId: string; text: string; absPath: string }[] = [];
-  // QA-050: the first council member refused pre-spawn on budget; drives the
-  // all-members-failed terminal to a typed budget failure.
+  const mergeInputs: CouncilMergeInput[] = [];
+  const draftedIds = new Set<string>();
+  const preservedDrafts: string[] = [];
+  // First pre-spawn budget refusal owns an all-members-failed budget terminal.
   let councilBudgetDenial: BudgetDenial | null = null;
   try {
     // Round 1 — parallel drafts (each member = one planner attempt).
-    const outcomes = await Promise.all(
+    const outcomes = await Promise.allSettled(
       memberAdapters.map((routed, idx) =>
         deps.runPlannerAttempt({
           input,
@@ -135,8 +131,12 @@ export async function runCouncilPlan(
         }),
       ),
     );
-    for (const [idx, outcome] of outcomes.entries()) {
-      const routed = memberAdapters[idx] as RoutedAdapter;
+    for (const settled of outcomes) {
+      if (settled.status === "rejected") continue;
+      const outcome = settled.value;
+      const staged = stageCouncilDraft(outcome, store, paths, input.signal?.aborted === true);
+      if (staged.preservedDraft) preservedDrafts.push(staged.preservedDraft);
+      if (staged.input) mergeInputs.push(staged.input);
       if (outcome.telemetry)
         attemptTelemetries.push({
           attemptId: outcome.attemptId,
@@ -146,25 +146,32 @@ export async function runCouncilPlan(
       planAttempts.push({
         attemptId: outcome.attemptId,
         harnessId: outcome.harnessId,
-        status: outcome.status,
+        status: outcome.status === "success" && !staged.input ? "failed" : outcome.status,
         outcomeClass: outcome.outcomeClass,
-        error: outcome.error,
+        error: staged.error,
       });
       if (outcome.budgetDenied) councilBudgetDenial ??= outcome.budgetDenial ?? null;
-      if (outcome.status === "success" && outcome.text) {
-        const rel = councilDraftRelPath(routed.adapter.id);
-        const absPath = join(paths.root, rel);
-        store.writeText(absPath, redactSecrets(outcome.text) + "\n");
-        drafts.push({ harnessId: routed.adapter.id, text: outcome.text, absPath });
-        log.emit("council.draft", { harness_id: routed.adapter.id, path: rel });
+      if (staged.input && !staged.input.unverified) {
+        draftedIds.add(outcome.harnessId);
+        log.emit("council.draft", {
+          harness_id: outcome.harnessId,
+          path: councilDraftRelPath(outcome.harnessId),
+        });
       } else {
         log.emit("council.member.failed", {
           harness_id: outcome.harnessId,
           attempt_id: outcome.attemptId,
-          error: outcome.error,
+          error: staged.input?.unverified ? outcome.error : staged.error,
+          ...(staged.input?.unverified
+            ? { unverified_draft_path: councilDraftRelPath(outcome.harnessId) }
+            : {}),
         });
       }
     }
+    // A planner already normalizes harness failures. Unexpected persistence or
+    // event failures remain run failures, after siblings and saved inputs settle.
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    if (rejected) throw rejected.reason;
   } catch (err) {
     // QA-047 root cause 2: the success path keeps roHome alive so the merge
     // REUSES the admitted context (draft authenticated there) instead of a
@@ -203,8 +210,7 @@ export async function runCouncilPlan(
     );
   }
 
-  // ALL members failed → typed failure (no plan to merge); one survivor merges.
-  if (drafts.length === 0) {
+  if (mergeInputs.length === 0) {
     roHome.dispose();
     return writePlanHarnessFailure(
       deps,
@@ -219,18 +225,18 @@ export async function runCouncilPlan(
         planAttempts,
         attemptTelemetries,
         budgetDenial: councilBudgetDenial,
+        preservedDrafts,
       },
       "all council members failed",
     );
   }
 
-  // The merger is the primary when it survived round 1, else the first
-  // surviving member — degradation must not sink an otherwise-good council on
-  // a dead nominal primary. drafts.length > 0 guarantees a survivor exists.
-  const draftedIds = new Set(drafts.map((d) => d.harnessId));
+  // Prefer accepted drafts in admitted order, then the first eligible unverified lane.
   const primary =
     memberAdapters.find((a) => draftedIds.has(a.adapter.id)) ??
-    (memberAdapters[0] as RoutedAdapter);
+    (memberAdapters.find((a) =>
+      mergeInputs.some((d) => d.harnessId === a.adapter.id),
+    ) as RoutedAdapter);
   let mergeOutcome: PlannerAttemptOutcome;
   try {
     mergeOutcome = await deps.runPlannerAttempt({
@@ -248,12 +254,7 @@ export async function runCouncilPlan(
       // QA-047 root cause 2: merge in the SAME admitted route context (not a
       // fresh HOME whose cold native-status probe times out as an absent login).
       fallbackHome: roHome.env,
-      // The merge references the draft FILES by absolute path (pointer lines);
-      // full draft text never rides the prompt bubble.
-      promptBody: councilMergePrompt(
-        input.prompt,
-        drafts.map((d) => ({ harnessId: d.harnessId, absPath: d.absPath })),
-      ),
+      promptBody: councilMergePrompt(input.prompt, mergeInputs),
       // D31: the merge is a synthesis iteration on the primary.
       intent: "synthesize",
       reservationEstimateUsd: input.delegatedFromRunId ? args.estimateUsdFloor : undefined,
@@ -317,6 +318,7 @@ export async function runCouncilPlan(
         planAttempts,
         attemptTelemetries,
         budgetDenial: mergeOutcome.budgetDenied ? (mergeOutcome.budgetDenial ?? null) : null,
+        preservedDrafts,
       },
       `council merge failed: ${mergeOutcome.error ?? "the primary produced no unified plan"}`,
     );
@@ -336,6 +338,7 @@ export async function runCouncilPlan(
     attemptTelemetries,
     winnerAttemptId: mergeOutcome.attemptId,
     council: councilProjection,
+    councilUnverifiedInputs: mergeInputs.filter((d) => d.unverified).length,
   });
 }
 
@@ -354,17 +357,11 @@ export function finalizePlanRun(
     log: EventLog;
     ledger: BudgetLedger;
     plans: { id: string; text: string }[];
-    planAttempts: {
-      attemptId: string;
-      harnessId: string;
-      status: "success" | "failed" | "blocked";
-      /** D-16 r9: interrupted planners project an interrupted terminal. */
-      outcomeClass?: AttemptOutcomeClass;
-      error: string | null;
-    }[];
+    planAttempts: PlanAttemptSummary[];
     attemptTelemetries: { attemptId: string; harnessId: string; telemetry: AttemptTelemetry }[];
     winnerAttemptId?: string | null;
     council: CouncilProjection | null;
+    councilUnverifiedInputs?: number;
   },
 ): OrchestratorResult {
   const {
@@ -411,6 +408,7 @@ export function finalizePlanRun(
   });
   const readiness = derivePlanReadiness(PlanQuestionsArtifact.parse(parsedQuestions));
   const councilNote = council ? councilDegradationNote(council) : "";
+  const councilInputs = `${council?.drafted ?? 0} contract-accepted draft(s), ${args.councilUnverifiedInputs ?? 0} unverified draft(s)`;
   // D-16: fold the WINNING attempt's work_state into the plan terminal (INV-116; see planTerminal.ts).
   const { planFacts, planVetoed, lifecycleLine, summarySuffix } = resolvePlanTerminalFacts(
     args.attemptTelemetries,
@@ -423,7 +421,7 @@ export function finalizePlanRun(
       "",
       lifecycleLine,
       council
-        ? `- Council: merged by ${council.mergedBy ?? "(none)"} from ${council.drafted} of ${council.requested} member(s)`
+        ? `- Council: merged by ${council.mergedBy ?? "(none)"}; inputs: ${councilInputs}; ${council.requested} member(s) requested`
         : `- Planner: ${winnerHarness}`,
       `- Plan: final/plan.md`,
       `- Open questions: ${readiness.questionCount}${parsedQuestions.parse === "none_found" ? " (no tagged block — unverified)" : ""}`,
@@ -464,7 +462,7 @@ export function finalizePlanRun(
     facts: planFacts,
     winner: null,
     runDir: paths.root,
-    summary: `${council ? `Council plan (merged by ${winnerHarness})` : `Plan by ${winnerHarness}`}; ${readiness.questionCount} open question(s)${parsedQuestions.parse === "none_found" ? " (untagged plan — unverified)" : ""}${summarySuffix}.`,
+    summary: `${council ? `Council plan (merged by ${winnerHarness}; ${councilInputs})` : `Plan by ${winnerHarness}`}; ${readiness.questionCount} open question(s)${parsedQuestions.parse === "none_found" ? " (untagged plan — unverified)" : ""}${summarySuffix}.`,
     candidates: planAttempts.map((p) => ({
       attemptId: p.attemptId,
       harnessId: p.harnessId,
@@ -486,19 +484,13 @@ export function writePlanHarnessFailure(
     paths: RunPaths;
     log: EventLog;
     ledger: BudgetLedger;
-    planAttempts: {
-      attemptId: string;
-      harnessId: string;
-      status: "success" | "failed" | "blocked";
-      /** D-16 r9: interrupted planners project an interrupted terminal. */
-      outcomeClass?: AttemptOutcomeClass;
-      error: string | null;
-    }[];
+    planAttempts: PlanAttemptSummary[];
     attemptTelemetries: { attemptId: string; harnessId: string; telemetry: AttemptTelemetry }[];
     /** QA-050: the typed budget denial captured when a planner slot was refused
      * pre-spawn, so plan/council terminals emit a budget failure (typed code +
      * remediation) instead of a harness auth/setup template. */
     budgetDenial?: BudgetDenial | null;
+    preservedDrafts?: string[];
   },
   fallbackMessage: string,
 ): OrchestratorResult {
@@ -515,13 +507,11 @@ export function writePlanHarnessFailure(
   const failedLines = planAttempts
     .filter((p) => p.status !== "success")
     .map((p) => `${p.attemptId}/${p.harnessId}: ${p.error ?? "failed"}`);
-  const preserved = planAttempts
-    .filter((p) => p.status === "success")
-    .map((p) => `${p.attemptId}/${p.harnessId}`);
+  const preserved =
+    ctx.preservedDrafts ??
+    planAttempts.filter((p) => p.status === "success").map((p) => `${p.attemptId}/${p.harnessId}`);
   const message = redactSecrets(
-    budgetMapping
-      ? budgetMapping.safeMessage
-      : `${failedLines.length > 0 ? failedLines.join("\n") : fallbackMessage}${preserved.length > 0 ? `\nPreserved drafts: ${preserved.join(", ")}` : ""}`.trim(),
+    `${budgetMapping ? budgetMapping.safeMessage : failedLines.length > 0 ? failedLines.join("\n") : fallbackMessage}${preserved.length > 0 ? `\nPreserved drafts: ${preserved.join(", ")}` : ""}`.trim(),
   );
   deps.writeRunTelemetry(
     store,

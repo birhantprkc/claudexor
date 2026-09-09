@@ -275,6 +275,16 @@ Tests and local smokes must never touch real user state:
   never enter automatic or reviewer pools. `fake-implement` additionally writes
   a real worktree file for producing intents, so the Agent write→apply and
   Create chains are exercisable with no real harness.
+- Council regression fixtures exercise actual planner transports and final
+  artifacts: retained unverified drafts, original failures, merge selection and
+  terminal RunFacts must agree. Check solo/draft/merge prompt guidance through
+  the real prompt consumers, and inspect the affected Council receipt visually.
+- Journal maintenance tests preserve synchronous `compact()` consumer coverage
+  and separately exercise streamed compaction with concurrent acknowledged
+  batches, cursor continuity, cancellation and installation faults. Run daemon
+  responsiveness/SSE acceptance in an empty fixture config without provider
+  profiles; rebuilding candidate source never requires restarting a live daemon
+  used by other work.
 - Read-only run lookups (`inspect`, `apply`) connect to an already-running daemon
   but never auto-start one (a typo'd run id reports `no such run`); only acting
   paths (`agent`/`best-of`/`create`, `decision`) auto-start it. `daemon start` blocks

@@ -145,7 +145,7 @@ export class ProjectStore {
   }
 
   private replay(): void {
-    for (const record of this.journal.records()) {
+    for (const record of this.journal.records(0, [REGISTERED, RELINKED, UNREGISTERED])) {
       if (record.type !== REGISTERED && record.type !== RELINKED && record.type !== UNREGISTERED)
         continue;
       this.apply(record.type, parseMutation(record.payload));

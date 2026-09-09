@@ -42,6 +42,7 @@ const UPSERTED = "quota.snapshot.upserted";
 const SCOPED_PREPARED = "quota.snapshot.scoped_prepared";
 const REMOVED = "quota.subject.removed";
 const PROJECTION_UPDATED = "quota.projection.updated";
+const REPLAY_TYPES = [SCOPED_PREPARED, UPSERTED, REMOVED, PROJECTION_UPDATED];
 /** Snapshots older than this are pruned from every projection read (W17):
  * a day-old observation is not quota truth, just footer clutter. */
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60_000;
@@ -77,8 +78,10 @@ export class QuotaRegistry {
     pacerStore?: QuotaPacerStateStore,
   ) {
     let rawMutationAfterMarker = false;
-    let pendingScoped: { baseHash: string; snapshot: QuotaSnapshot } | null = null;
-    for (const record of journal.records()) {
+    let pendingScoped: { seq: number; baseHash: string; snapshot: QuotaSnapshot } | null = null;
+    for (const record of journal.records(0, REPLAY_TYPES)) {
+      // Filtering must not make a formerly interrupted pair adjacent.
+      if (pendingScoped && record.seq !== pendingScoped.seq + 1) pendingScoped = null;
       if (record.type === SCOPED_PREPARED) {
         const payload =
           typeof record.payload === "object" &&
@@ -94,6 +97,7 @@ export class QuotaRegistry {
         pendingScoped =
           payload.version === 1 && typeof payload.base_hash === "string" && snapshot.success
             ? {
+                seq: record.seq,
                 baseHash: payload.base_hash,
                 snapshot: snapshot.data,
               }

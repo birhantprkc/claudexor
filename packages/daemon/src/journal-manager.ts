@@ -87,7 +87,10 @@ export class JournalManager {
   private preparedOperation: PreparedOperationPlan | null = null;
   private preparationResult: JournalManagerPreparation | null = null;
   private lifecycle: JournalManagerLifecycle = "idle";
-  constructor(rootDir: string, options: JournalManagerOptions = {}) {
+  constructor(
+    rootDir: string,
+    private readonly options: JournalManagerOptions = {},
+  ) {
     this.partition = options.partition?.trim() || "global";
     this.now = options.now ?? (() => new Date());
     this.faults = options.faults ?? {};
@@ -137,6 +140,7 @@ export class JournalManager {
         rootDir: this.journalRoot,
         partition: this.partition,
         now: this.now,
+        deferCompaction: this.options.requestMaintenance !== undefined,
       });
       this.recovery = this.journal.state();
       this.preparedOperation = inspectPreparedOperation({
@@ -251,6 +255,7 @@ export class JournalManager {
       for (const registration of this.registrations.values()) {
         registration.descriptor.recover?.(registration.slot.current());
       }
+      if (this.journal) this.options.requestMaintenance?.(this.journal);
     } catch (error) {
       const recovery = recoveryFrom(error, `${this.partition} projection recovery failed`);
       this.enterRecovery(recovery);
@@ -403,14 +408,9 @@ export class JournalManager {
   }
 
   /**
-   * Remove-project archival (QA-049): close this partition's journal and move
-   * its directory OUT of the active journal tree into `journal-archived/` — the
-   * same non-destructive rename the partition-quarantine path uses, never a
-   * delete. Returns the absolute archive path, or null when the partition never
-   * materialized on disk. Idempotent: a missing source with an existing archive
-   * returns that archive path; missing source and no archive returns null. A
-   * pre-existing archive for a re-registered id is preserved under a suffixed
-   * name rather than clobbered.
+   * Close the partition's generation and rename it into journal-archived/, never
+   * delete history. Missing source returns an existing archive path or null;
+   * a pre-existing archive for a re-registered id is preserved under a suffix.
    */
   archivePartition(): string | null {
     const archiveDir = join(this.rootDir, "journal-archived");
@@ -424,12 +424,8 @@ export class JournalManager {
     const dest = existsSync(target)
       ? join(archiveDir, `${this.artifactPrefix}-${randomUUID()}`)
       : target;
-    // RENAME THEN CLOSE (Ф2 finding 4): release the journal file handle for the
-    // move, but do NOT mark the manager permanently closed until the fallible
-    // rename SUCCEEDS. A rename failure that had pre-closed the partition would
-    // strand it closed in-process with its directory still live in the active
-    // tree. On failure, reopen a fresh generation so the partition stays
-    // usable/re-archivable, then rethrow.
+    // Revoke this generation before the move, but close the manager permanently
+    // only after rename succeeds; failure reopens a fresh usable generation.
     this.clearSlots();
     this.journal?.close();
     this.journal = null;
@@ -480,6 +476,7 @@ export class JournalManager {
         rootDir: this.journalRoot,
         partition: this.partition,
         now: this.now,
+        deferCompaction: this.options.requestMaintenance !== undefined,
       });
       this.recovery = this.journal.state();
       if (this.recovery.status === "recovery_required") {

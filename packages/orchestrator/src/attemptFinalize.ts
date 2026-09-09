@@ -188,6 +188,8 @@ export interface UnwrappedAnswer {
   source: WorkReportSource;
   /** Non-null when an active route failed to carry a valid WorkReport. */
   contractViolation: string | null;
+  /** Parsed model claim retained as evidence only; never a valid WorkReport. */
+  reportProblem?: { kind: "completed_with_required_inputs"; reported: WorkReport };
 }
 
 /** The `output` slot of a constrained `{work_report, output}` envelope (or a
@@ -391,6 +393,7 @@ function validateWorkReport(
       workReport: null,
       source,
       contractViolation: "a completed work_report must not list required_inputs",
+      reportProblem: { kind: "completed_with_required_inputs", reported: report },
     };
   }
   if (report.state === "needs_input" && report.required_inputs.length === 0) {

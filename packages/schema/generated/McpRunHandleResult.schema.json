@@ -853,12 +853,12 @@
                 "drafted": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "Members whose draft survived to the merge."
+                  "description": "Members with contract-accepted drafts; excludes retained unverified inputs and is not a work-completion or verification count."
                 },
                 "degraded": {
                   "type": "boolean",
                   "default": false,
-                  "description": "True when fewer members drafted than requested (failures disclosed per member)."
+                  "description": "True when fewer contract-accepted drafts than requested, including any retained unverified contribution; failures remain disclosed per member."
                 },
                 "mergedBy": {
                   "type": [
@@ -893,7 +893,7 @@
                           "failed",
                           "merged"
                         ],
-                        "description": "drafted = draft landed; merged = this member produced the unified plan; failed."
+                        "description": "Draft outcome: drafted = contract-accepted input; merged = accepted draft and successful merge; failed stays failed even when its unverified text helped the merger."
                       },
                       "error": {
                         "type": [
