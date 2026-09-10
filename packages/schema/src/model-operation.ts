@@ -200,8 +200,12 @@ export const ControlModelCatalogResponse = z
     source: Id,
     credentialProfileId: Id,
     accountFingerprint: z.string().nullable(),
-    observedAt: IsoTimestamp,
-    provenance: NonBlankString,
+    observedAt: IsoTimestamp.describe(
+      "Original catalog observation time; cached reuse never advances it.",
+    ),
+    provenance: NonBlankString.describe(
+      "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact.",
+    ),
     models: z.array(ModelCatalogEntry),
   })
   .strict()

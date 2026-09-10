@@ -1263,6 +1263,14 @@ and a mixed, unknown, empty or disabled pool remains unavailable with its compac
 prove quota exhaustion. Catalog polling obeys the same current quota admission
 without starting a generation.
 
+Catalog `provenance: "provider_http"` means the adapter read and validated a
+successful upstream HTTP catalog response at `observedAt`. Reusing that catalog
+preserves its original time; other provenance values, including historical
+diagnostic strings, do not certify provider contact. The control API forwards
+these adapter-owned fields without turning loopback reachability into upstream
+evidence. Catalog failure returns the existing typed problem, never a refreshed
+timestamp on an earlier successful catalog.
+
 The daemon is the durable scheduler. `DaemonServer` requires an injected durable
 command authority and has no in-memory command-record fallback. The HTTP control API is a live viewport and
 artifact/delivery facade. Every implemented operation is declared once as a

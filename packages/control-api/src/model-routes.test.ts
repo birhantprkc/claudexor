@@ -124,6 +124,7 @@ describe("raw model operation HTTP surface", () => {
   });
 
   it("keeps raw catalogs account-scoped and leaves omitted profile selection to the engine", async () => {
+    let provenance = "fixture";
     const modelSources = vi.fn(async () => ({
       sources: [{ id: "codex", label: "Codex", credentialHarness: "codex" }],
     }));
@@ -132,16 +133,29 @@ describe("raw model operation HTTP surface", () => {
       credentialProfileId: profile ?? "chosen",
       accountFingerprint: null,
       observedAt: "2026-09-06T00:00:00.000Z",
-      provenance: "fixture",
+      provenance,
       models: [],
     }));
     const f = await fixture({ modelSources, modelCatalog });
     expect((await f.request("/model-sources")).status).toBe(200);
-    expect((await f.request("/model-sources/codex/models")).status).toBe(200);
+    const historical = await f.request("/model-sources/codex/models");
+    expect(historical.status).toBe(200);
+    expect(await historical.json()).toMatchObject({
+      provenance: "fixture",
+      observedAt: "2026-09-06T00:00:00.000Z",
+    });
     expect(modelCatalog).toHaveBeenLastCalledWith("codex", undefined, undefined);
-    expect((await f.request("/model-sources/codex/models?credentialProfileId=chosen")).status).toBe(
-      200,
-    );
+    provenance = "provider_http";
+    const observed = await f.request("/model-sources/codex/models?credentialProfileId=chosen");
+    expect(observed.status).toBe(200);
+    expect(await observed.json()).toEqual({
+      source: "codex",
+      credentialProfileId: "chosen",
+      accountFingerprint: null,
+      observedAt: "2026-09-06T00:00:00.000Z",
+      provenance: "provider_http",
+      models: [],
+    });
     expect(modelCatalog).toHaveBeenLastCalledWith("codex", "chosen", undefined);
     expect(
       (await f.request("/model-sources/codex/models?requestedModel=exact%2Fmodel%2B1")).status,

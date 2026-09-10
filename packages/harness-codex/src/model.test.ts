@@ -44,6 +44,7 @@ function terminal(output: unknown[] = [native]) {
 }
 function setup(
   respond: (init: RequestInit | undefined) => Response | Promise<Response> = () => terminal(),
+  now: () => number = () => 1900000000000,
 ) {
   const profile = CredentialProfile.parse({
     profile_id: "work",
@@ -78,7 +79,7 @@ function setup(
     readAuthFile,
     fetcher,
     token,
-    adapter: createCodexModelAdapter({ fetch: fetcher, readAuthFile, now: () => 1900000000000 }),
+    adapter: createCodexModelAdapter({ fetch: fetcher, readAuthFile, now }),
     context: { profile, onDispatch, signal: new AbortController().signal },
     request: ModelCallRequest.parse({
       source: "codex",
@@ -123,9 +124,33 @@ describe("exact-profile Codex model catalog", () => {
         },
       ],
     });
-    expect(result.provenance).toContain("0.153.3");
+    expect(result.provenance).toBe("provider_http");
+    expect(fixture.fetcher.mock.calls[0]?.[0]).toContain("/models?client_version=0.153.3");
     expect(result.accountFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(result)).not.toContain(fixture.token);
+    expect(fixture.onDispatch).not.toHaveBeenCalled();
+  });
+  it("timestamps completed upstream bodies and performs a new GET for each catalog read", async () => {
+    let now = 1900000000000;
+    const fixture = setup(undefined, () => now);
+    const response = Response.json(catalog);
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      now += 1000;
+      return catalog;
+    });
+    fixture.fetcher.mockResolvedValueOnce(response);
+    const first = await fixture.adapter.catalog(fixture.context);
+    expect(first).toMatchObject({
+      provenance: "provider_http",
+      observedAt: new Date(now).toISOString(),
+    });
+    expect(now).toBe(1900000001000);
+    now += 1000;
+    const second = await fixture.adapter.catalog(fixture.context);
+    expect(second.provenance).toBe("provider_http");
+    expect(Date.parse(second.observedAt)).toBeGreaterThan(Date.parse(first.observedAt));
+    expect(fixture.fetcher).toHaveBeenCalledTimes(2);
+    expect(fixture.fetcher.mock.calls.every(([, init]) => init?.method !== "POST")).toBe(true);
     expect(fixture.onDispatch).not.toHaveBeenCalled();
   });
   it("derives the default from vendor priority and picker visibility, not the first row", () => {
@@ -162,14 +187,27 @@ describe("exact-profile Codex model catalog", () => {
       }).some((entry) => entry.isDefault),
     ).toBe(false);
   });
-  it("exposes a typed catalog problem instead of falling back to static inventory", async () => {
-    const fixture = setup();
-    fixture.fetcher.mockResolvedValue(new Response("broken", { status: 502 }));
-    await expect(fixture.adapter.catalog(fixture.context)).rejects.toMatchObject({
-      problem: { code: "catalog_unavailable" },
-    });
-    expect(fixture.onDispatch).not.toHaveBeenCalled();
-  });
+  it.each(["network", "http", "json", "catalog"])(
+    "does not reuse earlier HTTP proof after a %s failure",
+    async (failure) => {
+      const fixture = setup();
+      expect((await fixture.adapter.catalog(fixture.context)).provenance).toBe("provider_http");
+      if (failure === "network") fixture.fetcher.mockRejectedValueOnce(new Error("offline"));
+      else
+        fixture.fetcher.mockResolvedValueOnce(
+          failure === "http"
+            ? new Response("broken", { status: 502 })
+            : failure === "json"
+              ? new Response("unreadable catalog")
+              : Response.json({ models: [{ missingSlug: true }] }),
+        );
+      await expect(fixture.adapter.catalog(fixture.context)).rejects.toMatchObject({
+        problem: { code: "catalog_unavailable" },
+      });
+      expect(fixture.fetcher).toHaveBeenCalledTimes(2);
+      expect(fixture.onDispatch).not.toHaveBeenCalled();
+    },
+  );
   it("applies the same freshness rule to catalog 401 as to inference 401", async () => {
     const fixture = setup();
     fixture.readAuthFile.mockResolvedValue(
@@ -185,8 +223,11 @@ describe("exact-profile Codex model catalog", () => {
 
 describe("single-generation Codex adapter", () => {
   it("reuses this operation's exact catalog after a fresh auth read, without another GET", async () => {
-    const fixture = setup();
+    let now = 1900000000000;
+    const fixture = setup(undefined, () => now);
     const catalog = await fixture.adapter.catalog(fixture.context);
+    const original = structuredClone(catalog);
+    now += 1000;
     const result = await fixture.adapter.invoke(fixture.request, { ...fixture.context, catalog });
     expect(result.outcome).toBe("completed");
     expect(fixture.readAuthFile).toHaveBeenCalledTimes(2);
@@ -194,6 +235,8 @@ describe("single-generation Codex adapter", () => {
     expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "POST")).toHaveLength(
       1,
     );
+    expect(catalog).toEqual(original);
+    expect(Date.parse(catalog.observedAt)).toBeLessThan(now);
   });
   it.each(["accountFingerprint", "credentialProfileId", "source"] as const)(
     "refuses an operation-local catalog with changed %s before generation",
