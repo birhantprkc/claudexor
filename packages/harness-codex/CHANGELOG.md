@@ -1,5 +1,15 @@
 # @claudexor/harness-codex
 
+## 3.10.3
+
+### Patch Changes
+
+- Expose successful upstream Codex catalog contact through the existing provenance and observation-time fields while preserving strict old-client compatibility.
+  - @claudexor/core@3.10.3
+  - @claudexor/schema@3.10.3
+  - @claudexor/secrets@3.10.3
+  - @claudexor/util@3.10.3
+
 ## 3.10.2
 
 ### Patch Changes
