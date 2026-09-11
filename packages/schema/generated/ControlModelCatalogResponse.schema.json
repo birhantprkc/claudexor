@@ -21,13 +21,13 @@
         "observedAt": {
           "type": "string",
           "minLength": 1,
-          "description": "ISO-8601 timestamp string."
+          "description": "Original catalog observation time; cached reuse never advances it."
         },
         "provenance": {
           "type": "string",
           "minLength": 1,
           "pattern": "\\S",
-          "description": "User-supplied string that must contain visible content, not just whitespace."
+          "description": "provider_http means the catalog body was read and validated from a successful upstream HTTP response at observedAt. Other values do not certify provider contact."
         },
         "models": {
           "type": "array",
@@ -35,7 +35,10 @@
             "type": "object",
             "properties": {
               "id": {
-                "$ref": "#/definitions/ControlModelCatalogResponse/properties/provenance"
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S",
+                "description": "User-supplied string that must contain visible content, not just whitespace."
               },
               "label": {
                 "type": [

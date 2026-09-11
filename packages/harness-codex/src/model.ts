@@ -152,13 +152,14 @@ async function catalogFor(
     const code = problem.code === "provider_failed" ? "catalog_unavailable" : problem.code;
     throw new CodexModelError(code, problem.message, problem.context, problem.retryable);
   }
+  const models = parseCodexModelCatalog(body);
   return {
     source: "codex",
     credentialProfileId: context.profile.profile_id,
     accountFingerprint: auth.accountFingerprint,
     observedAt: new Date(now()).toISOString(),
-    provenance: `codex.backend.models; client_version=${CODEX_VENDOR_CLI_VERSION}; default=vendor-priority-and-visibility`,
-    models: parseCodexModelCatalog(body),
+    provenance: "provider_http",
+    models,
   };
 }
 
