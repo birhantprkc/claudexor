@@ -481,6 +481,48 @@ describe("production model service composition", () => {
     },
   );
 
+  it("advances to a healthy sibling on a catalog refusal outside the rotation codes", async () => {
+    const f = await fixture();
+    const original = f.catalog.getMockImplementation()!;
+    f.catalog.mockImplementation(async (context) => {
+      if (context.profile.profile_id === "a")
+        throw Object.assign(new Error("catalog unavailable"), {
+          problem: ControlProblem.parse({
+            code: "catalog_unavailable",
+            message: "catalog unavailable",
+            retryable: false,
+          }),
+        });
+      return original(context);
+    });
+    const done = await f.run({ mode: "auto", preferredProfileId: "a" });
+    expect(done.state).toBe("succeeded");
+    expect(done.dispatch.route?.credentialProfileId).toBe("b");
+    expect(f.catalog).toHaveBeenCalledTimes(2);
+    expect(f.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an explicit pin strict on a catalog refusal outside the rotation codes", async () => {
+    const f = await fixture();
+    f.catalog.mockRejectedValueOnce(
+      Object.assign(new Error("catalog unavailable"), {
+        problem: ControlProblem.parse({
+          code: "catalog_unavailable",
+          message: "catalog unavailable",
+          retryable: false,
+        }),
+      }),
+    );
+    const pinned = await f.run({ mode: "pin", profileId: "a" });
+    expect(pinned.problem).toMatchObject({
+      code: "catalog_unavailable",
+      context: { source: "codex", credentialProfileId: "a" },
+    });
+    expect(pinned.dispatch.state).toBe("not_started");
+    expect(f.catalog).toHaveBeenCalledTimes(1);
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
+
   it("does not turn local verification failure into a confirmed sign-in requirement", async () => {
     const f = await fixture();
     f.unusable.record({

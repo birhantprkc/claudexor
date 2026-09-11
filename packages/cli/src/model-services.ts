@@ -251,11 +251,7 @@ export function createModelServices(deps: Dependencies) {
         const problem = ControlProblem.safeParse(
           error && typeof error === "object" && "problem" in error ? error.problem : null,
         );
-        if (
-          !problem.success ||
-          !["auth_required", "subscription_window_exhausted"].includes(problem.data.code)
-        )
-          throw error;
+        if (!problem.success) throw error;
         const refusal = {
           ...problem.data,
           context: {

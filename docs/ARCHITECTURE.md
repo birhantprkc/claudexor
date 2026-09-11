@@ -1265,8 +1265,11 @@ bytes cannot certify a completed response and are reclaimed as crash residue.
 
 The operation catalog and generated endpoint reference below are the wire SSOT.
 Account Auto reuses the existing compatible pool, preferring the prior suitable
-profile; explicit pin never rotates. A failed quota observation feeds that same
-pool's existing quota owner, without a second retry planner or account store.
+profile; explicit pin never rotates. Any typed catalog refusal excludes that
+account from the remaining selection epoch and hands selection to the next
+candidate, while an explicit pin still refuses with that same typed refusal.
+A failed quota observation feeds that same pool's existing quota owner, without
+a second retry planner or account store.
 Pool refusal is projected from typed per-account causes: an all-quota pool is
 `subscription_window_exhausted`, an all-authentication pool is `auth_required`,
 and a mixed, unknown, empty or disabled pool remains unavailable with its compact
