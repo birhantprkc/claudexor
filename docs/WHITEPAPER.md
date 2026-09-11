@@ -42,6 +42,11 @@ conversation and tool execution remain its own; Claudexor translates the model
 exchange and reports what happened. This reuses the account and control plane
 instead of embedding another relay or importing the person's ordinary CLI login.
 
+The caller can also retain opaque provider transport state for its live reasoning
+turn. Claudexor binds this state to the actual account and model, preserves it
+through body failures, and leaves turn lifetime with the caller. It does not
+create a second conversation store or retry an uncertain generation.
+
 Model content and authorization are distinct responsibilities. The caller's model
 payload keeps its supplied content, including examples that resemble credentials;
 the adapter's own authorization never enters that payload. Temporary exchange
@@ -235,6 +240,11 @@ model output. Unknown cost is unknown — subscription valuation, metered cash,
 and absence are three different typed facts. A route fallback announced before
 the vendor process starts is selection evidence, not a fabricated paid attempt;
 receipt certainty is judged only across real started intervals.
+
+Token measurement follows the same rule. Normalized input totals and separate
+cache reads/writes retain unknown fields across missing contributions; older
+harness-specific counters keep their original meanings. A cache-read percentage
+therefore requires a measured numerator and denominator from the same scope.
 
 Run evidence lives in two labeled planes: Claudexor's internal orchestration
 record (contracts, events, attempts, reviews), and the project's produced

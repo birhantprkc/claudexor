@@ -1,5 +1,12 @@
 # @claudexor/schema
 
+## 3.10.4
+
+### Patch Changes
+
+- Codex model operations carry the caller's live `x-codex-turn-state` transport continuation on the existing route-bound opaque envelope (opt-in per request, first successful header captured before the body, replayed unchanged on the matching route, empty on a changed route). Attempt telemetry, run telemetry and run summaries gain an additive normalized `input_token_usage` / `inputTokenUsage` object (complete input total, cache reads, cache writes; null stays unknown) folded strictly across contributions; legacy token fields keep their harness-specific meanings.
+  - @claudexor/util@3.10.4
+
 ## 3.10.3
 
 ### Patch Changes

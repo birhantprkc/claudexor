@@ -1,5 +1,11 @@
 import { validateModel, type ModelAdapter, type ModelAdapterContext } from "@claudexor/core";
-import type { ControlModelCatalogResponse, ModelCatalogEntry, ModelRoute } from "@claudexor/schema";
+import type {
+  ControlModelCatalogResponse,
+  ModelCallResult,
+  ModelCatalogEntry,
+  ModelNativeContinuation,
+  ModelRoute,
+} from "@claudexor/schema";
 import { CLAUDEXOR_VERSION } from "@claudexor/util";
 import {
   prepareCodexModelAuth,
@@ -20,6 +26,38 @@ import { CODEX_VENDOR_CLI_VERSION } from "./vendor-cli-version.js";
 
 const ENDPOINT = "https://chatgpt.com/backend-api/codex";
 const CLIENT = "claudexor";
+const TURN_FORMAT = "codex.turn.v1";
+
+/** Transport state belongs to a caller's live turn, never to assistant history. */
+function prepareTurnContinuation(
+  native: ModelNativeContinuation | null | undefined,
+  route: ModelRoute,
+): ModelNativeContinuation | null | undefined {
+  if (native == null) return native;
+  const turnState = text(record(native.payload)?.turnState);
+  try {
+    if (
+      native.format !== TURN_FORMAT ||
+      turnState === null ||
+      new Headers({ "x-codex-turn-state": turnState }).get("x-codex-turn-state") !== turnState
+    )
+      throw new Error("invalid turn state");
+  } catch {
+    throw new CodexModelError(
+      "invalid_continuation",
+      "Codex transport continuation requires a valid, unchanged HTTP header value.",
+    );
+  }
+  // Unknown or changed identity starts empty. A transport hint must never pin
+  // an account or refuse otherwise valid generation on a newly selected route.
+  return route.accountFingerprint &&
+    native.route.accountFingerprint === route.accountFingerprint &&
+    native.route.source === route.source &&
+    native.route.credentialProfileId === route.credentialProfileId &&
+    native.route.model === route.model
+    ? native
+    : null;
+}
 
 export interface CodexModelAdapterDeps extends CodexModelAuthDeps {
   fetch?: typeof fetch;
@@ -181,6 +219,10 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         model: request.model,
       };
       let dispatched = false;
+      let nativeContinuation: ModelNativeContinuation | null | undefined =
+        request.nativeContinuation === undefined ? undefined : null;
+      const withTurnState = (result: ModelCallResult): ModelCallResult =>
+        nativeContinuation === undefined ? result : { ...result, nativeContinuation };
       try {
         if (
           request.source !== "codex" ||
@@ -196,6 +238,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         validateCodexModelOptions(request.options);
         const auth = await prepareCodexModelAuth(context.profile, context.signal, deps);
         route = { ...route, accountFingerprint: auth.accountFingerprint };
+        nativeContinuation = prepareTurnContinuation(request.nativeContinuation, route);
         const discovered = context.catalog;
         if (
           discovered &&
@@ -236,6 +279,12 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
         }
         const body = JSON.stringify(buildResponsesRequest(request, route));
         const requestHeaders = new Headers(headers(auth));
+        if (nativeContinuation) {
+          requestHeaders.set(
+            "x-codex-turn-state",
+            record(nativeContinuation.payload)!.turnState as string,
+          );
+        }
         if (request.options.cacheKey !== undefined) {
           try {
             requestHeaders.set("session_id", request.options.cacheKey);
@@ -267,9 +316,15 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
             /* HTTP status remains an authoritative refusal. */
           }
           result.problem = authenticatedProblem(response, error, auth, now());
-          return result;
+          return withTurnState(result);
         }
-        return await readResponsesStream(response, route);
+        // Capture before reading the stream. A truncated body still owns this
+        // same turn, and an already captured first header wins on later calls.
+        const turnState = response.headers.get("x-codex-turn-state");
+        if (nativeContinuation === null && turnState) {
+          nativeContinuation = { route, format: TURN_FORMAT, payload: { turnState } };
+        }
+        return withTurnState(await readResponsesStream(response, route));
       } catch (error) {
         const result = emptyModelResult({ ...route, model: null });
         result.outcome = dispatched ? "unknown" : "failed";
@@ -288,7 +343,7 @@ export function createCodexModelAdapter(deps: CodexModelAdapterDeps = {}): Model
                     ? "The model operation was cancelled before dispatch."
                     : "The Codex model request could not be prepared.",
               ).problem;
-        return result;
+        return withTurnState(result);
       }
     },
   };

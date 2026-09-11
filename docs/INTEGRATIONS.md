@@ -169,7 +169,9 @@ exemptions):
 
 Run summaries (`GET /v2/runs/:id`, CLI `--json`) carry the matching receipts:
 `inputTokens`/`outputTokens`/`cachedInputTokens` (null when a harness reported
-none — never a fake 0), `outputConformance`, and `authRoute`
+none — never a fake 0), the optional normalized `inputTokenUsage` object
+(complete input total, cache reads, cache writes; each null when unknown, absent
+on older runs), `outputConformance`, and `authRoute`
 ({requested, effective, source, reason, modelMismatch}) so embedders act on
 typed truth instead of parsing prose.
 

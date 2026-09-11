@@ -1229,6 +1229,17 @@ unknown; `maxOutputTokens` and `temperature` are explicit unsupported options,
 not silently dropped. CLI compaction percentages do not reduce catalog capacity.
 Other installed harnesses remain Agent capabilities, not raw model sources.
 
+The optional top-level `nativeContinuation` carries live transport state in the
+same private request/result resources, separately from historical assistant
+`codex.responses.v1` output items. Omission preserves stateless result shapes;
+null starts an empty caller-owned turn. `codex.turn.v1` binds the first successful
+`x-codex-turn-state` response header to the actual source, profile, account and
+model. Matching calls replay it unchanged, even if a later body is incomplete;
+changed or unknown route identity starts empty without refusing generation.
+The caller retains it through tools, steering and compaction within a live turn,
+then clears it at a new turn or cold restart. There is no daemon state map,
+checkpoint token, automatic retry, or token in public receipts and usage fields.
+
 `ModelOperations` uses the existing daemon command store, idempotency lookup,
 queue capacity, cancellation and terminal boundary. Models and Agents share the
 regular slots described in [Main Execution Paths](#6-main-execution-paths); a
@@ -2824,6 +2835,16 @@ run's `outcomeFacts`, so a needs_input/incomplete run is non-applyable and the
 outcome-aware CLI exit projection returns non-zero even on a succeeded
 lifecycle.
 Surfaces project it; they never recompute evidence from raw events or model prose.
+
+Attempt `usage` and run `usage_totals` optionally include `input_token_usage`:
+complete input `total_tokens`, `cache_read_tokens`, and `cache_write_tokens`, each
+explicitly nullable. Codex reports inclusive input directly; Claude and Cursor
+report fresh input separately from cache reads and writes, so all three components
+must be measured to derive their total. Legacy token fields retain their original
+harness-specific meanings. The attempt telemetry owner folds the new fields
+strictly across token contributions and attempts: any unknown contribution keeps
+that field unknown, while an unknown write does not hide known total/read counts.
+`ControlRunSummary` projects this stored aggregate verbatim as `inputTokenUsage`.
 
 `final/run_facts.yaml` (`RunFacts` in the schema) is the canonical immutable
 terminal-fact receipt. It binds the terminal outcome, canonical deliverable,

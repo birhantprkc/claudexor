@@ -1,15 +1,10 @@
-/**
- * Attempt-level telemetry: the single owner of tool-error records, web
- * evidence state, transient-failure observations, and the attempt outcome
- * truth. Adapters emit typed events; the orchestrator observes them here —
- * no regex over prose. Recovery needs matching tool + kind + target plus matching
- * non-null use ids when both exist; a missing id retains the tuple fallback.
- */
+/** The single owner of typed attempt evidence and outcome truth, never prose inference. */
 import type {
   AttemptTelemetryRecord,
   AuthSourceKind,
   ExternalContextPolicy,
   HarnessEvent,
+  InputTokenUsage,
   RequestRequirementResolution,
   TaskContract,
   ToolKind,
@@ -73,14 +68,7 @@ export interface WebEvidenceState {
   errorSummary: string | null;
 }
 
-/**
- * QA-040: runtime browser-MCP evidence for one attempt. `requested` is set when
- * the engine armed the browser injection (a fixed `browser` server namespace).
- * A browser tool call/result matched to that injected server flips attempted/
- * satisfied/failed — so a successful browser navigation is recognized as
- * trusted live-web activity even though adapters normalize browser calls as
- * `kind:"mcp"`. Spoof-resistant: only the engine-injected server name matches.
- */
+/** QA-040: browser evidence matches only the engine-injected MCP server namespace. */
 export interface BrowserEvidenceState {
   requested: boolean;
   serverName: string | null;
@@ -89,15 +77,8 @@ export interface BrowserEvidenceState {
   failed: boolean;
 }
 
-/**
- * Delegation-belt runtime readiness for one attempt (QA-024). `requested` is
- * set at attempt creation when a belt MCP server was injected into the spec;
- * `ready`/`failed` are filled from the harness's `started` event (its
- * `mcp_servers[<belt>].status`); `toolEvidence` flips when any exact belt tool
- * actually runs. Startup failure lives in this state; an exact non-ok tool
- * result lives in `toolErrors` and hard-fails under INV-030 while reusing
- * INV-043's invocation-aware recovery key.
- */
+/** QA-024: injection, typed startup and actual tool use remain independent facts.
+ * Non-ok tool results live in toolErrors, with INV-043 invocation-aware recovery. */
 export interface DelegationBeltState {
   requested: boolean;
   serverName: string | null;
@@ -154,15 +135,14 @@ export interface AttemptTelemetry {
   sideToolWorkReport: unknown;
   /** Contract/outcome truth for this attempt, produced by the orchestrator. */
   outcome: AttemptOutcomeState | null;
-  /** Token usage summed across this attempt's usage events (money stays in the
-   * ledger, not here). Each field is null until at least one usage event
-   * reports it, so "not reported" is never conflated with a real 0. The
-   * relation between cached and input tokens is harness-specific; never derive
-   * a cross-harness grand total. */
+  /** Legacy fields sum known reports with harness-specific input/cache semantics.
+   * Normalized input fields require complete coverage. Money stays in the ledger. */
   usage: {
     inputTokens: number | null;
     outputTokens: number | null;
     cachedInputTokens: number | null;
+    /** Complete normalized fields; undefined means no token contribution yet. */
+    inputTokenUsage?: InputTokenUsage;
   };
   /** Per-usage-event billing split. Route can change across native retries,
    * so this is deliberately not derived from the attempt's first route. */
@@ -237,13 +217,23 @@ function addToken(acc: number | null, value: number | undefined): number | null 
   return value === undefined ? acc : (acc ?? 0) + value;
 }
 
-/**
- * Read the injected belt server's status out of the harness `started` frame's
- * `mcp_servers` list (QA-024). The shape is the vendor's — claude emits
- * `{ name, status }` entries — so we defensively narrow each entry and match by
- * the injected belt server name. `status:"failed"` (or "error") is the startup
- * failure the outcome axis must not let terminalize a silent success.
- */
+/** Unknown on any contribution stays unknown; later values cannot revive a partial sum. */
+function foldInputTokenUsage(
+  acc: InputTokenUsage | undefined,
+  value: InputTokenUsage | undefined,
+): InputTokenUsage {
+  const add = (key: keyof InputTokenUsage): number | null => {
+    const next = value?.[key] ?? null;
+    return acc === undefined ? next : acc[key] === null || next === null ? null : acc[key] + next;
+  };
+  return {
+    total_tokens: add("total_tokens"),
+    cache_read_tokens: add("cache_read_tokens"),
+    cache_write_tokens: add("cache_write_tokens"),
+  };
+}
+
+/** QA-024: the injected server’s typed startup failure cannot become silent success. */
 function observeBeltStartup(t: AttemptTelemetry, ev: HarnessEvent): void {
   const payload = (ev as { payload?: Record<string, unknown> }).payload;
   const servers = payload?.["mcp_servers"];
@@ -261,14 +251,7 @@ function observeBeltStartup(t: AttemptTelemetry, ev: HarnessEvent): void {
   }
 }
 
-/**
- * QA-040: does this tool ref belong to the engine-armed browser MCP? Adapters
- * normalize browser calls as `kind:"mcp"` (codex `browser:browser_navigate`,
- * claude `mcp__browser__browser_navigate`), so the ToolKind cannot express
- * "browser". Match on the ENGINE-INJECTED server namespace only — a user MCP
- * server cannot spoof trusted browser evidence because the browser is matched
- * solely when the engine armed it under its fixed injected name.
- */
+/** QA-040: generic MCP kind is insufficient; match the engine-armed namespace. */
 function matchesBrowser(t: AttemptTelemetry, tool: { name: string; target?: string }): boolean {
   const server = t.browser.serverName;
   if (!t.browser.requested || !server) return false;
@@ -293,12 +276,7 @@ function bumpWebVerification(t: AttemptTelemetry, retrieval: string | undefined)
   else if (t.web.verification !== "verified") t.web.verification = "dispatched";
 }
 
-/**
- * Observe a normalized harness event into the attempt telemetry. Governance is
- * fully typed: only the `tool` ToolRef on tool_call/tool_result/file_change
- * events and the run-loop drop counters are consulted — never payload string
- * matching or tool-name heuristics.
- */
+/** Observe typed adapter evidence, never payload strings or tool-name heuristics. */
 export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): void {
   marks.observeAttemptOutputMarkers(t.outputMarkers, ev);
   // Delegation belt readiness (QA-024): normalized startup/error events carry
@@ -366,6 +344,11 @@ export function observeAttemptTelemetry(t: AttemptTelemetry, ev: HarnessEvent): 
     t.usage.inputTokens = addToken(t.usage.inputTokens, ev.usage.input_tokens);
     t.usage.outputTokens = addToken(t.usage.outputTokens, ev.usage.output_tokens);
     t.usage.cachedInputTokens = addToken(t.usage.cachedInputTokens, ev.usage.cached_input_tokens);
+    // A cost-only generation receipt still has unknown token coverage.
+    t.usage.inputTokenUsage = foldInputTokenUsage(
+      t.usage.inputTokenUsage,
+      ev.usage.input_token_usage,
+    );
   }
   if (ev.type === "completed") {
     const dropped =
@@ -763,18 +746,18 @@ export function attemptTelemetryRecord(
       input_tokens: t.usage.inputTokens,
       output_tokens: t.usage.outputTokens,
       cached_input_tokens: t.usage.cachedInputTokens,
+      ...(t.usage.inputTokenUsage === undefined
+        ? {}
+        : { input_token_usage: t.usage.inputTokenUsage }),
     },
   };
 }
 
-/** Sum token usage across attempt records (candidates + synthesis), the same
- *  scope as the ledger's spend. A field stays null unless some attempt reported
- *  it, so "no harness reported tokens" never reads as a real 0. */
-export function aggregateRunTokenUsage(records: AttemptTelemetryRecord[]): {
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cached_input_tokens: number | null;
-} {
+/** Sum all attempt records (candidates + synthesis). Legacy fields sum known
+ * reports; normalized fields require complete coverage, never a partial total. */
+export function aggregateRunTokenUsage(
+  records: AttemptTelemetryRecord[],
+): AttemptTelemetryRecord["usage"] {
   const sum = (pick: (u: AttemptTelemetryRecord["usage"]) => number | null): number | null => {
     let total: number | null = null;
     for (const r of records) {
@@ -783,10 +766,15 @@ export function aggregateRunTokenUsage(records: AttemptTelemetryRecord[]): {
     }
     return total;
   };
+  const inputTokenUsage = records.reduce<InputTokenUsage | undefined>(
+    (acc, record) => foldInputTokenUsage(acc, record.usage.input_token_usage),
+    undefined,
+  );
   return {
     input_tokens: sum((u) => u.input_tokens),
     output_tokens: sum((u) => u.output_tokens),
     cached_input_tokens: sum((u) => u.cached_input_tokens),
+    ...(inputTokenUsage === undefined ? {} : { input_token_usage: inputTokenUsage }),
   };
 }
 

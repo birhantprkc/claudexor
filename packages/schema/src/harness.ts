@@ -755,6 +755,18 @@ export const InteractionAnswerSet = z
   .describe("Typed answers delivered back into a live interactive harness session.");
 export type InteractionAnswerSet = z.infer<typeof InteractionAnswerSet>;
 
+export const InputTokenUsage = z
+  .object({
+    total_tokens: z.number().int().nonnegative().nullable(),
+    cache_read_tokens: z.number().int().nonnegative().nullable(),
+    cache_write_tokens: z.number().int().nonnegative().nullable(),
+  })
+  .strict()
+  .describe(
+    "Complete reported input total, including cache reads/writes, and its separately measured cache subsets. Null means unknown, never zero or a partial sum.",
+  );
+export type InputTokenUsage = z.infer<typeof InputTokenUsage>;
+
 /** Normalized event emitted by every adapter (the SSOT of adapter output). */
 export const HarnessEvent = z
   .object({
@@ -817,6 +829,7 @@ export const HarnessEvent = z
           .nonnegative()
           .optional()
           .describe("Reported cache token count; relation to input_tokens is harness-specific."),
+        input_token_usage: InputTokenUsage.optional(),
         cost_usd: z.number().nonnegative().optional().describe("Cost in USD."),
         /** True when cost_usd is derived from token pricing (not natively reported). */
         estimated: z

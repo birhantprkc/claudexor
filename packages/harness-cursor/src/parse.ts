@@ -6,6 +6,7 @@ import type {
   ToolKind,
   ToolRef,
 } from "@claudexor/schema";
+import { InputTokenUsage } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
 import { applyCursorVendorLimit } from "./retry-signals.js";
 
@@ -429,6 +430,21 @@ function parseCursorEventStateful(
       usage.cost_usd = obj.total_cost_usd;
     }
     if (Object.keys(usage).length > 0) {
+      // The headless result accumulator subtracts cache reads/writes from
+      // inputTokens (Cursor 2026.08.11, src/headless.ts turnEnded).
+      const input =
+        InputTokenUsage.shape.total_tokens.safeParse(nativeUsage.inputTokens).data ?? null;
+      const read =
+        InputTokenUsage.shape.cache_read_tokens.safeParse(nativeUsage.cacheReadTokens).data ?? null;
+      const write =
+        InputTokenUsage.shape.cache_write_tokens.safeParse(nativeUsage.cacheWriteTokens).data ??
+        null;
+      usage.input_token_usage = {
+        total_tokens:
+          input !== null && read !== null && write !== null ? input + read + write : null,
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+      };
       out.push({
         type: "usage",
         session_id: sessionId,

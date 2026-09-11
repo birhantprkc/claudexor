@@ -141,7 +141,7 @@
                     "format"
                   ],
                   "additionalProperties": false,
-                  "description": "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay."
+                  "description": "Opaque provider-native continuation bound to its account and model; its format distinguishes assistant content from live transport state."
                 }
               },
               "required": [
@@ -400,6 +400,17 @@
               "type": "null"
             }
           ]
+        },
+        "nativeContinuation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelCallResult/properties/message/anyOf/0/properties/nativeContinuation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Live transport continuation, present only when the request opted in; preserve independently of response body success."
         }
       },
       "required": [

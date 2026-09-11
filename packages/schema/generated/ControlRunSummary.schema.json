@@ -510,6 +510,51 @@
           ],
           "description": "Cached input tokens summed across all attempts; null when no harness reported them."
         },
+        "inputTokenUsage": {
+          "type": "object",
+          "properties": {
+            "total_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cache_read_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cache_write_tokens": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "total_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens"
+          ],
+          "additionalProperties": false,
+          "description": "Normalized input measurement projected from run telemetry; absent on older runs."
+        },
         "outputConformance": {
           "anyOf": [
             {

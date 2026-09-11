@@ -1,4 +1,5 @@
 import type { HarnessEvent, ToolKind, ToolRef } from "@claudexor/schema";
+import { InputTokenUsage } from "@claudexor/schema";
 import { nowIso, redactSecrets } from "@claudexor/util";
 import {
   claudeCompactBoundaryEvents,
@@ -361,6 +362,12 @@ function parseClaudeEventStateful(
     releaseSessionTasks(sessionId);
     const out: HarnessEvent[] = [];
     const u = obj.usage ?? {};
+    const input = InputTokenUsage.shape.total_tokens.safeParse(u.input_tokens).data ?? null;
+    const read =
+      InputTokenUsage.shape.cache_read_tokens.safeParse(u.cache_read_input_tokens).data ?? null;
+    const write =
+      InputTokenUsage.shape.cache_write_tokens.safeParse(u.cache_creation_input_tokens).data ??
+      null;
     out.push({
       type: "usage",
       session_id: sessionId,
@@ -369,6 +376,12 @@ function parseClaudeEventStateful(
         input_tokens: numberOrUndef(u.input_tokens),
         output_tokens: numberOrUndef(u.output_tokens),
         cached_input_tokens: sumOrUndef(u.cache_read_input_tokens, u.cache_creation_input_tokens),
+        input_token_usage: {
+          total_tokens:
+            input !== null && read !== null && write !== null ? input + read + write : null,
+          cache_read_tokens: read,
+          cache_write_tokens: write,
+        },
         cost_usd: numberOrUndef(obj.total_cost_usd),
       },
     });

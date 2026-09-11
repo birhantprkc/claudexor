@@ -2548,6 +2548,7 @@ function summarizeRun(
     inputTokens: telemetry?.usage_totals.input_tokens ?? null,
     outputTokens: telemetry?.usage_totals.output_tokens ?? null,
     cachedInputTokens: telemetry?.usage_totals.cached_input_tokens ?? null,
+    inputTokenUsage: telemetry?.usage_totals.input_token_usage,
     // The single engine validator's receipt, projected verbatim — surfaces
     // never re-validate the answer (null = no structured-output contract).
     outputConformance: outputConformance?.status ?? null,

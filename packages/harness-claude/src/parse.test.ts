@@ -312,6 +312,11 @@ describe("parseClaudeEvent", () => {
     expect(ok.map((e) => e.type)).toEqual(["usage", "message"]);
     expect(ok[0]?.usage?.cost_usd).toBe(0.25);
     expect(ok[0]?.usage?.cached_input_tokens).toBe(100);
+    expect(ok[0]?.usage?.input_token_usage).toEqual({
+      total_tokens: 110,
+      cache_read_tokens: 90,
+      cache_write_tokens: 10,
+    });
     expect(ok[1]?.text).toBe("[]");
     // The terminal result is claude's TYPED final answer (F2.5 W-C1).
     expect(ok[1]?.final).toBe(true);
@@ -992,4 +997,60 @@ describe("structured output flag", () => {
     );
     expect(bare).not.toContain("--json-schema");
   });
+});
+
+describe("claude normalized input measurement", () => {
+  function normalized(usage: Record<string, unknown>) {
+    return parseClaudeEvent({ type: "result", usage }, "counters")?.find(
+      (event) => event.type === "usage",
+    )?.usage?.input_token_usage;
+  }
+  it("keeps reads and writes separate, including measured zero", () => {
+    expect(
+      normalized({
+        input_tokens: 100,
+        cache_read_input_tokens: 80,
+        cache_creation_input_tokens: 10,
+      }),
+    ).toEqual({
+      total_tokens: 190,
+      cache_read_tokens: 80,
+      cache_write_tokens: 10,
+    });
+    expect(
+      normalized({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }),
+    ).toEqual({
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+  });
+  it.each([0, 1, 2])("preserves each independently missing component %s", (missing) => {
+    const fields = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+    const native: Record<string, unknown> = Object.fromEntries(
+      fields.map((field, index) => [field, [100, 80, 10][index]]),
+    );
+    delete native[fields[missing]!];
+    expect(normalized(native)).toEqual({
+      total_tokens: null,
+      cache_read_tokens: missing === 1 ? null : 80,
+      cache_write_tokens: missing === 2 ? null : 10,
+    });
+  });
+  it.each([undefined, null, -1, 0.5, "10", Infinity, NaN])(
+    "preserves unknown write rather than treating %j as zero",
+    (value) => {
+      expect(
+        normalized({
+          input_tokens: 100,
+          cache_read_input_tokens: 80,
+          cache_creation_input_tokens: value,
+        }),
+      ).toEqual({
+        total_tokens: null,
+        cache_read_tokens: 80,
+        cache_write_tokens: null,
+      });
+    },
+  );
 });

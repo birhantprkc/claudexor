@@ -756,6 +756,51 @@
                       }
                     ],
                     "default": null
+                  },
+                  "input_token_usage": {
+                    "type": "object",
+                    "properties": {
+                      "total_tokens": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cache_read_tokens": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cache_write_tokens": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "total_tokens",
+                      "cache_read_tokens",
+                      "cache_write_tokens"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Complete reported input total, including cache reads/writes, and its separately measured cache subsets. Null means unknown, never zero or a partial sum."
                   }
                 },
                 "additionalProperties": false,

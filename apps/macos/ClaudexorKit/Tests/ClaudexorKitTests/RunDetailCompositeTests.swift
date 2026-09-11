@@ -48,6 +48,15 @@ import Testing
         #expect(s.outcomeFacts == nil)
     }
 
+    @Test func runSummaryToleratesNormalizedInputMeasurementsWithoutATokenUI() throws {
+        let current = try JSONDecoder().decode(RunSummary.self, from: Data(#"""
+        {"runId":"r1","state":"succeeded","inputTokens":10,"cachedInputTokens":90,
+         "inputTokenUsage":{"total_tokens":110,"cache_read_tokens":90,"cache_write_tokens":null}}
+        """#.utf8))
+        #expect(current.runId == "r1")
+        #expect(current.state == "succeeded")
+    }
+
     @Test func runSummaryDecodesDelegateOutcomeAndNarrowChildLineage() throws {
         let json = #"""
         {"runId":"child","state":"running","parentRunId":"parent",

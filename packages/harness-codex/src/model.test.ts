@@ -42,6 +42,11 @@ function terminal(output: unknown[] = [native]) {
     })}\n\n`,
   );
 }
+
+function withHeader(response: Response, turnState: string): Response {
+  response.headers.set("x-codex-turn-state", turnState);
+  return response;
+}
 function setup(
   respond: (init: RequestInit | undefined) => Response | Promise<Response> = () => terminal(),
   now: () => number = () => 1900000000000,
@@ -222,6 +227,200 @@ describe("exact-profile Codex model catalog", () => {
 });
 
 describe("single-generation Codex adapter", () => {
+  it("omits transport state for legacy clients even when the server reports it", async () => {
+    const fixture = setup(() => withHeader(terminal(), "first-token"));
+    const result = await fixture.adapter.invoke(fixture.request, fixture.context);
+    expect(result).not.toHaveProperty("nativeContinuation");
+    expect(result.message?.nativeContinuation?.format).toBe("codex.responses.v1");
+    expect(ModelCallResult.parse(result)).not.toHaveProperty("nativeContinuation");
+  });
+  it("captures the first header, replays it across explicit tool/steering calls, and resets on a new caller turn", async () => {
+    const fixture = setup(() => withHeader(terminal(), "first-token"));
+    const request = {
+      ...fixture.request,
+      nativeContinuation: null,
+      options: { cacheKey: "one-owner" },
+    };
+    const first = await fixture.adapter.invoke(request, fixture.context);
+    expect(first.nativeContinuation).toEqual({
+      route: first.route,
+      format: "codex.turn.v1",
+      payload: { turnState: "first-token" },
+    });
+    const next = {
+      ...request,
+      nativeContinuation: first.nativeContinuation,
+      messages: [
+        ...request.messages,
+        first.message!,
+        {
+          role: "tool" as const,
+          tool_call_id: "call_one",
+          content: [
+            { type: "text", text: "tool evidence" },
+            {
+              type: "image_url",
+              image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "original" },
+            },
+          ],
+        },
+        { role: "user" as const, content: "steering inside this turn" },
+      ],
+    };
+    const before = structuredClone(next);
+    fixture.onDispatch.mockClear();
+    fixture.fetcher.mockImplementation(async (_url, init) =>
+      init?.method === "POST" ? withHeader(terminal(), "later-token") : Response.json(catalog),
+    );
+    const second = await fixture.adapter.invoke(next, fixture.context);
+    expect(second.nativeContinuation).toEqual(first.nativeContinuation);
+    expect(next).toEqual(before);
+    const sends = fixture.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    const sent = sends[1][1]!;
+    expect(new Headers(sent.headers).get("x-codex-turn-state")).toBe("first-token");
+    expect(new Headers(sent.headers).get("session_id")).toBe("one-owner");
+    expect(JSON.parse(sent.body as string)).toMatchObject({
+      prompt_cache_key: "one-owner",
+      input: expect.arrayContaining([
+        native,
+        {
+          type: "function_call_output",
+          call_id: "call_one",
+          output: [
+            { type: "input_text", text: "tool evidence" },
+            {
+              type: "input_image",
+              image_url: "data:image/png;base64,aGVsbG8=",
+              detail: "original",
+            },
+          ],
+        },
+      ]),
+    });
+    expect(sent.body).not.toContain("first-token");
+    fixture.onDispatch.mockClear();
+    const fresh = await fixture.adapter.invoke(
+      { ...next, nativeContinuation: null },
+      fixture.context,
+    );
+    expect(fresh.nativeContinuation?.payload).toEqual({ turnState: "later-token" });
+    const last = fixture.fetcher.mock.calls
+      .filter(([, init]) => init?.method === "POST")
+      .at(-1)![1]!;
+    expect(new Headers(last.headers).has("x-codex-turn-state")).toBe(false);
+  });
+  it.each(["source", "credentialProfileId", "accountFingerprint", "model"] as const)(
+    "starts empty when the supplied transport route changes %s without refusing generation",
+    async (field) => {
+      const fixture = setup(() => withHeader(terminal(), "new-token"));
+      const first = await fixture.adapter.invoke(
+        { ...fixture.request, nativeContinuation: null },
+        fixture.context,
+      );
+      fixture.onDispatch.mockClear();
+      const old = first.nativeContinuation!;
+      const result = await fixture.adapter.invoke(
+        {
+          ...fixture.request,
+          nativeContinuation: { ...old, route: { ...old.route, [field]: "other" } },
+        },
+        fixture.context,
+      );
+      expect(result.outcome).toBe("completed");
+      const last = fixture.fetcher.mock.calls.at(-1)![1]!;
+      expect(new Headers(last.headers).has("x-codex-turn-state")).toBe(false);
+      expect(result.nativeContinuation?.route).toEqual(result.route);
+    },
+  );
+  it("cannot replay uncertain account identity", async () => {
+    const fixture = setup(() => withHeader(terminal(), "token"));
+    fixture.readAuthFile.mockResolvedValue(
+      JSON.stringify({ tokens: { access_token: "opaque", account_id: "account-one" } }),
+    );
+    const first = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: null },
+      fixture.context,
+    );
+    expect(first.nativeContinuation?.route.accountFingerprint).toBeNull();
+    fixture.onDispatch.mockClear();
+    const second = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: first.nativeContinuation },
+      fixture.context,
+    );
+    expect(second.outcome).toBe("completed");
+    expect(
+      new Headers(fixture.fetcher.mock.calls.at(-1)![1]!.headers).has("x-codex-turn-state"),
+    ).toBe(false);
+  });
+  it.each(["\nforeign", "\rforeign", "ключ", " token ", ""])(
+    "refuses invalid explicit turn state before dispatch: %j",
+    async (turnState) => {
+      const fixture = setup();
+      const discovered = await fixture.adapter.catalog(fixture.context);
+      const result = await fixture.adapter.invoke(
+        {
+          ...fixture.request,
+          nativeContinuation: {
+            route: { ...discovered, model: "model-one" },
+            format: "codex.turn.v1",
+            payload: { turnState },
+          },
+        },
+        fixture.context,
+      );
+      expect(result.problem?.code).toBe("invalid_continuation");
+      expect(fixture.onDispatch).not.toHaveBeenCalled();
+      expect(fixture.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    },
+  );
+  it.each([{}, { turnState: 2 }, ["token"]])(
+    "refuses malformed turn payload %j",
+    async (payload) => {
+      const fixture = setup();
+      const result = await fixture.adapter.invoke(
+        {
+          ...fixture.request,
+          nativeContinuation: {
+            route: {
+              source: "codex",
+              credentialProfileId: "work",
+              accountFingerprint: null,
+              model: "model-one",
+            },
+            format: "codex.turn.v1",
+            payload,
+          },
+        },
+        fixture.context,
+      );
+      expect(result.problem?.code).toBe("invalid_continuation");
+      expect(fixture.onDispatch).not.toHaveBeenCalled();
+    },
+  );
+  it.each([new Response("data: {broken}\n\n"), new Response(null)])(
+    "preserves a successful header through an unknown body without a second generation",
+    async (response) => {
+      const fixture = setup(() => withHeader(response, "captured-before-body"));
+      const result = await fixture.adapter.invoke(
+        { ...fixture.request, nativeContinuation: null },
+        fixture.context,
+      );
+      expect(result.outcome).toBe("unknown");
+      expect(result.nativeContinuation?.payload).toEqual({ turnState: "captured-before-body" });
+      expect(fixture.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(
+        1,
+      );
+      expect(ModelCallResult.safeParse(result).success).toBe(true);
+    },
+  );
+  it("leaves an opted-in turn empty when the provider sends no header", async () => {
+    const fixture = setup();
+    const result = await fixture.adapter.invoke(
+      { ...fixture.request, nativeContinuation: null },
+      fixture.context,
+    );
+    expect(result.nativeContinuation).toBeNull();
+  });
   it("reuses this operation's exact catalog after a fresh auth read, without another GET", async () => {
     let now = 1900000000000;
     const fixture = setup(undefined, () => now);

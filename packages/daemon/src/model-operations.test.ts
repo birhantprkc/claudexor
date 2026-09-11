@@ -131,6 +131,33 @@ async function fixture(
 }
 
 describe("model operations over the existing daemon command substrate", () => {
+  it("keeps turn state in result custody across rejoin and ACK, outside public receipts", async () => {
+    const nativeContinuation = {
+      route,
+      format: "codex.turn.v1",
+      payload: { turnState: "private-turn-token" },
+    };
+    const invoke = vi.fn<ModelAdapter["invoke"]>(async (input, context) => {
+      expect(input.nativeContinuation).toBeNull();
+      await context.onDispatch(route);
+      return { ...result(), outcome: "unknown", message: null, nativeContinuation };
+    });
+    const f = await fixture(invoke);
+    const ref = f.upload({ ...request(), nativeContinuation: null });
+    const created = await f.operations.create(ref, "turn-state-rejoin");
+    const done = await f.terminal(created.id);
+    expect(JSON.stringify(done)).not.toContain("private-turn-token");
+    expect(JSON.stringify(f.store.records())).not.toContain("private-turn-token");
+    const first = f.operations.readResult(created.id);
+    expect(JSON.parse(first.bytes.toString()).nativeContinuation).toEqual(nativeContinuation);
+    expect((await f.operations.create(ref, "turn-state-rejoin")).id).toBe(created.id);
+    expect(f.operations.readResult(created.id).bytes.equals(first.bytes)).toBe(true);
+    f.operations.acknowledge(created.id, first.sha256);
+    expect((await f.operations.create(ref, "turn-state-rejoin")).response.state).toBe(
+      "acknowledged",
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
   it.each([{ stop_reason: "end_turn" }, { refusal: "The prior provider refused." }])(
     "reports invalid uploaded model bytes through HTTP as pre-admission 400: %j",
     async (extra) => {
