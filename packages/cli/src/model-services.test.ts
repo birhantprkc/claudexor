@@ -69,6 +69,11 @@ async function fixture(options: { lazy?: boolean } = {}) {
   const cfg = GlobalConfig.parse({ credential_profiles: profiles });
   const catalogModels: Record<string, ModelCatalogEntry[]> = { a: [model()], b: [model()] };
   const failures: Record<string, string> = {};
+  // The vendor-shaped `context` each account's typed refusal carries. A
+  // vendor-named reset by default; a test that means a different vendor fact
+  // (an HTTP status, say) declares it per account, as the live producer does.
+  const vendorReset = { resetsAt: new Date(Date.now() + 60000).toISOString() };
+  const failureContext: Record<string, Record<string, unknown>> = {};
   const probe = vi.fn<(profile: CredentialProfile) => Promise<CredentialProfileStatus>>(
     async (profile) => ({
       profile_id: profile.profile_id,
@@ -119,7 +124,7 @@ async function fixture(options: { lazy?: boolean } = {}) {
             code,
             message: "fixture refusal",
             retryable: false,
-            context: { resetsAt: new Date(Date.now() + 60000).toISOString() },
+            context: failureContext[context.profile.profile_id] ?? vendorReset,
           }
         : null,
     });
@@ -185,6 +190,7 @@ async function fixture(options: { lazy?: boolean } = {}) {
     cfg,
     catalogModels,
     failures,
+    failureContext,
     catalog,
     invoke,
     probe,
@@ -336,6 +342,16 @@ describe("production model service composition", () => {
     const f = await fixture();
     f.failures.a = a;
     f.failures.b = b;
+    // Declare the vendor fact that accompanies each code on the live route: a
+    // rejected credential arrives as HTTP 401, a spent window as a reset time.
+    for (const [id, code] of [
+      ["a", a],
+      ["b", b],
+    ] as const)
+      f.failureContext[id] =
+        code === "auth_required"
+          ? { httpStatus: 401 }
+          : { resetsAt: new Date(Date.now() + 60000).toISOString() };
     await f.run({ mode: "pin", profileId: "a" });
     await f.run({ mode: "pin", profileId: "b" });
     const done = await f.run();
@@ -437,6 +453,7 @@ describe("production model service composition", () => {
 
   it("keeps unproven profile failure distinct from a sibling's confirmed auth failure", async () => {
     const f = await fixture();
+    f.failureContext.a = { httpStatus: 401 };
     f.failures.a = "auth_required";
     await f.run({ mode: "pin", profileId: "a" });
     const original = f.probe.getMockImplementation()!;
@@ -454,19 +471,67 @@ describe("production model service composition", () => {
   });
 
   it.each(["rate_limited", "auth_refresh_failed"])(
-    "does not reinterpret %s as quota exhaustion or logout",
+    "records the vendor-named reset for a typed %s without reinterpreting it as logout",
     async (code) => {
       const f = await fixture();
       f.failures.a = code;
       const done = await f.run({ mode: "pin", profileId: "a" });
       expect(done.problem?.code).toBe(code);
-      expect(f.quota.read().snapshots).toEqual([]);
+      expect(f.quota.read().snapshots[0]?.subject.subject_id).toBe("a");
       expect(f.unusable.live()).toEqual([]);
     },
   );
 
+  it("writes no cooldown when a rate limit arrives without a vendor reset or delay", async () => {
+    const f = await fixture();
+    f.catalog.mockRejectedValueOnce(
+      Object.assign(new Error("rate limited"), {
+        problem: ControlProblem.parse({
+          code: "rate_limited",
+          message: "rate limited",
+          retryable: true,
+        }),
+      }),
+    );
+    const done = await f.run({ mode: "auto", preferredProfileId: "a" });
+    expect(done.state).toBe("succeeded");
+    expect(done.dispatch.route?.credentialProfileId).toBe("b");
+    expect(f.quota.read().snapshots).toEqual([]);
+    expect(f.unusable.live()).toEqual([]);
+  });
+
+  it("leaves a status-less provider failure without a cooldown or a verdict", async () => {
+    const f = await fixture();
+    f.failureContext.a = {};
+    f.failures.a = "provider_failed";
+    const done = await f.run({ mode: "pin", profileId: "a" });
+    expect(done.problem?.code).toBe("provider_failed");
+    expect(f.quota.read().snapshots).toEqual([]);
+    expect(f.unusable.live()).toEqual([]);
+  });
+
+  it("condemns a credential only on the adapter's confirmed auth loss, not on a bare 401", async () => {
+    const f = await fixture();
+    // The adapter emits this code precisely because a 401 on a token whose
+    // freshness it could not confirm is no proof that a new login is needed.
+    f.failureContext.a = { httpStatus: 401 };
+    f.failures.a = "auth_refresh_failed";
+    await f.run({ mode: "pin", profileId: "a" });
+    expect(f.unusable.live()).toEqual([]);
+    expect(f.quota.read().snapshots).toEqual([]);
+    const g = await fixture();
+    g.failureContext.a = { httpStatus: 401 };
+    g.failures.a = "auth_required";
+    await g.run({ mode: "pin", profileId: "a" });
+    expect(g.unusable.live()).toMatchObject([
+      { profile_id: "a", code: "auth_revoked", model: null, detail: "auth_required" },
+    ]);
+    expect(g.quota.read().snapshots).toEqual([]);
+  });
+
   it("shares confirmed auth loss with existing Agent account readiness", async () => {
     const f = await fixture();
+    f.failureContext.a = { httpStatus: 401 };
     f.failures.a = "auth_required";
     await f.run({ mode: "auto", preferredProfileId: "a" });
     expect(f.unusable.live()[0]).toMatchObject({
@@ -491,6 +556,12 @@ describe("production model service composition", () => {
     async (code) => {
       const f = await fixture();
       const original = f.catalog.getMockImplementation()!;
+      // The vendor fact each refusal carries on the live route: a rejected
+      // sign-in arrives as HTTP 401 with no reset time, a spent window names one.
+      const vendorFact =
+        code === "auth_required"
+          ? { httpStatus: 401 }
+          : { resetsAt: new Date(Date.now() + 60000).toISOString() };
       f.catalog.mockImplementation(async (context) => {
         if (context.profile.profile_id === "a")
           throw Object.assign(new Error("catalog refused"), {
@@ -498,7 +569,7 @@ describe("production model service composition", () => {
               code,
               message: "catalog refused",
               retryable: false,
-              context: { resetsAt: new Date(Date.now() + 60000).toISOString() },
+              context: vendorFact,
             }),
           });
         return original(context);

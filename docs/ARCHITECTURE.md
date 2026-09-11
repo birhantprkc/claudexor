@@ -1269,7 +1269,9 @@ profile; explicit pin never rotates. Any typed catalog refusal excludes that
 account from the remaining selection epoch and hands selection to the next
 candidate, while an explicit pin still refuses with that same typed refusal.
 A failed quota observation feeds that same pool's existing quota owner, without
-a second retry planner or account store.
+a second retry planner or account store. Cooldown evidence is written only when
+the vendor itself named a reset time or a retry delay; a refusal that carries
+neither creates no cooldown, rather than a block until an invented time.
 Pool refusal is projected from typed per-account causes: an all-quota pool is
 `subscription_window_exhausted`, an all-authentication pool is `auth_required`,
 and a mixed, unknown, empty or disabled pool remains unavailable with its compact

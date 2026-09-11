@@ -319,8 +319,11 @@ export function createModelServices(deps: Dependencies) {
         cached_input_tokens: usage?.cached_input_tokens ?? undefined,
       },
     };
-    if (problem?.code === "subscription_window_exhausted") {
-      const context = problem.context;
+    // A cooldown is an assertion about time, so only the vendor's own reset or
+    // retry delay may produce one. Without either field the registry would
+    // invent a window instead of admitting it does not know.
+    const context = problem?.context ?? {};
+    if (typeof context.resetsAt === "string" || typeof context.retryAfterMs === "number") {
       event.rate_limit = {
         resets_at: typeof context.resetsAt === "string" ? context.resetsAt : null,
         retry_delay_ms: typeof context.retryAfterMs === "number" ? context.retryAfterMs : null,
