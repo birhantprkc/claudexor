@@ -18,15 +18,10 @@ import { RequestRequirementResolution } from "./request-requirements.js";
 import { WorkState } from "./work-report.js";
 import { RunDelegationInfo } from "./delegation.js";
 import { RunFacts } from "./run-facts.js";
+import { InputTokenUsage } from "./harness.js";
 
-/**
- * Run telemetry artifact (`final/telemetry.yaml`).
- *
- * The orchestrator is the ONLY computer of web/tool evidence. Surfaces
- * (control-api, CLI, app) project this artifact; they must not re-derive
- * evidence from raw events. Legacy runs without the artifact render an honest
- * "telemetry unavailable" state instead of a recomputed guess.
- */
+/** Engine-owned final/telemetry.yaml: surfaces project, never re-derive evidence.
+ * Legacy runs without this artifact disclose unavailable telemetry. */
 
 export const WebEvidenceStatus = z
   .enum(["none", "attempted", "satisfied", "failed", "unverified"])
@@ -295,6 +290,10 @@ export const TokenUsage = z
   );
 export type TokenUsage = z.infer<typeof TokenUsage>;
 
+const AttemptTokenUsage = TokenUsage.extend({
+  input_token_usage: InputTokenUsage.optional(),
+});
+
 /**
  * Runtime readiness receipt for the Claudexor delegation belt (D32) on one
  * attempt (QA-024). The preflight/descriptor layer refuses TYPED when no belt
@@ -488,7 +487,7 @@ export const AttemptTelemetryRecord = z
      * armed for this attempt. Absent when the browser was not injected. */
     browser: BrowserEvidenceRecord.optional(),
     /** Token usage summed across this attempt's usage events. */
-    usage: TokenUsage.default({}),
+    usage: AttemptTokenUsage.default({}),
   })
   .describe(
     "Telemetry for one attempt: route evidence, web evidence, tool errors, dropped events, and outcome.",
@@ -535,7 +534,7 @@ export const RunTelemetry = z
       .nonnegative()
       .default(0)
       .describe("Sum of attempt tool warnings; rendered separately from terminal state."),
-    usage_totals: TokenUsage.default({}),
+    usage_totals: AttemptTokenUsage.default({}),
     /** The run's auth ROUTE RECEIPT (INV-061 disclosure): requested preference,
      * the effective route/source the deciding attempt disclosed, and a
      * deterministic reason — computed ONCE here; summary/CLI project it

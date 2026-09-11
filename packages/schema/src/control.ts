@@ -20,7 +20,7 @@ import {
 } from "./budget.js";
 export { ControlQuotaResponse } from "./quota.js";
 import { RunOutcomeFacts } from "./decision.js";
-import { EffortHint, HarnessModel, InteractionQuestion } from "./harness.js";
+import { EffortHint, HarnessModel, InputTokenUsage, InteractionQuestion } from "./harness.js";
 import { ContinuityKind, ThreadState, ThreadTurnKind, WorkspaceMode } from "./thread.js";
 import { ResourceAttachmentRef } from "./attachment.js";
 import { RequestRequirementResolution } from "./request-requirements.js";
@@ -642,9 +642,7 @@ export const ControlRunSummary = z
       .boolean()
       .optional()
       .describe("True when settled cash is estimated rather than exact."),
-    /** Token usage summed across every attempt (money stays in spendUsd). Each
-     * field null until a harness reported it — never render null as 0, and never
-     * sum into a grand total (codex cached ⊆ input; claude cached disjoint). */
+    /** Legacy totals retain harness-specific input/cache semantics; null is unknown. */
     inputTokens: z
       .number()
       .int()
@@ -668,10 +666,10 @@ export const ControlRunSummary = z
       .describe(
         "Cached input tokens summed across all attempts; null when no harness reported them.",
       ),
-    /** Typed conformance receipt for a run started with outputSchema: passed =
-     * final/output.json conforms; failed = the answer was missing, unparsable,
-     * or non-conformant (the run still ends success-with-warnings — the
-     * embedder retries). Null when the run had no structured-output contract. */
+    inputTokenUsage: InputTokenUsage.optional().describe(
+      "Normalized input measurement projected from run telemetry; absent on older runs.",
+    ),
+    /** Engine conformance receipt; absent contract is null, failure remains a warning. */
     outputConformance: z
       .enum(["passed", "failed"])
       .nullable()

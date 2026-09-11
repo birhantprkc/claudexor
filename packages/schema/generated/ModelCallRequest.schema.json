@@ -178,7 +178,7 @@
                   "format"
                 ],
                 "additionalProperties": false,
-                "description": "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay."
+                "description": "Opaque provider-native continuation bound to its account and model; its format distinguishes assistant content from live transport state."
               }
             },
             "required": [
@@ -300,6 +300,17 @@
           "additionalProperties": false,
           "description": "Generation options only, not a caller's context/output reserve; unsupported explicit options refuse before inference.",
           "default": {}
+        },
+        "nativeContinuation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelCallRequest/properties/messages/items/properties/nativeContinuation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Caller-owned live transport turn: omit for stateless compatibility, null to start empty. Separate from historical assistant continuations."
         }
       },
       "required": [

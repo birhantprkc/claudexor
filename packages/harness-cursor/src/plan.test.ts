@@ -187,6 +187,11 @@ describe("cursor plan-mode createPlan recovery (Defect 1)", () => {
         input_tokens: 18_240,
         output_tokens: 237,
         cached_input_tokens: 9_216,
+        input_token_usage: {
+          total_tokens: 27_456,
+          cache_read_tokens: 9_216,
+          cache_write_tokens: 0,
+        },
       });
     }
   });

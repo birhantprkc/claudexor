@@ -36,6 +36,14 @@ import {
   type ControlSetupJob,
 } from "@claudexor/schema";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parseCodexEvent } from "../../harness-codex/src/parse.js";
+import { parseClaudeEvent } from "../../harness-claude/src/parse.js";
+import {
+  createAttemptTelemetry,
+  observeAttemptTelemetry,
+  attemptTelemetryRecord,
+  aggregateRunTokenUsage,
+} from "../../orchestrator/src/attemptTelemetry.js";
 import { rmSync as __rmSyncReap } from "node:fs";
 import { afterAll as __afterAllReap } from "vitest";
 
@@ -8075,6 +8083,25 @@ describe("DaemonControlApiServer", () => {
       profile_id: "work",
       model_mismatch: null,
     };
+    // Follow the real native-parser -> attempt -> run artifact -> HTTP projection.
+    const codex = createAttemptTelemetry("off", false);
+    const claude = createAttemptTelemetry("off", false);
+    parseCodexEvent(
+      { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 80 } },
+      "codex",
+    )!.forEach((event) => observeAttemptTelemetry(codex, event));
+    parseClaudeEvent(
+      {
+        type: "result",
+        usage: { input_tokens: 100, cache_read_input_tokens: 50, cache_creation_input_tokens: 20 },
+      },
+      "claude",
+    )!.forEach((event) => observeAttemptTelemetry(claude, event));
+    telemetry["usage_totals"] = aggregateRunTokenUsage([
+      attemptTelemetryRecord("a01", "codex", codex),
+      attemptTelemetryRecord("a02", "claude", claude),
+    ]);
+    const normalized = { total_tokens: 270, cache_read_tokens: 130, cache_write_tokens: null };
     writeFileSync(telemetryPath, stringifyYaml(telemetry));
     await withDaemonServer(daemon, async (base) => {
       const detail = await apiFetch(`${base}/runs/run-d1`, {
@@ -8082,7 +8109,13 @@ describe("DaemonControlApiServer", () => {
       });
       const summary = (
         (await detail.json()) as {
-          summary: { delegation: unknown; authRoute: { profileId: string | null } };
+          summary: {
+            delegation: unknown;
+            authRoute: { profileId: string | null };
+            inputTokenUsage: unknown;
+            inputTokens: number;
+            cachedInputTokens: number;
+          };
         }
       ).summary;
       expect(summary.delegation).toEqual({
@@ -8093,6 +8126,9 @@ describe("DaemonControlApiServer", () => {
         remediation: null,
       });
       expect(summary.authRoute.profileId).toBe("work");
+      expect(summary.inputTokenUsage).toEqual(normalized);
+      expect(summary.inputTokens).toBe(200);
+      expect(summary.cachedInputTokens).toBe(150);
     });
   });
 

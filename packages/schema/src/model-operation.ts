@@ -44,7 +44,7 @@ export const ModelNativeContinuation = z
   })
   .strict()
   .describe(
-    "Complete provider-native assistant turn, bound to its account and model; replaces reconstruction on replay.",
+    "Opaque provider-native continuation bound to its account and model; its format distinguishes assistant content from live transport state.",
   );
 export type ModelNativeContinuation = z.infer<typeof ModelNativeContinuation>;
 
@@ -122,6 +122,11 @@ export const ModelCallRequest = z
     tools: z.array(ModelTool).default([]),
     toolChoice: ModelToolChoice.default("auto"),
     options: ModelCallOptions.default({}),
+    nativeContinuation: ModelNativeContinuation.nullable()
+      .optional()
+      .describe(
+        "Caller-owned live transport turn: omit for stateless compatibility, null to start empty. Separate from historical assistant continuations.",
+      ),
   })
   .strict()
   .describe(
@@ -153,6 +158,11 @@ export const ModelCallResult = z
     cost: ModelCostEvidence,
     appliedOptions: ModelCallOptions,
     problem: ControlProblem.nullable(),
+    nativeContinuation: ModelNativeContinuation.nullable()
+      .optional()
+      .describe(
+        "Live transport continuation, present only when the request opted in; preserve independently of response body success.",
+      ),
   })
   .strict()
   .describe(

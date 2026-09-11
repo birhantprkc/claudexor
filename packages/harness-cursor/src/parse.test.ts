@@ -297,6 +297,7 @@ describe("parseCursorEvent", () => {
       input_tokens: 23_654,
       output_tokens: 223,
       cached_input_tokens: 3_712,
+      input_token_usage: { total_tokens: 27_366, cache_read_tokens: 3_712, cache_write_tokens: 0 },
     });
     expect(usage?.usage?.cost_usd).toBeUndefined();
     expect(() => HarnessEvent.parse(usage)).not.toThrow();
@@ -321,6 +322,7 @@ describe("parseCursorEvent", () => {
       input_tokens: 0,
       cached_input_tokens: 5,
       cost_usd: 0,
+      input_token_usage: { total_tokens: 5, cache_read_tokens: 2, cache_write_tokens: 3 },
     });
 
     const absent = parseCursorEvent(
@@ -368,4 +370,48 @@ describe("parseCursorEvent", () => {
     expect(final?.final).toBe(true);
     expect(final?.payload?.["final_source"]).toBe("assistant_message");
   });
+});
+
+describe("cursor normalized input measurement", () => {
+  function normalized(usage: Record<string, unknown>) {
+    return parseCursorEvent({ type: "result", usage }, "counters")?.find(
+      (event) => event.type === "usage",
+    )?.usage?.input_token_usage;
+  }
+  it("keeps reads and writes separate, including measured zero", () => {
+    expect(normalized({ inputTokens: 100, cacheReadTokens: 80, cacheWriteTokens: 10 })).toEqual({
+      total_tokens: 190,
+      cache_read_tokens: 80,
+      cache_write_tokens: 10,
+    });
+    expect(normalized({ inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 })).toEqual({
+      total_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    });
+  });
+  it.each([0, 1, 2])("preserves each independently missing component %s", (missing) => {
+    const fields = ["inputTokens", "cacheReadTokens", "cacheWriteTokens"];
+    const native: Record<string, unknown> = Object.fromEntries(
+      fields.map((field, index) => [field, [100, 80, 10][index]]),
+    );
+    delete native[fields[missing]!];
+    expect(normalized(native)).toEqual({
+      total_tokens: null,
+      cache_read_tokens: missing === 1 ? null : 80,
+      cache_write_tokens: missing === 2 ? null : 10,
+    });
+  });
+  it.each([undefined, null, -1, 0.5, "10", Infinity, NaN])(
+    "preserves unknown write rather than treating %j as zero",
+    (value) => {
+      expect(
+        normalized({ inputTokens: 100, cacheReadTokens: 80, cacheWriteTokens: value }),
+      ).toEqual({
+        total_tokens: null,
+        cache_read_tokens: 80,
+        cache_write_tokens: null,
+      });
+    },
+  );
 });
