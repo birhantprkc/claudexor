@@ -193,7 +193,13 @@ export function createModelServices(deps: Dependencies) {
               ]
             : [];
           for (const refusal of catalogRefusals.values()) {
-            causes.add(refusal.code === "auth_required" ? "auth" : "quota");
+            causes.add(
+              refusal.code === "auth_required"
+                ? "auth"
+                : refusal.code === "subscription_window_exhausted"
+                  ? "quota"
+                  : "unavailable",
+            );
             if (refusal.code === "subscription_window_exhausted")
               resets.push(
                 typeof refusal.context.resetsAt === "string" ? refusal.context.resetsAt : null,

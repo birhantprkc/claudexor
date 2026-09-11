@@ -365,6 +365,49 @@ describe("production model service composition", () => {
     expect(f.invoke).not.toHaveBeenCalled();
   });
 
+  it.each(["catalog_unavailable"])(
+    "types a pool that lost every catalog to %s as unavailable, not as spent quota",
+    async (code) => {
+      const f = await fixture();
+      f.catalog.mockRejectedValue(
+        Object.assign(new Error("catalog refusal"), {
+          problem: ControlProblem.parse({ code, message: "catalog refusal", retryable: false }),
+        }),
+      );
+      const done = await f.run();
+      expect(done.problem).toMatchObject({
+        code: "credential_pool_exhausted",
+        context: { poolCause: "unavailable" },
+      });
+      expect(f.catalog).toHaveBeenCalledTimes(2);
+      expect(f.invoke).not.toHaveBeenCalled();
+    },
+  );
+
+  it("tells the owner the pool is unavailable, without a reset, when the network dies", async () => {
+    const f = await fixture();
+    f.catalog.mockRejectedValue(
+      // The shape the live adapter throws when the catalog fetch itself fails:
+      // a retryable catalog_unavailable carrying no vendor context at all.
+      Object.assign(new Error("network is unreachable"), {
+        problem: ControlProblem.parse({
+          code: "catalog_unavailable",
+          message: "The selected Codex account's catalog could not be reached.",
+          retryable: true,
+          context: {},
+        }),
+      }),
+    );
+    const done = await f.run();
+    expect(done.problem).toMatchObject({
+      code: "credential_pool_exhausted",
+      message: "No managed account can currently serve this model request",
+      context: { poolCause: "unavailable", resetsAt: null },
+    });
+    expect(f.catalog).toHaveBeenCalledTimes(2);
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
+
   it("preserves existing vendor-poller auth proof for Auto and pin without another probe generation", async () => {
     const f = await fixture();
     const read = f.quota.read.bind(f.quota);
