@@ -193,7 +193,13 @@ export function createModelServices(deps: Dependencies) {
               ]
             : [];
           for (const refusal of catalogRefusals.values()) {
-            causes.add(refusal.code === "auth_required" ? "auth" : "quota");
+            causes.add(
+              refusal.code === "auth_required"
+                ? "auth"
+                : refusal.code === "subscription_window_exhausted"
+                  ? "quota"
+                  : "unavailable",
+            );
             if (refusal.code === "subscription_window_exhausted")
               resets.push(
                 typeof refusal.context.resetsAt === "string" ? refusal.context.resetsAt : null,
@@ -251,11 +257,7 @@ export function createModelServices(deps: Dependencies) {
         const problem = ControlProblem.safeParse(
           error && typeof error === "object" && "problem" in error ? error.problem : null,
         );
-        if (
-          !problem.success ||
-          !["auth_required", "subscription_window_exhausted"].includes(problem.data.code)
-        )
-          throw error;
+        if (!problem.success) throw error;
         const refusal = {
           ...problem.data,
           context: {
@@ -317,8 +319,11 @@ export function createModelServices(deps: Dependencies) {
         cached_input_tokens: usage?.cached_input_tokens ?? undefined,
       },
     };
-    if (problem?.code === "subscription_window_exhausted") {
-      const context = problem.context;
+    // A cooldown is an assertion about time, so only the vendor's own reset or
+    // retry delay may produce one. Without either field the registry would
+    // invent a window instead of admitting it does not know.
+    const context = problem?.context ?? {};
+    if (typeof context.resetsAt === "string" || typeof context.retryAfterMs === "number") {
       event.rate_limit = {
         resets_at: typeof context.resetsAt === "string" ? context.resetsAt : null,
         retry_delay_ms: typeof context.retryAfterMs === "number" ? context.retryAfterMs : null,
