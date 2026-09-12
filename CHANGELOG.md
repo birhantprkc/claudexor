@@ -4,6 +4,8 @@ Release and candidate history for Claudexor. The current version is declared
 in the root `package.json` (the version SSOT); published versions are available
 on GitHub Releases.
 
+- **v3.10.5** (2026-09-12): a model request whose account cannot hand over its model list now moves on to the next available account instead of ending the whole attempt, unless the account was pinned explicitly, and each account is tried at most once per request. When no account can serve the request, the reason given is the one the accounts actually gave: a request that failed because the model lists were unreachable no longer reports that every account ran out of subscription quota, and reports no reset time. An account is marked busy until a stated time only when the vendor itself named that time or delay.
+
 - **v3.10.4** (2026-09-12): Codex model operations can carry the caller's live `x-codex-turn-state` continuation on the existing route-bound opaque envelope (opt-in per request, captured once before the body, replayed only on the matching account and model, no separate daemon turn-state store; retained only in the existing private request/result custody); attempt/run telemetry and run summaries gain an additive normalized input measurement (`inputTokenUsage`: complete input total, cache reads, cache writes, unknown stays null) folded strictly across contributions, while legacy token fields keep their harness-specific meanings.
 
 - **v3.10.3** (2026-09-11): exposes successful upstream Codex catalog contact through the existing provenance and observation-time fields. Reused catalogs retain their original observation time, failed reads produce no fresh proof, and the response stays compatible with strict older clients.

@@ -1,5 +1,34 @@
 # @claudexor/cli
 
+## 3.10.5
+
+### Patch Changes
+
+- Model account selection now moves on to the next available account after any typed refusal from an account's model catalog, instead of ending the whole attempt unless the refusal was one of two named ones; an explicitly pinned account still refuses instead of rotating, and each account is tried at most once per attempt. When no account can serve the request, the reported reason is the one the accounts actually gave, so a request that failed because the catalogs were unreachable no longer says every account is out of subscription quota, and it reports no reset time. An account is recorded as busy until a given time only when the vendor itself named that reset time or retry delay.
+  - @claudexor/acp-server@3.10.5
+  - @claudexor/artifact-store@3.10.5
+  - @claudexor/config@3.10.5
+  - @claudexor/control-api@3.10.5
+  - @claudexor/core@3.10.5
+  - @claudexor/daemon@3.10.5
+  - @claudexor/delivery@3.10.5
+  - @claudexor/gateway@3.10.5
+  - @claudexor/harness-agy@3.10.5
+  - @claudexor/harness-claude@3.10.5
+  - @claudexor/harness-codex@3.10.5
+  - @claudexor/harness-cursor@3.10.5
+  - @claudexor/harness-fake@3.10.5
+  - @claudexor/harness-opencode@3.10.5
+  - @claudexor/harness-raw-api@3.10.5
+  - @claudexor/journal@3.10.5
+  - @claudexor/mcp-server@3.10.5
+  - @claudexor/orchestrator@3.10.5
+  - @claudexor/review@3.10.5
+  - @claudexor/schema@3.10.5
+  - @claudexor/secrets@3.10.5
+  - @claudexor/util@3.10.5
+  - @claudexor/workspace@3.10.5
+
 ## 3.10.4
 
 ### Patch Changes

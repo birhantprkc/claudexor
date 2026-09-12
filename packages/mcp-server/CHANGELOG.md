@@ -1,5 +1,12 @@
 # @claudexor/mcp-server
 
+## 3.10.5
+
+### Patch Changes
+
+- @claudexor/schema@3.10.5
+- @claudexor/util@3.10.5
+
 ## 3.10.4
 
 ### Patch Changes
