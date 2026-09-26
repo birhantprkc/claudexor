@@ -103,3 +103,74 @@ describe("fake harness adapters", () => {
     expect(impl?.enabled_intents).toContain("create_from_scratch");
   });
 });
+
+describe("fake-steerable (live-input fixture)", () => {
+  it("parks until one live message, receipts it without echoing the text, then answers not_active", async () => {
+    const adapter = createFakeHarness("fake-steerable");
+    const manifest = await adapter.discover();
+    expect(manifest.capability_profile.live_input).toBe("mid_turn");
+    const s = HarnessRunSpec.parse({
+      session_id: "ses-steer",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/tmp",
+    });
+    const secret = "steerTextCanary-never-echoed";
+    // Nothing parked yet: the run has not started.
+    await expect(
+      adapter.message?.("ses-steer", { messageId: "m-early", text: secret }),
+    ).resolves.toEqual({ outcome: "not_active", reason: "no_active_turn" });
+    const iterator = adapter.run(s)[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "started" });
+    expect((await iterator.next()).value).toMatchObject({ type: "thinking" });
+    const parked = iterator.next();
+    await expect(
+      adapter.message?.("ses-steer", { messageId: "m-1", text: secret }),
+    ).resolves.toEqual({
+      outcome: "delivered",
+      nativeTurnId: "fake-turn-1",
+    });
+    const events: HarnessEvent[] = [(await parked).value as HarnessEvent];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      events.push(next.value);
+    }
+    expect(events[0]).toMatchObject({
+      type: "status",
+      payload: { code: "live_input_delivered", message_id: "m-1", native_turn_id: "fake-turn-1" },
+    });
+    expect(events.at(-1)?.type).toBe("completed");
+    expect(JSON.stringify(events)).not.toContain(secret);
+    // Consumed once; the session is over.
+    await expect(
+      adapter.message?.("ses-steer", { messageId: "m-2", text: secret }),
+    ).resolves.toEqual({
+      outcome: "not_active",
+      reason: "no_active_turn",
+    });
+  });
+
+  it("terminalizes as cancelled when aborted while parked, and other fakes have no message()", async () => {
+    const adapter = createFakeHarness("fake-steerable");
+    const abort = new AbortController();
+    const s = HarnessRunSpec.parse({
+      session_id: "ses-abort",
+      intent: "implement",
+      prompt: "do it",
+      cwd: "/tmp",
+      extra: { abortSignal: abort.signal },
+    });
+    const iterator = adapter.run(s)[Symbol.asyncIterator]();
+    await iterator.next();
+    await iterator.next();
+    const parked = iterator.next();
+    abort.abort();
+    expect((await parked).value).toMatchObject({ type: "completed", aborted: true });
+    expect((await iterator.next()).done).toBe(true);
+    for (const kind of FAKE_KINDS.filter((k) => k !== "fake-steerable")) {
+      expect(createFakeHarness(kind).message, kind).toBeUndefined();
+      expect((await createFakeHarness(kind).discover()).capability_profile.live_input).toBe("none");
+    }
+  });
+});

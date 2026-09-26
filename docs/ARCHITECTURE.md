@@ -609,10 +609,15 @@ the argv prompt only instructs the harness to read it, and the file is removed
 before every diff/gate/review (including native retries). This prevents
 `spawn E2BIG` without truncating evidence or polluting the candidate patch.
 
-One-shot Codex and Cursor prompts use the vendors' stdin contracts through the
-shared CLI run loop; prompt bytes never ride their process argv. One-shot stdin
-and a bidirectional session are exclusive owners of the same pipe. Adapters
-without a verified prompt-stdin contract retain their vendor-specific transport.
+Cursor prompts use the vendor's one-shot stdin contract through the shared CLI
+run loop; prompt bytes never ride process argv. Codex instead owns one native
+`app-server --stdio` JSON-RPC child per Claudexor run. The adapter keeps the run
+active while a native turn, active goal continuation, or run-owned background
+terminal exists. Native thread/turn ids are control handles, not durable engine
+truth; the daemon journal remains authoritative. Stop pauses an active goal,
+interrupts the exact stored turn id, terminates only background terminals whose
+item ids were observed in that run, verifies quiescence, then reaps app-server.
+Adapters without a verified prompt transport retain their vendor-specific path.
 
 Git-backed candidate envelopes also preserve bounded raster previews before
 cleanup (PNG/JPEG/WebP/GIF, 16 MiB each / 32 MiB total) under the attempt's
@@ -1283,9 +1288,10 @@ run. A read-only turn of a THREAD instead gets a DURABLE per-lane home under
 `projects/<project-sha256>/lanes/<threadId>/<harness>-<profileOrDefault>/home`
 (a lane = thread + harness + credential profile), a sibling of `workspaces/`
 and outside every worktree (INV-063). The lane home persists across turns so
-the harness's recorded native session is reachable for `codex exec resume` /
-`claude --resume` on the next lane turn (INV-034); it is removed only by thread
-purge, credential-profile deletion, or the orphan-lane retention sweep.
+the harness's recorded native session is reachable for Codex app-server
+`thread/resume` / `claude --resume` on the next lane turn (INV-034); it is
+removed only by thread purge, credential-profile deletion, or the orphan-lane
+retention sweep.
 
 Convergence modes also default to isolated envelopes. The CLI-only `--in-place`
 is reserved for explicit stateful external adapters, such as Terminal-Bench
@@ -1701,6 +1707,7 @@ validator dump, and validates the per-run SSE cursor as a nonnegative integer
 - `POST /v2/runs/:id/decision`
 - `GET /v2/runs/:id/events`
 - `POST /v2/runs/:id/interactions/:id/answer`
+- `POST /v2/runs/:id/messages`
 - `GET /v2/runs/:id/produced`
 - `GET /v2/runs/:id/produced/<path>`
 - `POST /v2/runs/:id/retry`
@@ -2612,9 +2619,10 @@ of local fake apply state.
 daemon abort closes the active harness stream and the process helper sends a
 cooperative interrupt with hard-kill fallback. (The former `interrupt` control
 kind was deleted as a fake knob — it mapped to the same daemon cancel.) Live
-input forwarding into a running harness is not a supported control surface; the
-former `/runs/:id/input` endpoint and `RunInput` DTO were removed as dead code
-rather than left as an always-`unsupported` stub.
+input into a running attempt is its own typed surface,
+`POST /v2/runs/:id/messages`, described under "Live messages into a running run"
+below; the former `/runs/:id/input` endpoint and `RunInput` DTO stay deleted (a
+stub that always answered `unsupported` was dead code, not a channel).
 
 A run blocked by the winning candidate's `NEEDS_HUMAN` findings (reviewer
 escalation, protected-path change, critical-risk diff) retains lifecycle
@@ -2708,6 +2716,116 @@ the run carries a typed `protected_path_approvals` entry for the matching glob
 built-in critical/security path gates such as `.github/workflows`. They are
 accepted only from the run request surface — plans and repo config never carry
 approvals.
+
+### Live messages into a running run
+
+`POST /v2/runs/:id/messages` places a message into a run's ACTIVE agent
+attempt while it runs (the nanny's correction that used to wait for the
+terminal or cost a cancel+restart). The body is `{text, expectedAttemptId?}`
+(1..65,536 UTF-16 code units, secret-like values refused like every prompt
+ingress), the `Idempotency-Key` is REQUIRED and IS the message id, and the
+route is served through the durable delivery ledger (`run.message`): a replay
+under the same key returns the recorded receipt, a different body under the
+same key is `409 idempotency_conflict`, and a command left non-terminal by a
+daemon restart answers `409 delivery_interrupted`. HTTP carries only transport
+facts (404 unknown run, 501 no service, 400 malformed/secret/too-long/missing
+key, 409 idempotency, 500 receipt-save failure); EVERY typed outcome is HTTP
+200 — deliberately unlike the answer and control routes — so a client reads
+`outcome`, never the status code. The protocol major stays 3; clients discover
+the route by its row in `GET /v2/operations`.
+
+Three boundaries are reported separately and never conflated:
+
+- **Daemon admission** — the run's `events.jsonl` gets a `message.accepted`
+  row through a failure-PROPAGATING append BEFORE any native dispatch. When
+  that append throws, nothing is sent and the receipt is `rejected` with
+  reason `admission_persist_failed` (a new key is needed to try again).
+- **Native acceptance** — outcome `accepted`: the harness's documented
+  acceptance boundary was observed (Codex: `turn/steer` returned `{turnId}`,
+  carried as `nativeTurnId`); consumption is unproved. No second row is
+  written: the receipt is the answer and replays under the same key.
+- **Native consumption** — outcome `delivered`: a correlated native
+  consumption event was observed (Codex: the `userMessage` echo whose
+  `clientId` equals the message id) and a `message.delivered` row closes the
+  message. Obedience is still unproved — the model may ignore the text. The
+  receipt reads `delivered` only when the echo reaches the adapter before it
+  answers; for Codex `turn/steer` replies first (the echo followed 2.9 s
+  later in the 0.156.1 recording), so the usual receipt is `accepted` and the
+  echo then surfaces as the adapter's status event with code live_input_delivered — a
+  `harness.event` timeline row carrying `message_id` and `native_turn_id` —
+  which a client reconciles against its message id. No `message.delivered`
+  row is written retroactively for an already-answered receipt.
+
+Every non-delivery closes with a `message.refused` row carrying `outcome` and
+`reason`: `rejected` (an explicit refusal of THIS submission: a vendor RPC
+refusal on a still-active turn `rpc_refused`, a caller error `multi_attempt`,
+or `admission_persist_failed`), `not_active` (no eligible target before
+dispatch: `run_terminal`, `no_live_session`, `attempt_mismatch`,
+`no_active_turn`, `interaction_pending`), `unsupported` (no live-input channel
+for this harness/transport/run scope: `no_live_session` for an adapter that
+declares `none` or lacks `message`, `thread_bound` for a thread turn), and
+`delivery_unknown` (the message MAY have landed: `transport_lost`,
+`response_timeout`; a receipt-save failure is the ledger's 500).
+`accepted:false` on `delivery_unknown` never means "safe to resend under a new
+key" — reuse the key to read the recorded verdict. Reasons come from adapter
+and registry state only, never from vendor prose (INV-049). The payload of
+every `message.*` row is `{message_id, attempt_id?, harness_id?, outcome?,
+reason?, live_input?, native_turn_id?, text_sha256, text_bytes, text, title}`;
+the journaled copy in the owning partition drops `text` (like the
+`run.created` prompt digest), the per-run `events.jsonl` keeps it, and the
+timeline shows it as the row detail.
+
+The daemon's in-process `LiveInputRegistry` (`packages/daemon/src/live-input.ts`)
+is the one live-handle owner, fed by the orchestrator at the agent attempt
+scope through `RunInput.onLiveAttempt` (a LIVE session-id getter, because a
+native transient retry mints a new session id per try) and released in that
+attempt's `finally`; `dropForRun` runs beside the interaction registry's on run
+terminal. Its decision order: an unknown-and-terminal run → `not_active`
+(`run_terminal`); a thread turn → `unsupported` (`thread_bound`: the
+continuity packet would lose the message, INV-137); no live attempt →
+`not_active` (`no_live_session`); several live attempts (race `n>1`) without
+`expectedAttemptId` → `rejected` (`multi_attempt`); a mismatching
+`expectedAttemptId` → `not_active` (`attempt_mismatch`); a pending interaction
+→ `not_active` (`interaction_pending`) with NO vendor write, since a steer
+beside an open `AskUserQuestion` would neither answer it nor be a work tool
+(INV-048); an adapter without `message` or a profile of `none` →
+`unsupported`; no native session yet → `not_active`; otherwise the adapter's
+verdict passes through 1:1. Candidate attempts (including the synthesis
+attempt) and the read-only ask/plan/report attempts register; reviewer lanes do
+not and therefore answer `not_active`.
+
+Steering lifetime is attempt-local: a native transient retry keeps the
+registration (the getter follows the new session), while a convergence
+attempt, an Exact Retry or a `rerun_with_feedback` run is a new attempt that
+never re-injects earlier messages — the message was addressed to a session,
+not to the task. Three disclosed residuals: a receipt that lands after the run's
+terminal commit (the adapter answered late) is file-tail-stamped into
+`events.jsonl` (`message.*` rows are in the post-terminal audit allowlist next
+to `control.*`, so terminal-authority validation accepts them) — durable and
+visible on the next timeline read, but the live SSE push for that row is
+missed; a closing row that arrives WHILE the terminal is being committed
+answers `500 message_receipt_unavailable` (the replay stays 500; the message
+may have landed); and a consumed steer is not inactivity-watchdog progress until the
+model's next output, so a message into a stalled session does not prevent its
+timeout.
+
+The channel is a per-adapter declaration, not a doctor probe:
+`HarnessCapabilityProfile.live_input` (`mid_turn` | `next_tool_boundary` |
+`none`, default `none`) is projected as `liveInput` on the `CatalogHarness` row
+of `GET /v2/agent-capabilities`, and an adapter that declares a channel implements
+`message(sessionId, {messageId, text})` beside `cancel`. Codex declares
+`mid_turn` (app-server `turn/steer` against the snapshotted active turn; a
+turn gap answers `not_active`/`no_active_turn`, an app-server without
+`turn/steer` answers `rejected`/`rpc_refused`). Claude Code declares `none`
+with no adapter code: recorded on Claude Code 2.1.282, a user frame written
+mid-turn while a Bash call ran was consumed only as the NEXT turn after the
+first `result` frame, at which Claudexor closes stdin, so the message could
+never be part of the run's attributed work. Cursor declares `none` (no
+persistent live-input channel: its prompt is piped once, then EOF); agy,
+opencode and raw-api declare `none`. There is no CLI verb or MCP tool for
+messages in this release (`claudexor follow` is the later surface), and the
+ACP server's `session/prompt` on an active session is refused rather than
+bridged into a steer.
 
 ### Live-tree mutation paths
 
@@ -3149,7 +3267,7 @@ run's final answer must conform to (agent race / ask answers), normalized and
 strictified
 for vendor strict modes (every object: `required` = all keys,
 `additionalProperties: false`; inline root — both live-verified: codex
-`--output-schema <FILE>` written into the scoped CODEX_HOME, claude
+app-server `turn/start.outputSchema`, claude
 `--json-schema <inline JSON>`). The conformance validator selects draft-07
 (the compatibility default when `$schema` is omitted) or draft 2020-12 from
 the caller declaration; the metadata declaration is removed only from the

@@ -1,6 +1,12 @@
 import { z } from "zod/v3";
 import { AccessProfile, ModeKind, ProviderFamily } from "./primitives.js";
-import { AdapterStatus, EffortHint, ReadonlyMechanism, WriteMechanism } from "./harness.js";
+import {
+  AdapterStatus,
+  EffortHint,
+  LiveInputCapability,
+  ReadonlyMechanism,
+  WriteMechanism,
+} from "./harness.js";
 import { WorkspaceMode } from "./thread.js";
 import { AttachmentInputClass } from "./attachment.js";
 import { OutputSchemaDialect } from "./output-schema-dialect.js";
@@ -139,6 +145,9 @@ export const CatalogHarness = z
     ),
     delegation: DelegationCapability.describe(
       "Whether this installed runtime can offer Delegate through this harness.",
+    ),
+    liveInput: LiveInputCapability.default("none").describe(
+      "How a live message enters one of this harness's RUNNING sessions (POST /v2/runs/:id/messages): mid_turn | next_tool_boundary | none. The harness maximum from its capability profile; the POST answers for the specific run. Omitted by engines older than 3.16.0 (= none).",
     ),
     setupLogin: SetupLoginCapability.nullable()
       .optional()

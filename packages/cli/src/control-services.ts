@@ -4,6 +4,7 @@ import {
   type OperatorDecisionRecord,
   JournalManager,
   InteractionRegistry,
+  LiveInputRegistry,
   ProjectPartitions,
   ProjectStore,
   ResourceStore,
@@ -19,6 +20,7 @@ import {
   ControlAccountsMigrationRollbackRequest,
   ControlCredentialProfileCreateRequest,
   type ControlRunStartRequest,
+  type LiveMessageInput,
   type RuntimeConcurrencyCaps,
   RunScope,
   TERMINAL_LIFECYCLES,
@@ -83,6 +85,7 @@ function activeRunProjectRoot(job: { runId?: string; params?: unknown }): string
 
 export function controlServices(
   interactions: InteractionRegistry,
+  liveInputs: LiveInputRegistry,
   projects: () => ProjectStore,
   threads: ProjectPartitions,
   setupBinding: SetupBinding,
@@ -298,6 +301,7 @@ export function controlServices(
     pendingInteractions: (runId: string) => interactions.pendingForRun(runId),
     answerInteraction: (runId: string, interactionId: string, answers: unknown) =>
       interactions.answer(runId, interactionId, answers),
+    sendRunMessage: (input: LiveMessageInput) => liveInputs.send(input),
     operatorDecision: (runId: string, params: unknown) => threads.operatorDecision(params, runId),
     findOperatorDecisionByIdempotency: (
       runId: string,

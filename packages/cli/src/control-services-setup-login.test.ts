@@ -37,6 +37,7 @@ function services(create: (...args: unknown[]) => unknown) {
   return controlServices(
     undefined as never,
     undefined as never,
+    undefined as never,
     { listThreads: () => [] } as never,
     {
       current: () => ({

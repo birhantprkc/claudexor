@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AgentCapabilityCatalog,
+  CatalogHarness,
   ControlRunStartRequest,
   MODE_MUTABILITY,
   RUN_START_CLIENT_REJECTED_KEYS,
@@ -89,6 +90,41 @@ describe("AgentCapabilityCatalog surfaces", () => {
       expect(["read", "write", "delivery", "ops"]).toContain(c.mutability);
       expect(["stable", "experimental"]).toContain(c.stability);
     }
+  });
+
+  it("a harness row carries its live-input channel: legacy omission reads none, the enum is closed", () => {
+    const row = {
+      id: "codex",
+      enabled: true,
+      displayName: "Codex",
+      status: "ok",
+      providerFamily: "openai",
+      enabledIntents: [],
+      disabledIntents: [],
+      reasons: [],
+      configuredModel: null,
+      configuredModelValid: null,
+      models: { source: "none", count: 0, verifiedAgainst: null },
+      webPolicy: "none",
+      attachmentInputs: [],
+      effortLevels: [],
+      accessProfilesSupported: [],
+      readonlyMechanism: "none",
+      writeMechanism: "none",
+      delegation: {
+        available: false,
+        reason: "manifest_unsupported",
+        remediation: "Choose a harness that supports Claudexor MCP injection.",
+        requiresFullAccess: false,
+      },
+    };
+    // An engine older than 3.16.0 omits the field: the consumer reads `none`.
+    expect(CatalogHarness.parse(row).liveInput).toBe("none");
+    for (const liveInput of ["mid_turn", "next_tool_boundary", "none"] as const) {
+      expect(CatalogHarness.parse({ ...row, liveInput }).liveInput).toBe(liveInput);
+    }
+    // An invented channel is refused, never passed through as a capability.
+    expect(() => CatalogHarness.parse({ ...row, liveInput: "interrupt" })).toThrow();
   });
 
   it("the MCP tool list includes the capabilities tool itself (self-describing surface)", () => {

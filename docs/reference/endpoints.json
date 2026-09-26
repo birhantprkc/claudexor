@@ -829,6 +829,18 @@
       "error_schema": "ControlProblem"
     },
     {
+      "method": "POST",
+      "path": "/v2/runs/:id/messages",
+      "mutating": true,
+      "applicability": "run",
+      "summary": "Place a live message into a run's active attempt and return a typed receipt: delivered (native consumption observed), accepted (native acceptance observed, consumption unproved), rejected, not_active, unsupported, or delivery_unknown. Every typed outcome answers HTTP 200 (unlike the answer and control routes); the Idempotency-Key is the message id and a replay returns the stored receipt.",
+      "auth": "loopback_bearer",
+      "request_schema": "ControlRunMessageRequest",
+      "parameters": [],
+      "response_schema": "ControlRunMessageResponse",
+      "error_schema": "ControlProblem"
+    },
+    {
       "method": "GET",
       "path": "/v2/runs/:id/produced",
       "mutating": false,

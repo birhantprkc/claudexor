@@ -1,5 +1,11 @@
 # @claudexor/artifact-store
 
+## 3.16.0
+
+### Patch Changes
+
+- @claudexor/util@3.16.0
+
 ## 3.15.1
 
 ### Patch Changes

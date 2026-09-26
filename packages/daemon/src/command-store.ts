@@ -23,6 +23,7 @@ import { fsyncDirectory, hashJson } from "@claudexor/util";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { commandScopeRoots } from "./command-scope-roots.js";
 import { idempotencyWireProjection } from "./idempotency-wire-projection.js";
+import { POST_TERMINAL_AUDIT_EVENT_TYPES } from "./journaled-run-events.js";
 import { durableTerminalRunEvents } from "./run-event-terminal-index.js";
 import { JOB_STATES, type JobRecord } from "./server.js";
 import {
@@ -487,7 +488,7 @@ function isBufferPrefix(whole: Buffer, prefix: Buffer): boolean {
 }
 
 function isPostTerminalControlAudit(type: string): boolean {
-  return type === "control.requested" || type === "control.applied" || type === "control.rejected";
+  return POST_TERMINAL_AUDIT_EVENT_TYPES.has(type);
 }
 
 function terminalResultMatches(

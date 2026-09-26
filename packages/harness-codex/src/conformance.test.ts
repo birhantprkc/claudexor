@@ -6,7 +6,15 @@ import {
   streamExpectationViolations,
   validateTypedStream,
   type FixtureStreamExpectations,
+  type LiveMessageResult,
+  type spawnProcess,
 } from "@claudexor/core";
+import { HarnessRunSpec, type HarnessEvent } from "@claudexor/schema";
+import {
+  CodexAppServerController,
+  codexAppServerEvents,
+  runCodexAppServer,
+} from "./app-server-run.js";
 import { parseCodexEvent, type CodexParseState } from "./parse.js";
 import { parse as parseYaml } from "yaml";
 
@@ -52,6 +60,43 @@ function parseLines(raw: string): {
 }
 
 describe("codex adapter conformance fixtures", () => {
+  it("maps the recorded 0.156.1 app-server stream with lifecycle parity", () => {
+    const name = "app-server/recorded-run-0.156.1.jsonl";
+    const state: CodexParseState = { startedEmitted: true };
+    const events: HarnessEvent[] = [
+      {
+        type: "started",
+        session_id: "ses-fixture",
+        ts: "2026-09-25T00:00:00.000Z",
+        payload: { native_session_id: "thread-fixture", native_turn_id: "turn-fixture" },
+      },
+    ];
+    for (const line of readFileSync(join(FIXTURES, name), "utf8").split("\n").filter(Boolean)) {
+      const notification = JSON.parse(line) as Record<string, unknown>;
+      const mapped = codexAppServerEvents(notification, "ses-fixture", state);
+      if (mapped) events.push(...mapped);
+      if (notification["method"] === "turn/completed") {
+        const final = parseCodexEvent({ type: "turn.completed", usage: {} }, "ses-fixture", state);
+        if (final) events.push(...final.filter((event) => event.type !== "usage"));
+        events.push({
+          type: "completed",
+          session_id: "ses-fixture",
+          ts: "2026-09-25T00:00:00.000Z",
+        });
+      }
+    }
+
+    const expectations = manifest.fixtures[name]?.expectations;
+    expect(expectations).toBeTruthy();
+    expect(streamExpectationViolations(events, expectations!)).toEqual([]);
+    const stats = validateTypedStream(events);
+    expect(stats.started).toBe(1);
+    expect(stats.toolCalls).toBe(1);
+    expect(stats.toolResults).toBe(1);
+    expect(stats.statuslessToolResults).toBe(0);
+    expect(stats.usageEvents).toBe(2);
+  });
+
   for (const name of readdirSync(FIXTURES).filter((f) => f.endsWith(".jsonl"))) {
     it(`parses ${name} into a conformant typed stream`, () => {
       const { events, invalidLines, recognizedLines } = parseLines(
@@ -112,5 +157,121 @@ describe("codex adapter conformance fixtures", () => {
         transient: expect.objectContaining({ kind: "timeout" }),
       }),
     ]);
+  });
+});
+
+describe("codex live-message fixture (turn/steer)", () => {
+  it("replays the recorded 0.156.1 steer stream through the run: accepted, then the echo delivers", async () => {
+    const name = "app-server/recorded-steer-0.156.1.jsonl";
+    const lines = readFileSync(join(FIXTURES, name), "utf8").split("\n").filter(Boolean);
+    // The recording was taken THROUGH runCodexAppServer, so its request ids are
+    // the adapter's own: every response frame is released only once the run has
+    // written the request with that id, which replays the wire 1:1.
+    const written = new Set<number>();
+    const writes: Array<{ id?: number; method: string; params?: Record<string, unknown> }> = [];
+    let wake: (() => void) | undefined;
+    let ended = false;
+    const spawn: typeof spawnProcess = async function* (_bin, _args, options = {}) {
+      options.onSpawn?.({
+        write(data) {
+          const request = JSON.parse(data) as (typeof writes)[number];
+          writes.push(request);
+          if (typeof request.id === "number") written.add(request.id);
+          wake?.();
+          wake = undefined;
+        },
+        end() {
+          ended = true;
+          wake?.();
+          wake = undefined;
+        },
+        closed: Promise.resolve(),
+      });
+      for (const line of lines) {
+        const id = (JSON.parse(line) as { id?: number }).id;
+        while (typeof id === "number" && !written.has(id) && !ended)
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+        if (ended) return;
+        yield { type: "stdout", line };
+      }
+      while (!ended)
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+    };
+    const controller = new CodexAppServerController();
+    const events: HarnessEvent[] = [];
+    let steer: Promise<LiveMessageResult> | undefined;
+    for await (const event of runCodexAppServer({
+      bin: "codex",
+      args: [],
+      spec: HarnessRunSpec.parse({
+        session_id: "ses-steer",
+        intent: "implement",
+        prompt: "Task: run the shell command `sleep 3; echo STEP_N` for N = 1..12",
+        cwd: process.cwd(),
+        access: "readonly",
+        model_hint: "gpt-6-astra",
+        effort_hint: "low",
+      }),
+      env: {},
+      spawn,
+      controller,
+      pollIntervalMs: 0,
+    })) {
+      events.push(event);
+      if (event.type === "tool_call" && !steer)
+        steer = controller.steer({
+          messageId: "live-message-fixture",
+          text: "URGENT CHANGE OF PLAN: stop the STEP sequence immediately. Do not run any more sleep commands. Reply with exactly the word MANGO and finish the turn.",
+        });
+    }
+
+    await expect(steer).resolves.toEqual({ outcome: "accepted", nativeTurnId: "turn-fixture" });
+    expect(writes.filter((request) => request.method === "turn/steer")).toEqual([
+      {
+        id: 4,
+        method: "turn/steer",
+        params: {
+          threadId: "thread-fixture",
+          expectedTurnId: "turn-fixture",
+          clientUserMessageId: "live-message-fixture",
+          input: [{ type: "text", text: expect.stringContaining("MANGO"), text_elements: [] }],
+        },
+      },
+    ]);
+    // The vendor echoed the steer as a userMessage carrying our clientId → one
+    // typed receipt; the model answered MANGO and steps 4..12 never ran.
+    expect(events.filter((event) => event.type === "status")).toEqual([
+      expect.objectContaining({
+        payload: {
+          code: "live_input_delivered",
+          message_id: "live-message-fixture",
+          native_turn_id: "turn-fixture",
+        },
+      }),
+    ]);
+    const expectations = manifest.fixtures[name]?.expectations;
+    expect(expectations).toBeTruthy();
+    expect(streamExpectationViolations(events, expectations!)).toEqual([]);
+    expect(events.find((event) => event.final)?.text).toBe("MANGO");
+    const stats = validateTypedStream(events);
+    expect(stats.started).toBe(1);
+    expect(stats.toolCalls).toBe(3);
+    expect(stats.toolResults).toBe(3);
+    expect(stats.statuslessToolResults).toBe(0);
+    expect(stats.usageEvents).toBe(4);
+    // Clean terminal: the steer tainted nothing. The 26 dropped frames are the
+    // recording's unmapped notifications (12 agentMessage deltas, 3 command
+    // output deltas, 4 rate-limit updates, account/updated, remoteControl,
+    // thread/started, the clientId:null prompt pair, two empty agentMessage
+    // item/started frames); the two echo frames are NOT among them.
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      payload: { native_session_id: "thread-fixture", dropped_unrecognized_events: 26 },
+    });
+    expect(events.at(-1)?.payload).not.toHaveProperty("harness_reported_error");
   });
 });

@@ -1,0 +1,27 @@
+{
+  "$ref": "#/definitions/ControlRunMessageRequest",
+  "definitions": {
+    "ControlRunMessageRequest": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536,
+          "description": "The message to place into the run's active attempt. 1..65536 UTF-16 code units (the JS string length, not bytes or visible characters); an over-long body is a 400, never truncated. Secret-like values are refused (inline_secret_rejected) like every prompt ingress."
+        },
+        "expectedAttemptId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target attempt id. Required when the run has several live attempts (race n>1): without it the daemon answers rejected/multi_attempt. A mismatch with the live attempt answers not_active/attempt_mismatch."
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false,
+      "description": "Live message into a running run. Send with an Idempotency-Key (the message id): a replay under the same key returns the recorded receipt without a second delivery."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

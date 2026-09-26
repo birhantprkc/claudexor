@@ -274,6 +274,28 @@ describe("parseCodexEvent", () => {
     expect(() => HarnessEvent.parse(out?.[0])).not.toThrow();
   });
 
+  it("maps declined app-server commands to error tool_results", () => {
+    const out = parseCodexEvent(
+      {
+        type: "item.completed",
+        item: {
+          id: "i-declined",
+          type: "command_execution",
+          command: "printf fixture-ok",
+          exit_code: null,
+          status: "declined",
+        },
+      },
+      "s1",
+    );
+    expect(out).toMatchObject([
+      {
+        type: "tool_result",
+        tool: { status: "error", error_summary: "command execution failed" },
+      },
+    ]);
+  });
+
   it("preserves a failed MCP belt call as exact error evidence", () => {
     const out = parseCodexEvent(
       {

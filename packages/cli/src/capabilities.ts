@@ -105,6 +105,7 @@ export async function buildAgentCapabilityCatalog(): Promise<AgentCapabilityCata
         readonlyMechanism: profile?.access_control.readonly_mechanism ?? "none",
         writeMechanism: profile?.access_control.write_mechanism ?? "none",
         delegation: delegationCapabilityFor(s.manifest),
+        liveInput: profile?.live_input ?? "none",
         setupLogin: await effectiveSetupLoginCapability(s.id, {
           getAdapter: (id) => adapters.get(id),
         }),

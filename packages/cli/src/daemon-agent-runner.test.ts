@@ -57,6 +57,7 @@ function runnerFixture() {
     quotaStore: () => ({ ingest: () => {} }) as unknown as QuotaRegistry,
     threads,
     interactions: { register: () => {} } as unknown as InteractionRegistry,
+    liveInputs: { register: () => ({ release: () => {} }) } as never,
     resources: () => ({ resolve: () => [] }) as unknown as ResourceStore,
     bus: { publish: () => {} } as unknown as RunEventBus,
   });

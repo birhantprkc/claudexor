@@ -143,8 +143,16 @@ pnpm test
   project diff evidence.
 - No regex governance for risk, permissions, tool success, web-required
   detection, winners, or tests-passed.
-- If a native surface is discovered but not wired to active runs, expose it as a
-  capability note only; do not enable live input/steering controls.
+- Live input into active runs ships only as a declared per-adapter channel
+  (`capability_profile.live_input`, projected as the catalog row's `liveInput`)
+  with journaled typed delivery: `message.accepted` before any native dispatch,
+  then `message.delivered` (a correlated consumption echo) or `message.refused`
+  with `outcome` and `reason`; an `accepted` receipt writes no second row and
+  consumption surfaces as the adapter's status event. An
+  adapter without a truthful channel declares `none` and answers `unsupported`
+  with no native write. If a native surface is discovered but not wired to
+  active runs, expose it as a capability note only; do not enable live
+  input/steering controls for that lane.
 - Treat manifest auth sources as source availability only. Aggregate/default
   readiness and Auth UI default status come from doctor status, enabled intents,
   and smoke/conformance checks; a selected account route comes from its exact

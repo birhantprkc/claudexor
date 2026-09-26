@@ -335,7 +335,9 @@ export function parseCodexEvent(
       }
       case "command_execution": {
         const failed =
-          item.status === "failed" || (typeof item.exit_code === "number" && item.exit_code !== 0);
+          item.status === "failed" ||
+          item.status === "declined" ||
+          (typeof item.exit_code === "number" && item.exit_code !== 0);
         const detail = summarizeCodexOutput(item.aggregated_output ?? item.output);
         return [
           {

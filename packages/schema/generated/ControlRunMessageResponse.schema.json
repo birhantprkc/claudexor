@@ -1,0 +1,88 @@
+{
+  "$ref": "#/definitions/ControlRunMessageResponse",
+  "definitions": {
+    "ControlRunMessageResponse": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "boolean",
+          "description": "True only for outcome delivered or accepted; false for every other outcome."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "delivered",
+            "accepted",
+            "rejected",
+            "not_active",
+            "unsupported",
+            "delivery_unknown"
+          ],
+          "description": "delivered = native consumption observed; accepted = native acceptance boundary observed (consumption unproved); rejected = explicit refusal of this submission; not_active = no eligible target before dispatch; unsupported = no live-input channel for this harness/transport/run scope; delivery_unknown = the message may have landed (never a safe-to-resend signal)."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "no_active_turn",
+            "run_terminal",
+            "attempt_mismatch",
+            "no_live_session",
+            "multi_attempt",
+            "thread_bound",
+            "interaction_pending",
+            "rpc_refused",
+            "admission_persist_failed",
+            "transport_lost",
+            "response_timeout"
+          ],
+          "description": "Why the outcome is not delivered: no_active_turn (the harness has no active native turn), run_terminal, attempt_mismatch (expectedAttemptId is not the live attempt), no_live_session (no registered live attempt, no adapter channel, or no native session yet), multi_attempt (several live attempts and no expectedAttemptId), thread_bound (thread turns are not steerable in v1), interaction_pending (a question is open; the message was not sent), rpc_refused (the vendor refused the steer on a still-active turn), admission_persist_failed (the daemon could not journal admission; nothing was sent), transport_lost, response_timeout."
+        },
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Run the message was addressed to."
+        },
+        "messageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "The submission's identity: the Idempotency-Key verbatim. Replaying it returns this receipt again; a new message needs a new key."
+        },
+        "attemptId": {
+          "type": "string",
+          "description": "Live attempt the message targeted, when one was selected."
+        },
+        "harnessId": {
+          "type": "string",
+          "description": "Harness of the targeted attempt."
+        },
+        "liveInput": {
+          "type": "string",
+          "enum": [
+            "mid_turn",
+            "next_tool_boundary",
+            "none"
+          ],
+          "description": "The targeted harness's declared live-input channel (its capability profile), when an attempt was selected."
+        },
+        "nativeTurnId": {
+          "type": "string",
+          "description": "Native turn id the harness reported on acceptance (Codex turn/steer result)."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable detail."
+        }
+      },
+      "required": [
+        "accepted",
+        "outcome",
+        "runId",
+        "messageId"
+      ],
+      "additionalProperties": false,
+      "description": "Receipt of a live message into a running run; every typed outcome answers HTTP 200 (unlike the answer/control routes), so read `outcome`, not the status code."
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

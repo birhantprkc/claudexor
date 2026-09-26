@@ -269,6 +269,7 @@ import {
   synthesizeContinuationRequest,
 } from "./continuation.js";
 import { interactionChannelFor } from "./interaction.js";
+import { liveAttempt, type LiveAttemptContext, type LiveAttemptHook } from "./live-input.js";
 import { gateSpecsFromContract, renderTestsEvidence } from "./contract-gates.js";
 import { buildTaskContract } from "./task-contract-builder.js";
 import { ArtifactStore, type RunPaths } from "@claudexor/artifact-store";
@@ -550,6 +551,7 @@ export interface RunInput {
   onInteraction?: (ctx: PendingInteractionContext) => Promise<InteractionHandlerResult>;
   /** Answer timeout: finite milliseconds, or null to wait until external release. */
   interactionTimeoutMs?: number | null;
+  onLiveAttempt?: LiveAttemptHook;
   /** Cancellation: aborts the run and cancels in-flight harness work. */
   signal?: AbortSignal;
   /**
@@ -676,6 +678,7 @@ export interface RoutedAdapter {
   /** Manifest `interactive` capability: only such routes are OFFERED an
    * InteractionChannel (gate). */
   supportsInteractive: boolean;
+  liveInput: LiveAttemptContext["liveInput"]; // manifest capability_profile.live_input
   /** Manifest `json_schema_output`: only such routes receive
    * HarnessRunSpec.output_schema (gate); others keep fenced-JSON parsing. */
   supportsJsonSchemaOutput: boolean;
@@ -1455,6 +1458,7 @@ export class Orchestrator {
           quotaAdmission: { model: null, profile: null, route: null },
           supportsSynthesize: manifest.capabilities.synthesize,
           supportsInteractive: manifest.capabilities.interactive,
+          liveInput: manifest.capability_profile.live_input,
           supportsJsonSchemaOutput: manifest.capabilities.json_schema_output,
           workReportTransport: manifest.capabilities.work_report_transport,
           structuredOutputChannel: manifest.capabilities.structured_output_channel,
@@ -2505,13 +2509,10 @@ export class Orchestrator {
       browserServerName,
     );
     let activeSessionId = spec.session_id;
-    const onAbort = () => {
-      void adapter.cancel?.(activeSessionId)?.catch(() => {});
-    };
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
+    const live = liveAttempt(runInput, routed, paths, contract, attemptId, () => activeSessionId);
+    const onAbort = () => void adapter.cancel?.(activeSessionId)?.catch(() => {});
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
     try {
       for (let nativeTry = 0; !signal?.aborted; nativeTry += 1) {
         // A3 per-try isolation: neither output nor progress markers leak across tries.
@@ -2750,6 +2751,7 @@ export class Orchestrator {
         await sleep(delayMs);
       }
     } finally {
+      live.release();
       signal?.removeEventListener("abort", onAbort);
     }
     // A pool-exhausted terminal is rotation's verdict, not the transient
@@ -6644,9 +6646,8 @@ export class Orchestrator {
       );
       const retryPolicy = transientRetryPolicy(this.config(input.repoRoot));
       let activeSessionId = spec.session_id;
-      const onAbort = () => {
-        void adapter.cancel?.(activeSessionId)?.catch(() => {});
-      };
+      const live = liveAttempt(input, routed, paths, contract, attemptId, () => activeSessionId);
+      const onAbort = () => void adapter.cancel?.(activeSessionId)?.catch(() => {});
       if (input.signal) {
         if (input.signal.aborted) onAbort();
         else input.signal.addEventListener("abort", onAbort, { once: true });
@@ -6844,6 +6845,7 @@ export class Orchestrator {
           await sleep(delayMs);
         }
       } finally {
+        live.release();
         input.signal?.removeEventListener("abort", onAbort);
         AC.settleGrantedAttemptLease({
           ledger,

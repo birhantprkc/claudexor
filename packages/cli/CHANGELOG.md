@@ -1,5 +1,39 @@
 # @claudexor/cli
 
+## 3.16.0
+
+### Minor Changes
+
+- 788ddca: Add `POST /v2/runs/:id/messages`: a live message into a running run's active attempt with journal-first admission, typed outcomes (delivered, accepted, rejected, not_active, unsupported, delivery_unknown) plus reasons, and a key-required idempotent receipt. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in the agent-capability catalog.
+
+### Patch Changes
+
+- Updated dependencies [de234bd]
+- Updated dependencies [788ddca]
+  - @claudexor/harness-codex@3.16.0
+  - @claudexor/schema@3.16.0
+  - @claudexor/control-api@3.16.0
+  - @claudexor/daemon@3.16.0
+  - @claudexor/orchestrator@3.16.0
+  - @claudexor/acp-server@3.16.0
+  - @claudexor/config@3.16.0
+  - @claudexor/core@3.16.0
+  - @claudexor/delivery@3.16.0
+  - @claudexor/gateway@3.16.0
+  - @claudexor/harness-agy@3.16.0
+  - @claudexor/harness-claude@3.16.0
+  - @claudexor/harness-cursor@3.16.0
+  - @claudexor/harness-fake@3.16.0
+  - @claudexor/harness-opencode@3.16.0
+  - @claudexor/harness-raw-api@3.16.0
+  - @claudexor/mcp-server@3.16.0
+  - @claudexor/review@3.16.0
+  - @claudexor/workspace@3.16.0
+  - @claudexor/artifact-store@3.16.0
+  - @claudexor/journal@3.16.0
+  - @claudexor/secrets@3.16.0
+  - @claudexor/util@3.16.0
+
 ## 3.15.1
 
 ### Patch Changes

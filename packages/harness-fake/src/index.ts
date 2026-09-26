@@ -29,7 +29,9 @@ export type FakeKind =
   | "fake-work-malformed"
   | "fake-context-exhausted"
   | "fake-context-then-complete"
-  | "fake-context-then-error";
+  | "fake-context-then-error"
+  // Live-input fixture: the run parks until one message arrives (never echoed).
+  | "fake-steerable";
 
 export const FAKE_KINDS: FakeKind[] = [
   "fake-success",
@@ -49,7 +51,40 @@ export const FAKE_KINDS: FakeKind[] = [
   "fake-context-exhausted",
   "fake-context-then-complete",
   "fake-context-then-error",
+  "fake-steerable",
 ];
+
+/** The one native turn id the steerable fake reports on its receipts. */
+const FAKE_TURN_ID = "fake-turn-1";
+
+/**
+ * Per-session waiter of the `fake-steerable` kind. The run parks in `park`
+ * until ONE live message (or the abort) arrives; `deliver` hands the message
+ * id to the parked run and answers whether a run was there to take it. Only
+ * the id crosses: the text is never read, so it can never be echoed.
+ */
+class FakeLiveInput {
+  private readonly waiters = new Map<string, (messageId: string | null) => void>();
+
+  park(sessionId: string, abort: AbortSignal | undefined): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      const settle = (messageId: string | null): void => {
+        this.waiters.delete(sessionId);
+        resolve(messageId);
+      };
+      if (abort?.aborted) return settle(null);
+      abort?.addEventListener("abort", () => settle(null), { once: true });
+      this.waiters.set(sessionId, settle);
+    });
+  }
+
+  deliver(sessionId: string, messageId: string): boolean {
+    const waiter = this.waiters.get(sessionId);
+    if (!waiter) return false;
+    waiter(messageId);
+    return true;
+  }
+}
 
 /** The D-16 kinds that declare a schema-constrained WorkReport transport and
  * emit a (possibly malformed) envelope final message. */
@@ -113,6 +148,9 @@ function buildManifest(id: string, provider: ProviderFamily): HarnessManifest {
       },
       access_control: { readonly_mechanism: "none", write_mechanism: "none" },
       isolation: { supported_containment: ["env_or_file_injection"] },
+      // Only the steerable fixture has a live-input channel; every other fake
+      // keeps `none` so the engine answers `unsupported` without a native write.
+      live_input: id === "fake-steerable" ? "mid_turn" : "none",
       // The offline fixture declares MCP injection so the engine's delegate-belt
       // path (agent --delegate) is exercisable deterministically; the fake spawns
       // no subprocess, so it simply ignores the injected belt descriptor (as it
@@ -165,6 +203,7 @@ async function* runFake(
   kind: FakeKind,
   spec: HarnessRunSpec,
   observedModel: string,
+  live: FakeLiveInput | null,
 ): AsyncIterable<HarnessEvent> {
   const s = spec.session_id;
   yield ev(s, "started", { observed_model: observedModel });
@@ -255,6 +294,34 @@ async function* runFake(
         abort?.addEventListener("abort", () => resolve(), { once: true });
         // No timer: without an abort this hangs forever, like the real bug.
       });
+      return;
+    }
+    case "fake-steerable": {
+      // Live-input fixture (`POST /v2/runs/:id/messages`): the run parks until
+      // ONE message reaches it through `message()`, then emits the same typed
+      // receipt codex yields on its userMessage echo and a deterministic final
+      // text. The message TEXT is never read (BIBLE §6: fakes echo nothing).
+      // An abort while parked terminalizes as a cancelled run.
+      // Register the waiter BEFORE the parking event reaches the journal, so a
+      // message sent the moment that row is visible always finds a parked run.
+      const parked = live!.park(s, spec.extra?.["abortSignal"] as AbortSignal | undefined);
+      yield ev(s, "thinking", { text: "waiting for a live message (fake)" });
+      const messageId = await parked;
+      if (messageId === null) {
+        yield ev(s, "completed", { aborted: true, observed_model: observedModel });
+        return;
+      }
+      yield ev(s, "status", {
+        text: `live message ${messageId} consumed by turn ${FAKE_TURN_ID}`,
+        payload: {
+          code: "live_input_delivered",
+          message_id: messageId,
+          native_turn_id: FAKE_TURN_ID,
+        },
+      });
+      yield ev(s, "message", { text: "Live message consumed by the fake harness." });
+      yield ev(s, "usage", { usage: { input_tokens: 100, output_tokens: 50, cost_usd: 0.01 } });
+      yield ev(s, "completed", { observed_model: observedModel });
       return;
     }
     case "fake-error-prose": {
@@ -422,6 +489,7 @@ function maybeWriteFakeChange(spec: HarnessRunSpec): void {
 export function createFakeHarness(kind: FakeKind, opts: FakeOptions = {}): HarnessAdapter {
   const provider: ProviderFamily = opts.provider ?? "local";
   const observedModel = opts.observedModel ?? `${kind}-model`;
+  const live = kind === "fake-steerable" ? new FakeLiveInput() : null;
   return {
     id: kind,
     async discover(): Promise<HarnessManifest> {
@@ -461,13 +529,24 @@ export function createFakeHarness(kind: FakeKind, opts: FakeOptions = {}): Harne
       };
     },
     run(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runFake(kind, spec, observedModel);
+      return runFake(kind, spec, observedModel, live);
     },
     review(spec: HarnessRunSpec): AsyncIterable<HarnessEvent> {
-      return runFake(kind, spec, observedModel);
+      return runFake(kind, spec, observedModel, live);
     },
     async cancel(): Promise<void> {
       /* no-op for fakes */
     },
+    // Only the steerable kind has the method: an absent `message` is how every
+    // other fake tells the engine `unsupported` (same rule as real adapters).
+    ...(live
+      ? {
+          async message(sessionId: string, input: { messageId: string; text: string }) {
+            return live.deliver(sessionId, input.messageId)
+              ? { outcome: "delivered" as const, nativeTurnId: FAKE_TURN_ID }
+              : { outcome: "not_active" as const, reason: "no_active_turn" as const };
+          },
+        }
+      : {}),
   };
 }

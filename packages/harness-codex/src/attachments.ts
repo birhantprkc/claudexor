@@ -9,3 +9,17 @@ export function codexImageArgs(attachments: HarnessRunSpec["attachments"] | unde
     return ["-i", attachment.path];
   });
 }
+
+/** Verified Codex app-server turn inputs; prompt bytes stay on the protocol channel. */
+export function codexAppServerInput(
+  spec: Pick<HarnessRunSpec, "prompt" | "attachments">,
+): Array<Record<string, unknown>> {
+  return [
+    { type: "text", text: spec.prompt },
+    ...(spec.attachments ?? []).flatMap((attachment) => {
+      if (attachment.kind !== "image") return [];
+      readVerifiedAttachmentBytes(attachment);
+      return [{ type: "localImage", path: attachment.path }];
+    }),
+  ];
+}

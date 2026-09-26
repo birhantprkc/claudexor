@@ -53,6 +53,8 @@ export const OPERATION_SUMMARIES: Record<string, string> = {
   "POST /v2/runs/:id/decision": "Record an operator unblock/rerun decision on a run.",
   "GET /v2/runs/:id/events": "Replay + tail a run's event stream (SSE).",
   "POST /v2/runs/:id/interactions/:id/answer": "Answer a run's pending interactive question.",
+  "POST /v2/runs/:id/messages":
+    "Place a live message into a run's active attempt and return a typed receipt: delivered (native consumption observed), accepted (native acceptance observed, consumption unproved), rejected, not_active, unsupported, or delivery_unknown. Every typed outcome answers HTTP 200 (unlike the answer and control routes); the Idempotency-Key is the message id and a replay returns the stored receipt.",
   "GET /v2/runs/:id/produced": "List a run's produced project outputs.",
   "GET /v2/runs/:id/produced/<path>": "Fetch one produced project-output file from a run.",
   "GET /v2/threads": "List conversation threads.",

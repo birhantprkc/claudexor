@@ -29,6 +29,7 @@ describe("thread PATCH forwarding (release wave round-7 tier1 blocker)", () => {
     const services = controlServices(
       undefined as never,
       undefined as never,
+      undefined as never,
       threads as never,
       undefined as never,
       undefined as never,
@@ -79,6 +80,7 @@ describe("thread PATCH forwarding (release wave round-7 tier1 blocker)", () => {
     const services = controlServices(
       undefined as never,
       undefined as never,
+      undefined as never,
       threads as never,
       undefined as never,
       undefined as never,
@@ -116,6 +118,7 @@ describe("thread PATCH forwarding (release wave round-7 tier1 blocker)", () => {
       }),
     };
     const services = controlServices(
+      undefined as never,
       undefined as never,
       undefined as never,
       threads as never,
@@ -168,6 +171,7 @@ describe("thread PATCH forwarding (release wave round-7 tier1 blocker)", () => {
     const services = controlServices(
       undefined as never,
       undefined as never,
+      undefined as never,
       threads as never,
       undefined as never,
       undefined as never,
@@ -198,6 +202,7 @@ describe("thread PATCH forwarding (release wave round-7 tier1 blocker)", () => {
       purgeThread: (id: string) => ({ id, state: "purged" }),
     };
     const services = controlServices(
+      undefined as never,
       undefined as never,
       undefined as never,
       threads as never,

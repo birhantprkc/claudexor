@@ -524,6 +524,9 @@ describe("Codex transport-aware native doctor", () => {
           ]),
         },
         isolation: { supported_containment: expect.arrayContaining(["host_user_context"]) },
+        // turn/steer into the active turn, recorded on codex-cli 0.156.1
+        // (fixtures/app-server/recorded-steer-0.156.1.jsonl).
+        live_input: "mid_turn",
       },
     });
     expect(manifest.capability_profile.auth.credential_transports).not.toContainEqual({

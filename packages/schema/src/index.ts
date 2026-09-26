@@ -62,6 +62,7 @@ export * from "./run-strategy.js";
 export * from "./plan.js";
 export * from "./status-projection.js";
 export * from "./control-operation-responses.js";
+export * from "./control-run-message.js";
 export * from "./control-thread-apply.js";
 export * from "./control-run-scope.js";
 export * from "./control-run-failure.js";

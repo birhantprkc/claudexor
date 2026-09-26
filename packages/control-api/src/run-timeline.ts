@@ -279,6 +279,16 @@ export function timelineEvents(
         : {};
     const harnessId = stringOrNull(payload["harness_id"] ?? payload["harness"]);
     const attemptId = stringOrNull(payload["attempt_id"] ?? payload["attemptId"]);
+    // Live-message receipts (message.*) and the adapter's consumption status
+    // (harness.event status live_input_delivered) carry the message id so a
+    // caller can reconcile delivery on the timeline (CONTRACT A26).
+    const nested = eventPayload(payload);
+    const messageId = stringOrNull(payload["message_id"] ?? nested["message_id"]);
+    const outcome = type.startsWith("message.")
+      ? stringOrNull(payload["outcome"])
+      : nested["code"] === "live_input_delivered"
+        ? "delivered"
+        : null;
     const partialGitInitialization =
       type === "project.git.initialized" && payload["partial"] === true;
     const title =
@@ -320,6 +330,8 @@ export function timelineEvents(
         ts: typeof ev["ts"] === "string" ? ev["ts"] : undefined,
         harnessId,
         attemptId,
+        messageId,
+        outcome,
         title,
         detail,
         textKind,

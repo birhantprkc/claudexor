@@ -6,6 +6,20 @@ export const ControlTimelineEvent = z
     ts: z.string().optional().describe("Event timestamp."),
     harnessId: z.string().nullable().default(null).describe("Harness involved, when any."),
     attemptId: z.string().nullable().default(null).describe("Attempt involved, when any."),
+    messageId: z
+      .string()
+      .nullable()
+      .default(null)
+      .describe(
+        "Live-message id on message.* receipt rows and on the adapter's live_input_delivered status row, when any.",
+      ),
+    outcome: z
+      .string()
+      .nullable()
+      .default(null)
+      .describe(
+        "Typed live-message outcome on message.* rows (delivered | accepted | rejected | not_active | unsupported | delivery_unknown); `delivered` on the adapter's consumption status row; null elsewhere.",
+      ),
     title: z.string().describe("Human-readable event title."),
     detail: z
       .string()

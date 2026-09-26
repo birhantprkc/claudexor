@@ -24,6 +24,46 @@
 # so they were NOT re-recorded and keep the version they were captured from.
 cli: codex
 fixtures:
+  # LIVE MESSAGE (`turn/steer`) capture taken THROUGH the adapter's own
+  # transport (runCodexAppServer + CodexAppServerController.steer) on codex-cli
+  # 0.156.1, 2026-09-26, model gpt-6-astra, effort low, read-only sandbox. The
+  # task asked for twelve sequential `sleep 3; echo STEP_N` commands; when the
+  # third command started the adapter sent `turn/steer` (request id 4,
+  # clientUserMessageId=live-message-fixture). The server answered `{turnId}`
+  # (= accepted) and 2.9 s later echoed the message as a `userMessage` item
+  # carrying that clientId (= delivered); the model answered MANGO and steps
+  # 4..12 never ran. Request ids 1..7 are the adapter's own (initialize,
+  # thread/start, turn/start, turn/steer, thread/read, thread/goal/get,
+  # thread/backgroundTerminals/list), so conformance.test.ts replays the file
+  # 1:1 through runCodexAppServer. Every raw stdout frame is kept in order.
+  app-server/recorded-steer-0.156.1.jsonl:
+    source: recorded
+    cli_version: "0.156.1"
+    recorded_at: "2026-09-26"
+    sanitized: "thread, turn, item and process ids; cwd, codexHome and rollout paths; hostname and installation id; account plan and rate-limit payloads; token counts; timestamps"
+    expectations:
+      final_messages: 1
+      final_source: "last_agent_message"
+      final_is_last_message: true
+      thinking_events: 0
+      started_events: 1
+      delta_messages: 0
+      tool_error_results: 0
+      typed_rate_limit: false
+  app-server/recorded-run-0.156.1.jsonl:
+    source: recorded
+    cli_version: "0.156.1"
+    recorded_at: "2026-09-25"
+    sanitized: "thread, turn, item and process ids; cwd; timestamps"
+    expectations:
+      final_messages: 1
+      final_source: "last_agent_message"
+      final_is_last_message: true
+      thinking_events: 2
+      started_events: 1
+      delta_messages: 0
+      tool_error_results: 0
+      typed_rate_limit: false
   recorded-astra-0.153.3.jsonl:
     source: recorded
     cli_version: "0.153.3"

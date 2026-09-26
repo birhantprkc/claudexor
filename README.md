@@ -31,7 +31,7 @@ with a vendor usage source (Antigravity, Claude, and Codex); Cursor has none
 yet. Everything runs on your machine, files are the source of truth, and there
 is no telemetry.
 
-Current status: **v3.15.1**. See "Stability at 2.0" below for what is a stable
+Current status: **v3.16.0**. See "Stability at 2.0" below for what is a stable
 contract and what remains experimental; retired verbs and mode ids hard-error
 with the new spelling instead of silently aliasing.
 
@@ -695,7 +695,10 @@ future verified host-side-effect mode is explicitly selected.
 Claudexor can be driven by other tools through CLI JSON on supported commands, the
 local daemon/control API, MCP, and ACP. These surfaces are capability-gated;
 integrations should not assume every subcommand has JSON output or every
-harness supports live steering (see "Stability at 2.0").
+harness supports live steering: read a harness's `liveInput` channel from
+`GET /v2/agent-capabilities` and send a live message through
+`POST /v2/runs/:id/messages`, which answers a typed outcome instead of guessing
+(see "Stability at 2.0").
 
 The CLI accepts repeatable/comma-separated `--attach <path>` or `--image <path>`
 and immediately streams each regular, non-symlink file through `/v2/uploads`.

@@ -23,6 +23,10 @@ export const CODEX_CAPABILITY_PROFILE: HarnessCapabilityProfile =
     // Codex's workspace-write seatbelt cancels the belt's daemon-crossing MCP
     // call; only full access lets it through.
     mcp_injection_requires_full_access: true,
+    // LIVE-VERIFIED (codex-cli 0.156.1): `turn/steer` injects a user message
+    // into the ACTIVE turn and the app-server echoes it as a userMessage item
+    // carrying our clientId (fixtures/app-server/recorded-steer-0.156.1.jsonl).
+    live_input: "mid_turn",
     attachment_inputs: [
       {
         kind: "image",

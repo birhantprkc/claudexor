@@ -47,6 +47,7 @@ function servicesWithJobs(
   return controlServices(
     undefined as never,
     undefined as never,
+    undefined as never,
     threads as never,
     setupBinding as never,
     undefined as never,
@@ -342,6 +343,7 @@ describe("deleteCredentialProfile (INV-135 delete service)", () => {
     };
     const quota = { removeSubject: () => 0, noteCredentialChange };
     const svc = controlServices(
+      undefined as never,
       undefined as never,
       undefined as never,
       threads as never,

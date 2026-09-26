@@ -2199,6 +2199,22 @@
                 "default": null,
                 "description": "Attempt involved, when any."
               },
+              "messageId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "description": "Live-message id on message.* receipt rows and on the adapter's live_input_delivered status row, when any."
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null,
+                "description": "Typed live-message outcome on message.* rows (delivered | accepted | rejected | not_active | unsupported | delivery_unknown); `delivered` on the adapter's consumption status row; null elsewhere."
+              },
               "title": {
                 "type": "string",
                 "description": "Human-readable event title."

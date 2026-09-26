@@ -139,6 +139,21 @@ export const RunEventType = z
     "interaction.answered",
     "interaction.timeout",
     "interaction.answer_discarded",
+    /** Live message into a running attempt (`POST /v2/runs/:id/messages`).
+     * `message.accepted` = daemon ADMISSION, journaled through a
+     * failure-propagating append BEFORE any native dispatch (nothing is sent
+     * when it cannot land). `message.delivered` = a correlated native
+     * consumption event was observed. `message.refused` = a typed non-delivery
+     * (`outcome` rejected | not_active | unsupported | delivery_unknown plus
+     * `reason`). A native `accepted` verdict adds no row: it is the receipt the
+     * route returns and replays under the same Idempotency-Key. Payload:
+     * {message_id, attempt_id?, harness_id?, outcome?, reason?, live_input?,
+     *  native_turn_id?, text_sha256, text_bytes, text, title}; the journaled
+     * copy drops `text` (daemon journaled-run-events.ts), the per-run
+     * events.jsonl keeps it, and the timeline shows it as the row detail. */
+    "message.accepted",
+    "message.delivered",
+    "message.refused",
     "plan.progress",
     "plan.questions",
     "plan.brief.materialized",

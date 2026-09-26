@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import type {
   InteractionRegistry,
+  LiveInputRegistry,
   ProjectPartitions,
   QuotaRegistry,
   ResourceStore,
@@ -34,6 +35,7 @@ export function createDaemonAgentRunner(deps: {
   quotaStore: () => QuotaRegistry;
   threads: ProjectPartitions;
   interactions: InteractionRegistry;
+  liveInputs: LiveInputRegistry;
   resources: () => ResourceStore;
   bus: RunEventBus;
   runtimeConcurrencyCaps?: RuntimeConcurrencyCaps;
@@ -43,6 +45,7 @@ export function createDaemonAgentRunner(deps: {
     quotaStore,
     threads,
     interactions,
+    liveInputs,
     resources,
     bus,
     runtimeConcurrencyCaps = RuntimeConcurrencyCaps.parse({}),
@@ -184,6 +187,9 @@ export function createDaemonAgentRunner(deps: {
         },
         onInteraction: (ctx2) => interactions.register(ctx2, p),
         interactionTimeoutMs: runConfig.global.interaction_timeout_ms,
+        // Live messages (POST /v2/runs/:id/messages): each agent attempt is a
+        // steering target for its own lifetime; the registry answers typed.
+        onLiveAttempt: (attempt) => liveInputs.register(attempt),
         threadId,
         executionRoot,
         retryOf: p.retryOf ?? null,

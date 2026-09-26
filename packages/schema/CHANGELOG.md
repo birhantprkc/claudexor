@@ -1,5 +1,15 @@
 # @claudexor/schema
 
+## 3.16.0
+
+### Minor Changes
+
+- 788ddca: Add `POST /v2/runs/:id/messages`: a live message into a running run's active attempt with journal-first admission, typed outcomes (delivered, accepted, rejected, not_active, unsupported, delivery_unknown) plus reasons, and a key-required idempotent receipt. Each harness declares its live-input channel as `capability_profile.live_input`, projected as `liveInput` in the agent-capability catalog.
+
+### Patch Changes
+
+- @claudexor/util@3.16.0
+
 ## 3.15.1
 
 ### Patch Changes

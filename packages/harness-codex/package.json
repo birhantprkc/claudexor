@@ -1,8 +1,8 @@
 {
   "name": "@claudexor/harness-codex",
-  "version": "3.15.1",
+  "version": "3.16.0",
   "license": "MIT",
-  "description": "Codex CLI adapter (codex exec --json).",
+  "description": "Codex CLI adapter (app-server lifecycle protocol).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

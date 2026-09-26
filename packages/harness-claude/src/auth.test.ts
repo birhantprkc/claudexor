@@ -311,6 +311,13 @@ describe("Claude readonly enforcement capability", () => {
     const manifest = await adapter.discover();
     expect(manifest.access_profiles_supported).not.toContain("readonly");
     expect(manifest.capability_profile.access_control.readonly_mechanism).toBe("none");
+    // No live-input channel: recorded on Claude Code 2.1.282 (2026-09-26), a
+    // user frame written mid-turn while a Bash call ran was NOT consumed at the
+    // turn's later tool boundaries; it surfaced only as the NEXT turn after the
+    // first `result` frame, where the run loop has already closed stdin. So the
+    // profile stays `none` and the adapter has no `message` method.
+    expect(manifest.capability_profile.live_input).toBe("none");
+    expect(adapter.message).toBeUndefined();
 
     const report = await adapter.doctor({
       cwd: "/repo",

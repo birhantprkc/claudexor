@@ -28,6 +28,7 @@ import {
   UsageCostBasis,
 } from "./processing.js";
 import { AuthCapabilities } from "./platform-auth.js";
+import { InteractionRequest, LiveInputCapability } from "./harness-interaction.js";
 export * from "./platform-auth.js";
 // Re-exported so sibling contract modules keep one import path for the type.
 export { EffortHint } from "./effort.js";
@@ -390,10 +391,20 @@ export const HarnessCapabilityProfile = z
       .describe(
         "An injected MCP server can only reach the daemon (belt) at full access; below it the harness sandbox cancels the call. true => Delegate below full access degrades to ordinary Agent with a durable typed receipt.",
       ),
+    /**
+     * Live input into a RUNNING session (`POST /v2/runs/:id/messages`). Truthful
+     * per adapter: codex declares mid_turn (turn/steer, recorded on 0.153.3 and
+     * 0.156.1); claude declares none (a mid-turn user frame is consumed only as
+     * the next turn after the first result frame, recorded on 2.1.282); cursor,
+     * agy, opencode and raw-api have no channel. Consumers: the agent-capability
+     * catalog row (`liveInput`) and the daemon's live-input registry, which
+     * answers `unsupported` without a native write when this is none.
+     */
+    live_input: LiveInputCapability.default("none"),
   })
   .default({})
   .describe(
-    "Structured per-harness facts the engine consumes: auth routing, isolation containment, readonly mechanism, finite attachment inputs, and MCP injection.",
+    "Structured per-harness facts the engine consumes: auth routing, isolation containment, readonly mechanism, finite attachment inputs, MCP injection, and live input into a running session.",
   );
 export type HarnessCapabilityProfile = z.infer<typeof HarnessCapabilityProfile>;
 
@@ -689,82 +700,9 @@ export const HarnessRunSpec = z
   );
 export type HarnessRunSpec = z.infer<typeof HarnessRunSpec>;
 
-/**
- * One multiple-choice option of an interactive question (AskUserQuestion-style).
- */
-export const InteractionOption = z
-  .object({
-    label: z.string().describe("Option label shown to the user."),
-    description: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Optional longer explanation of the option."),
-  })
-  .describe("One multiple-choice option of an interactive question.");
-export type InteractionOption = z.infer<typeof InteractionOption>;
-
-export const InteractionQuestion = z
-  .object({
-    id: Id.describe("Question id."),
-    question: z.string().describe("The question text."),
-    /** Short chip/header text some harnesses attach to a question. */
-    header: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Short chip/header text some harnesses attach to a question."),
-    options: z
-      .array(InteractionOption)
-      .default([])
-      .describe("Selectable options; empty for free-text-only questions."),
-    multi_select: z.boolean().default(false).describe("Whether multiple options may be selected."),
-  })
-  .describe("One question of an interactive user-input request.");
-export type InteractionQuestion = z.infer<typeof InteractionQuestion>;
-
-/**
- * A live request for user input raised by an interactive harness session.
- * Carried on `interaction_requested` HarnessEvents and projected into
- * `interaction.requested` RunEvents.
- */
-export const InteractionRequest = z
-  .object({
-    interaction_id: Id.describe("Interaction id used to correlate the answer set."),
-    questions: z
-      .array(InteractionQuestion)
-      .default([])
-      .describe("Questions the harness wants answered."),
-    /** Native tool that raised the request (e.g. "AskUserQuestion"). */
-    source_tool: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe('Native tool that raised the request (e.g. "AskUserQuestion").'),
-  })
-  .describe("A live request for user input raised by an interactive harness session.");
-export type InteractionRequest = z.infer<typeof InteractionRequest>;
-
-export const InteractionAnswer = z
-  .object({
-    question_id: Id.describe("Id of the question being answered."),
-    selected_labels: z.array(z.string()).default([]).describe("Labels of the selected options."),
-    free_text: z
-      .string()
-      .nullable()
-      .default(null)
-      .describe("Free-text answer; null when only options were selected."),
-  })
-  .describe("The user's answer to one interactive question.");
-export type InteractionAnswer = z.infer<typeof InteractionAnswer>;
-
-export const InteractionAnswerSet = z
-  .object({
-    interaction_id: Id.describe("Interaction this answer set responds to."),
-    answers: z.array(InteractionAnswer).default([]).describe("Answers, one per question."),
-  })
-  .describe("Typed answers delivered back into a live interactive harness session.");
-export type InteractionAnswerSet = z.infer<typeof InteractionAnswerSet>;
+// Interactive-session contracts (questions, answers, live input) live in
+// harness-interaction.ts; re-exported here so every importer keeps ONE path.
+export * from "./harness-interaction.js";
 
 export const InputTokenUsage = z
   .object({

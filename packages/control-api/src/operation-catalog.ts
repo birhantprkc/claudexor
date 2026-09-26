@@ -330,6 +330,16 @@ const operations: ControlOperationDescriptor[] = [
     "ControlInteractionAnswerResponse",
     { idempotency: "natural" },
   ),
+  j(
+    "POST",
+    "/v2/runs/:id/messages",
+    "mutating",
+    "ControlRunMessageRequest",
+    "ControlRunMessageResponse",
+    // key_required (not natural): a replayed message would be delivered twice;
+    // the Idempotency-Key is the message id and the stored receipt is replayed.
+    { idempotency: "key_required" },
+  ),
   j("GET", "/v2/runs/:id/produced", "read_only", null, "ControlArtifactListResponse"),
   descriptor({
     method: "GET",

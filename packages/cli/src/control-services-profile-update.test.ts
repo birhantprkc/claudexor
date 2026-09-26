@@ -181,6 +181,7 @@ function services(
   return controlServices(
     undefined as never,
     undefined as never,
+    undefined as never,
     threads as never,
     { current: () => ({ list: () => [] }) } as never,
     undefined as never,
@@ -274,6 +275,35 @@ describe("updateCredentialProfile (INV-135 Enabled toggle) + accounts projection
       if (previousCodexBin === undefined) delete process.env.CLAUDEXOR_CODEX_BIN;
       else process.env.CLAUDEXOR_CODEX_BIN = previousCodexBin;
     }
+  });
+
+  it("projects the manifest's live_input channel as the catalog row's liveInput (none when absent)", async () => {
+    const svc = services();
+    // The stubbed status carries no manifest: the row degrades to `none`.
+    const absent = await svc.agentCapabilities();
+    expect(absent.harnesses[0]).toMatchObject({ id: "claude", liveInput: "none" });
+
+    gatewayMock.statuses[0] = {
+      ...(gatewayMock.statuses[0] as Record<string, unknown>),
+      id: "codex",
+      manifest: {
+        display_name: "Codex",
+        provider_family: "openai",
+        capability_profile: {
+          live_input: "mid_turn",
+          access_control: { readonly_mechanism: "none", write_mechanism: "none" },
+          attachment_inputs: [],
+          mcp_injection: false,
+          mcp_injection_requires_full_access: false,
+        },
+        capabilities: { web_policy: "none", effort_levels: [], processing_preferences: [] },
+        access_profiles_supported: [],
+      },
+    };
+    const declared = await svc.agentCapabilities();
+    expect(declared.harnesses).toHaveLength(1);
+    expect(declared.harnesses[0]).toMatchObject({ id: "codex", liveInput: "mid_turn" });
+    expect(Object.hasOwn(declared.harnesses[0]!, "liveInput")).toBe(true);
   });
 
   it("mirrors native_credentials_enabled for ANY row at the harness default store — migration record or not", async () => {

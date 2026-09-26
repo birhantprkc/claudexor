@@ -67,6 +67,7 @@ export {
   type DaemonRunRecord,
 } from "./run-record.js";
 import { handleRunRetryRoute } from "./run-retry-routes.js";
+import { handleRunMessageRoute } from "./run-message-routes.js";
 import {
   handleRunApplyRoutes,
   runIdempotentDelivery,
@@ -174,6 +175,8 @@ import {
   ControlInteractionAnswerResponse,
   type ControlPendingInteraction,
   type ControlRouteInfo,
+  type LiveMessageDelivery,
+  type LiveMessageInput,
   ControlRunDecisionRequest,
   ControlRunDecisionResponse,
   ControlRunApplicabilityResponse,
@@ -292,6 +295,8 @@ export interface DaemonControlApiOptions {
         interactionId: string,
         answers: unknown,
       ) => { status: string; message?: string };
+      /** Live message into a running attempt; typed verdict, never a throw for a non-delivery. */
+      sendRunMessage?: (input: LiveMessageInput) => Promise<LiveMessageDelivery>;
       operatorDecision?: (runId: string, params: unknown) => ControlOperatorDecisionRecord | null;
       findOperatorDecisionByIdempotency?: (
         runId: string,
@@ -785,6 +790,23 @@ export class DaemonControlApiServer {
           json: (response, status, body) => this.json(response, status, body),
           requestError: (response, error, fallbackStatus) =>
             this.requestError(response, error, fallbackStatus),
+        },
+        method,
+        path,
+        req,
+        res,
+      )
+    )
+      return;
+
+    if (
+      await handleRunMessageRoute(
+        {
+          services: this.opts.services,
+          findRun: (id) => this.findRun(id),
+          readBody: (request) => this.readBody(request),
+          json: (response, status, body) => this.json(response, status, body),
+          requestError: (response, error) => this.requestError(response, error),
         },
         method,
         path,

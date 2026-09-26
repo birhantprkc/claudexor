@@ -324,6 +324,16 @@
                 "additionalProperties": false,
                 "description": "Whether this installed runtime can offer Delegate through this harness."
               },
+              "liveInput": {
+                "type": "string",
+                "enum": [
+                  "mid_turn",
+                  "next_tool_boundary",
+                  "none"
+                ],
+                "description": "How a live message enters one of this harness's RUNNING sessions (POST /v2/runs/:id/messages): mid_turn | next_tool_boundary | none. The harness maximum from its capability profile; the POST answers for the specific run. Omitted by engines older than 3.16.0 (= none).",
+                "default": "none"
+              },
               "setupLogin": {
                 "anyOf": [
                   {

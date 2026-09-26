@@ -3,6 +3,7 @@ import type { RunEvent } from "@claudexor/schema";
 import { describe, expect, it } from "vitest";
 import {
   JOURNALED_RUN_EVENT_TYPES,
+  POST_TERMINAL_AUDIT_EVENT_TYPES,
   isJournaledRunEvent,
   journaledRunEventCopy,
 } from "./journaled-run-events.js";
@@ -26,6 +27,9 @@ describe("journaled run events (owner decision D1: no per-token deltas in the jo
         "interaction.requested",
         "interaction.answered",
         "interaction.timeout",
+        "message.accepted",
+        "message.delivered",
+        "message.refused",
         "output.ready",
         "run.completed",
         "run.failed",
@@ -49,6 +53,50 @@ describe("journaled run events (owner decision D1: no per-token deltas in the jo
     });
     expect(copy.payload).not.toHaveProperty("prompt");
     expect(copy).toMatchObject({ seq: 1, run_id: "run-1", task_id: "task-1", type: "run.created" });
+  });
+
+  it("drops the live-message text from the journal copy and keeps the digest fields", () => {
+    const text = "Use MANGO, not the plan's fruit.";
+    for (const type of ["message.accepted", "message.delivered", "message.refused"] as const) {
+      const copy = journaledRunEventCopy(
+        event(type, {
+          message_id: "msg-1",
+          attempt_id: "a01",
+          outcome: "delivered",
+          text_sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+          text_bytes: Buffer.byteLength(text, "utf8"),
+          text,
+          title: "Live message delivered (32 bytes)",
+        }),
+      );
+      expect(copy.payload).not.toHaveProperty("text");
+      expect(copy.payload).toMatchObject({
+        message_id: "msg-1",
+        attempt_id: "a01",
+        outcome: "delivered",
+        text_bytes: Buffer.byteLength(text, "utf8"),
+      });
+      expect(copy).toMatchObject({ seq: 1, run_id: "run-1", type });
+    }
+    // A text-less receipt is stored as emitted (identity, not a rebuilt copy).
+    const bare = event("message.refused", { message_id: "msg-2", outcome: "not_active" });
+    expect(journaledRunEventCopy(bare)).toBe(bare);
+  });
+
+  it("allows exactly the cancel audit and the live-message receipts after a run's terminal", () => {
+    expect([...POST_TERMINAL_AUDIT_EVENT_TYPES].sort()).toEqual(
+      [
+        "control.requested",
+        "control.applied",
+        "control.rejected",
+        "message.accepted",
+        "message.delivered",
+        "message.refused",
+      ].sort(),
+    );
+    for (const type of ["harness.event", "interaction.requested", "run.completed"]) {
+      expect(POST_TERMINAL_AUDIT_EVENT_TYPES.has(type)).toBe(false);
+    }
   });
 
   it("leaves a prompt-less or non-string-prompt run.created and every other type untouched", () => {

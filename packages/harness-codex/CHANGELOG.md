@@ -1,5 +1,16 @@
 # @claudexor/harness-codex
 
+## 3.16.0
+
+### Patch Changes
+
+- de234bd: Keep Codex runs active across native goal continuations and run-owned background terminals, and make Stop interrupt that work through the app-server lifecycle.
+- Updated dependencies [788ddca]
+  - @claudexor/schema@3.16.0
+  - @claudexor/core@3.16.0
+  - @claudexor/secrets@3.16.0
+  - @claudexor/util@3.16.0
+
 ## 3.15.1
 
 ### Patch Changes
